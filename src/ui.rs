@@ -7,32 +7,25 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
-<<<<<<< Updated upstream
-use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
-=======
 use crate::patch::{ComponentKind, ComponentState};
->>>>>>> Stashed changes
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(10),   // main content
-            Constraint::Length(3), // status bar
-        ])
-        .split(frame.area());
+    if app.showing_picker {
+        render_picker(frame, frame.area(), app);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // header
+                Constraint::Min(10),   // main content
+                Constraint::Length(3), // status bar
+            ])
+            .split(frame.area());
 
-<<<<<<< Updated upstream
-    render_header(frame, chunks[0], app);
-    render_main(frame, chunks[1], app);
-    render_status(frame, chunks[2], app);
-=======
         render_header(frame, chunks[0], app);
         render_main(frame, chunks[1], app);
         render_status(frame, chunks[2], app);
     }
->>>>>>> Stashed changes
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -236,6 +229,13 @@ fn render_component(
                 Color::White,
             )
         }
+        ComponentKind::Encoder => {
+            let val = match &comp.state {
+                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
+                _ => String::from("---"),
+            };
+            ("◉", val, Color::Magenta)
+        }
         ComponentKind::Led => {
             let state = match &comp.state {
                 ComponentState::On => String::from("ON"),
@@ -305,8 +305,6 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(status, area);
 }
-<<<<<<< Updated upstream
-=======
 
 fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     // Calculate picker dimensions (70% width, 50% height, centered)
@@ -445,4 +443,3 @@ mod tests {
         assert!(!text.contains("SHIFT"));
     }
 }
->>>>>>> Stashed changes
