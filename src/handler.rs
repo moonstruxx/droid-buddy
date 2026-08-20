@@ -1,8 +1,15 @@
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::app::{is_entry_selectable, App};
+use crate::app::{is_entry_selectable, App, PrefixState};
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
+
+/// How long an armed `g` prefix waits for its follow-up key before silently
+/// cancelling. The timeout is lazy: it is checked only when the next event
+/// arrives, so no timer thread or event-loop change is needed.
+const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
@@ -10,6 +17,37 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if app.showing_picker {
         return handle_picker_event(key, app);
     }
+
+    // Lazy prefix timeout: a prefix that outlived its window cancels itself
+    // and the current key is processed normally below.
+    if app
+        .prefix
+        .as_ref()
+        .is_some_and(|p| p.started.elapsed() > PREFIX_TIMEOUT)
+    {
+        app.prefix = None;
+    }
+
+    // While a prefix is armed, only its follow-up key and Esc are special;
+    // any other key cancels the prefix and falls through to normal handling
+    // (so a second `g` simply re-arms with a fresh timeout).
+    if app.prefix.is_some() {
+        match key.code {
+            crossterm::event::KeyCode::Char('v') => {
+                app.showing_viewer = true;
+                app.prefix = None;
+                return false;
+            }
+            crossterm::event::KeyCode::Esc => {
+                app.prefix = None;
+                return false;
+            }
+            _ => {
+                app.prefix = None;
+            }
+        }
+    }
+
     match key.code {
         crossterm::event::KeyCode::Char('q') => true,
         crossterm::event::KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -22,6 +60,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.picker_dir = std::env::current_dir().unwrap_or_default();
             app.picker_index = 0;
             app.refresh_picker_entries();
+            false
+        }
+        crossterm::event::KeyCode::Char('g') => {
+            // Enter prefix mode; a repeated `g` re-arms the timer via the
+            // cancel-and-fall-through path above.
+            app.prefix = Some(PrefixState {
+                started: Instant::now(),
+            });
             false
         }
         crossterm::event::KeyCode::Char('1') => {
@@ -419,5 +465,67 @@ mod tests {
             handle_picker_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
         }
         assert_eq!(app.picker_index, len - 1); // clamped at the end
+    }
+
+    #[test]
+    fn g_enters_prefix_mode() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.prefix.is_some());
+    }
+
+    #[test]
+    fn g_then_v_opens_viewer_and_clears_prefix() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert!(app.showing_viewer);
+        assert!(app.prefix.is_none());
+    }
+
+    #[test]
+    fn g_then_other_key_cancels_prefix_and_processes_key_normally() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert!(app.prefix.is_none());
+        assert_eq!(app.hovered_component, Some(1));
+    }
+
+    #[test]
+    fn g_then_esc_cancels_prefix_without_other_action() {
+        let mut app = App::new();
+        app.active_shift = Some(ShiftGroup::Group1);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.prefix.is_none());
+        // Esc while a prefix is armed must not also clear the shift group.
+        assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
+    }
+
+    #[test]
+    fn g_prefix_times_out_and_next_key_processed_normally() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        // Simulate an expired timeout window, then a key that should run
+        // normally (navigation) instead of acting as a prefix follow-up.
+        app.prefix = Some(PrefixState {
+            started: Instant::now() - Duration::from_secs(2),
+        });
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert!(app.prefix.is_none());
+        assert_eq!(app.hovered_component, Some(1));
+    }
+
+    #[test]
+    fn g_while_armed_restarts_prefix_timer() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        app.prefix = Some(PrefixState {
+            started: Instant::now() - Duration::from_secs(2),
+        });
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.prefix.is_some());
+        assert!(app.prefix.as_ref().unwrap().started.elapsed() < Duration::from_secs(1));
     }
 }
