@@ -36,6 +36,10 @@ pub struct App {
     /// True when `g` + `v` opened the source viewer. Viewer rendering and
     /// its payload state land in later tasks of this change.
     pub showing_viewer: bool,
+    /// The patch currently displayed in the source viewer.
+    pub viewer_patch: Option<Patch>,
+    /// The index of the currently selected circuit in the viewer sidebar.
+    pub viewer_selected_circuit: Option<usize>,
 }
 
 impl App {
@@ -53,6 +57,8 @@ impl App {
             component_rects: Vec::new(),
             prefix: None,
             showing_viewer: false,
+            viewer_patch: None,
+            viewer_selected_circuit: None,
         }
     }
 
@@ -112,5 +118,22 @@ mod tests {
         let app = App::new();
         assert!(app.prefix.is_none());
         assert!(!app.showing_viewer);
+    }
+
+    #[test]
+    fn new_app_starts_with_viewer_fields_default() {
+        let app = App::new();
+        assert!(app.viewer_patch.is_none());
+        assert!(app.viewer_selected_circuit.is_none());
+    }
+
+    #[test]
+    fn can_set_viewer_patch_and_selected_circuit() {
+        let mut app = App::new();
+        let patch = Patch::sample();
+        app.viewer_patch = Some(patch);
+        app.viewer_selected_circuit = Some(2);
+        assert_eq!(app.viewer_patch.as_ref().unwrap().name, "Demo Patch");
+        assert_eq!(app.viewer_selected_circuit, Some(2));
     }
 }
