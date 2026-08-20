@@ -3,13 +3,25 @@ use std::time::Instant;
 
 use ratatui::layout::Rect;
 
-use crate::patch::{Patch, ShiftGroup};
+use crate::patch::{Patch, ShiftGroup, ViewerCircuit};
 
 /// State of an armed vim-style prefix key (`g` pressed, awaiting the
 /// follow-up key). `started` drives the lazy timeout check performed when
 /// the next event arrives.
 pub struct PrefixState {
     pub started: Instant,
+}
+
+/// Mode in which the source viewer was opened.
+/// Tracked so Task 6 can set `Fallback` and `main.rs` can behave accordingly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewerMode {
+    /// Viewer not open
+    None,
+    /// Viewer opened via herdr pane integration
+    Herdr,
+    /// Viewer opened via fallback (Task 6)
+    Fallback,
 }
 
 /// Application state
@@ -36,10 +48,15 @@ pub struct App {
     /// True when `g` + `v` opened the source viewer. Viewer rendering and
     /// its payload state land in later tasks of this change.
     pub showing_viewer: bool,
-    /// The patch currently displayed in the source viewer.
-    pub viewer_patch: Option<Patch>,
+    /// How the source viewer was opened: herdr pane, fallback window, or
+    /// not at all. Set by the herdr/fallback integration tasks.
+    pub viewer_mode: ViewerMode,
+    /// The circuits of the patch currently displayed in the source viewer.
+    pub viewer_patch: Option<Vec<ViewerCircuit>>,
     /// The index of the currently selected circuit in the viewer sidebar.
-    pub viewer_selected_circuit: Option<usize>,
+    pub viewer_selected_circuit: usize,
+    /// Scroll offset of the viewer's main area, in rows.
+    pub viewer_scroll: u16,
 }
 
 impl App {
@@ -57,8 +74,10 @@ impl App {
             component_rects: Vec::new(),
             prefix: None,
             showing_viewer: false,
+            viewer_mode: ViewerMode::None,
             viewer_patch: None,
-            viewer_selected_circuit: None,
+            viewer_selected_circuit: 0,
+            viewer_scroll: 0,
         }
     }
 
@@ -77,8 +96,15 @@ impl App {
         }
     }
 
+    /// Load a patch into the app: stores it as the active patch and
+    /// prepares its circuits for the source viewer.
+    pub fn load_patch(&mut self, patch: Patch) {
+        self.viewer_patch = Some(patch.viewer_circuits());
+        self.patch = Some(patch);
+    }
+
     pub fn load_sample_patch(&mut self) {
-        self.patch = Some(Patch::sample());
+        self.load_patch(Patch::sample());
         self.status_message = String::from("Sample patch loaded.");
     }
 }
@@ -124,16 +150,17 @@ mod tests {
     fn new_app_starts_with_viewer_fields_default() {
         let app = App::new();
         assert!(app.viewer_patch.is_none());
-        assert!(app.viewer_selected_circuit.is_none());
+        assert_eq!(app.viewer_selected_circuit, 0);
+        assert_eq!(app.viewer_scroll, 0);
     }
 
     #[test]
-    fn can_set_viewer_patch_and_selected_circuit() {
+    fn load_patch_populates_viewer_patch() {
         let mut app = App::new();
-        let patch = Patch::sample();
-        app.viewer_patch = Some(patch);
-        app.viewer_selected_circuit = Some(2);
-        assert_eq!(app.viewer_patch.as_ref().unwrap().name, "Demo Patch");
-        assert_eq!(app.viewer_selected_circuit, Some(2));
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let circuits = patch.viewer_circuits();
+        app.load_patch(patch);
+        assert_eq!(app.patch.as_ref().unwrap().name, "arpeggio1");
+        assert_eq!(app.viewer_patch, Some(circuits));
     }
 }
