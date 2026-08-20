@@ -32,6 +32,7 @@ pub enum ComponentKind {
     Knob,
     Switch,
     Led,
+    Encoder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

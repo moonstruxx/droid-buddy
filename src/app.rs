@@ -1,10 +1,6 @@
-<<<<<<< Updated upstream
-use crossterm::event::KeyEvent;
-=======
 use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
->>>>>>> Stashed changes
 
 use crate::patch::{Patch, ShiftGroup};
 
@@ -14,8 +10,6 @@ pub struct App {
     pub active_shift: Option<ShiftGroup>,
     pub hovered_component: Option<usize>,
     pub status_message: String,
-<<<<<<< Updated upstream
-=======
     /// File picker state
     pub showing_picker: bool,
     pub picker_dir: PathBuf,
@@ -28,7 +22,6 @@ pub struct App {
     /// renderer — not the event handler — knows where things actually ended
     /// up on screen.
     pub component_rects: Vec<(usize, Rect)>,
->>>>>>> Stashed changes
 }
 
 impl App {
@@ -38,36 +31,27 @@ impl App {
             active_shift: None,
             hovered_component: None,
             status_message: String::from("No patch loaded. Press 'l' to load."),
-<<<<<<< Updated upstream
-        }
-    }
-
-    pub fn handle_input(&mut self, key: KeyEvent) {
-        match key.code {
-            crossterm::event::KeyCode::Char('l') => {
-                self.load_sample_patch();
-            }
-            crossterm::event::KeyCode::Char('1') => {
-                self.active_shift = Some(ShiftGroup::Group1);
-            }
-            crossterm::event::KeyCode::Char('2') => {
-                self.active_shift = Some(ShiftGroup::Group2);
-            }
-            crossterm::event::KeyCode::Char('3') => {
-                self.active_shift = Some(ShiftGroup::Group3);
-            }
-            crossterm::event::KeyCode::Esc => {
-                self.active_shift = None;
-            }
-            _ => {}
-=======
             showing_picker: false,
             picker_dir: std::env::current_dir().unwrap_or_default(),
             selected_file: None,
             picker_entries: Vec::new(),
             picker_index: 0,
             component_rects: Vec::new(),
->>>>>>> Stashed changes
+        }
+    }
+
+    pub fn refresh_picker_entries(&mut self) {
+        self.picker_entries.clear();
+        // Add ".." for parent directory (unless at root)
+        if let Some(parent) = self.picker_dir.parent() {
+            self.picker_entries.push(parent.to_path_buf());
+        }
+        // Read directory entries
+        if let Ok(entries) = std::fs::read_dir(&self.picker_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                self.picker_entries.push(path);
+            }
         }
     }
 

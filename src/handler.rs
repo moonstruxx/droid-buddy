@@ -6,22 +6,22 @@ use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup
 
 /// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
+    // If file picker is showing, handle picker navigation
+    if app.showing_picker {
+        return handle_picker_event(key, app);
+    }
     match key.code {
         crossterm::event::KeyCode::Char('q') => true,
         crossterm::event::KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             true
         }
         crossterm::event::KeyCode::Char('l') => {
-<<<<<<< Updated upstream
-            app.load_sample_patch();
-=======
             // Opens the picker whether or not a patch is already loaded,
             // so a loaded patch can be swapped for a different one.
             app.showing_picker = true;
             app.picker_dir = std::env::current_dir().unwrap_or_default();
             app.picker_index = 0;
             app.refresh_picker_entries();
->>>>>>> Stashed changes
             false
         }
         crossterm::event::KeyCode::Char('1') => {
@@ -141,7 +141,10 @@ fn toggle_component(comp: &mut crate::patch::HwComponent) {
                 _ => ComponentState::On,
             };
         }
-        ComponentKind::Knob | ComponentKind::CvIn | ComponentKind::CvOut => {
+        ComponentKind::Knob
+        | ComponentKind::CvIn
+        | ComponentKind::CvOut
+        | ComponentKind::Encoder => {
             if let ComponentState::Value(v) = comp.state {
                 comp.state = ComponentState::Value((v + 0.1).min(1.0));
             }
@@ -160,8 +163,6 @@ fn navigate(app: &mut App, delta: i32) {
         app.hovered_component = Some(next as usize);
     }
 }
-<<<<<<< Updated upstream
-=======
 
 fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
     match key.code {
@@ -420,4 +421,3 @@ mod tests {
         assert_eq!(app.picker_index, len - 1); // clamped at the end
     }
 }
->>>>>>> Stashed changes
