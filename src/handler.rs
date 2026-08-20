@@ -1,7 +1,8 @@
-use crossterm::event::{KeyEvent, KeyModifiers};
+use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
-use crate::app::App;
-use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
+use crate::app::{is_entry_selectable, App};
+use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
 
 /// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
@@ -11,7 +12,16 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             true
         }
         crossterm::event::KeyCode::Char('l') => {
+<<<<<<< Updated upstream
             app.load_sample_patch();
+=======
+            // Opens the picker whether or not a patch is already loaded,
+            // so a loaded patch can be swapped for a different one.
+            app.showing_picker = true;
+            app.picker_dir = std::env::current_dir().unwrap_or_default();
+            app.picker_index = 0;
+            app.refresh_picker_entries();
+>>>>>>> Stashed changes
             false
         }
         crossterm::event::KeyCode::Char('1') => {
@@ -62,6 +72,67 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     }
 }
 
+/// Handle mouse input: hover highlight, click-to-toggle, and scroll to
+/// adjust knob/fader values. Hit-testing uses `app.component_rects`, which
+/// the renderer rebuilds every frame from the actual on-screen layout.
+pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
+    if app.showing_picker {
+        return;
+    }
+
+    let hit = app
+        .component_rects
+        .iter()
+        .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
+        .map(|(idx, _)| *idx);
+
+    match mouse.kind {
+        MouseEventKind::Moved => {
+            app.hovered_component = hit;
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(idx) = hit {
+                app.hovered_component = Some(idx);
+                if let Some(patch) = &mut app.patch {
+                    if let Some(comp) = patch.hw_components.get_mut(idx) {
+                        toggle_component(comp);
+                        app.status_message = format!("Toggled: {}", comp.label);
+                    }
+                }
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if let Some(idx) = hit {
+                if let Some(patch) = &mut app.patch {
+                    if let Some(comp) = patch.hw_components.get_mut(idx) {
+                        adjust_value(comp, 0.05);
+                    }
+                }
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if let Some(idx) = hit {
+                if let Some(patch) = &mut app.patch {
+                    if let Some(comp) = patch.hw_components.get_mut(idx) {
+                        adjust_value(comp, -0.05);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
+fn adjust_value(comp: &mut HwComponent, delta: f32) {
+    if let ComponentState::Value(v) = comp.state {
+        comp.state = ComponentState::Value((v + delta).clamp(0.0, 1.0));
+    }
+}
+
 fn toggle_component(comp: &mut crate::patch::HwComponent) {
     match comp.kind {
         ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
@@ -89,3 +160,264 @@ fn navigate(app: &mut App, delta: i32) {
         app.hovered_component = Some(next as usize);
     }
 }
+<<<<<<< Updated upstream
+=======
+
+fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
+    match key.code {
+        crossterm::event::KeyCode::Esc => {
+            app.showing_picker = false;
+            false
+        }
+        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+            if app.picker_index > 0 {
+                app.picker_index -= 1;
+            }
+            false
+        }
+        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+            if app.picker_index < app.picker_entries.len().saturating_sub(1) {
+                app.picker_index += 1;
+            }
+            false
+        }
+        crossterm::event::KeyCode::Enter => {
+            if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
+                if !is_entry_selectable(&selected_path) {
+                    return false;
+                }
+                let is_dir = selected_path.metadata().is_ok_and(|m| m.is_dir());
+                if is_dir {
+                    app.picker_dir = selected_path;
+                    app.picker_index = 0;
+                    app.refresh_picker_entries();
+                } else {
+                    match Patch::from_ini_file(&selected_path) {
+                        Ok(patch) => {
+                            app.status_message = format!("Loaded patch: {}", patch.name);
+                            app.patch = Some(patch);
+                            app.hovered_component = None;
+                            app.selected_file = Some(selected_path);
+                            app.showing_picker = false;
+                        }
+                        Err(e) => {
+                            app.status_message = format!("Failed to load patch: {}", e);
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::patch::Patch;
+    use ratatui::layout::Rect;
+
+    fn app_with_fixture() -> App {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        // Place component 0 (B1.1) at (0,0)-(16,2) and component 1 (L1.1) at (16,0)-(32,2).
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2)), (1, Rect::new(16, 0, 16, 2))];
+        app
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn hover_sets_hovered_component_from_rect_hit() {
+        let mut app = app_with_fixture();
+        handle_mouse_event(mouse(MouseEventKind::Moved, 5, 1), &mut app);
+        assert_eq!(app.hovered_component, Some(0));
+
+        handle_mouse_event(mouse(MouseEventKind::Moved, 20, 1), &mut app);
+        assert_eq!(app.hovered_component, Some(1));
+
+        handle_mouse_event(mouse(MouseEventKind::Moved, 100, 50), &mut app);
+        assert_eq!(app.hovered_component, None);
+    }
+
+    #[test]
+    fn click_toggles_button() {
+        let mut app = app_with_fixture();
+        assert!(matches!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            ComponentState::Off
+        ));
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        assert!(matches!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            ComponentState::On
+        ));
+    }
+
+    #[test]
+    fn scroll_adjusts_knob_value() {
+        let content = "[pot]\n    pot = P1.1\n    output = _X\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+
+        handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!((v - 0.05).abs() < 1e-6),
+            _ => panic!("expected Value state"),
+        }
+
+        handle_mouse_event(mouse(MouseEventKind::ScrollDown, 5, 1), &mut app);
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!(v.abs() < 1e-6),
+            _ => panic!("expected Value state"),
+        }
+    }
+
+    #[test]
+    fn mouse_ignored_while_picker_open() {
+        let mut app = app_with_fixture();
+        app.showing_picker = true;
+        handle_mouse_event(mouse(MouseEventKind::Moved, 5, 1), &mut app);
+        assert_eq!(app.hovered_component, None);
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn ctrl_c_quits() {
+        let mut app = App::new();
+        let quit = handle_event(
+            KeyEvent::new(crossterm::event::KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(quit);
+    }
+
+    #[test]
+    fn keyboard_navigation_continues_from_mouse_hover() {
+        let mut app = app_with_fixture();
+        // Mouse hovers component 1, then 'j' should move to component 2 —
+        // keyboard nav must pick up where the mouse left off, not reset it.
+        handle_mouse_event(mouse(MouseEventKind::Moved, 20, 1), &mut app);
+        assert_eq!(app.hovered_component, Some(1));
+
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(app.hovered_component, Some(2));
+    }
+
+    #[test]
+    fn keyboard_toggle_and_mouse_click_agree_on_target() {
+        let mut app = app_with_fixture();
+        handle_mouse_event(mouse(MouseEventKind::Moved, 5, 1), &mut app);
+        assert_eq!(app.hovered_component, Some(0));
+
+        // Enter (keyboard) toggles whatever is currently hovered, same as a click would.
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(matches!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            ComponentState::On
+        ));
+    }
+
+    #[test]
+    fn shift_key_bindings_1_through_4() {
+        let mut app = App::new();
+        for (ch, expected) in [
+            ('1', ShiftGroup::Group1),
+            ('2', ShiftGroup::Group2),
+            ('3', ShiftGroup::Group3),
+            ('4', ShiftGroup::Group4),
+        ] {
+            handle_event(key(crossterm::event::KeyCode::Char(ch)), &mut app);
+            assert_eq!(app.active_shift, Some(expected));
+        }
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert_eq!(app.active_shift, None);
+    }
+
+    fn picker_app_at(dir: &str) -> App {
+        let mut app = App::new();
+        app.picker_dir = std::path::PathBuf::from(dir);
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+        app
+    }
+
+    fn picker_index_of(app: &App, file_name: &str) -> usize {
+        app.picker_entries
+            .iter()
+            .position(|p| p.file_name().map(|n| n == file_name).unwrap_or(false))
+            .unwrap_or_else(|| panic!("no picker entry named {}", file_name))
+    }
+
+    #[test]
+    fn picker_esc_cancels() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        let quit = handle_picker_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(!quit);
+        assert!(!app.showing_picker);
+    }
+
+    #[test]
+    fn picker_enter_on_ini_loads_and_closes() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.picker_index = picker_index_of(&app, "patch_a.ini");
+        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(!app.showing_picker);
+        assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
+    }
+
+    #[test]
+    fn picker_enter_on_directory_navigates_in_without_closing() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.picker_index = picker_index_of(&app, "subdir");
+        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(app.showing_picker);
+        assert!(app.picker_dir.ends_with("subdir"));
+        assert!(app
+            .picker_entries
+            .iter()
+            .any(|p| p.file_name().map(|n| n == "patch_b.ini").unwrap_or(false)));
+    }
+
+    #[test]
+    fn picker_enter_on_non_ini_file_is_ignored() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.picker_index = picker_index_of(&app, "readme.txt");
+        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(app.showing_picker);
+        assert!(app.patch.is_none());
+    }
+
+    #[test]
+    fn picker_j_k_navigation_stays_in_bounds() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        let len = app.picker_entries.len();
+        app.picker_index = 0;
+        handle_picker_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(app.picker_index, 0); // clamped, doesn't go negative
+
+        for _ in 0..len + 2 {
+            handle_picker_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        }
+        assert_eq!(app.picker_index, len - 1); // clamped at the end
+    }
+}
+>>>>>>> Stashed changes

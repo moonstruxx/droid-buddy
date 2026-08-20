@@ -2,31 +2,40 @@ schema: spec-driven
 
 # Project context (optional)
 # This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Tech stack: Rust 2021, single-crate ratatui 0.29 + crossterm 0.28 TUI for DROID hardware patch files (.ini).
+  Layered monolith: main (entry/terminal) -> app (state) -> handler (input) -> patch (domain + parser) -> ui (rendering).
+  One-way dependencies: ui/handler depend on app/patch; patch never imports app/handler/ui.
+  The app is a patch viewer/simulator, NOT a hardware bridge (no MIDI, no network).
+
+  Semantic anchors (repo-wide principles; every change must honor them):
+  - YAGNI: every type, variant, derive, and trait has a current consumer or it gets deleted. No speculative
+    persistence or abstraction. Persistence and hardware integration are deferred ideas, not code.
+  - DRY: one source of truth per fact. Generated docs (ARCHITECTURE.md, DESIGN.md, guardrails) are derived
+    artifacts - regenerate with /make-*, never hand-edit.
+  - CodeAsDoc: names carry domain meaning (DROID vocabulary); doc comments explain non-obvious invariants and
+    reasons, never restate code; OpenSpec specs are the behavior contract, code is the executable spec.
+  - TDD London (mockist, outside-in): test through public entry points (handle_event, render); prefer real
+    fixtures for cheap deterministic collaborators (local filesystem, terminal); mock only genuinely costly or
+    unreliable boundaries - the app has none today; the renderer->handler geometry handoff (component_rects)
+    is the one true collaboration contract and must stay tested.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Always include a "Non-goals" section stating what is explicitly out of scope (YAGNI).
+    - Every new type, variant, or derive must name its current consumer in scope; speculative additions are rejected.
+  tasks:
+    - Every implementation task must include a test task or test step (TDD).
+    - Tests go in-module (#[cfg(test)]) with real fixtures; mock only genuinely external boundaries.
 
 # Per-operation guidance (optional)
 # Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+# operations:
+#   apply:
+#     guidance:
+#       - Keep test summaries concise
+#   archive:
+#     guidance:
+#       - Summarize the archive outcome before finishing
