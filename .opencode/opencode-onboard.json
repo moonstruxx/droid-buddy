@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "generatedAt": "2026-08-20T01:54:24.411Z",
+  "onboardVersion": "1.6.7",
+  "opencodeVersion": "1.18.17",
+  "platform": {
+    "backlog": "browser",
+    "repo": "none"
+  },
+  "models": {
+    "plan": "opencode/laguna-s-2.1-free",
+    "build": "opencode/nemotron-3.5-lightning-free",
+    "fast": "opencode/north-mini-code-free"
+  },
+  "agents": {
+    "maxConcurrent": 3
+  },
+  "source": {
+    "mode": "current",
+    "roots": [
+      "/home/bjoern/projects/droid_tui"
+    ]
+  },
+  "tools": {
+    "rtk": true,
+    "quota": true,
+    "caveman": true,
+    "codegraph": false,
+    "memory": false
+  },
+  "preexisting": {
+    "design": false,
+    "architecture": false,
+    "openspec": false
+  }
+}
