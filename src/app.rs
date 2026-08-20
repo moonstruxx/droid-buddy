@@ -1,8 +1,16 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ratatui::layout::Rect;
 
 use crate::patch::{Patch, ShiftGroup};
+
+/// State of an armed vim-style prefix key (`g` pressed, awaiting the
+/// follow-up key). `started` drives the lazy timeout check performed when
+/// the next event arrives.
+pub struct PrefixState {
+    pub started: Instant,
+}
 
 /// Application state
 pub struct App {
@@ -22,6 +30,12 @@ pub struct App {
     /// renderer — not the event handler — knows where things actually ended
     /// up on screen.
     pub component_rects: Vec<(usize, Rect)>,
+    /// Vim-style prefix mode: `g` was pressed and the app waits for a
+    /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
+    pub prefix: Option<PrefixState>,
+    /// True when `g` + `v` opened the source viewer. Viewer rendering and
+    /// its payload state land in later tasks of this change.
+    pub showing_viewer: bool,
 }
 
 impl App {
@@ -37,6 +51,8 @@ impl App {
             picker_entries: Vec::new(),
             picker_index: 0,
             component_rects: Vec::new(),
+            prefix: None,
+            showing_viewer: false,
         }
     }
 
@@ -84,5 +100,17 @@ pub fn is_entry_selectable(path: &Path) -> bool {
             }
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_app_starts_with_no_prefix_and_viewer_closed() {
+        let app = App::new();
+        assert!(app.prefix.is_none());
+        assert!(!app.showing_viewer);
     }
 }

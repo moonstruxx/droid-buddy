@@ -280,7 +280,11 @@ fn render_component(
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::styled(
-        &app.status_message,
+        if app.prefix.is_some() {
+            "Prefix: g"
+        } else {
+            app.status_message.as_str()
+        },
         Style::default().fg(Color::White),
     )];
 
@@ -348,7 +352,7 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
+    use crate::app::{App, PrefixState};
     use crate::patch::Patch;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -441,5 +445,25 @@ mod tests {
         app.load_sample_patch();
         let text = rendered_text(&mut app, 80, 24);
         assert!(!text.contains("SHIFT"));
+    }
+
+    #[test]
+    fn status_bar_shows_prefix_indicator_while_prefix_armed() {
+        let mut app = App::new();
+        app.load_sample_patch();
+        app.prefix = Some(PrefixState {
+            started: std::time::Instant::now(),
+        });
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(text.contains("Prefix: g"));
+        assert!(!text.contains("Sample patch loaded."));
+    }
+
+    #[test]
+    fn status_bar_omits_prefix_indicator_when_none_armed() {
+        let mut app = App::new();
+        app.load_sample_patch();
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(!text.contains("Prefix: g"));
     }
 }
