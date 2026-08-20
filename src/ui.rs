@@ -12,6 +12,8 @@ use crate::patch::{ComponentKind, ComponentState};
 pub fn render(frame: &mut Frame, app: &mut App) {
     if app.showing_picker {
         render_picker(frame, frame.area(), app);
+    } else if app.showing_viewer {
+        render_viewer(frame, frame.area(), app);
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -349,6 +351,179 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, picker_area);
 }
 
+fn render_viewer(frame: &mut Frame, area: Rect, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(3)])
+        .split(area);
+
+    let main_area = chunks[0];
+    let status_area = chunks[1];
+
+    let sidebar_width = (main_area.width / 5)
+        .max(20)
+        .min(main_area.width.saturating_sub(20));
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(20)])
+        .split(main_area);
+
+    render_viewer_sidebar(frame, h_chunks[0], app);
+    render_viewer_content(frame, h_chunks[1], app);
+    render_viewer_status(frame, status_area);
+}
+
+fn render_viewer_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Circuits ")
+        .border_style(Style::default().fg(Color::Blue));
+
+    let circuits = match &app.viewer_patch {
+        Some(c) => c,
+        None => {
+            frame.render_widget(block, area);
+            return;
+        }
+    };
+
+    let names: Vec<String> = circuits.iter().map(|c| c.name.clone()).collect();
+    let display_names = disambiguate_names(&names);
+
+    let lines: Vec<Line> = display_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let style = if i == app.viewer_selected_circuit {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(name.as_str(), style))
+        })
+        .collect();
+
+    let sidebar = Paragraph::new(lines).block(block);
+    frame.render_widget(sidebar, area);
+}
+
+fn render_viewer_content(frame: &mut Frame, area: Rect, app: &App) {
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let circuits = match &app.viewer_patch {
+        Some(c) => c,
+        None => {
+            let msg = Paragraph::new("No patch loaded")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center)
+                .block(outer_block);
+            frame.render_widget(msg, area);
+            return;
+        }
+    };
+
+    if circuits.is_empty() {
+        let msg = Paragraph::new("No circuits in patch")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(outer_block);
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for circuit in circuits {
+        let color = circuit_color(&circuit.name);
+
+        lines.push(Line::from(vec![
+            Span::styled("┌─ ", Style::default().fg(color)),
+            Span::styled(
+                circuit.name.as_str(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ─┐", Style::default().fg(color)),
+        ]));
+
+        for (key, value) in &circuit.entries {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(color)),
+                Span::styled(key.as_str(), Style::default().fg(Color::Cyan)),
+                Span::raw(" = "),
+                Span::styled(value.as_str(), Style::default().fg(Color::White)),
+                Span::styled(" │", Style::default().fg(color)),
+            ]));
+        }
+
+        lines.push(Line::from(Span::styled(
+            "└────┘",
+            Style::default().fg(color),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    let content = Paragraph::new(lines)
+        .scroll((app.viewer_scroll, 0))
+        .block(outer_block);
+
+    frame.render_widget(content, area);
+}
+
+fn render_viewer_status(frame: &mut Frame, area: Rect) {
+    let status = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "Source Viewer",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled("ESC", Style::default().fg(Color::Cyan)),
+        Span::raw(" to close | "),
+        Span::styled("j/k", Style::default().fg(Color::Cyan)),
+        Span::raw(" scroll | "),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(" to jump"),
+    ]))
+    .style(Style::default().bg(Color::DarkGray))
+    .alignment(Alignment::Left)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+
+    frame.render_widget(status, area);
+}
+
+fn circuit_color(name: &str) -> Color {
+    match name {
+        "button" | "switch" | "notebuttons" | "notobuttons" => Color::White,
+        "pot" | "encoder" | "faderbank" => Color::Magenta,
+        "cvin" | "cv_in" => Color::Cyan,
+        "cvout" | "cv_out" => Color::Green,
+        "led" => Color::Red,
+        _ => Color::Blue,
+    }
+}
+
+fn disambiguate_names(names: &[String]) -> Vec<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut result = Vec::new();
+    for name in names {
+        let count = counts.entry(name.clone()).or_insert(0);
+        if *count == 0 {
+            result.push(name.clone());
+        } else {
+            result.push(format!("{} ({})", name, count));
+        }
+        *count += 1;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,5 +640,68 @@ mod tests {
         app.load_sample_patch();
         let text = rendered_text(&mut app, 80, 24);
         assert!(!text.contains("Prefix: g"));
+    }
+
+    #[test]
+    fn renders_viewer_without_panic() {
+        let mut app = App::new();
+        app.showing_viewer = true;
+        render_at(&mut app, 80, 24);
+    }
+
+    #[test]
+    fn renders_viewer_with_circuits() {
+        let mut app = App::new();
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        app.load_patch(patch);
+        app.showing_viewer = true;
+        let text = rendered_text(&mut app, 120, 40);
+        assert!(text.contains("Circuits"));
+        assert!(text.contains("Source Viewer"));
+        assert!(text.contains("p2b8"));
+    }
+
+    #[test]
+    fn viewer_shows_no_patch_message_when_empty() {
+        let mut app = App::new();
+        app.showing_viewer = true;
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(text.contains("No patch loaded"));
+    }
+
+    #[test]
+    fn disambiguate_names_adds_suffix_to_duplicates() {
+        let names = vec![
+            String::from("copy"),
+            String::from("button"),
+            String::from("copy"),
+            String::from("copy"),
+        ];
+        let result = disambiguate_names(&names);
+        assert_eq!(result[0], "copy");
+        assert_eq!(result[1], "button");
+        assert_eq!(result[2], "copy (1)");
+        assert_eq!(result[3], "copy (2)");
+    }
+
+    #[test]
+    fn disambiguate_names_handles_all_unique() {
+        let names = vec![String::from("a"), String::from("b"), String::from("c")];
+        let result = disambiguate_names(&names);
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn circuit_color_maps_known_circuits() {
+        assert_eq!(circuit_color("button"), Color::White);
+        assert_eq!(circuit_color("switch"), Color::White);
+        assert_eq!(circuit_color("pot"), Color::Magenta);
+        assert_eq!(circuit_color("encoder"), Color::Magenta);
+        assert_eq!(circuit_color("cvout"), Color::Green);
+        assert_eq!(circuit_color("cvin"), Color::Cyan);
+        assert_eq!(circuit_color("led"), Color::Red);
+        assert_eq!(circuit_color("p2b8"), Color::Blue);
+        assert_eq!(circuit_color("copy"), Color::Blue);
     }
 }
