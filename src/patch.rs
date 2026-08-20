@@ -38,7 +38,7 @@ pub enum ComponentKind {
     Encoder,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ComponentState {
     Off,
     On,
@@ -416,7 +416,7 @@ fn scan_hw_tokens(value: &str) -> Vec<String> {
     tokens
 }
 
-fn token_kind(id: &str) -> Option<ComponentKind> {
+pub fn token_kind(id: &str) -> Option<ComponentKind> {
     match id.chars().next()? {
         'B' => Some(ComponentKind::Button),
         'L' => Some(ComponentKind::Led),
