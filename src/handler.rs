@@ -1,10 +1,13 @@
+use std::env;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::app::{is_entry_selectable, App, PrefixState};
+use crate::app::{is_entry_selectable, App, PrefixState, ViewerMode};
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
+use serde_json;
 
 /// How long an armed `g` prefix waits for its follow-up key before silently
 /// cancelling. The timeout is lazy: it is checked only when the next event
@@ -34,7 +37,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if app.prefix.is_some() {
         match key.code {
             crossterm::event::KeyCode::Char('v') => {
-                app.showing_viewer = true;
+                open_viewer_window(app);
                 app.prefix = None;
                 return false;
             }
@@ -257,6 +260,96 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
         }
         _ => false,
     }
+}
+
+/// Open the source viewer window.
+/// Currently supports herdr pane integration (Mode 1, Task 5).
+/// Task 6 will extend this with a fallback branch for when HERDR_ENV is not set.
+pub fn open_viewer_window(app: &mut App) {
+    // Show the viewer window
+    app.showing_viewer = true;
+
+    // Check if running inside herdr
+    if env::var("HERDR_ENV").map_or(false, |v| v == "1") {
+        // Mode 1: Herdr pane integration
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        // Run herdr pane split to create new pane to the right
+        let split_result = Command::new("herdr")
+            .args(&[
+                "pane",
+                "split",
+                "--current",
+                "--direction",
+                "right",
+                "--cwd",
+                &cwd,
+                "--no-focus",
+            ])
+            .output();
+
+        let split_success = split_result.as_ref().map_or(false, |r| r.status.success());
+        if !split_success {
+            app.status_message =
+                String::from("Failed to create herdr pane; falling back gracefully");
+            app.viewer_mode = ViewerMode::Fallback;
+            return;
+        }
+
+        // Parse JSON output to get the new pane's ID
+        let list_output = Command::new("herdr")
+            .args(&["pane", "list", "--output", "json"])
+            .output();
+
+        let pane_id = if let Ok(output) = &list_output {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            parse_herdr_pane_id(&json_str)
+        } else {
+            None
+        };
+
+        match pane_id {
+            Some(id) => {
+                // Launch viewer in the new pane
+                let run_result = Command::new("herdr")
+                    .args(&["pane", "run", &id, "droid_tui --view-source"])
+                    .output();
+
+                let run_success = run_result.as_ref().map_or(false, |r| r.status.success());
+                if !run_success {
+                    app.status_message =
+                        String::from("Failed to launch viewer in herdr pane; fell back gracefully");
+                }
+                app.viewer_mode = ViewerMode::Herdr;
+            }
+            None => {
+                app.status_message =
+                    String::from("Failed to parse herdr pane list; fell back gracefully");
+                app.viewer_mode = ViewerMode::Fallback;
+            }
+        }
+    } else {
+        // Extension point for Task 6: Fallback mode
+        // Task 6 will replace this branch with actual fallback window logic
+        app.viewer_mode = ViewerMode::Fallback;
+        app.status_message = String::from("Viewer: fallback mode (Task 6)");
+    }
+}
+
+fn parse_herdr_pane_id(json_str: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    // herdr pane list --output json returns an array of pane objects.
+    // The newly created pane (from the split above) should be the last entry.
+    // Look for the last object with an "id" field.
+    let arr = value.as_array()?;
+    let last_pane = arr.last()?;
+    last_pane
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
