@@ -45,6 +45,10 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                 if handler::handle_event(key, &mut app) {
                     break;
                 }
+                // Task 4: after-event prefix / viewer routing
+                if app.showing_viewer {
+                    app.showing_viewer = false;
+                }
             }
             Event::Mouse(mouse) => {
                 handler::handle_mouse_event(mouse, &mut app);
