@@ -45,6 +45,8 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                 if handler::handle_event(key, &mut app) {
                     break;
                 }
+                // Task 4/8: viewer routing is handled in handler::handle_event
+                // (ESC closes, j/k navigates, readonly). No unconditional close here.
             }
             Event::Mouse(mouse) => {
                 handler::handle_mouse_event(mouse, &mut app);

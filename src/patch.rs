@@ -9,6 +9,9 @@ pub struct Patch {
     pub name: String,
     pub hw_components: Vec<HwComponent>,
     pub shift_groups: Vec<ShiftGroup>,
+    /// Raw `.ini` sections, kept for the source viewer. Populated by
+    /// `from_ini_str`; hand-built patches (e.g. `sample()`) carry none.
+    pub sections: Vec<IniSection>,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -35,7 +38,7 @@ pub enum ComponentKind {
     Encoder,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ComponentState {
     Off,
     On,
@@ -133,6 +136,7 @@ impl Patch {
                 ShiftGroup::Group3,
                 ShiftGroup::Group4,
             ],
+            sections: Vec::new(),
         }
     }
 
@@ -283,13 +287,38 @@ impl Patch {
                 ShiftGroup::Group3,
                 ShiftGroup::Group4,
             ],
+            sections,
         })
+    }
+
+    /// Project the raw `.ini` sections into the source viewer's circuit
+    /// list: one `ViewerCircuit` per section, keeping the key-value pairs.
+    pub fn viewer_circuits(&self) -> Vec<ViewerCircuit> {
+        self.sections
+            .iter()
+            .map(|section| ViewerCircuit {
+                name: section.name.clone(),
+                entries: section.entries.clone(),
+            })
+            .collect()
     }
 }
 
-struct IniSection {
-    name: String,
-    entries: Vec<(String, String)>,
+/// A circuit as shown in the source viewer: section name plus its raw
+/// key-value pairs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ViewerCircuit {
+    pub name: String,
+    pub entries: Vec<(String, String)>,
+}
+
+/// A raw section of a DROID `.ini` patch: the circuit name in brackets
+/// plus its ordered `key = value` entries. Repeated section names are kept
+/// as separate sections (design.md Decision 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IniSection {
+    pub name: String,
+    pub entries: Vec<(String, String)>,
 }
 
 /// Strip a `#`-to-end-of-line comment (whole-line or inline).
@@ -387,7 +416,7 @@ fn scan_hw_tokens(value: &str) -> Vec<String> {
     tokens
 }
 
-fn token_kind(id: &str) -> Option<ComponentKind> {
+pub fn token_kind(id: &str) -> Option<ComponentKind> {
     match id.chars().next()? {
         'B' => Some(ComponentKind::Button),
         'L' => Some(ComponentKind::Led),
@@ -489,6 +518,28 @@ mod tests {
     #[test]
     fn rejects_empty_file() {
         assert!(Patch::from_ini_str("", String::from("empty")).is_err());
+    }
+
+    #[test]
+    fn viewer_circuits_maps_sections() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert_eq!(patch.sections.len(), 14);
+        let circuits = patch.viewer_circuits();
+        assert_eq!(circuits.len(), 14);
+        // Bare `[p2b8]` declaration carries no key-value pairs.
+        assert_eq!(circuits[0].name, "p2b8");
+        assert!(circuits[0].entries.is_empty());
+        // Repeated section names are preserved as separate circuits.
+        assert_eq!(circuits[2].name, "copy");
+        assert_eq!(circuits[3].name, "copy");
+        // Entries keep file order with values exactly as parsed.
+        assert_eq!(
+            circuits[1].entries,
+            vec![
+                (String::from("hz"), String::from("40 * P1.1")),
+                (String::from("square"), String::from("N1")),
+            ]
+        );
     }
 
     #[test]
