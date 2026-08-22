@@ -46,6 +46,15 @@ pub enum ComponentState {
     Active,
 }
 
+/// Which MASTER model a patch requires. MASTER18 has more CV jacks/RAM
+/// than MASTER; a patch that addresses jacks beyond MASTER's 8 CV in/out
+/// needs MASTER18. See `Patch::master_requirement`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MasterRequirement {
+    Master,
+    Master18,
+}
+
 /// Shift groups — modifier keys that change the behavior/label of a group of components
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShiftGroup {
@@ -291,6 +300,46 @@ impl Patch {
         })
     }
 
+    /// Sorted, deduplicated list of physical controller panels this patch
+    /// uses (the same strings as `HwComponent.controller`, e.g. "P2B8",
+    /// "CV I/O", "Notebuttons").
+    pub fn module_types(&self) -> Vec<String> {
+        let mut types: Vec<String> = self
+            .hw_components
+            .iter()
+            .map(|c| c.controller.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        types.sort();
+        types
+    }
+
+    /// Count of components this patch needs per controller/module type —
+    /// what a rack must provide to host this patch.
+    pub fn needs_by_type(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut needs = std::collections::BTreeMap::new();
+        for comp in &self.hw_components {
+            *needs.entry(comp.controller.clone()).or_insert(0) += 1;
+        }
+        needs
+    }
+
+    /// Whether this patch requires MASTER or MASTER18. Heuristic: MASTER18
+    /// carries more jacks/RAM than MASTER; a patch that addresses CV jack
+    /// 9 or higher needs MASTER18.
+    pub fn master_requirement(&self) -> MasterRequirement {
+        let needs_master18 = self.hw_components.iter().any(|c| {
+            matches!(c.kind, ComponentKind::CvIn | ComponentKind::CvOut)
+                && leading_number(&c.id).is_some_and(|n| n > 8)
+        });
+        if needs_master18 {
+            MasterRequirement::Master18
+        } else {
+            MasterRequirement::Master
+        }
+    }
+
     /// Project the raw `.ini` sections into the source viewer's circuit
     /// list: one `ViewerCircuit` per section, keeping the key-value pairs.
     pub fn viewer_circuits(&self) -> Vec<ViewerCircuit> {
@@ -513,6 +562,41 @@ mod tests {
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
         let b2_1 = patch.hw_components.iter().find(|c| c.id == "B2.1").unwrap();
         assert_eq!(b2_1.controller, "Notebuttons");
+    }
+
+    #[test]
+    fn module_types_lists_sorted_unique_controllers() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let types = patch.module_types();
+        assert!(types.contains(&String::from("P2B8")));
+        assert!(types.contains(&String::from("CV I/O")));
+        let mut sorted = types.clone();
+        sorted.sort();
+        assert_eq!(types, sorted);
+    }
+
+    #[test]
+    fn needs_by_type_counts_components_per_controller() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let needs = patch.needs_by_type();
+        assert_eq!(needs.get("P2B8"), Some(&18));
+        assert_eq!(needs.get("CV I/O"), Some(&4));
+    }
+
+    #[test]
+    fn master_requirement_is_master_for_patch_within_eight_cv_jacks() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        assert_eq!(patch.master_requirement(), MasterRequirement::Master);
+    }
+
+    #[test]
+    fn master_requirement_is_master18_when_cv_jack_beyond_eight_is_used() {
+        let content = "[copy]\n    input = I9\n    output = O1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_requirement(), MasterRequirement::Master18);
     }
 
     #[test]
