@@ -110,8 +110,14 @@ fn render_patch(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app:
         .collect();
     constraints.push(Constraint::Min(0));
 
+    let panel_direction = if app.orientation == crate::app::Orientation::Landscape {
+        Direction::Horizontal
+    } else {
+        Direction::Vertical
+    };
+
     let panel_chunks = Layout::default()
-        .direction(Direction::Vertical)
+        .direction(panel_direction)
         .constraints(constraints)
         .flex(Flex::Start)
         .split(area);
@@ -174,7 +180,14 @@ fn render_patch(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app:
                 let is_shift_active =
                     comp.shift_group.is_some() && comp.shift_group == app.active_shift;
                 render_component(frame, comp_chunks[col_i], comp, is_hovered, is_shift_active);
-                app.component_rects.push((global_idx, comp_chunks[col_i]));
+                let base_rect = comp_chunks[col_i];
+                let scaled_rect = Rect {
+                    x: base_rect.x,
+                    y: base_rect.y,
+                    width: (base_rect.width as f32 * app.scale_factor) as u16,
+                    height: (base_rect.height as f32 * app.scale_factor) as u16,
+                };
+                app.component_rects.push((global_idx, scaled_rect));
             }
         }
     }
@@ -299,6 +312,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
+
+    // Display scale and orientation permanently in the status bar
+    spans.push(Span::raw(" | "));
+    spans.push(Span::styled(
+        format!(
+            "Scale: {:.1} | Orientation: {:?}",
+            app.scale_factor, app.orientation
+        ),
+        Style::default().fg(Color::White),
+    ));
 
     let status = Paragraph::new(Line::from(spans))
         .style(Style::default().bg(Color::DarkGray))

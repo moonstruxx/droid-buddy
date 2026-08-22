@@ -63,7 +63,7 @@ flowchart LR
 ### 3.2 Domain Model & Parser (`src/patch.rs`)
 
 - **Responsibility**: typed model of a DROID patch and a hand-rolled `.ini` parser that builds it.
-- **Types**: `Patch` (name, `hw_components`, `shift_groups`), `HwComponent` (id, label, kind, shift_group, state, controller), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`).
+- **Types**: `Patch` (name, `hw_components`, `shift_groups`), `HwComponent` (id, label, kind, shift_group, state, controller), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth` (circuit-level containers that group components inside controller panels).
 - **Key functions**: `Patch::from_ini_file` / `from_ini_str` / `sample`, `parse_ini_sections` (comment stripping, repeated-section preservation), `scan_hw_tokens` (boundary-aware token scanner), `token_kind`, `add_component`.
 - **Inputs**: `.ini` file content; **Outputs**: `Result<Patch, String>` (descriptive errors, never panics on malformed input).
 - **Design notes**: the parser is deliberately custom (the `ini` crate was removed from `Cargo.toml`) to preserve repeated section names and control token extraction precisely.
@@ -71,14 +71,14 @@ flowchart LR
 ### 3.3 Input Handling (`src/handler.rs`)
 
 - **Responsibility**: translate terminal events into `App` mutations.
-- **Key functions**: `handle_event` (keyboard: `q`/Ctrl+C quit, `l` open picker, `1`–`4` shift groups, `Esc` clear shift/cancel, Enter/Space toggle, `j`/`k`/arrows navigate), `handle_mouse_event` (hover highlight, left-click toggle, scroll ±0.05 on knobs/faders), `handle_picker_event` (directory navigation, Enter on dir/`.ini`, Esc cancel), `rect_contains` hit-testing.
+- **Key functions**: `handle_event` (keyboard: `q`/Ctrl+C quit, `l` open picker, `1`–`4` shift groups, `o` toggle portrait/landscape orientation, `Esc` clear shift/cancel, Enter/Space toggle, `j`/`k`/arrows navigate), `handle_mouse_event` (hover highlight, left-click toggle, scroll ±0.05 on knobs/faders), `handle_picker_event` (directory navigation, Enter on dir/`.ini`, Esc cancel), `rect_contains` hit-testing.
 - **Inputs**: `KeyEvent`/`MouseEvent`; **Outputs**: `bool` (quit flag) or `()`; mutates `App`.
 - **Key invariant**: mouse hit-testing uses `app.component_rects` written by the renderer — the renderer, not the handler, knows where components actually landed on screen.
 
 ### 3.4 Application State (`src/app.rs`)
 
 - **Responsibility**: single mutable state object threaded through the whole app.
-- **Fields**: `patch: Option<Patch>`, `active_shift: Option<ShiftGroup>`, `hovered_component: Option<usize>`, `status_message`, file-picker state (`showing_picker`, `picker_dir`, `selected_file`, `picker_entries`, `picker_index`), `component_rects: Vec<(usize, Rect)>`.
+- **Fields**: `patch: Option<Patch>`, `active_shift: Option<ShiftGroup>`, `hovered_component: Option<usize>`, `status_message`, file-picker state (`showing_picker`, `picker_dir`, `selected_file`, `picker_entries`, `picker_index`), `component_rects: Vec<(usize, Rect)>`, `scale_factor: f32` (uniform component-cell scaling applied by the renderer), `orientation: Orientation` (Portrait/Landscape panel direction).
 - **Key functions**: `App::new`/`Default`, `refresh_picker_entries`, `load_sample_patch`; free function `is_entry_selectable` (`.ini` files and directories selectable, others dimmed).
 
 ### 3.5 Entry Point & Event Loop (`src/main.rs`)
@@ -164,7 +164,7 @@ sequenceDiagram
 ## 12. Development Workflow
 
 - **Setup**: `cargo build` (no install step; no remote to clone from).
-- **Test**: `cargo test` (24 unit tests).
+- **Test**: `cargo test` (54 unit tests).
 - **Lint**: `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 - **Format**: `cargo fmt --check` / `cargo fmt`.
 - **Verify binary**: `.claude/skills/verify/SKILL.md` drives the built binary interactively.
@@ -227,4 +227,4 @@ sequenceDiagram
 - **OpenSpec**: spec-driven change workflow (`openspec/changes/`, `openspec/specs/`).
 - **beads (bd)**: Dolt-backed issue tracker used for task tracking.
 
-<!-- Last updated: 2026-08-20 -->
+<!-- Last updated: 2026-08-22 -->

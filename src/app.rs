@@ -24,6 +24,15 @@ pub enum ViewerMode {
     Fallback,
 }
 
+/// Orientation of the patch display.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Orientation {
+    /// Portrait mode
+    Portrait,
+    /// Landscape mode
+    Landscape,
+}
+
 /// Application state
 pub struct App {
     pub patch: Option<Patch>,
@@ -57,6 +66,10 @@ pub struct App {
     pub viewer_selected_circuit: usize,
     /// Scroll offset of the viewer's main area, in rows.
     pub viewer_scroll: u16,
+    /// Scale factor for rendering (1.0 = default). Used for progressive scaling.
+    pub scale_factor: f32,
+    /// Current display orientation.
+    pub orientation: Orientation,
 }
 
 impl App {
@@ -78,6 +91,8 @@ impl App {
             viewer_patch: None,
             viewer_selected_circuit: 0,
             viewer_scroll: 0,
+            scale_factor: 1.0,
+            orientation: Orientation::Portrait,
         }
     }
 
@@ -93,6 +108,14 @@ impl App {
                 let path = entry.path();
                 self.picker_entries.push(path);
             }
+        }
+        // Scale factor affects entry density: with higher scale, show fewer entries
+        // to prevent overcrowding the picker UI
+        if self.scale_factor > 2.0 {
+            // When heavily scaled, trim to most relevant entries (parent + first N)
+            let max_entries =
+                (self.picker_entries.len() as f32 / self.scale_factor).ceil() as usize;
+            self.picker_entries.truncate(max_entries.max(1));
         }
     }
 

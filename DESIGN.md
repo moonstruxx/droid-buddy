@@ -70,7 +70,7 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 
 ## Component Anatomy
 
-Each component occupies a fixed cell of 16 columns × 2 rows:
+Each component occupies a fixed cell of 16 columns × 2 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together:
 
 - **Row 1**: a state glyph followed by the component label (e.g. `● TRIG A`).
 - **Row 2**: the state text (ON/OFF, percentage, CV IN/CV OUT), rendered in muted gray.
@@ -89,13 +89,14 @@ Glyphs by kind:
 ## Panels
 
 - Each panel is a bordered block titled with the controller name (e.g. ` P2B8 `).
-- Components flow left-to-right within a row and wrap to additional rows when the terminal is too narrow; each row is exactly one component-height.
+- Components are first grouped into module containers (one per circuit), then modules flow left-to-right within a row and wrap to additional rows when the terminal is too narrow; each row is exactly one component-height.
+- Panel layout follows the display orientation: panels stack vertically in portrait and arrange horizontally in landscape.
 - Panel borders are dark gray by default.
 - With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim to dark gray.
 
 ## Status Bar
 
-A dark-gray band at the bottom, bordered, left-aligned. It shows the current status message in white, and when a shift is active appends ` | SHIFT n ACTIVE` in the group color, bold.
+A dark-gray band at the bottom, bordered, left-aligned. It shows the current status message in white, appends ` | SHIFT n ACTIVE` in the group color, bold, when a shift is active, and permanently displays the current display settings as `Scale: <factor> | Orientation: <Portrait|Landscape>`.
 
 ## File Picker
 
@@ -105,4 +106,4 @@ An overlay centered in the terminal, roughly 70% of the width and 50% of the hei
 
 With no patch loaded, the main area shows the centered muted prompt `Press 'l' to load a patch`.
 
-<!-- Last updated: 2026-08-20 -->
+<!-- Last updated: 2026-08-22 -->

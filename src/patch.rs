@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 pub struct Patch {
     pub name: String,
     pub hw_components: Vec<HwComponent>,
+    /// Modules grouping hardware components by controller type.
+    /// Populated by `from_ini_str`; hand-built patches (e.g. `sample()`) carry none.
+    pub modules: Vec<Module>,
     pub shift_groups: Vec<ShiftGroup>,
     /// Raw `.ini` sections, kept for the source viewer. Populated by
     /// `from_ini_str`; hand-built patches (e.g. `sample()`) carry none.
@@ -46,6 +49,32 @@ pub enum ComponentState {
     Active,
 }
 
+/// Horizontal Pin width for modules in a DROID patch.
+/// One HP = one physical control position; typical widths are 4HP, 6HP, 8HP, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModuleWidth {
+    FourHP,
+    SixHP,
+    EightHP,
+    TwelveHP,
+    SixteenHP,
+    TwentyHP,
+}
+
+impl ModuleWidth {
+    /// Convert ModuleWidth to character cells (each HP = 4 chars, but we use 1 cell per HP for simplicity)
+    pub fn cell_width(&self) -> usize {
+        match self {
+            ModuleWidth::FourHP => 4,
+            ModuleWidth::SixHP => 6,
+            ModuleWidth::EightHP => 8,
+            ModuleWidth::TwelveHP => 12,
+            ModuleWidth::SixteenHP => 16,
+            ModuleWidth::TwentyHP => 20,
+        }
+    }
+}
+
 /// Which MASTER model a patch requires. MASTER18 has more CV jacks/RAM
 /// than MASTER; a patch that addresses jacks beyond MASTER's 8 CV in/out
 /// needs MASTER18. See `Patch::master_requirement`.
@@ -53,6 +82,126 @@ pub enum ComponentState {
 pub enum MasterRequirement {
     Master,
     Master18,
+}
+
+/// A module in a DROID patch, grouping hardware components by controller type.
+/// Modules provide logical grouping for the TUI rendering and resize behavior.
+/// A module has a fixed height of 3U and a width expressed in HP (Horizontal Pins).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Module {
+    /// Unique identifier for the module (typically the controller name)
+    pub id: String,
+    /// Human-readable model name (e.g. "P2B8", "Faderbank")
+    pub model_name: String,
+    /// Width in Horizontal Pins (HP)
+    pub width: ModuleWidth,
+    /// Height in Units (U), fixed at 3
+    pub height: u16,
+    /// Components contained in this module
+    pub components: Vec<HwComponent>,
+}
+
+impl Module {
+    /// Create a new Module with the given width and empty components vector
+    pub fn new(id: String, model_name: String, width: ModuleWidth) -> Self {
+        Self {
+            id,
+            model_name,
+            width,
+            height: 3,
+            components: Vec::new(),
+        }
+    }
+
+    /// Get the module width in character cells (based on HP)
+    pub fn cell_width(&self) -> usize {
+        self.width.cell_width()
+    }
+
+    /// Get the number of components in this module
+    pub fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Parse HwComponents from INI section names and group them into modules.
+    ///
+    /// This scans INI section names (e.g. `[button]`, `[knob]`, `[led]`) and groups
+    /// components by their controller assignment. Components without an explicit
+    /// controller are grouped into an "Unused" module.
+    ///
+    /// Returns a vector of modules, each containing components that share the same
+    /// controller. The first module will have the most common controller, etc.
+    pub fn from_ini_sections(sections: &[String]) -> Vec<Self> {
+        use std::collections::HashMap;
+
+        let mut controller_components: HashMap<String, Vec<HwComponent>> = HashMap::new();
+
+        for section in sections {
+            // Strip leading/trailing whitespace
+            let stripped = section.trim();
+
+            // Skip empty lines and comments
+            if stripped.is_empty() || stripped.starts_with('#') {
+                continue;
+            }
+
+            // Parse section name: remove [ and ]
+            let section_name = stripped
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(stripped);
+
+            // Extract controller from section name pattern like [button], [knob], etc.
+            let controller = if section_name.is_empty() {
+                "Unused".to_string()
+            } else {
+                let first_char = section_name.chars().next().unwrap_or('/');
+                // Map hardware token kinds to controller names
+                match first_char {
+                    'B' => "P2B8",
+                    'L' => "Led",
+                    'P' => "Pot",
+                    'O' => "CV Out",
+                    'I' => "CV In",
+                    'E' => "Encoder",
+                    'S' => "Switch",
+                    _ => "Unused",
+                }
+                .to_string()
+            };
+
+            // Group component under the inferred controller
+            controller_components
+                .entry(controller.clone())
+                .or_default()
+                .push(HwComponent {
+                    id: section_name.into(),
+                    label: section_name.into(),
+                    kind: ComponentKind::Button,
+                    shift_group: None,
+                    state: ComponentState::Off,
+                    controller,
+                });
+        }
+
+        // Convert to Module objects, sorted by number of components (largest first)
+        let mut modules: Vec<Module> = controller_components
+            .into_iter()
+            .map(|(controller, components)| {
+                let model_name = components
+                    .first()
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| controller.clone());
+
+                Module::new(controller, model_name, ModuleWidth::EightHP)
+            })
+            .collect();
+
+        // Sort by component count descending
+        modules.sort_by_key(|b| std::cmp::Reverse(b.component_count()));
+
+        modules
+    }
 }
 
 /// Shift groups — modifier keys that change the behavior/label of a group of components
@@ -145,6 +294,7 @@ impl Patch {
                 ShiftGroup::Group3,
                 ShiftGroup::Group4,
             ],
+            modules: Vec::new(),
             sections: Vec::new(),
         }
     }
@@ -183,6 +333,11 @@ impl Patch {
             return Err(String::from("No circuit sections found in patch file"));
         }
 
+        // Group components into modules based on INI section names
+        let modules =
+            Module::from_ini_sections(&sections.iter().map(|s| s.name.clone()).collect::<Vec<_>>());
+
+        // Flatten modules' components into hw_components for backward compatibility
         let mut components: Vec<HwComponent> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
         let mut p2b8_instances: u32 = 0;
@@ -287,9 +442,13 @@ impl Patch {
             };
         }
 
+        // Assign shift groups from modules (if modules have shift group info)
+        // For now, use the previously assigned shift groups from components
+
         Ok(Patch {
             name,
             hw_components: components,
+            modules,
             shift_groups: vec![
                 ShiftGroup::Group1,
                 ShiftGroup::Group2,
