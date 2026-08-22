@@ -1,13 +1,10 @@
 # Keybinding Specification
 
-
 ## Purpose
 
-Vim-style prefix key system for the source viewer. The `g` key arms a prefix
-mode with a lazy timeout; `g` + `v` opens the source viewer. While the viewer
-is open, dedicated keys control scrolling, jumping, and closing.
+Define keyboard shortcuts for navigating and interacting with the DROID TUI, including patch loading, component control, shift groups, and module resizing.
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Prefix key pattern for extensibility
 The system SHALL use a prefix key pattern (`g` + action key) for extended commands to allow future expansion without conflicts. Single-key bindings remain for frequent actions.
@@ -23,59 +20,6 @@ The system SHALL use a prefix key pattern (`g` + action key) for extended comman
 #### Scenario: Esc cancels prefix
 - **WHEN** user presses `g` then `Esc`
 - **THEN** the prefix mode is cancelled immediately
-
-#### Scenario: Non-matching key while prefix armed
-Given prefix is armed
-When user presses `h`
-Then the prefix is cleared
-And `h` processes as a normal key event
-
-### Requirement: Source viewer shortcut
-The system SHALL open the source viewer via `g` + `v`: while the prefix is armed, pressing `v` sets `app.showing_viewer = true`, clears the prefix, and populates `app.viewer_patch` from the current patch's circuits.
-
-#### Scenario: Open viewer with prefix
-Given no prefix is armed
-And a patch is loaded
-When user presses `g` then `v`
-Then `app.showing_viewer` becomes true
-And `app.viewer_patch` contains the patch's circuits
-And `app.prefix` is `None`
-
-### Requirement: Viewer scroll controls
-While the viewer is open, `j` or `Down` SHALL scroll the main area down (increments `app.viewer_scroll`) and `k` or `Up` SHALL scroll up (decrements with saturating arithmetic at 0).
-
-#### Scenario: Scroll viewer saturates at zero
-Given viewer is open with scroll at 0
-When user presses `k` (up)
-Then `app.viewer_scroll` remains 0 (saturating)
-When user presses `j` (down) three times
-Then `app.viewer_scroll` is 3
-
-### Requirement: Viewer circuit jump
-While the viewer is open, `Enter` SHALL jump the main area scroll to the selected sidebar circuit's position.
-
-#### Scenario: Jump to selected circuit
-Given viewer is open with a sidebar circuit selected
-When user presses `Enter`
-Then the main area scroll moves to that circuit's position
-
-### Requirement: Viewer close
-While the viewer is open, `Esc` SHALL close the viewer (`app.showing_viewer = false`).
-
-#### Scenario: Close viewer with Escape
-Given viewer is open
-When user presses `Esc`
-Then `app.showing_viewer` becomes false
-
-### Requirement: Esc cancels prefix without clearing shift group
-`Esc` while the prefix is armed (and the viewer is closed) SHALL cancel the prefix without other side effects; it does not clear the active shift group.
-
-#### Scenario: Cancel prefix with Escape
-Given prefix is armed
-And shift group 3 is active
-When user presses `Esc`
-Then `app.prefix` becomes `None`
-And `app.active_shift` remains `Some(Group3)`
 
 ### Requirement: Resize mode activation
 The system SHALL provide a resize mode activated via the `g r` key sequence. Resize mode allows module dimension adjustment via arrow keys.
@@ -140,10 +84,3 @@ The system SHALL display the current mode in the status bar to provide clear fee
 #### Scenario: Resize free mode indicator
 - **WHEN** in resize mode (free proportion)
 - **THEN** status shows "RESIZE MODE (free) - Arrows: width/height, Shift+Arrows: opposite dim, Esc: cancel"
-
-## Design Decisions
-
-- Decision 1: Lazy timeout check (no background timer). Rationale: the app is event-driven; checking expiry on the next keypress avoids threading complexity and keeps the event loop simple. A stale prefix that nobody presses is harmless.
-- Decision 2: `Esc` cancels prefix without clearing shift group. Rationale: shift group activation is an independent concern from prefix mode. Cancelling a mistaken `g` press should not disturb an active shift view.
-- Decision 3: `g` + `v` chosen for viewer (not `g` + `s` or `g` + `p`). Rationale: `v` is mnemonic for "viewer" and avoids collision with potential future `g` + `s` (save/search) bindings.
-- Decision 4: Scroll uses `u16` saturating arithmetic. Rationale: prevents underflow on decrement at 0, avoids panic on overflow at max.

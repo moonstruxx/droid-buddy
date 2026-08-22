@@ -133,6 +133,17 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.status_message = String::from("Shift cleared");
             false
         }
+        crossterm::event::KeyCode::Char('o') => {
+            app.orientation = match app.orientation {
+                crate::app::Orientation::Portrait => crate::app::Orientation::Landscape,
+                crate::app::Orientation::Landscape => crate::app::Orientation::Portrait,
+            };
+            app.status_message = format!(
+                "Scale: {:.1} | Orientation: {:?}",
+                app.scale_factor, app.orientation
+            );
+            false
+        }
         crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
             if let Some(idx) = app.hovered_component {
                 if let Some(patch) = &mut app.patch {

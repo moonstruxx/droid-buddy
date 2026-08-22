@@ -4,7 +4,7 @@
 
 Render hardware components grouped by physical controller type (P2B8, Faderbank, Notebuttons, Encoder, etc.) in labeled panels that mirror the physical hardware layout, providing clear visual organization of patch components.
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Group components by controller type
 The system SHALL group hardware components by their physical controller type (P2B8, Faderbank, Notebuttons, Encoder, Pot, Unusedfaders, etc.) based on the hardware token prefix and position. Controller panels now contain modules rather than raw components directly.
@@ -35,17 +35,6 @@ The system SHALL arrange components within each module in the same order as they
 - **WHEN** P2B8 buttons are rendered
 - **THEN** B1.1 appears first (left), B1.8 appears last (right), in physical order within their module
 
-### Requirement: Display component labels and state
-The system SHALL display each component's label (e.g., "TRIG A", "CUTOFF", "CV IN 1") and its current state (ON/OFF for buttons, percentage for knobs, value for CV I/O) within its panel.
-
-#### Scenario: Button state display
-- **WHEN** a button component is rendered
-- **THEN** it shows its label and current state (ON/OFF) with a visual indicator (● for on, ○ for off)
-
-#### Scenario: Knob value display
-- **WHEN** a knob component is rendered
-- **THEN** it shows its label and current value as a percentage (e.g., "50%")
-
 ### Requirement: Handle overflow with scrolling or wrapping
 The system SHALL handle panels that contain more modules than fit in the available terminal width by wrapping modules to multiple rows. Components within modules wrap based on module width.
 
@@ -56,17 +45,6 @@ The system SHALL handle panels that contain more modules than fit in the availab
 #### Scenario: Panel overflow with modules
 - **WHEN** a controller panel has more modules than fit in one row
 - **THEN** modules wrap to additional rows, maintaining their internal component layout
-
-### Requirement: Support terminal resize
-The system SHALL reflow the layout when the terminal is resized, preserving component visibility and panel structure.
-
-#### Scenario: Terminal resized larger
-- **WHEN** the terminal window is enlarged
-- **THEN** panels expand to use available space, potentially showing more components per row
-
-#### Scenario: Terminal resized smaller
-- **WHEN** the terminal window is reduced
-- **THEN** panels reflow to fit the smaller area, wrapping components as needed
 
 ### Requirement: Module-aware layout calculation
 The system SHALL calculate panel layout based on module dimensions rather than fixed component counts. Panel width accommodates the sum of module widths plus spacing.
