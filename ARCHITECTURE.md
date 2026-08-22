@@ -12,7 +12,7 @@ The app is a **patch viewer/interactor, not a hardware bridge**: it parses `.ini
 
 ```
 droid_tui/
-├── Cargo.toml              # crate manifest; deps: ratatui, crossterm, color-eyre, serde, serde_json
+├── Cargo.toml              # crate manifest; deps: ratatui, crossterm, color-eyre
 ├── Cargo.lock
 ├── src/
 │   ├── main.rs             # entry point, terminal lifecycle, event loop
@@ -130,7 +130,6 @@ sequenceDiagram
 | ratatui | 0.29 | Terminal UI: `DefaultTerminal`, `Layout`/`Flex`, widgets; owns raw-mode/alternate-screen lifecycle via `init()`/`restore()` |
 | crossterm | 0.28 | Event source (`event::read`), mouse capture enable/disable |
 | color-eyre | 0.6 | Error reporting + panic hook (chained to also disable mouse capture) |
-| serde / serde_json | 1 | Serialization derives on the domain model (future persistence/export) |
 | OpenSpec | — | Change proposals + capability specs under `openspec/` |
 
 ## 8. Deployment & Infrastructure
@@ -204,7 +203,7 @@ sequenceDiagram
 - **Hardware bridge**: upload patches to a running DROID rack via USB-MIDI SysEx (see `droid-hardware-setup` skill) and reflect real state.
 - **Schema validation**: validate parsed patches against the authoritative DROID circuit schema (`droid_living_examlpes/droid-lsp/src/circuits.json`, 76 circuits, 10 controllers).
 - **Per-row component styling** in the picker (restore the removed style intent).
-- **Persistence**: serde derives already exist on the model — export/import of component state is a natural next step.
+- **Persistence**: export/import of component state is a natural next step (serde removed).
 - **README + DESIGN.md** generation (`/make-design`).
 - **CI**: add a workflow running fmt/clippy/test on push.
 
