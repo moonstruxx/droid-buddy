@@ -25,6 +25,15 @@ colors:
     hover-modifier: reversed
     dim-modifier: dim
     emphasis-modifier: bold
+  viewer:
+    sidebar-border: blue
+    content-border: dark-gray
+    circuit-default-frame: blue
+    entry-key: cyan
+    entry-value: white
+    selected-modifier: reversed
+    status-background: dark-gray
+    shortcut-hint: cyan
 typography:
   family: terminal-default
   size: terminal-default
@@ -41,6 +50,9 @@ spacing:
   panel-padding: 1
   picker-width-ratio: 0.7
   picker-height-ratio: 0.5
+  viewer-sidebar-width-ratio: 0.2
+  viewer-sidebar-min-width: 20
+  viewer-status-height: 3
 elevation:
   level: none
 motion:
@@ -70,7 +82,7 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 
 ## Component Anatomy
 
-Each component occupies a fixed cell of 16 columns × 2 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together:
+Each component occupies a fixed cell of 16 columns × 2 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together. The factor steps through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends), and the status bar confirms each step as `Scaling: N%`.
 
 - **Row 1**: a state glyph followed by the component label (e.g. `● TRIG A`).
 - **Row 2**: the state text (ON/OFF, percentage, CV IN/CV OUT), rendered in muted gray.
@@ -102,8 +114,19 @@ A dark-gray band at the bottom, bordered, left-aligned. It shows the current sta
 
 An overlay centered in the terminal, roughly 70% of the width and 50% of the height, with a blue-bordered block titled ` File Picker `. Entries are listed with a `▶` marker on the selected row. The picker is a functional browser: directories and `.ini` files are selectable, other files are not.
 
+## Source Viewer
+
+Opened with `g` then `v`, the source viewer replaces the entire screen — it takes the same precedence slot as the file picker (an open picker wins) and swaps the three-band patch layout for a research view: a sidebar plus scrolling content over its own status bar.
+
+- **Circuit sidebar** (left, ~1/5 of the width, minimum 20 columns): a blue-bordered block titled ` Circuits ` listing every `[section]` of the loaded patch, disambiguated when names repeat. The selected row uses the same reversed-video treatment as hover elsewhere in the UI; remaining rows are plain white.
+- **Content pane** (right): dark-gray-bordered and vertically scrollable. Each circuit is drawn as a small ASCII box — a `┌─ name ─┐` cap with the name in bold, one `│ key = value │` line per setting with cyan keys and white values, closed by a `└────┘` base, followed by a blank line.
+- **Boxes wear their hardware color.** Each box's frame takes its circuit kind from the same palette as the components: buttons/switches/notebuttons white, pots/encoders/faderbank magenta, CV in cyan, CV out green, LEDs red; any other circuit falls back to blue. Reading the raw source therefore feels like looking at the rack it configures.
+- **Viewer status bar** (bottom, 3 rows): a dark-gray band replacing the normal status bar, reading bold-white `Source Viewer | ` followed by cyan-highlighted keys — `ESC` to close, `j/k` scroll, `Enter` to jump.
+- **Empty states**: centered muted `No patch loaded` or `No circuits in patch` inside the content border.
+- **Readonly**: the viewer displays source only; toggles and shift-group highlighting resume when `Esc` closes it.
+
 ## Empty State
 
 With no patch loaded, the main area shows the centered muted prompt `Press 'l' to load a patch`.
 
-<!-- Last updated: 2026-08-22 -->
+<!-- Last updated: 2026-08-23 -->
