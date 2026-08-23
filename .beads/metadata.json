@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "droid",
-  "project_id": "237fd55c-3a36-4ff7-a3aa-124d3a017674"
-}
