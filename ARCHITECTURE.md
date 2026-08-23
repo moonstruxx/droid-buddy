@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-`droid_tui` is a single-crate Rust terminal application for loading, inspecting, and interacting with DROID hardware patch files (`.ini`). It renders the hardware components a patch defines — buttons, knobs, CV I/O, encoders, LEDs, switches — grouped into labeled panels that mirror the physical controller layout (P2B8, Faderbank, Notebuttons, …), and supports keyboard and mouse interaction plus shift-group visualization.
+`droid_tui` is a single-crate Rust terminal application for loading, inspecting, and interacting with DROID hardware patch files (`.ini`). It renders the hardware components a patch defines — buttons, knobs, CV I/O, encoders, LEDs, switches — grouped into labeled panels that mirror the physical controller layout (P2B8, Faderbank, Notebuttons, …), and supports keyboard and mouse interaction plus shift-group visualization. A second surface, the **source viewer** (opened with `g` then `v`), projects the patch's raw `.ini` circuit sections into a sidebar/content view shown beside the app — in a herdr pane or a fallback terminal window.
 
 The system is a **layered monolith** with no framework, no async runtime, and no network: a single-threaded event loop reads terminal events, mutates an in-memory application state, and redraws the screen. The domain model and `.ini` parser are pure functions over strings; the renderer owns all layout decisions and publishes per-frame geometry back to the state for mouse hit-testing.
 
@@ -23,9 +23,10 @@ droid_tui/
 ├── fixtures/               # test fixtures: arpeggio1.ini, picker_test/
 ├── openspec/
 │   ├── changes/            # OpenSpec change proposals (archive/ holds completed ones)
-│   └── specs/              # capability specs (on archive/droid-patch-tui branch):
-│                           #   controller-panels, file-picker, mouse-interaction,
-│                           #   patch-parsing, shift-visualization
+│   └── specs/              # capability specs: controller-panels, file-picker,
+│                           #   mouse-interaction, patch-parsing, shift-visualization,
+│                           #   keybinding, module-scaling, module-orientation,
+│                           #   viewer-layout, herdr-integration
 ├── .opencode/              # agent orchestration config (engineers, source roots, platform)
 ├── .agents/skills/         # project skills (guardrails, ratatui, rust, openspec, …)
 ├── .beads/                 # beads issue tracker data (Dolt-backed, tooling only)
@@ -42,6 +43,7 @@ flowchart LR
     TERM -->|crossterm events| LOOP[Event Loop<br/>main.rs::run]
     LOOP --> HANDLER[handler.rs<br/>handle_event / handle_mouse_event]
     HANDLER -->|mutates| APP[App state<br/>app.rs]
+    HANDLER -.->|g v spawns viewer| SUB[Second terminal<br/>droid_tui --view-source]
     APP --> PATCH[Patch model<br/>patch.rs]
     PATCH -->|parses| INI[.ini patch file]
     LOOP -->|draw| UI[ui.rs render]
@@ -55,7 +57,7 @@ flowchart LR
 ### 3.1 User Interface (`src/ui.rs`)
 
 - **Responsibility**: render the entire screen from `App` state each frame; compute layout; publish component geometry for mouse hit-testing.
-- **Key functions**: `render` (picker overlay vs. header/main/status split), `render_patch` (groups components into controller panels, wraps to rows, applies shift-group border colors, records `component_rects`), `render_component`, `render_status`, `render_picker`.
+- **Key functions**: `render` (picker overlay vs. header/main/status split), `render_patch` (groups components into controller panels, wraps to rows, applies shift-group border colors, records `component_rects`), `render_component`, `render_status`, `render_picker`, `render_viewer` (source-viewer surface, split into `render_viewer_sidebar`, `render_viewer_content`, `render_viewer_status`).
 - **Technologies**: ratatui 0.29 (`Frame`, `Layout`, `Flex`, `Block`, `Paragraph`), crossterm colors/modifiers.
 - **Inputs**: `&mut App`; **Outputs**: terminal frame; side effect: `app.component_rects` filled per frame.
 - **Key invariant**: layout is recomputed fresh from `frame.area()` on every draw — terminal resize needs no state handling.
@@ -63,23 +65,24 @@ flowchart LR
 ### 3.2 Domain Model & Parser (`src/patch.rs`)
 
 - **Responsibility**: typed model of a DROID patch and a hand-rolled `.ini` parser that builds it.
-- **Types**: `Patch` (name, `hw_components`, `shift_groups`), `HwComponent` (id, label, kind, shift_group, state, controller), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth` (circuit-level containers that group components inside controller panels).
-- **Key functions**: `Patch::from_ini_file` / `from_ini_str` / `sample`, `parse_ini_sections` (comment stripping, repeated-section preservation), `scan_hw_tokens` (boundary-aware token scanner), `token_kind`, `add_component`.
+- **Types**: `Patch` (name, `hw_components`, `modules`, `sections`, `shift_groups`), `HwComponent` (id, label, kind, shift_group, state, controller), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth` (circuit-level containers that group components inside controller panels), `ViewerCircuit` (one `.ini` section projected as name + key-value pairs for the source viewer), `MasterRequirement` (Master vs Master18 rack heuristic).
+- **Key functions**: `Patch::from_ini_file` / `from_ini_str` / `sample`, `parse_ini_sections` (comment stripping, repeated-section preservation), `scan_hw_tokens` (boundary-aware token scanner), `token_kind`, `add_component`; rack-recognition API `module_types` / `needs_by_type` / `master_requirement`; `viewer_circuits` (projects raw sections for the source viewer).
 - **Inputs**: `.ini` file content; **Outputs**: `Result<Patch, String>` (descriptive errors, never panics on malformed input).
 - **Design notes**: the parser is deliberately custom (the `ini` crate was removed from `Cargo.toml`) to preserve repeated section names and control token extraction precisely.
 
 ### 3.3 Input Handling (`src/handler.rs`)
 
 - **Responsibility**: translate terminal events into `App` mutations.
-- **Key functions**: `handle_event` (keyboard: `q`/Ctrl+C quit, `l` open picker, `1`–`4` shift groups, `o` toggle portrait/landscape orientation, `Esc` clear shift/cancel, Enter/Space toggle, `j`/`k`/arrows navigate), `handle_mouse_event` (hover highlight, left-click toggle, scroll ±0.05 on knobs/faders), `handle_picker_event` (directory navigation, Enter on dir/`.ini`, Esc cancel), `rect_contains` hit-testing.
+- **Key functions**: `handle_event` (priority order: picker → armed prefix → viewer mode → normal keys; keyboard: `q`/Ctrl+C quit, `l` open picker, `g` arms a vim-style prefix (`g v` opens the source viewer), `+`/`-` cycle scale presets 50 %–200 % with wrap-around, `1`–`4` shift groups, `o` toggle portrait/landscape orientation, `Esc` clears shift / cancels prefix / closes viewer, Enter/Space toggle, `j`/`k`/arrows navigate), `handle_mouse_event` (hover highlight, left-click toggle, scroll ±0.05 on knobs/faders), `handle_picker_event` (directory navigation, Enter on dir/`.ini`, Esc cancel), `open_viewer_window` (viewer pane/window spawning), `parse_herdr_pane_id` (herdr JSON output parsing), `determine_fallback_terminal_cmd` (TERM-matched kitty/xterm/gnome-terminal/alacritty candidates), `rect_contains` hit-testing.
 - **Inputs**: `KeyEvent`/`MouseEvent`; **Outputs**: `bool` (quit flag) or `()`; mutates `App`.
 - **Key invariant**: mouse hit-testing uses `app.component_rects` written by the renderer — the renderer, not the handler, knows where components actually landed on screen.
+- **Viewer is readonly**: while `showing_viewer` is set only Esc/j/k/arrows/Enter are handled; component toggles and shift changes are ignored until the viewer closes.
 
 ### 3.4 Application State (`src/app.rs`)
 
 - **Responsibility**: single mutable state object threaded through the whole app.
-- **Fields**: `patch: Option<Patch>`, `active_shift: Option<ShiftGroup>`, `hovered_component: Option<usize>`, `status_message`, file-picker state (`showing_picker`, `picker_dir`, `selected_file`, `picker_entries`, `picker_index`), `component_rects: Vec<(usize, Rect)>`, `scale_factor: f32` (uniform component-cell scaling applied by the renderer), `orientation: Orientation` (Portrait/Landscape panel direction).
-- **Key functions**: `App::new`/`Default`, `refresh_picker_entries`, `load_sample_patch`; free function `is_entry_selectable` (`.ini` files and directories selectable, others dimmed).
+- **Fields**: `patch: Option<Patch>`, `active_shift: Option<ShiftGroup>`, `hovered_component: Option<usize>`, `status_message`, file-picker state (`showing_picker`, `picker_dir`, `selected_file`, `picker_entries`, `picker_index`), `component_rects: Vec<(usize, Rect)>`, `scale_factor: f32` (uniform component-cell scaling applied by the renderer), `orientation: Orientation` (Portrait/Landscape panel direction), `prefix: Option<PrefixState>` (armed vim-style prefix + start instant for the lazy 1 s timeout), viewer state (`showing_viewer: bool`, `viewer_mode: ViewerMode` — None/Herdr/Fallback, `viewer_patch: Option<Vec<ViewerCircuit>>`, `viewer_selected_circuit: usize`, `viewer_scroll: usize`).
+- **Key functions**: `App::new`/`Default`, `load_patch` (stores the patch and populates `viewer_patch` via `Patch::viewer_circuits`), `refresh_picker_entries`, `load_sample_patch`; free function `is_entry_selectable` (`.ini` files and directories selectable, others dimmed).
 
 ### 3.5 Entry Point & Event Loop (`src/main.rs`)
 
@@ -112,6 +115,8 @@ sequenceDiagram
 - **Load a patch**: press `l` → picker overlay lists current dir → navigate with `j`/`k`/arrows → Enter on `.ini` → `Patch::from_ini_file` parses → picker closes → panels render.
 - **Toggle a component**: Enter/Space on hovered component, or mouse click on a component rect → `toggle_component` flips `ComponentState` → status bar shows "Toggled: <label>".
 - **Shift visualization**: press `1`–`4` → `active_shift` set → panels containing matching `shift_group` get bold colored borders, others dim; `Esc` clears.
+- **Open the source viewer**: press `g` then `v` within 1 s → `open_viewer_window` splits a herdr pane to the right (`HERDR_ENV=1`) and runs `droid_tui --view-source` inside it, or falls back to a new kitty/xterm/gnome-terminal/alacritty window → that instance shows a Circuits sidebar over the raw section content; `j`/`k` select, Enter jumps (resets scroll); readonly until `Esc`.
+- **Scale modules**: press `+`/`-` → cycle presets 50 % → 100 % → 150 % → 200 % (wrapping at both ends) → the renderer multiplies the component cell size; status bar shows "Scaling: N%".
 - **Resize**: `Event::Resize` is ignored — the next `draw` recomputes layout from the new `frame.area()`.
 
 ## 5. Data Stores
@@ -120,7 +125,13 @@ sequenceDiagram
 
 ## 6. External Integrations / APIs
 
-**None at runtime.** The app reads local `.ini` files and simulates component state; it does not talk to DROID hardware, MIDI, or any network service. DROID reference material (`droid_living_examlpes/`) is a machine-local symlink used for development reference only.
+The app reads local `.ini` files and simulates component state; it does not talk to DROID hardware, MIDI, or any network service. Since the source viewer landed there is exactly one local integration: opening the viewer shells out via `std::process::Command`.
+
+- **herdr pane integration** (when `HERDR_ENV=1`): `herdr pane split --current --direction right --cwd "$PWD" --no-focus`, then `herdr pane run <pane-id> "droid_tui --view-source"`; the pane id is parsed from `herdr pane list --output json` by `parse_herdr_pane_id`.
+- **Terminal-emulator fallback** (otherwise): candidates from `determine_fallback_terminal_cmd` tried in order — TERM-matched first, then kitty (`@ new-window --offscreen`), xterm (`-e`), gnome-terminal (`--`), alacritty (`-e`). First successful launch sets `ViewerMode::Fallback`.
+- **Failure behavior**: every step degrades gracefully to a status message; the TUI never aborts, and on total failure `viewer_mode` is left unchanged.
+
+DROID reference material (`droid_living_examlpes/`) remains a machine-local symlink used for development reference only.
 
 ## 7. Key Technologies
 
@@ -130,6 +141,7 @@ sequenceDiagram
 | ratatui | 0.29 | Terminal UI: `DefaultTerminal`, `Layout`/`Flex`, widgets; owns raw-mode/alternate-screen lifecycle via `init()`/`restore()` |
 | crossterm | 0.28 | Event source (`event::read`), mouse capture enable/disable |
 | color-eyre | 0.6 | Error reporting + panic hook (chained to also disable mouse capture) |
+| serde / serde_json | 1 | Parses `herdr pane list --output json` for the viewer pane id (re-introduced with the source viewer) |
 | OpenSpec | — | Change proposals + capability specs under `openspec/` |
 
 ## 8. Deployment & Infrastructure
@@ -137,12 +149,12 @@ sequenceDiagram
 - **Build**: `cargo build` (debug) / `cargo build --release`; single native binary `droid_tui`.
 - **CI/CD**: none (no `.github/workflows`, no GitLab CI).
 - **Containerization**: none.
-- **Environment config**: none — no env vars, no config files; the picker starts in `std::env::current_dir()`.
+- **Environment config**: reads `HERDR_ENV` (herdr session detection for viewer pane integration) and `TERM` (fallback terminal choice); no config files; the picker starts in `std::env::current_dir()`.
 - **Git**: no remote configured; branches `master` (initial commit) and `feature/droid-patch-tui` (active work); archive branch `archive/droid-patch-tui` holds the archived `droid-patch-tui` change plus synced main specs.
 
 ## 9. Security Architecture
 
-- **Trust boundary**: the app runs locally with the user's privileges; the only external input is local `.ini` files.
+- **Trust boundary**: the app runs locally with the user's privileges; the only file input is local `.ini` files. Opening the source viewer executes local commands (`herdr`, host terminal emulators) with the user's privileges — command names are fixed constants, never user input.
 - **Input validation**: the parser is defensive — malformed/empty files return descriptive `Err(String)` and never panic (tested: `rejects_empty_file`).
 - **Secrets**: none handled, none stored.
 - **Auth/authz**: not applicable (no network, no multi-user).
@@ -164,7 +176,7 @@ sequenceDiagram
 ## 12. Development Workflow
 
 - **Setup**: `cargo build` (no install step; no remote to clone from).
-- **Test**: `cargo test` (54 unit tests).
+- **Test**: `cargo test` (55 unit tests).
 - **Lint**: `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 - **Format**: `cargo fmt --check` / `cargo fmt`.
 - **Verify binary**: `.claude/skills/verify/SKILL.md` drives the built binary interactively.
@@ -174,7 +186,7 @@ sequenceDiagram
 ## 13. Testing Strategy
 
 - **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, `ui.rs`.
-- **Coverage**: parser (fixture `fixtures/arpeggio1.ini`, empty-file rejection, internal-variable false-positive guard), handler (mouse hover/click/scroll, picker navigation/load/cancel, keyboard+mouse agreement, shift bindings, Ctrl+C quit), UI (renders empty/sample/real patch at various sizes, shift-group states, picker, status bar).
+- **Coverage**: parser (fixture `fixtures/arpeggio1.ini`, empty-file rejection, internal-variable false-positive guard, rack-recognition needs/master APIs, viewer-circuit projection), handler (mouse hover/click/scroll, picker navigation/load/cancel, keyboard+mouse agreement, shift bindings, Ctrl+C quit, `g` prefix arming/time-out/`g v` open, viewer navigation — Esc closes, j/k sidebar, Enter jump, readonly — `+`/`-` preset cycling), UI (renders empty/sample/real patch at various sizes, shift-group states, picker, status bar incl. prefix indicator, source viewer sidebar/content/status and empty-patch message).
 - **Frameworks**: std test harness only; no mocking, no property tests, no integration tests, no coverage gate.
 - **Gap**: no end-to-end test driving the real binary; UI tests render into a test `Frame` rather than a live terminal.
 
@@ -187,23 +199,26 @@ sequenceDiagram
 5. **Fresh layout per frame** — no resize state; `Event::Resize` is a no-op and the next draw reflows automatically.
 6. **Chained panic hook** — ratatui's hook restores raw mode/alternate screen; the app chains `DisableMouseCapture` before it so a panic leaves a clean terminal.
 7. **Shift groups as an enum** — `ShiftGroup::Group1–4` with `color()`/`key_label()`; panel borders and status bar derive from one source of truth.
+8. **Vim-style `g` prefix with lazy timeout** — arming stores only `PrefixState { started: Instant }`; expiry against `PREFIX_TIMEOUT` (1 s) is checked when the next event arrives instead of running a timer thread, keeping the event loop single-threaded and synchronous.
+9. **Source viewer as a second process instance** — opening the viewer spawns the same binary (`droid_tui --view-source`) in a herdr pane or emulator window rather than embedding a second buffer, leaving the main event loop untouched; `ViewerMode` records how it was opened so failures degrade gracefully.
 
 ## 15. Constraints, Risks, and Technical Debt
 
 - **`target/` partially tracked in git** (725+ files) — build artifacts committed at some point; `.gitignore` only covers beads/Dolt files. Hygiene debt; `git add -A` can accidentally sweep build output into commits.
 - **No README** — project has no user-facing documentation.
-- **ARCHITECTURE.md / DESIGN.md** were placeholders until now; DESIGN.md still is (run `/make-design`).
+- **ARCHITECTURE.md / DESIGN.md** were placeholders until 2026-08-20; both now hold full generated content and are maintained incrementally.
 - **Archived change `droid-patch-tui`** has 48 tasks never checked off in `tasks.md` (process debt; implementation is complete and tested).
 - **Picker row styling** (selected yellow bold, non-selectable dim) was computed but never applied to rendered output; removed as dead code during verification. Per-row styling is a design follow-up.
 - **No hardware integration** — component state is simulated; wiring to real DROID hardware (e.g., MIDI SysEx upload) is future work.
 - **Single-threaded redraw** — fine at current scale; no headless/scriptable mode.
+- **`--view-source` flag is passed but unconsumed** — `open_viewer_window` launches `droid_tui --view-source`, yet `main.rs` never inspects argv (viewer routing lives in `handler::handle_event`); the spawned instance currently behaves like a normal TUI session.
 
 ## 16. Future Considerations
 
 - **Hardware bridge**: upload patches to a running DROID rack via USB-MIDI SysEx (see `droid-hardware-setup` skill) and reflect real state.
 - **Schema validation**: validate parsed patches against the authoritative DROID circuit schema (`droid_living_examlpes/droid-lsp/src/circuits.json`, 76 circuits, 10 controllers).
 - **Per-row component styling** in the picker (restore the removed style intent).
-- **Persistence**: export/import of component state is a natural next step (serde removed).
+- **Persistence**: export/import of component state is a natural next step (serde/serde_json are available again since the herdr viewer integration).
 - **README + DESIGN.md** generation (`/make-design`).
 - **CI**: add a workflow running fmt/clippy/test on push.
 
@@ -213,7 +228,7 @@ sequenceDiagram
 - **Language**: Rust (edition 2021)
 - **Type**: terminal UI application (ratatui)
 - **Runtime**: native binary; Linux
-- **Date of review**: 2026-08-20
+- **Date of review**: 2026-08-23
 - **Maintainer**: not evident from the repository
 
 ## 18. Glossary / Acronyms
@@ -222,9 +237,11 @@ sequenceDiagram
 - **Hardware token**: address of a physical control in a patch, e.g. `B1.1` (button), `L1.2` (LED), `P1.1` (pot), `O1` (CV out), `I1` (CV in), `E1.1` (encoder), `S1.3` (switch).
 - **Controller**: physical panel type — P2B8, Faderbank, Notebuttons, Encoder, Pot, Unusedfaders, etc.
 - **Shift group**: a set of components whose behavior/labels change while a shift key (1–4) is held.
+- **Source viewer**: readonly projection of the patch's raw `.ini` sections (circuit sidebar + content), opened with `g` then `v` in a separate pane/window running `droid_tui --view-source`.
+- **Prefix key**: an armed `g` waits up to 1 s for a follow-up key (e.g. `v`); expiry is checked lazily on the next event.
 - **Herdr / tmux**: terminal multiplexers; mouse events must pass through them.
 - **ratatui / crossterm**: Rust TUI framework / terminal backend.
 - **OpenSpec**: spec-driven change workflow (`openspec/changes/`, `openspec/specs/`).
 - **beads (bd)**: Dolt-backed issue tracker used for task tracking.
 
-<!-- Last updated: 2026-08-22 -->
+<!-- Last updated: 2026-08-23 -->
