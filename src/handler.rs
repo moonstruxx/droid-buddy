@@ -1,18 +1,41 @@
-use std::env;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::app::{is_entry_selectable, App, PrefixState, ViewerMode};
+use crate::app::{is_entry_selectable, App, PrefixState, SourceViewMode, ViewerFocus};
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
-use serde_json;
 
 /// How long an armed `g` prefix waits for its follow-up key before silently
 /// cancelling. The timeout is lazy: it is checked only when the next event
 /// arrives, so no timer thread or event-loop change is needed.
 const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn open_embedded_viewer(app: &mut App) {
+    app.showing_viewer = true;
+    app.viewer_focus = ViewerFocus::Source;
+    app.prefix = None;
+    // Initial-position rule: BOF when nothing selected, else first occurrence
+    // of the selected component.
+    if let Some(token) = app.selected_component.clone() {
+        if let Some(patch) = app.patch.as_ref() {
+            if let Some(spans) = patch.occurrence_index.get(&token) {
+                if let Some(first) = spans.first() {
+                    app.source_scroll = first.line;
+                    app.occurrence_cursor = 0;
+                    return;
+                }
+            }
+        }
+        // Selected token has no occurrence: fall through to BOF but keep
+        // selection and reset cursor.
+        app.source_scroll = 0;
+        app.occurrence_cursor = 0;
+    } else {
+        app.source_scroll = 0;
+        app.occurrence_cursor = 0;
+    }
+}
 
 /// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
@@ -37,8 +60,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if app.prefix.is_some() {
         match key.code {
             crossterm::event::KeyCode::Char('v') => {
-                open_viewer_window(app);
-                app.prefix = None;
+                open_embedded_viewer(app);
                 return false;
             }
             crossterm::event::KeyCode::Esc => {
@@ -51,39 +73,103 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
     }
 
-    // Viewer mode: ESC closes viewer, j/k navigates sidebar, other keys are readonly
+    // Embedded viewer pane handling
     if app.showing_viewer {
+        // Global viewer keys: Esc, Tab, t work from either focus.
         match key.code {
             crossterm::event::KeyCode::Esc => {
                 app.showing_viewer = false;
-                app.viewer_mode = ViewerMode::None;
+                app.viewer_focus = ViewerFocus::Panels;
+                app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
-                if let Some(circuits) = &app.viewer_patch {
-                    if !circuits.is_empty() {
-                        app.viewer_selected_circuit =
-                            (app.viewer_selected_circuit + 1).min(circuits.len() - 1);
+            crossterm::event::KeyCode::Tab => {
+                app.viewer_focus = match app.viewer_focus {
+                    ViewerFocus::Source => ViewerFocus::Panels,
+                    ViewerFocus::Panels => ViewerFocus::Source,
+                };
+                return false;
+            }
+            crossterm::event::KeyCode::Char('t') => {
+                app.source_view_mode = match app.source_view_mode {
+                    SourceViewMode::Raw => SourceViewMode::Prettified,
+                    SourceViewMode::Prettified => SourceViewMode::Raw,
+                };
+                return false;
+            }
+            _ => {}
+        }
+
+        if app.viewer_focus == ViewerFocus::Source {
+            // Quit still works even when source is focused.
+            if matches!(key.code, crossterm::event::KeyCode::Char('q')) {
+                return true;
+            }
+            if matches!(key.code, crossterm::event::KeyCode::Char('c'))
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                return true;
+            }
+            // Allow picker open even when source focused (picker precedence).
+            if matches!(key.code, crossterm::event::KeyCode::Char('l')) {
+                app.showing_picker = true;
+                app.picker_dir = std::env::current_dir().unwrap_or_default();
+                app.picker_index = 0;
+                app.refresh_picker_entries();
+                return false;
+            }
+            match key.code {
+                crossterm::event::KeyCode::Char('j') => {
+                    app.source_scroll = app.source_scroll.saturating_add(1);
+                    return false;
+                }
+                crossterm::event::KeyCode::Char('k') => {
+                    app.source_scroll = app.source_scroll.saturating_sub(1);
+                    return false;
+                }
+                crossterm::event::KeyCode::Down => {
+                    if app.selected_component.is_some() {
+                        let next = app.occurrence_cursor.saturating_add(1);
+                        app.jump_to_occurrence(next);
                     }
+                    return false;
                 }
-                return false;
-            }
-            crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
-                if app.viewer_selected_circuit > 0 {
-                    app.viewer_selected_circuit -= 1;
+                crossterm::event::KeyCode::Up => {
+                    if app.selected_component.is_some() {
+                        let prev = app.occurrence_cursor.saturating_sub(1);
+                        app.jump_to_occurrence(prev);
+                    }
+                    return false;
                 }
-                return false;
-            }
-            crossterm::event::KeyCode::Enter => {
-                // Circuit jump: keep viewer open, reset scroll to show selected circuit
-                app.viewer_scroll = 0;
-                return false;
-            }
-            _ => {
-                // Readonly: ignore component toggles/shift changes while viewer is open
-                return false;
+                crossterm::event::KeyCode::Home => {
+                    if app.selected_component.is_some() {
+                        app.jump_to_occurrence(0);
+                    }
+                    return false;
+                }
+                crossterm::event::KeyCode::End => {
+                    if let Some(token) = app.selected_component.clone() {
+                        if let Some(patch) = app.patch.as_ref() {
+                            if let Some(spans) = patch.occurrence_index.get(&token) {
+                                if !spans.is_empty() {
+                                    app.jump_to_occurrence(spans.len() - 1);
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }
+                _ => {
+                    // Isolation: panel toggles / shift / scale / orientation inert
+                    // until Tab/Esc. Only j/k/Up/Down/Home/End/t/Tab/Esc (handled
+                    // above) plus l/q/Ctrl-C are allowed; everything else is
+                    // ignored without side effects.
+                    return false;
+                }
             }
         }
+        // viewer_focus == Panels: fall through to normal panel handling below
+        // (Esc/Tab/t already consumed).
     }
 
     match key.code {
@@ -129,8 +215,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         crossterm::event::KeyCode::Esc => {
+            // When viewer is closed, Esc clears shift (and prefix already
+            // handled above). When viewer was open, this branch is unreachable
+            // because the viewer Esc handler returned early.
             app.active_shift = None;
             app.status_message = String::from("Shift cleared");
+            app.prefix = None;
             false
         }
         crossterm::event::KeyCode::Char('o') => {
@@ -163,11 +253,24 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
         crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
             if let Some(idx) = app.hovered_component {
-                if let Some(patch) = &mut app.patch {
-                    if let Some(comp) = patch.hw_components.get_mut(idx) {
-                        toggle_component(comp);
-                        app.status_message = format!("Toggled: {}", comp.label);
+                // Capture token id before mutating patch to avoid borrow conflict.
+                let token_id = app
+                    .patch
+                    .as_ref()
+                    .and_then(|p| p.hw_components.get(idx))
+                    .map(|c| c.id.clone());
+                if let Some(token) = token_id {
+                    if let Some(patch) = &mut app.patch {
+                        if let Some(comp) = patch.hw_components.get_mut(idx) {
+                            toggle_component(comp);
+                            app.status_message = format!("Toggled: {}", comp.label);
+                        }
                     }
+                    // Commit interaction: toggle AND select. Selection jumps
+                    // source_scroll to first occurrence via App::select_component.
+                    // Jump happens even while viewer is closed so reopen lands
+                    // at the correct line (initial-position rule reapplies).
+                    app.select_component(token);
                 }
             }
             false
@@ -191,6 +294,56 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if app.showing_picker {
         return;
     }
+    // Minimap click-to-scroll: uses renderer-published minimap geometry with
+    // the same proportional mapping as the viewport indicator in ui.rs
+    // (indicator: scroll * inner_h / total_lines). Click must work whenever
+    // the embedded viewer is visible, regardless of focus, and takes
+    // precedence over panel interactions (picker already returned above).
+    if app.showing_viewer {
+        if let Some(rect) = app.minimap_rect {
+            if rect_contains(&rect, mouse.column, mouse.row)
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            {
+                if let Some(patch) = app.patch.as_ref() {
+                    let total_lines = if !patch.raw_lines.is_empty() {
+                        patch.raw_lines.len()
+                    } else {
+                        patch.sections.len().max(1)
+                    };
+                    // Mirror ui.rs render_minimap: inner area excludes the
+                    // 1-cell border on each side; viewport_h proxy is inner_h.
+                    let inner_h = rect.height.saturating_sub(2) as usize;
+                    if inner_h != 0 {
+                        let inner_y = rect.y.saturating_add(1);
+                        // Map click y to inner row, clamping border clicks to
+                        // the nearest inner row so the fraction stays 0..1.
+                        let row = if mouse.row < inner_y {
+                            0
+                        } else if mouse.row >= inner_y + inner_h as u16 {
+                            inner_h.saturating_sub(1)
+                        } else {
+                            (mouse.row - inner_y) as usize
+                        };
+                        // Invert indicator mapping: row = scroll * inner_h / total
+                        // -> scroll = row * total / inner_h (top-aligned).
+                        let raw_target = row * total_lines / inner_h;
+                        // Center the clicked line in the viewport, matching the
+                        // requirement's "minus viewport half" and keeping the
+                        // handler/ui mapping consistent so the indicator tracks.
+                        let viewport_h = inner_h;
+                        let centered = raw_target.saturating_sub(viewport_h / 2);
+                        let max_scroll = total_lines.saturating_sub(viewport_h);
+                        app.source_scroll = centered.min(max_scroll);
+                    }
+                }
+                return;
+            }
+        }
+        // Isolation: when source pane is focused, panel mouse interactions are inert.
+        if app.viewer_focus == ViewerFocus::Source {
+            return;
+        }
+    }
 
     let hit = app
         .component_rects
@@ -205,11 +358,29 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(idx) = hit {
                 app.hovered_component = Some(idx);
-                if let Some(patch) = &mut app.patch {
-                    if let Some(comp) = patch.hw_components.get_mut(idx) {
-                        toggle_component(comp);
-                        app.status_message = format!("Toggled: {}", comp.label);
+                let token_id = app
+                    .patch
+                    .as_ref()
+                    .and_then(|p| p.hw_components.get(idx))
+                    .map(|c| c.id.clone());
+                if let Some(token) = token_id {
+                    if let Some(patch) = &mut app.patch {
+                        if let Some(comp) = patch.hw_components.get_mut(idx) {
+                            toggle_component(comp);
+                            app.status_message = format!("Toggled: {}", comp.label);
+                        }
                     }
+                    app.select_component(token);
+                }
+            } else {
+                // Empty-panel-space click: clear selection without moving
+                // source_scroll (deselection stability). Ignore clicks on the
+                // minimap column so task 3.3 can handle click-to-scroll.
+                let on_minimap = app
+                    .minimap_rect
+                    .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
+                if !on_minimap {
+                    app.clear_selected_component();
                 }
             }
         }
@@ -325,251 +496,6 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
     }
 }
 
-/// Open the source viewer window.
-/// Currently supports herdr pane integration (Mode 1, Task 5).
-/// Task 6 extends this with a fallback branch for when HERDR_ENV is not set.
-pub fn open_viewer_window(app: &mut App) {
-    // Show the viewer window
-    app.showing_viewer = true;
-
-    // Check if running inside herdr
-    if env::var("HERDR_ENV").is_ok_and(|v| v == "1") {
-        // Mode 1: Herdr pane integration (unchanged from Task 5)
-        let cwd = std::env::current_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        // Run herdr pane split to create new pane to the right
-        let split_result = Command::new("herdr")
-            .args([
-                "pane",
-                "split",
-                "--current",
-                "--direction",
-                "right",
-                "--cwd",
-                &cwd,
-                "--no-focus",
-            ])
-            .output();
-
-        let split_success = split_result.as_ref().is_ok_and(|r| r.status.success());
-        if !split_success {
-            app.status_message =
-                String::from("Failed to create herdr pane; falling back gracefully");
-            app.viewer_mode = ViewerMode::Fallback;
-            return;
-        }
-
-        // Parse JSON output to get the new pane's ID
-        let list_output = Command::new("herdr")
-            .args(["pane", "list", "--output", "json"])
-            .output();
-
-        let pane_id = if let Ok(output) = &list_output {
-            let json_str = String::from_utf8_lossy(&output.stdout);
-            parse_herdr_pane_id(&json_str)
-        } else {
-            None
-        };
-
-        match pane_id {
-            Some(id) => {
-                // Launch viewer in the new pane
-                let run_result = Command::new("herdr")
-                    .args(["pane", "run", &id, "droid_tui --view-source"])
-                    .output();
-
-                let run_success = run_result.as_ref().is_ok_and(|r| r.status.success());
-                if !run_success {
-                    app.status_message =
-                        String::from("Failed to launch viewer in herdr pane; fell back gracefully");
-                }
-                app.viewer_mode = ViewerMode::Herdr;
-            }
-            None => {
-                app.status_message =
-                    String::from("Failed to parse herdr pane list; fell back gracefully");
-                app.viewer_mode = ViewerMode::Fallback;
-            }
-        }
-    } else {
-        // Mode 2: Fallback secondary window (Task 6)
-        let term = env::var("TERM").unwrap_or_default();
-        let candidates = determine_fallback_terminal_cmd(&term);
-
-        let mut spawned = false;
-        for cmd_list in &candidates {
-            let cmd = cmd_list.first().map(|c| c.as_str()).unwrap_or("");
-            let args: &[String] = if cmd_list.len() > 1 {
-                &cmd_list[1..]
-            } else {
-                &[]
-            };
-            match Command::new(cmd).args(args).output() {
-                Ok(output) if output.status.success() => {
-                    app.viewer_mode = ViewerMode::Fallback;
-                    let terminal_name = cmd_list[0].split_whitespace().next().unwrap_or(cmd);
-                    app.status_message = format!("Viewer: fallback mode ({})", terminal_name);
-                    spawned = true;
-                    break;
-                }
-                _ => continue,
-            }
-        }
-
-        if !spawned {
-            app.status_message =
-                String::from("Viewer: fallback mode (no terminal executable found)");
-            // viewer_mode stays as Previous value (not set to Fallback)
-            // Actually, let me re-read the spec: "On total failure: graceful status message,
-            // viewer_mode unchanged"
-            // So we should NOT set viewer_mode to Fallback on failure
-        }
-    }
-}
-
-fn parse_herdr_pane_id(json_str: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    // herdr pane list --output json returns an array of pane objects.
-    // The newly created pane (from the split above) should be the last entry.
-    // Look for the last object with an "id" field.
-    let arr = value.as_array()?;
-    let last_pane = arr.last()?;
-    last_pane
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-/// Given a TERM string, return an ordered list of fallback terminal command candidates.
-/// The TERM-matched candidate (if any) is first, followed by the remaining candidates
-/// in fixed preference order: kitty → xterm → gnome-terminal → alacritty.
-///
-/// Each candidate is a `Vec<String>` suitable for use as `&[&str]` arguments with
-/// `std::process::Command::new().args()`. The viewer command is split into separate
-/// argv entries: `"droid_tui"` and `"--view-source"` — never combined as one string.
-fn determine_fallback_terminal_cmd(term: &str) -> Vec<Vec<String>> {
-    let fixed_preference = ["kitty", "xterm", "gnome-terminal", "alacritty"];
-
-    // Find if TERM matches any known terminal
-    let mut term_matched_idx: Option<usize> = None;
-    for (i, t) in fixed_preference.iter().enumerate() {
-        if *t == term {
-            term_matched_idx = Some(i);
-            break;
-        }
-    }
-
-    let mut result = Vec::new();
-
-    if let Some(idx) = term_matched_idx {
-        // Place the TERM-matched candidate first
-        result.push(match idx {
-            0 => vec![
-                "kitty".to_string(),
-                "@".to_string(),
-                "new-window".to_string(),
-                "--offscreen".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ],
-            1 => vec![
-                "xterm".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ],
-            2 => vec![
-                "gnome-terminal".to_string(),
-                "--".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ],
-            3 => vec![
-                "alacritty".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ],
-            _ => return result,
-        });
-
-        // Add remaining candidates in fixed preference order, skipping the matched one
-        for (i, terminal) in fixed_preference.iter().enumerate() {
-            if i == idx {
-                continue;
-            }
-            result.push(match *terminal {
-                "kitty" => vec![
-                    "kitty".to_string(),
-                    "@".to_string(),
-                    "new-window".to_string(),
-                    "--offscreen".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                "xterm" => vec![
-                    "xterm".to_string(),
-                    "-e".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                "gnome-terminal" => vec![
-                    "gnome-terminal".to_string(),
-                    "--".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                "alacritty" => vec![
-                    "alacritty".to_string(),
-                    "-e".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                _ => continue,
-            });
-        }
-    } else {
-        // No TERM match: kitty first as default preference, then the rest in fixed order
-        result.push(vec![
-            "kitty".to_string(),
-            "@".to_string(),
-            "new-window".to_string(),
-            "--offscreen".to_string(),
-            "droid_tui".to_string(),
-            "--view-source".to_string(),
-        ]);
-
-        for terminal in &fixed_preference[1..] {
-            result.push(match *terminal {
-                "xterm" => vec![
-                    "xterm".to_string(),
-                    "-e".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                "gnome-terminal" => vec![
-                    "gnome-terminal".to_string(),
-                    "--".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                "alacritty" => vec![
-                    "alacritty".to_string(),
-                    "-e".to_string(),
-                    "droid_tui".to_string(),
-                    "--view-source".to_string(),
-                ],
-                _ => continue,
-            });
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +508,15 @@ mod tests {
         let mut app = App::new();
         app.patch = Some(patch);
         // Place component 0 (B1.1) at (0,0)-(16,2) and component 1 (L1.1) at (16,0)-(32,2).
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2)), (1, Rect::new(16, 0, 16, 2))];
+        app
+    }
+
+    fn app_with_source_navigation() -> App {
+        let patch =
+            Patch::from_ini_file(std::path::Path::new("fixtures/source_navigation.ini")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2)), (1, Rect::new(16, 0, 16, 2))];
         app
     }
@@ -813,7 +748,39 @@ mod tests {
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
         handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert!(app.prefix.is_none());
+    }
+
+    #[test]
+    fn g_then_v_initial_position_bof_when_no_selection() {
+        let mut app = app_with_source_navigation();
+        // No selection -> BOF
+        app.source_scroll = 99;
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert!(app.showing_viewer);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.source_scroll, 0);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert!(app.selected_component.is_none());
+    }
+
+    #[test]
+    fn g_then_v_jumps_to_first_occurrence_when_selected() {
+        let mut app = app_with_source_navigation();
+        let first = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
+        app.select_component(String::from("B1.1"));
+        // Move scroll away to prove jump
+        app.source_scroll = 999;
+        app.showing_viewer = false;
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert!(app.showing_viewer);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.source_scroll, first);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.selected_component, Some(String::from("B1.1")));
     }
 
     #[test]
@@ -863,283 +830,599 @@ mod tests {
     }
 
     #[test]
-    fn determine_fallback_terminal_cmd_kitty_term_has_kitty_first() {
-        let candidates = determine_fallback_terminal_cmd("kitty");
-        assert_eq!(
-            candidates[0],
-            vec![
-                "kitty".to_string(),
-                "@".to_string(),
-                "new-window".to_string(),
-                "--offscreen".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(candidates.len(), 4);
-        // Verify the remaining candidates are in fixed preference order
-        assert_eq!(
-            candidates[1],
-            vec![
-                "xterm".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(
-            candidates[2],
-            vec![
-                "gnome-terminal".to_string(),
-                "--".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(
-            candidates[3],
-            vec![
-                "alacritty".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        // Verify no "&" anywhere in any candidate
-        for candidate in &candidates {
-            for arg in candidate {
-                assert!(
-                    !arg.contains("&"),
-                    "Argument should not contain '&': {}",
-                    arg
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn determine_fallback_terminal_cmd_xterm_term_has_xterm_first() {
-        let candidates = determine_fallback_terminal_cmd("xterm");
-        assert_eq!(
-            candidates[0],
-            vec![
-                "xterm".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(candidates.len(), 4);
-        // Verify the remaining candidates are in fixed preference order
-        // (kitty first among remaining, since xterm was moved to front)
-        assert_eq!(
-            candidates[1],
-            vec![
-                "kitty".to_string(),
-                "@".to_string(),
-                "new-window".to_string(),
-                "--offscreen".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(
-            candidates[2],
-            vec![
-                "gnome-terminal".to_string(),
-                "--".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(
-            candidates[3],
-            vec![
-                "alacritty".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn determine_fallback_terminal_cmd_empty_term_has_kitty_first() {
-        let candidates = determine_fallback_terminal_cmd("");
-        assert_eq!(
-            candidates[0],
-            vec![
-                "kitty".to_string(),
-                "@".to_string(),
-                "new-window".to_string(),
-                "--offscreen".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(candidates.len(), 4);
-        assert_eq!(
-            candidates[1],
-            vec![
-                "xterm".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(
-            candidates[2],
-            vec![
-                "gnome-terminal".to_string(),
-                "--".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-        assert_eq!(
-            candidates[3],
-            vec![
-                "alacritty".to_string(),
-                "-e".to_string(),
-                "droid_tui".to_string(),
-                "--view-source".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn determine_fallback_terminal_cmd_all_vectors_split_correctly() {
-        // Test all four TERM values have correctly split command vectors
-        let kitty_candidates = determine_fallback_terminal_cmd("kitty");
-        let xterm_candidates = determine_fallback_terminal_cmd("xterm");
-        let gnome_candidates = determine_fallback_terminal_cmd("gnome-terminal");
-        let alacritty_candidates = determine_fallback_terminal_cmd("alacritty");
-
-        // Check kitty vector structure
-        assert_eq!(kitty_candidates[0].len(), 6);
-        assert_eq!(kitty_candidates[0][0], "kitty");
-        assert_eq!(kitty_candidates[0][1], "@");
-        assert_eq!(kitty_candidates[0][2], "new-window");
-        assert_eq!(kitty_candidates[0][3], "--offscreen");
-        assert_eq!(kitty_candidates[0][4], "droid_tui");
-        assert_eq!(kitty_candidates[0][5], "--view-source");
-
-        // Check xterm vector structure (no "&")
-        for candidate in &xterm_candidates {
-            for arg in candidate {
-                assert!(
-                    !arg.contains("&"),
-                    "Argument should not contain '&': {}",
-                    arg
-                );
-            }
-        }
-
-        // Check gnome-terminal vector structure
-        assert_eq!(gnome_candidates[0].len(), 4);
-        assert_eq!(gnome_candidates[0][0], "gnome-terminal");
-        assert_eq!(gnome_candidates[0][1], "--");
-        assert_eq!(gnome_candidates[0][2], "droid_tui");
-        assert_eq!(gnome_candidates[0][3], "--view-source");
-
-        // Check alacritty vector structure (no "&")
-        for candidate in &alacritty_candidates {
-            for arg in candidate {
-                assert!(
-                    !arg.contains("&"),
-                    "Argument should not contain '&': {}",
-                    arg
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn viewer_esc_closes() {
-        // Setup: viewer is showing with a patch loaded
-        let mut app = App::new();
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        app.patch = Some(patch);
-        app.showing_viewer = true;
-        app.viewer_mode = ViewerMode::Fallback;
-
-        // Press ESC – handler.rs ESC handling clears prefix/shift,
-        // and main.rs routing (task 4) then closes the viewer.
+    fn viewer_esc_closes_keeping_selection_and_scroll() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert!(app.showing_viewer);
+        let scroll = app.source_scroll;
+        let sel = app.selected_component.clone();
         handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
-
-        // After the full event loop iteration in main.rs, showing_viewer
-        // is set to false. The handler returns false (no quit), and
-        // the viewer closes as a result of task 4's routing.
-        assert!(
-            !app.showing_viewer,
-            "ESC should close the viewer per task 4 main.rs routing"
-        );
+        assert!(!app.showing_viewer);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.selected_component, sel, "selection kept on close");
+        assert_eq!(app.source_scroll, scroll, "scroll kept on close");
+        assert!(app.prefix.is_none());
     }
 
     #[test]
-    fn viewer_sidebar_navigation_with_j_k() {
-        // Setup: viewer is showing with circuits
-        let mut app = App::new();
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        app.load_patch(patch);
-        app.showing_viewer = true;
-        // Ensure we have circuits to navigate
-        assert!(app.viewer_patch.is_some());
-
-        // Simulate pressing 'j' (down) to navigate the sidebar
+    fn viewer_j_k_scroll_when_source_focused() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.source_scroll, 0);
         handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
-        // The handler's Down/'j' navigation moves the selected circuit;
-        // test that no panic occurs and state remains consistent.
-        assert!(app.viewer_patch.is_some());
-
-        // Press 'k' (up) to navigate back
+        assert_eq!(app.source_scroll, 1);
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(app.source_scroll, 3);
         handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
-        assert!(app.viewer_patch.is_some());
+        assert_eq!(app.source_scroll, 2);
+        // Saturate at 0
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(app.source_scroll, 0);
     }
 
     #[test]
-    fn viewer_circuit_jump_on_enter() {
-        // Setup: viewer is showing with circuits
-        let mut app = App::new();
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        app.load_patch(patch);
-        app.showing_viewer = true;
-
-        // Press Enter to "jump" to the selected circuit.
-        // Test that the handler processes Enter without panic and the
-        // viewer state stays consistent.
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
-        assert!(app.viewer_patch.is_some());
-        assert_eq!(app.viewer_selected_circuit, 0); // default, no reordering
+    fn t_toggles_view_mode_when_viewer_open() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
+        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        assert_eq!(app.source_view_mode, SourceViewMode::Prettified);
+        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
     }
 
     #[test]
-    fn viewer_readonly_behavior_no_toggle_on_key() {
-        // Setup: viewer is showing with a patch
+    fn t_noop_when_viewer_closed() {
         let mut app = App::new();
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        app.patch = Some(patch);
-        app.showing_viewer = true;
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
+        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
+    }
 
-        // Record initial component state – viewer mode is readonly,
-        // so component states must not change on key presses.
-        let initial_state = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+    #[test]
+    fn tab_switches_focus_when_viewer_open() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    }
 
-        // Press various keys – none should change component states
-        // because the viewer is in readonly mode.
+    #[test]
+    fn tab_noop_when_viewer_closed() {
+        let mut app = App::new();
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert!(!app.showing_viewer);
+    }
+
+    #[test]
+    fn viewer_focus_source_isolation_ignores_panel_keys() {
+        let mut app = app_with_source_navigation();
+        // Open viewer, source focused
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        // Shift keys inert
         handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('2')), &mut app);
-        // 'c' with ctrl would quit, but outside viewer routing.
-
-        // Verify the component state is unchanged (viewer is readonly)
+        assert_eq!(app.active_shift, None, "shift inert when source focused");
+        // Scale inert
+        let scale_before = app.scale_factor;
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
         assert_eq!(
-            app.patch.as_ref().unwrap().hw_components[0].state.clone(),
-            initial_state,
-            "Viewer mode should be readonly; component states must not change"
+            app.scale_factor, scale_before,
+            "scale inert when source focused"
         );
+        // Orientation inert
+        let orient_before = app.orientation.clone();
+        handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
+        assert_eq!(
+            app.orientation, orient_before,
+            "orientation inert when source focused"
+        );
+        // Component toggle inert
+        app.hovered_component = Some(0);
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "toggle inert when source focused"
+        );
+        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "space toggle inert when source focused"
+        );
+    }
+
+    #[test]
+    fn viewer_focus_panels_allows_panel_keys() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        // Switch to panels
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
+        let scale_before = app.scale_factor;
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_ne!(app.scale_factor, scale_before);
+        let orient_before = app.orientation.clone();
+        handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
+        assert_ne!(app.orientation, orient_before);
+        app.hovered_component = Some(0);
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert_ne!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before
+        );
+    }
+
+    #[test]
+    fn viewer_occurrence_navigation_up_down_home_end() {
+        let mut app = app_with_source_navigation();
+        let occurrences = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
+        assert!(
+            occurrences.len() >= 3,
+            "fixture needs at least 3 occurrences"
+        );
+        app.select_component(String::from("B1.1"));
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, occurrences[0].line);
+        // Down -> 1
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.occurrence_cursor, 1);
+        assert_eq!(app.source_scroll, occurrences[1].line);
+        // Down -> 2
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.occurrence_cursor, 2);
+        // saturate at bounds: press Down many times, should end at last
+        for _ in 0..10 {
+            handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        }
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
+        // Up -> back one
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 2);
+        // Home -> 0
+        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, occurrences[0].line);
+        // End -> last
+        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
+        assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
+    }
+
+    #[test]
+    fn mouse_isolation_when_source_focused() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "mouse click inert when source focused"
+        );
+        // After Tab to panels, mouse works
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        assert_ne!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before
+        );
+    }
+
+    // ---- Task 3.2: selection-into-commit, deselection stability, occurrence bounds ----
+
+    fn idx_for(app: &App, token: &str) -> usize {
+        app.patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == token)
+            .unwrap_or_else(|| panic!("no component {token}"))
+    }
+
+    #[test]
+    fn enter_toggles_and_selects_jumping_to_first_occurrence() {
+        let mut app = app_with_source_navigation();
+        let token = "B1.1";
+        let first = app.patch.as_ref().unwrap().occurrences_for(token)[0].line;
+        let idx = idx_for(&app, token);
+        app.hovered_component = Some(idx);
+        app.source_scroll = 999;
+        // Panel focus (viewer closed) -> Enter should toggle + select + jump
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert_eq!(app.selected_component, Some(String::from(token)));
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, first);
+        // Toggled state
+        assert!(matches!(
+            app.patch.as_ref().unwrap().hw_components[idx].state,
+            ComponentState::On
+        ));
+    }
+
+    #[test]
+    fn space_toggles_and_selects_jumping_to_first_occurrence() {
+        let mut app = app_with_source_navigation();
+        let token = "B1.2";
+        let first = app.patch.as_ref().unwrap().occurrences_for(token)[0].line;
+        let idx = idx_for(&app, token);
+        app.hovered_component = Some(idx);
+        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        assert_eq!(app.selected_component, Some(String::from(token)));
+        assert_eq!(app.source_scroll, first);
+        assert_eq!(app.occurrence_cursor, 0);
+    }
+
+    #[test]
+    fn click_toggles_and_selects_jumping_to_first_occurrence() {
+        let mut app = app_with_source_navigation();
+        let token = "B1.1";
+        let first = app.patch.as_ref().unwrap().occurrences_for(token)[0].line;
+        let idx = idx_for(&app, token);
+        app.component_rects = vec![(idx, Rect::new(10, 10, 16, 2))];
+        app.source_scroll = 999;
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
+            &mut app,
+        );
+        assert_eq!(app.selected_component, Some(String::from(token)));
+        assert_eq!(app.source_scroll, first);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.hovered_component, Some(idx));
+    }
+
+    #[test]
+    fn replacement_selection_rejumps_to_new_first_occurrence_via_enter_and_click() {
+        let mut app = app_with_source_navigation();
+        let b11_first = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
+        let p11_first = app.patch.as_ref().unwrap().occurrences_for("P1.1")[0].line;
+        // First selection via Enter on B1.1
+        let b_idx = idx_for(&app, "B1.1");
+        app.hovered_component = Some(b_idx);
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert_eq!(app.source_scroll, b11_first);
+        // Replacement via click on P1.1
+        let p_idx = idx_for(&app, "P1.1");
+        app.component_rects = vec![
+            (b_idx, Rect::new(0, 0, 16, 2)),
+            (p_idx, Rect::new(20, 0, 16, 2)),
+        ];
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 22, 1),
+            &mut app,
+        );
+        assert_eq!(app.selected_component, Some(String::from("P1.1")));
+        assert_eq!(app.source_scroll, p11_first);
+        assert_eq!(app.occurrence_cursor, 0);
+        // And back to B1.1 via Space
+        app.hovered_component = Some(b_idx);
+        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        assert_eq!(app.selected_component, Some(String::from("B1.1")));
+        assert_eq!(app.source_scroll, b11_first);
+    }
+
+    #[test]
+    fn empty_panel_click_clears_selection_without_moving_scroll() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        let scroll_before = app.source_scroll;
+        assert!(app.selected_component.is_some());
+        // Rects only cover component 0 at (0,0); click far away is empty panel space
+        let idx0 = idx_for(&app, "B1.1");
+        app.component_rects = vec![(idx0, Rect::new(0, 0, 16, 2))];
+        // Ensure minimap not interfering
+        app.minimap_rect = None;
+        // Click empty space
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 100, 50),
+            &mut app,
+        );
+        assert!(app.selected_component.is_none(), "selection cleared");
+        assert_eq!(
+            app.source_scroll, scroll_before,
+            "deselection must not move source_scroll"
+        );
+        assert_eq!(app.occurrence_cursor, 0);
+        // Clicking empty again keeps no-op similarly
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 99, 49),
+            &mut app,
+        );
+        assert!(app.selected_component.is_none());
+        assert_eq!(app.source_scroll, scroll_before);
+    }
+
+    #[test]
+    fn empty_click_on_minimap_does_not_clear_selection() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        let scroll_before = app.source_scroll;
+        let idx0 = idx_for(&app, "B1.1");
+        app.component_rects = vec![(idx0, Rect::new(0, 0, 16, 2))];
+        app.minimap_rect = Some(Rect::new(70, 0, 10, 20));
+        // Click inside minimap (empty relative to components but on minimap)
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 75, 5),
+            &mut app,
+        );
+        // Selection preserved, scroll preserved (minimap click handled in 3.3)
+        assert_eq!(app.selected_component, Some(String::from("B1.1")));
+        assert_eq!(app.source_scroll, scroll_before);
+    }
+
+    #[test]
+    fn occurrence_navigation_no_selection_noop() {
+        let mut app = app_with_source_navigation();
+        // Ensure no selection, viewer open and source focused
+        assert!(app.selected_component.is_none());
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        app.source_scroll = 5;
+        app.occurrence_cursor = 0;
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.source_scroll, 5);
+        assert_eq!(app.occurrence_cursor, 0);
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.source_scroll, 5);
+        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        assert_eq!(app.source_scroll, 5);
+        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        assert_eq!(app.source_scroll, 5);
+    }
+
+    #[test]
+    fn occurrence_navigation_saturates_at_bounds_via_handler() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        let occurrences = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
+        assert!(occurrences.len() >= 2);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        // Already at first occurrence after select
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, occurrences[0].line);
+        // Up at first saturates
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, occurrences[0].line);
+        // Down to last saturates
+        for _ in 0..occurrences.len() + 5 {
+            handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        }
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
+        assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
+        // Down while at last stays
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
+        // Home -> first, End -> last
+        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        assert_eq!(app.occurrence_cursor, 0);
+        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
+    }
+
+    #[test]
+    fn j_k_scroll_remains_when_viewer_open() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.source_scroll, 0);
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(app.source_scroll, 1);
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(app.source_scroll, 0);
+        // j/k saturate at 0
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(app.source_scroll, 0);
+    }
+
+    #[test]
+    fn esc_clears_prefix_when_viewer_closed() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.prefix.is_some());
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.prefix.is_none());
+        // When viewer open and source focused, g is inert (isolation), so prefix stays None.
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert!(app.showing_viewer);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(
+            app.prefix.is_none(),
+            "g should be inert when source focused"
+        );
+        // After Tab to panels, g arms again.
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.prefix.is_some());
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        // Esc first clears the prefix, viewer stays open
+        assert!(app.showing_viewer);
+        assert!(app.prefix.is_none());
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(!app.showing_viewer);
+    }
+
+    // ── 5.1 regression anchoring inside handler.rs (fixtures/source_navigation.ini) ──
+    // Each test below drives real flows end-to-end through handle_event/handle_mouse_event + render
+    // so they break if geometry, prefix, or viewer routing drifts. The dedicated
+    // src/regression.rs holds the full suite; these smoke tests anchor the
+    // same coverage directly in handler.rs per task 5.1 scope requirement.
+    #[test]
+    fn regression_handler_e2e_initial_bof_and_selected_open() {
+        let mut app = app_with_source_navigation();
+        app.source_scroll = 77;
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert!(app.showing_viewer);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.source_scroll, 0, "BOF when no selection");
+        // selected-open jumps to first occurrence
+        let mut app2 = app_with_source_navigation();
+        let first = app2.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
+        app2.select_component(String::from("B1.1"));
+        app2.source_scroll = 999;
+        app2.showing_viewer = false;
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app2);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app2);
+        assert_eq!(app2.source_scroll, first);
+        assert_eq!(app2.occurrence_cursor, 0);
+    }
+
+    #[test]
+    fn regression_handler_e2e_t_and_tab_and_picker_and_isolation() {
+        let mut app = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        // t preserves usable content: toggles but stays in bounds
+        let scroll_before = app.source_scroll;
+        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Prettified);
+        assert_eq!(app.source_scroll, scroll_before);
+        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Raw);
+        // Tab round-trip Source->Panels->Source
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        // picker precedence: l opens picker even when source focused
+        handle_event(key(crossterm::event::KeyCode::Char('l')), &mut app);
+        assert!(app.showing_picker, "picker overlays viewer");
+        // while picker open, t is inert
+        let mode_before = app.source_view_mode.clone();
+        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        assert_eq!(app.source_view_mode, mode_before);
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(!app.showing_picker);
+        assert!(app.showing_viewer);
+        // isolation: panel keys inert when Source focused
+        if app.viewer_focus != ViewerFocus::Source {
+            handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        }
+        let scale_before = app.scale_factor;
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_eq!(
+            app.scale_factor, scale_before,
+            "scale inert when Source focused"
+        );
+        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        assert!(
+            app.active_shift.is_none(),
+            "shift inert when Source focused"
+        );
+    }
+
+    #[test]
+    fn regression_handler_e2e_minimap_and_deselect_and_bounds() {
+        use crate::ui::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        let occ = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        // occurrence bounds: Up saturates at 0, End/Down saturate at last
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.occurrence_cursor, 0);
+        for _ in 0..occ.len() + 3 {
+            handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        }
+        assert_eq!(app.occurrence_cursor, occ.len() - 1);
+        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        assert_eq!(app.occurrence_cursor, 0);
+        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        assert_eq!(app.occurrence_cursor, occ.len() - 1);
+        // deselect keeps position
+        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        let pos = app.source_scroll;
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        let idx = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .unwrap();
+        app.component_rects = vec![(idx, Rect::new(0, 0, 16, 2))];
+        app.minimap_rect = None;
+        {
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        }
+        app.minimap_rect = None;
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 100, 50),
+            &mut app,
+        );
+        assert!(app.selected_component.is_none());
+        assert_eq!(app.source_scroll, pos, "deselect must not move scroll");
+        // minimap click maps correctly
+        let mut app2 = app_with_source_navigation();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app2);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app2);
+        {
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &mut app2)).unwrap();
+        }
+        let rect = app2.minimap_rect.expect("minimap visible");
+        let x = rect.x + 1;
+        let top_y = rect.y + 1;
+        let bot_y = rect.y + rect.height.saturating_sub(2);
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), x, top_y),
+            &mut app2,
+        );
+        let top = app2.source_scroll;
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), x, bot_y),
+            &mut app2,
+        );
+        let bot = app2.source_scroll;
+        assert!(top <= bot, "minimap top <= bottom");
+        assert!(top <= 5, "top near BOF");
     }
 }
