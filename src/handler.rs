@@ -144,6 +144,23 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             );
             false
         }
+        crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
+            // Cycle through the scaling presets defined by the module-scaling spec.
+            const PRESETS: [f32; 4] = [0.5, 1.0, 1.5, 2.0];
+            let idx = PRESETS
+                .iter()
+                .position(|p| (p - app.scale_factor).abs() < f32::EPSILON)
+                .unwrap_or(1);
+            let step = if matches!(key.code, crossterm::event::KeyCode::Char('+')) {
+                1
+            } else {
+                PRESETS.len() - 1
+            };
+            let next = PRESETS[(idx + step) % PRESETS.len()];
+            app.scale_factor = next;
+            app.status_message = format!("Scaling: {}%", (next * 100.0) as u32);
+            false
+        }
         crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
             if let Some(idx) = app.hovered_component {
                 if let Some(patch) = &mut app.patch {
@@ -639,6 +656,28 @@ mod tests {
 
     fn key(code: crossterm::event::KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn plus_and_minus_cycle_scale_presets_with_status() {
+        let mut app = App::new();
+        // From the 100% default, '-' steps down one preset to 50%.
+        handle_event(key(crossterm::event::KeyCode::Char('-')), &mut app);
+        assert_eq!(app.scale_factor, 0.5);
+        assert_eq!(app.status_message, "Scaling: 50%");
+
+        // '+' climbs back through the presets.
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 1.0);
+        assert_eq!(app.status_message, "Scaling: 100%");
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 1.5);
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 2.0);
+
+        // At the top preset, '+' wraps around to the bottom.
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 0.5);
     }
 
     #[test]
