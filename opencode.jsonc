@@ -1,5 +1,16 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "docs": {
+      "path": "/home/bjoern/git/droid",
+      "description": "Collection of relevant droid information like patches, documentation, related sw",
+    },
+   "docs": {
+      "path": "/home/bjoern/git/droid/droid_man",
+      "description": "droid manual converted to md / docx prefer this over pdf version"
+    },
+  },
+
   "agent": {
     "build": {
       "disable": true
