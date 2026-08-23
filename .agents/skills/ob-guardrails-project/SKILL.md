@@ -18,26 +18,27 @@ license: MIT
 - Rust 2021 edition, single binary crate `droid_tui` (Cargo.toml) — a TUI for loading and interacting with DROID hardware patches.
 - Layered module structure: `src/main.rs` (entry, terminal lifecycle) → `src/app.rs` (application state) → `src/handler.rs` (keyboard input) → `src/patch.rs` (DROID patch data model) → `src/ui.rs` (rendering).
 - Dependency direction is one-way: `ui` and `handler` depend on `app` and `patch`; `app` depends on `patch`; `patch` must not import `app`, `handler`, or `ui`.
-- The DROID patch data model (serde `Serialize`/`Deserialize`) lives in `src/patch.rs`; keep serialization concerns there. serde_json usage lives where its data lives: `handler.rs::parse_herdr_pane_id` parses `herdr pane list --output json`.
+- The DROID patch data model (serde `Serialize`/`Deserialize`) lives in `src/patch.rs`; keep serialization concerns there. Source viewing is an in-process UI feature, not an external protocol.
 - The renderer owns layout: `ui.rs` publishes `component_rects` into `App` each frame; `handler.rs` reads them for mouse hit-testing. Only the renderer knows where components landed.
 - Layout is recomputed fresh from `frame.area()` on every draw — `Event::Resize` is a no-op; do not add resize state.
 - The `.ini` parser is hand-rolled (the `ini` crate was removed): it preserves repeated section names and uses a boundary-aware token scanner so internal variables like `_ENV1_DECAY_POT` are not misread as hardware tokens.
+- The parser retains verbatim raw lines and 0-based line/byte-column spans for section headers and hardware-token hits; `Patch` builds ordered occurrence indexes and cycle-safe `select`/`selectat` modifier indexes for named source-navigation consumers.
 - Components are grouped by physical controller (`HwComponent.controller`); shift groups are an enum (`ShiftGroup::Group1–4`) with `color()`/`key_label()` as the single source of truth.
 - The app is a patch viewer/simulator, NOT a hardware bridge: no MIDI, no network, no hardware I/O at runtime.
-- The source viewer is a second process instance of the same binary launched with `--view-source` (`g v` prefix): it runs inside a herdr pane (`HERDR_ENV=1`) or a TERM-matched fallback terminal (kitty/xterm/gnome-terminal/alacritty). Every launch failure degrades to a status message — never abort the main TUI.
-- While the viewer is open (`showing_viewer`) input is readonly: only Esc/j/k/arrows/Enter are handled; component toggles and shift changes wait until it closes. Picker still wins precedence over the viewer surface.
-- Known gap: `--view-source` argv is currently unconsumed by `main.rs` (viewer routing lives in `handler::handle_event`), so the spawned instance behaves like a normal TUI session; do not assume auto-entry into viewer mode until that is closed via an OpenSpec change.
+- The source viewer is embedded in the main TUI and opened with `g v`; it shares `App` state with panels and renders raw patch lines through parser-recorded spans and indexes.
+- Viewer state uses `selected_component`, `ViewerFocus`, `SourceViewMode`, `occurrence_cursor`, `source_scroll`, and `minimap_rect`. Source focus isolates panel actions; Tab returns to panels, Esc closes while keeping selection and source position, and picker precedence remains highest.
+- The renderer publishes `component_rects` and optional `minimap_rect` each frame; handler uses both for mouse hit-testing and proportional minimap scrolling.
 - `ARCHITECTURE.md` (last updated 2026-08-23) is the authoritative architecture reference; update it when the architecture changes.
 
 ## Design System
-- Semantic colors (ANSI 16, terminal-dependent): component kinds — button/switch white, knob/encoder magenta, CV-in cyan, CV-out green, LED red; shift groups — 1 yellow, 2 cyan, 3 magenta, 4 green; accents — blue (header/picker borders), dark-gray (muted/borders/status background); viewer tokens — sidebar border blue, content border + status bg dark-gray, entry keys/shortcut hints cyan.
-- Spacing grid: component cell 16×2 scaled by preset (`+`/`-` cycle 50% → 100% → 150% → 200% with wrap-around), orientation Portrait/Landscape toggled with `o`; header 3 rows, status 3 rows, viewer-status 3 rows, main min 10, panel padding 1, picker ~70%×50% centered, viewer sidebar width = total width / 5 (min 20).
+- Semantic colors (ANSI 16, terminal-dependent): component kinds — button/switch white, knob/encoder magenta, CV-in cyan, CV-out green, LED red; shift groups — 1 yellow, 2 cyan, 3 magenta, 4 green; accents — blue (header/picker/sidebar borders), dark-gray (muted/content/minimap/status background); source view — occurrences yellow, boolean/transitive modifier highlights cyan, exact-value modifier highlights magenta, current occurrence reversed.
+- Spacing grid: component cell 16×2 scaled by preset (`+`/`-` cycle 50% → 100% → 150% → 200% with wrap-around), orientation Portrait/Landscape toggled with `o`; header 3 rows, status 3 rows, source status 3 rows, main min 10, panel padding 1, picker ~70%×50% centered, source sidebar width = source pane width / 5 (min 20), minimap width 3 and hidden when source space is narrow.
 - Modifiers: bold = emphasis, dim = de-emphasis, reversed = hover + viewer selection. No motion, radii, shadows, or elevation.
 - Glyphs: button `●`/`○`, switch `▣`/`□`, LED `◉`/`○`, knob/encoder `◉`+percentage, CV `→`/`←`, picker selection `▶`.
 - `DESIGN.md` (last updated 2026-08-23) is the authoritative design reference; update it when the design system changes.
 
 ## Testing
-- 55 unit tests, in-module `#[cfg(test)]` in `src/patch.rs`, `src/handler.rs`, `src/ui.rs`; fixtures in `fixtures/` (`arpeggio1.ini`, `picker_test/`). Coverage includes parser/rack-recognition, handler interaction, viewer navigation, and UI rendering.
+- 117 unit tests, in-module `#[cfg(test)]` in `src/patch.rs`, `src/handler.rs`, `src/ui.rs`, plus cross-layer tests in `src/regression.rs`; fixtures in `fixtures/` (`arpeggio1.ini`, `picker_test/`, `source_navigation.ini`). Coverage includes parser spans/indexes/modifier graphs, handler selection/navigation/focus/isolation, minimap interaction, and UI rendering.
 - Run `cargo test` before reporting completion; add unit tests for new logic alongside the code in `src/*.rs`.
 - No `unwrap()`/`expect()` outside `#[cfg(test)]` modules — `cargo clippy --all-targets --all-features --locked -- -D warnings` enforces this.
 
@@ -45,7 +46,7 @@ license: MIT
 - Skills are installed via `npx skills add -y <owner/repo@skill>` and live in `.agents/skills/`, tracked in `skills-lock.json`.
 - OpenCode config (`opencode.jsonc`) uses `opencode/nemotron-3.5-lightning-free` as the default model.
 - Plugin `@slkiser/opencode-quota@4.2.0` is active for quota management.
-- Rust dependencies: ratatui 0.29, crossterm 0.28, color-eyre 0.6, serde 1 (derive), serde_json 1.
+- Rust dependencies: ratatui 0.29, crossterm 0.28, color-eyre 0.6, serde 1 (derive). Source viewing needs no launcher or external-process dependencies.
 - `Cargo.lock` must stay in sync with `Cargo.toml` — validate with `cargo build --locked` (never mutate the lockfile silently).
 - CodeGraph MCP availability is governed by `.opencode/opencode-onboard.json` (`tools.codegraph` flag) — check the flag before relying on codegraph tools.
 
@@ -57,7 +58,7 @@ license: MIT
 - Backlog platform: `browser` (work items parsed via `@ob-userstory` skill).
 - Repo platform: `none` (no PR/MR automation configured yet).
 - Max concurrent agents: 3 (from `.opencode/opencode-onboard.json`).
-- OpenSpec change workflow: propose under `openspec/changes/`, implement, archive to `openspec/changes/archive/` and sync specs to `openspec/specs/` (10 capability specs: controller-panels, file-picker, mouse-interaction, patch-parsing, shift-visualization, keybinding, module-scaling, module-orientation, viewer-layout, herdr-integration).
+- OpenSpec change workflow: propose under `openspec/changes/`, implement, archive to `openspec/changes/archive/` and sync specs to `openspec/specs/`; embedded source navigation is covered by source-navigation plus viewer-layout, keybinding, patch-parsing, and mouse-interaction deltas.
 - Task tracking via beads (`bd`); conservative profile — no commits, pushes, or Dolt sync without explicit approval.
 
 ## Security
@@ -65,8 +66,8 @@ license: MIT
 - Terminal hygiene: raw mode, alternate screen, and mouse capture are restored on normal exit and on panic (chained panic hook).
 
 ## Data & State
-- No persistence: all state lives in `App` in memory; the app writes no files at runtime.
-- serde derives on the domain model (`patch.rs`) exist for future export; serde_json is actively used in `handler.rs` for herdr pane-id parsing — neither introduces a storage layer; do not add persistence without an OpenSpec change.
+- No persistence: all state lives in `App` in memory; the app writes no files at runtime. Viewer selection, focus, mode, occurrence cursor, scroll, and minimap geometry reset with in-memory app state.
+- serde derives on the domain model (`patch.rs`) exist for future export; there is no storage layer or external viewer protocol. Do not add persistence without an OpenSpec change.
 
 ## Domain-Specific: DROID
 - Hardware tokens: `B` button, `L` LED, `P` pot, `O` CV out, `I` CV in, `E` encoder, `S` switch, each followed by a digit address (e.g. `B1.1`, `P1.1`).
@@ -74,4 +75,4 @@ license: MIT
 - Authoritative circuit schema: `droid_living_examlpes/droid-lsp/src/circuits.json` (76 circuits, 10 controllers) — machine-local symlink, untracked; do not commit it.
 - DROID reference skills: `droid-patch-format` (token grammar, RAM sizes, circuit catalog), `droid-circuit-reference`, `droid-patch-cookbook` (global).
 
-<!-- Last updated: 2026-08-23T13:19:11.000Z -->
+<!-- Last updated: 2026-08-23T19:12:34+02:00 -->

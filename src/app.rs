@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use ratatui::layout::Rect;
 
-use crate::patch::{Patch, ShiftGroup, ViewerCircuit};
+use crate::patch::Patch;
+use crate::patch::ShiftGroup;
 
 /// State of an armed vim-style prefix key (`g` pressed, awaiting the
 /// follow-up key). `started` drives the lazy timeout check performed when
@@ -12,16 +13,20 @@ pub struct PrefixState {
     pub started: Instant,
 }
 
-/// Mode in which the source viewer was opened.
-/// Tracked so Task 6 can set `Fallback` and `main.rs` can behave accordingly.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ViewerMode {
-    /// Viewer not open
-    None,
-    /// Viewer opened via herdr pane integration
-    Herdr,
-    /// Viewer opened via fallback (Task 6)
-    Fallback,
+/// Which pane receives keyboard input while the embedded source pane is open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ViewerFocus {
+    #[default]
+    Panels,
+    Source,
+}
+
+/// View mode for the embedded source pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SourceViewMode {
+    #[default]
+    Raw,
+    Prettified,
 }
 
 /// Orientation of the patch display.
@@ -54,18 +59,24 @@ pub struct App {
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
-    /// True when `g` + `v` opened the source viewer. Viewer rendering and
-    /// its payload state land in later tasks of this change.
+    /// True when `g` + `v` opened the embedded source pane.
     pub showing_viewer: bool,
-    /// How the source viewer was opened: herdr pane, fallback window, or
-    /// not at all. Set by the herdr/fallback integration tasks.
-    pub viewer_mode: ViewerMode,
-    /// The circuits of the patch currently displayed in the source viewer.
-    pub viewer_patch: Option<Vec<ViewerCircuit>>,
-    /// The index of the currently selected circuit in the viewer sidebar.
-    pub viewer_selected_circuit: usize,
-    /// Scroll offset of the viewer's main area, in rows.
-    pub viewer_scroll: u16,
+    /// Which component is explicitly selected (distinct from hover). Holds the
+    /// hardware token id (e.g. "B1.1") so it can be looked up directly in
+    /// `Patch::occurrence_index`.
+    pub selected_component: Option<String>,
+    /// Which pane has keyboard focus while the viewer is open.
+    pub viewer_focus: ViewerFocus,
+    /// Raw vs prettified rendering for the source pane. Defaults to Raw.
+    pub source_view_mode: SourceViewMode,
+    /// Index into `occurrences_for(selected_component)` for Up/Down/Home/End
+    /// navigation. Saturates at bounds.
+    pub occurrence_cursor: usize,
+    /// Line offset of the source view (0-based).
+    pub source_scroll: usize,
+    /// Geometry of the minimap column published by the renderer each frame
+    /// (like `component_rects`). Used for click-to-scroll hit testing.
+    pub minimap_rect: Option<Rect>,
     /// Scale factor for rendering (1.0 = default). Used for progressive scaling.
     pub scale_factor: f32,
     /// Current display orientation.
@@ -87,10 +98,12 @@ impl App {
             component_rects: Vec::new(),
             prefix: None,
             showing_viewer: false,
-            viewer_mode: ViewerMode::None,
-            viewer_patch: None,
-            viewer_selected_circuit: 0,
-            viewer_scroll: 0,
+            selected_component: None,
+            viewer_focus: ViewerFocus::Panels,
+            source_view_mode: SourceViewMode::Raw,
+            occurrence_cursor: 0,
+            source_scroll: 0,
+            minimap_rect: None,
             scale_factor: 1.0,
             orientation: Orientation::Portrait,
         }
@@ -119,16 +132,64 @@ impl App {
         }
     }
 
-    /// Load a patch into the app: stores it as the active patch and
-    /// prepares its circuits for the source viewer.
+    /// Load a patch into the app and reset source-navigation state ready for
+    /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
+    /// minimap geometry yet (renderer will publish on next frame).
     pub fn load_patch(&mut self, patch: Patch) {
-        self.viewer_patch = Some(patch.viewer_circuits());
         self.patch = Some(patch);
+        self.selected_component = None;
+        self.occurrence_cursor = 0;
+        self.source_scroll = 0;
+        self.source_view_mode = SourceViewMode::Raw;
+        self.viewer_focus = ViewerFocus::Panels;
+        self.minimap_rect = None;
     }
 
     pub fn load_sample_patch(&mut self) {
         self.load_patch(Patch::sample());
         self.status_message = String::from("Sample patch loaded.");
+    }
+
+    /// Select a component by hardware token id and jump `source_scroll` to
+    /// its first occurrence line (if any). Resets the occurrence cursor to 0.
+    pub fn select_component(&mut self, id: String) {
+        let target_line = self
+            .patch
+            .as_ref()
+            .and_then(|p| p.occurrence_index.get(&id))
+            .and_then(|spans| spans.first())
+            .map(|s| s.line);
+        self.selected_component = Some(id);
+        self.occurrence_cursor = 0;
+        if let Some(line) = target_line {
+            self.source_scroll = line;
+        }
+    }
+
+    /// Clear the explicit selection without moving `source_scroll`.
+    pub fn clear_selected_component(&mut self) {
+        self.selected_component = None;
+        self.occurrence_cursor = 0;
+    }
+
+    /// Move occurrence cursor saturating at bounds and sync `source_scroll`
+    /// to that occurrence's line. No-op when nothing is selected.
+    pub fn jump_to_occurrence(&mut self, idx: usize) {
+        let Some(token) = self.selected_component.clone() else {
+            return;
+        };
+        let Some(patch) = &self.patch else {
+            return;
+        };
+        let Some(spans) = patch.occurrence_index.get(&token) else {
+            return;
+        };
+        if spans.is_empty() {
+            return;
+        }
+        let clamped = idx.min(spans.len() - 1);
+        self.occurrence_cursor = clamped;
+        self.source_scroll = spans[clamped].line;
     }
 }
 
@@ -161,6 +222,7 @@ pub fn is_entry_selectable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patch::Patch;
 
     #[test]
     fn new_app_starts_with_no_prefix_and_viewer_closed() {
@@ -170,20 +232,145 @@ mod tests {
     }
 
     #[test]
-    fn new_app_starts_with_viewer_fields_default() {
+    fn new_app_has_source_navigation_defaults() {
         let app = App::new();
-        assert!(app.viewer_patch.is_none());
-        assert_eq!(app.viewer_selected_circuit, 0);
-        assert_eq!(app.viewer_scroll, 0);
+        assert!(app.selected_component.is_none());
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, 0);
+        assert!(app.minimap_rect.is_none());
+        // hovered stays distinct from selected
+        assert!(app.hovered_component.is_none());
     }
 
     #[test]
-    fn load_patch_populates_viewer_patch() {
+    fn load_patch_resets_source_navigation_state_to_bof() {
+        let mut app = App::new();
+        // Put app into a non-default navigation state first
+        app.selected_component = Some(String::from("B1.1"));
+        app.viewer_focus = ViewerFocus::Source;
+        app.source_view_mode = SourceViewMode::Prettified;
+        app.occurrence_cursor = 5;
+        app.source_scroll = 42;
+        app.minimap_rect = Some(Rect::new(0, 0, 10, 10));
+        app.hovered_component = Some(2);
+
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+
+        assert!(
+            app.selected_component.is_none(),
+            "selection cleared on load"
+        );
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, 0);
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert!(app.minimap_rect.is_none());
+        // patch itself is set, hover is intentionally not cleared here
+        assert!(app.patch.is_some());
+        assert_eq!(app.hovered_component, Some(2));
+    }
+
+    #[test]
+    fn load_sample_patch_inits_new_fields_with_defaults() {
+        let mut app = App::new();
+        app.load_sample_patch();
+        assert!(app.selected_component.is_none());
+        assert_eq!(app.source_view_mode, SourceViewMode::Raw);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, 0);
+        assert!(app.minimap_rect.is_none());
+    }
+
+    #[test]
+    fn select_component_jumps_to_first_occurrence_line() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        let first_b11_line = patch.occurrences_for("B1.1").first().unwrap().line;
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        assert_eq!(app.selected_component, Some(String::from("B1.1")));
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, first_b11_line);
+    }
+
+    #[test]
+    fn select_component_with_unknown_token_keeps_scroll() {
         let mut app = App::new();
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        let circuits = patch.viewer_circuits();
+        app.load_patch(patch);
+        app.source_scroll = 7;
+        app.select_component(String::from("B99.99"));
+        assert_eq!(app.selected_component, Some(String::from("B99.99")));
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, 7, "unknown token must not move scroll");
+    }
+
+    #[test]
+    fn clear_selected_component_keeps_scroll_and_resets_cursor() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        let first = patch.occurrences_for("B1.1").first().unwrap().line;
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        assert_eq!(app.source_scroll, first);
+        app.source_scroll = 99;
+        app.occurrence_cursor = 2;
+        app.clear_selected_component();
+        assert!(app.selected_component.is_none());
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, 99, "deselection must not move scroll");
+    }
+
+    #[test]
+    fn jump_to_occurrence_saturates_and_is_noop_without_selection() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(patch);
+        // No selection -> no-op
+        app.source_scroll = 5;
+        app.jump_to_occurrence(1);
+        assert_eq!(app.source_scroll, 5);
+        assert_eq!(app.occurrence_cursor, 0);
+
+        app.select_component(String::from("B1.1"));
+        let occurrences = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
+        assert!(occurrences.len() >= 2);
+        app.jump_to_occurrence(1);
+        assert_eq!(app.occurrence_cursor, 1);
+        assert_eq!(app.source_scroll, occurrences[1].line);
+        // Saturate beyond bounds
+        app.jump_to_occurrence(999);
+        assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
+        assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
+        // Back to first via 0
+        app.jump_to_occurrence(0);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert_eq!(app.source_scroll, occurrences[0].line);
+    }
+
+    #[test]
+    fn replacement_selection_rejumps_to_new_first_occurrence() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        let b11_first = patch.occurrences_for("B1.1").first().unwrap().line;
+        let p11_first = patch.occurrences_for("P1.1").first().unwrap().line;
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        assert_eq!(app.source_scroll, b11_first);
+        app.select_component(String::from("P1.1"));
+        assert_eq!(app.source_scroll, p11_first);
+        assert_eq!(app.occurrence_cursor, 0);
+    }
+
+    #[test]
+    fn load_patch_populates_patch_name() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         assert_eq!(app.patch.as_ref().unwrap().name, "arpeggio1");
-        assert_eq!(app.viewer_patch, Some(circuits));
     }
 }

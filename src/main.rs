@@ -11,6 +11,8 @@ use crate::ui::render;
 pub mod app;
 pub mod handler;
 pub mod patch;
+#[cfg(test)]
+mod regression;
 pub mod ui;
 
 fn main() -> Result<()> {

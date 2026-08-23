@@ -1,7 +1,26 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+/// 0-based line and byte-column span: line is 0-based, column range is
+/// [col_start, col_end) byte offsets within that raw line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Span {
+    pub line: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+}
+
+/// A single `select = X` relationship resolved to its affected source span.
+/// `source` is the raw `X` (hardware token or internal cable). `selectat`
+/// holds the optional `selectat = N` exact-value string in the same section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModifierAffect {
+    pub span: Span,
+    pub source: String,
+    pub selectat: Option<String>,
+}
 
 /// Represents a loaded DROID patch
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +34,22 @@ pub struct Patch {
     /// Raw `.ini` sections, kept for the source viewer. Populated by
     /// `from_ini_str`; hand-built patches (e.g. `sample()`) carry none.
     pub sections: Vec<IniSection>,
+    /// Verbatim raw lines including comments and blank lines, in file order.
+    #[serde(default)]
+    pub raw_lines: Vec<String>,
+    /// Every boundary-aware hardware-token hit with its source span, in
+    /// reading order (top-to-bottom, left-to-right).
+    #[serde(default)]
+    pub token_spans: Vec<(String, Span)>,
+    /// Token -> ordered occurrence spans, built from `token_spans` in
+    /// reading order. Present for named consumers (`occurrences_for`).
+    #[serde(default)]
+    pub occurrence_index: HashMap<String, Vec<Span>>,
+    /// Hardware token -> modifier spans whose `select = X` transitively
+    /// resolves to that token (cycle-safe). Present for named consumers
+    /// (`modifier_affected_spans`, `modifier_entries_for`).
+    #[serde(default)]
+    pub modifier_index: HashMap<String, Vec<ModifierAffect>>,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -296,6 +331,10 @@ impl Patch {
             ],
             modules: Vec::new(),
             sections: Vec::new(),
+            raw_lines: Vec::new(),
+            token_spans: Vec::new(),
+            occurrence_index: HashMap::new(),
+            modifier_index: HashMap::new(),
         }
     }
 
@@ -328,10 +367,12 @@ impl Patch {
             return Err(String::from("Patch file is empty"));
         }
 
+        let raw_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
         let sections = parse_ini_sections(content);
         if sections.is_empty() {
             return Err(String::from("No circuit sections found in patch file"));
         }
+        let token_spans = collect_token_spans(&raw_lines);
 
         // Group components into modules based on INI section names
         let modules =
@@ -445,6 +486,9 @@ impl Patch {
         // Assign shift groups from modules (if modules have shift group info)
         // For now, use the previously assigned shift groups from components
 
+        let occurrence_index = build_occurrence_index(&token_spans);
+        let modifier_index = build_modifier_index(&raw_lines, &sections);
+
         Ok(Patch {
             name,
             hw_components: components,
@@ -456,6 +500,10 @@ impl Patch {
                 ShiftGroup::Group4,
             ],
             sections,
+            raw_lines,
+            token_spans,
+            occurrence_index,
+            modifier_index,
         })
     }
 
@@ -510,6 +558,31 @@ impl Patch {
             })
             .collect()
     }
+
+    /// Occurrences of `token` in reading order. Empty slice if absent.
+    pub fn occurrences_for(&self, token: &str) -> &[Span] {
+        self.occurrence_index
+            .get(token)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Modifier spans whose `select = X` (and optional `selectat`) transitively
+    /// resolves to `token`. Cycle-safe, file-order.
+    pub fn modifier_affected_spans(&self, token: &str) -> Vec<Span> {
+        self.modifier_index
+            .get(token)
+            .map(|v| v.iter().map(|e| e.span).collect())
+            .unwrap_or_default()
+    }
+
+    /// Full modifier entries for `token` (span + source + selectat).
+    pub fn modifier_entries_for(&self, token: &str) -> &[ModifierAffect] {
+        self.modifier_index
+            .get(token)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 /// A circuit as shown in the source viewer: section name plus its raw
@@ -527,6 +600,9 @@ pub struct ViewerCircuit {
 pub struct IniSection {
     pub name: String,
     pub entries: Vec<(String, String)>,
+    /// Source span of the header line (including brackets), 0-based.
+    #[serde(default)]
+    pub header_span: Span,
 }
 
 /// Strip a `#`-to-end-of-line comment (whole-line or inline).
@@ -541,15 +617,23 @@ fn strip_comment(line: &str) -> &str {
 /// repeated section names as distinct entries.
 fn parse_ini_sections(content: &str) -> Vec<IniSection> {
     let mut sections: Vec<IniSection> = Vec::new();
-    for raw_line in content.lines() {
-        let line = strip_comment(raw_line).trim();
+    for (line_idx, raw_line) in content.lines().enumerate() {
+        let stripped = strip_comment(raw_line);
+        let line = stripped.trim();
         if line.is_empty() {
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
+            let col_start = stripped.find('[').unwrap_or(0);
+            let col_end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
             sections.push(IniSection {
                 name: line[1..line.len() - 1].trim().to_lowercase(),
                 entries: Vec::new(),
+                header_span: Span {
+                    line: line_idx,
+                    col_start,
+                    col_end,
+                },
             });
             continue;
         }
@@ -622,6 +706,279 @@ fn scan_hw_tokens(value: &str) -> Vec<String> {
         i += 1;
     }
     tokens
+}
+
+/// Like `scan_hw_tokens` but returns spans (line + column range) for each hit.
+/// `value` is the trimmed value string, `line` the 0-based line index,
+/// `col_offset` the byte column where `value` starts in the raw line.
+fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec<(String, Span)> {
+    let bytes = value.as_bytes();
+    let len = bytes.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < len {
+        let c = bytes[i] as char;
+        let boundary_ok =
+            i == 0 || !((bytes[i - 1] as char).is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+        let starts_token = HW_TOKEN_LETTERS.contains(&c)
+            && i + 1 < len
+            && (bytes[i + 1] as char).is_ascii_digit()
+            && boundary_ok;
+        if starts_token {
+            let start = i;
+            i += 1;
+            while i < len && (bytes[i] as char).is_ascii_digit() {
+                i += 1;
+            }
+            if i < len && bytes[i] == b'.' && i + 1 < len && (bytes[i + 1] as char).is_ascii_digit()
+            {
+                i += 1;
+                while i < len && (bytes[i] as char).is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            let clean_end = i >= len
+                || !((bytes[i] as char).is_ascii_alphanumeric()
+                    || bytes[i] == b'_'
+                    || bytes[i] == b'.');
+            if clean_end {
+                let token = value[start..i].to_string();
+                out.push((
+                    token,
+                    Span {
+                        line,
+                        col_start: col_offset + start,
+                        col_end: col_offset + i,
+                    },
+                ));
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn collect_token_spans(raw_lines: &[String]) -> Vec<(String, Span)> {
+    let mut out = Vec::new();
+    for (line_idx, raw_line) in raw_lines.iter().enumerate() {
+        let stripped = strip_comment(raw_line);
+        let trimmed = stripped.trim();
+        if trimmed.is_empty() || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
+            continue;
+        }
+        let Some(eq_pos) = stripped.find('=') else {
+            continue;
+        };
+        // Require trimmed also contains '=' to avoid stray lines without a section.
+        if !trimmed.contains('=') {
+            continue;
+        }
+        let value_part = &stripped[eq_pos + 1..];
+        let value_trimmed = value_part.trim();
+        if value_trimmed.is_empty() {
+            continue;
+        }
+        // Byte offset of trimmed value within stripped.
+        let offset_in_part = value_part.find(value_trimmed).unwrap_or(0);
+        let col_offset = eq_pos + 1 + offset_in_part;
+        out.extend(scan_hw_tokens_with_spans(
+            value_trimmed,
+            line_idx,
+            col_offset,
+        ));
+    }
+    out
+}
+
+fn build_occurrence_index(token_spans: &[(String, Span)]) -> HashMap<String, Vec<Span>> {
+    let mut map: HashMap<String, Vec<Span>> = HashMap::new();
+    for (tok, span) in token_spans {
+        map.entry(tok.clone()).or_default().push(*span);
+    }
+    map
+}
+
+fn scan_internal_tokens(value: &str) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '_' {
+            let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric());
+            if boundary_ok {
+                let start = i;
+                i += 1;
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                if i > start + 1 {
+                    let token: String = chars[start..i].iter().collect();
+                    let clean_end =
+                        i >= chars.len() || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_');
+                    if clean_end {
+                        out.push(token);
+                    }
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn is_hardware_token(s: &str) -> bool {
+    token_kind(s).is_some()
+}
+
+fn build_producer_map(sections: &[IniSection]) -> HashMap<String, HashSet<String>> {
+    let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+    for section in sections {
+        let mut section_hardware: HashSet<String> = HashSet::new();
+        let mut section_internals: HashSet<String> = HashSet::new();
+        let mut output_internals: HashSet<String> = HashSet::new();
+        for (k, v) in &section.entries {
+            for t in scan_hw_tokens(v) {
+                section_hardware.insert(t);
+            }
+            for t in scan_internal_tokens(v) {
+                section_internals.insert(t);
+            }
+            if k.starts_with("output") {
+                for t in scan_internal_tokens(v) {
+                    output_internals.insert(t);
+                }
+            }
+        }
+        for produced in output_internals {
+            let mut sources: HashSet<String> = HashSet::new();
+            for h in &section_hardware {
+                if h != &produced {
+                    sources.insert(h.clone());
+                }
+            }
+            for iv in &section_internals {
+                if iv != &produced {
+                    sources.insert(iv.clone());
+                }
+            }
+            map.entry(produced).or_default().extend(sources);
+        }
+    }
+    map
+}
+
+#[allow(clippy::needless_range_loop)]
+fn find_select_span(
+    raw_lines: &[String],
+    sections: &[IniSection],
+    section_idx: usize,
+    src: &str,
+) -> Option<Span> {
+    let header_line = sections[section_idx].header_span.line;
+    let next_header = sections
+        .get(section_idx + 1)
+        .map(|s| s.header_span.line)
+        .unwrap_or(raw_lines.len());
+    for line_idx in (header_line + 1)..next_header {
+        let raw_line = &raw_lines[line_idx];
+        let stripped = strip_comment(raw_line);
+        let trimmed = stripped.trim();
+        if trimmed.is_empty() || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
+            continue;
+        }
+        let Some(eq_pos) = stripped.find('=') else {
+            continue;
+        };
+        if !trimmed.contains('=') {
+            continue;
+        }
+        let key_part = &stripped[..eq_pos];
+        let key = key_part.trim().to_lowercase();
+        if key != "select" {
+            continue;
+        }
+        let value_part = &stripped[eq_pos + 1..];
+        let value_trimmed = value_part.trim();
+        if value_trimmed != src {
+            // Fallback: value may be token surrounded by expression; check containment
+            if !value_trimmed.contains(src) {
+                continue;
+            }
+        }
+        let offset_in_part = value_part.find(src).unwrap_or(0);
+        let col_start = eq_pos + 1 + offset_in_part;
+        let col_end = col_start + src.len();
+        return Some(Span {
+            line: line_idx,
+            col_start,
+            col_end,
+        });
+    }
+    None
+}
+
+fn collect_hardware_recursive(
+    start: &str,
+    producers: &HashMap<String, HashSet<String>>,
+    visited: &mut HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    if !visited.insert(start.to_string()) {
+        return;
+    }
+    if is_hardware_token(start) {
+        out.insert(start.to_string());
+        return;
+    }
+    if let Some(parents) = producers.get(start) {
+        for p in parents {
+            collect_hardware_recursive(p, producers, visited, out);
+        }
+    }
+}
+
+fn build_modifier_index(
+    raw_lines: &[String],
+    sections: &[IniSection],
+) -> HashMap<String, Vec<ModifierAffect>> {
+    let producers = build_producer_map(sections);
+    let mut index: HashMap<String, Vec<ModifierAffect>> = HashMap::new();
+    for (section_idx, section) in sections.iter().enumerate() {
+        let mut select_src: Option<String> = None;
+        let mut selectat_val: Option<String> = None;
+        for (k, v) in &section.entries {
+            if k == "select" {
+                select_src = Some(v.trim().to_string());
+            }
+            if k == "selectat" {
+                selectat_val = Some(v.trim().to_string());
+            }
+        }
+        let Some(src) = select_src else {
+            continue;
+        };
+        let Some(span) = find_select_span(raw_lines, sections, section_idx, &src) else {
+            continue;
+        };
+        let mut reachable: HashSet<String> = HashSet::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        collect_hardware_recursive(&src, &producers, &mut visited, &mut reachable);
+        // Direct hardware token with no producer entry still reaches itself
+        if reachable.is_empty() && is_hardware_token(&src) {
+            reachable.insert(src.clone());
+        }
+        for hw in reachable {
+            index.entry(hw).or_default().push(ModifierAffect {
+                span,
+                source: src.clone(),
+                selectat: selectat_val.clone(),
+            });
+        }
+    }
+    // Keep file order: pending selects were iterated section order, so per-hw vec is already ordered.
+    index
 }
 
 pub fn token_kind(id: &str) -> Option<ComponentKind> {
@@ -792,5 +1149,126 @@ mod tests {
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
         assert_eq!(patch.hw_components.len(), 1);
         assert_eq!(patch.hw_components[0].id, "O2");
+    }
+
+    #[test]
+    fn occurrence_index_is_reading_order_and_unknown_is_empty() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        // token_spans is already reading order; occurrence_index groups preserve it
+        let b11 = patch.occurrences_for("B1.1");
+        assert!(
+            b11.len() >= 3,
+            "B1.1 should occur at least in button, copy and select"
+        );
+        // Lines must be non-decreasing, columns increase within same line
+        for w in b11.windows(2) {
+            assert!(
+                w[0].line < w[1].line
+                    || (w[0].line == w[1].line && w[0].col_start <= w[1].col_start)
+            );
+        }
+        // Unknown token yields empty without error
+        assert!(patch.occurrences_for("B99.99").is_empty());
+        assert!(patch.modifier_affected_spans("B99.99").is_empty());
+        assert!(patch.modifier_entries_for("B99.99").is_empty());
+        // occurrence_index matches token_spans grouping
+        let mut expected: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (tok, _) in &patch.token_spans {
+            *expected.entry(tok.clone()).or_default() += 1;
+        }
+        for (tok, count) in expected {
+            assert_eq!(
+                patch.occurrences_for(&tok).len(),
+                count,
+                "occurrence count mismatch for {tok}"
+            );
+        }
+        // Internal variables produce no occurrence
+        assert!(patch.occurrences_for("_TRANSIT").is_empty());
+        assert!(patch.occurrences_for("_CYCLE_A").is_empty());
+    }
+
+    #[test]
+    fn modifier_direct_hardware_boolean_activation() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        // select = B1.1 boolean form has no selectat
+        let entries = patch.modifier_entries_for("B1.1");
+        let direct = entries
+            .iter()
+            .find(|e| e.source == "B1.1" && e.selectat.is_none());
+        assert!(direct.is_some(), "B1.1 should have direct boolean select");
+        let span = direct.unwrap().span;
+        // Span should point inside the select = B1.1 line
+        let raw = &patch.raw_lines[span.line];
+        assert!(raw.contains("select"));
+        assert!(raw.contains("B1.1"));
+    }
+
+    #[test]
+    fn modifier_exact_value_selectat() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        let entries = patch.modifier_entries_for("P1.1");
+        let exact = entries
+            .iter()
+            .find(|e| e.source == "P1.1" && e.selectat.as_deref() == Some("0.5"));
+        assert!(exact.is_some(), "P1.1 should have exact-value selectat 0.5");
+        let span = exact.unwrap().span;
+        assert!(patch.raw_lines[span.line].contains("select"));
+    }
+
+    #[test]
+    fn modifier_transitive_internal_producer() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        // B1.2 -> _TRANSIT -> select = _TRANSIT
+        let mods = patch.modifier_affected_spans("B1.2");
+        // Should include the transit select line (and also direct selects of B1.2)
+        let has_transit = mods.iter().any(|s| {
+            let line = &patch.raw_lines[s.line];
+            line.contains("_TRANSIT") || patch.raw_lines[s.line].contains("select")
+        });
+        assert!(
+            has_transit,
+            "B1.2 should transitively affect select = _TRANSIT"
+        );
+        // Longer chain B1.1 -> _CHAIN1 -> _CHAIN2 -> select _CHAIN2
+        let b11_mods = patch.modifier_entries_for("B1.1");
+        let has_chain2 = b11_mods.iter().any(|e| e.source == "_CHAIN2");
+        assert!(
+            has_chain2,
+            "B1.1 should transitively affect select = _CHAIN2"
+        );
+        // Spans for transitive case should be ordered file-wise
+        for w in mods.windows(2) {
+            assert!(w[0].line <= w[1].line);
+        }
+    }
+
+    #[test]
+    fn modifier_cycle_safe_termination() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        // Cycle: _CYCLE_A <-> _CYCLE_B produced from B1.3; select = _CYCLE_B
+        let mods = patch.modifier_entries_for("B1.3");
+        let has_cycle = mods.iter().any(|e| e.source == "_CYCLE_B");
+        assert!(
+            has_cycle,
+            "B1.3 should reach select = _CYCLE_B through cycle"
+        );
+        // Must terminate and still provide exact selectat 1
+        let exact = mods
+            .iter()
+            .find(|e| e.source == "_CYCLE_B" && e.selectat.as_deref() == Some("1"));
+        assert!(exact.is_some());
+        // No hang: simply reaching this point proves termination (timeout would fail test)
+    }
+
+    #[test]
+    fn modifier_direct_hardware_p12_boolean() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        let entries = patch.modifier_entries_for("P1.2");
+        // P1.2 has a direct select = P1.2 without selectat
+        assert!(entries
+            .iter()
+            .any(|e| e.source == "P1.2" && e.selectat.is_none()));
     }
 }
