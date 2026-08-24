@@ -93,6 +93,124 @@ fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
     buf.content().iter().map(|c| c.symbol()).collect::<String>()
 }
 
+#[allow(dead_code)]
+fn buffer_to_ansi(buffer: &Buffer) -> String {
+    let area = buffer.area;
+    let mut rows = Vec::with_capacity(area.height as usize);
+    for y in 0..area.height {
+        let mut line = String::with_capacity(area.width as usize);
+        for x in 0..area.width {
+            let cell = buffer.cell((x, y)).unwrap();
+            line.push_str(cell.symbol());
+        }
+        rows.push(line.trim_end().to_string());
+    }
+    while rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    rows.join("\n")
+}
+
+#[allow(dead_code)]
+fn color_to_css(color: Color) -> Option<String> {
+    match color {
+        Color::Reset => None,
+        Color::Black => Some(String::from("black")),
+        Color::Red => Some(String::from("red")),
+        Color::Green => Some(String::from("green")),
+        Color::Yellow => Some(String::from("yellow")),
+        Color::Blue => Some(String::from("blue")),
+        Color::Magenta => Some(String::from("magenta")),
+        Color::Cyan => Some(String::from("cyan")),
+        Color::Gray => Some(String::from("gray")),
+        Color::DarkGray => Some(String::from("darkgray")),
+        Color::White => Some(String::from("white")),
+        Color::LightRed => Some(String::from("#ff5555")),
+        Color::LightGreen => Some(String::from("#55ff55")),
+        Color::LightYellow => Some(String::from("#ffff55")),
+        Color::LightBlue => Some(String::from("#5555ff")),
+        Color::LightMagenta => Some(String::from("#ff55ff")),
+        Color::LightCyan => Some(String::from("#55ffff")),
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        Color::Indexed(idx) => Some(format!("indexed-{idx}")),
+    }
+}
+
+#[allow(dead_code)]
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn buffer_to_html(buffer: &Buffer) -> String {
+    let area = buffer.area;
+    let mut rows = Vec::with_capacity(area.height as usize);
+    for y in 0..area.height {
+        let mut row_html = String::new();
+        // Determine last non-space column to trim trailing empty cells.
+        let mut last = None;
+        for x in (0..area.width).rev() {
+            let cell = buffer.cell((x, y)).unwrap();
+            if cell.symbol() != " " {
+                last = Some(x);
+                break;
+            }
+        }
+        let width = last.map(|x| x + 1).unwrap_or(0);
+        for x in 0..width {
+            let cell = buffer.cell((x, y)).unwrap();
+            let symbol = cell.symbol();
+            let mut style = cell.style();
+            // REVERSED swaps fg/bg as in ui.rs hover_style.
+            if style.add_modifier.contains(Modifier::REVERSED) {
+                let fg = style.fg;
+                let bg = style.bg;
+                style.fg = bg;
+                style.bg = fg;
+            }
+            let mut css_parts = Vec::new();
+            if let Some(fg) = style.fg.and_then(color_to_css) {
+                css_parts.push(format!("color:{fg}"));
+            }
+            if let Some(bg) = style.bg.and_then(color_to_css) {
+                css_parts.push(format!("background-color:{bg}"));
+            }
+            if style.add_modifier.contains(Modifier::BOLD) {
+                css_parts.push(String::from("font-weight:bold"));
+            }
+            if style.add_modifier.contains(Modifier::DIM) {
+                css_parts.push(String::from("opacity:0.6"));
+            }
+            let escaped = html_escape(symbol);
+            if css_parts.is_empty() {
+                row_html.push_str(&escaped);
+            } else {
+                row_html.push_str(&format!(
+                    "<span style=\"{}\">{}</span>",
+                    css_parts.join(";"),
+                    escaped
+                ));
+            }
+        }
+        rows.push(row_html);
+    }
+    while rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    rows.join("\n")
+}
+
 fn has_highlighted_token(
     buffer: &Buffer,
     token: &str,
