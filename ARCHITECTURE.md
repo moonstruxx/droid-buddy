@@ -59,7 +59,7 @@ flowchart LR
 ### 3.1 User Interface (`src/ui.rs`)
 
 - **Responsibility**: render the entire screen from `App` state each frame; compute layout; publish component geometry for mouse hit-testing.
-- **Key functions**: `render` (picker overlay vs. header/main/status split), `render_patch` (groups components into controller panels, wraps to rows, applies shift-group border colors, renders LED-associated elements as single boxed cells with kind-colored borders, records `component_rects`), `render_component`, `render_status`, `render_picker`, `render_embedded_main` (splits panels | source columns by `app.viewer_split_ratio`, clamped 0.3–0.7), `render_source_pane`, `render_source_sidebar`, `render_source_content`, `render_minimap`, and `render_viewer_status(frame, area, app)` (hints plus trailing transient status message).
+- **Key functions**: `render` (picker overlay vs. header/main/status split), `render_patch` / `render_patch_grouped` (groups components into controller panels, wraps to rows, applies shift-group border colors, renders LED-associated elements as single boxed cells with kind-colored borders, subdivides a multi-circuit panel into per-instance module sub-blocks — "Panel contains modules" — and records `component_rects`), `render_component_grid` (shared per-panel/per-module grid renderer), `render_component`, `render_status`, `render_picker`, `render_embedded_main` (splits panels | source columns by `app.viewer_split_ratio`, clamped 0.3–0.7), `render_source_pane`, `render_source_sidebar`, `render_source_content`, `render_minimap`, and `render_viewer_status(frame, area, app)` (hints plus trailing transient status message).
 - **Technologies**: ratatui 0.29 (`Frame`, `Layout`, `Flex`, `Block`, `Paragraph`), crossterm colors/modifiers.
 - **Inputs**: `&mut App`; **Outputs**: terminal frame; side effect: `app.component_rects` filled per frame.
 - **Key invariant**: layout is recomputed fresh from `frame.area()` on every draw — terminal resize needs no state handling.
@@ -67,8 +67,8 @@ flowchart LR
 ### 3.2 Domain Model & Parser (`src/patch.rs`)
 
 - **Responsibility**: typed model of a DROID patch and a hand-rolled `.ini` parser that builds it.
-- **Types**: `Patch` (name, `hw_components`, `modules`, `sections`, raw lines, token spans, occurrence index, modifier index, `shift_groups`), `Span` (0-based line and byte-column range), `ModifierAffect` (resolved modifier span/source/selectat), `HwComponent` (id, label, kind, shift_group, state, controller, led), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth`, `IniSection`, and `ViewerCircuit` for prettified blocks.
-- **Key functions**: `Patch::from_ini_file` / `from_ini_str` / `sample`, `parse_ini_sections` (comment stripping, repeated-section preservation and header spans), `collect_token_spans`, `scan_hw_tokens` (boundary-aware token scanner), `build_occurrence_index`, `build_modifier_index` (cycle-safe `select`/`selectat` resolution), `token_kind`, `add_component`; rack-recognition API `module_types` / `needs_by_type` / `master_requirement`; `occurrences_for`, `modifier_affected_spans`, `modifier_entries_for`, and `viewer_circuits`.
+- **Types**: `Patch` (name, `hw_components`, `modules`, `sections`, raw lines, token spans, occurrence index, modifier index, `shift_groups`), `Span` (0-based line and byte-column range), `ModifierAffect` (resolved modifier span/source/selectat), `HwComponent` (id, label, kind, shift_group, state, controller, led, plus `module_instance()` deriving the component's circuit-instance number from the leading digit run of its token id), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth`, `IniSection`, and `ViewerCircuit` for prettified blocks.
+- **Key functions**: `Patch::from_ini_file` / `from_ini_str` / `sample`, `parse_ini_sections` (comment stripping, repeated-section preservation and header spans), `collect_token_spans`, `scan_hw_tokens` (boundary-aware token scanner), `build_occurrence_index`, `build_modifier_index` (cycle-safe `select`/`selectat` resolution), `token_kind`, `add_component`; LED-association detection (a bare `led = L.N` entry, plus numbered circuit params `ledN = L.M` paired by shared numeric suffix with a same-suffix element entry such as `buttonN`/`potN` — the DROID convention for circuits like `matrixmixer`); rack-recognition API `module_types` / `needs_by_type` / `master_requirement`; `occurrences_for`, `modifier_affected_spans`, `modifier_entries_for`, and `viewer_circuits`.
 - **Inputs**: `.ini` file content; **Outputs**: `Result<Patch, String>` (descriptive errors, never panics on malformed input).
 - **Design notes**: the parser is deliberately custom (the `ini` crate was removed from `Cargo.toml`) to preserve repeated section names and control token extraction precisely.
 
@@ -108,8 +108,8 @@ sequenceDiagram
     H->>A: mutate state (toggle, navigate, shift, picker)
     L->>U: terminal.draw(render)
     U->>A: read state
-    U->>U: group components into panels, wrap, style
-    U->>A: write component_rects (geometry for hit-testing)
+    U->>U: group components into panels (and per-circuit module sub-blocks), wrap, style
+    U->>A: write component_rects (geometry for hit-testing, exactly matching rendered cells)
     U->>T: draw frame
 ```
 
@@ -188,7 +188,7 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 ## 13. Testing Strategy
 
 - **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, `ui.rs`, plus cross-layer, per-theme frame-rendering, and `insta` snapshot tests in `regression.rs` (`buffer_to_ansi` / `buffer_to_html` helpers) and `src/snapshots/`.
-- **Coverage**: 164+ tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, per-theme rendering of boxed cells/shift surfaces/picker/viewer panes under `classic`/`terminal`/`mono`, and config discovery/load/save/fallback paths; plus visual-validation matrix (`arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini` × `classic`/`terminal`/`mono` × widths 80/120/100, viewer open/closed, shift1) via snapshot harness.
+- **Coverage**: 164+ tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), numbered-circuit `ledN = L.M` pairing by shared suffix, module-instance grouping (multi-instance panels split into sub-blocks, physical order preserved), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, scale-correct hit rects (no overlap at non-default scale), panel geometry overflow/overlap and knob-clipping with the viewer open, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, per-theme rendering of boxed cells/shift surfaces/picker/viewer panes under `classic`/`terminal`/`mono`, and config discovery/load/save/fallback paths; plus visual-validation matrix (`arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini` × `classic`/`terminal`/`mono` × widths 80/120/100, viewer open/closed, shift1) via snapshot harness.
 - **Visual validation**: deterministic `TestBackend` → ANSI + HTML gallery (`evidence/gallery/index.html`, one row per scenario, columns per theme) — no live terminal/pty; ephemeral in worktree (`.gitignore` covers `src/snapshots/`, `evidence/gallery/`, `*.snap.new`) and durable in archive (`scripts/archive-gallery.sh` mirrors to `openspec/changes/archive/2026-08-24-add-visual-validation/evidence/gallery/`); strict gate — `cargo test` generates and asserts `insta` snapshots and fails on any face regression (`cargo insta test --check` in CI); HTML side-by-side proves spec-to-face for `visual-validation` (`openspec/specs/visual-validation/spec.md`).
 - **Frameworks**: std test harness + `insta` 1 for golden-file management; no mocking, no property tests, no live-terminal end-to-end test, no coverage gate.
 - **Gap**: no end-to-end test driving the real binary; UI tests render into a test `Frame` rather than a live terminal (visual snapshots are `TestBackend` determinism, not pty capture).
@@ -204,11 +204,12 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 7. **Shift groups as an enum** — `ShiftGroup::Group1–4` with `color()`/`key_label()`; panel borders and status bar derive from one source of truth.
 8. **Vim-style `g` prefix with lazy timeout** — arming stores only `PrefixState { started: Instant }`; expiry against `PREFIX_TIMEOUT` (1 s) is checked when the next event arrives instead of running a timer thread, keeping the event loop single-threaded and synchronous.
 9. **Embedded source viewer** — `g v` opens a source pane in the same TUI and `App`; raw lines and parser-recorded spans support selection jumps, occurrence navigation, modifier highlights, and minimap interaction without IPC or a process boundary.
-10. **Boxed rendering gated on parse-time LED association** — a component renders as ONE bordered cell only when its `.ini` section carried an `led = L.N` assignment (stored as `HwComponent.led`); the border uses the component-kind color and the LED glyph reflects state inside the shared box. LED-less components keep two-line text rendering; LEDs are never rendered as standalone cells.
+10. **Boxed rendering gated on parse-time LED association** — a component renders as ONE bordered cell only when its `.ini` section carries an LED association (stored as `HwComponent.led`): a bare `led = L.N` entry, or a numbered circuit `ledN = L.M` param paired by shared numeric suffix with a same-suffix element entry (`buttonN`/`potN`) as used by circuits like `matrixmixer` (the `ledN` value is authoritative for the LED token). The border uses the component-kind color; the label lives in the block's top title row and the single interior row holds state + the LED glyph (one state, not a duplicate textual LED state). LED-less components keep two-line text rendering; LEDs are never rendered as standalone cells.
 11. **Adjustable panels/source split** — the embedded viewer's column ratio lives in `App.viewer_split_ratio` (default 0.6, clamped 0.3–0.7, persisted across patch loads as a view preference); `[`/`]` nudge it in exact 0.1 steps only while the viewer is open.
 12. **Semantic color-token layer** — every rendered color comes from `Theme` tokens in `src/theme.rs`; no `Color::` literals outside tests. Built-in palettes `classic` (byte-identical to pre-theming colors), `terminal` (all `Reset`), and `mono` (grayscale, shift tokens pairwise distinct) are resolved by name and installed globally via `theme::init` at startup.
 13. **XDG user config with injected validation** — `src/config.rs` discovers `droid-tui/config.toml` under `$XDG_CONFIG_HOME` (or `$HOME/.config`); name validation is injected as a canonicalizer function so the loader stays decoupled from the theme catalog. Missing file silently yields defaults; malformed TOML and unknown themes warn once on stderr and fall back to `classic`. Writes are atomic (temp-file + rename).
 14. **Config load before terminal init** — `main()` loads settings and initializes the active theme before `ratatui::init()` so warnings print to a clean terminal. The global theme lives behind a `Mutex<Option<&'static Theme>>` (not `OnceLock`) because test-ordering must not poison the palette across tests.
+15. **Panel contains modules** — a controller panel whose components come from more than one circuit instance (detected via `HwComponent.module_instance()`, the leading digit run of the token id) is subdivided into per-instance module sub-blocks, each bordered and titled with the instance number (e.g. `P2B8 1`, `P2B8 2`); a single-instance panel renders as one flat grid and CV I/O never subdivides. Panel height is sized from the visible (LED-folded) component count so trailing rows like knobs are not clipped, and the published `component_rects` hit rects exactly match the rendered cell size (a prior scale-factor inflation spilled a hit rect into its neighbor's screen area, misresolving hover/selection).
 
 ## 15. Constraints, Risks, and Technical Debt
 
@@ -236,7 +237,7 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 - **Language**: Rust (edition 2021)
 - **Type**: terminal UI application (ratatui)
 - **Runtime**: native binary; Linux
-- **Date of review**: 2026-08-23
+- **Date of review**: 2026-08-24
 - **Maintainer**: not evident from the repository
 
 ## 18. Glossary / Acronyms
@@ -254,4 +255,4 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 - **OpenSpec**: spec-driven change workflow (`openspec/changes/`, `openspec/specs/`).
 - **beads (bd)**: Dolt-backed issue tracker used for task tracking.
 
-<!-- Last updated: 2026-08-24 · visual-validation: testing strategy + CI ephemeral/durable + strict gate -->
+<!-- Last updated: 2026-08-24 · panel-contains-modules + boxed-LED redesign: ui.rs per-module sub-blocks, patch.rs numbered-LED pairing + module_instance, hit-rect/panel-height geometry fixes -->

@@ -69,6 +69,18 @@ pub struct HwComponent {
     pub led: Option<String>,
 }
 
+impl HwComponent {
+    /// The circuit-instance number embedded in this component's id (e.g. `1`
+    /// in `B1.1`, `2` in `B2.1`) — the same number `from_ini_str` already
+    /// uses to assign `controller` and `shift_group`. Used by the renderer
+    /// to group a panel's components by originating circuit instance
+    /// without needing new parser state (controller-panels/spec.md "Panel
+    /// contains modules").
+    pub fn module_instance(&self) -> Option<u32> {
+        leading_number(&self.id)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComponentKind {
     Button,
@@ -412,20 +424,24 @@ impl Patch {
                 controller_types
                     .entry(n)
                     .or_insert_with(|| String::from("P2B8"));
+                // Label is just the token id ("B1.1") — the panel title
+                // already reads "P2B8", so a "P2B8 Button 1.1" label was a
+                // redundant prefix that clipped to an indistinguishable
+                // "P2B8 Button 1." inside COMPONENT_WIDTH (droid_tui-p2x).
                 for i in 1..=8 {
                     add_component(
                         &mut components,
                         &mut seen_ids,
                         format!("B{}.{}", n, i),
                         ComponentKind::Button,
-                        format!("P2B8 Button {}.{}", n, i),
+                        format!("B{}.{}", n, i),
                     );
                     add_component(
                         &mut components,
                         &mut seen_ids,
                         format!("L{}.{}", n, i),
                         ComponentKind::Led,
-                        format!("P2B8 Led {}.{}", n, i),
+                        format!("L{}.{}", n, i),
                     );
                 }
                 for i in 1..=2 {
@@ -434,7 +450,7 @@ impl Patch {
                         &mut seen_ids,
                         format!("P{}.{}", n, i),
                         ComponentKind::Knob,
-                        format!("P2B8 Knob {}.{}", n, i),
+                        format!("P{}.{}", n, i),
                     );
                 }
             } else if KNOWN_CONTROLLER_SECTIONS.contains(&section.name.as_str()) {
@@ -467,6 +483,39 @@ impl Patch {
                 if let Some(element) = &element_token {
                     if let Some(comp) = components.iter_mut().find(|c| c.id == *element) {
                         comp.led = Some(led.clone());
+                    }
+                }
+            }
+
+            // Numbered circuit LED params (e.g. `led11 = L1.1`) pair with the
+            // same-suffix element entry in the section (`button11 = B1.1`) —
+            // the DROID convention for circuits like matrixmixer that address
+            // buttons and LEDs by a shared matrix-position suffix. The ledN
+            // VALUE (L.N) is authoritative for the LED hardware token; the
+            // serial-position-dependent numbering is already encoded by the
+            // patch author, so the parser reads it directly rather than
+            // deriving it. Match suffix against any hardware-token-valued
+            // sibling entry (buttonN, potN, ...) in the same section.
+            let mut element_by_suffix: HashMap<&str, &str> = HashMap::new();
+            for (key, value) in &section.entries {
+                // A `led*` key is the LED side of a pair, never the element
+                // being driven — exclude it so a lone `ledN` can't pair with
+                // itself when it has no same-suffix element sibling.
+                if key.starts_with("led") {
+                    continue;
+                }
+                if let Some(suffix) = leading_digits(key) {
+                    if token_kind(value).is_some() {
+                        element_by_suffix.entry(suffix).or_insert(value);
+                    }
+                }
+            }
+            for (key, led) in &section.entries {
+                if let Some(led_suffix) = key.strip_prefix("led").and_then(leading_digits) {
+                    if let Some(element) = element_by_suffix.get(led_suffix) {
+                        if let Some(comp) = components.iter_mut().find(|c| c.id == **element) {
+                            comp.led = Some(led.clone());
+                        }
                     }
                 }
             }
@@ -1028,6 +1077,18 @@ fn leading_number(id: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// The trailing digit run of an entry key, e.g. `"11"` from `"button11"`
+/// or `"led11"`. Used to pair numbered circuit LED params (`led11`) with
+/// their same-suffix element entry (`button11`).
+fn leading_digits(s: &str) -> Option<&str> {
+    let start = s.find(|c: char| c.is_ascii_digit())?;
+    let end = s[start..]
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| start + i)
+        .unwrap_or(s.len());
+    (start < end).then(|| &s[start..end])
+}
+
 fn titlecase(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -1092,6 +1153,55 @@ mod tests {
         let patch = Patch::from_ini_str(&content, String::from("led_pairs")).unwrap();
         let p1_1 = patch.hw_components.iter().find(|c| c.id == "P1.1").unwrap();
         assert_eq!(p1_1.led, Some(String::from("L1.3")));
+    }
+
+    #[test]
+    fn numbered_led_param_pairs_with_same_suffix_element() {
+        // matrixmixer addresses buttons and LEDs by a shared matrix-position
+        // suffix: button11 = B1.1 pairs with led11 = L1.1 (droid_tui-abt).
+        // The ledN VALUE is authoritative for the LED token.
+        let content = std::fs::read_to_string("fixtures/alg27_2.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("alg27_2")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        // button11 = B1.1 / led11 = L1.1
+        assert_eq!(find("B1.1").led.as_deref(), Some("L1.1"));
+        // button12 = B1.2 / led12 = L1.2
+        assert_eq!(find("B1.2").led.as_deref(), Some("L1.2"));
+        // button13 = B2.1 / led13 = L2.1
+        assert_eq!(find("B2.1").led.as_deref(), Some("L2.1"));
+        // button21 = B1.3 / led21 = L1.3
+        assert_eq!(find("B1.3").led.as_deref(), Some("L1.3"));
+        // button43 = B2.7 / led43 = L2.7
+        assert_eq!(find("B2.7").led.as_deref(), Some("L2.7"));
+    }
+
+    #[test]
+    fn numbered_led_param_without_sibling_element_leaves_led_none() {
+        let content = "[matrixmixer]\nbutton11 = B1.1\nled11 = L1.1\nled22 = L2.4\n";
+        let patch = Patch::from_ini_str(content, String::from("partial")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(b1_1.led.as_deref(), Some("L1.1"));
+        // led22 has no matching button22/pot22... so it must not associate anything.
+        assert!(
+            patch
+                .hw_components
+                .iter()
+                .all(|c| c.led.as_deref() != Some("L2.4")),
+            "led22 with no same-suffix element must not associate L2.4"
+        );
+    }
+
+    #[test]
+    fn module_instance_reads_leading_digit_run_from_id() {
+        let content = std::fs::read_to_string("fixtures/multi_module_p2b8.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("multi_module_p2b8")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(find("B1.1").module_instance(), Some(1));
+        assert_eq!(find("L1.8").module_instance(), Some(1));
+        assert_eq!(find("P1.2").module_instance(), Some(1));
+        assert_eq!(find("B2.1").module_instance(), Some(2));
+        assert_eq!(find("L2.8").module_instance(), Some(2));
+        assert_eq!(find("P2.2").module_instance(), Some(2));
     }
 
     #[test]

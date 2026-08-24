@@ -137,9 +137,75 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         })
         .collect();
 
+    // Per-panel component lists with folded LEDs already filtered out, since
+    // those cells are skipped at render time and must not consume grid slots
+    // (rows_for/row_chunks) or count toward panel height.
+    let visible_panels: HashMap<&str, Vec<&crate::patch::HwComponent>> = panel_order
+        .iter()
+        .map(|name| {
+            let visible: Vec<&crate::patch::HwComponent> = panels[name]
+                .iter()
+                .filter(|c| {
+                    !(c.kind == ComponentKind::Led && folded_led_ids.contains(c.id.as_str()))
+                })
+                .copied()
+                .collect();
+            (name.as_str(), visible)
+        })
+        .collect();
+
+    // Split each panel's visible components into per-circuit module groups,
+    // preserving first-appearance order of each instance key (controller-
+    // panels/spec.md "Panel contains modules"). A panel with only one
+    // instance renders unchanged as a single flat grid — module sub-borders
+    // only appear when a panel genuinely mixes multiple circuit instances,
+    // matching the spec's "components from multiple circuits" condition.
+    // CV I/O never subdivides: its tokens are fixed jacks, not pluggable HP
+    // modules (DESIGN.md's controller glossary does not list CV I/O).
+    let module_groups: HashMap<&str, Vec<Vec<&crate::patch::HwComponent>>> = panel_order
+        .iter()
+        .map(|name| {
+            let visible = &visible_panels[name.as_str()];
+            let groups = if name == "CV I/O" {
+                vec![visible.clone()]
+            } else {
+                let mut order: Vec<u32> = Vec::new();
+                let mut by_instance: HashMap<u32, Vec<&crate::patch::HwComponent>> = HashMap::new();
+                for comp in visible {
+                    let key = comp.module_instance().unwrap_or(0);
+                    by_instance
+                        .entry(key)
+                        .or_insert_with(|| {
+                            order.push(key);
+                            Vec::new()
+                        })
+                        .push(*comp);
+                }
+                if order.len() <= 1 {
+                    vec![visible.clone()]
+                } else {
+                    order
+                        .into_iter()
+                        .map(|k| by_instance.remove(&k).unwrap())
+                        .collect()
+                }
+            };
+            (name.as_str(), groups)
+        })
+        .collect();
+
+    let module_height = |components: &[&crate::patch::HwComponent], bordered: bool| -> u16 {
+        rows_for(components.len()) * COMPONENT_HEIGHT + if bordered { 2 } else { 0 }
+    };
+
     let mut constraints: Vec<Constraint> = panel_order
         .iter()
-        .map(|name| Constraint::Length(rows_for(panels[name].len()) * COMPONENT_HEIGHT + 2))
+        .map(|name| {
+            let groups = &module_groups[name.as_str()];
+            let subdivided = groups.len() > 1;
+            let total: u16 = groups.iter().map(|g| module_height(g, subdivided)).sum();
+            Constraint::Length(total + 2)
+        })
         .collect();
     constraints.push(Constraint::Min(0));
 
@@ -159,7 +225,7 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         if i >= panel_chunks.len() {
             break;
         }
-        let components = &panels[name];
+        let groups = &module_groups[name.as_str()];
 
         // A panel is "affected" when at least one of its components belongs
         // to the currently active shift group; affected panels get a bold
@@ -167,7 +233,10 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         // panels use the default border when no shift is active. See
         // shift-visualization/spec.md.
         let affected = app.active_shift.is_some()
-            && components.iter().any(|c| c.shift_group == app.active_shift);
+            && groups
+                .iter()
+                .flatten()
+                .any(|c| c.shift_group == app.active_shift);
 
         let (border_style, title) = match app.active_shift {
             Some(group) if affected => (
@@ -201,57 +270,101 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             continue;
         }
 
-        let row_chunks = Layout::default()
+        if groups.len() <= 1 {
+            render_component_grid(frame, inner, &groups[0], &index_of, app, patch, cols);
+            continue;
+        }
+
+        let module_constraints: Vec<Constraint> = groups
+            .iter()
+            .map(|g| Constraint::Length(module_height(g, true)))
+            .collect();
+        let module_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(vec![
-                Constraint::Length(COMPONENT_HEIGHT);
-                rows_for(components.len()) as usize
-            ])
+            .constraints(module_constraints)
             .flex(Flex::Start)
             .split(inner);
 
-        for (row_i, row) in components.chunks(cols).enumerate() {
-            if row_i >= row_chunks.len() {
+        for (m_i, components) in groups.iter().enumerate() {
+            if m_i >= module_chunks.len() {
                 break;
             }
-            let comp_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Length(COMPONENT_WIDTH); row.len()])
-                .flex(Flex::Start)
-                .split(row_chunks[row_i]);
-
-            for (col_i, comp) in row.iter().enumerate() {
-                if col_i >= comp_chunks.len() {
-                    break;
-                }
-
-                // Skip folded LED components — they are referenced by another
-                // component's `led` field and will be rendered as a box instead.
-                if comp.kind == ComponentKind::Led && folded_led_ids.contains(comp.id.as_str()) {
-                    continue;
-                }
-
-                let global_idx = index_of[comp.id.as_str()];
-                let is_hovered = app.hovered_component == Some(global_idx);
-                let is_shift_active =
-                    comp.shift_group.is_some() && comp.shift_group == app.active_shift;
-                render_component(
-                    frame,
-                    comp_chunks[col_i],
-                    comp,
-                    is_hovered,
-                    is_shift_active,
-                    patch,
-                );
-                let base_rect = comp_chunks[col_i];
-                let scaled_rect = Rect {
-                    x: base_rect.x,
-                    y: base_rect.y,
-                    width: (base_rect.width as f32 * app.scale_factor) as u16,
-                    height: (base_rect.height as f32 * app.scale_factor) as u16,
-                };
-                app.component_rects.push((global_idx, scaled_rect));
+            let module_title = match components.first().and_then(|c| c.module_instance()) {
+                Some(n) => format!(" {} {} ", name, n),
+                None => format!(" {} ", name),
+            };
+            let module_block = Block::default()
+                .title(module_title)
+                .title_style(border_style)
+                .borders(Borders::ALL)
+                .border_style(border_style);
+            let module_inner = module_block.inner(module_chunks[m_i]);
+            frame.render_widget(module_block, module_chunks[m_i]);
+            if module_inner.width == 0 || module_inner.height == 0 {
+                continue;
             }
+            render_component_grid(frame, module_inner, components, &index_of, app, patch, cols);
+        }
+    }
+}
+
+/// Render one module's/panel's components into a grid within `area`,
+/// wrapping to additional rows at `cols` columns. Shared by the flat
+/// (single-instance) panel path and the per-module path above.
+fn render_component_grid(
+    frame: &mut Frame,
+    area: Rect,
+    components: &[&crate::patch::HwComponent],
+    index_of: &HashMap<&str, usize>,
+    app: &mut App,
+    patch: &crate::patch::Patch,
+    cols: usize,
+) {
+    let rows_for = |n: usize| -> u16 { (n.div_ceil(cols)).max(1) as u16 };
+
+    let row_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![
+            Constraint::Length(COMPONENT_HEIGHT);
+            rows_for(components.len()) as usize
+        ])
+        .flex(Flex::Start)
+        .split(area);
+
+    for (row_i, row) in components.chunks(cols).enumerate() {
+        if row_i >= row_chunks.len() {
+            break;
+        }
+        let comp_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Length(COMPONENT_WIDTH); row.len()])
+            .flex(Flex::Start)
+            .split(row_chunks[row_i]);
+
+        for (col_i, comp) in row.iter().enumerate() {
+            if col_i >= comp_chunks.len() {
+                break;
+            }
+
+            let global_idx = index_of[comp.id.as_str()];
+            let is_hovered = app.hovered_component == Some(global_idx);
+            let is_shift_active =
+                comp.shift_group.is_some() && comp.shift_group == app.active_shift;
+            render_component(
+                frame,
+                comp_chunks[col_i],
+                comp,
+                is_hovered,
+                is_shift_active,
+                patch,
+            );
+            // Published rect must match what was actually rendered above
+            // (comp_chunks[col_i]) — scale_factor isn't applied to layout
+            // anywhere, so scaling only the hit rect inflated it past the
+            // real cell into the neighboring cell's screen area, making
+            // hover/selection resolve to the wrong component and paint
+            // the highlight where the mouse wasn't (droid_tui-wmg).
+            app.component_rects.push((global_idx, comp_chunks[col_i]));
         }
     }
 }
@@ -346,15 +459,13 @@ fn render_component(
         // Look up the LED component by id — do not use .unwrap().
         let led_component = patch.hw_components.iter().find(|c| c.id == led_id.as_str());
 
-        let (led_glyph, led_state_text) = match led_component {
+        let led_glyph = match led_component {
             Some(led) => match &led.state {
-                ComponentState::On | ComponentState::Active => ("◉", String::from("ON")),
-                _ => ("○", String::from("OFF")),
+                ComponentState::On | ComponentState::Active => "◉",
+                _ => "○",
             },
-            None => {
-                // LED not found in patch — fall back to unlit glyph/state.
-                ("○", String::from("OFF"))
-            }
+            // LED not found in patch — fall back to unlit glyph.
+            None => "○",
         };
 
         // Hover styling applied to box content/border, same convention as text path.
@@ -367,23 +478,29 @@ fn render_component(
             Style::default().fg(fg_color)
         };
 
-        // 3-row box: line 1 = symbol + label, line 2 = state_text + glyph + state,
-        // line 3 = empty (fills the 3‑row cell without a visual gap).
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(symbol, display_style),
-                Span::raw(" "),
-                Span::styled(&comp.label, display_style),
-            ]),
-            Line::from(Span::styled(
-                format!("{} {}", state_text, led_glyph),
+        // controller-panels spec §"Box LED-associated elements": one bordered
+        // cell, border colored by the element's kind, showing the element's
+        // symbol, label, state, and the LED glyph reflecting the LED's state
+        // — a single state, not a second textual LED state (droid_tui-888).
+        // The 3-row cell has no room for a border plus multiple content
+        // lines, so the label lives in the top title (drawn inside the
+        // border row) and the single interior row holds state + LED glyph.
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(display_style)
+            .title_top(Line::styled(
+                format!(" {} {} ", symbol, comp.label),
                 display_style,
-            )),
-            Line::from(Span::styled(led_state_text, display_style)),
-        ];
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
 
-        let widget = Paragraph::new(lines).alignment(Alignment::Center);
-        frame.render_widget(widget, area);
+        let line = Line::from(Span::styled(
+            format!("{} {}", state_text, led_glyph),
+            display_style,
+        ));
+        let widget = Paragraph::new(line).alignment(Alignment::Center);
+        frame.render_widget(widget, inner);
     } else {
         // led: None — render the existing two‑line text cell into the 3‑row area.
         // The Paragraph fills the available area; no gap is left below.
