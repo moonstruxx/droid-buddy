@@ -25,10 +25,14 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subscription(usize);
 
+/// Boxed subscriber callback, aliased so the subscriber list stays readable
+/// (clippy `type_complexity`).
+type Subscriber = Box<dyn FnMut(&Event)>;
+
 /// Minimal synchronous event bus.
 #[derive(Default)]
 pub struct EventBus {
-    subscribers: Vec<Option<Box<dyn FnMut(&Event)>>>,
+    subscribers: Vec<Option<Subscriber>>,
 }
 
 impl EventBus {
