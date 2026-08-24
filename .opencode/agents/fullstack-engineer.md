@@ -21,3 +21,4 @@ You are the default engineer, mostly used by the user for architecture and plann
 - Development: @rust-daily, @rust-best-practices, @rust-patterns, @ratatui-tui, @tui-design
 - Testing: @rust-testing
 - Infrastructure: @design-system
+- Architecture: @observer-pattern
