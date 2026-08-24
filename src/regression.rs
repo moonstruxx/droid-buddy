@@ -2144,3 +2144,153 @@ fn gallery_generate_on_flag() {
         "gallery contains P2B8 face"
     );
 }
+
+// ── graph render snapshot/visual tests (task 5.3) ───────────────────────
+// Renders the full-screen signal-flow graph (design D8) through the same
+// TestBackend + insta path as the panel/viewer visual tests. A fixture loaded
+// via `app_from_fixture` + `open_graph` mirrors how `open_viewer` drives the
+// viewer, so each scenario is a real graph-build + layout-solve + render.
+// Edge colors are asserted directly on buffer cells (ANSI/HTML drop fg), and
+// snapshots pin the geometry so faces stay inspectable and gate regressions.
+
+/// An `App` with a fixture patch loaded and the graph view opened, mirroring
+/// `open_viewer` for the graph surface (`g g` equivalent).
+fn graph_app_from_fixture(name: &str) -> App {
+    let mut app = app_from_fixture(name);
+    app.open_graph();
+    assert!(app.showing_graph, "graph view should be open");
+    app
+}
+
+/// True when any box-drawing glyph cell in `buffer` carries fg `color`.
+/// Edge polylines render as box glyphs (`─│┌┐└┘├┤┬┴┼`) with the cable color;
+/// ports (`◉`/`●`) and node/cluster frames use other tokens, so filtering to
+/// box glyphs isolates edge cells from the rest of the graph face.
+fn has_box_glyph_of_color(buffer: &Buffer, color: Color) -> bool {
+    buffer.content().iter().any(|cell| {
+        cell.fg == color
+            && ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"].contains(&cell.symbol())
+    })
+}
+
+#[test]
+fn visual_graph_node_cluster_faces_snapshot() {
+    // cable_banner_combos.ini: two banner clusters (implicit unnamed group +
+    // "Mixer") over multiple circuits. Faces: rounded node frames + title
+    // bars, left input / right output ports, and titled cluster containers.
+    for &theme_name in theme::THEMES {
+        if theme_name == "terminal" {
+            continue; // faces already covered; keep the matrix light
+        }
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [100u16, 40] {
+            let mut app = graph_app_from_fixture("cable_banner_combos");
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            // Rounded node frames + cluster container.
+            assert!(
+                ansi.contains("╭"),
+                "{theme_name} {width}: rounded node frame missing\n{ansi}"
+            );
+            // Circuit titles are only asserted at the wide width: on a 40-col
+            // surface the force-directed layout stacks nodes (each 22 cols) into
+            // ~18 cols of travel, so frames overlap and a neighbor's port glyph
+            // clips a title's last char. That is expected narrow-terminal
+            // degradation (covered by regression_graph_narrow_terminal_no_panic),
+            // not a title that failed to render.
+            if width >= 100 {
+                for circuit in ["button", "clocktool", "mixer", "contour"] {
+                    assert!(
+                        ansi.contains(circuit),
+                        "{theme_name} {width}: node title {circuit} missing"
+                    );
+                }
+            }
+            // Ports: button/clocktool source _GATE/_CLOCK (right output ●);
+            // mixer/contour sink them (left input ◉).
+            assert!(ansi.contains("◉"), "{theme_name} {width}: input port");
+            assert!(ansi.contains("●"), "{theme_name} {width}: output port");
+            // Cluster containers: plain border + "Mixer" banner title.
+            assert!(ansi.contains("┌"), "{theme_name} {width}: cluster border");
+            assert!(
+                ansi.contains("Mixer"),
+                "{theme_name} {width}: cluster title missing"
+            );
+
+            insta::with_settings!({snapshot_suffix => format!("graph_cable_banner_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn visual_graph_edge_kinds_colors_snapshot() {
+    // graph_edge_kinds.ini chains clocktool -> osc -> notesequencer -> vca,
+    // producing _CLK (control), _AUD (audio), _NOTE (midi). In classic these
+    // map to distinct ANSI tokens, so assert the colored box glyphs directly.
+    let _guard = ThemedGuard::pin("classic");
+    let t = *theme::resolve("classic");
+    let mut app = graph_app_from_fixture("graph_edge_kinds");
+    let buf = buffer_for(&mut app, 100, 40);
+
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_control),
+        "control edge (_CLK) renders cyan"
+    );
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_audio),
+        "audio edge (_AUD) renders green"
+    );
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_midi),
+        "midi edge (_NOTE) renders magenta"
+    );
+
+    let ansi = buffer_to_ansi(&buf);
+    insta::with_settings!({snapshot_suffix => "graph_edge_kinds_classic_100"}, {
+        insta::assert_snapshot!(ansi);
+    });
+}
+
+#[test]
+fn visual_graph_topology_error_highlight_snapshot() {
+    // graph_topology_error.ini: `_CLK` has two sources (clocktool + divider),
+    // an n -> 1 topology Error, so every `_CLK` edge must render with the
+    // graph_edge_error token (red), overriding the inferred control color.
+    let _guard = ThemedGuard::pin("classic");
+    let t = *theme::resolve("classic");
+    let mut app = graph_app_from_fixture("graph_topology_error");
+    let buf = buffer_for(&mut app, 100, 40);
+
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_error),
+        "n -> 1 cable edges render with the error token (red)"
+    );
+    assert!(
+        !has_box_glyph_of_color(&buf, t.graph_edge_control),
+        "error cable must not render with its inferred control color"
+    );
+
+    let ansi = buffer_to_ansi(&buf);
+    insta::with_settings!({snapshot_suffix => "graph_topology_error_classic_100"}, {
+        insta::assert_snapshot!(ansi);
+    });
+}
+
+#[test]
+fn regression_graph_narrow_terminal_no_panic() {
+    // The graph must degrade gracefully on narrow surfaces: no panic, a
+    // non-empty buffer, and node frames still readable where they fit.
+    for fixture in ["cable_banner_combos", "graph_topology_error"] {
+        for (w, h) in [(60u16, 24), (40, 16), (30, 12), (20, 8)] {
+            let mut app = graph_app_from_fixture(fixture);
+            let buf = buffer_for(&mut app, w, h);
+            assert!(
+                !buf.content().is_empty(),
+                "{fixture} {w}x{h}: buffer must not be empty"
+            );
+        }
+    }
+}

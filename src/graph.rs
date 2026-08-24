@@ -163,6 +163,12 @@ fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<Graph
             }
         }
     }
+    // Sort deterministically: `patch.cable_index` is a HashMap, whose iteration
+    // order is randomized per process. Edge order feeds the layout solver's
+    // f32 spring-force accumulation (non-commutative under rounding) and the
+    // renderer's shared-cell ownership, so a stable order is required for
+    // reproducible layouts (design D9).
+    edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
     edges
 }
 
