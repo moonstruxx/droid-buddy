@@ -9,8 +9,8 @@
 
 ## 2. Gallery and strict gate
 
-- [ ] 2.1 HTML gallery renderer — generate `evidence/gallery/index.html` with one row per scenario (columns classic/terminal/mono, widths 80/120, viewer open/closed, shift active), each cell being the HTML from 1.1; add `cargo test -- --generate-gallery` / `cargo run --bin snapshot-gallery` entrypoint; verify gallery opens in browser and matches ANSI content <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 1.3, 1.4], touches: [src/regression.rs, tools/snapshot-gallery/**, evidence/gallery/**] -->
-- [ ] 2.2 Strict `cargo test` auto gate + ephemeral wiring — `cargo test` generates and asserts insta snapshots (no separate make step), `.gitignore` covers pending `.snap` files, CI runs `cargo insta test --check` and fails on diff; verify `cargo test` exits non-zero on intentional face change <!-- agent: rusty-engineer.build, depends_on: [1.2, 1.3, 1.4], touches: [src/regression.rs, .gitignore, Cargo.toml] -->
+- [x] 2.1 HTML gallery renderer — generate `evidence/gallery/index.html` with one row per scenario (columns classic/terminal/mono, widths 80/120, viewer open/closed, shift active), each cell being the HTML from 1.1; add `cargo test -- --generate-gallery` / `cargo run --bin snapshot-gallery` entrypoint; verify gallery opens in browser and matches ANSI content <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 1.3, 1.4], touches: [src/regression.rs, tools/snapshot-gallery/**, evidence/gallery/**] -->
+- [x] 2.2 Strict `cargo test` auto gate + ephemeral wiring — `cargo test` generates and asserts insta snapshots (no separate make step), `.gitignore` covers pending `.snap` files, CI runs `cargo insta test --check` and fails on diff; verify `cargo test` exits non-zero on intentional face change <!-- agent: rusty-engineer.build, depends_on: [1.2, 1.3, 1.4], touches: [src/regression.rs, .gitignore, Cargo.toml] -->
 
 ## 3. Archive and CI durability
 

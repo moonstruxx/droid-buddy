@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::cell::RefCell;
 use std::sync::Mutex;
 
@@ -161,16 +160,15 @@ pub fn resolve(name: &str) -> &'static Theme {
 
 static ACTIVE: Mutex<Option<&'static Theme>> = Mutex::new(None);
 
-#[cfg(test)]
 thread_local! {
-    // Per-thread palette override so parallel tests can render under
-    // different themes without observing each other's global state.
+    // Per-thread palette override so parallel tests and the gallery
+    // binary can render under different themes without observing each
+    // other's global state.
     static TEST_OVERRIDE: RefCell<Option<&'static Theme>> = const { RefCell::new(None) };
 }
 
 /// The theme rendering must use. Defaults to `classic` until `init` runs.
 pub fn active() -> &'static Theme {
-    #[cfg(test)]
     if let Some(theme) = TEST_OVERRIDE.with(|slot| *slot.borrow()) {
         return theme;
     }
@@ -195,10 +193,10 @@ pub fn init(theme: Theme) {
     }
 }
 
-/// Test-only: pins the palette for the calling thread (`None` restores the
-/// global/default resolution), keeping theme-sensitive tests independent.
-#[cfg(test)]
-pub(crate) fn set_test_theme(theme: Option<Theme>) {
+/// Pins the palette for the calling thread (`None` restores the
+/// global/default resolution). Used by theme-sensitive tests and the
+/// gallery generator to keep renders independent.
+pub fn set_test_theme(theme: Option<Theme>) {
     let leaked = theme.map(|t| &*Box::leak(Box::new(t)));
     TEST_OVERRIDE.with(|slot| *slot.borrow_mut() = leaked);
 }
