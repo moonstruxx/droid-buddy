@@ -15,10 +15,12 @@ droid_tui/
 ├── Cargo.toml              # crate manifest; deps: ratatui, crossterm, color-eyre
 ├── Cargo.lock
 ├── src/
-│   ├── main.rs             # entry point, terminal lifecycle, event loop
+│   ├── main.rs             # entry point, config/theme init, event loop
 │   ├── app.rs              # App state struct + picker helpers
 │   ├── handler.rs          # keyboard + mouse event handling
 │   ├── patch.rs            # domain model (Patch, HwComponent, …) + .ini parser
+│   ├── theme.rs            # semantic color-token layer + built-in palettes
+│   ├── config.rs           # XDG config.toml load/save (theme preference)
 │   └── ui.rs               # ratatui rendering (panels, components, status, picker)
 ├── fixtures/               # test fixtures: arpeggio1.ini, picker_test/
 ├── openspec/
@@ -87,7 +89,7 @@ flowchart LR
 ### 3.5 Entry Point & Event Loop (`src/main.rs`)
 
 - **Responsibility**: process lifecycle and the draw→read→dispatch loop.
-- **Key functions**: `main` (color-eyre install, `ratatui::init()`, mouse capture enable, panic-hook chaining to disable mouse capture on panic, `run`, restore), `run` (loop: `terminal.draw(render)` → `event::read()` → dispatch key/mouse/resize).
+- **Key functions**: `main` (color-eyre install, config load + `theme::init` BEFORE `ratatui::init()` so stderr warnings are visible and rendering never starts half-themed, mouse capture enable, panic-hook chaining to disable mouse capture on panic, `run`, restore), `run` (loop: `terminal.draw(render)` → `event::read()` → dispatch key/mouse/resize).
 - **Technologies**: crossterm 0.28 (`EnableMouseCapture`/`DisableMouseCapture`, `event::read`), ratatui `DefaultTerminal`.
 
 ## 4. Data Flow
@@ -138,7 +140,8 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 | ratatui | 0.29 | Terminal UI: `DefaultTerminal`, `Layout`/`Flex`, widgets; owns raw-mode/alternate-screen lifecycle via `init()`/`restore()` |
 | crossterm | 0.28 | Event source (`event::read`), mouse capture enable/disable |
 | color-eyre | 0.6 | Error reporting + panic hook (chained to also disable mouse capture) |
-| serde | 1 | Serialization derives for the in-memory patch domain model; no persistence layer |
+| serde | 1 | Serialization derives for the in-memory patch domain model and the v1 `Settings` schema |
+| toml | 0.9 | `config.toml` parse/serialize (single `theme` key) |
 | OpenSpec | — | Change proposals + capability specs under `openspec/` |
 
 ## 8. Deployment & Infrastructure
@@ -173,7 +176,7 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 ## 12. Development Workflow
 
 - **Setup**: `cargo build` (no install step; no remote to clone from).
-- **Test**: `cargo test` (135 unit tests).
+- **Test**: `cargo test` (164 unit/regression tests).
 - **Lint**: `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 - **Format**: `cargo fmt --check` / `cargo fmt`.
 - **Verify binary**: `.claude/skills/verify/SKILL.md` drives the built binary interactively.
@@ -182,8 +185,8 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 
 ## 13. Testing Strategy
 
-- **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, and `ui.rs`, plus cross-layer tests in `regression.rs`.
-- **Coverage**: 135 tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, plus cross-layer regression tests for boxed-cell rendering (LED-associated box vs plain text cell), mixed grids, boxed-cell click hit-testing, split-ratio clamp/snap via `[`/`]`, and narrow-terminal boxed layouts.
+- **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, `ui.rs`, plus cross-layer and per-theme frame-rendering tests in `regression.rs`.
+- **Coverage**: 164 tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, per-theme rendering of boxed cells/shift surfaces/picker/viewer panes under `classic`/`terminal`/`mono`, and config discovery/load/save/fallback paths.
 - **Frameworks**: std test harness only; no mocking, no property tests, no live-terminal end-to-end test, no coverage gate.
 - **Gap**: no end-to-end test driving the real binary; UI tests render into a test `Frame` rather than a live terminal.
 
@@ -200,6 +203,9 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 9. **Embedded source viewer** — `g v` opens a source pane in the same TUI and `App`; raw lines and parser-recorded spans support selection jumps, occurrence navigation, modifier highlights, and minimap interaction without IPC or a process boundary.
 10. **Boxed rendering gated on parse-time LED association** — a component renders as ONE bordered cell only when its `.ini` section carried an `led = L.N` assignment (stored as `HwComponent.led`); the border uses the component-kind color and the LED glyph reflects state inside the shared box. LED-less components keep two-line text rendering; LEDs are never rendered as standalone cells.
 11. **Adjustable panels/source split** — the embedded viewer's column ratio lives in `App.viewer_split_ratio` (default 0.6, clamped 0.3–0.7, persisted across patch loads as a view preference); `[`/`]` nudge it in exact 0.1 steps only while the viewer is open.
+12. **Semantic color-token layer** — every rendered color comes from `Theme` tokens in `src/theme.rs`; no `Color::` literals outside tests. Built-in palettes `classic` (byte-identical to pre-theming colors), `terminal` (all `Reset`), and `mono` (grayscale, shift tokens pairwise distinct) are resolved by name and installed globally via `theme::init` at startup.
+13. **XDG user config with injected validation** — `src/config.rs` discovers `droid-tui/config.toml` under `$XDG_CONFIG_HOME` (or `$HOME/.config`); name validation is injected as a canonicalizer function so the loader stays decoupled from the theme catalog. Missing file silently yields defaults; malformed TOML and unknown themes warn once on stderr and fall back to `classic`. Writes are atomic (temp-file + rename).
+14. **Config load before terminal init** — `main()` loads settings and initializes the active theme before `ratatui::init()` so warnings print to a clean terminal. The global theme lives behind a `Mutex<Option<&'static Theme>>` (not `OnceLock`) because test-ordering must not poison the palette across tests.
 
 ## 15. Constraints, Risks, and Technical Debt
 
@@ -237,6 +243,8 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 - **Controller**: physical panel type — P2B8, Faderbank, Notebuttons, Encoder, Pot, Unusedfaders, etc.
 - **Shift group**: a set of components whose behavior/labels change while a shift key (1–4) is held.
 - **Source viewer**: embedded readonly source pane showing raw `.ini` lines or prettified circuit blocks, with sidebar, selection-driven highlighting, occurrence navigation, and optional minimap; opened with `g` then `v`.
+- **Theme token**: a named color role in `src/theme.rs` (e.g. `knob`, `shift2`, `occurrence_highlight`); rendering reads tokens, never raw colors.
+- **config.toml**: user preferences file under `$XDG_CONFIG_HOME/droid-tui/` (v1 schema: single `theme` key).
 - **Prefix key**: an armed `g` waits up to 1 s for a follow-up key (e.g. `v`); expiry is checked lazily on the next event.
 - **Viewer focus**: `ViewerFocus::Panels` or `ViewerFocus::Source`; controls whether panel or source-pane keys act.
 - **ratatui / crossterm**: Rust TUI framework / terminal backend.
