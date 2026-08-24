@@ -262,15 +262,6 @@ impl ShiftGroup {
             ShiftGroup::Group4 => "4",
         }
     }
-
-    pub fn color(&self) -> ratatui::style::Color {
-        match self {
-            ShiftGroup::Group1 => ratatui::style::Color::Yellow,
-            ShiftGroup::Group2 => ratatui::style::Color::Cyan,
-            ShiftGroup::Group3 => ratatui::style::Color::Magenta,
-            ShiftGroup::Group4 => ratatui::style::Color::Green,
-        }
-    }
 }
 
 impl Patch {

@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, SourceViewMode, ViewerFocus};
-use crate::patch::{ComponentKind, ComponentState};
+use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::theme;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -172,7 +172,7 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         let (border_style, title) = match app.active_shift {
             Some(group) if affected => (
                 Style::default()
-                    .fg(group.color())
+                    .fg(shift_color(group))
                     .add_modifier(Modifier::BOLD),
                 format!(" {} [SHIFT {}] ", name, group.key_label()),
             ),
@@ -278,9 +278,7 @@ fn render_component(
                 },
                 state,
                 if is_shift_active {
-                    // Shift-active emphasis has no dedicated token yet; task
-                    // 3.2 moves shift lookups into the theme layer.
-                    Color::Yellow
+                    shift_color(comp.shift_group.expect("is_shift_active implies a group"))
                 } else {
                     theme::active().button
                 },
@@ -407,6 +405,18 @@ fn render_component(
     }
 }
 
+/// Shift colors come from the theme's per-group tokens so themes can
+/// restyle (or grayscale) shift visualization without touching rendering.
+fn shift_color(group: ShiftGroup) -> Color {
+    let t = theme::active();
+    match group {
+        ShiftGroup::Group1 => t.shift1,
+        ShiftGroup::Group2 => t.shift2,
+        ShiftGroup::Group3 => t.shift3,
+        ShiftGroup::Group4 => t.shift4,
+    }
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::styled(
         if app.prefix.is_some() {
@@ -422,7 +432,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!("SHIFT {} ACTIVE", group.key_label()),
             Style::default()
-                .fg(group.color())
+                .fg(shift_color(group))
                 .add_modifier(Modifier::BOLD),
         ));
     }
