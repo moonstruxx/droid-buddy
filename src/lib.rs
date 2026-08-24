@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod events;
 pub mod gallery;
 pub mod graph;
 pub mod handler;
