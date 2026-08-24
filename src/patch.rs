@@ -63,6 +63,10 @@ pub struct HwComponent {
     /// Physical controller panel this component belongs to (e.g. "P2B8",
     /// "Faderbank", "Notebuttons", "CV I/O"). See design.md Decision 3.
     pub controller: String,
+    /// Optional LED token associated with this component (e.g. `L1.1`).
+    /// Set during `from_ini_str` parsing when a `led = L.N` entry
+    /// appears in the same section as the component.
+    pub led: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +220,7 @@ impl Module {
                     shift_group: None,
                     state: ComponentState::Off,
                     controller,
+                    led: None,
                 });
         }
 
@@ -281,6 +286,7 @@ impl Patch {
                     shift_group: Some(ShiftGroup::Group1),
                     state: ComponentState::Off,
                     controller: "P2B8".into(),
+                    led: None,
                 },
                 HwComponent {
                     id: "btn_2".into(),
@@ -289,6 +295,7 @@ impl Patch {
                     shift_group: Some(ShiftGroup::Group1),
                     state: ComponentState::Off,
                     controller: "P2B8".into(),
+                    led: None,
                 },
                 HwComponent {
                     id: "cv_in_1".into(),
@@ -297,6 +304,7 @@ impl Patch {
                     shift_group: Some(ShiftGroup::Group2),
                     state: ComponentState::Value(0.0),
                     controller: "CV I/O".into(),
+                    led: None,
                 },
                 HwComponent {
                     id: "cv_out_1".into(),
@@ -305,6 +313,7 @@ impl Patch {
                     shift_group: Some(ShiftGroup::Group2),
                     state: ComponentState::Value(0.0),
                     controller: "CV I/O".into(),
+                    led: None,
                 },
                 HwComponent {
                     id: "knob_1".into(),
@@ -313,6 +322,7 @@ impl Patch {
                     shift_group: Some(ShiftGroup::Group3),
                     state: ComponentState::Value(0.5),
                     controller: "P2B8".into(),
+                    led: None,
                 },
                 HwComponent {
                     id: "led_1".into(),
@@ -321,6 +331,7 @@ impl Patch {
                     shift_group: None,
                     state: ComponentState::On,
                     controller: "P2B8".into(),
+                    led: None,
                 },
             ],
             shift_groups: vec![
@@ -389,6 +400,19 @@ impl Patch {
             std::collections::HashMap::new();
 
         for section in &sections {
+            // --- LED association: scan this section for a `led = L.N` entry
+            // and identify the "element" (first hardware token in the section).
+            let led_token: Option<String> = section
+                .entries
+                .iter()
+                .find(|(k, _)| *k == "led")
+                .map(|(_, v)| v.clone());
+            let element_token: Option<String> = section
+                .entries
+                .iter()
+                .flat_map(|(_, v)| scan_hw_tokens(v).first().cloned())
+                .next();
+
             // A bare `[p2b8]` declaration implies 18 hardware tokens even
             // when it has no key-value pairs of its own (design.md Decision 2b).
             if section.name == "p2b8" {
@@ -443,6 +467,15 @@ impl Patch {
                     if let Some(kind) = token_kind(&token) {
                         let label = format!("{} {}", titlecase(&section.name), token);
                         add_component(&mut components, &mut seen_ids, token, kind, label);
+                    }
+                }
+            }
+
+            // After add_component calls for this section, associate LED if present.
+            if let Some(led) = &led_token {
+                if let Some(element) = &element_token {
+                    if let Some(comp) = components.iter_mut().find(|c| c.id == *element) {
+                        comp.led = Some(led.clone());
                     }
                 }
             }
@@ -1038,12 +1071,58 @@ fn add_component(
         state,
         // Filled in by the controller-panel assignment pass in from_ini_str.
         controller: String::new(),
+        led: None,
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn led_association_captured_for_button_with_led() {
+        let content = std::fs::read_to_string("fixtures/led_pairs.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(b1_1.led, Some(String::from("L1.1")));
+    }
+
+    #[test]
+    fn led_association_none_for_button_without_led() {
+        let content = std::fs::read_to_string("fixtures/led_pairs.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs")).unwrap();
+        let b1_2 = patch.hw_components.iter().find(|c| c.id == "B1.2").unwrap();
+        assert_eq!(b1_2.led, None);
+    }
+
+    #[test]
+    fn led_association_captured_for_knob_with_led() {
+        let content = std::fs::read_to_string("fixtures/led_pairs.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs")).unwrap();
+        let p1_1 = patch.hw_components.iter().find(|c| c.id == "P1.1").unwrap();
+        assert_eq!(p1_1.led, Some(String::from("L1.3")));
+    }
+
+    #[test]
+    fn arpeggio1_button_led_associations() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        // arpeggio1 wires each of the 8 P2B8 buttons to its LED (B1.N -> L1.N).
+        for i in 1..=8u32 {
+            let btn = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == format!("B1.{}", i))
+                .unwrap_or_else(|| panic!("B1.{} must exist", i));
+            assert_eq!(
+                btn.led,
+                Some(format!("L1.{}", i)),
+                "B1.{} should be associated with L1.{}",
+                i,
+                i
+            );
+        }
+    }
 
     #[test]
     fn parses_arpeggio_fixture() {
