@@ -73,6 +73,10 @@ pub struct App {
     /// renderer-publishes/handler-consumes contract as `component_rects`.
     /// Cleared per frame; populated by the renderer (task 5.1).
     pub graph_cluster_rects: Vec<(usize, Rect)>,
+    /// Node rects published by the renderer each frame while the graph is open,
+    /// keyed by index into `graph.nodes` (parallel to `graph_positions`). Same
+    /// renderer-publishes/handler-consumes contract; used for drag hit-testing.
+    pub graph_node_rects: Vec<(usize, Rect)>,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -128,6 +132,7 @@ impl App {
             graph: None,
             graph_positions: Vec::new(),
             graph_cluster_rects: Vec::new(),
+            graph_node_rects: Vec::new(),
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -199,6 +204,7 @@ impl App {
         self.graph = graph;
         self.graph_positions = positions;
         self.graph_cluster_rects.clear();
+        self.graph_node_rects.clear();
         self.showing_graph = true;
         self.emit_graph_built();
     }
@@ -231,6 +237,12 @@ impl App {
         self.graph_cluster_rects.clear();
     }
 
+    /// Clear the renderer-published node rects each frame while the graph is
+    /// open, mirroring `clear_graph_cluster_rects`.
+    pub fn clear_graph_node_rects(&mut self) {
+        self.graph_node_rects.clear();
+    }
+
     /// Reset graph-view state on patch load: the graph is rebuilt from a fresh
     /// solve the next time it opens.
     fn reset_graph_state(&mut self) {
@@ -238,6 +250,7 @@ impl App {
         self.graph = None;
         self.graph_positions.clear();
         self.graph_cluster_rects.clear();
+        self.graph_node_rects.clear();
     }
 
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].

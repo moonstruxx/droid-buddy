@@ -721,6 +721,7 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         graph,
         graph_positions,
         graph_cluster_rects,
+        graph_node_rects: node_rect_field,
         ..
     } = app;
     let Some(graph) = graph.as_ref() else {
@@ -741,8 +742,10 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             render_graph_cluster_frame(frame, rect, cluster);
         }
     }
-    for (node, node_rect) in graph.nodes.iter().zip(&node_rects) {
-        render_graph_node(frame, *node_rect, node, graph);
+    for (i, node) in graph.nodes.iter().enumerate() {
+        let node_rect = node_rects[i];
+        node_rect_field.push((i, node_rect));
+        render_graph_node(frame, node_rect, node, graph);
     }
 }
 
