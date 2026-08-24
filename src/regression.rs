@@ -1096,13 +1096,16 @@ fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
         |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
     let rects = app.component_rects.clone();
 
-    // Every published rect matches COMPONENT_WIDTH x COMPONENT_HEIGHT (3) —
-    // the actually-rendered cell size — never a scale_factor-inflated size.
+    // Every published rect matches the actually-rendered (scaled) cell size —
+    // the hit rect IS the rendered cell, so hit testing stays correct at every
+    // scale preset (BUG droid_tui-ro0 makes the cell scale with scale_factor;
+    // the old fixed-size assertion encoded the pre-fix behavior).
+    let expected_h = ((3.0_f32 * app.scale_factor).round() as u16).max(3);
     for (i, r) in &rects {
         assert_eq!(
             r.height,
-            3,
-            "{} hit rect height must match the rendered cell, not scale_factor",
+            expected_h,
+            "{} hit rect height must match the rendered (scaled) cell",
             id_of(*i)
         );
     }
@@ -1227,7 +1230,11 @@ fn regression_cell_geometry_no_overflow_overlap() {
     // absorbed into their owning buttons' boxes. Panel height must be sized
     // from the visible count, not the raw count, or the knobs get clipped
     // off the bottom of the panel (droid_tui-1hg).
-    for (w, h) in [(80u16, 20u16), (100, 22), (120, 24)] {
+    // NOTE: BUG 2 (droid_tui-7ik) sizes each panel from its real inner width, so
+    // the wrap count in a narrow frame is correct (no 2px overflow). That makes
+    // panels a little taller than the old overflowing wrap, so the frames below
+    // are sized with enough vertical room for the corrected grid.
+    for (w, h) in [(80u16, 40u16), (100, 44), (120, 48)] {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         let mut app = App::new();
         app.load_patch(patch);
