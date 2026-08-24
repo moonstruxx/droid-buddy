@@ -1,4 +1,6 @@
-use std::sync::OnceLock;
+#[cfg(test)]
+use std::cell::RefCell;
+use std::sync::Mutex;
 
 use ratatui::style::Color;
 
@@ -20,6 +22,14 @@ pub struct Theme {
     pub text: Color,
     pub viewer_key: Color,
     pub status_bg: Color,
+    pub focus_border: Color,
+    pub occurrence_highlight: Color,
+    pub modifier_boolean: Color,
+    pub modifier_exact: Color,
+    pub minimap_occurrence: Color,
+    pub minimap_modifier_boolean: Color,
+    pub minimap_modifier_exact: Color,
+    pub minimap_combined: Color,
 }
 
 impl Theme {
@@ -41,6 +51,14 @@ impl Theme {
             text: Color::Reset,
             viewer_key: Color::Cyan,
             status_bg: Color::DarkGray,
+            focus_border: Color::Yellow,
+            occurrence_highlight: Color::Yellow,
+            modifier_boolean: Color::Cyan,
+            modifier_exact: Color::Magenta,
+            minimap_occurrence: Color::Yellow,
+            minimap_modifier_boolean: Color::Cyan,
+            minimap_modifier_exact: Color::Magenta,
+            minimap_combined: Color::Magenta,
         }
     }
 
@@ -62,6 +80,14 @@ impl Theme {
             text: Color::Reset,
             viewer_key: Color::Reset,
             status_bg: Color::Reset,
+            focus_border: Color::Reset,
+            occurrence_highlight: Color::Reset,
+            modifier_boolean: Color::Reset,
+            modifier_exact: Color::Reset,
+            minimap_occurrence: Color::Reset,
+            minimap_modifier_boolean: Color::Reset,
+            minimap_modifier_exact: Color::Reset,
+            minimap_combined: Color::Reset,
         }
     }
 
@@ -83,6 +109,17 @@ impl Theme {
             text: Color::White,
             viewer_key: Color::Gray,
             status_bg: Color::Black,
+            focus_border: Color::White,
+            occurrence_highlight: Color::White,
+            // Boolean vs exact modifiers share glyph and underline styling, and
+            // minimap occurrence vs combined rows share the same block glyph,
+            // so each pair needs distinct grays to stay tellable apart.
+            modifier_boolean: Color::Gray,
+            modifier_exact: Color::White,
+            minimap_occurrence: Color::White,
+            minimap_modifier_boolean: Color::Gray,
+            minimap_modifier_exact: Color::White,
+            minimap_combined: Color::Gray,
         }
     }
 }
@@ -122,19 +159,48 @@ pub fn resolve(name: &str) -> &'static Theme {
     }
 }
 
-static ACTIVE: OnceLock<Theme> = OnceLock::new();
+static ACTIVE: Mutex<Option<&'static Theme>> = Mutex::new(None);
+
+#[cfg(test)]
+thread_local! {
+    // Per-thread palette override so parallel tests can render under
+    // different themes without observing each other's global state.
+    static TEST_OVERRIDE: RefCell<Option<&'static Theme>> = const { RefCell::new(None) };
+}
 
 /// The theme rendering must use. Defaults to `classic` until `init` runs.
 pub fn active() -> &'static Theme {
-    // Fall back without claiming the slot: startup calls `init` before any
-    // rendering, and a later `init` must not be silently swallowed.
-    ACTIVE.get().unwrap_or(&CLASSIC)
+    #[cfg(test)]
+    if let Some(theme) = TEST_OVERRIDE.with(|slot| *slot.borrow()) {
+        return theme;
+    }
+    ACTIVE
+        .lock()
+        .map(|guard| *guard)
+        .ok()
+        .flatten()
+        .unwrap_or(&CLASSIC)
 }
 
 /// Installs the startup-selected theme. A second call is ignored because
 /// rendering holds references into the first value.
 pub fn init(theme: Theme) {
-    let _ = ACTIVE.set(theme);
+    // Leak so `active()` can hand out `&'static Theme` without holding the
+    // lock across rendering.
+    let installed: &'static Theme = Box::leak(Box::new(theme));
+    if let Ok(mut guard) = ACTIVE.lock() {
+        if guard.is_none() {
+            *guard = Some(installed);
+        }
+    }
+}
+
+/// Test-only: pins the palette for the calling thread (`None` restores the
+/// global/default resolution), keeping theme-sensitive tests independent.
+#[cfg(test)]
+pub(crate) fn set_test_theme(theme: Option<Theme>) {
+    let leaked = theme.map(|t| &*Box::leak(Box::new(t)));
+    TEST_OVERRIDE.with(|slot| *slot.borrow_mut() = leaked);
 }
 
 #[cfg(test)]
@@ -158,6 +224,14 @@ mod tests {
         assert_eq!(t.text, Color::Reset);
         assert_eq!(t.viewer_key, Color::Cyan);
         assert_eq!(t.status_bg, Color::DarkGray);
+        assert_eq!(t.focus_border, Color::Yellow);
+        assert_eq!(t.occurrence_highlight, Color::Yellow);
+        assert_eq!(t.modifier_boolean, Color::Cyan);
+        assert_eq!(t.modifier_exact, Color::Magenta);
+        assert_eq!(t.minimap_occurrence, Color::Yellow);
+        assert_eq!(t.minimap_modifier_boolean, Color::Cyan);
+        assert_eq!(t.minimap_modifier_exact, Color::Magenta);
+        assert_eq!(t.minimap_combined, Color::Magenta);
     }
 
     #[test]
@@ -178,6 +252,14 @@ mod tests {
             t.text,
             t.viewer_key,
             t.status_bg,
+            t.focus_border,
+            t.occurrence_highlight,
+            t.modifier_boolean,
+            t.modifier_exact,
+            t.minimap_occurrence,
+            t.minimap_modifier_boolean,
+            t.minimap_modifier_exact,
+            t.minimap_combined,
         ] {
             assert_eq!(color, Color::Reset);
         }
@@ -192,6 +274,16 @@ mod tests {
                 assert_ne!(a, b, "shift tokens must be pairwise distinct");
             }
         }
+    }
+
+    #[test]
+    fn mono_distinct_where_signals_share_glyph_and_modifier() {
+        // These pairs render with identical glyphs/modifiers in the minimap
+        // and source view, so color is the only remaining distinguishing cue.
+        let t = Theme::mono();
+        assert_ne!(t.modifier_boolean, t.modifier_exact);
+        assert_ne!(t.minimap_occurrence, t.minimap_combined);
+        assert_ne!(t.minimap_modifier_boolean, t.minimap_modifier_exact);
     }
 
     #[test]
@@ -223,8 +315,10 @@ mod tests {
 
     #[test]
     fn active_defaults_to_classic_and_init_overrides_it() {
+        set_test_theme(None);
         assert_eq!(*active(), Theme::classic());
-        init(Theme::terminal());
+        set_test_theme(Some(Theme::terminal()));
         assert_eq!(*active(), Theme::terminal());
+        set_test_theme(None);
     }
 }

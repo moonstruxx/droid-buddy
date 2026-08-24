@@ -540,7 +540,7 @@ fn render_panels_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.viewer_focus == ViewerFocus::Panels;
     let border_style = if focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme::active().focus_border)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme::active().muted)
@@ -761,7 +761,7 @@ fn render_source_content(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.viewer_focus == ViewerFocus::Source;
     let border_style = if focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme::active().focus_border)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme::active().muted)
@@ -952,17 +952,17 @@ fn build_raw_highlighted_lines(patch: &crate::patch::Patch, app: &App) -> Vec<Li
                 let style = match cur {
                     HighlightKind::None => Style::default(),
                     HighlightKind::OccOther => Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme::active().occurrence_highlight)
                         .add_modifier(Modifier::BOLD),
                     HighlightKind::OccCurrent => Style::default()
-                        .fg(Color::Yellow)
-                        .bg(Color::DarkGray)
+                        .fg(theme::active().occurrence_highlight)
+                        .bg(theme::active().muted)
                         .add_modifier(Modifier::REVERSED | Modifier::BOLD),
                     HighlightKind::ModCyan => Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::active().modifier_boolean)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                     HighlightKind::ModMagenta => Style::default()
-                        .fg(Color::Magenta)
+                        .fg(theme::active().modifier_exact)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 };
                 if cur == HighlightKind::None {
@@ -1010,9 +1010,9 @@ fn build_prettified_highlighted_lines(
                         .iter()
                         .any(|e| e.source == value.trim() && e.selectat.is_some());
                     let col = if is_exact {
-                        Color::Magenta
+                        theme::active().modifier_exact
                     } else {
-                        Color::Cyan
+                        theme::active().modifier_boolean
                     };
                     vec![Span::styled(
                         value.clone(),
@@ -1046,7 +1046,7 @@ fn build_prettified_highlighted_lines(
                             out.push(Span::styled(
                                 value[s..e].to_string(),
                                 Style::default()
-                                    .fg(Color::Yellow)
+                                    .fg(theme::active().occurrence_highlight)
                                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
                             ));
                             last = e;
@@ -1136,7 +1136,7 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
         let has_mod = (line_start..line_end).any(|l| mod_lines.contains(&l));
         let is_viewport = viewport_range.contains(&row);
         let (ch, mut style) = if has_mod && has_occ {
-            ("█", Style::default().fg(Color::Magenta))
+            ("█", Style::default().fg(theme::active().minimap_combined))
         } else if has_mod {
             let col = {
                 // Distinguish exact-value vs boolean: check any mod affect with selectat
@@ -1148,14 +1148,14 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
                     })
                 });
                 if is_exact {
-                    Color::Magenta
+                    theme::active().minimap_modifier_exact
                 } else {
-                    Color::Cyan
+                    theme::active().minimap_modifier_boolean
                 }
             };
             ("▓", Style::default().fg(col))
         } else if has_occ {
-            ("█", Style::default().fg(Color::Yellow))
+            ("█", Style::default().fg(theme::active().minimap_occurrence))
         } else {
             ("·", Style::default().fg(theme::active().muted))
         };
@@ -1344,16 +1344,17 @@ mod tests {
     // because other tests in this binary assume the default theme is active.
     #[test]
     fn renders_frame_under_every_builtin_theme_without_panic() {
+        // Thread-local override keeps other tests on the default palette.
         for name in theme::THEMES {
             let mut app = App::new();
             app.load_sample_patch();
             app.showing_viewer = true;
-            theme::init(*theme::resolve(name));
+            theme::set_test_theme(Some(*theme::resolve(name)));
             render_at(&mut app, 100, 30);
             app.showing_viewer = false;
             render_at(&mut app, 100, 30);
         }
-        theme::init(theme::Theme::classic());
+        theme::set_test_theme(None);
     }
 
     #[test]
