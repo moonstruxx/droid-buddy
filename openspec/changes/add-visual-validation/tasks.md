@@ -19,4 +19,4 @@
 
 ## 4. Docs and verification
 
-- [ ] 4.1 Regenerate DESIGN.md + ARCHITECTURE.md + guardrails and run full gates — run `/make-design` and `/make-architecture` and `/make-guardrails`, then `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` all green; verify `DESIGN.md` provenance note for visual-validation and `ARCHITECTURE.md` testing section updated <!-- agent: layout-designer-engineer.fast, depends_on: [2.2, 3.1], touches: [DESIGN.md, ARCHITECTURE.md, .agents/skills/ob-guardrails-project/SKILL.md] -->
+- [x] 4.1 Regenerate DESIGN.md + ARCHITECTURE.md + guardrails and run full gates — run `/make-design` and `/make-architecture` and `/make-guardrails`, then `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` all green; verify `DESIGN.md` provenance note for visual-validation and `ARCHITECTURE.md` testing section updated <!-- agent: layout-designer-engineer.fast, depends_on: [2.2, 3.1], touches: [DESIGN.md, ARCHITECTURE.md, .agents/skills/ob-guardrails-project/SKILL.md] -->

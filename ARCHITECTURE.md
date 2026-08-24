@@ -147,10 +147,10 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 ## 8. Deployment & Infrastructure
 
 - **Build**: `cargo build` (debug) / `cargo build --release`; single native binary `droid_tui`.
-- **CI/CD**: none (no `.github/workflows`, no GitLab CI).
+- **CI/CD**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, strict gate `cargo insta test --check`, `cargo build --release --locked`, and uploads ephemeral `evidence/gallery/` + pending `*.snap.new` as `visual-gallery` artifact (retention 14 days).
 - **Containerization**: none.
 - **Environment config**: no application-specific environment configuration; the picker starts in `std::env::current_dir()`.
-- **Git**: no remote configured; branches `master` (initial commit) and `feature/droid-patch-tui` (active work); archive branch `archive/droid-patch-tui` holds the archived `droid-patch-tui` change plus synced main specs.
+- **Git**: no remote configured; branches `master` (initial commit) and `feature/droid-patch-tui` (active work); archive branch `archive/droid-patch-tui` holds the archived `droid-patch-tui` change plus synced main specs; `feature/add-visual-validation` carries the `visual-validation` change with ephemeral `evidence/gallery` and durable archive mirror via `scripts/archive-gallery.sh`.
 
 ## 9. Security Architecture
 
@@ -176,19 +176,22 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 ## 12. Development Workflow
 
 - **Setup**: `cargo build` (no install step; no remote to clone from).
-- **Test**: `cargo test` (164 unit/regression tests).
+- **Test**: `cargo test` (164+ unit/regression/snapshot tests) — strict gate; any `insta` snapshot mismatch fails the run.
 - **Lint**: `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 - **Format**: `cargo fmt --check` / `cargo fmt`.
+- **Snapshots**: `insta` (`insta = "1"` dev-dep) manages `src/snapshots/*.snap`; `cargo insta review` / `INSTA_UPDATE=always cargo test` accepts intentional face changes; `cargo insta test --check` is the CI source of truth.
+- **Gallery**: ephemeral `evidence/gallery/` (HTML + ANSI sidecars, `index.html` per scenario) generated via `cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`, `.gitignore`'d; durable mirror via `scripts/archive-gallery.sh` into `openspec/changes/archive/add-visual-validation/evidence/gallery/`.
 - **Verify binary**: `.claude/skills/verify/SKILL.md` drives the built binary interactively.
 - **Agent orchestration**: `.opencode/` defines 4 specialized engineers (rusty, layout-designer, horst, dermannmitdermachine), `maxConcurrent: 3`; platform: backlog = browser, repo = none.
-- **Change workflow**: OpenSpec — propose under `openspec/changes/`, implement, archive to `openspec/changes/archive/` and sync specs to `openspec/specs/`.
+- **Change workflow**: OpenSpec — propose under `openspec/changes/`, implement, archive to `openspec/changes/archive/` and sync specs to `openspec/specs/` (archive hook `scripts/archive-gallery.sh` carries ephemeral gallery into durable archive).
 
 ## 13. Testing Strategy
 
-- **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, `ui.rs`, plus cross-layer and per-theme frame-rendering tests in `regression.rs`.
-- **Coverage**: 164 tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, per-theme rendering of boxed cells/shift surfaces/picker/viewer panes under `classic`/`terminal`/`mono`, and config discovery/load/save/fallback paths.
-- **Frameworks**: std test harness only; no mocking, no property tests, no live-terminal end-to-end test, no coverage gate.
-- **Gap**: no end-to-end test driving the real binary; UI tests render into a test `Frame` rather than a live terminal.
+- **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, `ui.rs`, plus cross-layer, per-theme frame-rendering, and `insta` snapshot tests in `regression.rs` (`buffer_to_ansi` / `buffer_to_html` helpers) and `src/snapshots/`.
+- **Coverage**: 164+ tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, per-theme rendering of boxed cells/shift surfaces/picker/viewer panes under `classic`/`terminal`/`mono`, and config discovery/load/save/fallback paths; plus visual-validation matrix (`arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini` × `classic`/`terminal`/`mono` × widths 80/120/100, viewer open/closed, shift1) via snapshot harness.
+- **Visual validation**: deterministic `TestBackend` → ANSI + HTML gallery (`evidence/gallery/index.html`, one row per scenario, columns per theme) — no live terminal/pty; ephemeral in worktree (`.gitignore` covers `src/snapshots/`, `evidence/gallery/`, `*.snap.new`) and durable in archive (`scripts/archive-gallery.sh` mirrors to `openspec/changes/archive/add-visual-validation/evidence/gallery/`); strict gate — `cargo test` generates and asserts `insta` snapshots and fails on any face regression (`cargo insta test --check` in CI); HTML side-by-side proves spec-to-face for `visual-validation` (`openspec/specs/visual-validation/spec.md`).
+- **Frameworks**: std test harness + `insta` 1 for golden-file management; no mocking, no property tests, no live-terminal end-to-end test, no coverage gate.
+- **Gap**: no end-to-end test driving the real binary; UI tests render into a test `Frame` rather than a live terminal (visual snapshots are `TestBackend` determinism, not pty capture).
 
 ## 14. Architectural Decisions & Rationale
 
@@ -251,4 +254,4 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 - **OpenSpec**: spec-driven change workflow (`openspec/changes/`, `openspec/specs/`).
 - **beads (bd)**: Dolt-backed issue tracker used for task tracking.
 
-<!-- Last updated: 2026-08-24 -->
+<!-- Last updated: 2026-08-24 · visual-validation: testing strategy + CI ephemeral/durable + strict gate -->
