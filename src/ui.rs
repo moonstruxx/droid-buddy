@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, SourceViewMode, ViewerFocus};
+use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::theme;
 
@@ -31,7 +32,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     render_header(frame, chunks[0], app);
-    if app.showing_viewer {
+    if app.showing_graph {
+        render_graph(frame, chunks[1], app);
+        render_status(frame, chunks[2], app);
+    } else if app.showing_viewer {
         render_embedded_main(frame, chunks[1], app);
         render_viewer_status(frame, chunks[2], app);
     } else {
@@ -680,6 +684,220 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
         );
 
     frame.render_widget(paragraph, picker_area);
+}
+
+// ── Signal-flow graph view (task 5.1) ──────────────────────────────────────
+
+/// Width of a rounded node frame. Kept modest so nodes stay legible and many
+/// fit across a wide surface; clamped to the surface on narrow terminals.
+const GRAPH_NODE_WIDTH: u16 = 22;
+/// Height of a rounded node frame (title bar row + interior + borders).
+const GRAPH_NODE_HEIGHT: u16 = 5;
+/// Gap between a cluster's member nodes and its container frame.
+const GRAPH_CLUSTER_PADDING: u16 = 2;
+
+/// Render the full-screen signal-flow graph surface (design D8): cluster
+/// containers from banner groups first, then rounded node frames with title
+/// bars and left/right edge ports on top. The graph view takes over the whole
+/// main area like the source viewer, never an overlay mixed with panels.
+/// Edge polylines are task 5.2 and deliberately not drawn here.
+fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.clear_graph_cluster_rects();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let empty = match app.graph.as_ref() {
+        None => true,
+        Some(g) => g.nodes.is_empty() || app.graph_positions.len() != g.nodes.len(),
+    };
+    if empty {
+        render_graph_empty(frame, area);
+        return;
+    }
+
+    // Split `app` field borrows so reading the graph and publishing cluster
+    // rects (a renderer→handler handoff) coexist within one frame.
+    let App {
+        graph,
+        graph_positions,
+        graph_cluster_rects,
+        ..
+    } = app;
+    let Some(graph) = graph.as_ref() else {
+        return;
+    };
+
+    // Map frozen solver positions (floats in a virtual plane) onto the surface:
+    // the bounding box of all positions stretches to fill the usable area, so
+    // any set of positions lands on-screen deterministically (design D8/Open
+    // Questions allow an implementation-time fit).
+    let node_rects = graph_node_rects(graph_positions, area, &graph.nodes);
+    let surface = frame.area();
+
+    // Clusters first so node frames draw over their containers' interiors.
+    for (i, cluster) in graph.clusters.iter().enumerate() {
+        if let Some(rect) = graph_cluster_rect(cluster, &graph.nodes, &node_rects, surface) {
+            graph_cluster_rects.push((i, rect));
+            render_graph_cluster_frame(frame, rect, cluster);
+        }
+    }
+    for (node, node_rect) in graph.nodes.iter().zip(&node_rects) {
+        render_graph_node(frame, *node_rect, node, graph);
+    }
+}
+
+/// Empty-patch message for the graph surface, mirroring the source viewer's
+/// `render_empty` handling: a centered hint instead of a bare panel.
+fn render_graph_empty(frame: &mut Frame, area: Rect) {
+    let msg = Paragraph::new("No patch loaded. Press 'l' to load.")
+        .style(Style::default().fg(theme::active().muted))
+        .alignment(Alignment::Center);
+    frame.render_widget(msg, area);
+}
+
+/// Map each frozen solver position onto a screen rect for its node frame.
+/// A simple deterministic fit: the min/max of all positions defines the box
+/// that stretches into the area, leaving room for the node's own frame so no
+/// node overflows the right/bottom edges. Coincident positions coincide.
+fn graph_node_rects(positions: &[(f32, f32)], area: Rect, nodes: &[GraphNode]) -> Vec<Rect> {
+    if positions.len() != nodes.len() {
+        return Vec::new();
+    }
+    let node_w = GRAPH_NODE_WIDTH.min(area.width);
+    let node_h = GRAPH_NODE_HEIGHT.min(area.height);
+    // Available travel for the top-left corner: the frame keeps its full size.
+    let avail_w = area.width.saturating_sub(node_w).max(1) as f32;
+    let avail_h = area.height.saturating_sub(node_h).max(1) as f32;
+    let min_x = positions.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let max_x = positions
+        .iter()
+        .map(|p| p.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = positions.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let max_y = positions
+        .iter()
+        .map(|p| p.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let span_x = (max_x - min_x).max(1.0);
+    let span_y = (max_y - min_y).max(1.0);
+    positions
+        .iter()
+        .map(|&(x, y)| {
+            let sx = (x - min_x) / span_x;
+            let sy = (y - min_y) / span_y;
+            let col = area.x + (sx * avail_w).round() as u16;
+            let row = area.y + (sy * avail_h).round() as u16;
+            Rect::new(col, row, node_w, node_h)
+        })
+        .collect()
+}
+
+/// Title text for a node's frame: the circuit name, with the zero-based
+/// instance index appended only when the name is repeated (instance > 0).
+fn graph_node_title(node: &GraphNode) -> String {
+    if node.instance_index == 0 {
+        node.circuit.clone()
+    } else {
+        format!("{} {}", node.circuit, node.instance_index)
+    }
+}
+
+/// Render one node as a ComfyUI-style rounded frame with a title bar and
+/// edge ports: an input marker on the left border for nodes that sink edges,
+/// an output marker on the right border for nodes that source them. A node
+/// can be both. Exact port-to-edge pairing is task 5.2; here the ports are
+/// simple presence markers.
+fn render_graph_node(frame: &mut Frame, area: Rect, node: &GraphNode, graph: &Graph) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::active().graph_node_border))
+        .title(graph_node_title(node))
+        .title_style(Style::default().fg(theme::active().graph_node_title));
+    frame.render_widget(block, area);
+
+    let is_sink = graph.edges.iter().any(|e| e.sink == node.id);
+    let is_source = graph.edges.iter().any(|e| e.source == node.id);
+    let mid_row = area.y + area.height / 2;
+    if is_sink {
+        frame.buffer_mut().set_string(
+            area.x,
+            mid_row,
+            "◉",
+            Style::default().fg(theme::active().graph_port_input),
+        );
+    }
+    if is_source {
+        frame.buffer_mut().set_string(
+            area.x + area.width - 1,
+            mid_row,
+            "●",
+            Style::default().fg(theme::active().graph_port_output),
+        );
+    }
+}
+
+/// Render one banner-group cluster as a titled bordered container enclosing its
+/// member nodes. The implicit unnamed group (empty title) renders as a plain
+/// bordered area without a title. Publishes the container rect to
+/// `graph_cluster_rects` so handler hit-testing (4.3) can use it.
+/// Compute a cluster's container rect: the union of its member node frames
+/// inflated by a border margin, clamped into `surface`. `None` when the cluster
+/// has no member nodes (defensive; banner groups always cover every section).
+fn graph_cluster_rect(
+    cluster: &Cluster,
+    nodes: &[GraphNode],
+    node_rects: &[Rect],
+    surface: Rect,
+) -> Option<Rect> {
+    let member_rects: Vec<Rect> = nodes
+        .iter()
+        .zip(node_rects)
+        .filter(|(node, _)| cluster.section_range.contains(&node.section_index))
+        .map(|(_, rect)| *rect)
+        .collect();
+    let mut union = member_rects.first().copied()?;
+    for rect in &member_rects[1..] {
+        union = union.union(*rect);
+    }
+    Some(clamp_rect(
+        Rect::new(
+            union.x.saturating_sub(GRAPH_CLUSTER_PADDING),
+            union.y.saturating_sub(GRAPH_CLUSTER_PADDING),
+            union.width.saturating_add(GRAPH_CLUSTER_PADDING * 2),
+            union.height.saturating_add(GRAPH_CLUSTER_PADDING * 2),
+        ),
+        surface,
+    ))
+}
+
+/// Draw a cluster's bordered container. The implicit unnamed group (empty
+/// title) renders as a plain bordered area without a title.
+fn render_graph_cluster_frame(frame: &mut Frame, rect: Rect, cluster: &Cluster) {
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::active().graph_cluster_border));
+    if !cluster.title.is_empty() {
+        block = block
+            .title(cluster.title.as_str())
+            .title_style(Style::default().fg(theme::active().graph_cluster_title));
+    }
+    frame.render_widget(block, rect);
+}
+
+/// Clamp `rect` into `within`, shrinking overhanging right/bottom edges.
+fn clamp_rect(rect: Rect, within: Rect) -> Rect {
+    let x = rect
+        .x
+        .min(within.x + within.width.saturating_sub(1))
+        .max(within.x);
+    let y = rect
+        .y
+        .min(within.y + within.height.saturating_sub(1))
+        .max(within.y);
+    let max_w = within.x + within.width - x;
+    let max_h = within.y + within.height - y;
+    Rect::new(x, y, rect.width.min(max_w), rect.height.min(max_h))
 }
 
 // ── Embedded viewer layout (task 4.1) ──────────────────────────────────────
@@ -2348,5 +2566,118 @@ mod led_box_tests {
             text.contains("●") || text.contains("○") || text.contains("▣") || text.contains("□"),
             "led: None component should render text cell with symbol"
         );
+    }
+}
+#[cfg(test)]
+mod graph_view_tests {
+    use super::*;
+    use crate::patch::Patch;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A synthetic patch with two named banner groups (clusters) and one cable
+    /// fanning out: `clocktool` sources `_CLK`, `copy` and `osc` sink it.
+    fn graph_app() -> App {
+        let content = "\
+# ---- Pulsar ----
+[clocktool]
+    output = _CLK
+[copy]
+    input = _CLK
+# ---- Steady ----
+[osc]
+    input = _CLK
+[p2b8]
+";
+        let mut app = App::new();
+        let patch = Patch::from_ini_str(content, String::from("g")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app
+    }
+
+    fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
+        buffer_for(app, width, height)
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn graph_view_renders_rounded_node_frames_and_titles() {
+        let mut app = graph_app();
+        let text = rendered_text(&mut app, 120, 40);
+        // Rounded node frames use ╭╮╰╯; the circuit name is the title bar.
+        assert!(text.contains("╭"), "node frames must use a rounded border");
+        assert!(text.contains("clocktool"), "circuit name in the title bar");
+    }
+
+    #[test]
+    fn graph_view_renders_input_and_output_ports() {
+        let mut app = graph_app();
+        let text = rendered_text(&mut app, 120, 40);
+        // clocktool sources _CLK (right output port ●); copy and osc sink it
+        // (left input port ◉).
+        assert!(text.contains("◉"), "sink nodes need a left input port");
+        assert!(text.contains("●"), "source nodes need a right output port");
+    }
+
+    #[test]
+    fn graph_cluster_containers_render_titled_borders() {
+        let mut app = graph_app();
+        let text = rendered_text(&mut app, 120, 40);
+        // Cluster containers use a plain (┌┐) border vs the nodes' rounded one,
+        // and are titled with the banner name.
+        assert!(
+            text.contains("Pulsar"),
+            "first cluster titled from its banner"
+        );
+        assert!(
+            text.contains("Steady"),
+            "second cluster titled from its banner"
+        );
+        assert!(text.contains("┌"), "cluster containers use a plain border");
+    }
+
+    #[test]
+    fn graph_cluster_rects_published_per_cluster_within_surface() {
+        let mut app = graph_app();
+        let buf = buffer_for(&mut app, 120, 40);
+        let clusters = app.graph.as_ref().unwrap().clusters.len();
+        assert_eq!(app.graph_cluster_rects.len(), clusters);
+        for (i, (index, rect)) in app.graph_cluster_rects.iter().enumerate() {
+            assert_eq!(*index, i, "cluster rect indices must be sequential");
+            assert!(rect.width > 0 && rect.height > 0);
+            assert!(rect.x < buf.area.width && rect.y < buf.area.height);
+        }
+    }
+
+    #[test]
+    fn graph_view_renders_at_wide_and_narrow_sizes() {
+        for (w, h) in [(120, 40), (60, 20)] {
+            let mut app = graph_app();
+            let text = rendered_text(&mut app, w, h);
+            assert!(text.contains("╭"), "{w}×{h}: rounded node frame missing");
+            assert!(
+                text.contains("clocktool"),
+                "{w}×{h}: node title bar missing"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_empty_state_renders_message() {
+        let mut app = App::new();
+        app.open_graph();
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(text.contains("No patch loaded"));
     }
 }
