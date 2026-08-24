@@ -132,24 +132,28 @@ fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// Advance `positions` up to `max_iter` iterations. `active` (when `Some`)
-/// marks which nodes may move; inactive nodes stay put but still exert forces
-/// (they anchor the active set). Freezes early when kinetic energy converges.
+/// Advance `positions` up to `max_iter` iterations, returning how many were
+/// actually run so callers can detect early energy-threshold convergence.
+/// `active` (when `Some`) marks which nodes may move; inactive nodes stay put
+/// but still exert forces (they anchor the active set). Freezes early when
+/// kinetic energy converges.
 fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     max_iter: usize,
     active: Option<&[bool]>,
-) {
+) -> usize {
     let n = graph.nodes.len();
     if n == 0 {
-        return;
+        return 0;
     }
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
     let mut velocity = vec![(0.0f32, 0.0f32); n];
 
+    let mut iterations = 0;
     for _ in 0..max_iter {
+        iterations += 1;
         // Rebuild the uniform repulsion grid from current positions (D9).
         let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for (i, &pos) in positions.iter().enumerate().take(n) {
@@ -204,6 +208,7 @@ fn run_iterations(
             break;
         }
     }
+    iterations
 }
 
 /// Force on `a` pulling it toward `b` along the edge (Hooke's law).
@@ -455,5 +460,246 @@ mod tests {
         // is one full vertical spacing, so c's y exceeds both a's and b's.
         assert!(positions[2].1 > positions[0].1 + VERTICAL_SPACING * 0.5);
         assert!(positions[2].1 > positions[1].1 + VERTICAL_SPACING * 0.5);
+    }
+
+    /// Number of iterations a full `solve` would run before freezing (energy
+    /// threshold or cap). Lets tests assert convergence "within the cap"
+    /// deterministically instead of timing the solver.
+    fn solve_iteration_count(graph: &Graph) -> usize {
+        let mut positions = seed_positions(graph);
+        run_iterations(graph, &mut positions, MAX_ITERATIONS, None)
+    }
+
+    /// Number of iterations a local re-settle around `moved` would run before
+    /// freezing. Mirrors `local_resettle` but surfaces the iteration count.
+    fn resettle_iteration_count(
+        graph: &Graph,
+        positions: &mut [(f32, f32)],
+        moved: &NodeId,
+        radius: f32,
+        iterations: usize,
+    ) -> usize {
+        let Some(center) = graph.nodes.iter().position(|n| &n.id == moved) else {
+            return 0;
+        };
+        let c = positions[center];
+        let active: Vec<bool> = (0..graph.nodes.len())
+            .map(|i| dist(positions[i], c) <= radius)
+            .collect();
+        run_iterations(graph, positions, iterations, Some(&active))
+    }
+
+    #[test]
+    fn solve_converges_within_iteration_cap() {
+        // D1: the solver is bounded by MAX_ITERATIONS and must always return a
+        // frozen, finite layout. Graphs that keep re-energizing (a cycle) run
+        // to the cap, which stops the iteration — never an unbounded loop.
+        let mut edges = Vec::new();
+        for i in 0..39 {
+            edges.push((i, (i + 1) % 40));
+        }
+        let graph = make_graph(40, &edges); // cyclic: converges at the cap
+        let count = solve_iteration_count(&graph);
+        assert!(count <= MAX_ITERATIONS, "solve exceeded cap: {count}");
+        assert!(count > 0);
+        assert_finite_and_bounded(&solve(&graph));
+    }
+
+    #[test]
+    fn solve_converges_by_energy_threshold_before_cap() {
+        // A settling graph (a long chain) converges via the energy-threshold
+        // freeze well before the cap, proving "convergence" is the solver
+        // reaching rest, not merely the cap cutting off an unsettled layout.
+        let mut edges = Vec::new();
+        for i in 0..49 {
+            edges.push((i, i + 1));
+        }
+        let graph = make_graph(50, &edges);
+        let count = solve_iteration_count(&graph);
+        assert!(
+            count < MAX_ITERATIONS,
+            "expected energy convergence below cap, took {count} (cap {MAX_ITERATIONS})"
+        );
+        assert!(count > 0);
+        assert_finite_and_bounded(&solve(&graph));
+    }
+
+    #[test]
+    fn frozen_positions_stable_across_repeated_solves() {
+        // Once a solve freezes, re-solving the unchanged graph must return
+        // bit-identical positions — no drift between queries (D1 freeze
+        // stability).
+        let graph = make_graph(
+            48,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 0),
+                (5, 6),
+                (6, 7),
+                (7, 8),
+                (8, 5),
+                (10, 11),
+                (11, 12),
+            ],
+        );
+        let baseline = solve(&graph);
+        assert_finite_and_bounded(&baseline);
+        for _ in 0..3 {
+            assert_eq!(
+                solve(&graph),
+                baseline,
+                "positions drifted across a repeated query"
+            );
+        }
+    }
+
+    #[test]
+    fn same_input_yields_identical_positions_on_same_machine() {
+        // D9: deterministic seed, no RNG — two solves of the identical graph
+        // are bit-identical. Only guaranteed on the same machine because the
+        // node-id hash uses fixed DefaultHasher keys per process.
+        let graph = make_graph(
+            64,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (0, 4),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (8, 9),
+                (9, 10),
+                (10, 11),
+                (11, 8),
+                (8, 0),
+                (12, 13),
+                (13, 14),
+            ],
+        );
+        let a = solve(&graph);
+        let b = solve(&graph);
+        assert_eq!(a, b);
+        assert_finite_and_bounded(&a);
+    }
+
+    #[test]
+    fn local_resettle_is_deterministic_for_same_move() {
+        // Determinism extends to the damped re-settle: the same move from the
+        // same frozen layout must yield the same result (D9).
+        let graph = make_graph(20, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]);
+        let baseline = solve(&graph);
+
+        let mut a = baseline.clone();
+        a[0] = (5000.0, 5000.0);
+        local_resettle(
+            &graph,
+            &mut a,
+            &(String::from("n0"), 0),
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+        );
+
+        let mut b = baseline.clone();
+        b[0] = (5000.0, 5000.0);
+        local_resettle(
+            &graph,
+            &mut b,
+            &(String::from("n0"), 0),
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+        );
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn local_resettle_budget_is_below_full_solve_cap() {
+        // The local re-settle is contractually cheaper than a full solve (D1);
+        // this structural invariant underlies "terminates faster" without
+        // relying on wall-clock timing. Enforced at compile time so a budget
+        // regression fails the build.
+        const {
+            assert!(LOCAL_ITERATIONS < MAX_ITERATIONS);
+        };
+    }
+
+    #[test]
+    fn local_resettle_terminates_faster_than_full_solve() {
+        // A long chain needs many iterations to converge fully; a local
+        // re-settle around one node is capped at LOCAL_ITERATIONS, so it
+        // provably does less work than the full solve on the same graph (D1).
+        let mut edges = Vec::new();
+        for i in 0..199 {
+            edges.push((i, i + 1));
+        }
+        let graph = make_graph(200, &edges);
+
+        let full_count = solve_iteration_count(&graph);
+        assert!(
+            full_count > LOCAL_ITERATIONS,
+            "expected full solve to need more than {LOCAL_ITERATIONS} iters, got {full_count}"
+        );
+
+        let mut positions = solve(&graph);
+        let resettle_count = resettle_iteration_count(
+            &graph,
+            &mut positions,
+            &(String::from("n0"), 0),
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+        );
+        assert!(resettle_count <= LOCAL_ITERATIONS);
+        assert!(
+            resettle_count < full_count,
+            "re-settle {resettle_count} iters not below full solve {full_count}"
+        );
+    }
+
+    #[test]
+    fn local_resettle_leaves_distant_anchors_unmoved() {
+        // Teleporting one node far away: every node beyond LOCAL_RADIUS acts
+        // as a fixed anchor and stays exactly where it was — only the moved
+        // node's neighbourhood re-settles.
+        let graph = make_graph(
+            14,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (6, 7),
+                (8, 9),
+                (10, 11),
+                (12, 13),
+            ],
+        );
+        let baseline = solve(&graph);
+        let mut positions = baseline.clone();
+        positions[0] = (10000.0, 10000.0);
+        let found = local_resettle(
+            &graph,
+            &mut positions,
+            &(String::from("n0"), 0),
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+        );
+        assert!(found);
+        assert_finite_and_bounded(&positions);
+        // All other nodes are farther than LOCAL_RADIUS from the teleported
+        // position, so none of them move.
+        for i in 1..14 {
+            assert_eq!(
+                positions[i], baseline[i],
+                "distant node {i} moved during re-settle"
+            );
+        }
+        // The moved node itself settles somewhere new.
+        assert_ne!(positions[0], (10000.0, 10000.0));
     }
 }
