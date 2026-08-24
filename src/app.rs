@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use ratatui::layout::Rect;
 
-use crate::graph::{Cluster, Graph};
+use crate::events::{Event, EventBus};
+use crate::graph::{Cluster, Graph, NodeId};
 use crate::layout;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
@@ -105,6 +106,9 @@ pub struct App {
     /// 0.6 means panels get 60%, source gets 40%.
     /// This is a view preference that persists across patch loads.
     pub viewer_split_ratio: f32,
+    /// Synchronous observer event bus (design D6). Re-solve triggers and
+    /// topology errors are emitted here for subscribers (renderer, status).
+    pub events: EventBus,
 }
 
 impl App {
@@ -136,6 +140,7 @@ impl App {
             scale_factor: 1.0,
             orientation: Orientation::Portrait,
             viewer_split_ratio: 0.6,
+            events: EventBus::default(),
         }
     }
 
@@ -195,6 +200,24 @@ impl App {
         self.graph_positions = positions;
         self.graph_cluster_rects.clear();
         self.showing_graph = true;
+        self.emit_graph_built();
+    }
+
+    /// Publish `GraphRebuilt`, plus a `TopologyError` per validation finding,
+    /// so subscribers re-render and surface topology problems (design D6).
+    fn emit_graph_built(&mut self) {
+        if let Some(graph) = &self.graph {
+            for issue in &graph.validation {
+                self.events.dispatch(&Event::TopologyError(issue.clone()));
+            }
+            self.events.dispatch(&Event::GraphRebuilt);
+        }
+    }
+
+    /// Emit `NodeMoved` so subscribers (renderer, status) can react. Task 4.3
+    /// (handler.rs) calls this after re-settling layout around a dragged node.
+    pub fn notify_node_moved(&mut self, node: &NodeId) {
+        self.events.dispatch(&Event::NodeMoved(node.clone()));
     }
 
     /// Close the graph view, leaving panel/source-viewer state untouched.
