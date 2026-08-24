@@ -118,8 +118,11 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             .push(comp);
     }
 
-    let cols = ((area.width / COMPONENT_WIDTH).max(1)) as usize;
-    let rows_for = |n: usize| -> u16 { (n.div_ceil(cols)).max(1) as u16 };
+    // Cell size now follows the active scale preset. The published hit rects
+    // are the real rendered cells (see render_component_grid), so scaling the
+    // layout keeps hit testing correct automatically (droid_tui-ro0).
+    let scaled_w = ((COMPONENT_WIDTH as f32 * app.scale_factor).round() as u16).max(8);
+    let scaled_h = ((COMPONENT_HEIGHT as f32 * app.scale_factor).round() as u16).max(3);
 
     // Build a set of LED ids that are "folded" (referenced by another component
     // and match an existing component id of kind Led). These LED components
@@ -194,17 +197,19 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         })
         .collect();
 
-    let module_height = |components: &[&crate::patch::HwComponent], bordered: bool| -> u16 {
-        rows_for(components.len()) * COMPONENT_HEIGHT + if bordered { 2 } else { 0 }
-    };
-
+    let num_panels = panel_order.len().max(1);
+    let landscape = app.orientation == crate::app::Orientation::Landscape;
+    // Size each panel to its actual grid content so it can never collapse into
+    // a 1:35 sliver. The per-panel column count is derived from the panel's
+    // real inner width (and scaled_w) below, not from the full area width.
     let mut constraints: Vec<Constraint> = panel_order
         .iter()
         .map(|name| {
             let groups = &module_groups[name.as_str()];
-            let subdivided = groups.len() > 1;
-            let total: u16 = groups.iter().map(|g| module_height(g, subdivided)).sum();
-            Constraint::Length(total + 2)
+            let (needed_w, needed_h) =
+                panel_grid_size(groups, landscape, area, scaled_w, scaled_h, num_panels);
+            let len = if landscape { needed_w } else { needed_h };
+            Constraint::Length(len)
         })
         .collect();
     constraints.push(Constraint::Min(0));
@@ -271,13 +276,20 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         }
 
         if groups.len() <= 1 {
-            render_component_grid(frame, inner, &groups[0], &index_of, app, patch, cols);
+            render_component_grid(frame, inner, &groups[0], &index_of, app, patch);
             continue;
         }
 
+        // Subdivided: each module instance is its own bordered sub-block.
+        // Column count is taken from THIS block's real inner width so the grid
+        // never mis-wraps relative to its container.
+        let module_cols = (inner.width / scaled_w).max(1) as usize;
         let module_constraints: Vec<Constraint> = groups
             .iter()
-            .map(|g| Constraint::Length(module_height(g, true)))
+            .map(|g| {
+                let rows = (g.len().div_ceil(module_cols)).max(1) as u16;
+                Constraint::Length(rows * scaled_h + 2)
+            })
             .collect();
         let module_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -303,14 +315,17 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             if module_inner.width == 0 || module_inner.height == 0 {
                 continue;
             }
-            render_component_grid(frame, module_inner, components, &index_of, app, patch, cols);
+            render_component_grid(frame, module_inner, components, &index_of, app, patch);
         }
     }
 }
 
-/// Render one module's/panel's components into a grid within `area`,
-/// wrapping to additional rows at `cols` columns. Shared by the flat
-/// (single-instance) panel path and the per-module path above.
+/// Render one module's/panel's components into a grid within `area`.
+/// The column count is derived from the cell's actual inner width and the
+/// scaled cell size, so the published hit rect (`comp_chunks[col_i]`, the real
+/// rendered cell) always matches what is drawn and hover/selection stay correct
+/// at every scale preset (droid_tui-ro0). Shared by the flat (single-instance)
+/// panel path and the per-module path above.
 fn render_component_grid(
     frame: &mut Frame,
     area: Rect,
@@ -318,14 +333,18 @@ fn render_component_grid(
     index_of: &HashMap<&str, usize>,
     app: &mut App,
     patch: &crate::patch::Patch,
-    cols: usize,
 ) {
+    // Cell size follows the live scale preset so the published hit rect
+    // (comp_chunks[col_i]) always equals the drawn cell.
+    let scaled_w = ((COMPONENT_WIDTH as f32 * app.scale_factor).round() as u16).max(8);
+    let scaled_h = ((COMPONENT_HEIGHT as f32 * app.scale_factor).round() as u16).max(3);
+    let cols = (area.width / scaled_w).max(1) as usize;
     let rows_for = |n: usize| -> u16 { (n.div_ceil(cols)).max(1) as u16 };
 
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(vec![
-            Constraint::Length(COMPONENT_HEIGHT);
+            Constraint::Length(scaled_h);
             rows_for(components.len()) as usize
         ])
         .flex(Flex::Start)
@@ -337,7 +356,7 @@ fn render_component_grid(
         }
         let comp_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Length(COMPONENT_WIDTH); row.len()])
+            .constraints(vec![Constraint::Length(scaled_w); row.len()])
             .flex(Flex::Start)
             .split(row_chunks[row_i]);
 
@@ -358,15 +377,63 @@ fn render_component_grid(
                 is_shift_active,
                 patch,
             );
-            // Published rect must match what was actually rendered above
-            // (comp_chunks[col_i]) — scale_factor isn't applied to layout
-            // anywhere, so scaling only the hit rect inflated it past the
-            // real cell into the neighboring cell's screen area, making
-            // hover/selection resolve to the wrong component and paint
-            // the highlight where the mouse wasn't (droid_tui-wmg).
+            // Published rect is the real rendered cell (comp_chunks[col_i]).
+            // Layout already uses the scaled cell size, so the hit rect stays
+            // exactly equal to the drawn cell at every scale preset.
             app.component_rects.push((global_idx, comp_chunks[col_i]));
         }
     }
+}
+
+/// Compute the grid extent of one controller panel so it can be sized to its
+/// actual content instead of becoming a 1:35 sliver (droid_tui-7ik).
+///
+/// * `cols` is derived from the panel's *real* inner width, not the full area
+///   width, so the wrap count is correct inside narrow panels.
+/// * The cross-axis length is `needed_w` (Landscape, panels side-by-side) or
+///   `needed_h` (Portrait, panels stacked), each built from the live grid
+///   geometry rather than the sum of vertical extents.
+fn panel_grid_size(
+    groups: &[Vec<&crate::patch::HwComponent>],
+    landscape: bool,
+    area: Rect,
+    scaled_w: u16,
+    scaled_h: u16,
+    num_panels: usize,
+) -> (u16, u16) {
+    let subdivided = groups.len() > 1;
+    // Estimate this panel's inner width: full area width in Portrait (panels
+    // span the whole width); an equal share of the area in Landscape so panels
+    // stay narrow enough to sit side by side.
+    let inner_w_est = if landscape {
+        (area.width / num_panels as u16).max(scaled_w)
+    } else {
+        area.width.saturating_sub(2)
+    };
+    let cols = (inner_w_est / scaled_w).max(1) as usize;
+
+    let needed_w = if subdivided {
+        let module_cols = (inner_w_est.saturating_sub(2) / scaled_w).max(1) as usize;
+        (module_cols as u16) * scaled_w + 4
+    } else {
+        (cols as u16) * scaled_w + 2
+    };
+
+    let needed_h = if subdivided {
+        let module_cols = ((inner_w_est.saturating_sub(2)) / scaled_w).max(1) as usize;
+        let mut h: u16 = 2; // panel border
+        for g in groups {
+            let rows = (g.len().div_ceil(module_cols)).max(1) as u16;
+            h += rows * scaled_h + 2;
+        }
+        h
+    } else {
+        let n = groups.first().map(|g| g.len()).unwrap_or(0);
+        let rows = (n.div_ceil(cols)).max(1) as u16;
+        rows * scaled_h + 2
+    };
+
+    (needed_w, needed_h)
 }
 
 fn render_component(
@@ -1099,6 +1166,13 @@ fn build_raw_highlighted_lines(patch: &crate::patch::Patch, app: &App) -> Vec<Li
     lines
 }
 
+/// Display width of `s`. The project does not depend on `unicode_width`,
+/// and the prettified content is ASCII config text, so `chars().count()` is
+/// exact enough for box alignment.
+fn display_width(s: &str) -> usize {
+    s.chars().count()
+}
+
 fn build_prettified_highlighted_lines(
     patch: &crate::patch::Patch,
     app: &App,
@@ -1108,21 +1182,37 @@ fn build_prettified_highlighted_lines(
     let selected = app.selected_component.as_deref();
     for circuit in &circuits {
         let color = circuit_color(&circuit.name);
-        lines.push(Line::from(vec![
-            Span::styled("┌─ ", Style::default().fg(color)),
+
+        // Uniform interior width so every box gets one clean right border
+        // (droid_tui-mzg). `w` is the widest content row; the box renders an
+        // (w + 2)-wide inner strip so the top dashes, the entry padding and the
+        // footer all share the same right edge.
+        let header_text = format!("─ {} ─", circuit.name);
+        let mut w: usize = display_width(&header_text);
+        for (key, value) in &circuit.entries {
+            let entry_text = format!("{} = {}", key, value);
+            w = w.max(display_width(&entry_text));
+        }
+
+        // Top border: corner, the framed title (name kept bold), padding dashes
+        // to reach width w + 2, closing corner.
+        let top_pad = (w + 2).saturating_sub(display_width(&header_text));
+        let top_spans: Vec<Span<'static>> = vec![
+            Span::styled("┌", Style::default().fg(color)),
+            Span::styled("─ ", Style::default().fg(color)),
             Span::styled(
                 circuit.name.clone(),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" ─┐", Style::default().fg(color)),
-        ]));
+            Span::styled(" ─", Style::default().fg(color)),
+            Span::styled("─".repeat(top_pad), Style::default().fg(color)),
+            Span::styled("┐", Style::default().fg(color)),
+        ];
+        lines.push(Line::from(top_spans));
+
         for (key, value) in &circuit.entries {
-            let mut line_spans: Vec<Span<'static>> = vec![
-                Span::styled("│ ", Style::default().fg(color)),
-                Span::styled(key.clone(), Style::default().fg(theme::active().viewer_key)),
-                Span::raw(" = "),
-            ];
-            // Determine highlighted value spans
+            // Highlighted value spans — styling (colors, BOLD, UNDERLINED,
+            // REVERSED) preserved verbatim; only geometry changes below.
             let val_spans: Vec<Span<'static>> = if let Some(tok) = selected {
                 let mods = patch.modifier_entries_for(tok);
                 let is_modifier_value = mods.iter().any(|e| e.source == value.trim());
@@ -1149,9 +1239,6 @@ fn build_prettified_highlighted_lines(
                             Style::default().fg(theme::active().text),
                         )]
                     } else {
-                        // Check current occurrence distinction inside prettified value?
-                        // For prettified we use same occ style for all hits; current gets REVERSED
-                        // Lookup current occurrence span content vs value? Simplify: all occ yellow bold, not reversed
                         let mut out: Vec<Span<'static>> = Vec::new();
                         let mut last = 0usize;
                         for (s, e) in ranges {
@@ -1161,9 +1248,6 @@ fn build_prettified_highlighted_lines(
                                     Style::default().fg(theme::active().text),
                                 ));
                             }
-                            // Decide current vs other: we highlight current occurrence (if any) with REVERSED
-                            // We map current occurrence line to value? For prettified we treat all as OccOther except if value equals token and it's the current line file-wise we could mark current.
-                            // Simplify: use REVERSED for all occ in prettified to stand out
                             out.push(Span::styled(
                                 value[s..e].to_string(),
                                 Style::default()
@@ -1187,12 +1271,35 @@ fn build_prettified_highlighted_lines(
                     Style::default().fg(theme::active().text),
                 )]
             };
-            line_spans.extend(val_spans);
+
+            // Assemble "key = value" and measure it to width `w` for alignment.
+            let mut content_spans: Vec<Span<'static>> = vec![
+                Span::styled(key.clone(), Style::default().fg(theme::active().viewer_key)),
+                Span::raw(" = "),
+            ];
+            for s in &val_spans {
+                content_spans.push(s.clone());
+            }
+            let content_w: usize = content_spans
+                .iter()
+                .map(|s| display_width(&s.content))
+                .sum();
+
+            let mut line_spans: Vec<Span<'static>> =
+                vec![Span::styled("│ ", Style::default().fg(color))];
+            if content_w < w {
+                let gap = w - content_w;
+                line_spans.extend(content_spans);
+                line_spans.push(Span::styled(" ".repeat(gap), Style::default().fg(color)));
+            } else {
+                line_spans.extend(content_spans);
+            }
             line_spans.push(Span::styled(" │", Style::default().fg(color)));
             lines.push(Line::from(line_spans));
         }
+
         lines.push(Line::from(Span::styled(
-            "└────┘",
+            format!("└{}┘", "─".repeat(w + 2)),
             Style::default().fg(color),
         )));
         lines.push(Line::from(""));
