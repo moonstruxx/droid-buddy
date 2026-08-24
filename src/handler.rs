@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::app::{is_entry_selectable, App, PrefixState, SourceViewMode, ViewerFocus};
+use crate::app::{is_entry_selectable, App, GraphDrag, PrefixState, SourceViewMode, ViewerFocus};
+use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
 
 /// How long an armed `g` prefix waits for its follow-up key before silently
@@ -63,6 +64,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 open_embedded_viewer(app);
                 return false;
             }
+            crossterm::event::KeyCode::Char('g') => {
+                // `g g` opens the graph surface, mirroring `g v` (design D7).
+                app.open_graph();
+                app.prefix = None;
+                return false;
+            }
             crossterm::event::KeyCode::Esc => {
                 app.prefix = None;
                 return false;
@@ -70,6 +77,36 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             _ => {
                 app.prefix = None;
             }
+        }
+    }
+
+    // Graph surface handling (`g g`). Esc closes it and restores the prior
+    // view; q / Ctrl+C still quit and `l` opens the picker, mirroring the
+    // viewer's global-key behavior. The graph has no focus split, so nothing
+    // else is routed here.
+    if app.showing_graph {
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                app.close_graph();
+                app.prefix = None;
+                return false;
+            }
+            crossterm::event::KeyCode::Char('q') => {
+                return true;
+            }
+            crossterm::event::KeyCode::Char('c')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                return true;
+            }
+            crossterm::event::KeyCode::Char('l') => {
+                app.showing_picker = true;
+                app.picker_dir = std::env::current_dir().unwrap_or_default();
+                app.picker_index = 0;
+                app.refresh_picker_entries();
+                return false;
+            }
+            _ => {}
         }
     }
 
@@ -309,6 +346,12 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if app.showing_picker {
         return;
     }
+    // While the graph surface is open it owns all mouse input; nothing falls
+    // through to panel/minimap handling below.
+    if app.showing_graph {
+        handle_graph_mouse(mouse, app);
+        return;
+    }
     // Minimap click-to-scroll: uses renderer-published minimap geometry with
     // the same proportional mapping as the viewport indicator in ui.rs
     // (indicator: scroll * inner_h / total_lines). Click must work whenever
@@ -437,6 +480,74 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     }
 }
 
+/// Handle mouse input while the graph surface is open. The graph has no hover
+/// or panel concept: a left-button Down on a renderer-published node rect
+/// begins a drag, Drag follows the pointer with a damped local re-settle and
+/// a `NodeMoved` event, and Up releases. Everything else is a no-op (design
+/// D1/D7). No other app state is touched during a drag.
+fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let hit = app
+                .graph_node_rects
+                .iter()
+                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
+                .map(|(idx, _)| *idx);
+            let Some(node_index) = hit else {
+                return;
+            };
+            // Record the grab offset so the node follows the pointer without
+            // jumping to the grab point on the first drag delta.
+            if let Some((px, py)) = app.graph_positions.get(node_index).copied() {
+                app.graph_drag = Some(GraphDrag {
+                    node_index,
+                    offset_x: px - mouse.column as f32,
+                    offset_y: py - mouse.row as f32,
+                });
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(drag) = app.graph_drag.as_ref() else {
+                return;
+            };
+            let Some(graph) = app.graph.as_ref() else {
+                return;
+            };
+            let Some(node_id) = graph.nodes.get(drag.node_index).map(|n| n.id.clone()) else {
+                return;
+            };
+            if let Some(pos) = app.graph_positions.get_mut(drag.node_index) {
+                *pos = (
+                    clamp_drag(mouse.column as f32 + drag.offset_x),
+                    clamp_drag(mouse.row as f32 + drag.offset_y),
+                );
+            }
+            layout::local_resettle(
+                graph,
+                &mut app.graph_positions,
+                &node_id,
+                layout::LOCAL_RADIUS,
+                layout::LOCAL_ITERATIONS,
+            );
+            app.notify_node_moved(&node_id);
+        }
+        MouseEventKind::Up(_) => {
+            app.graph_drag = None;
+        }
+        _ => {}
+    }
+}
+
+/// Bound a dragged node's position to a sane virtual-plane window. Mouse
+/// coordinates are already inside the terminal, but the grab offset can carry
+/// the sum far out; the renderer's min/max fit maps any bounded set onto the
+/// surface, so this only guards against float blowup while keeping the node
+/// reachable.
+const DRAG_POSITION_LIMIT: f32 = 10_000.0;
+fn clamp_drag(v: f32) -> f32 {
+    v.clamp(-DRAG_POSITION_LIMIT, DRAG_POSITION_LIMIT)
+}
+
 fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
@@ -530,6 +641,7 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::Event;
     use crate::patch::Patch;
     use ratatui::layout::Rect;
 
@@ -898,7 +1010,10 @@ mod tests {
     }
 
     #[test]
-    fn g_while_armed_restarts_prefix_timer() {
+    fn g_after_timeout_rearms_prefix() {
+        // Non-interference (task 4.3): a `g` whose prefix already timed out
+        // clears the stale prefix and re-arms a fresh one rather than acting
+        // as a follow-up key.
         let mut app = App::new();
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
         app.prefix = Some(PrefixState {
@@ -907,6 +1022,28 @@ mod tests {
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
         assert!(app.prefix.as_ref().unwrap().started.elapsed() < Duration::from_secs(1));
+        assert!(
+            !app.showing_graph,
+            "timed-out prefix must not open the graph"
+        );
+    }
+
+    #[test]
+    fn g_then_g_opens_graph_for_loaded_patch() {
+        // Task 4.3: a second `g` while the prefix is armed opens the graph and
+        // runs a full solve, mirroring `g v` (design D7).
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.prefix.is_some(), "first g arms the prefix");
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+        assert!(app.prefix.is_none(), "prefix cleared on open");
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.nodes.is_empty(), "graph holds the patch's circuits");
+        assert_eq!(app.graph_positions.len(), graph.nodes.len());
+        for (x, y) in &app.graph_positions {
+            assert!(x.is_finite() && y.is_finite());
+        }
     }
 
     #[test]
@@ -1422,6 +1559,152 @@ mod tests {
         assert!(app.prefix.is_none());
         handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
         assert!(!app.showing_viewer);
+    }
+
+    // ── Task 4.3: graph handler wiring (`g g`) ──
+
+    /// App with a fixture patch loaded, the graph opened, and node rects
+    /// published as the renderer would, so drag hit-testing has geometry.
+    fn graph_app() -> App {
+        let mut app = app_with_fixture();
+        app.open_graph();
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        app.graph_node_rects = (0..node_count)
+            .map(|i| (i, Rect::new(10 + (i as u16) * 20, 10, 16, 3)))
+            .collect();
+        app
+    }
+
+    #[test]
+    fn esc_while_graph_open_closes_and_restores_state() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        app.viewer_focus = ViewerFocus::Source;
+        app.source_view_mode = SourceViewMode::Prettified;
+        app.source_scroll = 9;
+        app.occurrence_cursor = 2;
+        let before = (
+            app.selected_component.clone(),
+            app.viewer_focus.clone(),
+            app.source_view_mode.clone(),
+            app.source_scroll,
+            app.occurrence_cursor,
+        );
+        app.open_graph();
+        assert!(app.showing_graph);
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(!app.showing_graph, "Esc closes the graph");
+        assert_eq!(app.selected_component, before.0, "selection kept on close");
+        assert_eq!(app.viewer_focus, before.1, "viewer focus kept");
+        assert_eq!(app.source_view_mode, before.2, "view mode kept");
+        assert_eq!(app.source_scroll, before.3, "source scroll kept");
+        assert_eq!(app.occurrence_cursor, before.4, "occurrence cursor kept");
+        assert!(app.prefix.is_none());
+    }
+
+    #[test]
+    fn q_quits_while_graph_open() {
+        let mut app = app_with_fixture();
+        app.open_graph();
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('q')), &mut app);
+        assert!(quit, "q quits even with the graph open");
+    }
+
+    #[test]
+    fn l_opens_picker_while_graph_open() {
+        let mut app = app_with_fixture();
+        app.open_graph();
+        handle_event(key(crossterm::event::KeyCode::Char('l')), &mut app);
+        assert!(app.showing_picker, "l opens the picker over the graph");
+    }
+
+    #[test]
+    fn drag_node_moves_position_resettles_and_emits_node_moved() {
+        let mut app = graph_app();
+        assert!(!app.graph.as_ref().unwrap().nodes.is_empty());
+        // Subscribe a probe to the synchronous bus to observe NodeMoved.
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let store = std::rc::Rc::clone(&seen);
+        app.events
+            .subscribe(move |event| store.borrow_mut().push(event.clone()));
+
+        let before = app.graph_positions[0];
+        // Down on node 0's rect (0 -> (10,10,16,3)) starts the drag.
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
+            &mut app,
+        );
+        assert!(app.graph_drag.is_some(), "Down on a node rect grabs it");
+        // Drag to a new point: position must change and NodeMoved must fire.
+        handle_mouse_event(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 25),
+            &mut app,
+        );
+        assert_ne!(
+            app.graph_positions[0], before,
+            "dragged node position changed"
+        );
+        assert!(
+            app.graph_positions
+                .iter()
+                .all(|(x, y)| x.is_finite() && y.is_finite()),
+            "re-settle keeps finite positions"
+        );
+        assert!(
+            seen.borrow()
+                .iter()
+                .any(|e| matches!(e, Event::NodeMoved(_))),
+            "NodeMoved emitted during drag"
+        );
+
+        // Up ends the drag; a further Drag must do nothing.
+        let after_up = app.graph_positions[0];
+        let moves_after_up = seen.borrow().len();
+        handle_mouse_event(
+            mouse(MouseEventKind::Up(MouseButton::Left), 30, 25),
+            &mut app,
+        );
+        assert!(app.graph_drag.is_none(), "Up releases the drag");
+        handle_mouse_event(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 31, 26),
+            &mut app,
+        );
+        assert_eq!(
+            app.graph_positions[0], after_up,
+            "post-release drag is a no-op"
+        );
+        assert_eq!(
+            seen.borrow().len(),
+            moves_after_up,
+            "no NodeMoved after release"
+        );
+    }
+
+    #[test]
+    fn graph_mouse_off_node_rect_is_harmless() {
+        let mut app = graph_app();
+        let before = app.graph_positions.clone();
+        let start_moves = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = std::rc::Rc::clone(&start_moves);
+        app.events.subscribe(move |_| count.set(count.get() + 1));
+
+        // Down/Drag/Up entirely off any node rect: no drag starts, no panic,
+        // no position change, no events.
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 200, 60),
+            &mut app,
+        );
+        assert!(app.graph_drag.is_none());
+        handle_mouse_event(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 201, 61),
+            &mut app,
+        );
+        handle_mouse_event(
+            mouse(MouseEventKind::Up(MouseButton::Left), 201, 61),
+            &mut app,
+        );
+        assert_eq!(app.graph_positions, before);
+        assert_eq!(start_moves.get(), 0, "no events fired off-node");
     }
 
     // ── 5.1 regression anchoring inside handler.rs (fixtures/source_navigation.ini) ──

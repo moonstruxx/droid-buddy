@@ -16,6 +16,17 @@ pub struct PrefixState {
     pub started: Instant,
 }
 
+/// Grabbed-node state for a graph drag (design D1/D7). Holds the index of the
+/// dragged node in `graph.nodes` plus the grab offset (node position minus the
+/// Down point) so the node follows the pointer without jumping on the first
+/// drag delta. `Some` only between a left-button Down on a node rect and the
+/// matching Up.
+pub struct GraphDrag {
+    pub node_index: usize,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
 /// Which pane receives keyboard input while the embedded source pane is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ViewerFocus {
@@ -77,6 +88,10 @@ pub struct App {
     /// keyed by index into `graph.nodes` (parallel to `graph_positions`). Same
     /// renderer-publishes/handler-consumes contract; used for drag hit-testing.
     pub graph_node_rects: Vec<(usize, Rect)>,
+    /// In-progress graph drag (`g g`). `Some` from a left-button Down on a
+    /// `graph_node_rects` entry until the matching Up; drives node repositioning
+    /// + damped local re-settle (design D1).
+    pub graph_drag: Option<GraphDrag>,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -133,6 +148,7 @@ impl App {
             graph_positions: Vec::new(),
             graph_cluster_rects: Vec::new(),
             graph_node_rects: Vec::new(),
+            graph_drag: None,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -205,6 +221,7 @@ impl App {
         self.graph_positions = positions;
         self.graph_cluster_rects.clear();
         self.graph_node_rects.clear();
+        self.graph_drag = None;
         self.showing_graph = true;
         self.emit_graph_built();
     }
@@ -251,6 +268,7 @@ impl App {
         self.graph_positions.clear();
         self.graph_cluster_rects.clear();
         self.graph_node_rects.clear();
+        self.graph_drag = None;
     }
 
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
