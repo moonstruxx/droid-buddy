@@ -9,8 +9,6 @@ use crate::app::App;
 use crate::ui::render;
 
 pub mod app;
-// Wired into main() by config-store task 2.4; test-only until then.
-#[cfg(test)]
 pub mod config;
 pub mod handler;
 pub mod patch;
@@ -21,6 +19,10 @@ pub mod ui;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    // Config load runs before terminal init so stderr warnings are visible
+    // and rendering never starts with a half-selected theme.
+    let settings = config::load(&theme::canonical_theme_name, theme::THEMES);
+    theme::init(*theme::resolve(&settings.theme));
     let terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;
 
