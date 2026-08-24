@@ -709,9 +709,13 @@ fn should_show_minimap(source_pane_area: Rect, total_area: Rect, app: &App) -> b
 
 fn render_source_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
+        app.source_pane_rect = None;
         app.minimap_rect = None;
         return;
     }
+    // Publish the full pane rect (sidebar/minimap included) for mouse focus
+    // routing; minimap click-to-scroll keeps precedence in the handler.
+    app.source_pane_rect = Some(area);
 
     let patch_has_sections = app.patch.as_ref().is_some_and(|p| !p.sections.is_empty());
     let mut show_sidebar = area.width >= 40 && patch_has_sections;
