@@ -12,6 +12,28 @@ pub struct Span {
     pub col_end: usize,
 }
 
+/// A single cable index entry: cable name → producing circuits + ordered sink references.
+///
+/// Extracted from section param values:
+/// - `output = _NAME` registers a cable source for the section's circuit
+/// - Any other param value referencing `_NAME` (bare or embedded) registers a sink reference
+/// - Comment lines (`# …`) are ignored entirely — real patches carry commented-out
+///   preamble cable maps that must NOT produce edges.
+/// - Internal `_ENV…`-style names that appear only inside comments must not leak into the index.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CableIndexEntry {
+    /// Circuits that produce this cable via `output =`, in file appearance order.
+    /// Empty if this cable name is only referenced as a sink, never produced.
+    /// More than one producer is an invalid `n → 1` topology, flagged by graph
+    /// validation (graph.rs), not by the parser.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Ordered sink references: (section_name, param_key) pairs where this cable
+    /// is referenced as a sink, in file appearance order.
+    #[serde(default)]
+    pub sink_refs: Vec<(String, String)>,
+}
+
 /// A single `select = X` relationship resolved to its affected source span.
 /// `source` is the raw `X` (hardware token or internal cable). `selectat`
 /// holds the optional `selectat = N` exact-value string in the same section.
@@ -50,6 +72,14 @@ pub struct Patch {
     /// (`modifier_affected_spans`, `modifier_entries_for`).
     #[serde(default)]
     pub modifier_index: HashMap<String, Vec<ModifierAffect>>,
+    /// Virtual cable index: cable name → producing circuits + ordered sink references.
+    /// Extracted from section param values during patch parsing:
+    /// - `output = _NAME` registers a cable source for the section's circuit
+    /// - Any other param value referencing `_NAME` (bare or embedded) registers a sink reference
+    /// - Comment lines (`# …`) are ignored entirely
+    /// - Internal `_ENV…`-style names that appear only inside comments must not leak into the index.
+    #[serde(default)]
+    pub cable_index: HashMap<String, CableIndexEntry>,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -349,6 +379,7 @@ impl Patch {
             token_spans: Vec::new(),
             occurrence_index: HashMap::new(),
             modifier_index: HashMap::new(),
+            cable_index: HashMap::new(),
         }
     }
 
@@ -561,6 +592,7 @@ impl Patch {
 
         let occurrence_index = build_occurrence_index(&token_spans);
         let modifier_index = build_modifier_index(&raw_lines, &sections);
+        let cable_index = collect_cable_index(&sections);
 
         Ok(Patch {
             name,
@@ -577,6 +609,7 @@ impl Patch {
             token_spans,
             occurrence_index,
             modifier_index,
+            cable_index,
         })
     }
 
@@ -830,6 +863,71 @@ fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec
         i += 1;
     }
     out
+}
+
+/// Build the virtual-cable index from parsed sections.
+///
+/// - A pure `output = _NAME` value registers `_NAME` as produced by the
+///   section's circuit (a source).
+/// - Any other param value referencing `_NAME` — bare or embedded in an
+///   arithmetic expression — registers an ordered sink reference
+///   `(section_name, param_key)`.
+/// - Comment lines are already stripped by `parse_ini_sections`, so commented
+///   cable maps (`# output = _MIDIC`) never produce index entries, and
+///   `_ENV…`-style internal names that appear only inside comments cannot leak.
+fn collect_cable_index(sections: &[IniSection]) -> HashMap<String, CableIndexEntry> {
+    let mut index: HashMap<String, CableIndexEntry> = HashMap::new();
+
+    for section in sections {
+        let section_name = &section.name;
+        // Repeated section names (e.g. two `[copy]` circuits) are distinct
+        // instances: each contributes its own sink refs. Dedup only within one
+        // section instance, per (key, cable-name) pair.
+        let mut section_seen: HashSet<(String, String)> = HashSet::new();
+        for (key, value) in &section.entries {
+            let key_lower = key.to_lowercase();
+
+            // Check if this is an "output = _NAME" entry (value is purely _NAME).
+            // The entire value must be just _NAME with nothing else — if the value
+            // is an expression like `output = _X * 2`, then _X is a sink reference,
+            // not a source.
+            if key_lower == "output" {
+                let names = scan_internal_tokens(value);
+                // Value is purely _NAME if scan_internal_tokens returns exactly one
+                // token and it equals the full value.
+                if names.len() == 1 && &names[0] == value {
+                    // Record as a cable source: the producing circuit is the section.
+                    let entry = index.entry(names[0].clone()).or_default();
+                    if !entry.sources.iter().any(|s| s == section_name) {
+                        entry.sources.push(section_name.clone());
+                    }
+                    // Skip sink reference extraction for this value since it is the source.
+                    continue;
+                }
+                // Fall through: _NAME embedded in a non-trivial value is a sink ref.
+            }
+
+            // Extract all _NAME references from the value (for sink references).
+            // Comment lines are already stripped by parse_ini_sections, so only real
+            // param values are considered. Internal _ENV…-style names that appear
+            // only as sink references (never via output =) are recorded here.
+            let names = scan_internal_tokens(value);
+            for name in &names {
+                // Dedup per (key, cable-name) within this section instance only.
+                // (A pure `output = _NAME` value already `continue`d above, so any
+                // `output` reaching here is an expression whose _NAME refs are sinks.)
+                let dedup_key = (key_lower.clone(), name.clone());
+                if section_seen.insert(dedup_key) {
+                    let entry = index.entry(name.clone()).or_default();
+                    entry
+                        .sink_refs
+                        .push((section_name.clone(), key_lower.clone()));
+                }
+            }
+        }
+    }
+
+    index
 }
 
 fn collect_token_spans(raw_lines: &[String]) -> Vec<(String, Span)> {
@@ -1450,5 +1548,113 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| e.source == "P1.2" && e.selectat.is_none()));
+    }
+
+    // --- Virtual-cable / signal-flow extraction (signal-flow-graph change) ---
+
+    #[test]
+    fn cable_index_output_creates_source() {
+        let content = "[p2b8]\n[clocktool]\n    output = _PULSARCLOCK\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let entry = patch.cable_index.get("_PULSARCLOCK").unwrap();
+        assert_eq!(entry.sources, vec![String::from("clocktool")]);
+        assert!(entry.sink_refs.is_empty());
+    }
+
+    #[test]
+    fn cable_index_input_registers_sink() {
+        let content =
+            "[p2b8]\n[clocktool]\n    output = _PULSARCLOCK\n[copy]\n    input = _PULSARCLOCK\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let entry = patch.cable_index.get("_PULSARCLOCK").unwrap();
+        assert_eq!(entry.sources, vec![String::from("clocktool")]);
+        assert_eq!(
+            entry.sink_refs,
+            vec![(String::from("copy"), String::from("input"))]
+        );
+    }
+
+    #[test]
+    fn cable_index_fanout_one_source_many_sinks() {
+        // 1 → n fan-out: one producer, two consumers.
+        let content = "[p2b8]\n[clocktool]\n    output = _PULSARCLOCK\n[copy]\n    input = _PULSARCLOCK\n[copy]\n    input = _PULSARCLOCK\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let entry = patch.cable_index.get("_PULSARCLOCK").unwrap();
+        assert_eq!(entry.sources.len(), 1);
+        assert_eq!(entry.sink_refs.len(), 2);
+    }
+
+    #[test]
+    fn cable_index_expression_embedded_sinks() {
+        // `_NAME` embedded in an arithmetic expression registers a sink ref.
+        let content = "[p2b8]\n[osc1]\n    frequency = _BASE * 2 - _PITCH\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let base = patch.cable_index.get("_BASE").unwrap();
+        assert!(base.sources.is_empty());
+        assert_eq!(
+            base.sink_refs,
+            vec![(String::from("osc1"), String::from("frequency"))]
+        );
+        let pitch = patch.cable_index.get("_PITCH").unwrap();
+        assert_eq!(
+            pitch.sink_refs,
+            vec![(String::from("osc1"), String::from("frequency"))]
+        );
+    }
+
+    #[test]
+    fn cable_index_output_expression_is_sink_not_source() {
+        // `output = _X * 2` is an expression; _X is a sink, not a source.
+        let content = "[p2b8]\n[clocktool]\n    output = _BASE * 2\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let entry = patch.cable_index.get("_BASE").unwrap();
+        assert!(
+            entry.sources.is_empty(),
+            "expression output must not create a source"
+        );
+        assert_eq!(
+            entry.sink_refs,
+            vec![(String::from("clocktool"), String::from("output"))]
+        );
+    }
+
+    #[test]
+    fn cable_index_commented_definitions_ignored() {
+        // Commented cable maps (`# output = _MIDIC`) must NOT produce entries.
+        let content = "#   output = _MIDIC\n[p2b8]\n[clocktool]\n    output = _PULSARCLOCK\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert!(!patch.cable_index.contains_key("_MIDIC"));
+        assert!(patch.cable_index.contains_key("_PULSARCLOCK"));
+    }
+
+    #[test]
+    fn cable_index_internal_env_names_do_not_leak_from_comments() {
+        // `_ENV…`-style internal names that appear ONLY inside comments must not
+        // leak into the index.
+        let content =
+            "#   input = _ENV1_DECAY_POT_ABSBIPOLAR\n[p2b8]\n[clocktool]\n    output = _PULSARCLOCK\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert!(!patch.cable_index.contains_key("_ENV1_DECAY_POT_ABSBIPOLAR"));
+        assert!(patch.cable_index.contains_key("_PULSARCLOCK"));
+    }
+
+    #[test]
+    fn cable_index_alg27_fixture_fanout_and_comment_exclusion() {
+        // Real fixture: [clocktool] output = _PULSARCLOCK fans out to 12 real
+        // sinks (2x [copy] input, 10x clock) across the patch; commented
+        // _MIDIC / _PULSARCLOCKPITCH maps must not leak.
+        let content = std::fs::read_to_string("fixtures/alg27_2.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("alg27_2")).unwrap();
+        let entry = patch.cable_index.get("_PULSARCLOCK").unwrap();
+        assert_eq!(entry.sources, vec![String::from("clocktool")]);
+        assert_eq!(entry.sink_refs.len(), 12);
+        // Every real sink is a `input` or `clock` param, none from comments.
+        assert!(entry
+            .sink_refs
+            .iter()
+            .all(|(_, sk)| sk == "input" || sk == "clock"));
+        assert!(!patch.cable_index.contains_key("_MIDIC"));
+        assert!(!patch.cable_index.contains_key("_PULSARCLOCKPITCH"));
+        assert!(!patch.cable_index.contains_key("_TRIGGER_CLOCKCHECK"));
     }
 }
