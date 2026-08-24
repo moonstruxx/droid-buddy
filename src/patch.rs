@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,20 @@ pub struct ModifierAffect {
     pub selectat: Option<String>,
 }
 
+/// A comment-banner group: the ordered circuit-section range owned by a
+/// `# ---- Name ----` banner (from the banner line until the next banner or
+/// EOF). The implicit group of sections before the first banner carries
+/// `banner: None` and is ordered first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BannerGroup {
+    /// Banner text from `# ---- Name ----`, dashes/spaces trimmed. `None`
+    /// for the implicit unnamed group before the first banner.
+    pub banner: Option<String>,
+    /// Range of `Patch.sections` occurrence indices this group owns,
+    /// `start` inclusive to `end` exclusive.
+    pub section_range: Range<usize>,
+}
+
 /// Represents a loaded DROID patch
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Patch {
@@ -80,6 +95,13 @@ pub struct Patch {
     /// - Internal `_ENV…`-style names that appear only inside comments must not leak into the index.
     #[serde(default)]
     pub cable_index: HashMap<String, CableIndexEntry>,
+    /// Ordered comment-banner groups: each banner (`# ---- Name ----`) owns
+    /// the circuit-section range from its line until the next banner or EOF.
+    /// Sections before the first banner form an implicit unnamed group
+    /// (`banner = None`) ordered first. Populated by `from_ini_str`; hand-built
+    /// patches (e.g. `sample()`) carry none.
+    #[serde(default)]
+    pub banner_groups: Vec<BannerGroup>,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -380,6 +402,7 @@ impl Patch {
             occurrence_index: HashMap::new(),
             modifier_index: HashMap::new(),
             cable_index: HashMap::new(),
+            banner_groups: Vec::new(),
         }
     }
 
@@ -593,6 +616,7 @@ impl Patch {
         let occurrence_index = build_occurrence_index(&token_spans);
         let modifier_index = build_modifier_index(&raw_lines, &sections);
         let cable_index = collect_cable_index(&sections);
+        let banner_groups = collect_banner_groups(&raw_lines, &sections);
 
         Ok(Patch {
             name,
@@ -610,6 +634,7 @@ impl Patch {
             occurrence_index,
             modifier_index,
             cable_index,
+            banner_groups,
         })
     }
 
@@ -752,6 +777,66 @@ fn parse_ini_sections(content: &str) -> Vec<IniSection> {
         }
     }
     sections
+}
+
+/// If `line` is a comment banner (`# ---- Name ----`), return the banner text
+/// (dashes/spaces trimmed). Returns `None` for any non-banner line (plain
+/// comments, section headers, `key = value` lines, blanks, or a bare dash
+/// rule with no name).
+fn parse_banner(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('#')?.trim();
+    if !rest.starts_with('-') {
+        return None;
+    }
+    let inner = rest.trim_matches('-').trim();
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+/// Build the ordered banner→section-range groups for a patch.
+///
+/// A banner line (`# ---- Name ----`) starts a group that owns every circuit
+/// section from that line until the next banner (or EOF). Sections before the
+/// first banner form an implicit unnamed group (`banner = None`) ordered
+/// first. Attribution is per section OCCURRENCE: repeated section names are
+/// distinct circuit instances, and each maps to the banner active at its
+/// header line. Line numbers (banner lines vs `IniSection.header_span.line`)
+/// are the bridge because comments are stripped before section parsing.
+fn collect_banner_groups(raw_lines: &[String], sections: &[IniSection]) -> Vec<BannerGroup> {
+    // Banner line index -> banner text, in file order.
+    let banners: Vec<(usize, String)> = raw_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| parse_banner(line).map(|text| (idx, text)))
+        .collect();
+
+    // Per section occurrence, the active banner is the last banner at or
+    // before its header line; if no banner precedes it, the section belongs
+    // to the implicit unnamed group. Consecutive sections sharing an active
+    // banner form one contiguous range.
+    let mut groups: Vec<BannerGroup> = Vec::new();
+    let mut b: usize = 0;
+    for (si, section) in sections.iter().enumerate() {
+        let header_line = section.header_span.line;
+        while b < banners.len() && banners[b].0 <= header_line {
+            b += 1;
+        }
+        let active = if b == 0 {
+            None
+        } else {
+            Some(banners[b - 1].1.clone())
+        };
+        match groups.last_mut() {
+            Some(g) if g.banner == active => g.section_range.end = si + 1,
+            _ => groups.push(BannerGroup {
+                banner: active,
+                section_range: si..si + 1,
+            }),
+        }
+    }
+    groups
 }
 
 const HW_TOKEN_LETTERS: [char; 7] = ['B', 'L', 'P', 'O', 'I', 'E', 'S'];
@@ -1656,5 +1741,113 @@ mod tests {
         assert!(!patch.cable_index.contains_key("_MIDIC"));
         assert!(!patch.cable_index.contains_key("_PULSARCLOCKPITCH"));
         assert!(!patch.cable_index.contains_key("_TRIGGER_CLOCKCHECK"));
+    }
+
+    // --- banner-range grouping (task 1.2) ---
+
+    #[test]
+    fn banner_groups_multiple_banners_own_ordered_ranges() {
+        let content = "\
+# ---- Alpha ----
+[button]
+button = B1.1
+# ---- Omega ----
+[button]
+button = B1.2
+";
+        let patch = Patch::from_ini_str(content, String::from("multi")).unwrap();
+        let groups = &patch.banner_groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].banner.as_deref(), Some("Alpha"));
+        assert_eq!(groups[0].section_range, 0..1);
+        assert_eq!(groups[1].banner.as_deref(), Some("Omega"));
+        assert_eq!(groups[1].section_range, 1..2);
+    }
+
+    #[test]
+    fn banner_groups_circuits_before_first_banner_form_unnamed_group() {
+        let content = "\
+[button]
+button = B1.1
+# ---- Titled ----
+[button]
+button = B1.2
+";
+        let patch = Patch::from_ini_str(content, String::from("pre_banner")).unwrap();
+        let groups = &patch.banner_groups;
+        assert_eq!(groups.len(), 2);
+        // The implicit pre-first-banner group is unnamed and ordered first.
+        assert_eq!(groups[0].banner, None);
+        assert_eq!(groups[0].section_range, 0..1);
+        assert_eq!(groups[1].banner.as_deref(), Some("Titled"));
+        assert_eq!(groups[1].section_range, 1..2);
+    }
+
+    #[test]
+    fn banner_groups_last_banner_range_extends_to_eof() {
+        let content = "\
+# ---- Alpha ----
+[button]
+button = B1.1
+# ---- Omega ----
+[button]
+button = B1.2
+[button]
+button = B1.3
+# ---- trailing banner at EOF owns nothing ----
+";
+        let patch = Patch::from_ini_str(content, String::from("to_eof")).unwrap();
+        let groups = &patch.banner_groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].banner.as_deref(), Some("Alpha"));
+        assert_eq!(groups[0].section_range, 0..1);
+        // Omega owns sections through the end of the file: no following banner
+        // terminates its range.
+        assert_eq!(groups[1].banner.as_deref(), Some("Omega"));
+        assert_eq!(groups[1].section_range, 1..3);
+        // The trailing banner at EOF has no following section and adds no group.
+        assert!(patch
+            .banner_groups
+            .iter()
+            .all(|g| g.banner.as_deref() != Some("trailing banner at EOF owns nothing")));
+    }
+
+    #[test]
+    fn banner_groups_repeated_section_names_attributed_per_occurrence() {
+        let content = "\
+[env]
+# ---- Group A ----
+[button]
+button = B1.1
+[button]
+button = B1.2
+# ---- Group B ----
+[button]
+button = B1.3
+";
+        let patch = Patch::from_ini_str(content, String::from("repeated")).unwrap();
+        let groups = &patch.banner_groups;
+        // env before the first banner -> unnamed group; the two `[button]`
+        // occurrences under Group A are distinct instances in one range; the
+        // third `[button]` occurrence under Group B is a separate instance.
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].banner, None);
+        assert_eq!(groups[0].section_range, 0..1);
+        assert_eq!(
+            patch.sections[groups[0].section_range.clone()][0].name,
+            "env"
+        );
+        assert_eq!(groups[1].banner.as_deref(), Some("Group A"));
+        assert_eq!(groups[1].section_range, 1..3);
+        // Both occurrences under Group A are `[button]` sections.
+        assert!(patch.sections[groups[1].section_range.clone()]
+            .iter()
+            .all(|s| s.name == "button"));
+        assert_eq!(groups[2].banner.as_deref(), Some("Group B"));
+        assert_eq!(groups[2].section_range, 3..4);
+        assert_eq!(
+            patch.sections[groups[2].section_range.clone()][0].name,
+            "button"
+        );
     }
 }
