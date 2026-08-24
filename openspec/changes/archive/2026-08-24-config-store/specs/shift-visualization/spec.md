@@ -19,13 +19,17 @@ The system SHALL render a colored border frame around controller panels that con
 - **WHEN** ShiftGroup::Group1 is active and a panel contains Group2 components
 - **THEN** that panel displays a dim gray border
 
-### Requirement: Status bar shift indicator
+### Requirement: Status bar shows active shift
 The system SHALL display the currently active shift group in the status bar with the group's theme color and bold styling.
 
-#### Scenario: Classic status text
-- **WHEN** the classic theme is active and shift key 3 is held
+#### Scenario: Status bar with active shift
+- **WHEN** ShiftGroup::Group3 is active and the classic theme is active
 - **THEN** the status bar shows "SHIFT 3 ACTIVE" in magenta bold text
 
 #### Scenario: Themed status text
 - **WHEN** any theme is active and a shift key is held
 - **THEN** the status bar shows "SHIFT N ACTIVE" in that theme's token for the group, bold
+
+#### Scenario: Status bar with no active shift
+- **WHEN** no shift group is active
+- **THEN** the status bar shows only the general status message without shift indicator

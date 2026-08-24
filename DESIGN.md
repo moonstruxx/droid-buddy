@@ -88,6 +88,20 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 - **Shift is a spotlight.** When a shift key (1–4) is held, panels containing that shift group get a bold colored border with a `[SHIFT n]` marker in the title; all other panels dim. The status bar repeats the active shift in its group color. The user always knows what a shift key will affect.
 - **Interaction is forgiving.** Hover reverses the component's colors; click toggles; scroll adjusts values in small steps (±0.05). Keyboard and mouse are interchangeable — the same component is targeted whether reached by `j`/`k` navigation or by pointing.
 
+## Theming
+
+Every color in the interface is a named semantic token resolved from the active theme at render time; rendering code contains no raw color literals. The token set covers component kinds (`button`, `knob`, `cv_in`, `cv_out`, `led`), shift groups (`shift1`–`shift4`), chrome (`accent`, `muted`, `text`, `status_bg`), viewer keys/hints (`viewer_key`), viewer highlights (`focus_border`, `occurrence_highlight`, `modifier_boolean`, `modifier_exact`), and the four minimap signal colors (`minimap_occurrence`, `minimap_modifier_boolean`, `minimap_modifier_exact`, `minimap_combined`).
+
+Three built-in themes ship, selected by name (case-insensitive; `-`, `_`, and space are interchangeable separators):
+
+| Theme | Character |
+|---|---|
+| `classic` | The original ANSI palette: kind colors white/magenta/cyan/green/red, shifts yellow/cyan/magenta/green, blue accents, dark-gray chrome |
+| `terminal` | Every token is `Color::Reset`, so each user's terminal scheme supplies all colors — works with custom schemes and low-color terminals |
+| `mono` | Grayscale only; shift tokens are pairwise distinct because shift groups are told apart by color alone during normal patching |
+
+The choice persists in `$XDG_CONFIG_HOME/droid-tui/config.toml` as a single `theme = "…"` key. A missing file silently selects `classic`; a malformed file or unknown name warns once on stderr at startup and falls back to `classic`. The theme is installed before the terminal UI initializes, so a session never renders with a half-selected palette.
+
 ## Component Anatomy
 
 Each component occupies a fixed cell of 16 columns × 3 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together. The factor steps through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends), and the status bar confirms each step as `Scaling: N%`.
