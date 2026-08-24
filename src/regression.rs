@@ -1087,3 +1087,178 @@ fn regression_narrow_terminal_boxed_layout_no_panic() {
         let _ = buffer_for(&mut app, w, h);
     }
 }
+
+// ── theme regression (config-store task 3.3) ─────────────────────────────
+// Each surface × theme pair renders into a real TestBackend frame with the
+// palette pinned via the test-only thread-local override, so these tests stay
+// order-independent and never touch prod `theme::init()` state.
+
+use crate::theme;
+
+/// Pins a built-in palette for the calling thread and always restores the
+/// default resolution on drop, keeping sibling tests on `classic` even when
+/// an assertion fires mid-theme.
+struct ThemedGuard;
+
+impl ThemedGuard {
+    fn pin(name: &str) -> Self {
+        theme::set_test_theme(Some(*theme::resolve(name)));
+        Self
+    }
+}
+
+impl Drop for ThemedGuard {
+    fn drop(&mut self) {
+        theme::set_test_theme(None);
+    }
+}
+
+/// Style of the first character of the first occurrence of `token`, or None
+/// when the token is not rendered anywhere in the buffer.
+fn first_token_style(buffer: &Buffer, token: &str) -> Option<Style> {
+    let area = buffer.area;
+    let want: Vec<char> = token.chars().collect();
+    for y in 0..area.height {
+        let mut chars: Vec<char> = Vec::with_capacity(area.width as usize);
+        let mut styles: Vec<Style> = Vec::with_capacity(area.width as usize);
+        for x in 0..area.width {
+            let cell = buffer.cell((x, y)).unwrap();
+            chars.push(cell.symbol().chars().next().unwrap_or(' '));
+            styles.push(cell.style());
+        }
+        if chars.len() < want.len() {
+            continue;
+        }
+        for start in 0..=chars.len() - want.len() {
+            if chars[start..start + want.len()] == want[..] {
+                return Some(styles[start]);
+            }
+        }
+    }
+    None
+}
+
+/// Whether any box-drawing glyph is drawn in `fg` (and `modifier`, when given).
+fn has_border_glyph(buffer: &Buffer, fg: Color, modifier: Option<Modifier>) -> bool {
+    const GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
+    buffer.content().iter().any(|cell| {
+        let sym = cell.symbol();
+        sym.chars().count() == 1
+            && GLYPHS.contains(&sym.chars().next().unwrap_or(' '))
+            && cell.style().fg == Some(fg)
+            && modifier.is_none_or(|m| cell.style().add_modifier.contains(m))
+    })
+}
+
+/// Spot-checks that pin `name`'s signature tokens to their documented ANSI
+/// values, guarding against silent palette drift in the classic palette.
+fn assert_classic_signature_tokens(t: &crate::theme::Theme) {
+    assert_eq!(t.shift1, Color::Yellow, "classic shift1");
+    assert_eq!(t.focus_border, Color::Yellow, "classic focus_border");
+    assert_eq!(t.occurrence_highlight, Color::Yellow, "classic occurrence");
+    assert_eq!(t.accent, Color::Blue, "classic accent");
+    assert_eq!(t.status_bg, Color::DarkGray, "classic status_bg");
+}
+
+#[test]
+fn regression_theme_boxed_cells_and_shift_surfaces() {
+    for &name in theme::THEMES {
+        let _guard = ThemedGuard::pin(name);
+        let t = *theme::resolve(name);
+        if name == "classic" {
+            assert_classic_signature_tokens(&t);
+        }
+
+        // Boxed LED cell content carries the component-kind token, framed by
+        // panel borders in the muted token while no shift is active.
+        let mut plain = led_pairs_app();
+        let buf = buffer_for(&mut plain, 100, 40);
+        let _boxed = rect_for(&plain, "B1.1");
+        let label = first_token_style(&buf, "B1.1").expect("boxed label rendered");
+        assert_eq!(label.fg, Some(t.button), "{name}: boxed cell kind color");
+        assert!(
+            has_border_glyph(&buf, t.muted, None),
+            "{name}: idle panel border muted"
+        );
+
+        // Active shift repaints affected panel borders and the status chip
+        // with the group token over the shared status background.
+        let mut shifted = App::new();
+        shifted.load_sample_patch();
+        shifted.active_shift = Some(ShiftGroup::Group1);
+        let buf = buffer_for(&mut shifted, 100, 40);
+        assert!(
+            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
+            "{name}: affected panel border uses shift1 bold"
+        );
+        // Match the full status phrase: affected panel titles also say
+        // "[SHIFT 1]", so the bare word would hit the title row first.
+        let chip = first_token_style(&buf, "SHIFT 1 ACTIVE").expect("shift status rendered");
+        assert_eq!(chip.fg, Some(t.shift1), "{name}: shift status fg");
+        assert_eq!(chip.bg, Some(t.status_bg), "{name}: status bar background");
+    }
+}
+
+#[test]
+fn regression_theme_picker_surface() {
+    for &name in theme::THEMES {
+        let _guard = ThemedGuard::pin(name);
+        let t = *theme::resolve(name);
+        if name == "classic" {
+            assert_classic_signature_tokens(&t);
+        }
+
+        let mut app = App::new();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+        let buf = buffer_for(&mut app, 100, 30);
+        let title = first_token_style(&buf, "File Picker").expect("picker title rendered");
+        assert_eq!(title.bg, Some(t.muted), "{name}: picker body background");
+        assert!(
+            has_border_glyph(&buf, t.accent, None),
+            "{name}: picker border accent"
+        );
+    }
+}
+
+#[test]
+fn regression_theme_viewer_sidebar_content_status() {
+    for &name in theme::THEMES {
+        let _guard = ThemedGuard::pin(name);
+        let t = *theme::resolve(name);
+        if name == "classic" {
+            assert_classic_signature_tokens(&t);
+        }
+
+        let mut app = fixture_app();
+        app.select_component(String::from("B1.1"));
+        open_viewer(&mut app);
+        let buf = buffer_for(&mut app, 120, 40);
+
+        // Sidebar frame uses the accent token.
+        assert!(
+            has_border_glyph(&buf, t.accent, None),
+            "{name}: sidebar border accent"
+        );
+        // Source-focused content pane gets the focus border, bold.
+        assert!(
+            has_border_glyph(&buf, t.focus_border, Some(Modifier::BOLD)),
+            "{name}: focused source border"
+        );
+        // Viewer status bar paints its background and key-hint tokens.
+        let status = first_token_style(&buf, "Source Viewer").expect("viewer status rendered");
+        assert_eq!(status.bg, Some(t.status_bg), "{name}: viewer status bg");
+        let esc = first_token_style(&buf, "ESC").expect("key hints rendered");
+        assert_eq!(esc.fg, Some(t.viewer_key), "{name}: viewer key hint fg");
+        // Current occurrence rides the occurrence-highlight token.
+        assert!(
+            has_highlighted_token(
+                &buf,
+                "B1.1",
+                Some(t.occurrence_highlight),
+                Some(Modifier::REVERSED)
+            ),
+            "{name}: current occurrence highlighted"
+        );
+    }
+}
