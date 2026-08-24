@@ -167,4 +167,8 @@ Opened with `g` then `v`, the source viewer is embedded in the existing three-ba
 
 With no patch loaded, the main area shows the centered muted prompt `Press 'l' to load a patch`.
 
-<!-- Last updated: 2026-08-24 -->
+## Visual Validation Provenance
+
+Face correctness is proven via the `insta` snapshot harness in `src/regression.rs` (`buffer_to_ansi` trims trailing empty cells, `buffer_to_html` maps fg/bg/bold/dim/reversed per span). The browsable gallery at `evidence/gallery/index.html` renders one row per scenario — fixtures `arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini` × themes `classic`/`terminal`/`mono` × widths 80/120 and viewer open/closed + shift1 — as HTML + ANSI sidecars. Output is ephemeral in the worktree (`.gitignore`'d, generated via `cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`) and durable in the OpenSpec archive (`scripts/archive-gallery.sh` mirrors into `openspec/changes/archive/add-visual-validation/evidence/gallery`); the strict gate (`cargo test` / `cargo insta test --check`) fails on any face mismatch. This is the `visual-validation` change; see `openspec/specs/visual-validation/spec.md`.
+
+<!-- Last updated: 2026-08-24 · visual-validation provenance + ephemeral/durable + strict gate -->

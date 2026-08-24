@@ -30,18 +30,19 @@ license: MIT
 - The renderer publishes `component_rects` and optional `minimap_rect` each frame; handler uses both for mouse hit-testing and proportional minimap scrolling.
 - Boxed rendering is gated on parse-time LED association: a component renders as ONE bordered cell only when `HwComponent.led` is `Some` (from an `led = L.N` assignment in its `.ini` section); the border uses the component-kind color and the LED glyph lives inside the shared box. LED-less components keep two-line text rendering; LEDs are never standalone cells.
 - The embedded viewer's panels/source column ratio is `App.viewer_split_ratio` (default 0.6, clamped 0.3–0.7, persists across `load_patch`; adjusted via `adjust_viewer_split_ratio(delta)`); `[`/`]` nudge it by exact 0.1 steps only while `showing_viewer` is true. `render_viewer_status(frame, area, app)` takes `&App` and must never let the trailing transient status message displace the hint spans.
-- `ARCHITECTURE.md` (last updated 2026-08-24) is the authoritative architecture reference; update it when the architecture changes.
+- `ARCHITECTURE.md` (last updated 2026-08-24 · visual-validation: testing strategy + CI ephemeral/durable + strict gate) is the authoritative architecture reference; update it when the architecture changes.
 
 ## Design System
 - Semantic colors (ANSI 16, terminal-dependent): component kinds — button/switch white, knob/encoder magenta, CV-in cyan, CV-out green, LED red; shift groups — 1 yellow, 2 cyan, 3 magenta, 4 green; accents — blue (header/picker/sidebar borders), dark-gray (muted/content/minimap/status background); source view — occurrences yellow, boolean/transitive modifier highlights cyan, exact-value modifier highlights magenta, current occurrence reversed.
 - Spacing grid: component cell 16×3 scaled by preset (`+`/`-` cycle 50% → 100% → 150% → 200% with wrap-around; boxed LED cells and text cells share the grid), orientation Portrait/Landscape toggled with `o`, panels/source split adjusted with `[`/`]` (30–70%, default 60/40); header 3 rows, status 3 rows, source status 3 rows, main min 10, panel padding 1, picker ~70%×50% centered, source sidebar width = source pane width / 5 (min 20), minimap width 3 and hidden when source pane width < 40 or total area < 80.
 - Modifiers: bold = emphasis, dim = de-emphasis, reversed = hover + viewer selection. No motion, radii, shadows, or elevation.
 - Glyphs: button `●`/`○`, switch `▣`/`□`, LED `◉`/`○`, knob/encoder `◉`+percentage, CV `→`/`←`, picker selection `▶`.
-- `DESIGN.md` (last updated 2026-08-23) is the authoritative design reference; update it when the design system changes.
+- `DESIGN.md` (last updated 2026-08-24 · visual-validation provenance + ephemeral/durable + strict gate) is the authoritative design reference; update it when the design system changes.
 
 ## Testing
-- 135 unit tests, in-module `#[cfg(test)]` in `src/patch.rs`, `src/handler.rs`, `src/ui.rs`, plus cross-layer tests in `src/regression.rs`; fixtures in `fixtures/` (`arpeggio1.ini`, `picker_test/`, `source_navigation.ini`, `led_pairs.ini`). Coverage includes parser spans/indexes/modifier graphs and LED association, handler selection/navigation/focus/isolation/split-ratio keys, minimap interaction, UI rendering including boxed vs text cells, and regression tests for mixed grids, boxed-cell click hit-testing, split-ratio clamp/snap, and narrow-terminal layouts.
-- Run `cargo test` before reporting completion; add unit tests for new logic alongside the code in `src/*.rs`.
+- 135+ unit/snapshot tests, in-module `#[cfg(test)]` in `src/patch.rs`, `src/handler.rs`, `src/ui.rs`, plus cross-layer and `insta` snapshot tests in `src/regression.rs` (`buffer_to_ansi` / `buffer_to_html`, `src/snapshots/`); fixtures in `fixtures/` (`arpeggio1.ini`, `picker_test/`, `source_navigation.ini`, `led_pairs.ini`). Coverage includes parser spans/indexes/modifier graphs and LED association, handler selection/navigation/focus/isolation/split-ratio keys, minimap interaction, UI rendering including boxed vs text cells, regression tests for mixed grids, boxed-cell click hit-testing, split-ratio clamp/snap, narrow-terminal layouts, plus visual-validation matrix (`arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini` × `classic`/`terminal`/`mono` × widths 80/120/100, viewer open/closed, shift1) via deterministic `TestBackend` → ANSI + HTML gallery.
+- Visual validation: ephemeral `evidence/gallery/` (HTML + ANSI sidecars, `index.html`) generated via `cargo run --bin snapshot-gallery` / `cargo test -- --generate-gallery`, `.gitignore`'d; durable mirror via `scripts/archive-gallery.sh` into `openspec/changes/archive/add-visual-validation/evidence/gallery/`; strict gate — `cargo test` and `cargo insta test --check` fail on any snapshot mismatch (insta `1` dev-dep, `cargo insta review` to accept).
+- Run `cargo test` before reporting completion; add unit tests for new logic alongside the code in `src/*.rs`; intentional face changes require `cargo insta review` acceptance and artifact verification.
 - No `unwrap()`/`expect()` outside `#[cfg(test)]` modules — `cargo clippy --all-targets --all-features --locked -- -D warnings` enforces this.
 
 ## Dependencies
@@ -53,8 +54,8 @@ license: MIT
 - CodeGraph MCP availability is governed by `.opencode/opencode-onboard.json` (`tools.codegraph` flag) — check the flag before relying on codegraph tools.
 
 ## Build & Deployment
-- Build with `cargo build`; test with `cargo test` (edition 2021).
-- No CI/CD or deployment configured yet. Add rules here when tooling is established.
+- Build with `cargo build`; test with `cargo test` (edition 2021); strict gate `cargo insta test --check` fails on face regression.
+- CI: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo insta test --check`, `cargo build --release --locked`, and uploads ephemeral `evidence/gallery/` + `*.snap.new` as `visual-gallery` artifact; gallery is durable only in OpenSpec archive via `scripts/archive-gallery.sh`.
 
 ## Git Workflow
 - Backlog platform: `browser` (work items parsed via `@ob-userstory` skill).
@@ -77,4 +78,4 @@ license: MIT
 - Authoritative circuit schema: `droid_living_examlpes/droid-lsp/src/circuits.json` (76 circuits, 10 controllers) — machine-local symlink, untracked; do not commit it.
 - DROID reference skills: `droid-patch-format` (token grammar, RAM sizes, circuit catalog), `droid-circuit-reference`, `droid-patch-cookbook` (global).
 
-<!-- Last updated: 2026-08-23T19:12:34+02:00 -->
+<!-- Last updated: 2026-08-24T visual-validation: insta harness + gallery + strict gate + ephemeral/durable archive -->
