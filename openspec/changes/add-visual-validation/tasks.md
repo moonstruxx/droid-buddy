@@ -14,8 +14,8 @@
 
 ## 3. Archive and CI durability
 
-- [ ] 3.1 Archive evidence hook — on `openspec archive add-visual-validation`, copy `evidence/gallery/` (HTML + ANSI) into `openspec/changes/archive/add-visual-validation/evidence/gallery/`; add a short archive script/note; verify `openspec archive --help` flow and file presence post-archive <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [openspec/changes/add-visual-validation/evidence/**, scripts/archive-gallery.sh] -->
-- [ ] 3.2 CI ephemeral artifact upload — configure CI to upload `evidence/gallery/` and pending `snapshots/` as artifact (no commit), retain for PR review; verify artifact appears in CI run log <!-- agent: rusty-engineer.fast, depends_on: [2.1], touches: [.github/workflows/**, .gitlab-ci.yml] -->
+- [x] 3.1 Archive evidence hook — on `openspec archive add-visual-validation`, copy `evidence/gallery/` (HTML + ANSI) into `openspec/changes/archive/add-visual-validation/evidence/gallery/`; add a short archive script/note; verify `openspec archive --help` flow and file presence post-archive <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [openspec/changes/add-visual-validation/evidence/**, scripts/archive-gallery.sh] -->
+- [x] 3.2 CI ephemeral artifact upload — configure CI to upload `evidence/gallery/` and pending `snapshots/` as artifact (no commit), retain for PR review; verify artifact appears in CI run log <!-- agent: rusty-engineer.fast, depends_on: [2.1], touches: [.github/workflows/**, .gitlab-ci.yml] -->
 
 ## 4. Docs and verification
 

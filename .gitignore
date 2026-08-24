@@ -7,5 +7,5 @@ snapshots/
 src/snapshots/
 **/*.snap.new
 *.snap.new
-evidence/
-evidence/gallery/
+/evidence/
+/evidence/gallery/
