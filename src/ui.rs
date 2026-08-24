@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -78,7 +78,7 @@ fn render_empty(frame: &mut Frame, area: Rect) {
 }
 
 const COMPONENT_WIDTH: u16 = 16;
-const COMPONENT_HEIGHT: u16 = 2;
+const COMPONENT_HEIGHT: u16 = 3;
 
 /// Render hardware components grouped into physical controller panels
 /// (P2B8, Faderbank, Notebuttons, CV I/O, ...) that mirror the hardware
@@ -119,6 +119,22 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
 
     let cols = ((area.width / COMPONENT_WIDTH).max(1)) as usize;
     let rows_for = |n: usize| -> u16 { (n.div_ceil(cols)).max(1) as u16 };
+
+    // Build a set of LED ids that are "folded" (referenced by another component
+    // and match an existing component id of kind Led). These LED components
+    // must be skipped as standalone grid cells; their owners render as boxes.
+    let folded_led_ids: HashSet<&str> = patch
+        .hw_components
+        .iter()
+        .filter(|c| c.led.is_some())
+        .filter_map(|c| c.led.as_deref())
+        .filter(|led_id| {
+            patch
+                .hw_components
+                .iter()
+                .any(|c| c.id == *led_id && c.kind == ComponentKind::Led)
+        })
+        .collect();
 
     let mut constraints: Vec<Constraint> = panel_order
         .iter()
@@ -204,11 +220,25 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
                 if col_i >= comp_chunks.len() {
                     break;
                 }
+
+                // Skip folded LED components — they are referenced by another
+                // component's `led` field and will be rendered as a box instead.
+                if comp.kind == ComponentKind::Led && folded_led_ids.contains(comp.id.as_str()) {
+                    continue;
+                }
+
                 let global_idx = index_of[comp.id.as_str()];
                 let is_hovered = app.hovered_component == Some(global_idx);
                 let is_shift_active =
                     comp.shift_group.is_some() && comp.shift_group == app.active_shift;
-                render_component(frame, comp_chunks[col_i], comp, is_hovered, is_shift_active);
+                render_component(
+                    frame,
+                    comp_chunks[col_i],
+                    comp,
+                    is_hovered,
+                    is_shift_active,
+                    patch,
+                );
                 let base_rect = comp_chunks[col_i];
                 let scaled_rect = Rect {
                     x: base_rect.x,
@@ -228,6 +258,7 @@ fn render_component(
     comp: &crate::patch::HwComponent,
     is_hovered: bool,
     is_shift_active: bool,
+    patch: &crate::patch::Patch,
 ) {
     let (symbol, state_text, fg_color): (&str, String, Color) = match comp.kind {
         ComponentKind::Button => {
@@ -306,20 +337,68 @@ fn render_component(
         Style::default().fg(fg_color)
     };
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(symbol, hover_style),
-            Span::raw(" "),
-            Span::styled(&comp.label, hover_style),
-        ]),
-        Line::from(Span::styled(
-            state_text,
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    // If this component owns a LED, render a bordered box (3 rows tall).
+    if let Some(led_id) = &comp.led {
+        // Look up the LED component by id — do not use .unwrap().
+        let led_component = patch.hw_components.iter().find(|c| c.id == led_id.as_str());
 
-    let widget = Paragraph::new(lines).alignment(Alignment::Center);
-    frame.render_widget(widget, area);
+        let (led_glyph, led_state_text) = match led_component {
+            Some(led) => match &led.state {
+                ComponentState::On | ComponentState::Active => ("◉", String::from("ON")),
+                _ => ("○", String::from("OFF")),
+            },
+            None => {
+                // LED not found in patch — fall back to unlit glyph/state.
+                ("○", String::from("OFF"))
+            }
+        };
+
+        // Hover styling applied to box content/border, same convention as text path.
+        let display_style = if is_hovered {
+            Style::default()
+                .fg(fg_color)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(fg_color)
+        };
+
+        // 3-row box: line 1 = symbol + label, line 2 = state_text + glyph + state,
+        // line 3 = empty (fills the 3‑row cell without a visual gap).
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(symbol, display_style),
+                Span::raw(" "),
+                Span::styled(&comp.label, display_style),
+            ]),
+            Line::from(Span::styled(
+                format!("{} {}", state_text, led_glyph),
+                display_style,
+            )),
+            Line::from(Span::styled(led_state_text, display_style)),
+        ];
+
+        let widget = Paragraph::new(lines).alignment(Alignment::Center);
+        frame.render_widget(widget, area);
+    } else {
+        // led: None — render the existing two‑line text cell into the 3‑row area.
+        // The Paragraph fills the available area; no gap is left below.
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(symbol, hover_style),
+                Span::raw(" "),
+                Span::styled(&comp.label, hover_style),
+            ]),
+            Line::from(Span::styled(
+                state_text,
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::raw("")), // third row filler so the 3‑row area is fully occupied
+        ];
+
+        let widget = Paragraph::new(lines).alignment(Alignment::Center);
+        frame.render_widget(widget, area);
+    }
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -1851,5 +1930,75 @@ mod tests {
                 "minimap visibility at width {w} expected {should_show}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod led_box_tests {
+    use super::*;
+    use crate::patch::Patch;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn render_at(app: &mut App, width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+    }
+
+    #[test]
+    fn led_some_renders_boxed_content() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch.clone());
+
+        render_at(&mut app, 80, 40);
+
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains("◉") || text.contains("○"),
+            "led: Some component should render LED glyph (◉ or ○)"
+        );
+        assert!(
+            text.contains("B1.1") || text.contains("P2B8"),
+            "led: Some component should render component label"
+        );
+    }
+
+    #[test]
+    fn led_none_renders_text_cell() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch.clone());
+
+        render_at(&mut app, 80, 40);
+
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains("●") || text.contains("○") || text.contains("▣") || text.contains("□"),
+            "led: None component should render text cell with symbol"
+        );
     }
 }
