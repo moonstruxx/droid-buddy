@@ -16,6 +16,7 @@ pub mod handler;
 pub mod patch;
 #[cfg(test)]
 mod regression;
+pub mod theme;
 pub mod ui;
 
 fn main() -> Result<()> {
