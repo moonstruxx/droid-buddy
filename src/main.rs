@@ -5,17 +5,9 @@ use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
 use ratatui::DefaultTerminal;
 
-use crate::app::App;
-use crate::ui::render;
-
-pub mod app;
-pub mod config;
-pub mod handler;
-pub mod patch;
-#[cfg(test)]
-mod regression;
-pub mod theme;
-pub mod ui;
+use droid_tui::app::App;
+use droid_tui::ui::render;
+use droid_tui::{config, handler, theme};
 
 fn main() -> Result<()> {
     color_eyre::install()?;

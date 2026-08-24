@@ -1456,7 +1456,10 @@ fn visual_controller_panels_arpeggio_snapshot() {
             // HTML helper sanity: non-empty and contains expected face tokens.
             assert!(!html.is_empty(), "{theme_name} {width}: html non-empty");
             // HTML is per-cell spans, so contiguous text is split across tags — check tags + ANSI instead.
-            assert!(html.contains("<span"), "{theme_name} {width}: html has spans");
+            assert!(
+                html.contains("<span"),
+                "{theme_name} {width}: html has spans"
+            );
             assert!(!html.is_empty());
 
             insta::with_settings!({snapshot_suffix => format!("arpeggio_{theme_name}_{width}")}, {
@@ -1724,4 +1727,39 @@ fn visual_theming_shift_and_mono_snapshot() {
     assert!(viewer_row.contains("<td"));
     assert!(viewer_row.len() > 200);
     insta::assert_snapshot!("viewer_shift_html_row", viewer_row);
+}
+
+// ── gallery generation hook (task 2.1) ───────────────────────────────────
+// Materializes `evidence/gallery/index.html` on demand via
+// `cargo test -- --generate-gallery` or `GENERATE_GALLERY=1 cargo test`.
+// Uses the same TestBackend + buffer_to_html path as the visual tests so
+// the gallery matches ANSI snapshots byte-for-byte.
+#[test]
+fn gallery_generate_on_flag() {
+    if !crate::gallery::should_generate_gallery() {
+        return;
+    }
+    let path = crate::gallery::generate_gallery().expect("gallery generation failed");
+    assert!(
+        path.exists(),
+        "gallery index.html written to {}",
+        path.display()
+    );
+    let html = std::fs::read_to_string(&path).expect("read gallery");
+    // Gallery must have one row per scenario and three theme columns per row.
+    assert!(html.contains("<table>"), "gallery table present");
+    assert!(
+        html.contains("data-theme=\"classic\"")
+            && html.contains("data-theme=\"terminal\"")
+            && html.contains("data-theme=\"mono\"")
+    );
+    // Spot-check that a known fixture token appears in the HTML cells
+    // (per-cell HTML is split across spans, so check for presence of
+    // hallmark tokens in ANSI sidecars as well).
+    let ansi_classic = std::fs::read_to_string("evidence/gallery/arpeggio_80_classic.ansi")
+        .expect("arpeggio ansi sidecar");
+    assert!(
+        ansi_classic.contains("P2B8") || html.contains("P2B8"),
+        "gallery contains P2B8 face"
+    );
 }
