@@ -55,6 +55,7 @@ Available engineers:
 | `rusty-engineer` | `.opencode/agents/rusty-engineer.md` | Rust application logic, monolith/layered architecture, and design patterns for the ratatui TUI |
 | `horst-engineer` | `.opencode/agents/horst-engineer.md` | Rust unit and regression testing for the ratatui TUI |
 | `dermannmitdermachine-engineer` | `.opencode/agents/dermannmitdermachine-engineer.md` | Rust application logic, DROID framework, monolith/layered architecture, and design patterns for the ratatui TUI |
+| `api-engineer` | `.opencode/agents/api-engineer.md` | API/Integration, ComfyUI-style node graphs, force-directed physics layout, and third-party integration for the ratatui TUI |
 
 The `ob-plan-apply` skill is authoritative for subagent waves, dependency ordering, retries, and concurrency. Read `agents.maxConcurrent` from `.opencode/opencode-onboard.json` before spawning workers.
 
