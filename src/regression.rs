@@ -1013,21 +1013,63 @@ fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
     );
     let buf = buffer_for(&mut app, 100, 40);
 
-    // Boxed: LED-associated button fills the 3-row cell and its third row
-    // carries the associated LED's state text.
+    // Boxed: LED-associated button fills the 3-row cell as a bordered box
+    // (controller-panels spec "Box LED-associated elements": symbol, label,
+    // state, and the LED glyph — a single state, not a second textual LED
+    // state). The label lives in the block's top title, drawn inside the
+    // border row, since a 3-row cell has no room for a border plus multiple
+    // content lines.
     let boxed = rect_for(&app, "B1.1");
     assert_eq!(boxed.height, 3, "boxed cell is COMPONENT_HEIGHT tall");
-    assert!(row_text(&buf, boxed, 0).contains("B1.1"), "label row");
+    assert!(
+        row_text(&buf, boxed, 0).contains("B1.1"),
+        "label lives in the top border's title"
+    );
     let mid = row_text(&buf, boxed, 1);
     assert!(
         mid.contains("ON") || mid.contains("OFF"),
         "state row: {mid:?}"
     );
     assert!(mid.contains('◉') || mid.contains('○'), "LED glyph in box");
-    let led_row = row_text(&buf, boxed, 2).trim().to_string();
+    let led_row = row_text(&buf, boxed, 2);
     assert!(
-        led_row == "ON" || led_row == "OFF",
-        "third row shows LED state, got {led_row:?}"
+        !led_row.contains("ON") && !led_row.contains("OFF"),
+        "bottom row is plain border, not a second textual state \
+         (droid_tui-888 duplicate OFF), got {led_row:?}"
+    );
+
+    // Border uses the element's kind color (button -> theme::active().button;
+    // knob -> theme::active().knob — controller-panels spec "Kind colors
+    // follow the theme").
+    let corner = buf
+        .cell((boxed.x, boxed.y))
+        .expect("boxed cell has a top-left corner cell");
+    assert_eq!(
+        corner.symbol(),
+        "┌",
+        "boxed cell renders a bordered box, got {:?}",
+        corner.symbol()
+    );
+    assert_eq!(
+        corner.style().fg,
+        Some(theme::active().button),
+        "border color follows the button kind"
+    );
+
+    let knob_boxed = rect_for(&app, "P1.1");
+    let knob_corner = buf
+        .cell((knob_boxed.x, knob_boxed.y))
+        .expect("boxed knob cell has a top-left corner cell");
+    assert_eq!(
+        knob_corner.symbol(),
+        "┌",
+        "boxed knob cell renders a bordered box, got {:?}",
+        knob_corner.symbol()
+    );
+    assert_eq!(
+        knob_corner.style().fg,
+        Some(theme::active().knob),
+        "border color follows the knob kind"
     );
 
     // Text: LED-less button keeps plain content with a blank filler row.
@@ -1038,6 +1080,110 @@ fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
         row_text(&buf, plain, 2).trim().is_empty(),
         "non-LED cell leaves the filler row blank"
     );
+}
+
+#[test]
+fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
+    // scale_factor used to inflate the *published* hit rect (width/height *
+    // scale_factor) while the actual rendered cell stayed COMPONENT_WIDTH x
+    // COMPONENT_HEIGHT, so at scale != 1.0 a hit rect spilled past its own
+    // cell into the neighbor's screen area: hovering the neighbor resolved
+    // to this component instead, and the highlight painted on the wrong
+    // cell (droid_tui-wmg).
+    let mut app = led_pairs_app();
+    handle_event(key(KeyCode::Char('+')), &mut app); // scale_factor away from 1.0
+    assert_ne!(app.scale_factor, 1.0);
+    let buf = buffer_for(&mut app, 100, 40);
+
+    let id_of =
+        |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
+    let rects = app.component_rects.clone();
+
+    // Every published rect matches COMPONENT_WIDTH x COMPONENT_HEIGHT (3) —
+    // the actually-rendered cell size — never a scale_factor-inflated size.
+    for (i, r) in &rects {
+        assert_eq!(
+            r.height,
+            3,
+            "{} hit rect height must match the rendered cell, not scale_factor",
+            id_of(*i)
+        );
+    }
+    // No rect spills into a neighbor's screen area.
+    for (i, a) in rects.iter().enumerate() {
+        for b in rects.iter().skip(i + 1) {
+            assert!(
+                !rects_overlap(a.1, b.1),
+                "cells {} and {} overlap at scale_factor {}",
+                id_of(a.0),
+                id_of(b.0),
+                app.scale_factor
+            );
+        }
+    }
+
+    // A mouse move over B1.2's rendered cell must resolve to B1.2, not to
+    // its neighbor B1.1 (whose hit rect used to bleed rightward into it).
+    let b12 = rect_for(&app, "B1.2");
+    let inside_b12 = (b12.x + 1, b12.y);
+    handle_mouse_event(
+        mouse(MouseEventKind::Moved, inside_b12.0, inside_b12.1),
+        &mut app,
+    );
+    assert_eq!(
+        app.hovered_component,
+        Some(idx_for(&app, "B1.2")),
+        "hover resolves to the cell under the cursor, not an inflated neighbor rect"
+    );
+    let _ = buf;
+}
+
+#[test]
+fn regression_p2b8_knobs_render_fully_with_embedded_viewer_open() {
+    // droid_tui-6vu: knobs (non-boxed, plain 3-row cells) sit in the last
+    // row of the P2B8 panel. Once droid_tui-1hg stopped over-allocating
+    // panel rows for folded LEDs, the knob row is no longer squeezed
+    // against the panel's bottom border — verify that holds with the
+    // embedded source viewer open too (the scenario the original report
+    // called out for the highlight overlap).
+    for (w, h) in [(100u16, 30u16), (120, 32), (140, 34)] {
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        open_viewer(&mut app);
+        let buf = buffer_for(&mut app, w, h);
+
+        let id_of =
+            |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
+        let rects = app.component_rects.clone();
+
+        for tok in ["P1.1", "P1.2"] {
+            let r = rects
+                .iter()
+                .find(|(i, _)| id_of(*i) == tok)
+                .unwrap_or_else(|| panic!("{tok} missing a rendered cell at {w}x{h}"))
+                .1;
+            assert_eq!(
+                r.height, 3,
+                "{tok} squished to {} rows at {w}x{h} with viewer open",
+                r.height
+            );
+            assert!(
+                r.y + r.height <= buf.area.height,
+                "{tok} clipped past the frame bottom at {w}x{h}: {r:?}"
+            );
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for b in rects.iter().skip(i + 1) {
+                assert!(
+                    !rects_overlap(a.1, b.1),
+                    "cells {} and {} overlap at {w}x{h} with viewer open",
+                    id_of(a.0),
+                    id_of(b.0)
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -1073,6 +1219,71 @@ fn regression_mixed_grid_cells_coexist_without_overlap() {
                 id_of(a.0),
                 id_of(b.0)
             );
+        }
+    }
+}
+
+#[test]
+fn regression_cell_geometry_no_overflow_overlap() {
+    // P2B8 in arpeggio1.ini has 8 buttons + 8 folded LEDs + 2 knobs (18 raw
+    // HwComponents), but only 10 are visible cells once folded LEDs are
+    // absorbed into their owning buttons' boxes. Panel height must be sized
+    // from the visible count, not the raw count, or the knobs get clipped
+    // off the bottom of the panel (droid_tui-1hg).
+    for (w, h) in [(80u16, 20u16), (100, 22), (120, 24)] {
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        let buf = buffer_for(&mut app, w, h);
+
+        let id_of =
+            |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
+        let rects = app.component_rects.clone();
+
+        for tok in [
+            "B1.1", "B1.2", "B1.3", "B1.4", "B1.5", "B1.6", "B1.7", "B1.8", "P1.1", "P1.2",
+        ] {
+            let r = rects
+                .iter()
+                .find(|(i, _)| id_of(*i) == tok)
+                .unwrap_or_else(|| {
+                    panic!("{tok} missing a rendered cell at {w}x{h} — panel clipped it")
+                })
+                .1;
+            // Overallocating rows for folded LEDs used to starve the panel's
+            // real rows of vertical space, squishing cells below their full
+            // COMPONENT_HEIGHT (droid_tui-1hg).
+            assert_eq!(
+                r.height, 3,
+                "{tok} squished to {} rows at {w}x{h} — panel row count includes folded LEDs",
+                r.height
+            );
+        }
+        for tok in [
+            "L1.1", "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
+        ] {
+            assert!(
+                !rects.iter().any(|(i, _)| id_of(*i) == tok),
+                "folded {tok} should not get its own standalone cell"
+            );
+        }
+
+        for (i, r) in &rects {
+            assert!(
+                r.x + r.width <= buf.area.width && r.y + r.height <= buf.area.height,
+                "cell for {} overflows the {w}x{h} frame: {r:?}",
+                id_of(*i)
+            );
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for b in rects.iter().skip(i + 1) {
+                assert!(
+                    !rects_overlap(a.1, b.1),
+                    "cells {} and {} overlap at {w}x{h}",
+                    id_of(a.0),
+                    id_of(b.0)
+                );
+            }
         }
     }
 }
@@ -1429,6 +1640,15 @@ fn visual_controller_panels_arpeggio_snapshot() {
                 ansi.contains("P2B8"),
                 "{theme_name} {width}: panel title P2B8 in ANSI"
             );
+            // Each P2B8 button gets a distinct, unclipped identifier — not
+            // all clipped to the same "P2B8 Button 1." (droid_tui-p2x).
+            for i in 1..=8 {
+                let tok = format!("B1.{i}");
+                assert!(
+                    ansi.contains(&tok),
+                    "{theme_name} {width}: {tok} label not clipped/merged"
+                );
+            }
 
             // Style tokens: kind colors (button white / knob magenta etc) and muted chrome.
             if let Some(style) = first_token_style(&buf, "B1.1") {
@@ -1463,6 +1683,53 @@ fn visual_controller_panels_arpeggio_snapshot() {
             assert!(!html.is_empty());
 
             insta::with_settings!({snapshot_suffix => format!("arpeggio_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn visual_multi_module_p2b8_snapshot() {
+    // droid_tui-21v / droid_tui-my3: two bare [p2b8] sections must render as
+    // two distinct module sub-blocks within one "P2B8" panel (not one flat
+    // 36-component grid), each internally in physical B.1..B.8 order.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("multi_module_p2b8");
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            assert!(
+                ansi.contains("P2B8 1"),
+                "{theme_name} {width}: module 1 sub-block title present\n{ansi}"
+            );
+            assert!(
+                ansi.contains("P2B8 2"),
+                "{theme_name} {width}: module 2 sub-block title present\n{ansi}"
+            );
+
+            // Physical order within each module: B.1 before B.8, and module 1's
+            // components all precede module 2's (no cross-instance interleaving).
+            let pos = |needle: &str| {
+                ansi.find(needle)
+                    .unwrap_or_else(|| panic!("{theme_name} {width}: {needle} missing\n{ansi}"))
+            };
+            assert!(
+                pos("B1.1") < pos("B1.8"),
+                "{theme_name} {width}: B1.1 before B1.8"
+            );
+            assert!(
+                pos("B1.8") < pos("B2.1"),
+                "{theme_name} {width}: module 1 before module 2"
+            );
+            assert!(
+                pos("B2.1") < pos("B2.8"),
+                "{theme_name} {width}: B2.1 before B2.8"
+            );
+
+            insta::with_settings!({snapshot_suffix => format!("multi_module_p2b8_{theme_name}_{width}")}, {
                 insta::assert_snapshot!(ansi);
             });
         }
@@ -1544,6 +1811,40 @@ fn visual_boxed_vs_plain_led_pairs_snapshot() {
         });
         insta::with_settings!({snapshot_suffix => format!("led_pairs_{theme_name}_100_html")}, {
             insta::assert_snapshot!(html);
+        });
+    }
+}
+
+#[test]
+fn visual_numbered_led_pairs_snapshot() {
+    // droid_tui-abt: matrixmixer-style `ledN = L.N` params (shared suffix with
+    // `buttonN`) must render B1.x/L1.x as single boxed cells with the LED folded.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = app_from_fixture("numbered_led_pairs");
+        let buf = buffer_for(&mut app, 80, 40);
+        let ansi = buffer_to_ansi(&buf);
+
+        // Parser associated both buttons via their numbered ledN sibling.
+        let patch = app.patch.as_ref().unwrap();
+        let b11 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        let b12 = patch.hw_components.iter().find(|c| c.id == "B1.2").unwrap();
+        assert_eq!(b11.led.as_deref(), Some("L1.1"), "{theme_name}: B1.1 boxed");
+        assert_eq!(b12.led.as_deref(), Some("L1.2"), "{theme_name}: B1.2 boxed");
+
+        // Both LEDs folded: no standalone L1.1/L1.2 cells.
+        let rect_ids: Vec<String> = app
+            .component_rects
+            .iter()
+            .map(|(idx, _)| patch.hw_components[*idx].id.clone())
+            .collect();
+        assert!(
+            !rect_ids.contains(&String::from("L1.1")) && !rect_ids.contains(&String::from("L1.2")),
+            "{theme_name}: numbered-pair LEDs folded"
+        );
+
+        insta::with_settings!({snapshot_suffix => format!("numbered_led_pairs_{theme_name}_80")}, {
+            insta::assert_snapshot!(ansi);
         });
     }
 }

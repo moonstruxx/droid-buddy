@@ -104,17 +104,17 @@ The choice persists in `$XDG_CONFIG_HOME/droid-tui/config.toml` as a single `the
 
 ## Component Anatomy
 
-Each component occupies a fixed cell of 16 columns × 3 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together. The factor steps through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends), and the status bar confirms each step as `Scaling: N%`.
+Each component occupies a fixed cell of 16 columns × 3 rows. A scale factor is tracked through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends) and reported in the status bar as `Scaling: N%`; it does not currently resize the rendered cells — components always render at 16×3 and the published hit rects match that fixed size.
 
 Components without a parse-time LED association render as two-line text cells:
 
 - **Row 1**: a state glyph followed by the component label (e.g. `● TRIG A`).
 - **Row 2**: the state text (ON/OFF, percentage, CV IN/CV OUT), rendered in muted gray.
 
-**Boxed cells for LED-associated components.** When a component's `.ini` section declares an LED association (`led = L.N`), parsed into `HwComponent.led`, it renders as one bordered box filling its full cell instead of a bare text cell:
+**Boxed cells for LED-associated components.** When a component's `.ini` section declares an LED association — a bare `led = L.N` entry, or a numbered circuit param `ledN = L.M` (e.g. `led11 = L1.1`) that shares its numeric suffix with a same-suffix element entry (`button11 = B1.1`, `pot11 = P1.1`) in the same section, the DROID convention for circuits like `matrixmixer` — the association is parsed into `HwComponent.led` and the component renders as one bordered box filling its full cell instead of a bare text cell:
 
 - The box border uses the owning component's kind color — button/switch white, knob/encoder magenta, CV in cyan, CV out green, LED red.
-- Inside the box: row 1 is the element symbol + label; row 2 is the element state text plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED component's live state.
+- The element symbol + label live in the box's top title row, drawn inside the border row; the single interior row holds the element state text plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED component's live state — one state, not a second textual LED state.
 - Hover applies the same reversed/dark-gray emphasis to box content and border that text cells use.
 - Components whose LED id does not resolve to an existing LED component fall back to the unlit glyph/state.
 - LEDs referenced this way are never rendered as standalone grid cells; only unreferenced LEDs appear on their own.
@@ -133,7 +133,7 @@ Glyphs by kind:
 ## Panels
 
 - Each panel is a bordered block titled with the controller name (e.g. ` P2B8 `).
-- Components are first grouped into module containers (one per circuit), then modules flow left-to-right within a row and wrap to additional rows when the terminal is too narrow; each row is exactly one component-height.
+- A panel whose components come from more than one circuit instance is subdivided into per-instance module sub-blocks, each a bordered block titled with the controller name and instance number (e.g. ` P2B8 1 `, ` P2B8 2 `), stacked vertically; within a module, components flow left-to-right and wrap to additional rows at the panel's column width. A single-instance panel renders as one flat grid, and CV I/O is never subdivided.
 - Panel layout follows the display orientation: panels stack vertically in portrait and arrange horizontally in landscape.
 - Panel borders are dark gray by default.
 - With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim to dark gray.
@@ -169,6 +169,6 @@ With no patch loaded, the main area shows the centered muted prompt `Press 'l' t
 
 ## Visual Validation Provenance
 
-Face correctness is proven via the `insta` snapshot harness in `src/regression.rs` (`buffer_to_ansi` trims trailing empty cells, `buffer_to_html` maps fg/bg/bold/dim/reversed per span). The browsable gallery at `evidence/gallery/index.html` renders one row per scenario — fixtures `arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini` × themes `classic`/`terminal`/`mono` × widths 80/120 and viewer open/closed + shift1 — as HTML + ANSI sidecars. Output is ephemeral in the worktree (`.gitignore`'d, generated via `cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`) and durable in the OpenSpec archive (`scripts/archive-gallery.sh` mirrors into `openspec/changes/archive/2026-08-24-add-visual-validation/evidence/gallery`); the strict gate (`cargo test` / `cargo insta test --check`) fails on any face mismatch. This is the `visual-validation` change; see `openspec/specs/visual-validation/spec.md`.
+Face correctness is proven via the `insta` snapshot harness in `src/regression.rs` (`buffer_to_ansi` trims trailing empty cells, `buffer_to_html` maps fg/bg/bold/dim/reversed per span). The browsable gallery at `evidence/gallery/index.html` renders one row per scenario — fixtures `arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini`, `multi_module_p2b8.ini`, `numbered_led_pairs.ini` × themes `classic`/`terminal`/`mono` × widths 80/120 and viewer open/closed + shift1 — as HTML + ANSI sidecars. Output is ephemeral in the worktree (`.gitignore`'d, generated via `cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`) and durable in the OpenSpec archive (`scripts/archive-gallery.sh` mirrors into `openspec/changes/archive/2026-08-24-add-visual-validation/evidence/gallery`); the strict gate (`cargo test` / `cargo insta test --check`) fails on any face mismatch. This is the `visual-validation` change; see `openspec/specs/visual-validation/spec.md`.
 
-<!-- Last updated: 2026-08-24 · visual-validation provenance + ephemeral/durable + strict gate -->
+<!-- Last updated: 2026-08-24 · panel-contains-modules + boxed-LED redesign: module sub-blocks in Panels, single-state boxed cell + numbered-LED pairing in Component Anatomy, scale note + new fixtures -->

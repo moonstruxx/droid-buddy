@@ -82,9 +82,15 @@ The system SHALL calculate panel layout based on module dimensions rather than f
 ### Requirement: Box LED-associated elements
 An element with an associated LED (`led: Some(...)`) SHALL render as a single bordered cell: border color from the active theme's token for the element's kind (button, knob, cv-in, cv-out, led; in the default `classic` theme these are button=white, knob=magenta, cv-in=cyan, cv-out=green, led=red); inside the border the element symbol, label, state, and the LED glyph reflecting the LED component's state. The LED component SHALL NOT render as its own standalone cell.
 
+An element's LED association is detected from two sources in its `.ini` section: a bare `led = L.N` entry (single element per section), or a numbered circuit LED param `ledN = L.M` (e.g. `led11 = L1.1`) that shares its numeric suffix with a same-suffix element entry (`button11 = B1.1`, `pot11 = P1.1`, ...) in the same section — the DROID convention for circuits like `matrixmixer` that address buttons and LEDs by a shared matrix-position suffix. The `ledN` value (`L.M`) is authoritative for the LED hardware token; its serial-position-dependent numbering is encoded by the patch author, not derived by the parser.
+
 #### Scenario: P2B8 button with LED
 - **WHEN** a P2B8 button section carries an `led = L1.N` association and the classic theme is active
 - **THEN** B1.1 renders as a bordered box with white border showing the button's symbol/label/state and the LED's glyph/state inside
+
+#### Scenario: Numbered circuit LED param pairs button and LED
+- **WHEN** a circuit section carries `button11 = B1.1` and `led11 = L1.1` (shared suffix `11`) and any theme is active
+- **THEN** B1.1 renders as a single bordered box with L1.1's glyph folded inside, and L1.1 does not render as a standalone cell
 
 #### Scenario: Knob without LED
 - **WHEN** a pot has no LED association and any theme is active
