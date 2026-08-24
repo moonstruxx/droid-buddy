@@ -394,3 +394,276 @@ mod tests {
         );
     }
 }
+/// Fixture-driven suite through the public `Graph::build_from_patch` entry
+/// point (task 2.3). Model shape, edge directions, and cluster membership are
+/// exercised against real `fixtures/` patches; synthetic inputs are used only
+/// where a fixture lacks the needed shape (named banners, invalid topologies).
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Load a fixture and build its graph, deriving clusters from the patch's
+    /// own `banner_groups` exactly as a caller would (task 1.2).
+    fn fixture_graph(name: &str) -> Graph {
+        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{name}"))).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        Graph::build_from_patch(&patch, &clusters)
+    }
+
+    /// Cluster → `(title, section_range)` snapshot for a graph.
+    fn cluster_spans(graph: &Graph) -> Vec<(String, Range<usize>)> {
+        graph
+            .clusters
+            .iter()
+            .map(|c| (c.title.clone(), c.section_range.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn arpeggio_model_shape_matches_circuit_instances() {
+        // 14 sections → 14 nodes; repeated [button] (8) and [copy] (2) names
+        // are distinct instances with zero-based indices.
+        let graph = fixture_graph("arpeggio1.ini");
+        assert_eq!(graph.nodes.len(), 14);
+
+        let buttons: Vec<&GraphNode> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.circuit == "button")
+            .collect();
+        assert_eq!(buttons.len(), 8);
+        for (i, b) in buttons.iter().enumerate() {
+            assert_eq!(b.instance_index, i);
+            assert_eq!(b.id, (String::from("button"), i));
+        }
+
+        let copies: Vec<&GraphNode> = graph.nodes.iter().filter(|n| n.circuit == "copy").collect();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies[0].instance_index, 0);
+        assert_eq!(copies[1].instance_index, 1);
+        assert_ne!(copies[0].id, copies[1].id);
+
+        // Section indices are the distinct 0..14 positions.
+        let mut section_indices: Vec<usize> = graph.nodes.iter().map(|n| n.section_index).collect();
+        section_indices.sort_unstable();
+        assert_eq!(section_indices, (0..14).collect::<Vec<_>>());
+
+        // Canonical circuit set (single occurrence of each distinct name).
+        let mut circuits: Vec<&str> = graph.nodes.iter().map(|n| n.circuit.as_str()).collect();
+        circuits.sort_unstable();
+        circuits.dedup();
+        assert_eq!(
+            circuits,
+            vec!["arpeggio", "button", "contour", "copy", "lfo", "p2b8"]
+        );
+    }
+
+    #[test]
+    fn arpeggio_edge_directions_run_from_button_sources_to_arpeggio() {
+        // Each virtual cable is produced by a [button] and consumed by the
+        // [arpeggio] section; _SCALE fans out to four select params.
+        let graph = fixture_graph("arpeggio1.ini");
+        assert_eq!(graph.edges.len(), 11);
+
+        for e in &graph.edges {
+            assert_eq!(
+                e.source,
+                (String::from("button"), 0),
+                "cable {} must be produced by the first button instance",
+                e.cable
+            );
+            assert_eq!(
+                e.sink,
+                (String::from("arpeggio"), 0),
+                "cable {} must be consumed by the arpeggio section",
+                e.cable
+            );
+        }
+
+        // _SCALE reaches four arpeggio select params (fan-out within the patch).
+        let scale_edges: Vec<&GraphEdge> =
+            graph.edges.iter().filter(|e| e.cable == "_SCALE").collect();
+        assert_eq!(scale_edges.len(), 4);
+        for e in &scale_edges {
+            assert_eq!(e.sink, (String::from("arpeggio"), 0));
+        }
+    }
+
+    #[test]
+    fn alg27_model_shape_matches_164_sections_with_repeated_instances() {
+        // 164 sections across 22 distinct circuit names; repeated names get
+        // unique ids rather than colliding.
+        let graph = fixture_graph("alg27_2.ini");
+        assert_eq!(graph.nodes.len(), 164);
+
+        let mut section_indices: Vec<usize> = graph.nodes.iter().map(|n| n.section_index).collect();
+        section_indices.sort_unstable();
+        assert_eq!(section_indices, (0..164).collect::<Vec<_>>());
+
+        let clocktools: Vec<&GraphNode> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.circuit == "clocktool")
+            .collect();
+        assert_eq!(clocktools.len(), 11);
+        let ids: std::collections::HashSet<&NodeId> = clocktools.iter().map(|n| &n.id).collect();
+        assert_eq!(
+            ids.len(),
+            11,
+            "each clocktool instance must have a distinct id"
+        );
+        for (i, ct) in clocktools.iter().enumerate() {
+            assert_eq!(ct.instance_index, i);
+        }
+    }
+
+    #[test]
+    fn alg27_pulsarclock_fans_out_twelve_edges_from_clocktool() {
+        // [clocktool] output = _PULSARCLOCK reaches 12 real sinks: the two
+        // [copy] inputs and the ten [clocktool] clock params (which resolve by
+        // name back to the first clocktool instance → self loops).
+        let graph = fixture_graph("alg27_2.ini");
+        let clk: Vec<&GraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.cable == "_PULSARCLOCK")
+            .collect();
+        assert_eq!(clk.len(), 12);
+        for e in &clk {
+            assert_eq!(e.source, (String::from("clocktool"), 0));
+        }
+        let sinks: std::collections::HashSet<&NodeId> = clk.iter().map(|e| &e.sink).collect();
+        assert_eq!(sinks.len(), 2, "sinks resolve to copy and clocktool only");
+        assert!(sinks.contains(&(String::from("clocktool"), 0)));
+        assert!(sinks.contains(&(String::from("copy"), 0)));
+    }
+
+    #[test]
+    fn alg27_matrixsel_fans_out_seven_edges_from_pot_to_matrixmixer() {
+        // `output = _MATRIXSEL` lives in a [pot] section; it is consumed by
+        // seven [matrixmixer] select params → one source, seven directed edges.
+        let graph = fixture_graph("alg27_2.ini");
+        let mx: Vec<&GraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.cable == "_MATRIXSEL")
+            .collect();
+        assert_eq!(mx.len(), 7);
+        for e in &mx {
+            assert_eq!(e.source, (String::from("pot"), 0));
+            assert_eq!(e.sink, (String::from("matrixmixer"), 0));
+        }
+    }
+
+    #[test]
+    fn cluster_membership_covers_every_node_via_fixture_banner_groups() {
+        // Real fixtures carry no named banners, so each yields one implicit
+        // unnamed group spanning all sections; every node's section_index must
+        // land inside some cluster's range (membership derivable from the model).
+        for name in ["arpeggio1.ini", "alg27_2.ini", "source_navigation.ini"] {
+            let graph = fixture_graph(name);
+            assert_eq!(graph.clusters.len(), 1, "{name} has no named banners");
+            for node in &graph.nodes {
+                assert!(
+                    graph
+                        .clusters
+                        .iter()
+                        .any(|c| c.section_range.contains(&node.section_index)),
+                    "{name}: node {} (section {}) not covered by any cluster",
+                    node.circuit,
+                    node.section_index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cluster_membership_matches_named_banner_ranges_synthetic() {
+        // Fixtures lack named banners, so exercise multi-banner membership on a
+        // synthetic patch (allowed by the task where the fixture lacks the shape).
+        let content = "\
+# ---- Pulsar ----
+[clocktool]
+    output = _CLK
+[copy]
+    input = _CLK
+# ---- Steady ----
+[osc]
+    input = _CLK
+[p2b8]
+";
+        let patch = Patch::from_ini_str(content, String::from("clusters")).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let graph = Graph::build_from_patch(&patch, &clusters);
+
+        assert_eq!(
+            cluster_spans(&graph),
+            vec![
+                (String::from("Pulsar"), 0..2),
+                (String::from("Steady"), 2..4),
+            ]
+        );
+
+        let clocktool = graph
+            .nodes
+            .iter()
+            .find(|n| n.circuit == "clocktool")
+            .unwrap();
+        let osc = graph.nodes.iter().find(|n| n.circuit == "osc").unwrap();
+        assert!(graph.clusters[0]
+            .section_range
+            .contains(&clocktool.section_index));
+        assert!(graph.clusters[1].section_range.contains(&osc.section_index));
+        assert!(!graph.clusters[1]
+            .section_range
+            .contains(&clocktool.section_index));
+    }
+
+    #[test]
+    fn arpeggio_fixture_is_topologically_valid() {
+        // All eight real cables have exactly one source → no validation issues.
+        let graph = fixture_graph("arpeggio1.ini");
+        assert!(
+            graph.validation.is_empty(),
+            "arpeggio1.ini must be valid, got {:?}",
+            graph.validation
+        );
+    }
+
+    #[test]
+    fn alg27_fixture_flags_dangling_cable_as_warning() {
+        // `_CHANSEL` is consumed in real params but produced by no `output =`:
+        // a genuine dangling reference (externally sourced in the real patch).
+        // Cables with exactly one source (_PULSARCLOCK, _MATRIXSEL, _MATRIXEDIT)
+        // are not flagged.
+        let graph = fixture_graph("alg27_2.ini");
+        let by_cable: HashMap<&str, TopologySeverity> = graph
+            .validation
+            .iter()
+            .map(|i| (i.cable.as_str(), i.severity))
+            .collect();
+        assert_eq!(
+            by_cable.get("_CHANSEL"),
+            Some(&TopologySeverity::Warning),
+            "dangling _CHANSEL must be a warning"
+        );
+        assert_eq!(by_cable.get("_PULSARCLOCK"), None);
+        assert_eq!(by_cable.get("_MATRIXSEL"), None);
+        assert_eq!(by_cable.get("_MATRIXEDIT"), None);
+    }
+}
