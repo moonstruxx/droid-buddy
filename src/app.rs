@@ -81,6 +81,10 @@ pub struct App {
     pub scale_factor: f32,
     /// Current display orientation.
     pub orientation: Orientation,
+    /// Split ratio for viewer/source pane division (0.3 to 0.7).
+    /// 0.6 means panels get 60%, source gets 40%.
+    /// This is a view preference that persists across patch loads.
+    pub viewer_split_ratio: f32,
 }
 
 impl App {
@@ -106,6 +110,7 @@ impl App {
             minimap_rect: None,
             scale_factor: 1.0,
             orientation: Orientation::Portrait,
+            viewer_split_ratio: 0.6,
         }
     }
 
@@ -143,6 +148,11 @@ impl App {
         self.source_view_mode = SourceViewMode::Raw;
         self.viewer_focus = ViewerFocus::Panels;
         self.minimap_rect = None;
+    }
+
+    /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
+    pub fn adjust_viewer_split_ratio(&mut self, delta: f32) {
+        self.viewer_split_ratio = (self.viewer_split_ratio + delta).clamp(0.3, 0.7);
     }
 
     pub fn load_sample_patch(&mut self) {
@@ -372,5 +382,38 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         assert_eq!(app.patch.as_ref().unwrap().name, "arpeggio1");
+    }
+
+    #[test]
+    fn viewer_split_ratio_defaults_to_0_6() {
+        let app = App::new();
+        assert_eq!(app.viewer_split_ratio, 0.6);
+    }
+
+    #[test]
+    fn adjust_viewer_split_ratio_clamps() {
+        let mut app = App::new();
+
+        // Adjusting +0.2 from 0.6 should clamp to 0.7
+        app.adjust_viewer_split_ratio(0.2);
+        assert_eq!(app.viewer_split_ratio, 0.7);
+
+        // Reset to 0.6 and adjust -0.5, should clamp to 0.3
+        app.viewer_split_ratio = 0.6;
+        app.adjust_viewer_split_ratio(-0.5);
+        assert_eq!(app.viewer_split_ratio, 0.3);
+
+        // Adjusting within bounds should work fine
+        app.viewer_split_ratio = 0.5;
+        app.adjust_viewer_split_ratio(0.1);
+        assert_eq!(app.viewer_split_ratio, 0.6);
+
+        app.viewer_split_ratio = 0.3;
+        app.adjust_viewer_split_ratio(-0.1);
+        assert_eq!(app.viewer_split_ratio, 0.3);
+
+        app.viewer_split_ratio = 0.7;
+        app.adjust_viewer_split_ratio(0.1);
+        assert_eq!(app.viewer_split_ratio, 0.7);
     }
 }
