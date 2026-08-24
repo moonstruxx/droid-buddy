@@ -78,3 +78,25 @@ The system SHALL calculate panel layout based on module dimensions rather than f
 #### Scenario: Panel wraps at terminal boundary
 - **WHEN** the sum of module widths exceeds terminal width
 - **THEN** subsequent modules wrap to the next row within the panel
+
+### Requirement: Box LED-associated elements
+An element with an associated LED (`led: Some(...)`) SHALL render as a single bordered cell: border color from the element's kind color (button=white, knob=magenta, cv-in=cyan, cv-out=green, led=red); inside the border the element symbol, label, state, and the LED glyph reflecting the LED component's state. The LED component SHALL NOT render as its own standalone cell.
+
+#### Scenario: P2B8 button with LED
+- **WHEN** a P2B8 button section carries an `led = L1.N` association
+- **THEN** B1.1 renders as a bordered box with white border showing the button's symbol/label/state and the LED's glyph/state inside
+
+#### Scenario: Knob without LED
+- **WHEN** a pot has no LED association
+- **THEN** it renders as the two-line text cell (no border, no box)
+
+### Requirement: Box geometry and hit-testing
+Boxed cells use the updated component cell geometry (height 3). The published component geometry SHALL reflect the boxed cell for click hit-testing.
+
+#### Scenario: Click on boxed cell
+- **WHEN** the user clicks anywhere inside a bordered box
+- **THEN** the element toggles/selects
+
+#### Scenario: LED state changes
+- **WHEN** the LED state of a boxed element changes
+- **THEN** the glyph inside the box updates accordingly

@@ -97,6 +97,22 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 };
                 return false;
             }
+            crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']') => {
+                let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
+                    -0.1
+                } else {
+                    0.1
+                };
+                app.adjust_viewer_split_ratio(delta);
+                // Snap to a clean 0.1 step so repeated presses stay exact
+                // (avoids float drift such as 0.7000000000000001).
+                app.viewer_split_ratio = (app.viewer_split_ratio * 10.0).round() / 10.0;
+                let pct_panels = app.viewer_split_ratio * 100.0;
+                let pct_source = 100.0 - pct_panels;
+                app.status_message =
+                    format!("Panels/Source split: {:.0}%/{:.0}%", pct_panels, pct_source);
+                return false;
+            }
             _ => {}
         }
 
@@ -613,6 +629,55 @@ mod tests {
         // At the top preset, '+' wraps around to the bottom.
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 0.5);
+    }
+
+    /// Open the embedded source viewer via `g` then `v`.
+    fn open_viewer(app: &mut App) {
+        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
+        handle_event(key(crossterm::event::KeyCode::Char('v')), app);
+        assert!(app.showing_viewer);
+    }
+
+    #[test]
+    fn bracket_split_keys_noop_when_viewer_closed() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.6);
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.6);
+        assert_eq!(
+            app.status_message,
+            String::from("No patch loaded. Press 'l' to load.")
+        );
+    }
+
+    #[test]
+    fn close_bracket_increases_split_ratio_by_0_1_and_clamps_at_0_7() {
+        let mut app = App::new();
+        open_viewer(&mut app);
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.7);
+        assert_eq!(app.status_message, "Panels/Source split: 70%/30%");
+        // Further presses clamp at the upper bound.
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.7);
+    }
+
+    #[test]
+    fn open_bracket_decreases_split_ratio_by_0_1_and_clamps_at_0_3() {
+        let mut app = App::new();
+        open_viewer(&mut app);
+        // Steps 0.6 -> 0.5 -> 0.4 -> 0.3.
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.5);
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.4);
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.3);
+        assert_eq!(app.status_message, "Panels/Source split: 30%/70%");
+        // Further presses clamp at the lower bound.
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.3);
     }
 
     #[test]

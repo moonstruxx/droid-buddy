@@ -7,15 +7,19 @@ Embedded source-pane layout for displaying DROID `.ini` patch source in the main
 ## Requirements
 
 ### Requirement: Embedded source pane layout
-The source viewer SHALL render as an embedded split pane of the main TUI instead of a separate process window: hardware panels on the left, source pane on the right, with the file-picker overlay taking precedence over the source pane when open.
+The source viewer SHALL render as an embedded split pane of the main TUI instead of a separate process window, with the panels | source column split ratio adjustable and defaulting in favor of the panels (60% panels / 40% source).
 
-#### Scenario: Embedded split replaces external window
-- **WHEN** user presses `g` then `v`
-- **THEN** the source pane appears inside the running TUI; no second process, herdr pane, or terminal window is spawned
+#### Scenario: Default split
+- **WHEN** the user opens the source viewer
+- **THEN** the panels column takes 60% of the width and the source pane takes 40%
 
-#### Scenario: Picker precedence preserved
-- **WHEN** the source pane is open and the user opens the file picker
-- **THEN** the picker overlay renders above the source pane
+#### Scenario: Adjust ratio
+- **WHEN** the user presses `[` or `]` while the source viewer is open
+- **THEN** the source pane narrows or widens by ±10% per keypress
+
+#### Scenario: Ratio clamped
+- **WHEN** the user adjusts past the bounds
+- **THEN** the source pane never takes more than 70% or less than 30% of the width
 
 ### Requirement: Two-pane circuit layout
 The source pane SHALL keep the diff-viewer style two-pane layout: a left sidebar listing circuits and a main area rendering circuit content. The sidebar occupies ~20% width (minimum 20 columns, capped so the main area retains at least 20 columns), bordered `Color::Blue` titled "Circuits"; the main area occupies the remaining width bordered `Color::DarkGray`.
