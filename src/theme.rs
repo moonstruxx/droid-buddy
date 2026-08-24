@@ -35,6 +35,13 @@ pub struct Theme {
     pub graph_port_output: Color,
     pub graph_cluster_border: Color,
     pub graph_cluster_title: Color,
+    /// Cable edge color by inferred kind (design D8): control, audio, midi,
+    /// and the unknown fallback, plus the topology-error highlight.
+    pub graph_edge_control: Color,
+    pub graph_edge_audio: Color,
+    pub graph_edge_midi: Color,
+    pub graph_edge_unknown: Color,
+    pub graph_edge_error: Color,
 }
 
 impl Theme {
@@ -70,6 +77,11 @@ impl Theme {
             graph_port_output: Color::Green,
             graph_cluster_border: Color::Blue,
             graph_cluster_title: Color::Blue,
+            graph_edge_control: Color::Cyan,
+            graph_edge_audio: Color::Green,
+            graph_edge_midi: Color::Magenta,
+            graph_edge_unknown: Color::DarkGray,
+            graph_edge_error: Color::Red,
         }
     }
 
@@ -105,6 +117,11 @@ impl Theme {
             graph_port_output: Color::Reset,
             graph_cluster_border: Color::Reset,
             graph_cluster_title: Color::Reset,
+            graph_edge_control: Color::Reset,
+            graph_edge_audio: Color::Reset,
+            graph_edge_midi: Color::Reset,
+            graph_edge_unknown: Color::Reset,
+            graph_edge_error: Color::Reset,
         }
     }
 
@@ -143,6 +160,14 @@ impl Theme {
             graph_port_output: Color::White,
             graph_cluster_border: Color::White,
             graph_cluster_title: Color::Gray,
+            // The four edge kinds plus error must stay pairwise distinct in mono:
+            // type/severity is carried by color alone. Only four gray shades exist,
+            // so `unknown` falls back to the terminal default (Reset) as neutral.
+            graph_edge_control: Color::White,
+            graph_edge_audio: Color::Gray,
+            graph_edge_midi: Color::DarkGray,
+            graph_edge_unknown: Color::Reset,
+            graph_edge_error: Color::Black,
         }
     }
 }
@@ -260,6 +285,11 @@ mod tests {
         assert_eq!(t.graph_port_output, Color::Green);
         assert_eq!(t.graph_cluster_border, Color::Blue);
         assert_eq!(t.graph_cluster_title, Color::Blue);
+        assert_eq!(t.graph_edge_control, Color::Cyan);
+        assert_eq!(t.graph_edge_audio, Color::Green);
+        assert_eq!(t.graph_edge_midi, Color::Magenta);
+        assert_eq!(t.graph_edge_unknown, Color::DarkGray);
+        assert_eq!(t.graph_edge_error, Color::Red);
     }
 
     #[test]
@@ -294,6 +324,11 @@ mod tests {
             t.graph_port_output,
             t.graph_cluster_border,
             t.graph_cluster_title,
+            t.graph_edge_control,
+            t.graph_edge_audio,
+            t.graph_edge_midi,
+            t.graph_edge_unknown,
+            t.graph_edge_error,
         ] {
             assert_eq!(color, Color::Reset);
         }
@@ -318,6 +353,23 @@ mod tests {
         assert_ne!(t.modifier_boolean, t.modifier_exact);
         assert_ne!(t.minimap_occurrence, t.minimap_combined);
         assert_ne!(t.minimap_modifier_boolean, t.minimap_modifier_exact);
+    }
+
+    #[test]
+    fn mono_edge_tokens_are_pairwise_distinct() {
+        let t = Theme::mono();
+        let edges = [
+            t.graph_edge_control,
+            t.graph_edge_audio,
+            t.graph_edge_midi,
+            t.graph_edge_unknown,
+            t.graph_edge_error,
+        ];
+        for (i, a) in edges.iter().enumerate() {
+            for b in &edges[i + 1..] {
+                assert_ne!(a, b, "edge kind/error tokens must be pairwise distinct");
+            }
+        }
     }
 
     #[test]

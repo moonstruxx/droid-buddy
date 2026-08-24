@@ -697,10 +697,11 @@ const GRAPH_NODE_HEIGHT: u16 = 5;
 const GRAPH_CLUSTER_PADDING: u16 = 2;
 
 /// Render the full-screen signal-flow graph surface (design D8): cluster
-/// containers from banner groups first, then rounded node frames with title
-/// bars and left/right edge ports on top. The graph view takes over the whole
-/// main area like the source viewer, never an overlay mixed with panels.
-/// Edge polylines are task 5.2 and deliberately not drawn here.
+/// containers from banner groups, then cable edge polylines, then rounded node
+/// frames with title bars and left/right edge ports on top. Edges draw before
+/// nodes so the node frames cover the port cells for a clean join. The graph
+/// view takes over the whole main area like the source viewer, never an
+/// overlay mixed with panels.
 fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     app.clear_graph_cluster_rects();
     if area.width == 0 || area.height == 0 {
@@ -742,6 +743,8 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             render_graph_cluster_frame(frame, rect, cluster);
         }
     }
+    // Edges before nodes so node frames draw over the port cells.
+    render_graph_edges(frame, area, graph, &node_rects);
     for (i, node) in graph.nodes.iter().enumerate() {
         let node_rect = node_rects[i];
         node_rect_field.push((i, node_rect));
@@ -802,6 +805,173 @@ fn graph_node_title(node: &GraphNode) -> String {
         node.circuit.clone()
     } else {
         format!("{} {}", node.circuit, node.instance_index)
+    }
+}
+
+/// Inferred cable type for edge coloring (design D8). DROID cables carry no
+/// type; the kind is guessed from the producing circuit's name and is a visual
+/// aid only. Topology and validation never depend on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CableKind {
+    Control,
+    Audio,
+    Midi,
+    Unknown,
+}
+
+impl CableKind {
+    /// Classify a producing circuit's output: clock/gate/trigger/pulsar/div
+    /// emit control signals; midi/note/seq/pitch emit musical/midi signals;
+    /// anything else is treated as audio/CV.
+    fn from_circuit(circuit: &str) -> CableKind {
+        let name = circuit.to_ascii_lowercase();
+        if ["clock", "gate", "trigger", "pulsar", "div"]
+            .iter()
+            .any(|k| name.contains(k))
+        {
+            CableKind::Control
+        } else if ["midi", "note", "seq", "pitch"]
+            .iter()
+            .any(|k| name.contains(k))
+        {
+            CableKind::Midi
+        } else {
+            CableKind::Audio
+        }
+    }
+}
+
+/// The producing circuit of a cable: the source end of the first edge carrying
+/// it, resolved to a node's circuit name.
+fn cable_source_circuit<'a>(graph: &'a Graph, cable: &str) -> Option<&'a str> {
+    let source = graph
+        .edges
+        .iter()
+        .find(|e| e.cable == cable)?
+        .source
+        .clone();
+    graph
+        .nodes
+        .iter()
+        .find(|n| n.id == source)
+        .map(|n| n.circuit.as_str())
+}
+
+/// Cable kind inferred from its producing circuit; `Unknown` when no edge
+/// produces it.
+fn cable_kind(graph: &Graph, cable: &str) -> CableKind {
+    match cable_source_circuit(graph, cable) {
+        Some(circuit) => CableKind::from_circuit(circuit),
+        None => CableKind::Unknown,
+    }
+}
+
+/// The fg color for a cable's edge: the topology-error highlight when any
+/// issue references the cable, else the inferred-kind token.
+fn cable_color(graph: &Graph, cable: &str) -> Color {
+    let theme = theme::active();
+    if graph.validation.iter().any(|issue| issue.cable == cable) {
+        return theme.graph_edge_error;
+    }
+    match cable_kind(graph, cable) {
+        CableKind::Control => theme.graph_edge_control,
+        CableKind::Audio => theme.graph_edge_audio,
+        CableKind::Midi => theme.graph_edge_midi,
+        CableKind::Unknown => theme.graph_edge_unknown,
+    }
+}
+
+/// The box-drawing glyph for a polyline cell given which orthogonal neighbors
+/// also belong to the polyline. A cell with a single neighbor gets a straight
+/// run along that axis; its missing neighbor is the port, covered by the node.
+fn box_drawing_char(up: bool, down: bool, left: bool, right: bool) -> char {
+    match (up, down, left, right) {
+        (true, true, false, false) => '│',
+        (false, false, true, true) => '─',
+        (false, true, false, true) => '┌',
+        (false, true, true, false) => '┐',
+        (true, false, false, true) => '└',
+        (true, false, true, false) => '┘',
+        (true, true, false, true) => '├',
+        (true, true, true, false) => '┤',
+        (false, true, true, true) => '┬',
+        (true, false, true, true) => '┴',
+        (true, true, true, true) => '┼',
+        (true, false, false, false) | (false, true, false, false) => '│',
+        (false, false, true, false) | (false, false, false, true) => '─',
+        _ => '╳',
+    }
+}
+
+/// All cells of the deterministic 3-segment polyline between a source port
+/// (right edge of the source node) and a sink port (left edge of the sink):
+/// a horizontal run out of the source, a vertical connector, a horizontal run
+/// into the sink.
+fn polyline_cells(x_s: i16, y_s: i16, x_t: i16, y_t: i16) -> Vec<(i16, i16)> {
+    let mid_x = (x_s + x_t) / 2;
+    let mut cells = Vec::new();
+    for x in x_s.min(mid_x)..=x_s.max(mid_x) {
+        cells.push((x, y_s));
+    }
+    for y in y_s.min(y_t)..=y_s.max(y_t) {
+        cells.push((mid_x, y));
+    }
+    for x in x_t.min(mid_x)..=x_t.max(mid_x) {
+        cells.push((x, y_t));
+    }
+    cells
+}
+
+/// Draw every cable as a colored box-drawing polyline between its ports,
+/// clipped to `area`. Edges draw before node frames so the frames cover the
+/// port cells for a clean join. When two polylines share a cell the later
+/// edge in `graph.edges` wins, keeping crossings deterministic.
+fn render_graph_edges(frame: &mut Frame, area: Rect, graph: &Graph, node_rects: &[Rect]) {
+    for edge in &graph.edges {
+        let (Some(src), Some(sink)) = (
+            graph.nodes.iter().position(|n| n.id == edge.source),
+            graph.nodes.iter().position(|n| n.id == edge.sink),
+        ) else {
+            continue;
+        };
+        let src_rect = node_rects[src];
+        let sink_rect = node_rects[sink];
+        let x_s = src_rect.x as i16 + src_rect.width as i16 - 1;
+        let y_s = src_rect.y as i16 + src_rect.height as i16 / 2;
+        let x_t = sink_rect.x as i16;
+        let y_t = sink_rect.y as i16 + sink_rect.height as i16 / 2;
+        if x_s == x_t && y_s == y_t {
+            continue; // coincident nodes: zero-length edge, nothing to draw
+        }
+        let raw = polyline_cells(x_s, y_s, x_t, y_t);
+        let mut cells: Vec<(i16, i16)> = Vec::new();
+        for cell in raw {
+            if !cells.contains(&cell) {
+                cells.push(cell);
+            }
+        }
+        let color = cable_color(graph, &edge.cable);
+        let style = Style::default().fg(color);
+        let (ax, ay, aw, ah) = (
+            area.x as i16,
+            area.y as i16,
+            area.width as i16,
+            area.height as i16,
+        );
+        for &(cx, cy) in &cells {
+            if cx < ax || cx >= ax + aw || cy < ay || cy >= ay + ah {
+                continue; // clipped at the surface
+            }
+            let ch = box_drawing_char(
+                cells.contains(&(cx, cy - 1)),
+                cells.contains(&(cx, cy + 1)),
+                cells.contains(&(cx - 1, cy)),
+                cells.contains(&(cx + 1, cy)),
+            );
+            frame
+                .buffer_mut()
+                .set_string(cx as u16, cy as u16, ch.to_string().as_str(), style);
+        }
     }
 }
 
@@ -2574,8 +2744,10 @@ mod led_box_tests {
 #[cfg(test)]
 mod graph_view_tests {
     use super::*;
+    use crate::graph::{GraphEdge, TopologyIssue, TopologySeverity};
     use crate::patch::Patch;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
     /// A synthetic patch with two named banner groups (clusters) and one cable
@@ -2682,5 +2854,349 @@ mod graph_view_tests {
         app.open_graph();
         let text = rendered_text(&mut app, 80, 24);
         assert!(text.contains("No patch loaded"));
+    }
+
+    // ---- task 5.2 edge rendering ----
+
+    /// The graph surface `render_graph` receives: the terminal minus the 3-row
+    /// header and 3-row status bar (mirrors the layout in `render`).
+    fn graph_main_area(width: u16, height: u16) -> Rect {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(3),
+            ])
+            .split(Rect::new(0, 0, width, height))[1]
+    }
+
+    /// An `App` in the graph view with a hand-built graph and frozen positions,
+    /// giving tests full control over node geometry.
+    fn graph_app_from(graph: Graph, positions: Vec<(f32, f32)>) -> App {
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = positions;
+        app.graph_cluster_rects.clear();
+        app.graph_node_rects.clear();
+        app.showing_graph = true;
+        app
+    }
+
+    fn node(name: &str, idx: usize, circuit: &str, section_index: usize) -> GraphNode {
+        GraphNode {
+            id: (name.to_string(), idx),
+            circuit: circuit.to_string(),
+            instance_index: idx,
+            section_index,
+        }
+    }
+
+    /// In-area cells of an edge's polyline, mirroring `render_graph_edges`.
+    fn edge_cells(buf: &Buffer, app: &App, cable: &str) -> Vec<(u16, u16)> {
+        let graph = app.graph.as_ref().unwrap();
+        let area = graph_main_area(buf.area.width, buf.area.height);
+        let node_rects = graph_node_rects(&app.graph_positions, area, &graph.nodes);
+        let edge = graph.edges.iter().find(|e| e.cable == cable).unwrap();
+        let src = graph
+            .nodes
+            .iter()
+            .position(|n| n.id == edge.source)
+            .unwrap();
+        let sink = graph.nodes.iter().position(|n| n.id == edge.sink).unwrap();
+        let s = node_rects[src];
+        let t = node_rects[sink];
+        let x_s = s.x as i16 + s.width as i16 - 1;
+        let y_s = s.y as i16 + s.height as i16 / 2;
+        let x_t = t.x as i16;
+        let y_t = t.y as i16 + t.height as i16 / 2;
+        polyline_cells(x_s, y_s, x_t, y_t)
+            .into_iter()
+            .filter(|&(cx, cy)| {
+                cx >= area.x as i16
+                    && cx < area.x as i16 + area.width as i16
+                    && cy >= area.y as i16
+                    && cy < area.y as i16 + area.height as i16
+            })
+            .map(|(cx, cy)| (cx as u16, cy as u16))
+            .collect()
+    }
+
+    /// All cells covered by any cable other than `cable`; the later-drawn edge
+    /// owns a shared cell, so those cells are not asserted on one cable.
+    fn other_cable_cells(buf: &Buffer, app: &App, cable: &str) -> Vec<(u16, u16)> {
+        let mut others: Vec<(u16, u16)> = Vec::new();
+        for c in app
+            .graph
+            .as_ref()
+            .unwrap()
+            .edges
+            .iter()
+            .map(|e| e.cable.as_str())
+        {
+            if c == cable {
+                continue;
+            }
+            for cell in edge_cells(buf, app, c) {
+                if !others.contains(&cell) {
+                    others.push(cell);
+                }
+            }
+        }
+        others
+    }
+
+    /// Assert every non-port, non-shared cell of `cable`'s polyline holds a
+    /// box-drawing glyph colored `expected` and stays inside `area`.
+    fn assert_edge_drawn(buf: &Buffer, app: &App, cable: &str, expected: Color) {
+        let graph = app.graph.as_ref().unwrap();
+        let area = graph_main_area(buf.area.width, buf.area.height);
+        let edge = graph.edges.iter().find(|e| e.cable == cable).unwrap();
+        let src = graph
+            .nodes
+            .iter()
+            .position(|n| n.id == edge.source)
+            .unwrap();
+        let sink = graph.nodes.iter().position(|n| n.id == edge.sink).unwrap();
+        let node_rects = graph_node_rects(&app.graph_positions, area, &graph.nodes);
+        let s = node_rects[src];
+        let t = node_rects[sink];
+        let port_s = (s.x + s.width - 1, s.y + s.height / 2);
+        let port_t = (t.x, t.y + t.height / 2);
+        let shared = other_cable_cells(buf, app, cable);
+        let node_covered: Vec<(u16, u16)> = node_rects
+            .iter()
+            .flat_map(|r| {
+                (r.x..r.x + r.width).flat_map(move |x| (r.y..r.y + r.height).map(move |y| (x, y)))
+            })
+            .collect();
+        for (cx, cy) in edge_cells(buf, app, cable) {
+            if (cx, cy) == port_s || (cx, cy) == port_t {
+                continue; // port cells are covered by the node frame
+            }
+            if shared.contains(&(cx, cy)) {
+                continue; // later-drawn edge owns shared cells
+            }
+            if node_covered.contains(&(cx, cy)) {
+                continue; // node frame draws over the edge here
+            }
+            let cell = buf.cell((cx, cy)).unwrap();
+            assert!(
+                ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"].contains(&cell.symbol()),
+                "cable {cable} cell ({cx},{cy}) is not a box glyph: {:?}",
+                cell.symbol()
+            );
+            assert_eq!(cell.fg, expected, "cable {cable} cell ({cx},{cy}) color");
+            assert!(
+                cx < area.x + area.width && cy < area.y + area.height,
+                "cable {cable} cell ({cx},{cy}) escaped the surface"
+            );
+        }
+    }
+
+    #[test]
+    fn cable_kind_classifies_by_producing_circuit() {
+        assert_eq!(CableKind::from_circuit("clocktool"), CableKind::Control);
+        assert_eq!(CableKind::from_circuit("divider"), CableKind::Control);
+        assert_eq!(CableKind::from_circuit("trigger2"), CableKind::Control);
+        assert_eq!(CableKind::from_circuit("midi"), CableKind::Midi);
+        assert_eq!(CableKind::from_circuit("notesequencer"), CableKind::Midi);
+        assert_eq!(CableKind::from_circuit("osc"), CableKind::Audio);
+        assert_eq!(CableKind::from_circuit("vca"), CableKind::Audio);
+    }
+
+    #[test]
+    fn cable_color_maps_each_inferred_kind_to_its_token() {
+        let graph = Graph {
+            nodes: vec![
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+                node("midi", 0, "midi", 2),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".into(),
+                    source: ("clock".into(), 0),
+                    sink: ("osc".into(), 0),
+                },
+                GraphEdge {
+                    cable: "_AUD".into(),
+                    source: ("osc".into(), 0),
+                    sink: ("midi".into(), 0),
+                },
+                GraphEdge {
+                    cable: "_NOTE".into(),
+                    source: ("midi".into(), 0),
+                    sink: ("clock".into(), 0),
+                },
+            ],
+            clusters: vec![],
+            validation: vec![],
+        };
+        assert_eq!(cable_color(&graph, "_CLK"), Color::Cyan, "control");
+        assert_eq!(cable_color(&graph, "_AUD"), Color::Green, "audio");
+        assert_eq!(cable_color(&graph, "_NOTE"), Color::Magenta, "midi");
+        assert_eq!(
+            cable_color(&graph, "_MISSING"),
+            Color::DarkGray,
+            "no producing edge -> unknown"
+        );
+    }
+
+    #[test]
+    fn cable_color_error_token_overrides_inferred_kind() {
+        let mut graph = Graph {
+            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![],
+            validation: vec![],
+        };
+        assert_eq!(cable_color(&graph, "_CLK"), Color::Cyan);
+        graph.validation.push(TopologyIssue {
+            cable: "_CLK".into(),
+            severity: TopologySeverity::Error,
+            message: "n -> 1".into(),
+        });
+        assert_eq!(
+            cable_color(&graph, "_CLK"),
+            Color::Red,
+            "a referenced cable renders with the error token"
+        );
+    }
+
+    #[test]
+    fn straight_edge_renders_box_characters_between_ports() {
+        // Two nodes on the same row: the edge is a single horizontal run.
+        let graph = Graph {
+            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![],
+            validation: vec![],
+        };
+        let mut app = graph_app_from(graph, vec![(0.0, 0.5), (1.0, 0.5)]);
+        let buf = buffer_for(&mut app, 120, 40);
+        assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
+        // The source is clocktool (control -> cyan); spot-check an interior cell.
+        let cells = edge_cells(&buf, &app, "_CLK");
+        assert!(cells.len() > 2, "a straight edge must span several cells");
+        let interior = cells[cells.len() / 2];
+        assert_eq!(buf.cell(interior).unwrap().symbol(), "─");
+        assert_eq!(buf.cell(interior).unwrap().fg, Color::Cyan);
+    }
+
+    #[test]
+    fn crossing_edges_render_without_panic_and_later_wins() {
+        // Square layout: A--C and B--D are diagonals whose vertical connectors
+        // share the midpoint column, so the two polylines cross there.
+        let graph = Graph {
+            nodes: vec![
+                node("a", 0, "clocktool", 0),
+                node("b", 0, "osc", 1),
+                node("c", 0, "osc", 2),
+                node("d", 0, "vca", 3),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".into(),
+                    source: ("a".into(), 0),
+                    sink: ("c".into(), 0),
+                },
+                GraphEdge {
+                    cable: "_AUD".into(),
+                    source: ("b".into(), 0),
+                    sink: ("d".into(), 0),
+                },
+            ],
+            clusters: vec![],
+            validation: vec![],
+        };
+        let mut app = graph_app_from(graph, vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
+        let buf = buffer_for(&mut app, 120, 40);
+        // Both edges render fully with their own colors (no panic on the cross).
+        assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
+        assert_edge_drawn(&buf, &app, "_AUD", Color::Green);
+        // The shared vertical column: the later edge (_AUD) overwrites it, so
+        // the crossing cell carries _AUD's glyph and color.
+        let shared_x = 59u16; // midpoint of the two diagonal polylines
+        let cells_a = edge_cells(&buf, &app, "_CLK");
+        let crossing = cells_a
+            .iter()
+            .find(|&&(x, y)| x == shared_x && y > 5 && y < 30);
+        let &(cx, cy) = crossing.unwrap();
+        assert_eq!(buf.cell((cx, cy)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((cx, cy)).unwrap().fg, Color::Green);
+    }
+
+    #[test]
+    fn cluster_spanning_edge_renders_through_both_cluster_containers() {
+        // graph_app puts clocktool in "Pulsar" and osc in "Steady", so _CLK is
+        // a cluster-spanning cable and must still draw its polyline.
+        let mut app = graph_app();
+        let buf = buffer_for(&mut app, 120, 40);
+        assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
+        assert!(
+            !edge_cells(&buf, &app, "_CLK").is_empty(),
+            "cluster-spanning cable must draw cells"
+        );
+    }
+
+    #[test]
+    fn topology_error_cable_renders_with_error_color() {
+        let graph = Graph {
+            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![],
+            validation: vec![TopologyIssue {
+                cable: "_CLK".into(),
+                severity: TopologySeverity::Warning,
+                message: "dangling".into(),
+            }],
+        };
+        let mut app = graph_app_from(graph, vec![(0.0, 0.5), (1.0, 0.5)]);
+        let buf = buffer_for(&mut app, 120, 40);
+        assert_edge_drawn(&buf, &app, "_CLK", Color::Red);
+    }
+
+    #[test]
+    fn edge_polyline_clips_cleanly_at_surface() {
+        // Push the sink far right/bottom so the polyline's horizontal and
+        // vertical runs would overrun the surface; every drawn cell must stay
+        // inside `area` and the render must not panic.
+        let graph = Graph {
+            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![],
+            validation: vec![],
+        };
+        let mut app = graph_app_from(graph, vec![(0.0, 0.0), (1.0, 1.0)]);
+        let buf = buffer_for(&mut app, 60, 20);
+        for (cx, cy) in edge_cells(&buf, &app, "_CLK") {
+            assert!(cx < buf.area.width && cy < buf.area.height);
+        }
+        assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
+    }
+
+    #[test]
+    fn edges_render_or_degrade_without_panic_at_small_areas() {
+        for (w, h) in [(30, 10), (22, 8), (15, 6)] {
+            let mut app = graph_app();
+            let _ = buffer_for(&mut app, w, h); // must not panic
+        }
     }
 }
