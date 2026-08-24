@@ -111,15 +111,21 @@ Given viewer is open and focus is on panels
 When user presses `Tab`
 Then the source pane is focused again
 
-### Requirement: Viewer input isolation
-While the source pane is open, component toggles (Enter/Space/click), shift-group changes (1–4), scale (`+`/`-`), and orientation (`o`) SHALL be ignored until the pane closes — except when focus is explicitly moved back to the panel area via `Tab`.
+### Requirement: Live panel interaction while viewer is open
+While the source pane is open, component toggles (Enter/Space/click), shift-group changes (`1`–`4`), scale (`+`/`-`), and orientation (`o`) SHALL work regardless of viewer focus. Only conflicting navigation keys (`j`/`k`, Up/Down/Home/End) are routed by `ViewerFocus`; `Tab` switches focus.
 
-#### Scenario: Readonly until refocused or closed
-Given viewer is open and focused
-When user presses Space, a digit, or clicks a component
-Then no component state changes
-When user presses Tab and then Space
-Then the hovered/targeted component toggles normally
+#### Scenario: Panel keys work while source focused
+Given viewer is open and source is focused
+When user presses a digit, `+`, `o`, or Space on a hovered component
+Then the shift group / scale / orientation / component state changes accordingly
+And selecting a component scrolls the source view to its first occurrence
+
+#### Scenario: Mouse click routes focus
+Given viewer is open and source is focused
+When the user left-clicks a component rect
+Then the component toggles and focus becomes Panels
+When the user left-clicks inside the source pane area
+Then focus becomes Source without toggling anything or clearing the selection
 
 ### Requirement: Esc cancels prefix without clearing shift group
 `Esc` while the prefix is armed (and the viewer is closed) SHALL cancel the prefix without other side effects; it does not clear the active shift group.

@@ -175,13 +175,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     }
                     return false;
                 }
-                _ => {
-                    // Isolation: panel toggles / shift / scale / orientation inert
-                    // until Tab/Esc. Only j/k/Up/Down/Home/End/t/Tab/Esc (handled
-                    // above) plus l/q/Ctrl-C are allowed; everything else is
-                    // ignored without side effects.
-                    return false;
-                }
+                // Live interaction: everything else falls through to normal
+                // panel handling below (shift/scale/orientation/Enter-toggle
+                // work even while the source pane is focused). Only j/k and
+                // Up/Down/Home/End stay routed by focus because they would
+                // otherwise conflict with panel navigation.
+                _ => {}
             }
         }
         // viewer_focus == Panels: fall through to normal panel handling below
@@ -355,10 +354,6 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                 return;
             }
         }
-        // Isolation: when source pane is focused, panel mouse interactions are inert.
-        if app.viewer_focus == ViewerFocus::Source {
-            return;
-        }
     }
 
     let hit = app
@@ -388,6 +383,11 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     }
                     app.select_component(token);
                 }
+                // Clicking a component is a panel interaction: hand keyboard
+                // focus back to the panels while the viewer stays open.
+                if app.showing_viewer {
+                    app.viewer_focus = ViewerFocus::Panels;
+                }
             } else {
                 // Empty-panel-space click: clear selection without moving
                 // source_scroll (deselection stability). Ignore clicks on the
@@ -395,8 +395,23 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                 let on_minimap = app
                     .minimap_rect
                     .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
-                if !on_minimap {
-                    app.clear_selected_component();
+                // Bare source-pane space (no component, no minimap) focuses
+                // the source pane without side effects; the selection must
+                // survive so occurrence navigation keeps working there.
+                let in_source_pane = app.showing_viewer
+                    && !on_minimap
+                    && app
+                        .source_pane_rect
+                        .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
+                if in_source_pane {
+                    app.viewer_focus = ViewerFocus::Source;
+                } else {
+                    if !on_minimap {
+                        app.clear_selected_component();
+                    }
+                    if app.showing_viewer {
+                        app.viewer_focus = ViewerFocus::Panels;
+                    }
                 }
             }
         }
@@ -974,44 +989,78 @@ mod tests {
     }
 
     #[test]
-    fn viewer_focus_source_isolation_ignores_panel_keys() {
+    fn viewer_focus_source_live_panel_keys() {
         let mut app = app_with_source_navigation();
-        // Open viewer, source focused
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        open_viewer(&mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        // Shift keys inert
+
+        // Shift keys work live while source is focused.
         handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
-        assert_eq!(app.active_shift, None, "shift inert when source focused");
-        // Scale inert
+        assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
+        assert_eq!(app.status_message, "Shift 1 active");
+
+        // Scale preset cycling works live.
         let scale_before = app.scale_factor;
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
-        assert_eq!(
+        assert_ne!(
             app.scale_factor, scale_before,
-            "scale inert when source focused"
+            "scale live when source focused"
         );
-        // Orientation inert
+
+        // Orientation toggle works live.
         let orient_before = app.orientation.clone();
         handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
-        assert_eq!(
+        assert_ne!(
             app.orientation, orient_before,
-            "orientation inert when source focused"
+            "orientation live when source focused"
         );
-        // Component toggle inert
-        app.hovered_component = Some(0);
-        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+
+        // Enter toggles the hovered component AND selects it; the selection
+        // re-jumps source_scroll to the first occurrence so the visible
+        // source view follows the interaction.
+        let b11_idx = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .unwrap();
+        app.hovered_component = Some(b11_idx);
+        let first_b11 = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
+        let state_before = app.patch.as_ref().unwrap().hw_components[b11_idx]
+            .state
+            .clone();
         handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
-        assert_eq!(
-            app.patch.as_ref().unwrap().hw_components[0].state,
+        assert_ne!(
+            app.patch.as_ref().unwrap().hw_components[b11_idx].state,
             state_before,
-            "toggle inert when source focused"
+            "Enter toggles while source focused"
         );
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.source_scroll, first_b11);
+        assert_eq!(app.occurrence_cursor, 0);
+        // Space toggles back, still live.
         handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
         assert_eq!(
-            app.patch.as_ref().unwrap().hw_components[0].state,
+            app.patch.as_ref().unwrap().hw_components[b11_idx].state,
             state_before,
-            "space toggle inert when source focused"
+            "Space toggles while source focused"
         );
+
+        // j/k and Up/Down/Home/End remain routed by focus (they would
+        // otherwise conflict with panel navigation).
+        let scroll = app.source_scroll;
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(
+            app.source_scroll,
+            scroll + 1,
+            "j scrolls source when focused"
+        );
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.occurrence_cursor, 1, "Down navigates occurrences");
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.occurrence_cursor, 0, "Up navigates occurrences");
     }
 
     #[test]
@@ -1078,10 +1127,9 @@ mod tests {
     }
 
     #[test]
-    fn mouse_isolation_when_source_focused() {
+    fn mouse_click_component_works_when_source_focused() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        open_viewer(&mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
@@ -1089,21 +1137,50 @@ mod tests {
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
             &mut app,
         );
-        assert_eq!(
+        assert_ne!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before,
-            "mouse click inert when source focused"
+            "mouse click toggles even when source focused"
         );
-        // After Tab to panels, mouse works
+        assert_eq!(
+            app.viewer_focus,
+            ViewerFocus::Panels,
+            "component click hands focus to panels"
+        );
+    }
+
+    #[test]
+    fn mouse_click_source_pane_space_focuses_source_without_side_effects() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        open_viewer(&mut app);
+        // Start from panels focus to prove a bare source-pane click switches it.
         handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        app.source_pane_rect = Some(Rect::new(60, 3, 40, 20));
+        app.minimap_rect = None;
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        let scroll_before = app.source_scroll;
+        // Click inside the source pane but on no component and no minimap.
         handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 80, 10),
             &mut app,
         );
-        assert_ne!(
+        assert_eq!(
+            app.viewer_focus,
+            ViewerFocus::Source,
+            "bare source-pane click focuses source"
+        );
+        assert_eq!(
+            app.selected_component.as_deref(),
+            Some("B1.1"),
+            "selection kept"
+        );
+        assert_eq!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before
         );
+        assert_eq!(app.source_scroll, scroll_before);
     }
 
     // ---- Task 3.2: selection-into-commit, deselection stability, occurrence bounds ----
@@ -1323,16 +1400,17 @@ mod tests {
         assert!(app.prefix.is_some());
         handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
         assert!(app.prefix.is_none());
-        // When viewer open and source focused, g is inert (isolation), so prefix stays None.
+        // When viewer open and source focused, g is live too and arms the prefix.
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
         handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        assert!(
-            app.prefix.is_none(),
-            "g should be inert when source focused"
-        );
+        assert!(app.prefix.is_some(), "g arms even when source focused");
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        // Esc first clears the prefix, viewer stays open
+        assert!(app.showing_viewer);
+        assert!(app.prefix.is_none());
         // After Tab to panels, g arms again.
         handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
@@ -1400,20 +1478,21 @@ mod tests {
         handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
         assert!(!app.showing_picker);
         assert!(app.showing_viewer);
-        // isolation: panel keys inert when Source focused
+        // live interaction: panel keys work even when Source focused
         if app.viewer_focus != ViewerFocus::Source {
             handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
         }
         let scale_before = app.scale_factor;
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
-        assert_eq!(
+        assert_ne!(
             app.scale_factor, scale_before,
-            "scale inert when Source focused"
+            "scale live when Source focused"
         );
         handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
-        assert!(
-            app.active_shift.is_none(),
-            "shift inert when Source focused"
+        assert_eq!(
+            app.active_shift,
+            Some(ShiftGroup::Group1),
+            "shift live when Source focused"
         );
     }
 

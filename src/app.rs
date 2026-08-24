@@ -77,6 +77,10 @@ pub struct App {
     /// Geometry of the minimap column published by the renderer each frame
     /// (like `component_rects`). Used for click-to-scroll hit testing.
     pub minimap_rect: Option<Rect>,
+    /// Full geometry of the embedded source pane published by the renderer
+    /// each frame while the viewer is open. Used to route bare source-pane
+    /// clicks to `ViewerFocus::Source` without side effects.
+    pub source_pane_rect: Option<Rect>,
     /// Scale factor for rendering (1.0 = default). Used for progressive scaling.
     pub scale_factor: f32,
     /// Current display orientation.
@@ -108,6 +112,7 @@ impl App {
             occurrence_cursor: 0,
             source_scroll: 0,
             minimap_rect: None,
+            source_pane_rect: None,
             scale_factor: 1.0,
             orientation: Orientation::Portrait,
             viewer_split_ratio: 0.6,
@@ -139,7 +144,7 @@ impl App {
 
     /// Load a patch into the app and reset source-navigation state ready for
     /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
-    /// minimap geometry yet (renderer will publish on next frame).
+    /// minimap/source-pane geometry yet (renderer will publish on next frame).
     pub fn load_patch(&mut self, patch: Patch) {
         self.patch = Some(patch);
         self.selected_component = None;
@@ -148,6 +153,7 @@ impl App {
         self.source_view_mode = SourceViewMode::Raw;
         self.viewer_focus = ViewerFocus::Panels;
         self.minimap_rect = None;
+        self.source_pane_rect = None;
     }
 
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].

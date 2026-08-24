@@ -694,7 +694,11 @@ fn regression_minimap_click_maps_correctly() {
     assert!(scroll_above <= scroll_below);
 
     // Minimap click works regardless of focus (Panels vs Source) and takes precedence over panel toggle
-    handle_event(key(KeyCode::Tab), &mut app); // to Panels
+    // The clamped border click below the minimap counts as empty-panel space
+    // and may have handed focus to Panels; normalize before the check.
+    if app.viewer_focus != ViewerFocus::Panels {
+        handle_event(key(KeyCode::Tab), &mut app); // to Panels
+    }
     assert_eq!(app.viewer_focus, ViewerFocus::Panels);
     let state_before = app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")]
         .state
@@ -772,12 +776,12 @@ fn regression_tab_focus_round_trip() {
     open_viewer(&mut app);
     assert_eq!(app.viewer_focus, ViewerFocus::Source);
     // render shows focus emphasis (yellow border) is not directly assertable via text,
-    // but we can verify state and that panel keys are isolated when Source focused
+    // but we can verify state and that panel keys are live even when Source focused
     let scale_before = app.scale_factor;
     handle_event(key(KeyCode::Char('+')), &mut app);
-    assert_eq!(
+    assert_ne!(
         app.scale_factor, scale_before,
-        "scale inert when Source focused"
+        "scale live when Source focused"
     );
 
     handle_event(key(KeyCode::Tab), &mut app);
@@ -857,89 +861,48 @@ fn regression_picker_precedence() {
     let _ = buffer_for(&mut app, 120, 40);
 }
 
-// ── viewer isolation ────────────────────────────────────────────────────
+// ── viewer live interaction (main window unblocked, droid_tui-0lw) ─────
 
 #[test]
-fn regression_viewer_isolation() {
+fn regression_viewer_live_interaction() {
     let mut app = fixture_app();
     open_viewer(&mut app);
     assert_eq!(app.viewer_focus, ViewerFocus::Source);
-    // Capture state before
-    let state_before = app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")]
-        .state
-        .clone();
-    let shift_before = app.active_shift;
+
+    // Panel keys are live while Source focused.
+    handle_event(key(KeyCode::Char('1')), &mut app);
+    assert_eq!(app.active_shift, Some(ShiftGroup::Group1), "shift live");
     let scale_before = app.scale_factor;
+    handle_event(key(KeyCode::Char('+')), &mut app);
+    assert_ne!(app.scale_factor, scale_before, "scale live");
     let orient_before = app.orientation.clone();
-
-    // Panel toggles / shift / scale / orientation inert when Source focused
-    app.hovered_component = Some(idx_for(&app, "B1.1"));
-    handle_event(key(KeyCode::Enter), &mut app);
-    assert_eq!(
-        app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].state,
-        state_before,
-        "Enter inert when source focused"
-    );
-    handle_event(key(KeyCode::Char(' ')), &mut app);
-    assert_eq!(
-        app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].state,
-        state_before,
-        "Space inert when source focused"
-    );
-    handle_event(key(KeyCode::Char('1')), &mut app);
-    assert_eq!(app.active_shift, shift_before, "shift inert");
-    handle_event(key(KeyCode::Char('+')), &mut app);
-    assert_eq!(app.scale_factor, scale_before, "scale inert");
     handle_event(key(KeyCode::Char('o')), &mut app);
-    assert_eq!(app.orientation, orient_before, "orientation inert");
+    assert_ne!(app.orientation, orient_before, "orientation live");
 
-    // Mouse click on panel component inert when Source focused
-    handle_mouse_event(
-        mouse(MouseEventKind::Down(MouseButton::Left), 2, 1),
-        &mut app,
-    );
-    assert_eq!(
-        app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].state,
-        state_before,
-        "mouse inert when source focused"
-    );
-
-    // g prefix also inert when source focused (doesn't arm)
-    handle_event(key(KeyCode::Char('g')), &mut app);
-    assert!(app.prefix.is_none(), "g inert when source focused");
-    // l still opens picker (exception to isolation), j/k line scroll and Up/Down occurrence still work
-    let scroll_before = app.source_scroll;
-    handle_event(key(KeyCode::Char('j')), &mut app);
-    assert_eq!(app.source_scroll, scroll_before + 1);
-    app.select_component(String::from("B1.1"));
-    open_viewer(&mut app); // already open but re-assert
-                           // Ensure source focused
-    if app.viewer_focus != ViewerFocus::Source {
-        handle_event(key(KeyCode::Tab), &mut app);
-    }
-    let occ_before = app.occurrence_cursor;
-    handle_event(key(KeyCode::Down), &mut app);
-    assert!(app.occurrence_cursor >= occ_before);
-
-    // Tab to Panels: isolation lifts, panel interactions work again
-    handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-    handle_event(key(KeyCode::Char('1')), &mut app);
-    assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
-    let s = app.scale_factor;
-    handle_event(key(KeyCode::Char('+')), &mut app);
-    assert_ne!(app.scale_factor, s);
-    let o = app.orientation.clone();
-    handle_event(key(KeyCode::Char('o')), &mut app);
-    assert_ne!(app.orientation, o);
-    app.hovered_component = Some(idx_for(&app, "B1.1"));
+    // Enter toggles AND selects the hovered component; selection jumps
+    // source_scroll to its first occurrence.
+    let b11 = idx_for(&app, "B1.1");
+    app.hovered_component = Some(b11);
+    let first_b11 = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
+    let state_before = app.patch.as_ref().unwrap().hw_components[b11].state.clone();
     handle_event(key(KeyCode::Enter), &mut app);
     assert_ne!(
-        app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].state,
-        state_before
+        app.patch.as_ref().unwrap().hw_components[b11].state,
+        state_before,
+        "Enter toggles while Source focused"
     );
-    // Mouse now works after Tab
-    let state_mid = app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.2")]
+    assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+    assert_eq!(app.source_scroll, first_b11);
+    handle_event(key(KeyCode::Char(' ')), &mut app);
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[b11].state,
+        state_before,
+        "Space toggles while Source focused"
+    );
+
+    // Mouse click on a panel component toggles regardless of focus and
+    // hands keyboard focus to the panels.
+    let b12_state_before = app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.2")]
         .state
         .clone();
     handle_mouse_event(
@@ -948,21 +911,55 @@ fn regression_viewer_isolation() {
     );
     assert_ne!(
         app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.2")].state,
-        state_mid
+        b12_state_before,
+        "mouse click toggles while viewer open"
+    );
+    assert_eq!(
+        app.viewer_focus,
+        ViewerFocus::Panels,
+        "component click hands focus to panels"
     );
 
-    // t and Esc still work from both focuses (global viewer keys)
-    handle_event(key(KeyCode::Tab), &mut app); // back to Source for global check
+    // Tab back to Source; a bare source-pane click re-focuses the source
+    // pane without clearing the selection or toggling anything.
+    handle_event(key(KeyCode::Tab), &mut app);
+    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    let sel = app.selected_component.clone();
+    let scroll = app.source_scroll;
+    app.minimap_rect = None;
+    app.source_pane_rect = Some(Rect::new(72, 3, 47, 34));
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), 100, 30),
+        &mut app,
+    );
+    assert_eq!(
+        app.viewer_focus,
+        ViewerFocus::Source,
+        "bare source-pane click focuses source"
+    );
+    assert_eq!(app.selected_component, sel, "selection kept");
+    assert_eq!(app.source_scroll, scroll, "scroll kept");
+
+    // l still opens picker (picker precedence), j/k line scroll and
+    // Up/Down occurrence navigation stay routed by focus.
+    let scroll_before = app.source_scroll;
+    handle_event(key(KeyCode::Char('j')), &mut app);
+    assert_eq!(app.source_scroll, scroll_before + 1);
+    let occ_before = app.occurrence_cursor;
+    handle_event(key(KeyCode::Down), &mut app);
+    assert!(app.occurrence_cursor >= occ_before);
+
+    // t works from both focuses (global viewer key).
     let mode_before = app.source_view_mode.clone();
     handle_event(key(KeyCode::Char('t')), &mut app);
     assert_ne!(app.source_view_mode, mode_before);
-    handle_event(key(KeyCode::Tab), &mut app); // Panels
-    let mode_before2 = app.source_view_mode.clone();
-    handle_event(key(KeyCode::Char('t')), &mut app);
-    assert_ne!(app.source_view_mode, mode_before2);
+
+    // Esc closes keeping selection and resets focus to Panels.
     handle_event(key(KeyCode::Esc), &mut app);
     assert!(!app.showing_viewer);
-    // After close, normal panel handling resumes
+    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert_eq!(app.selected_component, sel);
+    // After close, normal panel handling resumes.
     handle_event(key(KeyCode::Char('1')), &mut app);
     assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
     let _ = buffer_for(&mut app, 80, 24);
@@ -1907,6 +1904,82 @@ fn visual_viewer_layout_open_closed_snapshot() {
         });
         insta::with_settings!({snapshot_suffix => format!("viewer_open_{theme_name}_100_html")}, {
             insta::assert_snapshot!(html_open);
+        });
+    }
+}
+
+#[test]
+fn visual_viewer_live_interaction_snapshot() {
+    // droid_tui-0lw: with the viewer open and the source pane focused, panel
+    // keys are live. Frame A drives shift1 through the real key path while
+    // Source is focused — a state that was impossible before the fix because
+    // '1' was swallowed by the source-focus branch — and proves the shift
+    // face (chip + bold borders) renders beside the viewer chrome. Frame B
+    // shows B1.1 toggled AND selected via Enter with source_scroll parked at
+    // its first occurrence while the viewer stays open.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+
+        // Frame A: viewer open + Source focused + shift1 activated live.
+        let mut app = app_from_fixture("source_navigation");
+        open_viewer(&mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(KeyCode::Char('1')), &mut app);
+        assert_eq!(
+            app.active_shift,
+            Some(ShiftGroup::Group1),
+            "{theme_name}: shift1 live while Source focused"
+        );
+        let buf = buffer_for(&mut app, 100, 40);
+        let ansi = buffer_to_ansi(&buf);
+        // The viewer status bar replaces the normal one (and its hints fill
+        // width 100), so liveness shows on the panels themselves: affected
+        // panels get [SHIFT 1] titles and bold shift-colored borders.
+        assert!(
+            ansi.contains("[SHIFT 1]"),
+            "{theme_name}: affected panels tagged [SHIFT 1] with viewer open\n{ansi}"
+        );
+        assert!(
+            ansi.contains("Source Viewer"),
+            "{theme_name}: viewer still open beside live panels"
+        );
+        assert!(
+            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
+            "{theme_name}: shift1 bold border visible with viewer open"
+        );
+        insta::with_settings!({snapshot_suffix => format!("viewer_live_shift1_{theme_name}_100")}, {
+            insta::assert_snapshot!(ansi);
+        });
+
+        // Frame B: Enter toggles + selects B1.1 and scrolls the source view
+        // to its first occurrence — the viewer never closes.
+        let b11 = idx_for(&app, "B1.1");
+        app.hovered_component = Some(b11);
+        let first_b11 = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
+        let state_before = app.patch.as_ref().unwrap().hw_components[b11].state.clone();
+        handle_event(key(KeyCode::Enter), &mut app);
+        assert_ne!(
+            app.patch.as_ref().unwrap().hw_components[b11].state,
+            state_before,
+            "{theme_name}: Enter toggles while Source focused"
+        );
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.source_scroll, first_b11);
+        assert!(app.showing_viewer, "{theme_name}: viewer stays open");
+
+        let buf = buffer_for(&mut app, 100, 40);
+        let ansi = buffer_to_ansi(&buf);
+        assert!(
+            ansi.contains("B1.1"),
+            "{theme_name}: selected token visible in both columns"
+        );
+        assert!(
+            ansi.contains("[SHIFT 1]"),
+            "{theme_name}: shift face persists across toggle frame"
+        );
+        insta::with_settings!({snapshot_suffix => format!("viewer_live_toggle_{theme_name}_100")}, {
+            insta::assert_snapshot!(ansi);
         });
     }
 }

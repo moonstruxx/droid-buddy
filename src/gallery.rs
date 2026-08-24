@@ -8,12 +8,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 
 use crate::app::{App, ViewerFocus};
+use crate::handler::handle_event;
 use crate::patch::ShiftGroup;
 use crate::theme;
 use crate::ui::render;
@@ -220,6 +222,37 @@ fn setup_viewer_shift1(app: &mut App) {
     app.active_shift = Some(ShiftGroup::Group1);
 }
 
+/// Drive one key through the real handler so gallery scenarios exercise the
+/// same input path as the running TUI instead of hand-set state fields.
+fn press(app: &mut App, code: KeyCode) {
+    handle_event(KeyEvent::new(code, KeyModifiers::NONE), app);
+}
+
+fn setup_viewer_live_shift1(app: &mut App) {
+    // droid_tui-0lw: shift1 is pressed while the viewer is open and the
+    // source pane is focused — inert before the fix, now live, so the frame
+    // shows viewer chrome + shift chip + bold shift borders together.
+    *app = app_from_fixture("source_navigation");
+    app.select_component(String::from("B1.1"));
+    press(app, KeyCode::Char('g'));
+    press(app, KeyCode::Char('v'));
+    press(app, KeyCode::Char('1'));
+}
+
+fn setup_viewer_live_toggle(app: &mut App) {
+    // droid_tui-0lw: Enter toggles AND selects B1.1 while Source is focused,
+    // jumping source_scroll to its first occurrence with the viewer open.
+    *app = app_from_fixture("source_navigation");
+    press(app, KeyCode::Char('g'));
+    press(app, KeyCode::Char('v'));
+    let idx = app
+        .patch
+        .as_ref()
+        .and_then(|p| p.hw_components.iter().position(|c| c.id == "B1.1"));
+    app.hovered_component = idx;
+    press(app, KeyCode::Enter);
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -276,6 +309,20 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 40,
         setup: setup_viewer_shift1,
+    },
+    Scenario {
+        id: "viewer_live_shift1_100",
+        label: "source_navigation · width 100 · viewer open · shift1 pressed while Source focused",
+        width: 100,
+        height: 40,
+        setup: setup_viewer_live_shift1,
+    },
+    Scenario {
+        id: "viewer_live_toggle_100",
+        label: "source_navigation · width 100 · viewer open · B1.1 toggled+selected via Enter",
+        width: 100,
+        height: 40,
+        setup: setup_viewer_live_toggle,
     },
 ];
 
