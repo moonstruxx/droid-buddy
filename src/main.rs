@@ -9,6 +9,9 @@ use crate::app::App;
 use crate::ui::render;
 
 pub mod app;
+// Wired into main() by config-store task 2.4; test-only until then.
+#[cfg(test)]
+pub mod config;
 pub mod handler;
 pub mod patch;
 #[cfg(test)]
