@@ -29,6 +29,12 @@ pub struct Theme {
     pub minimap_modifier_boolean: Color,
     pub minimap_modifier_exact: Color,
     pub minimap_combined: Color,
+    pub graph_node_border: Color,
+    pub graph_node_title: Color,
+    pub graph_port_input: Color,
+    pub graph_port_output: Color,
+    pub graph_cluster_border: Color,
+    pub graph_cluster_title: Color,
 }
 
 impl Theme {
@@ -58,6 +64,12 @@ impl Theme {
             minimap_modifier_boolean: Color::Cyan,
             minimap_modifier_exact: Color::Magenta,
             minimap_combined: Color::Magenta,
+            graph_node_border: Color::White,
+            graph_node_title: Color::Yellow,
+            graph_port_input: Color::Cyan,
+            graph_port_output: Color::Green,
+            graph_cluster_border: Color::Blue,
+            graph_cluster_title: Color::Blue,
         }
     }
 
@@ -87,6 +99,12 @@ impl Theme {
             minimap_modifier_boolean: Color::Reset,
             minimap_modifier_exact: Color::Reset,
             minimap_combined: Color::Reset,
+            graph_node_border: Color::Reset,
+            graph_node_title: Color::Reset,
+            graph_port_input: Color::Reset,
+            graph_port_output: Color::Reset,
+            graph_cluster_border: Color::Reset,
+            graph_cluster_title: Color::Reset,
         }
     }
 
@@ -119,6 +137,12 @@ impl Theme {
             minimap_modifier_boolean: Color::Gray,
             minimap_modifier_exact: Color::White,
             minimap_combined: Color::Gray,
+            graph_node_border: Color::White,
+            graph_node_title: Color::White,
+            graph_port_input: Color::Gray,
+            graph_port_output: Color::White,
+            graph_cluster_border: Color::White,
+            graph_cluster_title: Color::Gray,
         }
     }
 }
@@ -230,6 +254,12 @@ mod tests {
         assert_eq!(t.minimap_modifier_boolean, Color::Cyan);
         assert_eq!(t.minimap_modifier_exact, Color::Magenta);
         assert_eq!(t.minimap_combined, Color::Magenta);
+        assert_eq!(t.graph_node_border, Color::White);
+        assert_eq!(t.graph_node_title, Color::Yellow);
+        assert_eq!(t.graph_port_input, Color::Cyan);
+        assert_eq!(t.graph_port_output, Color::Green);
+        assert_eq!(t.graph_cluster_border, Color::Blue);
+        assert_eq!(t.graph_cluster_title, Color::Blue);
     }
 
     #[test]
@@ -258,6 +288,12 @@ mod tests {
             t.minimap_modifier_boolean,
             t.minimap_modifier_exact,
             t.minimap_combined,
+            t.graph_node_border,
+            t.graph_node_title,
+            t.graph_port_input,
+            t.graph_port_output,
+            t.graph_cluster_border,
+            t.graph_cluster_title,
         ] {
             assert_eq!(color, Color::Reset);
         }
