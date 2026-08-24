@@ -92,16 +92,18 @@ impl Graph {
     /// Cable attribution is by section *name* (the cable index records names,
     /// not instance indices), so a name shared by several instances resolves
     /// to the first instance. Instance-accurate attribution is left to the
-    /// topology-validation pass (task 2.2).
+    /// topology-validation pass (task 2.2), which operates on the cable index
+    /// entries by name, keeping that convention consistent.
     pub fn build_from_patch(patch: &Patch, clusters: &[Cluster]) -> Graph {
         let nodes = build_nodes(patch);
         let node_by_name = name_to_first_node(&nodes);
         let edges = build_edges(patch, &node_by_name);
+        let validation = validate_topology(patch);
         Graph {
             nodes,
             edges,
             clusters: clusters.to_vec(),
-            validation: Vec::new(),
+            validation,
         }
     }
 }
@@ -162,6 +164,41 @@ fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<Graph
         }
     }
     edges
+}
+
+/// Topology validation as a graph-build step (design D4). For every cable in
+/// the patch's cable index, exactly one source is valid; zero sources (a
+/// dangling reference: some section sinks a cable nobody produces) is a
+/// `Warning`; two or more sources driving one cable is an invalid `n → 1`
+/// topology and an `Error`.
+///
+/// A produced-but-unused cable (one source, no sinks) is fine: `n` is any
+/// number of sinks. Findings travel with the graph for the renderer to
+/// highlight; they never block building or viewing.
+fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
+    let mut issues = Vec::new();
+    for (cable, entry) in &patch.cable_index {
+        match entry.sources.len() {
+            0 => issues.push(TopologyIssue {
+                cable: cable.clone(),
+                severity: TopologySeverity::Warning,
+                message: format!(
+                    "cable {cable} is referenced as a sink by {} section(s) but never produced by an `output =`",
+                    entry.sink_refs.len()
+                ),
+            }),
+            1 => {}
+            n => issues.push(TopologyIssue {
+                cable: cable.clone(),
+                severity: TopologySeverity::Error,
+                message: format!(
+                    "cable {cable} has {n} sources ({}) but exactly one is required",
+                    entry.sources.join(", ")
+                ),
+            }),
+        }
+    }
+    issues
 }
 
 #[cfg(test)]
@@ -266,10 +303,94 @@ mod tests {
     #[test]
     fn cable_without_source_produces_no_edge() {
         // `_ORPHAN` is only referenced as a sink, never produced: the build
-        // produces no edge (validation flags the dangling ref in task 2.2).
+        // produces no edge, and validation flags the dangling ref as a warning.
         let graph = build("[p2b8]\n[sink]\n    input = _ORPHAN\n", &[]);
         assert!(graph.edges.is_empty());
-        // Reserved validation slot is empty until task 2.2 populates it.
+        assert_eq!(graph.validation.len(), 1);
+        let issue = &graph.validation[0];
+        assert_eq!(issue.cable, "_ORPHAN");
+        assert_eq!(issue.severity, TopologySeverity::Warning);
+    }
+
+    #[test]
+    fn valid_fanout_produces_no_validation_issues() {
+        // One source fanning out to three sinks is the canonical valid case.
+        let graph = build(
+            "[p2b8]\n\
+             [src]\n    output = _CLK\n\
+             [sink1]\n    input = _CLK\n\
+             [sink2]\n    input = _CLK\n\
+             [sink3]\n    input = _CLK\n",
+            &[],
+        );
         assert!(graph.validation.is_empty());
+    }
+
+    #[test]
+    fn dangling_cable_flags_warning() {
+        // `_ORPHAN` is sunk by two sections but never produced.
+        let graph = build(
+            "[p2b8]\n\
+             [a]\n    input = _ORPHAN\n\
+             [b]\n    input = _ORPHAN\n",
+            &[],
+        );
+        assert_eq!(graph.validation.len(), 1);
+        let issue = &graph.validation[0];
+        assert_eq!(issue.cable, "_ORPHAN");
+        assert_eq!(issue.severity, TopologySeverity::Warning);
+        // Two sink sections are reported in the message.
+        assert!(issue.message.contains("2 section(s)"));
+    }
+
+    #[test]
+    fn multiple_sources_flags_n_to_one_error() {
+        // Two circuits both `output = _BUS`: invalid n → 1 topology.
+        let graph = build(
+            "[p2b8]\n\
+             [prod1]\n    output = _BUS\n\
+             [prod2]\n    output = _BUS\n\
+             [sink]\n    input = _BUS\n",
+            &[],
+        );
+        assert_eq!(graph.validation.len(), 1);
+        let issue = &graph.validation[0];
+        assert_eq!(issue.cable, "_BUS");
+        assert_eq!(issue.severity, TopologySeverity::Error);
+        // Both producers are named in the message.
+        assert!(issue.message.contains("prod1") && issue.message.contains("prod2"));
+    }
+
+    #[test]
+    fn mixed_cases_flag_appropriately() {
+        // One valid fan-out cable, one dangling cable, one n → 1 cable.
+        let graph = build(
+            "[p2b8]\n\
+             [src]\n    output = _A\n\
+             [sink_a]\n    input = _A\n\
+             [prod1]\n    output = _BUS\n\
+             [prod2]\n    output = _BUS\n\
+             [sink_bus]\n    input = _BUS\n\
+             [dang]\n    input = _ORPHAN\n",
+            &[],
+        );
+        assert_eq!(graph.validation.len(), 2);
+        // Iteration over the cable index is a HashMap: match by cable, not order.
+        let by_cable: HashMap<&str, TopologySeverity> = graph
+            .validation
+            .iter()
+            .map(|i| (i.cable.as_str(), i.severity))
+            .collect();
+        assert_eq!(by_cable.get("_A"), None, "valid cable must not be flagged");
+        assert_eq!(
+            by_cable.get("_BUS"),
+            Some(&TopologySeverity::Error),
+            "n → 1 cable must be an error"
+        );
+        assert_eq!(
+            by_cable.get("_ORPHAN"),
+            Some(&TopologySeverity::Warning),
+            "dangling cable must be a warning"
+        );
     }
 }
