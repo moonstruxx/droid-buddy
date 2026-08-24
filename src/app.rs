@@ -3,6 +3,8 @@ use std::time::Instant;
 
 use ratatui::layout::Rect;
 
+use crate::graph::{Cluster, Graph};
+use crate::layout;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
 
@@ -56,6 +58,20 @@ pub struct App {
     /// renderer — not the event handler — knows where things actually ended
     /// up on screen.
     pub component_rects: Vec<(usize, Rect)>,
+    /// True when the signal-flow graph view (`g g`) is open.
+    pub showing_graph: bool,
+    /// The signal-flow graph built from the current patch. `None` until a
+    /// patch is loaded and the graph is opened.
+    pub graph: Option<Graph>,
+    /// Frozen node positions from the last full solve, parallel to
+    /// `graph.nodes` (index `i` ↔ `graph.nodes[i]`). Re-solved on open and on
+    /// node move; never mutated by a continuous tick (design D1).
+    pub graph_positions: Vec<(f32, f32)>,
+    /// Cluster-container rects published by the renderer each frame while the
+    /// graph is open, keyed by index into `graph.clusters` — the same
+    /// renderer-publishes/handler-consumes contract as `component_rects`.
+    /// Cleared per frame; populated by the renderer (task 5.1).
+    pub graph_cluster_rects: Vec<(usize, Rect)>,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -104,6 +120,10 @@ impl App {
             picker_entries: Vec::new(),
             picker_index: 0,
             component_rects: Vec::new(),
+            showing_graph: false,
+            graph: None,
+            graph_positions: Vec::new(),
+            graph_cluster_rects: Vec::new(),
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -146,6 +166,7 @@ impl App {
     /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
     /// minimap/source-pane geometry yet (renderer will publish on next frame).
     pub fn load_patch(&mut self, patch: Patch) {
+        self.reset_graph_state();
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
@@ -154,6 +175,46 @@ impl App {
         self.viewer_focus = ViewerFocus::Panels;
         self.minimap_rect = None;
         self.source_pane_rect = None;
+    }
+
+    /// Build the signal-flow graph from the current patch and run a fresh full
+    /// solve, storing frozen positions, then open the graph view. With no patch
+    /// loaded the graph is empty but the view still opens so the renderer can
+    /// show the empty-patch message (design D7: `g g` works either way).
+    pub fn open_graph(&mut self) {
+        let (graph, positions) = match &self.patch {
+            Some(patch) => {
+                let clusters = clusters_from_patch(patch);
+                let graph = Graph::build_from_patch(patch, &clusters);
+                let positions = layout::solve(&graph);
+                (Some(graph), positions)
+            }
+            None => (Some(Graph::default()), Vec::new()),
+        };
+        self.graph = graph;
+        self.graph_positions = positions;
+        self.graph_cluster_rects.clear();
+        self.showing_graph = true;
+    }
+
+    /// Close the graph view, leaving panel/source-viewer state untouched.
+    pub fn close_graph(&mut self) {
+        self.showing_graph = false;
+    }
+
+    /// Clear the renderer-published cluster rects each frame while the graph is
+    /// open, mirroring how `component_rects` is rebuilt per draw.
+    pub fn clear_graph_cluster_rects(&mut self) {
+        self.graph_cluster_rects.clear();
+    }
+
+    /// Reset graph-view state on patch load: the graph is rebuilt from a fresh
+    /// solve the next time it opens.
+    fn reset_graph_state(&mut self) {
+        self.showing_graph = false;
+        self.graph = None;
+        self.graph_positions.clear();
+        self.graph_cluster_rects.clear();
     }
 
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
@@ -215,6 +276,19 @@ impl Default for App {
     }
 }
 
+/// Map a patch's ordered banner groups onto graph clusters, giving the
+/// implicit unnamed pre-first-banner group a default title.
+fn clusters_from_patch(patch: &Patch) -> Vec<Cluster> {
+    patch
+        .banner_groups
+        .iter()
+        .map(|group| Cluster {
+            title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
+            section_range: group.section_range.clone(),
+        })
+        .collect()
+}
+
 /// Check if a file picker entry is selectable (.ini files or directories)
 pub fn is_entry_selectable(path: &Path) -> bool {
     match path.file_name() {
@@ -239,6 +313,98 @@ pub fn is_entry_selectable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::patch::Patch;
+
+    #[test]
+    fn new_app_has_graph_defaults_closed() {
+        let app = App::new();
+        assert!(!app.showing_graph);
+        assert!(app.graph.is_none());
+        assert!(app.graph_positions.is_empty());
+        assert!(app.graph_cluster_rects.is_empty());
+    }
+
+    #[test]
+    fn open_graph_builds_and_solves_a_loaded_patch() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+
+        assert!(app.showing_graph);
+        let graph = app.graph.as_ref().unwrap();
+        assert!(
+            !graph.nodes.is_empty(),
+            "graph should hold the patch's circuits"
+        );
+        assert_eq!(app.graph_positions.len(), graph.nodes.len());
+        for (x, y) in &app.graph_positions {
+            assert!(x.is_finite() && y.is_finite());
+        }
+    }
+
+    #[test]
+    fn open_graph_without_patch_yields_empty_graph() {
+        let mut app = App::new();
+        app.open_graph();
+        assert!(app.showing_graph);
+        let graph = app.graph.as_ref().unwrap();
+        assert!(graph.nodes.is_empty());
+        assert!(app.graph_positions.is_empty());
+    }
+
+    #[test]
+    fn close_graph_preserves_panel_and_source_viewer_state() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        app.viewer_focus = ViewerFocus::Source;
+        app.source_view_mode = SourceViewMode::Prettified;
+        app.source_scroll = 9;
+        app.occurrence_cursor = 2;
+
+        let before_selection = app.selected_component.clone();
+        let before_focus = app.viewer_focus.clone();
+        let before_mode = app.source_view_mode.clone();
+        let before_scroll = app.source_scroll;
+        let before_cursor = app.occurrence_cursor;
+
+        app.open_graph();
+        app.close_graph();
+
+        assert!(!app.showing_graph);
+        assert_eq!(app.selected_component, before_selection);
+        assert_eq!(app.viewer_focus, before_focus);
+        assert_eq!(app.source_view_mode, before_mode);
+        assert_eq!(app.source_scroll, before_scroll);
+        assert_eq!(app.occurrence_cursor, before_cursor);
+    }
+
+    #[test]
+    fn load_patch_resets_graph_state() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.showing_graph);
+        assert!(app.graph.is_some());
+        assert!(!app.graph_positions.is_empty());
+
+        let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(second);
+        assert!(!app.showing_graph);
+        assert!(app.graph.is_none());
+        assert!(app.graph_positions.is_empty());
+        assert!(app.graph_cluster_rects.is_empty());
+    }
+
+    #[test]
+    fn clear_graph_cluster_rects_empties_the_field() {
+        let mut app = App::new();
+        app.graph_cluster_rects = vec![(0, Rect::new(0, 0, 5, 5)), (1, Rect::new(1, 1, 5, 5))];
+        app.clear_graph_cluster_rects();
+        assert!(app.graph_cluster_rects.is_empty());
+    }
 
     #[test]
     fn new_app_starts_with_no_prefix_and_viewer_closed() {
