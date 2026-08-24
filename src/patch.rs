@@ -1850,4 +1850,119 @@ button = B1.3
             "button"
         );
     }
+
+    // --- real-fixture integration: extraction + grouping together (task 1.3) ---
+
+    #[test]
+    fn cable_index_arpeggio_fixture_one_source_many_sinks() {
+        // Real fixture: each `[button]` circuit produces a cable via `output =`.
+        // `_SCALE` fans out 1 → n: one producer, four `selectN` sinks.
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let scale = patch.cable_index.get("_SCALE").unwrap();
+        assert_eq!(scale.sources, vec![String::from("button")]);
+        assert_eq!(scale.sink_refs.len(), 4);
+        assert!(scale.sink_refs.iter().all(|(sec, _)| sec == "arpeggio"));
+        // A single-consumer cable: `_DIRECTION` is produced once, consumed once.
+        let dir = patch.cable_index.get("_DIRECTION").unwrap();
+        assert_eq!(dir.sources, vec![String::from("button")]);
+        assert_eq!(
+            dir.sink_refs,
+            vec![(String::from("arpeggio"), String::from("direction"))]
+        );
+    }
+
+    #[test]
+    fn cable_index_source_navigation_expression_embedded_and_real_cables() {
+        // Real fixture: `output = _ENV1_DECAY_POT_ABSBIPOLAR * -1 + _DECAY_MIN`
+        // is an expression, so both `_NAME` tokens register as sink refs (never
+        // sources); pure `output = _TRANSIT` produces a real source.
+        let content = std::fs::read_to_string("fixtures/source_navigation.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("source_navigation")).unwrap();
+        let decay = patch.cable_index.get("_ENV1_DECAY_POT_ABSBIPOLAR").unwrap();
+        assert!(decay.sources.is_empty());
+        assert!(decay
+            .sink_refs
+            .iter()
+            .any(|(sec, key)| sec == "button" && key == "output"));
+        let min = patch.cable_index.get("_DECAY_MIN").unwrap();
+        assert!(min.sources.is_empty());
+        assert!(min.sink_refs.iter().any(|(sec, _)| sec == "button"));
+        // Pure cable produced in `[compare]`, consumed by `select = _TRANSIT`.
+        let transit = patch.cable_index.get("_TRANSIT").unwrap();
+        assert_eq!(transit.sources, vec![String::from("compare")]);
+        assert!(transit.sink_refs.iter().any(|(sec, _)| sec == "switch"));
+    }
+
+    #[test]
+    fn banner_groups_real_fixture_owns_ordered_ranges() {
+        // Real fixture (cable_banner_combos.ini): the pre-first-banner `[button]`
+        // section forms the implicit unnamed group; the `# ---- Mixer ----` banner
+        // owns the following three circuit sections.
+        let content = std::fs::read_to_string("fixtures/cable_banner_combos.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("cable_banner_combos")).unwrap();
+        let groups = &patch.banner_groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].banner, None);
+        assert_eq!(groups[0].section_range, 0..1);
+        assert_eq!(
+            patch.sections[groups[0].section_range.clone()][0].name,
+            "button"
+        );
+        assert_eq!(groups[1].banner.as_deref(), Some("Mixer"));
+        assert_eq!(groups[1].section_range, 1..4);
+    }
+
+    #[test]
+    fn cable_and_banner_groups_coexist_consistently() {
+        // Real fixture (cable_banner_combos.ini): cable extraction and banner
+        // grouping run on the same patch. `_CLOCK`'s source (clocktool) and sink
+        // (mixer) both fall inside the Mixer banner range; `_GATE` is produced in
+        // the pre-first-banner group and consumed inside the Mixer group — a cable
+        // legitimately spanning banner groups. The commented-out map stays absent.
+        let content = std::fs::read_to_string("fixtures/cable_banner_combos.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("cable_banner_combos")).unwrap();
+        let section_index = |name: &str| {
+            patch
+                .sections
+                .iter()
+                .position(|s| s.name == name)
+                .expect("section must exist in fixture")
+        };
+        let unnamed = &patch.banner_groups[0].section_range;
+        let mixer = &patch.banner_groups[1].section_range;
+        assert_eq!(unnamed, &(0..1));
+        assert_eq!(mixer, &(1..4));
+        // _CLOCK: produced and consumed entirely inside the Mixer banner range.
+        let clock = patch.cable_index.get("_CLOCK").unwrap();
+        assert!(mixer.contains(&section_index("clocktool")));
+        assert!(mixer.contains(&section_index("mixer")));
+        assert_eq!(clock.sources, vec![String::from("clocktool")]);
+        assert_eq!(
+            clock.sink_refs,
+            vec![(String::from("mixer"), String::from("clock"))]
+        );
+        // _GATE: source in the unnamed group, sinks in the Mixer group.
+        let gate = patch.cable_index.get("_GATE").unwrap();
+        assert!(unnamed.contains(&section_index("button")));
+        assert_eq!(gate.sources, vec![String::from("button")]);
+        assert_eq!(
+            gate.sink_refs,
+            vec![
+                (String::from("mixer"), String::from("input")),
+                (String::from("contour"), String::from("gate")),
+            ]
+        );
+        // _MIX: fully contained in the Mixer banner range too.
+        let mix = patch.cable_index.get("_MIX").unwrap();
+        assert!(mixer.contains(&section_index("mixer")));
+        assert!(mixer.contains(&section_index("contour")));
+        assert_eq!(mix.sources, vec![String::from("mixer")]);
+        assert_eq!(
+            mix.sink_refs,
+            vec![(String::from("contour"), String::from("input"))]
+        );
+        // Commented-out cable map never leaks into the index.
+        assert!(!patch.cable_index.contains_key("_COMMENTED"));
+    }
 }
