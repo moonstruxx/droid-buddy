@@ -57,7 +57,7 @@ flowchart LR
 ### 3.1 User Interface (`src/ui.rs`)
 
 - **Responsibility**: render the entire screen from `App` state each frame; compute layout; publish component geometry for mouse hit-testing.
-- **Key functions**: `render` (picker overlay vs. header/main/status split), `render_patch` (groups components into controller panels, wraps to rows, applies shift-group border colors, records `component_rects`), `render_component`, `render_status`, `render_picker`, `render_embedded_main`, `render_source_pane`, `render_source_sidebar`, `render_source_content`, `render_minimap`, and `render_viewer_status`.
+- **Key functions**: `render` (picker overlay vs. header/main/status split), `render_patch` (groups components into controller panels, wraps to rows, applies shift-group border colors, renders LED-associated elements as single boxed cells with kind-colored borders, records `component_rects`), `render_component`, `render_status`, `render_picker`, `render_embedded_main` (splits panels | source columns by `app.viewer_split_ratio`, clamped 0.3–0.7), `render_source_pane`, `render_source_sidebar`, `render_source_content`, `render_minimap`, and `render_viewer_status(frame, area, app)` (hints plus trailing transient status message).
 - **Technologies**: ratatui 0.29 (`Frame`, `Layout`, `Flex`, `Block`, `Paragraph`), crossterm colors/modifiers.
 - **Inputs**: `&mut App`; **Outputs**: terminal frame; side effect: `app.component_rects` filled per frame.
 - **Key invariant**: layout is recomputed fresh from `frame.area()` on every draw — terminal resize needs no state handling.
@@ -65,7 +65,7 @@ flowchart LR
 ### 3.2 Domain Model & Parser (`src/patch.rs`)
 
 - **Responsibility**: typed model of a DROID patch and a hand-rolled `.ini` parser that builds it.
-- **Types**: `Patch` (name, `hw_components`, `modules`, `sections`, raw lines, token spans, occurrence index, modifier index, `shift_groups`), `Span` (0-based line and byte-column range), `ModifierAffect` (resolved modifier span/source/selectat), `HwComponent` (id, label, kind, shift_group, state, controller), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth`, `IniSection`, and `ViewerCircuit` for prettified blocks.
+- **Types**: `Patch` (name, `hw_components`, `modules`, `sections`, raw lines, token spans, occurrence index, modifier index, `shift_groups`), `Span` (0-based line and byte-column range), `ModifierAffect` (resolved modifier span/source/selectat), `HwComponent` (id, label, kind, shift_group, state, controller, led), `ComponentKind` (Button, CvIn, CvOut, Knob, Switch, Led, Encoder), `ComponentState` (Off, On, Value(f32), Active), `ShiftGroup` (Group1–4 with `color()`/`key_label()`), `Module` / `ModuleWidth`, `IniSection`, and `ViewerCircuit` for prettified blocks.
 - **Key functions**: `Patch::from_ini_file` / `from_ini_str` / `sample`, `parse_ini_sections` (comment stripping, repeated-section preservation and header spans), `collect_token_spans`, `scan_hw_tokens` (boundary-aware token scanner), `build_occurrence_index`, `build_modifier_index` (cycle-safe `select`/`selectat` resolution), `token_kind`, `add_component`; rack-recognition API `module_types` / `needs_by_type` / `master_requirement`; `occurrences_for`, `modifier_affected_spans`, `modifier_entries_for`, and `viewer_circuits`.
 - **Inputs**: `.ini` file content; **Outputs**: `Result<Patch, String>` (descriptive errors, never panics on malformed input).
 - **Design notes**: the parser is deliberately custom (the `ini` crate was removed from `Cargo.toml`) to preserve repeated section names and control token extraction precisely.
@@ -73,7 +73,7 @@ flowchart LR
 ### 3.3 Input Handling (`src/handler.rs`)
 
 - **Responsibility**: translate terminal events into `App` mutations.
-- **Key functions**: `handle_event` (priority order: picker → armed prefix → embedded-viewer focus → normal keys; keyboard: `q`/Ctrl+C quit, `l` open picker, `g` arms a vim-style prefix (`g v` opens the embedded source pane), `t` toggles raw/prettified mode, Tab switches pane focus, `+`/`-` cycle scale presets 50 %–200 % with wrap-around, `1`–`4` shift groups, `o` toggle portrait/landscape orientation, `Esc` closes the pane or cancels prefix, Enter/Space toggle/select components, `j`/`k` scroll or navigate, and Up/Down/Home/End navigate occurrences), `handle_mouse_event` (hover highlight, panel click toggle/select, empty-space deselection, scroll ±0.05 on knobs/faders, minimap click-to-scroll), `handle_picker_event` (directory navigation, Enter on dir/`.ini`, Esc cancel), and `rect_contains` hit-testing.
+- **Key functions**: `handle_event` (priority order: picker → armed prefix → embedded-viewer focus → normal keys; keyboard: `q`/Ctrl+C quit, `l` open picker, `g` arms a vim-style prefix (`g v` opens the embedded source pane), `t` toggles raw/prettified mode, Tab switches pane focus, `+`/`-` cycle scale presets 50 %–200 % with wrap-around, `[`/`]` adjust the panels/source split ratio ±0.1 while the source pane is open (clamped 30 %–70 %), `1`–`4` shift groups, `o` toggle portrait/landscape orientation, `Esc` closes the pane or cancels prefix, Enter/Space toggle/select components, `j`/`k` scroll or navigate, and Up/Down/Home/End navigate occurrences), `handle_mouse_event` (hover highlight, panel click toggle/select, empty-space deselection, scroll ±0.05 on knobs/faders, minimap click-to-scroll), `handle_picker_event` (directory navigation, Enter on dir/`.ini`, Esc cancel), and `rect_contains` hit-testing.
 - **Inputs**: `KeyEvent`/`MouseEvent`; **Outputs**: `bool` (quit flag) or `()`; mutates `App`.
 - **Key invariant**: mouse hit-testing uses `app.component_rects` written by the renderer — the renderer, not the handler, knows where components actually landed on screen.
 - **Viewer focus**: `ViewerFocus::Source` isolates panel actions; Tab returns focus to panels, while Esc closes the pane and keeps selection and source position. Picker remains highest priority.
@@ -81,7 +81,7 @@ flowchart LR
 ### 3.4 Application State (`src/app.rs`)
 
 - **Responsibility**: single mutable state object threaded through the whole app.
-- **Fields**: `patch: Option<Patch>`, `active_shift: Option<ShiftGroup>`, `hovered_component: Option<usize>`, `status_message`, file-picker state (`showing_picker`, `picker_dir`, `selected_file`, `picker_entries`, `picker_index`), `component_rects: Vec<(usize, Rect)>`, `scale_factor: f32` (uniform component-cell scaling applied by the renderer), `orientation: Orientation` (Portrait/Landscape panel direction), `prefix: Option<PrefixState>` (armed vim-style prefix + start instant for the lazy 1 s timeout), and embedded viewer state (`showing_viewer`, `selected_component: Option<String>`, `viewer_focus: ViewerFocus`, `source_view_mode: SourceViewMode`, `occurrence_cursor`, `source_scroll`, `minimap_rect`).
+- **Fields**: `patch: Option<Patch>`, `active_shift: Option<ShiftGroup>`, `hovered_component: Option<usize>`, `status_message`, file-picker state (`showing_picker`, `picker_dir`, `selected_file`, `picker_entries`, `picker_index`), `component_rects: Vec<(usize, Rect)>`, `scale_factor: f32` (uniform component-cell scaling applied by the renderer), `viewer_split_ratio: f32` (panels/source column ratio, default 0.6, clamped 0.3–0.7, persists across `load_patch`; adjusted via `adjust_viewer_split_ratio(delta)`), `orientation: Orientation` (Portrait/Landscape panel direction), `prefix: Option<PrefixState>` (armed vim-style prefix + start instant for the lazy 1 s timeout), and embedded viewer state (`showing_viewer`, `selected_component: Option<String>`, `viewer_focus: ViewerFocus`, `source_view_mode: SourceViewMode`, `occurrence_cursor`, `source_scroll`, `minimap_rect`).
 - **Key functions**: `App::new`/`Default`, `load_patch` (stores the patch and resets source-navigation state), `select_component` (selects token and jumps to its first occurrence), `clear_selected_component`, `jump_to_occurrence`, `refresh_picker_entries`, `load_sample_patch`; free function `is_entry_selectable` (`.ini` files and directories selectable, others dimmed).
 
 ### 3.5 Entry Point & Event Loop (`src/main.rs`)
@@ -117,6 +117,7 @@ sequenceDiagram
 - **Shift visualization**: press `1`–`4` → `active_shift` set → panels containing matching `shift_group` get bold colored borders, others dim; `Esc` clears.
 - **Open the source viewer**: press `g` then `v` within 1 s → `open_embedded_viewer` sets `showing_viewer`, focuses the source pane, and starts at BOF or the selected component's first occurrence. Raw lines render by default; `t` switches to prettified circuit blocks. `j`/`k` scroll, Up/Down/Home/End navigate selected-token occurrences, Tab changes focus, and Esc closes while keeping selection and scroll.
 - **Scale modules**: press `+`/`-` → cycle presets 50 % → 100 % → 150 % → 200 % (wrapping at both ends) → the renderer multiplies the component cell size; status bar shows "Scaling: N%".
+- **Adjust the panels/source split**: press `[` or `]` while the embedded source pane is open → `adjust_viewer_split_ratio(∓0.1)` moves the column boundary in exact 10 % steps between 30 % and 70 % panels; the layout reflows immediately and the viewer status bar trails "Panels/Source split: N%/M%".
 - **Resize**: `Event::Resize` is ignored — the next `draw` recomputes layout from the new `frame.area()`.
 
 ## 5. Data Stores
@@ -172,7 +173,7 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 ## 12. Development Workflow
 
 - **Setup**: `cargo build` (no install step; no remote to clone from).
-- **Test**: `cargo test` (117 unit tests).
+- **Test**: `cargo test` (135 unit tests).
 - **Lint**: `cargo clippy --all-targets --all-features --locked -- -D warnings`.
 - **Format**: `cargo fmt --check` / `cargo fmt`.
 - **Verify binary**: `.claude/skills/verify/SKILL.md` drives the built binary interactively.
@@ -182,7 +183,7 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 ## 13. Testing Strategy
 
 - **Location**: in-module `#[cfg(test)]` unit tests in `patch.rs`, `handler.rs`, and `ui.rs`, plus cross-layer tests in `regression.rs`.
-- **Coverage**: 117 tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, and UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status.
+- **Coverage**: 135 tests cover parser spans, raw-line round trips, occurrence indexes, cycle-safe modifier graphs, rack recognition, LED-`=` association (button with LED, section without), selection-driven jumps, focus isolation, occurrence navigation, picker and minimap mouse behavior, UI frames for raw/prettified source, highlights, minimap geometry, narrow layouts, panels, shifts, and status, plus cross-layer regression tests for boxed-cell rendering (LED-associated box vs plain text cell), mixed grids, boxed-cell click hit-testing, split-ratio clamp/snap via `[`/`]`, and narrow-terminal boxed layouts.
 - **Frameworks**: std test harness only; no mocking, no property tests, no live-terminal end-to-end test, no coverage gate.
 - **Gap**: no end-to-end test driving the real binary; UI tests render into a test `Frame` rather than a live terminal.
 
@@ -197,6 +198,8 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 7. **Shift groups as an enum** — `ShiftGroup::Group1–4` with `color()`/`key_label()`; panel borders and status bar derive from one source of truth.
 8. **Vim-style `g` prefix with lazy timeout** — arming stores only `PrefixState { started: Instant }`; expiry against `PREFIX_TIMEOUT` (1 s) is checked when the next event arrives instead of running a timer thread, keeping the event loop single-threaded and synchronous.
 9. **Embedded source viewer** — `g v` opens a source pane in the same TUI and `App`; raw lines and parser-recorded spans support selection jumps, occurrence navigation, modifier highlights, and minimap interaction without IPC or a process boundary.
+10. **Boxed rendering gated on parse-time LED association** — a component renders as ONE bordered cell only when its `.ini` section carried an `led = L.N` assignment (stored as `HwComponent.led`); the border uses the component-kind color and the LED glyph reflects state inside the shared box. LED-less components keep two-line text rendering; LEDs are never rendered as standalone cells.
+11. **Adjustable panels/source split** — the embedded viewer's column ratio lives in `App.viewer_split_ratio` (default 0.6, clamped 0.3–0.7, persisted across patch loads as a view preference); `[`/`]` nudge it in exact 0.1 steps only while the viewer is open.
 
 ## 15. Constraints, Risks, and Technical Debt
 
@@ -240,4 +243,4 @@ DROID reference material (`droid_living_examlpes/`) remains a machine-local syml
 - **OpenSpec**: spec-driven change workflow (`openspec/changes/`, `openspec/specs/`).
 - **beads (bd)**: Dolt-backed issue tracker used for task tracking.
 
-<!-- Last updated: 2026-08-23T19:12:34+02:00 -->
+<!-- Last updated: 2026-08-24 -->

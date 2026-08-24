@@ -32,7 +32,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_header(frame, chunks[0], app);
     if app.showing_viewer {
         render_embedded_main(frame, chunks[1], app);
-        render_viewer_status(frame, chunks[2]);
+        render_viewer_status(frame, chunks[2], app);
     } else {
         render_main(frame, chunks[1], app);
         render_status(frame, chunks[2], app);
@@ -486,18 +486,25 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_embedded_main(frame: &mut Frame, area: Rect, app: &mut App) {
     app.component_rects.clear();
-    // minimap geometry published by 4.2; keep None for 4.1 so handler click is no-op
-    app.minimap_rect = None;
-
+    // minimap_rect is owned entirely by render_source_pane below: it publishes
+    // Some(rect) when the minimap is rendered and resets to None on every
+    // path where it is not.
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     // Split main area horizontally: panels | source_pane
-    // Use percentage so narrow terminals degrade gracefully; never panic.
+    // The panels column width is app.viewer_split_ratio (clamped 0.3–0.7,
+    // default 0.6 = 60% panels / 40% source). Percentages so narrow terminals
+    // degrade gracefully; never panic.
+    let panels_pct = (app.viewer_split_ratio.clamp(0.3, 0.7) * 100.0) as u16;
+    let source_pct = 100u16.saturating_sub(panels_pct);
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(panels_pct),
+            Constraint::Percentage(source_pct),
+        ])
         .split(area);
 
     if h_chunks.len() < 2 {
@@ -555,7 +562,10 @@ fn should_show_minimap(source_pane_area: Rect, total_area: Rect, app: &App) -> b
     if total_area.width < 80 {
         return false;
     }
-    if source_pane_area.width < 60 {
+    // Pane-width floor calibrated for the viewer_split_ratio split (default
+    // 0.6 panels / 0.4 source): at a 120-col terminal the pane is ~48 cols and
+    // must still show the minimap; at 80 cols it is ~32 and must stay hidden.
+    if source_pane_area.width < 40 {
         return false;
     }
     if source_pane_area.height < 10 {
@@ -1157,8 +1167,11 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_viewer_status(frame: &mut Frame, area: Rect) {
-    let status = Paragraph::new(Line::from(vec![
+fn render_viewer_status(frame: &mut Frame, area: Rect, app: &App) {
+    // Transient status message (e.g. split-ratio feedback from `[`/`]`) trails
+    // the hints so they always stay fully visible; the message shows when the
+    // bar has room.
+    let mut spans = vec![
         Span::styled(
             "Source Viewer",
             Style::default()
@@ -1177,15 +1190,25 @@ fn render_viewer_status(frame: &mut Frame, area: Rect) {
         Span::styled("t", Style::default().fg(Color::Cyan)),
         Span::raw(" toggle | "),
         Span::styled("Tab", Style::default().fg(Color::Cyan)),
-        Span::raw(" focus"),
-    ]))
-    .style(Style::default().bg(Color::DarkGray))
-    .alignment(Alignment::Left)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
+        Span::raw(" focus | "),
+        Span::styled("[ / ]", Style::default().fg(Color::Cyan)),
+        Span::raw(" split"),
+    ];
+    if !app.status_message.is_empty() {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            app.status_message.as_str(),
+            Style::default().fg(Color::White),
+        ));
+    }
+    let status = Paragraph::new(Line::from(spans))
+        .style(Style::default().bg(Color::DarkGray))
+        .alignment(Alignment::Left)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
 
     frame.render_widget(status, area);
 }
@@ -1456,6 +1479,58 @@ mod tests {
         render_at(&mut app, 120, 40);
         let text = rendered_text(&mut app, 120, 40);
         assert!(text.contains("Circuits"));
+    }
+
+    #[test]
+    fn embedded_split_respects_viewer_split_ratio() {
+        // Find the panels pane's right border column; it must shift with the ratio.
+        let border_col = |ratio: f32| -> u16 {
+            let mut app = app_with_embedded("arpeggio1");
+            app.viewer_split_ratio = ratio;
+            let backend = TestBackend::new(100, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            // Main content starts after the 3-row header, so row 3 is the panels
+            // block's top border row. Its top-right corner '┐' marks the panels
+            // right border. Find the first such corner in that row.
+            let mut col = 0u16;
+            for x in 0..buffer.area().width {
+                if buffer[(x, 3)].symbol() == "┐" {
+                    col = x;
+                    break;
+                }
+            }
+            col
+        };
+        let at_06 = border_col(0.6);
+        let at_07 = border_col(0.7);
+        let at_03 = border_col(0.3);
+        // 0.6 gives 60% of 100 = col 59; 0.7 gives 70% = col 69; 0.3 gives 30% = col 29.
+        assert!(
+            at_07 > at_06,
+            "wider source ratio must push panels border right"
+        );
+        assert!(
+            at_06 > at_03,
+            "narrower source ratio must pull panels border left"
+        );
+        assert_eq!(at_06, 59);
+        assert_eq!(at_07, 69);
+        assert_eq!(at_03, 29);
+    }
+
+    #[test]
+    fn viewer_status_bar_shows_split_message() {
+        let mut app = app_with_embedded("arpeggio1");
+        app.status_message = "Panels/Source split: 70%/30%".to_string();
+        // Wide enough that hints plus the trailing message all fit.
+        let text = rendered_text(&mut app, 160, 40);
+        assert!(text.contains("Source Viewer"));
+        assert!(
+            text.contains("Panels/Source split: 70%/30%"),
+            "viewer status bar must surface transient split-ratio message"
+        );
     }
 
     #[test]

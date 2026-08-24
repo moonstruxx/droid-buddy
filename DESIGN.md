@@ -51,7 +51,7 @@ typography:
     hover: reversed
 spacing:
   component-width: 16
-  component-height: 2
+  component-height: 3
   header-height: 3
   status-height: 3
   main-min-height: 10
@@ -90,10 +90,20 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 
 ## Component Anatomy
 
-Each component occupies a fixed cell of 16 columns × 2 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together. The factor steps through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends), and the status bar confirms each step as `Scaling: N%`.
+Each component occupies a fixed cell of 16 columns × 3 rows; a uniform scale factor multiplies every component's rendered width and height so the whole panel zooms together. The factor steps through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends), and the status bar confirms each step as `Scaling: N%`.
+
+Components without a parse-time LED association render as two-line text cells:
 
 - **Row 1**: a state glyph followed by the component label (e.g. `● TRIG A`).
 - **Row 2**: the state text (ON/OFF, percentage, CV IN/CV OUT), rendered in muted gray.
+
+**Boxed cells for LED-associated components.** When a component's `.ini` section declares an LED association (`led = L.N`), parsed into `HwComponent.led`, it renders as one bordered box filling its full cell instead of a bare text cell:
+
+- The box border uses the owning component's kind color — button/switch white, knob/encoder magenta, CV in cyan, CV out green, LED red.
+- Inside the box: row 1 is the element symbol + label; row 2 is the element state text plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED component's live state.
+- Hover applies the same reversed/dark-gray emphasis to box content and border that text cells use.
+- Components whose LED id does not resolve to an existing LED component fall back to the unlit glyph/state.
+- LEDs referenced this way are never rendered as standalone grid cells; only unreferenced LEDs appear on their own.
 
 Glyphs by kind:
 
@@ -124,16 +134,18 @@ An overlay centered in the terminal, roughly 70% of the width and 50% of the hei
 
 ## Source Viewer
 
-Opened with `g` then `v`, the source viewer is embedded in the existing three-band TUI. The header and bottom status band remain; the flexible main band becomes a 50/50 split between the hardware panels and the source viewer. An open file picker still has absolute precedence and renders over the viewer.
+Opened with `g` then `v`, the source viewer is embedded in the existing three-band TUI. The header and bottom status band remain; the flexible main band becomes a horizontal panels|source split. An open file picker still has absolute precedence and renders over the viewer.
 
-- **Panels pane** (left half): a bordered ` Panels ` block containing the normal hardware layout. Its border is bold yellow when panel focus is active; otherwise it is dark gray. Panel interactions are isolated while source focus is active.
-- **Source pane** (right half): internally split into a circuit sidebar, scrolling source content, and an optional minimap. The sidebar is ~1/5 of the source-pane width, with a 20-column minimum while retaining at least 20 columns for content. It is a blue-bordered ` Circuits ` block listing every `[section]` in parse order; repeated names are disambiguated as `copy`, `copy (1)`, `copy (2)`. The selected entry uses reversed video; other entries are white.
+- **Adjustable split**: while the source pane is open, `[` narrows the source pane and `]` widens it in ±10 % steps, clamped to 30–70 % of the main band (default 60/40 favoring panels). The ratio persists across patch loads within a session.
+
+- **Panels pane**: a bordered ` Panels ` block containing the normal hardware layout. Its border is bold yellow when panel focus is active; otherwise it is dark gray. Panel interactions are isolated while source focus is active.
+- **Source pane**: internally split into a circuit sidebar, scrolling source content, and an optional minimap. The sidebar is ~1/5 of the source-pane width, with a 20-column minimum while retaining at least 20 columns for content. It is a blue-bordered ` Circuits ` block listing every `[section]` in parse order; repeated names are disambiguated as `copy`, `copy (1)`, `copy (2)`. The selected entry uses reversed video; other entries are white.
 - **Focus emphasis**: the source content border and title are bold yellow while source focus is active, and dark gray while panel focus is active. `Tab` switches focus; `Esc` closes the viewer while preserving selection and source position.
 - **Raw mode** (default): the content pane shows retained verbatim `.ini` lines, including comments and blank lines, with vertical scroll. The title is ` Source [raw] `. `t` toggles to prettified mode without closing the viewer.
 - **Prettified mode**: each circuit is rendered as a small ASCII box — a `┌─ name ─┐` cap with a bold, circuit-colored name, one `│ key = value │` line per setting with cyan keys and white values, a `└────┘` base, and a blank line. Circuit frame colors reuse the component palette: buttons/switches/notebuttons white, pots/encoders/faderbank magenta, CV in cyan, CV out green, LEDs red, and unknown circuits blue.
 - **Selection highlights**: selected-token occurrences are yellow and bold; the current occurrence is yellow, bold, and reversed on dark gray. Affected boolean `select`/transitive modifier spans are cyan, bold, and underlined. Affected exact-value (`selectat`) spans are magenta, bold, and underlined. In prettified mode, affected values use the same cyan/magenta modifier colors; token references are yellow, bold, and reversed. Clearing selection clears these highlights.
-- **Minimap**: when the loaded patch and terminal are wide enough, a ` Map ` column is 3 columns wide (plus borders) and summarizes the full raw file. Plain lines use dark-gray `·`; occurrence lines use yellow `█`; modifier lines use cyan `▓` for boolean or magenta `▓` for exact-value relationships (combined occurrence/modifier lines are magenta `█`). The visible source viewport is shown as a reversed dark-gray indicator and moves proportionally with source scroll. The renderer publishes the minimap rectangle for click-to-scroll hit testing. It is hidden when total width is below 80 columns, the source pane is below 60 columns, height is below 10 rows, or keeping it would reduce readable source content below 20 columns.
-- **Viewer status bar** (bottom, 3 rows): a dark-gray bordered band reads bold-white `Source Viewer | ` followed by cyan shortcut tokens — `ESC` close, `j/k` scroll, `Up/Down` occurrence navigation, `Home/End` first/last occurrence, `t` mode toggle, and `Tab` focus.
+- **Minimap**: when the loaded patch and terminal are wide enough, a ` Map ` column is 3 columns wide (plus borders) and summarizes the full raw file. Plain lines use dark-gray `·`; occurrence lines use yellow `█`; modifier lines use cyan `▓` for boolean or magenta `▓` for exact-value relationships (combined occurrence/modifier lines are magenta `█`). The visible source viewport is shown as a reversed dark-gray indicator and moves proportionally with source scroll. The renderer publishes the minimap rectangle for click-to-scroll hit testing. It is hidden when total width is below 80 columns, the source pane is below 40 columns, height is below 10 rows, or keeping it would reduce readable source content below 20 columns.
+- **Viewer status bar** (bottom, 3 rows): a dark-gray bordered band reads bold-white `Source Viewer | ` followed by cyan shortcut tokens — `ESC` close, `j/k` scroll, `Up/Down` occurrence navigation, `Home/End` first/last occurrence, `t` mode toggle, `Tab` focus, and `[ / ]` split adjustment. Transient messages (e.g. `Panels/Source split: 50%/50%`) render as trailing spans *after* the hint list so the hints always stay fully visible.
 - **Empty states**: centered muted `No patch loaded` or `No circuits in patch` appears inside the source content border; the sidebar remains an empty bordered block.
 - **Readonly and isolation**: the source pane never toggles components. While source focus is active, panel toggles, shift selection, scale, and orientation keys are inert; `Tab` returns panel focus. Panel interaction and shift visualization remain available from the panel-focused state.
 
@@ -141,4 +153,4 @@ Opened with `g` then `v`, the source viewer is embedded in the existing three-ba
 
 With no patch loaded, the main area shows the centered muted prompt `Press 'l' to load a patch`.
 
-<!-- Last updated: 2026-08-23 -->
+<!-- Last updated: 2026-08-24 -->

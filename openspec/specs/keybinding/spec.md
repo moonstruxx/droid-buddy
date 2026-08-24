@@ -195,6 +195,25 @@ The system SHALL display the current mode in the status bar to provide clear fee
 - **WHEN** in resize mode (free proportion)
 - **THEN** status shows "RESIZE MODE (free) - Arrows: width/height, Shift+Arrows: opposite dim, Esc: cancel"
 
+### Requirement: Split ratio keys
+When the source viewer is open, the `[` and `]` keys SHALL adjust the panels | source split ratio.
+
+#### Scenario: Widen source
+- **WHEN** the user presses `]` while the source viewer is open
+- **THEN** the source pane widens by 10% and the panels column shrinks accordingly
+
+#### Scenario: Narrow source
+- **WHEN** the user presses `[` while the source viewer is open
+- **THEN** the source pane narrows by 10% and the panels column grows accordingly
+
+#### Scenario: Ratio clamped
+- **WHEN** the user adjusts past either bound
+- **THEN** the ratio stops at 30% / 70% for either side
+
+#### Scenario: Viewer closed
+- **WHEN** the source viewer is not open
+- **THEN** pressing `[` or `]` has no effect on layout state
+
 ## Design Decisions
 
 - Decision 1: Lazy timeout check (no background timer). Rationale: the app is event-driven; checking expiry on the next keypress avoids threading complexity and keeps the event loop simple. A stale prefix that nobody presses is harmless.

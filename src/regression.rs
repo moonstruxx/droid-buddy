@@ -2,6 +2,11 @@
 //! Drives real flows end-to-end through `handle_event` + `render` with
 //! `fixtures/source_navigation.ini`. Each test is a small story rather
 //! than an isolated unit: open viewer, select, navigate, toggle, click.
+//!
+//! A second story arc covers boxed components and the viewer split ratio
+//! (`fixtures/led_pairs.ini`): parse to boxed/text frames to mixed grid
+//! to click hit-testing, plus `[`/`]` split adjustment through handler,
+//! App state, and the rendered layout.
 
 use std::path::Path;
 
@@ -843,4 +848,242 @@ fn regression_viewer_isolation() {
     handle_event(key(KeyCode::Char('1')), &mut app);
     assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
     let _ = buffer_for(&mut app, 80, 24);
+}
+
+// ── boxed components & split ratio (task 5.1: boxed-components) ────────
+
+/// App loaded with the LED-association fixture: B1.1 owns L1.1 (boxed),
+/// B1.2 has no LED (text cell), P1.1 owns L1.3, and the bare `[p2b8]`
+/// section materializes the standalone L1.* LED components.
+fn led_pairs_app() -> App {
+    let patch = Patch::from_ini_file(Path::new("fixtures/led_pairs.ini")).unwrap();
+    let mut app = App::new();
+    app.load_patch(patch);
+    app
+}
+
+/// Rect the last real render published for `token`'s component.
+fn rect_for(app: &App, token: &str) -> Rect {
+    let idx = idx_for(app, token);
+    app.component_rects
+        .iter()
+        .find(|(i, _)| *i == idx)
+        .map(|(_, r)| *r)
+        .unwrap_or_else(|| panic!("render published no rect for {token}"))
+}
+
+/// Symbols of one row inside a rendered component cell.
+fn row_text(buffer: &Buffer, rect: Rect, row: u16) -> String {
+    let y = rect.y + row;
+    (0..rect.width)
+        .filter_map(|x| buffer.cell((rect.x + x, y)))
+        .map(|c| c.symbol())
+        .collect()
+}
+
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
+#[test]
+fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
+    let mut app = led_pairs_app();
+    // Flow precondition; full parse coverage lives in patch.rs unit tests.
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].led,
+        Some(String::from("L1.1"))
+    );
+    let buf = buffer_for(&mut app, 100, 40);
+
+    // Boxed: LED-associated button fills the 3-row cell and its third row
+    // carries the associated LED's state text.
+    let boxed = rect_for(&app, "B1.1");
+    assert_eq!(boxed.height, 3, "boxed cell is COMPONENT_HEIGHT tall");
+    assert!(row_text(&buf, boxed, 0).contains("B1.1"), "label row");
+    let mid = row_text(&buf, boxed, 1);
+    assert!(
+        mid.contains("ON") || mid.contains("OFF"),
+        "state row: {mid:?}"
+    );
+    assert!(mid.contains('◉') || mid.contains('○'), "LED glyph in box");
+    let led_row = row_text(&buf, boxed, 2).trim().to_string();
+    assert!(
+        led_row == "ON" || led_row == "OFF",
+        "third row shows LED state, got {led_row:?}"
+    );
+
+    // Text: LED-less button keeps plain content with a blank filler row.
+    let plain = rect_for(&app, "B1.2");
+    assert_eq!(plain.height, 3, "grid geometry unified at 3 rows");
+    assert!(row_text(&buf, plain, 0).contains("B1.2"), "label row");
+    assert!(
+        row_text(&buf, plain, 2).trim().is_empty(),
+        "non-LED cell leaves the filler row blank"
+    );
+}
+
+#[test]
+fn regression_mixed_grid_cells_coexist_without_overlap() {
+    let mut app = led_pairs_app();
+    let buf = buffer_for(&mut app, 100, 40);
+    let rects = app.component_rects.clone();
+    assert!(rects.len() >= 5, "fixture renders several cells");
+
+    let id_of =
+        |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
+    let has_rect = |tok: &str| rects.iter().any(|(i, _)| id_of(*i) == tok);
+
+    // Folded LEDs are absorbed into their owners' boxes; unfolded LEDs
+    // keep their own standalone cells in the same grid.
+    assert!(!has_rect("L1.1"), "folded L1.1 gets no standalone cell");
+    assert!(!has_rect("L1.3"), "folded L1.3 gets no standalone cell");
+    assert!(has_rect("L1.2"), "unfolded LED keeps its own cell");
+    assert!(has_rect("P1.1"), "boxed knob rendered next to text cells");
+
+    for (i, r) in &rects {
+        assert!(
+            r.x + r.width <= buf.area.width && r.y + r.height <= buf.area.height,
+            "cell for {} overflows the frame: {r:?}",
+            id_of(*i)
+        );
+    }
+    for (i, a) in rects.iter().enumerate() {
+        for b in rects.iter().skip(i + 1) {
+            assert!(
+                !rects_overlap(a.1, b.1),
+                "cells {} and {} overlap",
+                id_of(a.0),
+                id_of(b.0)
+            );
+        }
+    }
+}
+
+#[test]
+fn regression_click_on_boxed_cell_toggles_and_selects() {
+    let mut app = led_pairs_app();
+    // Real renderer geometry drives hit-testing — no hand-built rects.
+    let _ = buffer_for(&mut app, 100, 40);
+
+    let boxed = rect_for(&app, "B1.1");
+    let idx = idx_for(&app, "B1.1");
+    let start = app.patch.as_ref().unwrap().hw_components[idx].state.clone();
+    let cx = boxed.x + boxed.width / 2;
+    let cy = boxed.y + boxed.height / 2;
+
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), cx, cy),
+        &mut app,
+    );
+    let mid = app.patch.as_ref().unwrap().hw_components[idx].state.clone();
+    assert_ne!(mid, start, "click inside boxed cell toggles");
+    assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+    assert_eq!(app.hovered_component, Some(idx));
+
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), cx, cy),
+        &mut app,
+    );
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[idx].state,
+        start,
+        "second click toggles back"
+    );
+
+    // Text cell hit-testing still works alongside boxes.
+    let plain = rect_for(&app, "B1.2");
+    let idx2 = idx_for(&app, "B1.2");
+    let before = app.patch.as_ref().unwrap().hw_components[idx2]
+        .state
+        .clone();
+    handle_mouse_event(
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            plain.x + plain.width / 2,
+            plain.y + plain.height / 2,
+        ),
+        &mut app,
+    );
+    assert_ne!(
+        app.patch.as_ref().unwrap().hw_components[idx2].state,
+        before,
+        "click on text cell toggles"
+    );
+    assert_eq!(app.selected_component.as_deref(), Some("B1.2"));
+}
+
+#[test]
+fn regression_split_ratio_brackets_clamp_snap_and_drive_layout() {
+    let mut app = fixture_app();
+    open_viewer(&mut app);
+    let approx = |got: f32, want: f32| (got - want).abs() < 1e-6;
+    assert!(approx(app.viewer_split_ratio, 0.6), "default 0.6");
+
+    handle_event(key(KeyCode::Char(']')), &mut app);
+    assert!(approx(app.viewer_split_ratio, 0.7), "] steps +0.1 exactly");
+    assert!(
+        app.status_message.contains("70%/30%"),
+        "status reflects split: {:?}",
+        app.status_message
+    );
+    handle_event(key(KeyCode::Char(']')), &mut app);
+    assert!(approx(app.viewer_split_ratio, 0.7), "clamped at 0.7");
+
+    for want in [0.6f32, 0.5, 0.4, 0.3] {
+        handle_event(key(KeyCode::Char('[')), &mut app);
+        assert!(approx(app.viewer_split_ratio, want), "exact step {want}");
+    }
+    handle_event(key(KeyCode::Char('[')), &mut app);
+    assert!(approx(app.viewer_split_ratio, 0.3), "clamped at 0.3");
+    assert!(app.status_message.contains("30%/70%"));
+
+    // Ratio is a view preference: it survives loading another patch.
+    assert!(app.showing_viewer, "viewer stays open across load_patch");
+    let other = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+    app.load_patch(other);
+    assert!(approx(app.viewer_split_ratio, 0.3), "ratio persists");
+
+    // The rendered split follows the key-driven ratio: panels right border
+    // sits at ~ratio of a 100-col main area (row 3 = panels top border row).
+    fn border_col(app: &mut App) -> u16 {
+        let buf = buffer_for(app, 100, 40);
+        let mut col = 0u16;
+        for x in 0..buf.area.width {
+            if buf.cell((x, 3)).map(|c| c.symbol() == "┐").unwrap_or(false) {
+                col = x;
+                break;
+            }
+        }
+        col
+    }
+    let at_03 = border_col(&mut app);
+    for _ in 0..4 {
+        handle_event(key(KeyCode::Char(']')), &mut app);
+    }
+    assert!(approx(app.viewer_split_ratio, 0.7));
+    let at_07 = border_col(&mut app);
+    assert!(at_07 > at_03, "border moves right as panels grow");
+    assert!((28..=31).contains(&at_03), "30% of 100 cols, got {at_03}");
+    assert!((68..=71).contains(&at_07), "70% of 100 cols, got {at_07}");
+}
+
+#[test]
+fn regression_narrow_terminal_boxed_layout_no_panic() {
+    for (w, h) in [(100u16, 40u16), (60, 24), (40, 14), (26, 10), (20, 8)] {
+        let mut app = led_pairs_app();
+        let buf = buffer_for(&mut app, w, h);
+        for (_, r) in &app.component_rects {
+            assert!(
+                r.x + r.width <= w && r.y + r.height <= h,
+                "boxed cell {r:?} overflows {w}x{h}"
+            );
+        }
+        assert!(!buf.content().is_empty());
+    }
+    // Embedded viewer with the ratio split also degrades gracefully.
+    for (w, h) in [(80u16, 24u16), (50, 16), (36, 12)] {
+        let mut app = led_pairs_app();
+        app.showing_viewer = true;
+        let _ = buffer_for(&mut app, w, h);
+    }
 }

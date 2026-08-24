@@ -112,3 +112,18 @@ The system SHALL resolve, at load time, which circuit assignments react to which
 #### Scenario: Cyclic definitions terminate
 - **WHEN** internal variables reference each other in a cycle
 - **THEN** resolution completes without hanging, resolving what is reachable
+
+### Requirement: Record LED association
+When a section assigns `led = L.N`, the parser SHALL link that LED token to the element defined in the same section (e.g. `b = B1.1`), exposing the association on the parsed patch's component as an optional LED reference.
+
+#### Scenario: Button with LED
+- **WHEN** a `[button]` section contains `b = B1.1` and `led = L1.1`
+- **THEN** the parsed button component carries the association `led: Some("L1.1")` alongside its id `B1.1`
+
+#### Scenario: Section without led
+- **WHEN** a section defines an element but no `led =` assignment
+- **THEN** the parsed component has no LED association (`led: None`)
+
+#### Scenario: Existing parse unchanged
+- **WHEN** a patch contains no `led =` assignments at all
+- **THEN** every component parses with `led: None` — no behavioral change
