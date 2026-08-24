@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{App, SourceViewMode, ViewerFocus};
 use crate::patch::{ComponentKind, ComponentState};
+use crate::theme;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     // Picker takes absolute precedence – overlay on top of anything.
@@ -48,14 +49,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let header = Paragraph::new(title)
         .style(
             Style::default()
-                .fg(Color::White)
+                .fg(theme::active().text)
                 .add_modifier(Modifier::BOLD),
         )
         .alignment(Alignment::Center)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue)),
+                .border_style(Style::default().fg(theme::active().accent)),
         );
 
     frame.render_widget(header, area);
@@ -72,7 +73,7 @@ fn render_main(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_empty(frame: &mut Frame, area: Rect) {
     let msg = Paragraph::new("Press 'l' to load a patch")
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(theme::active().muted))
         .alignment(Alignment::Center);
     frame.render_widget(msg, area);
 }
@@ -177,11 +178,14 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             ),
             Some(_) => (
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme::active().muted)
                     .add_modifier(Modifier::DIM),
                 format!(" {} ", name),
             ),
-            None => (Style::default().fg(Color::DarkGray), format!(" {} ", name)),
+            None => (
+                Style::default().fg(theme::active().muted),
+                format!(" {} ", name),
+            ),
         };
 
         let block = Block::default()
@@ -274,20 +278,22 @@ fn render_component(
                 },
                 state,
                 if is_shift_active {
+                    // Shift-active emphasis has no dedicated token yet; task
+                    // 3.2 moves shift lookups into the theme layer.
                     Color::Yellow
                 } else {
-                    Color::White
+                    theme::active().button
                 },
             )
         }
-        ComponentKind::CvIn => ("→", String::from("CV IN"), Color::Cyan),
-        ComponentKind::CvOut => ("←", String::from("CV OUT"), Color::Green),
+        ComponentKind::CvIn => ("→", String::from("CV IN"), theme::active().cv_in),
+        ComponentKind::CvOut => ("←", String::from("CV OUT"), theme::active().cv_out),
         ComponentKind::Knob => {
             let val = match &comp.state {
                 ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
                 _ => String::from("---"),
             };
-            ("◉", val, Color::Magenta)
+            ("◉", val, theme::active().knob)
         }
         ComponentKind::Switch => {
             let state = match &comp.state {
@@ -301,7 +307,7 @@ fn render_component(
                     "□"
                 },
                 state,
-                Color::White,
+                theme::active().button,
             )
         }
         ComponentKind::Encoder => {
@@ -309,7 +315,7 @@ fn render_component(
                 ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
                 _ => String::from("---"),
             };
-            ("◉", val, Color::Magenta)
+            ("◉", val, theme::active().knob)
         }
         ComponentKind::Led => {
             let state = match &comp.state {
@@ -323,7 +329,7 @@ fn render_component(
                     "○"
                 },
                 state,
-                Color::Red,
+                theme::active().led,
             )
         }
     };
@@ -331,7 +337,7 @@ fn render_component(
     let hover_style = if is_hovered {
         Style::default()
             .fg(fg_color)
-            .bg(Color::DarkGray)
+            .bg(theme::active().muted)
             .add_modifier(Modifier::REVERSED)
     } else {
         Style::default().fg(fg_color)
@@ -357,7 +363,7 @@ fn render_component(
         let display_style = if is_hovered {
             Style::default()
                 .fg(fg_color)
-                .bg(Color::DarkGray)
+                .bg(theme::active().muted)
                 .add_modifier(Modifier::REVERSED)
         } else {
             Style::default().fg(fg_color)
@@ -391,7 +397,7 @@ fn render_component(
             ]),
             Line::from(Span::styled(
                 state_text,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::active().muted),
             )),
             Line::from(Span::raw("")), // third row filler so the 3‑row area is fully occupied
         ];
@@ -408,7 +414,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             app.status_message.as_str()
         },
-        Style::default().fg(Color::White),
+        Style::default().fg(theme::active().text),
     )];
 
     if let Some(group) = app.active_shift {
@@ -428,16 +434,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             "Scale: {:.1} | Orientation: {:?}",
             app.scale_factor, app.orientation
         ),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme::active().text),
     ));
 
     let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(Color::DarkGray))
+        .style(Style::default().bg(theme::active().status_bg))
         .alignment(Alignment::Left)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(theme::active().muted)),
         );
 
     frame.render_widget(status, area);
@@ -471,12 +477,12 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
 
     let joined = entry_lines.join("\n");
     let paragraph = Paragraph::new(joined)
-        .style(Style::default().bg(Color::DarkGray))
+        .style(Style::default().bg(theme::active().muted))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(" File Picker ")
-                .border_style(Style::default().fg(Color::Blue)),
+                .border_style(Style::default().fg(theme::active().accent)),
         );
 
     frame.render_widget(paragraph, picker_area);
@@ -527,7 +533,7 @@ fn render_panels_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme::active().muted)
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -709,7 +715,7 @@ fn render_source_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Circuits ")
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(Style::default().fg(theme::active().accent));
 
     let Some(patch) = app.patch.as_ref() else {
         frame.render_widget(block, area);
@@ -731,7 +737,7 @@ fn render_source_sidebar(frame: &mut Frame, area: Rect, app: &App) {
             let style = if Some(i) == selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme::active().text)
             };
             Line::from(Span::styled(name.as_str(), style))
         })
@@ -748,7 +754,7 @@ fn render_source_content(frame: &mut Frame, area: Rect, app: &App) {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme::active().muted)
     };
 
     let title = match app.source_view_mode {
@@ -764,7 +770,7 @@ fn render_source_content(frame: &mut Frame, area: Rect, app: &App) {
 
     let Some(patch) = app.patch.as_ref() else {
         let msg = Paragraph::new("No patch loaded")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme::active().muted))
             .alignment(Alignment::Center)
             .block(outer_block);
         frame.render_widget(msg, area);
@@ -773,7 +779,7 @@ fn render_source_content(frame: &mut Frame, area: Rect, app: &App) {
 
     if patch.sections.is_empty() && patch.raw_lines.is_empty() {
         let msg = Paragraph::new("No circuits in patch")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme::active().muted))
             .alignment(Alignment::Center)
             .block(outer_block);
         frame.render_widget(msg, area);
@@ -784,7 +790,7 @@ fn render_source_content(frame: &mut Frame, area: Rect, app: &App) {
         SourceViewMode::Raw => {
             if patch.raw_lines.is_empty() {
                 let msg = Paragraph::new("No patch loaded")
-                    .style(Style::default().fg(Color::DarkGray))
+                    .style(Style::default().fg(theme::active().muted))
                     .alignment(Alignment::Center)
                     .block(outer_block);
                 frame.render_widget(msg, area);
@@ -800,7 +806,7 @@ fn render_source_content(frame: &mut Frame, area: Rect, app: &App) {
             let circuits = patch.viewer_circuits();
             if circuits.is_empty() {
                 let msg = Paragraph::new("No circuits in patch")
-                    .style(Style::default().fg(Color::DarkGray))
+                    .style(Style::default().fg(theme::active().muted))
                     .alignment(Alignment::Center)
                     .block(outer_block);
                 frame.render_widget(msg, area);
@@ -982,7 +988,7 @@ fn build_prettified_highlighted_lines(
         for (key, value) in &circuit.entries {
             let mut line_spans: Vec<Span<'static>> = vec![
                 Span::styled("│ ", Style::default().fg(color)),
-                Span::styled(key.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled(key.clone(), Style::default().fg(theme::active().viewer_key)),
                 Span::raw(" = "),
             ];
             // Determine highlighted value spans
@@ -1009,7 +1015,7 @@ fn build_prettified_highlighted_lines(
                     if ranges.is_empty() {
                         vec![Span::styled(
                             value.clone(),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(theme::active().text),
                         )]
                     } else {
                         // Check current occurrence distinction inside prettified value?
@@ -1021,7 +1027,7 @@ fn build_prettified_highlighted_lines(
                             if s > last {
                                 out.push(Span::styled(
                                     value[last..s].to_string(),
-                                    Style::default().fg(Color::White),
+                                    Style::default().fg(theme::active().text),
                                 ));
                             }
                             // Decide current vs other: we highlight current occurrence (if any) with REVERSED
@@ -1038,7 +1044,7 @@ fn build_prettified_highlighted_lines(
                         if last < value.len() {
                             out.push(Span::styled(
                                 value[last..].to_string(),
-                                Style::default().fg(Color::White),
+                                Style::default().fg(theme::active().text),
                             ));
                         }
                         out
@@ -1047,7 +1053,7 @@ fn build_prettified_highlighted_lines(
             } else {
                 vec![Span::styled(
                     value.clone(),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(theme::active().text),
                 )]
             };
             line_spans.extend(val_spans);
@@ -1070,7 +1076,7 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
     let Some(patch) = app.patch.as_ref() else {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(theme::active().muted));
         frame.render_widget(block, area);
         return;
     };
@@ -1083,7 +1089,7 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
     if inner_height == 0 {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(theme::active().muted));
         frame.render_widget(block, area);
         return;
     }
@@ -1141,15 +1147,17 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
         } else if has_occ {
             ("█", Style::default().fg(Color::Yellow))
         } else {
-            ("·", Style::default().fg(Color::DarkGray))
+            ("·", Style::default().fg(theme::active().muted))
         };
         if is_viewport {
-            style = style.bg(Color::DarkGray).add_modifier(Modifier::REVERSED);
+            style = style
+                .bg(theme::active().muted)
+                .add_modifier(Modifier::REVERSED);
             // Ensure viewport visible even on empty lines
             if ch == "·" {
                 style = Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
+                    .fg(theme::active().text)
+                    .bg(theme::active().muted)
                     .add_modifier(Modifier::REVERSED);
             }
         }
@@ -1161,8 +1169,8 @@ fn render_minimap(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Map ")
-        .title_style(Style::default().fg(Color::DarkGray))
-        .border_style(Style::default().fg(Color::DarkGray));
+        .title_style(Style::default().fg(theme::active().muted))
+        .border_style(Style::default().fg(theme::active().muted));
     let paragraph = Paragraph::new(rows).block(block);
     frame.render_widget(paragraph, area);
 }
@@ -1175,52 +1183,53 @@ fn render_viewer_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(
             "Source Viewer",
             Style::default()
-                .fg(Color::White)
+                .fg(theme::active().text)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
-        Span::styled("ESC", Style::default().fg(Color::Cyan)),
+        Span::styled("ESC", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" close | "),
-        Span::styled("j/k", Style::default().fg(Color::Cyan)),
+        Span::styled("j/k", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" scroll | "),
-        Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
+        Span::styled("Up/Down", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" occur | "),
-        Span::styled("Home/End", Style::default().fg(Color::Cyan)),
+        Span::styled("Home/End", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" jump | "),
-        Span::styled("t", Style::default().fg(Color::Cyan)),
+        Span::styled("t", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" toggle | "),
-        Span::styled("Tab", Style::default().fg(Color::Cyan)),
+        Span::styled("Tab", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" focus | "),
-        Span::styled("[ / ]", Style::default().fg(Color::Cyan)),
+        Span::styled("[ / ]", Style::default().fg(theme::active().viewer_key)),
         Span::raw(" split"),
     ];
     if !app.status_message.is_empty() {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
             app.status_message.as_str(),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::active().text),
         ));
     }
     let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(Color::DarkGray))
+        .style(Style::default().bg(theme::active().status_bg))
         .alignment(Alignment::Left)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(theme::active().muted)),
         );
 
     frame.render_widget(status, area);
 }
 
 fn circuit_color(name: &str) -> Color {
+    let t = theme::active();
     match name {
-        "button" | "switch" | "notebuttons" | "notobuttons" => Color::White,
-        "pot" | "encoder" | "faderbank" => Color::Magenta,
-        "cvin" | "cv_in" => Color::Cyan,
-        "cvout" | "cv_out" => Color::Green,
-        "led" => Color::Red,
-        _ => Color::Blue,
+        "button" | "switch" | "notebuttons" | "notobuttons" => t.button,
+        "pot" | "encoder" | "faderbank" => t.knob,
+        "cvin" | "cv_in" => t.cv_in,
+        "cvout" | "cv_out" => t.cv_out,
+        "led" => t.led,
+        _ => t.accent,
     }
 }
 
@@ -1320,6 +1329,23 @@ mod tests {
         render_at(&mut app, 80, 24);
     }
 
+    // Smoke-level only (deep per-theme regression is task 3.3): each built-in
+    // theme must render a full frame without panicking. Restores classic last
+    // because other tests in this binary assume the default theme is active.
+    #[test]
+    fn renders_frame_under_every_builtin_theme_without_panic() {
+        for name in theme::THEMES {
+            let mut app = App::new();
+            app.load_sample_patch();
+            app.showing_viewer = true;
+            theme::init(*theme::resolve(name));
+            render_at(&mut app, 100, 30);
+            app.showing_viewer = false;
+            render_at(&mut app, 100, 30);
+        }
+        theme::init(theme::Theme::classic());
+    }
+
     #[test]
     fn status_bar_shows_active_shift_group() {
         let mut app = App::new();
@@ -1407,17 +1433,25 @@ mod tests {
         assert_eq!(result, vec!["a", "b", "c"]);
     }
 
+    // Assert against theme::active(), never Theme::classic(): theme tests in
+    // this binary mutate the process-global active theme, so only a same-
+    // moment token read keeps these assertions deterministic.
     #[test]
-    fn circuit_color_maps_known_circuits() {
-        assert_eq!(circuit_color("button"), Color::White);
-        assert_eq!(circuit_color("switch"), Color::White);
-        assert_eq!(circuit_color("pot"), Color::Magenta);
-        assert_eq!(circuit_color("encoder"), Color::Magenta);
-        assert_eq!(circuit_color("cvout"), Color::Green);
-        assert_eq!(circuit_color("cvin"), Color::Cyan);
-        assert_eq!(circuit_color("led"), Color::Red);
-        assert_eq!(circuit_color("p2b8"), Color::Blue);
-        assert_eq!(circuit_color("copy"), Color::Blue);
+    fn circuit_color_maps_known_circuits_to_kind_tokens() {
+        let t = theme::active();
+        assert_eq!(circuit_color("button"), t.button);
+        assert_eq!(circuit_color("switch"), t.button);
+        assert_eq!(circuit_color("notebuttons"), t.button);
+        assert_eq!(circuit_color("pot"), t.knob);
+        assert_eq!(circuit_color("encoder"), t.knob);
+        assert_eq!(circuit_color("faderbank"), t.knob);
+        assert_eq!(circuit_color("cvin"), t.cv_in);
+        assert_eq!(circuit_color("cv_in"), t.cv_in);
+        assert_eq!(circuit_color("cvout"), t.cv_out);
+        assert_eq!(circuit_color("cv_out"), t.cv_out);
+        assert_eq!(circuit_color("led"), t.led);
+        assert_eq!(circuit_color("p2b8"), t.accent);
+        assert_eq!(circuit_color("copy"), t.accent);
     }
 
     // ── 4.1 embedded layout tests ───────────────────────────────────────
