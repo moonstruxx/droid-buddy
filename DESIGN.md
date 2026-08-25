@@ -42,6 +42,18 @@ colors:
     minimap-viewport: reversed-on-dark-gray
     status-background: dark-gray
     shortcut-hint: cyan
+  graph:
+    node-border: white
+    node-title: yellow
+    port-input: cyan
+    port-output: green
+    cluster-border: blue
+    cluster-title: blue
+    edge-control: cyan
+    edge-audio: green
+    edge-midi: magenta
+    edge-unknown: dark-gray
+    edge-error: red
 typography:
   family: terminal-default
   size: terminal-default
@@ -61,6 +73,9 @@ spacing:
   viewer-sidebar-width-ratio: 0.2
   viewer-sidebar-min-width: 20
   viewer-status-height: 3
+  graph-node-width: 22
+  graph-node-height: 5
+  graph-cluster-padding: 2
 elevation:
   level: none
 motion:
@@ -90,7 +105,7 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 
 ## Theming
 
-Every color in the interface is a named semantic token resolved from the active theme at render time; rendering code contains no raw color literals. The token set covers component kinds (`button`, `knob`, `cv_in`, `cv_out`, `led`), shift groups (`shift1`–`shift4`), chrome (`accent`, `muted`, `text`, `status_bg`), viewer keys/hints (`viewer_key`), viewer highlights (`focus_border`, `occurrence_highlight`, `modifier_boolean`, `modifier_exact`), and the four minimap signal colors (`minimap_occurrence`, `minimap_modifier_boolean`, `minimap_modifier_exact`, `minimap_combined`).
+Every color in the interface is a named semantic token resolved from the active theme at render time; rendering code contains no raw color literals. The token set covers component kinds (`button`, `knob`, `cv_in`, `cv_out`, `led`), shift groups (`shift1`–`shift4`), chrome (`accent`, `muted`, `text`, `status_bg`), viewer keys/hints (`viewer_key`), viewer highlights (`focus_border`, `occurrence_highlight`, `modifier_boolean`, `modifier_exact`), the four minimap signal colors (`minimap_occurrence`, `minimap_modifier_boolean`, `minimap_modifier_exact`, `minimap_combined`), and the graph surface tokens — node chrome (`graph_node_border`, `graph_node_title`), port markers (`graph_port_input`, `graph_port_output`), cluster chrome (`graph_cluster_border`, `graph_cluster_title`), and the five cable-edge colors (`graph_edge_control`, `graph_edge_audio`, `graph_edge_midi`, `graph_edge_unknown`, `graph_edge_error`).
 
 Three built-in themes ship, selected by name (case-insensitive; `-`, `_`, and space are interchangeable separators):
 
@@ -163,12 +178,22 @@ Opened with `g` then `v`, the source viewer is embedded in the existing three-ba
 - **Empty states**: centered muted `No patch loaded` or `No circuits in patch` appears inside the source content border; the sidebar remains an empty bordered block.
 - **Live interaction**: the source pane never toggles components directly, but the main window stays live while it is open: Enter/Space/click toggle+select components (selection re-jumps the source view), shift/scale/orientation keys work from either focus, and mouse clicks set focus to the clicked pane (component → Panels, source-pane area → Source). Only conflicting navigation keys (`j`/`k`, arrows) follow `Tab` focus.
 
+## Signal-Flow Graph
+
+Opened with `g` then `g` (mirroring the source viewer's `g v`), the signal-flow graph is embedded in the existing three-band TUI: the header and status bands remain, and the main band becomes a full-screen surface for the patch's signal topology — circuits as nodes, virtual `_cable` connections as directed edges, and comment-banner groups as cluster containers. An open file picker still has absolute precedence.
+
+- **Empty state**: with no patch loaded the surface shows the centered muted prompt `No patch loaded. Press 'l' to load.`
+- **Clusters**: each `# ---- Name ----` banner group is a titled, plain-bordered container (blue border and title) drawn as the padded union of its member nodes' rectangles, so edges run behind the node frames. The renderer publishes each cluster rect for hit testing.
+- **Edges**: cables render as box-drawing polylines (`│ ─ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼`) drawn cell by cell between the ports, with the port cells covered by the node frames for a clean join. An edge's color is the cable kind inferred from the producing circuit's name — **control** (circuits named clock/gate/trigger/pulsar/div) cyan, **audio** (the default) green, **midi** (midi/note/seq/pitch) magenta, and **unknown** dark gray when no edge produces the cable — overridden by the red `graph_edge_error` token when a topology-validation finding (dangling sink, `n → 1`) references the cable.
+- **Nodes**: ComfyUI-style rounded frames (`BorderType::Rounded`), 22×5 cells, titled with the circuit name; repeated names append the instance index (`copy`, `copy (1)`, `copy (2)`). The node border is white and the title yellow. A left `◉` input port marks nodes that consume cables; a right `●` output port marks producers (presence markers, not per-parameter pairing).
+- **Interaction**: while the surface is open it owns all mouse input. Left-dragging a node repositions it; on release the layout locally re-settles around the node (damped, bounded iteration budget) while distant nodes stay anchored. `Esc` closes the surface and restores the prior view; `q`/Ctrl+C still quit and `l` still opens the picker. The status bar continues to show the scale/orientation/shift state.
+
 ## Empty State
 
 With no patch loaded, the main area shows the centered muted prompt `Press 'l' to load a patch`.
 
 ## Visual Validation Provenance
 
-Face correctness is proven via the `insta` snapshot harness in `src/regression.rs` (`buffer_to_ansi` trims trailing empty cells, `buffer_to_html` maps fg/bg/bold/dim/reversed per span). The browsable gallery at `evidence/gallery/index.html` renders one row per scenario — fixtures `arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini`, `multi_module_p2b8.ini`, `numbered_led_pairs.ini` × themes `classic`/`terminal`/`mono` × widths 80/120 and viewer open/closed + shift1 — as HTML + ANSI sidecars. Output is ephemeral in the worktree (`.gitignore`'d, generated via `cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`) and durable in the OpenSpec archive (`scripts/archive-gallery.sh` mirrors into `openspec/changes/archive/2026-08-24-add-visual-validation/evidence/gallery`); the strict gate (`cargo test` / `cargo insta test --check`) fails on any face mismatch. This is the `visual-validation` change; see `openspec/specs/visual-validation/spec.md`.
+Face correctness is proven via the `insta` snapshot harness in `src/regression.rs` (`buffer_to_ansi` trims trailing empty cells, `buffer_to_html` maps fg/bg/bold/dim/reversed per span). The browsable gallery at `evidence/gallery/index.html` renders one row per scenario — fixtures `arpeggio1.ini`, `led_pairs.ini`, `source_navigation.ini`, `multi_module_p2b8.ini`, `numbered_led_pairs.ini` × themes `classic`/`terminal`/`mono` × widths 80/120 and viewer open/closed + shift1 — as HTML + ANSI sidecars. Graph-surface faces are covered by the same snapshot harness (scenarios `cable_banner_combos.ini`, `graph_edge_kinds.ini`, `graph_topology_error.ini` × `classic`/`mono` × widths 40/100), asserting cluster/node frames, edge-kind colors, and the topology-error highlight. Output is ephemeral in the worktree (`.gitignore`'d, generated via `cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`) and durable in the OpenSpec archive (`scripts/archive-gallery.sh` mirrors into `openspec/changes/archive/2026-08-24-add-visual-validation/evidence/gallery`); the strict gate (`cargo test` / `cargo insta test --check`) fails on any face mismatch. This is the `visual-validation` change; see `openspec/specs/visual-validation/spec.md`.
 
-<!-- Last updated: 2026-08-24 · panel-contains-modules + boxed-LED redesign: module sub-blocks in Panels, single-state boxed cell + numbered-LED pairing in Component Anatomy, scale note + new fixtures -->
+<!-- Last updated: 2026-08-25 · signal-flow-graph surface: new Signal-Flow Graph section (clusters/edges/nodes/interaction), graph color tokens in frontmatter + Theming, graph node/cluster spacing tokens, graph snapshot scenarios in Visual Validation -->
