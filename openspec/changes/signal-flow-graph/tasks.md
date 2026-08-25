@@ -40,4 +40,4 @@ Notes:
 
 ## 6. Verification
 
-- [ ] 6.1 Full gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test` (incl. `cargo insta test --check`), `cargo build --release --locked` — all four exit 0. Verify: gate output clean; no new warnings <!-- agent: horst-engineer.fast, depends_on: [1.3, 2.3, 3.2, 4.3, 5.3], touches: [] -->
+- [x] 6.1 Full gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test` (incl. `cargo insta test --check`), `cargo build --release --locked` — all four exit 0. Verify: gate output clean; no new warnings <!-- agent: horst-engineer.fast, depends_on: [1.3, 2.3, 3.2, 4.3, 5.3], touches: [] -->
