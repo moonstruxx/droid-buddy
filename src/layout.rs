@@ -14,6 +14,14 @@
 //!
 //! Pure module: no terminal dependency. Positions are a `Vec<(f32, f32)>`
 //! parallel to `graph.nodes` — index `i` is the position of `graph.nodes[i]`.
+//!
+//! Quad-view usage: `solve` is the single convergence entry point for both
+//! the FULL graph and the FILTERED induced subgraph. The FILTERED pane holds
+//! `filtered_positions = solve(&filtered_graph)` independently from
+//! `graph_positions = solve(&full_graph)` — a fresh compact solve, not a
+//! reuse of FULL positions. `solve_filtered` is a thin alias for that call
+//! site so the intent is explicit and tests can target the filtered path
+//! without coupling to FULL-graph fixtures.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -51,10 +59,32 @@ pub const LOCAL_RADIUS: f32 = 200.0;
 ///
 /// The returned `Vec<(f32, f32)>` is parallel to `graph.nodes`: index `i`
 /// holds the position of `graph.nodes[i]`.
+///
+/// Used for both the FULL graph (`solve(&full_graph)`) and the FILTERED
+/// induced subgraph (`solve(&filtered_graph)` / `solve_filtered`) — each call
+/// seeds deterministically from its own graph (topological depth + cluster
+/// bands + node-id hash, no RNG) and converges independently under the same
+/// bounded, grid-hashed solver (`MAX_ITERATIONS`, `ENERGY_THRESHOLD`). No API
+/// break to `local_resettle`.
 pub fn solve(graph: &Graph) -> Vec<(f32, f32)> {
     let mut positions = seed_positions(graph);
     run_iterations(graph, &mut positions, MAX_ITERATIONS, None);
     positions
+}
+
+/// Compact convergence for the FILTERED quad pane (task 2.2).
+///
+/// Thin alias over [`solve`] — identical bounded, deterministic, grid-hashed
+/// convergence (`MAX_ITERATIONS` cap, `ENERGY_THRESHOLD` freeze, no RNG).
+/// Exists as a distinct entry point so the quad view can hold
+/// `filtered_positions = solve_filtered(&filtered_graph)` independently from
+/// `graph_positions = solve(&full_graph)`, and so filtered-compact tests can
+/// target this path without coupling to FULL-graph fixtures. A small filtered
+/// graph converges compactly and quickly; when the filtered set is a strict
+/// subset of FULL, its positions differ from the corresponding FULL subset.
+/// Pure, no terminal dependency. No API break to `solve`/`local_resettle`.
+pub fn solve_filtered(graph: &Graph) -> Vec<(f32, f32)> {
+    solve(graph)
 }
 
 /// Damped local re-settle after a node move (design D1).
