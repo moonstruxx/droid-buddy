@@ -317,6 +317,7 @@ mod tests {
             edges,
             clusters: vec![],
             validation: vec![],
+            ..Default::default()
         }
     }
 
@@ -454,6 +455,7 @@ mod tests {
             edges: vec![],
             clusters,
             validation: vec![],
+            ..Default::default()
         };
         let positions = solve(&graph);
         // Cluster 0 stripe (a, b) is above cluster 1 stripe (c): min band gap

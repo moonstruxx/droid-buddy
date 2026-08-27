@@ -3062,6 +3062,7 @@ mod graph_view_tests {
             ],
             clusters: vec![],
             validation: vec![],
+            ..Default::default()
         };
         assert_eq!(cable_color(&graph, "_CLK"), Color::Cyan, "control");
         assert_eq!(cable_color(&graph, "_AUD"), Color::Green, "audio");
@@ -3084,6 +3085,7 @@ mod graph_view_tests {
             }],
             clusters: vec![],
             validation: vec![],
+            ..Default::default()
         };
         assert_eq!(cable_color(&graph, "_CLK"), Color::Cyan);
         graph.validation.push(TopologyIssue {
@@ -3110,6 +3112,7 @@ mod graph_view_tests {
             }],
             clusters: vec![],
             validation: vec![],
+            ..Default::default()
         };
         let mut app = graph_app_from(graph, vec![(0.0, 0.5), (1.0, 0.5)]);
         let buf = buffer_for(&mut app, 120, 40);
@@ -3147,6 +3150,7 @@ mod graph_view_tests {
             ],
             clusters: vec![],
             validation: vec![],
+            ..Default::default()
         };
         let mut app = graph_app_from(graph, vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
         let buf = buffer_for(&mut app, 120, 40);
@@ -3193,6 +3197,7 @@ mod graph_view_tests {
                 severity: TopologySeverity::Warning,
                 message: "dangling".into(),
             }],
+            ..Default::default()
         };
         let mut app = graph_app_from(graph, vec![(0.0, 0.5), (1.0, 0.5)]);
         let buf = buffer_for(&mut app, 120, 40);
@@ -3213,6 +3218,7 @@ mod graph_view_tests {
             }],
             clusters: vec![],
             validation: vec![],
+            ..Default::default()
         };
         let mut app = graph_app_from(graph, vec![(0.0, 0.0), (1.0, 1.0)]);
         let buf = buffer_for(&mut app, 60, 20);
