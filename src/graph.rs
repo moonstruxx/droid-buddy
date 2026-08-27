@@ -459,12 +459,12 @@ mod tests {
         // One valid fan-out cable, one dangling cable, one n → 1 cable.
         let graph = build(
             "[p2b8]\n\
-             [src]\n    output = _A\n\
-             [sink_a]\n    input = _A\n\
-             [prod1]\n    output = _BUS\n\
-             [prod2]\n    output = _BUS\n\
-             [sink_bus]\n    input = _BUS\n\
-             [dang]\n    input = _ORPHAN\n",
+              [src]\n    output = _A\n\
+              [sink_a]\n    input = _A\n\
+              [prod1]\n    output = _BUS\n\
+              [prod2]\n    output = _BUS\n\
+              [sink_bus]\n    input = _BUS\n\
+              [dang]\n    input = _ORPHAN\n",
             &[],
         );
         assert_eq!(graph.validation.len(), 2);
@@ -485,6 +485,127 @@ mod tests {
             Some(&TopologySeverity::Warning),
             "dangling cable must be a warning"
         );
+    }
+
+    #[test]
+    fn with_highlights_copies_influenced_sets_exactly() {
+        let content =
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let graph = Graph::build_from_patch(&patch, &[]);
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        let hl = graph.with_highlights(&sub);
+        assert_eq!(hl.highlighted_nodes, sub.influenced_nodes);
+        assert_eq!(hl.highlighted_edges, sub.influenced_edges);
+        // original unchanged
+        assert!(graph.highlighted_nodes.is_empty());
+        assert!(graph.highlighted_edges.is_empty());
+        // highlighted graph keeps nodes/edges/clusters/validation
+        assert_eq!(hl.nodes, graph.nodes);
+        assert_eq!(hl.edges, graph.edges);
+    }
+
+    #[test]
+    fn filtered_membership_is_induced_subgraph() {
+        let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n[other]\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let graph = Graph::build_from_patch(&patch, &[]);
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        let filt = graph.filtered_influence(&sub);
+        // nodes are strict subset
+        assert!(filt.nodes.len() < graph.nodes.len());
+        for n in &filt.nodes {
+            assert!(sub.influenced_nodes.contains(&n.id));
+            assert!(graph.nodes.iter().any(|g| g.id == n.id));
+        }
+        // edges are subset: cable in influenced_edges and endpoints in filtered nodes
+        let filt_ids: HashSet<NodeId> = filt.nodes.iter().map(|n| n.id.clone()).collect();
+        for e in &filt.edges {
+            assert!(sub.influenced_edges.contains(&e.cable));
+            assert!(filt_ids.contains(&e.source));
+            assert!(filt_ids.contains(&e.sink));
+        }
+        assert!(filt.edges.len() <= graph.edges.len());
+        // highlighted sets cleared for filtered pane
+        assert!(filt.highlighted_nodes.is_empty());
+        assert!(filt.highlighted_edges.is_empty());
+        // validation filtered to influenced edges only
+        for iss in &filt.validation {
+            assert!(sub.influenced_edges.contains(&iss.cable));
+        }
+        // edges sorted deterministically
+        let mut sorted = filt.edges.clone();
+        sorted.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+        assert_eq!(filt.edges, sorted);
+    }
+
+    #[test]
+    fn filtered_preserves_cluster_intersection() {
+        let content = "# ---- G1 ----\n[button]\n    button = B1.1\n    output = _A\n[copy]\n    input = _A\n    output = O1\n# ---- G2 ----\n[other]\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let graph = Graph::build_from_patch(&patch, &clusters);
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        let filt = graph.filtered_influence(&sub);
+        // only G1 intersects influenced nodes (clocktool, copy); G2 ([other]) is excluded
+        assert_eq!(filt.clusters.len(), 1);
+        assert_eq!(filt.clusters[0].title, "G1");
+    }
+
+    #[test]
+    fn with_highlights_empty_subtree_clears_highlights() {
+        let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let graph = Graph::build_from_patch(&patch, &[]);
+        let empty = crate::patch::InfluenceSubtree::default();
+        let hl = graph.with_highlights(&empty);
+        assert!(hl.highlighted_nodes.is_empty());
+        assert!(hl.highlighted_edges.is_empty());
+        assert_eq!(hl.nodes, graph.nodes);
+        assert_eq!(hl.edges, graph.edges);
+    }
+
+    #[test]
+    fn fixture_filtered_and_highlight_sets() {
+        let patch = Patch::from_ini_file(std::path::Path::new(
+            "fixtures/modifier_switch_passthrough.ini",
+        ))
+        .unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let graph = Graph::build_from_patch(&patch, &clusters);
+        let vars = patch.hw_token_to_vars("B1.1");
+        // B1.1 drives _TRIG and _EXTRA → at least those two cables in union
+        assert!(vars.contains(&String::from("_TRIG")));
+        assert!(vars.contains(&String::from("_EXTRA")));
+        let sub = patch.influence_subtree(&vars);
+        let hl = graph.with_highlights(&sub);
+        assert_eq!(hl.highlighted_nodes, sub.influenced_nodes);
+        assert_eq!(hl.highlighted_edges, sub.influenced_edges);
+        let filt = graph.filtered_influence(&sub);
+        assert!(!filt.nodes.is_empty());
+        assert!(filt.nodes.len() < graph.nodes.len());
+        assert!(filt.highlighted_nodes.is_empty());
+        assert!(filt.highlighted_edges.is_empty());
+        // switch passthrough cable present
+        assert!(sub.influenced_edges.contains("_SWOUT"));
+        assert!(filt.edges.iter().any(|e| e.cable == "_SWOUT"));
+        // copy chain cables present
+        assert!(sub.influenced_edges.contains("_COPY1"));
+        assert!(sub.influenced_edges.contains("_COPY2"));
     }
 }
 /// Fixture-driven suite through the public `Graph::build_from_patch` entry
