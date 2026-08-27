@@ -8,9 +8,9 @@
     "repo": "none"
   },
   "models": {
-    "plan": "opencode/laguna-s-2.1-free",
-    "build": "opencode/nemotron-3.5-lightning-free",
-    "fast": "opencode/north-mini-code-free"
+    "plan": "opencode-go/muse-spark-1.2-contributor",
+    "build": "opencode-go/muse-spark-1.2-contributor",
+    "fast": "opencode-go/muse-spark-1.2-contributor"
   },
   "agents": {
     "maxConcurrent": 3
@@ -24,7 +24,7 @@
   "tools": {
     "rtk": true,
     "quota": true,
-    "caveman": true,
+    "caveman": false,
     "codegraph": false,
     "memory": false
   },

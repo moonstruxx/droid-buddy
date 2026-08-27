@@ -61,13 +61,6 @@ The marker sections below may contain instructions for selected optimization ski
 
 <!-- OB-GUARDRAILS-MEMORY-END -->
 
-<!-- OB-GUARDRAILS-CAVEMAN-START -->
-## Caveman (optimization skill — MANDATORY LOAD)
-
-- **You MUST call `skill("caveman")` via the skill tool before responding.** This is not optional. Caveman mode is mandatory for all responses.
-- No revert unless user says "stop caveman" or "normal mode".
-<!-- OB-GUARDRAILS-CAVEMAN-END -->
-
 <!-- OB-GUARDRAILS-HUMANIZER-START -->
 ## Humanizer (optimization skill — MANDATORY LOAD)
 
