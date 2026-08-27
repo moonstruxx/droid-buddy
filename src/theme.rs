@@ -42,6 +42,10 @@ pub struct Theme {
     pub graph_edge_midi: Color,
     pub graph_edge_unknown: Color,
     pub graph_edge_error: Color,
+    pub graph_node_highlight: Color,
+    pub graph_node_dim: Color,
+    pub graph_edge_highlight: Color,
+    pub graph_edge_dim: Color,
 }
 
 impl Theme {
@@ -82,6 +86,10 @@ impl Theme {
             graph_edge_midi: Color::Magenta,
             graph_edge_unknown: Color::DarkGray,
             graph_edge_error: Color::Red,
+            graph_node_highlight: Color::Yellow,
+            graph_node_dim: Color::Gray,
+            graph_edge_highlight: Color::White,
+            graph_edge_dim: Color::DarkGray,
         }
     }
 
@@ -122,6 +130,10 @@ impl Theme {
             graph_edge_midi: Color::Reset,
             graph_edge_unknown: Color::Reset,
             graph_edge_error: Color::Reset,
+            graph_node_highlight: Color::Reset,
+            graph_node_dim: Color::Reset,
+            graph_edge_highlight: Color::Reset,
+            graph_edge_dim: Color::Reset,
         }
     }
 
@@ -168,6 +180,10 @@ impl Theme {
             graph_edge_midi: Color::DarkGray,
             graph_edge_unknown: Color::Reset,
             graph_edge_error: Color::Black,
+            graph_node_highlight: Color::White,
+            graph_node_dim: Color::Black,
+            graph_edge_highlight: Color::Gray,
+            graph_edge_dim: Color::DarkGray,
         }
     }
 }
