@@ -2152,4 +2152,246 @@ button = B1.3
         // Commented-out cable map never leaks into the index.
         assert!(!patch.cable_index.contains_key("_COMMENTED"));
     }
+
+    // --- influence walk (task 4.1) ---
+
+    fn influenced_nodes_sorted(patch: &Patch, roots: &[String]) -> Vec<NodeId> {
+        let mut v: Vec<NodeId> = patch
+            .influence_subtree(roots)
+            .influenced_nodes
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn influenced_edges_sorted(patch: &Patch, roots: &[String]) -> Vec<String> {
+        let mut v: Vec<String> = patch
+            .influence_subtree(roots)
+            .influenced_edges
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn influence_direct_consumption() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _CLK\n[copy]\n    input = _CLK\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let nodes = influenced_nodes_sorted(&patch, &[String::from("_CLK")]);
+        assert_eq!(nodes, vec![(String::from("copy"), 0)]);
+        let edges = influenced_edges_sorted(&patch, &[String::from("_CLK")]);
+        assert_eq!(edges, vec![String::from("_CLK")]);
+    }
+
+    #[test]
+    fn influence_indirect_via_switch() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n\
+             [clocktool]\n    output = _SEL\n\
+             [switch]\n    select = _SEL\n    input = _A\n    output = _B\n\
+             [quantizer]\n    input = _B\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_SEL")]);
+        assert!(sub.influenced_nodes.contains(&(String::from("switch"), 0)));
+        assert!(sub
+            .influenced_nodes
+            .contains(&(String::from("quantizer"), 0)));
+        assert!(sub.influenced_edges.contains("_SEL"));
+        assert!(sub.influenced_edges.contains("_B"));
+    }
+
+    #[test]
+    fn influence_indirect_via_copy_hop() {
+        // copy is not in any allowlist — structural hop (input+output) qualifies it.
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+        assert!(sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_edges.contains("_A"));
+        assert!(sub.influenced_edges.contains("_B"));
+    }
+
+    #[test]
+    fn influence_any_input_output_circuit_qualifies_as_hop() {
+        // mixer/logic with input+output must hop even though not switch/copy.
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[mixer]\n    input = _A\n    output = _MIX\n[sink]\n    input = _MIX\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        assert!(sub.influenced_nodes.contains(&(String::from("mixer"), 0)));
+        assert!(sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_edges.contains("_MIX"));
+    }
+
+    #[test]
+    fn influence_copy_chain() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[copy]\n    input = _B\n    output = _C\n[sink]\n    input = _C\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 1)));
+        assert!(sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_edges.contains("_A"));
+        assert!(sub.influenced_edges.contains("_B"));
+        assert!(sub.influenced_edges.contains("_C"));
+    }
+
+    #[test]
+    fn influence_cycle_safe_and_deterministic() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[copy]\n    input = _B\n    output = _A\n[switch]\n    select = _B\n    output = O1\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let a = patch.influence_subtree(&[String::from("_A")]);
+        let b = patch.influence_subtree(&[String::from("_A")]);
+        assert_eq!(a, b, "influence walk must be deterministic");
+        assert!(a.influenced_edges.contains("_A"));
+        assert!(a.influenced_edges.contains("_B"));
+        assert!(a.influenced_nodes.contains(&(String::from("copy"), 0)));
+        assert!(a.influenced_nodes.contains(&(String::from("copy"), 1)));
+        assert!(a.influenced_nodes.contains(&(String::from("switch"), 0)));
+    }
+
+    #[test]
+    fn influence_leaf_termination_no_output() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[led]\n    input = _A\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        assert!(sub.influenced_nodes.contains(&(String::from("led"), 0)));
+        assert!(sub.influenced_edges.contains("_A"));
+        // led has no output, so no further cables queued
+        assert_eq!(sub.influenced_edges.len(), 1);
+    }
+
+    #[test]
+    fn influence_hw_token_to_vars_single() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[button]\n    button = B1.1\n    output = _TRIG\n",
+            String::from("t"),
+        )
+        .unwrap();
+        assert_eq!(patch.hw_token_to_vars("B1.1"), vec![String::from("_TRIG")]);
+        assert!(patch.hw_token_to_vars("B1.2").is_empty());
+    }
+
+    #[test]
+    fn influence_hw_token_to_vars_multiple_and_sorted() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[button]\n    button = B1.1\n    output = _ZVAR\n[copy]\n    input = B1.1\n    output = _AVAR\n",
+            String::from("t"),
+        )
+        .unwrap();
+        assert_eq!(
+            patch.hw_token_to_vars("B1.1"),
+            vec![String::from("_AVAR"), String::from("_ZVAR")]
+        );
+    }
+
+    #[test]
+    fn influence_hw_token_to_vars_embedded_and_boundary_aware() {
+        // B1.1 inside an expression plus B1.1_extra must not count.
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[button]\n    button = B1.1_extra\n    output = _NOPE\n[copy]\n    input = B1.1 + P1.1\n    output = _YES\n",
+            String::from("t"),
+        )
+        .unwrap();
+        assert_eq!(patch.hw_token_to_vars("B1.1"), vec![String::from("_YES")]);
+        assert!(!patch
+            .hw_token_to_vars("B1.1")
+            .contains(&String::from("_NOPE")));
+    }
+
+    #[test]
+    fn influence_empty_roots_returns_empty() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[]);
+        assert!(sub.influenced_nodes.is_empty());
+        assert!(sub.influenced_edges.is_empty());
+    }
+
+    #[test]
+    fn influence_dangling_root_still_records_edge() {
+        let patch = Patch::from_ini_str("[p2b8]\n[copy]\n    input = _ORPHAN\n", String::from("t"))
+            .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_ORPHAN")]);
+        assert!(sub.influenced_edges.contains("_ORPHAN"));
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+    }
+
+    #[test]
+    fn influence_union_over_multiple_roots() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[clocktool]\n    output = _B\n[sinka]\n    input = _A\n[sinkb]\n    input = _B\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_A"), String::from("_B")]);
+        assert!(sub.influenced_nodes.contains(&(String::from("sinka"), 0)));
+        assert!(sub.influenced_nodes.contains(&(String::from("sinkb"), 0)));
+        assert!(sub.influenced_edges.contains("_A"));
+        assert!(sub.influenced_edges.contains("_B"));
+    }
+
+    #[test]
+    fn influence_fixture_modifier_switch_passthrough() {
+        let patch =
+            Patch::from_ini_file(Path::new("fixtures/modifier_switch_passthrough.ini")).unwrap();
+        // HW -> VAR
+        let mut vars = patch.hw_token_to_vars("B1.1");
+        vars.sort();
+        assert_eq!(vars, vec![String::from("_EXTRA"), String::from("_TRIG")]);
+        // direct consumption: _BASE -> copy (+ leaf)
+        let base = patch.influence_subtree(&[String::from("_BASE")]);
+        assert!(base.influenced_nodes.iter().any(|(n, _)| n == "copy"));
+        assert!(base.influenced_nodes.iter().any(|(n, _)| n == "contour"));
+        assert!(base.influenced_edges.contains("_BASE"));
+        // switch passthrough: _TRIG -> switch -> _SWOUT -> quantizer/mixer
+        let trig = patch.influence_subtree(&[String::from("_TRIG")]);
+        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "switch"));
+        assert!(trig.influenced_edges.contains("_SWOUT"));
+        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "quantizer"));
+        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "mixer"));
+        // copy chain: _COPY1 -> _COPY2 -> contour/logic
+        assert!(trig.influenced_edges.contains("_COPY1"));
+        assert!(trig.influenced_edges.contains("_COPY2"));
+        assert!(trig.influenced_edges.contains("_LOGICOUT"));
+        // any-input+output hop: logic must be in the walk
+        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "logic"));
+        // leaf: led consumes _SWOUT but has no output -> no extra cable
+        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "led"));
+        // cycle-safe: _CYCLE_A / _CYCLE_B reachable but finite
+        assert!(trig.influenced_edges.contains("_CYCLE_A"));
+        assert!(trig.influenced_edges.contains("_CYCLE_B"));
+        // deterministic
+        let again = patch.influence_subtree(&[String::from("_TRIG")]);
+        assert_eq!(trig, again);
+        // _EXTRA (second var from B1.1) union via hw derivation
+        let union = patch.influence_subtree(&patch.hw_token_to_vars("B1.1"));
+        assert!(union.influenced_edges.contains("_TRIG"));
+        assert!(union.influenced_edges.contains("_EXTRA"));
+    }
 }

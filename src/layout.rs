@@ -321,6 +321,7 @@ fn edge_pairs(graph: &Graph, index: &HashMap<&NodeId, usize>) -> Vec<(usize, usi
 mod tests {
     use super::*;
     use crate::graph::{Cluster, GraphEdge, GraphNode};
+    use crate::patch::Patch;
 
     fn node(name: &str, section_index: usize) -> GraphNode {
         GraphNode {
@@ -733,5 +734,93 @@ mod tests {
         }
         // The moved node itself settles somewhere new.
         assert_ne!(positions[0], (10000.0, 10000.0));
+    }
+
+    #[test]
+    fn filtered_compact_solve_is_finite_distinct_and_converges() {
+        // FULL vs FILTERED: filtered_positions = solve_filtered(filtered_graph)
+        // finite, distinct from FULL subset, compact convergence.
+        let patch = Patch::from_ini_file(std::path::Path::new(
+            "fixtures/modifier_switch_passthrough.ini",
+        ))
+        .unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let full = Graph::build_from_patch(&patch, &clusters);
+        let vars = patch.hw_token_to_vars("B1.1");
+        let sub = patch.influence_subtree(&vars);
+        let filtered = full.filtered_influence(&sub);
+        assert!(!filtered.nodes.is_empty());
+        assert!(filtered.nodes.len() < full.nodes.len());
+        let full_pos = solve(&full);
+        let filt_pos = solve_filtered(&filtered);
+        assert_eq!(filt_pos.len(), filtered.nodes.len());
+        assert_finite_and_bounded(&filt_pos);
+        assert_finite_and_bounded(&full_pos);
+        // deterministic: second filtered solve identical
+        assert_eq!(filt_pos, solve_filtered(&filtered));
+        // distinct from FULL subset: at least one node moved vs its FULL position
+        let full_index: HashMap<&NodeId, usize> = full
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (&n.id, i))
+            .collect();
+        let filt_index: HashMap<&NodeId, usize> = filtered
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (&n.id, i))
+            .collect();
+        let eps = 1e-3f32;
+        let mut any_distinct = false;
+        for id in filtered.nodes.iter().map(|n| &n.id) {
+            let fi = filt_index[id];
+            let gi = full_index[id];
+            let (fx, fy) = filt_pos[fi];
+            let (gx, gy) = full_pos[gi];
+            if (fx - gx).abs() > eps || (fy - gy).abs() > eps {
+                any_distinct = true;
+                break;
+            }
+        }
+        assert!(
+            any_distinct,
+            "filtered compact solve must differ from FULL subset projection"
+        );
+        // compact convergence: bounding box of filtered is within cap and not exploding
+        let bbox = |ps: &[(f32, f32)]| {
+            let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+            let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+            for (x, y) in ps {
+                min_x = min_x.min(*x);
+                max_x = max_x.max(*x);
+                min_y = min_y.min(*y);
+                max_y = max_y.max(*y);
+            }
+            ((max_x - min_x), (max_y - min_y))
+        };
+        let (fw, fh) = bbox(&filt_pos);
+        assert!(fw.is_finite() && fh.is_finite());
+        assert!(fw < 1e6 && fh < 1e6);
+        // iteration count within cap
+        let filt_iters = solve_iteration_count(&filtered);
+        assert!(filt_iters <= MAX_ITERATIONS);
+        assert!(filt_iters > 0);
+    }
+
+    #[test]
+    fn filtered_solve_on_empty_is_empty_and_deterministic() {
+        let empty = Graph::default();
+        let a = solve_filtered(&empty);
+        let b = solve_filtered(&empty);
+        assert!(a.is_empty());
+        assert_eq!(a, b);
     }
 }
