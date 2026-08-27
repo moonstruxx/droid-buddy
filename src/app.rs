@@ -35,6 +35,16 @@ pub enum ViewerFocus {
     Source,
 }
 
+/// Which pane has keyboard focus while the quad concurrent view is open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QuadFocus {
+    #[default]
+    Panels,
+    Source,
+    GraphFull,
+    GraphFiltered,
+}
+
 /// View mode for the embedded source pane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SourceViewMode {
@@ -128,6 +138,24 @@ pub struct App {
     /// Synchronous observer event bus (design D6). Re-solve triggers and
     /// topology errors are emitted here for subscribers (renderer, status).
     pub events: EventBus,
+    /// True when the quad concurrent view is open (panels | source / graph FULL | graph FILTERED).
+    pub showing_quad: bool,
+    /// Which of the four quad panes has keyboard focus.
+    pub quad_focus: QuadFocus,
+    /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
+    pub active_modifier_var: Option<String>,
+    /// Forward influence result for the active modifier, if any.
+    pub influence: Option<crate::patch::InfluenceSubtree>,
+    /// Induced subgraph on `influence` (FILTERED pane).
+    pub filtered_graph: Option<Graph>,
+    /// Frozen positions for `filtered_graph`, parallel to `filtered_graph.nodes`.
+    pub filtered_positions: Vec<(f32, f32)>,
+    /// Cluster rects published by the renderer for the FILTERED pane.
+    pub filtered_cluster_rects: Vec<(usize, Rect)>,
+    /// Node rects published by the renderer for the FILTERED pane.
+    pub filtered_node_rects: Vec<(usize, Rect)>,
+    /// In-progress drag for the FILTERED pane, mirroring `graph_drag`.
+    pub filtered_drag: Option<GraphDrag>,
 }
 
 impl App {
@@ -162,6 +190,15 @@ impl App {
             orientation: Orientation::Portrait,
             viewer_split_ratio: 0.6,
             events: EventBus::default(),
+            showing_quad: false,
+            quad_focus: QuadFocus::default(),
+            active_modifier_var: None,
+            influence: None,
+            filtered_graph: None,
+            filtered_positions: Vec::new(),
+            filtered_cluster_rects: Vec::new(),
+            filtered_node_rects: Vec::new(),
+            filtered_drag: None,
         }
     }
 
@@ -193,6 +230,7 @@ impl App {
     /// minimap/source-pane geometry yet (renderer will publish on next frame).
     pub fn load_patch(&mut self, patch: Patch) {
         self.reset_graph_state();
+        self.reset_quad_state();
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
@@ -271,6 +309,151 @@ impl App {
         self.graph_drag = None;
     }
 
+    /// Reset quad-view state on patch load, mirroring `reset_graph_state`.
+    fn reset_quad_state(&mut self) {
+        self.showing_quad = false;
+        self.quad_focus = QuadFocus::Panels;
+        self.active_modifier_var = None;
+        self.influence = None;
+        self.filtered_graph = None;
+        self.filtered_positions.clear();
+        self.filtered_cluster_rects.clear();
+        self.filtered_node_rects.clear();
+        self.filtered_drag = None;
+    }
+
+    /// Open the quad concurrent view. Ensures the full graph is built and
+    /// synchronizes influence from the current selection.
+    pub fn open_quad(&mut self) {
+        if self.graph.is_none() {
+            let (graph, positions) = match &self.patch {
+                Some(patch) => {
+                    let clusters = clusters_from_patch(patch);
+                    let graph = Graph::build_from_patch(patch, &clusters);
+                    let positions = layout::solve(&graph);
+                    (Some(graph), positions)
+                }
+                None => (Some(Graph::default()), Vec::new()),
+            };
+            self.graph = graph;
+            self.graph_positions = positions;
+            self.graph_cluster_rects.clear();
+            self.graph_node_rects.clear();
+            self.graph_drag = None;
+            self.emit_graph_built();
+        }
+        self.showing_quad = true;
+        self.quad_focus = QuadFocus::Panels;
+        self.filtered_cluster_rects.clear();
+        self.filtered_node_rects.clear();
+        self.filtered_drag = None;
+        self.recompute_influence();
+    }
+
+    /// Close the quad view, returning focus to controller panels and preserving
+    /// selection and source scroll position.
+    pub fn close_quad(&mut self) {
+        self.showing_quad = false;
+        self.quad_focus = QuadFocus::Panels;
+    }
+
+    /// Cycle quad focus across four panes in order.
+    pub fn cycle_quad_focus(&mut self) {
+        self.quad_focus = match self.quad_focus {
+            QuadFocus::Panels => QuadFocus::Source,
+            QuadFocus::Source => QuadFocus::GraphFull,
+            QuadFocus::GraphFull => QuadFocus::GraphFiltered,
+            QuadFocus::GraphFiltered => QuadFocus::Panels,
+        };
+    }
+
+    /// Clear filtered-graph node rects each frame while quad is open.
+    pub fn clear_filtered_node_rects(&mut self) {
+        self.filtered_node_rects.clear();
+    }
+
+    /// Clear filtered-graph cluster rects each frame while quad is open.
+    pub fn clear_filtered_cluster_rects(&mut self) {
+        self.filtered_cluster_rects.clear();
+    }
+
+    /// Recompute the influence subtree for the currently selected hardware token.
+    ///
+    /// Derivation follows `Patch::hw_token_to_vars` (boundary-aware scan) and
+    /// `Patch::influence_subtree` (structural hops, cycle-safe, deterministic).
+    /// When a non-empty root set exists the method builds `filtered_graph` via
+    /// `Graph::filtered_influence` and solves it independently with
+    /// `layout::solve_filtered` for a compact FILTERED pane, applies highlights
+    /// to the FULL graph, and emits `InfluenceRecomputed`. With no selection
+    /// or no derived vars the influence and filtered state are cleared.
+    pub fn recompute_influence(&mut self) {
+        let Some(patch) = self.patch.as_ref().cloned() else {
+            self.clear_influence_state();
+            return;
+        };
+        let Some(token) = self.selected_component.clone() else {
+            self.clear_influence_state();
+            return;
+        };
+        let vars = patch.hw_token_to_vars(&token);
+        if vars.is_empty() {
+            self.clear_influence_state();
+            return;
+        }
+        self.active_modifier_var = Some(vars[0].clone());
+        let subtree = patch.influence_subtree(&vars);
+        self.influence = Some(subtree.clone());
+        // Only (re)build full-graph state when a graph already exists or quad
+        // is open. Otherwise keep influence without eagerly constructing a graph
+        // so plain panel interactions don't emit GraphRebuilt.
+        let needs_graph = self.graph.is_some() || self.showing_quad;
+        if needs_graph && self.graph.is_none() {
+            let clusters = clusters_from_patch(&patch);
+            let graph = Graph::build_from_patch(&patch, &clusters);
+            let positions = layout::solve(&graph);
+            self.graph = Some(graph);
+            self.graph_positions = positions;
+            self.graph_cluster_rects.clear();
+            self.graph_node_rects.clear();
+            self.graph_drag = None;
+            self.emit_graph_built();
+        }
+        if let Some(graph) = self.graph.as_mut() {
+            graph.highlighted_nodes = subtree.influenced_nodes.clone();
+            graph.highlighted_edges = subtree.influenced_edges.clone();
+        }
+        if let Some(graph) = self.graph.as_ref() {
+            let filtered = graph.filtered_influence(&subtree);
+            let positions = layout::solve_filtered(&filtered);
+            self.filtered_graph = Some(filtered);
+            self.filtered_positions = positions;
+            self.filtered_node_rects.clear();
+            self.filtered_cluster_rects.clear();
+            self.filtered_drag = None;
+        } else {
+            self.filtered_graph = None;
+            self.filtered_positions.clear();
+            self.filtered_cluster_rects.clear();
+            self.filtered_node_rects.clear();
+            self.filtered_drag = None;
+        }
+        self.events.dispatch(&Event::InfluenceRecomputed(subtree));
+    }
+
+    fn clear_influence_state(&mut self) {
+        self.active_modifier_var = None;
+        self.influence = None;
+        self.filtered_graph = None;
+        self.filtered_positions.clear();
+        self.filtered_cluster_rects.clear();
+        self.filtered_node_rects.clear();
+        self.filtered_drag = None;
+        if let Some(graph) = self.graph.as_mut() {
+            graph.highlighted_nodes.clear();
+            graph.highlighted_edges.clear();
+        }
+    }
+
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
     pub fn adjust_viewer_split_ratio(&mut self, delta: f32) {
         self.viewer_split_ratio = (self.viewer_split_ratio + delta).clamp(0.3, 0.7);
@@ -283,6 +466,7 @@ impl App {
 
     /// Select a component by hardware token id and jump `source_scroll` to
     /// its first occurrence line (if any). Resets the occurrence cursor to 0.
+    /// Also recomputes modifier influence so quad/graph highlight stays in sync.
     pub fn select_component(&mut self, id: String) {
         let target_line = self
             .patch
@@ -295,12 +479,14 @@ impl App {
         if let Some(line) = target_line {
             self.source_scroll = line;
         }
+        self.recompute_influence();
     }
 
     /// Clear the explicit selection without moving `source_scroll`.
     pub fn clear_selected_component(&mut self) {
         self.selected_component = None;
         self.occurrence_cursor = 0;
+        self.recompute_influence();
     }
 
     /// Move occurrence cursor saturating at bounds and sync `source_scroll`

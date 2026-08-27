@@ -8,6 +8,7 @@
 //! subscription order on `dispatch`; a `Subscription` handle allows removal.
 
 use crate::graph::{NodeId, TopologyIssue};
+use crate::patch::InfluenceSubtree;
 
 /// Events the bus can carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +20,8 @@ pub enum Event {
     GraphRebuilt,
     /// A topology-validation finding; carries the offending cable/issue.
     TopologyError(TopologyIssue),
+    /// The modifier influence walk was (re)computed for the selected token.
+    InfluenceRecomputed(InfluenceSubtree),
 }
 
 /// Handle identifying one registered subscriber, for later removal.
@@ -101,6 +104,7 @@ mod tests {
                 Event::NodeMoved(_) => 0,
                 Event::GraphRebuilt => 1,
                 Event::TopologyError(_) => 2,
+                Event::InfluenceRecomputed(_) => 3,
             });
         });
 

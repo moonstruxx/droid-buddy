@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::app::{is_entry_selectable, App, GraphDrag, PrefixState, SourceViewMode, ViewerFocus};
+use crate::app::{
+    is_entry_selectable, App, GraphDrag, PrefixState, QuadFocus, SourceViewMode, ViewerFocus,
+};
 use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
 
@@ -61,12 +63,24 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if app.prefix.is_some() {
         match key.code {
             crossterm::event::KeyCode::Char('v') => {
+                if app.showing_quad {
+                    app.close_quad();
+                }
                 open_embedded_viewer(app);
                 return false;
             }
             crossterm::event::KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
+                if app.showing_quad {
+                    app.close_quad();
+                }
                 app.open_graph();
+                app.prefix = None;
+                return false;
+            }
+            crossterm::event::KeyCode::Char('q') => {
+                // `g q` opens the quad concurrent view (panels | source / FULL | FILTERED).
+                app.open_quad();
                 app.prefix = None;
                 return false;
             }
@@ -78,6 +92,101 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
             }
         }
+    }
+
+    // Quad concurrent view handling — picker and prefix remain highest priority.
+    if app.showing_quad {
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                app.close_quad();
+                app.prefix = None;
+                return false;
+            }
+            crossterm::event::KeyCode::Tab => {
+                app.cycle_quad_focus();
+                return false;
+            }
+            crossterm::event::KeyCode::Char('q') => {
+                return true;
+            }
+            crossterm::event::KeyCode::Char('c')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                return true;
+            }
+            crossterm::event::KeyCode::Char('l') => {
+                app.showing_picker = true;
+                app.picker_dir = std::env::current_dir().unwrap_or_default();
+                app.picker_index = 0;
+                app.refresh_picker_entries();
+                return false;
+            }
+            crossterm::event::KeyCode::Char('t') if app.quad_focus == QuadFocus::Source => {
+                app.source_view_mode = match app.source_view_mode {
+                    SourceViewMode::Raw => SourceViewMode::Prettified,
+                    SourceViewMode::Prettified => SourceViewMode::Raw,
+                };
+                return false;
+            }
+            crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']')
+                if app.quad_focus == QuadFocus::Source =>
+            {
+                let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
+                    -0.1
+                } else {
+                    0.1
+                };
+                app.adjust_viewer_split_ratio(delta);
+                app.viewer_split_ratio = (app.viewer_split_ratio * 10.0).round() / 10.0;
+                let pct_panels = app.viewer_split_ratio * 100.0;
+                let pct_source = 100.0 - pct_panels;
+                app.status_message =
+                    format!("Panels/Source split: {:.0}%/{:.0}%", pct_panels, pct_source);
+                return false;
+            }
+            _ => {}
+        }
+        // Source-pane navigation when quad focus is on Source — mirrors the
+        // embedded viewer's Source focus handling (Up/Down/Home/End only).
+        if app.quad_focus == QuadFocus::Source {
+            match key.code {
+                crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                    if app.selected_component.is_some() {
+                        let next = app.occurrence_cursor.saturating_add(1);
+                        app.jump_to_occurrence(next);
+                    }
+                    return false;
+                }
+                crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                    if app.selected_component.is_some() {
+                        let prev = app.occurrence_cursor.saturating_sub(1);
+                        app.jump_to_occurrence(prev);
+                    }
+                    return false;
+                }
+                crossterm::event::KeyCode::Home => {
+                    if app.selected_component.is_some() {
+                        app.jump_to_occurrence(0);
+                    }
+                    return false;
+                }
+                crossterm::event::KeyCode::End => {
+                    if let Some(token) = app.selected_component.clone() {
+                        if let Some(patch) = app.patch.as_ref() {
+                            if let Some(spans) = patch.occurrence_index.get(&token) {
+                                if !spans.is_empty() {
+                                    app.jump_to_occurrence(spans.len() - 1);
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        // Fall through to normal panel handling for Panels/Graph* focuses so
+        // shift/scale/orientation/toggle still work while quad is open.
     }
 
     // Graph surface handling (`g g`). Esc closes it and restores the prior
@@ -346,6 +455,11 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if app.showing_picker {
         return;
     }
+    // While the quad view is open both graph panes own mouse drag input.
+    // A drag started in one pane continues until Up regardless of hit.
+    if app.showing_quad && handle_quad_mouse(mouse, app) {
+        return;
+    }
     // While the graph surface is open it owns all mouse input; nothing falls
     // through to panel/minimap handling below.
     if app.showing_graph {
@@ -355,9 +469,9 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     // Minimap click-to-scroll: uses renderer-published minimap geometry with
     // the same proportional mapping as the viewport indicator in ui.rs
     // (indicator: scroll * inner_h / total_lines). Click must work whenever
-    // the embedded viewer is visible, regardless of focus, and takes
+    // the embedded viewer or quad is visible, regardless of focus, and takes
     // precedence over panel interactions (picker already returned above).
-    if app.showing_viewer {
+    if app.showing_viewer || app.showing_quad {
         if let Some(rect) = app.minimap_rect {
             if rect_contains(&rect, mouse.column, mouse.row)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -427,8 +541,10 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     app.select_component(token);
                 }
                 // Clicking a component is a panel interaction: hand keyboard
-                // focus back to the panels while the viewer stays open.
-                if app.showing_viewer {
+                // focus back to the panels while the viewer/quad stays open.
+                if app.showing_quad {
+                    app.quad_focus = QuadFocus::Panels;
+                } else if app.showing_viewer {
                     app.viewer_focus = ViewerFocus::Panels;
                 }
             } else {
@@ -441,18 +557,24 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                 // Bare source-pane space (no component, no minimap) focuses
                 // the source pane without side effects; the selection must
                 // survive so occurrence navigation keeps working there.
-                let in_source_pane = app.showing_viewer
+                let in_source_pane = (app.showing_viewer || app.showing_quad)
                     && !on_minimap
                     && app
                         .source_pane_rect
                         .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
                 if in_source_pane {
-                    app.viewer_focus = ViewerFocus::Source;
+                    if app.showing_quad {
+                        app.quad_focus = QuadFocus::Source;
+                    } else {
+                        app.viewer_focus = ViewerFocus::Source;
+                    }
                 } else {
                     if !on_minimap {
                         app.clear_selected_component();
                     }
-                    if app.showing_viewer {
+                    if app.showing_quad {
+                        app.quad_focus = QuadFocus::Panels;
+                    } else if app.showing_viewer {
                         app.viewer_focus = ViewerFocus::Panels;
                     }
                 }
@@ -535,6 +657,119 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
             app.graph_drag = None;
         }
         _ => {}
+    }
+}
+
+/// Handle mouse for the quad concurrent view's two graph panes.
+/// Returns true if the event was consumed as a graph drag (Down on a node,
+/// Drag while a grab is active, or Up releasing a grab).
+fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            // Prioritize filtered pane hit, then full pane. Both use the same
+            // renderer-published rect contract; quad_focus tracks selection.
+            if let Some(idx) = app
+                .filtered_node_rects
+                .iter()
+                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
+                .map(|(i, _)| *i)
+            {
+                app.quad_focus = QuadFocus::GraphFiltered;
+                if let Some((px, py)) = app.filtered_positions.get(idx).copied() {
+                    app.filtered_drag = Some(GraphDrag {
+                        node_index: idx,
+                        offset_x: px - mouse.column as f32,
+                        offset_y: py - mouse.row as f32,
+                    });
+                }
+                return true;
+            }
+            if let Some(idx) = app
+                .graph_node_rects
+                .iter()
+                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
+                .map(|(i, _)| *i)
+            {
+                app.quad_focus = QuadFocus::GraphFull;
+                if let Some((px, py)) = app.graph_positions.get(idx).copied() {
+                    app.graph_drag = Some(GraphDrag {
+                        node_index: idx,
+                        offset_x: px - mouse.column as f32,
+                        offset_y: py - mouse.row as f32,
+                    });
+                }
+                return true;
+            }
+            false
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(drag) = app.filtered_drag.as_ref() {
+                let node_index = drag.node_index;
+                let offset_x = drag.offset_x;
+                let offset_y = drag.offset_y;
+                let filtered = app.filtered_graph.clone();
+                let Some(graph) = filtered else {
+                    return true;
+                };
+                let Some(node_id) = graph.nodes.get(node_index).map(|n| n.id.clone()) else {
+                    return true;
+                };
+                if let Some(pos) = app.filtered_positions.get_mut(node_index) {
+                    *pos = (
+                        clamp_drag(mouse.column as f32 + offset_x),
+                        clamp_drag(mouse.row as f32 + offset_y),
+                    );
+                }
+                layout::local_resettle(
+                    &graph,
+                    &mut app.filtered_positions,
+                    &node_id,
+                    layout::LOCAL_RADIUS,
+                    layout::LOCAL_ITERATIONS,
+                );
+                app.notify_node_moved(&node_id);
+                return true;
+            }
+            if let Some(drag) = app.graph_drag.as_ref() {
+                let node_index = drag.node_index;
+                let offset_x = drag.offset_x;
+                let offset_y = drag.offset_y;
+                let graph = app.graph.clone();
+                let Some(graph) = graph else {
+                    return true;
+                };
+                let Some(node_id) = graph.nodes.get(node_index).map(|n| n.id.clone()) else {
+                    return true;
+                };
+                if let Some(pos) = app.graph_positions.get_mut(node_index) {
+                    *pos = (
+                        clamp_drag(mouse.column as f32 + offset_x),
+                        clamp_drag(mouse.row as f32 + offset_y),
+                    );
+                }
+                layout::local_resettle(
+                    &graph,
+                    &mut app.graph_positions,
+                    &node_id,
+                    layout::LOCAL_RADIUS,
+                    layout::LOCAL_ITERATIONS,
+                );
+                app.notify_node_moved(&node_id);
+                return true;
+            }
+            false
+        }
+        MouseEventKind::Up(_) => {
+            let was_dragging = app.filtered_drag.is_some() || app.graph_drag.is_some();
+            app.filtered_drag = None;
+            app.graph_drag = None;
+            was_dragging
+        }
+        MouseEventKind::Moved => {
+            // Hover does not consume in quad; let panel hover run.
+            false
+        }
+        _ => false,
     }
 }
 
