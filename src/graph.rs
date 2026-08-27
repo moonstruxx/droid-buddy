@@ -5,10 +5,10 @@
 //! plus caller-supplied banner clusters into a graph the renderer can draw and
 //! the layout solver can position.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use crate::patch::Patch;
+use crate::patch::{InfluenceSubtree, Patch};
 
 /// A node's identity: `(circuit_name, instance_index)`.
 ///
@@ -78,6 +78,17 @@ pub struct Graph {
     /// Reserved for task 2.2 (design D4): the slot is always empty today so
     /// validation results can travel with the graph once the pass is added.
     pub validation: Vec<TopologyIssue>,
+    /// Highlight sets for FULL graph rendering when an influence is active.
+    /// `highlighted_nodes` are `NodeId`s from `InfluenceSubtree::influenced_nodes`;
+    /// `highlighted_edges` are cable names from `InfluenceSubtree::influenced_edges`
+    /// (edge is highlighted when its cable is in the set). Empty means no
+    /// influence is active and the FULL graph renders without dim/highlight
+    /// override. Pure, no IO; derived from `crate::patch::InfluenceSubtree` so
+    /// there is a single source of truth (patch owns the walk, graph owns the
+    /// rendering state).
+    #[allow(clippy::type_complexity)]
+    pub highlighted_nodes: HashSet<NodeId>,
+    pub highlighted_edges: HashSet<String>,
 }
 
 impl Graph {
@@ -104,6 +115,82 @@ impl Graph {
             edges,
             clusters: clusters.to_vec(),
             validation,
+            highlighted_nodes: HashSet::new(),
+            highlighted_edges: HashSet::new(),
+        }
+    }
+
+    /// Return a clone of this graph with highlight sets derived from `subtree`.
+    ///
+    /// Used for FULL graph rendering: influenced edges/nodes render with
+    /// `graph_edge_highlight` / `graph_node_highlight`, the rest dimmed.
+    /// Pure, no IO.
+    pub fn with_highlights(&self, subtree: &InfluenceSubtree) -> Graph {
+        let mut out = self.clone();
+        out.highlighted_nodes = subtree.influenced_nodes.clone();
+        out.highlighted_edges = subtree.influenced_edges.clone();
+        out
+    }
+
+    /// Build the induced subgraph for `subtree` (FILTERED pane).
+    ///
+    /// - `nodes` = those with `id` in `subtree.influenced_nodes`
+    /// - `edges` = those with `cable` in `subtree.influenced_edges` and both
+    ///   endpoints in the filtered node set
+    /// - `clusters` = banner clusters filtered to ranges intersecting the
+    ///   filtered node `section_indices`
+    /// - `validation` = filtered to cables in `subtree.influenced_edges`
+    ///   (re-runs topology validation on the subgraph; the filtered validation
+    ///   never introduces new cables, only narrows the FULL graph's findings)
+    /// - `highlighted_*` for the filtered graph is cleared — the pane is
+    ///   uniformly highlighted (compact re-solve), so dim/highlight is not
+    ///   needed.
+    ///
+    /// Deterministic: node/edge order is preserved (edges were already
+    /// sorted by `(cable, source, sink)` in `build_edges`), clusters keep
+    /// caller order. Pure, no IO.
+    pub fn filtered_influence(&self, subtree: &InfluenceSubtree) -> Graph {
+        let nodes: Vec<GraphNode> = self
+            .nodes
+            .iter()
+            .filter(|n| subtree.influenced_nodes.contains(&n.id))
+            .cloned()
+            .collect();
+        let node_ids: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+        let mut edges: Vec<GraphEdge> = self
+            .edges
+            .iter()
+            .filter(|e| {
+                subtree.influenced_edges.contains(&e.cable)
+                    && node_ids.contains(&e.source)
+                    && node_ids.contains(&e.sink)
+            })
+            .cloned()
+            .collect();
+        edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+        let clusters: Vec<Cluster> = self
+            .clusters
+            .iter()
+            .filter(|c| {
+                nodes
+                    .iter()
+                    .any(|n| c.section_range.contains(&n.section_index))
+            })
+            .cloned()
+            .collect();
+        let validation: Vec<TopologyIssue> = self
+            .validation
+            .iter()
+            .filter(|iss| subtree.influenced_edges.contains(&iss.cable))
+            .cloned()
+            .collect();
+        Graph {
+            nodes,
+            edges,
+            clusters,
+            validation,
+            highlighted_nodes: HashSet::new(),
+            highlighted_edges: HashSet::new(),
         }
     }
 }
