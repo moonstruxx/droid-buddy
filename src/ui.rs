@@ -704,6 +704,7 @@ const GRAPH_CLUSTER_PADDING: u16 = 2;
 /// overlay mixed with panels.
 fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     app.clear_graph_cluster_rects();
+    app.clear_graph_node_rects();
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -2833,6 +2834,35 @@ mod graph_view_tests {
             assert!(rect.width > 0 && rect.height > 0);
             assert!(rect.x < buf.area.width && rect.y < buf.area.height);
         }
+    }
+
+    #[test]
+    fn graph_node_rects_rebuilt_per_frame_not_accumulated() {
+        let mut app = graph_app();
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        buffer_for(&mut app, 120, 40);
+        assert_eq!(app.graph_node_rects.len(), node_count);
+        // Move a node the way a drag would, then render another frame: the
+        // published rects must be rebuilt from the current positions, never
+        // appended to the previous frame's stale entries.
+        app.graph_positions[0].0 += 500.0;
+        buffer_for(&mut app, 120, 40);
+        assert_eq!(
+            app.graph_node_rects.len(),
+            node_count,
+            "node rects must be rebuilt per frame, not accumulated"
+        );
+        let (idx, rect) = app.graph_node_rects[0];
+        assert_eq!(idx, 0);
+        let expected = graph_node_rects(
+            &app.graph_positions,
+            graph_main_area(120, 40),
+            &app.graph.as_ref().unwrap().nodes,
+        );
+        assert_eq!(
+            rect, expected[0],
+            "published rects reflect the moved position"
+        );
     }
 
     #[test]
