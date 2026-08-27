@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::Path;
 
@@ -59,6 +59,26 @@ pub struct BannerGroup {
     pub section_range: Range<usize>,
 }
 
+/// Node identity for the influence walk: `(circuit_name, instance_index)`.
+///
+/// Repeated section names are distinct circuit instances, so the name alone
+/// is not unique. Mirrors `crate::graph::NodeId` but lives in `patch` so
+/// the walk stays pure and avoids a `patch -> graph` dependency (ARCHITECTURE).
+pub type NodeId = (String, usize);
+
+/// Forward influence result: the set of circuits and cables reachable from a
+/// modifier's root variable(s) via structural hops (any circuit on the current
+/// flow that has an output port). Pure, deterministic, cycle-safe.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct InfluenceSubtree {
+    /// Circuit nodes reached by the walk, as `NodeId`s.
+    #[serde(default)]
+    pub influenced_nodes: HashSet<NodeId>,
+    /// Cable names traversed by the walk (including roots, even if dangling).
+    #[serde(default)]
+    pub influenced_edges: HashSet<String>,
+}
+
 /// Represents a loaded DROID patch
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Patch {
@@ -102,6 +122,12 @@ pub struct Patch {
     /// patches (e.g. `sample()`) carry none.
     #[serde(default)]
     pub banner_groups: Vec<BannerGroup>,
+    /// Per-section output cables: `circuit_outputs[i]` lists every `_VAR`
+    /// produced by `sections[i]` via `output = _VAR` (comment-aware, repeated
+    /// sections are distinct instances). Parallel to `sections`; deterministic
+    /// order (file appearance, sorted per section for stability).
+    #[serde(default)]
+    pub circuit_outputs: Vec<Vec<String>>,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -403,6 +429,7 @@ impl Patch {
             modifier_index: HashMap::new(),
             cable_index: HashMap::new(),
             banner_groups: Vec::new(),
+            circuit_outputs: Vec::new(),
         }
     }
 
@@ -617,6 +644,7 @@ impl Patch {
         let modifier_index = build_modifier_index(&raw_lines, &sections);
         let cable_index = collect_cable_index(&sections);
         let banner_groups = collect_banner_groups(&raw_lines, &sections);
+        let circuit_outputs = collect_circuit_outputs(&sections);
 
         Ok(Patch {
             name,
@@ -635,6 +663,7 @@ impl Patch {
             modifier_index,
             cable_index,
             banner_groups,
+            circuit_outputs,
         })
     }
 
@@ -713,6 +742,126 @@ impl Patch {
             .get(token)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Derive root `_VAR`(s) for a hardware token: every `_VAR` produced via
+    /// `output = _VAR` in a section whose any param value contains the token
+    /// (boundary-aware, via `scan_hw_tokens`). Distinct, sorted, deterministic.
+    pub fn hw_token_to_vars(&self, hw_token: &str) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut vars: Vec<String> = Vec::new();
+        for (idx, section) in self.sections.iter().enumerate() {
+            let has_token = section
+                .entries
+                .iter()
+                .any(|(_, v)| scan_hw_tokens(v).iter().any(|t| t == hw_token));
+            if has_token {
+                if let Some(outputs) = self.circuit_outputs.get(idx) {
+                    for var in outputs {
+                        if seen.insert(var.clone()) {
+                            vars.push(var.clone());
+                        }
+                    }
+                }
+            }
+        }
+        vars.sort();
+        vars
+    }
+
+    /// Forward BFS influence walk from `root_vars`.
+    ///
+    /// Queue is cables (`VecDeque<String>`). `visited_cables` + `visited_nodes`
+    /// make it cycle-safe. Iteration over cable sinks is deterministic:
+    /// sinks are collected per-param and sorted by `(section_name, param_key,
+    /// section_index)` (D9). Hop eligibility is structural — any sink circuit
+    /// that has an output port (`circuit_outputs[sink_idx]` non-empty) — not an
+    /// allowlist. Leaf termination when sink has no output.
+    /// Pure, no terminal IO.
+    pub fn influence_subtree(&self, root_vars: &[String]) -> InfluenceSubtree {
+        if root_vars.is_empty() {
+            return InfluenceSubtree::default();
+        }
+        let node_ids = build_node_ids(&self.sections);
+        // Dedup + sort roots for deterministic seed order.
+        let mut seen_root: HashSet<String> = HashSet::new();
+        let mut roots: Vec<String> = Vec::new();
+        for r in root_vars {
+            if seen_root.insert(r.clone()) {
+                roots.push(r.clone());
+            }
+        }
+        roots.sort();
+        let mut queue: VecDeque<String> = roots.into_iter().collect();
+        let mut visited_cables: HashSet<String> = HashSet::new();
+        let mut visited_nodes: HashSet<NodeId> = HashSet::new();
+        let mut influenced_nodes: HashSet<NodeId> = HashSet::new();
+        let mut influenced_edges: HashSet<String> = HashSet::new();
+        while let Some(cable) = queue.pop_front() {
+            if !visited_cables.insert(cable.clone()) {
+                continue;
+            }
+            influenced_edges.insert(cable.clone());
+            // Collect per-param sink entries for this cable, then sort for determinism.
+            let mut sink_entries: Vec<(NodeId, usize, String)> = Vec::new();
+            for (idx, section) in self.sections.iter().enumerate() {
+                for (k, v) in &section.entries {
+                    let k_lower = k.to_lowercase();
+                    if k_lower == "output" {
+                        let names = scan_internal_tokens(v);
+                        if names.len() == 1 && names[0] == cable {
+                            continue;
+                        }
+                    }
+                    if scan_internal_tokens(v).iter().any(|n| n == &cable) {
+                        let nid = node_ids
+                            .get(idx)
+                            .cloned()
+                            .unwrap_or_else(|| (section.name.clone(), 0));
+                        sink_entries.push((nid, idx, k_lower.clone()));
+                    }
+                }
+            }
+            // Sort by (section_name, param_key, section_index) for deterministic BFS expansion.
+            sink_entries.sort_by(|a, b| {
+                let an = &a.0 .0;
+                let bn = &b.0 .0;
+                an.cmp(bn)
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            // Dedup per (NodeId, param_key) to keep per-param distinct but avoid duplicate pushes for same param.
+            let mut seen_sink: HashSet<(NodeId, String)> = HashSet::new();
+            for (nid, sink_idx, param_key) in sink_entries {
+                let dedup_key = (nid.clone(), param_key.clone());
+                if !seen_sink.insert(dedup_key) {
+                    continue;
+                }
+                if !visited_nodes.insert(nid.clone()) {
+                    // Node already visited — its outputs have been queued, but still mark as influenced (already).
+                    // Ensure influenced_nodes contains it (visited implies influenced).
+                    influenced_nodes.insert(nid);
+                    continue;
+                }
+                influenced_nodes.insert(nid.clone());
+                // Structural hop: if sink has output ports, queue its outputs.
+                if let Some(outputs) = self.circuit_outputs.get(sink_idx) {
+                    if !outputs.is_empty() {
+                        let mut sorted_outputs = outputs.clone();
+                        sorted_outputs.sort();
+                        for out in sorted_outputs {
+                            if !visited_cables.contains(&out) && !queue.contains(&out) {
+                                queue.push_back(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        InfluenceSubtree {
+            influenced_nodes,
+            influenced_edges,
+        }
     }
 }
 
@@ -1013,6 +1162,44 @@ fn collect_cable_index(sections: &[IniSection]) -> HashMap<String, CableIndexEnt
     }
 
     index
+}
+
+/// Per-section output reverse map: `circuit_outputs[i]` lists every `_VAR`
+/// produced by `sections[i]` via `output = _VAR` (comment-aware because
+/// `parse_ini_sections` already stripped comments). Repeated section names are
+/// distinct instances; ordering is deterministic (file order, sorted per section).
+fn collect_circuit_outputs(sections: &[IniSection]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(sections.len());
+    for section in sections {
+        let mut vars: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (k, v) in &section.entries {
+            if k.to_lowercase() == "output" {
+                let names = scan_internal_tokens(v);
+                if names.len() == 1 && names[0] == *v && seen.insert(names[0].clone()) {
+                    vars.push(names[0].clone());
+                }
+            }
+        }
+        vars.sort();
+        out.push(vars);
+    }
+    out
+}
+
+/// Build `NodeId`s parallel to `sections`: `(circuit_name, instance_index)`
+/// where `instance_index` is the zero-based occurrence order among same-named
+/// sections. Deterministic, matches `graph.rs::build_nodes`.
+fn build_node_ids(sections: &[IniSection]) -> Vec<NodeId> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut ids: Vec<NodeId> = Vec::with_capacity(sections.len());
+    for section in sections {
+        let count = counts.entry(section.name.clone()).or_insert(0);
+        let idx = *count;
+        *count += 1;
+        ids.push((section.name.clone(), idx));
+    }
+    ids
 }
 
 fn collect_token_spans(raw_lines: &[String]) -> Vec<(String, Span)> {
