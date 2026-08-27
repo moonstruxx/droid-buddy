@@ -253,6 +253,17 @@ fn setup_viewer_live_toggle(app: &mut App) {
     press(app, KeyCode::Enter);
 }
 
+fn setup_quad_modifier_none(app: &mut App) {
+    *app = app_from_fixture("modifier_switch_passthrough");
+    app.open_quad();
+}
+
+fn setup_quad_modifier_b1(app: &mut App) {
+    *app = app_from_fixture("modifier_switch_passthrough");
+    app.select_component(String::from("B1.1"));
+    app.open_quad();
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -323,6 +334,34 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 40,
         setup: setup_viewer_live_toggle,
+    },
+    Scenario {
+        id: "quad_none_120",
+        label: "modifier_switch_passthrough · width 120 · quad 4-pane · no modifier",
+        width: 120,
+        height: 40,
+        setup: setup_quad_modifier_none,
+    },
+    Scenario {
+        id: "quad_b1_120",
+        label: "modifier_switch_passthrough · width 120 · quad 4-pane · B1.1 FULL highlight + FILTERED compact",
+        width: 120,
+        height: 40,
+        setup: setup_quad_modifier_b1,
+    },
+    Scenario {
+        id: "quad_b1_100",
+        label: "modifier_switch_passthrough · width 100 · quad fallback · B1.1 fallback (<120)",
+        width: 100,
+        height: 40,
+        setup: setup_quad_modifier_b1,
+    },
+    Scenario {
+        id: "quad_b1_80",
+        label: "modifier_switch_passthrough · width 80 · quad fallback · B1.1 narrow",
+        width: 80,
+        height: 40,
+        setup: setup_quad_modifier_b1,
     },
 ];
 
