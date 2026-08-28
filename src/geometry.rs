@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::patch::Patch;
 
 // ---------------------------------------------------------------------------
 // Data model — mirrors rack_geometry.json (D1 schema)
@@ -265,6 +267,319 @@ pub fn is_adjacent(a: (u8, u8), b: (u8, u8)) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// BindingFeatures — D3 shape (Track 1 + Track 2 shared)
+// ---------------------------------------------------------------------------
+
+/// Single feature struct that feeds both the hard invariant and the learned
+/// spike (design D3). All distances are in B32-grid units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindingFeatures {
+    pub src_kind: u8,
+    pub sink_kind: u8,
+    pub param_key: u8,
+    pub src_xy: (u8, u8),
+    pub sink_xy: (u8, u8),
+    pub euclidean: f32,
+    pub manhattan: u8,
+    pub same_controller: bool,
+    pub same_rack: bool,
+    pub adjacent: bool,
+    pub cable_hops: u8,
+}
+
+impl BindingFeatures {
+    /// Compute binding features for `src_token -> sink_token` in the context
+    /// of `geometry` and `patch`.
+    ///
+    /// Returns `None` if either token cannot be resolved to a grid position.
+    /// `param_key` is set to 0 (the binding API does not carry a separate
+    /// param discriminant; callers needing per-param granularity can use
+    /// `from_tokens_with_param`).
+    pub fn from_tokens(
+        src_token: &str,
+        sink_token: &str,
+        geometry: &RackGeometry,
+        patch: &Patch,
+    ) -> Option<Self> {
+        Self::from_tokens_with_param(src_token, sink_token, 0, geometry, patch)
+    }
+
+    /// Like `from_tokens` but with an explicit `param_key` discriminant.
+    pub fn from_tokens_with_param(
+        src_token: &str,
+        sink_token: &str,
+        param_key: u8,
+        geometry: &RackGeometry,
+        patch: &Patch,
+    ) -> Option<Self> {
+        let src_xy = geometry.resolve(src_token)?;
+        let sink_xy = geometry.resolve(sink_token)?;
+        let euclidean = RackGeometry::distance(src_xy, sink_xy);
+        let manhattan = {
+            let dx = (src_xy.0 as i16 - sink_xy.0 as i16).abs() as u16;
+            let dy = (src_xy.1 as i16 - sink_xy.1 as i16).abs() as u16;
+            (dx + dy).min(255) as u8
+        };
+        let adjacent = RackGeometry::is_adjacent(src_xy, sink_xy);
+        let (same_controller, same_rack) = controller_rack_flags(src_token, sink_token, geometry);
+        let cable_hops = compute_cable_hops(patch, src_token, sink_token);
+        Some(Self {
+            src_kind: token_kind_u8(src_token),
+            sink_kind: token_kind_u8(sink_token),
+            param_key,
+            src_xy,
+            sink_xy,
+            euclidean,
+            manhattan,
+            same_controller,
+            same_rack,
+            adjacent,
+            cable_hops,
+        })
+    }
+}
+
+fn token_kind_u8(token: &str) -> u8 {
+    match token.chars().next().map(|c| c.to_ascii_uppercase()) {
+        Some('B') => 0,
+        Some('L') => 1,
+        Some('P') => 2,
+        Some('O') => 3,
+        Some('I') => 4,
+        Some('E') => 5,
+        Some('S') => 6,
+        Some('G') => 7,
+        Some('R') => 8,
+        Some('M') => 8,
+        _ => 255,
+    }
+}
+
+fn controller_rack_flags(
+    src_token: &str,
+    sink_token: &str,
+    geometry: &RackGeometry,
+) -> (bool, bool) {
+    let src_info = controller_for_token(src_token, geometry);
+    let sink_info = controller_for_token(sink_token, geometry);
+    match (src_info, sink_info) {
+        (Some((src_rack, src_slot)), Some((sink_rack, sink_slot))) => {
+            let same_rack = src_rack.id == sink_rack.id;
+            let same_controller = same_rack
+                && src_slot.name == sink_slot.name
+                && src_slot.x == sink_slot.x
+                && src_slot.grid.eq_ignore_ascii_case(&sink_slot.grid);
+            (same_controller, same_rack)
+        }
+        _ => (false, false),
+    }
+}
+
+fn controller_for_token<'a>(
+    token: &str,
+    geometry: &'a RackGeometry,
+) -> Option<(&'a Rack, &'a ControllerSlot)> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let kind = token.chars().next()?.to_ascii_uppercase();
+    let digits: String = token
+        .chars()
+        .skip(1)
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let instance: usize = digits.parse().unwrap_or(1);
+    if instance == 0 {
+        return None;
+    }
+    let grid_key = match kind {
+        'B' | 'L' => "b32",
+        'E' => "e4",
+        'R' | 'M' | 'P' | 'O' | 'I' | 'S' | 'G' => "r2c",
+        _ => return None,
+    };
+    let mut candidates: Vec<(&Rack, &ControllerSlot)> = Vec::new();
+    for rack in &geometry.racks {
+        for slot in &rack.controllers {
+            if slot.grid.eq_ignore_ascii_case(grid_key) {
+                candidates.push((rack, slot));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let idx = (instance - 1) % candidates.len();
+    Some(candidates[idx])
+}
+
+// ---------------------------------------------------------------------------
+// cable_hops — via Patch.cable_index + circuit_outputs graph traversal
+// ---------------------------------------------------------------------------
+
+const HW_TOKEN_LETTERS: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M', 'R', 'G'];
+
+fn scan_hw_tokens_local(value: &str) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
+        let starts_token = HW_TOKEN_LETTERS.contains(&c)
+            && i + 1 < chars.len()
+            && chars[i + 1].is_ascii_digit()
+            && boundary_ok;
+        if starts_token {
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < chars.len()
+                && chars[i] == '.'
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+            {
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            let clean_end = i >= chars.len()
+                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
+            if clean_end {
+                tokens.push(chars[start..i].iter().collect());
+            }
+            continue;
+        }
+        i += 1;
+    }
+    tokens
+}
+
+fn scan_internal_tokens_local(value: &str) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '_' {
+            let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric());
+            if boundary_ok {
+                let start = i;
+                i += 1;
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                if i > start + 1 {
+                    let token: String = chars[start..i].iter().collect();
+                    let clean_end =
+                        i >= chars.len() || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_');
+                    if clean_end {
+                        out.push(token);
+                    }
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn section_contains_token(section: &crate::patch::IniSection, token: &str) -> bool {
+    section
+        .entries
+        .iter()
+        .any(|(_, v)| scan_hw_tokens_local(v).iter().any(|t| t == token))
+}
+
+fn section_consumes_cable(section: &crate::patch::IniSection, cable: &str) -> bool {
+    section.entries.iter().any(|(k, v)| {
+        let toks = scan_internal_tokens_local(v);
+        if !toks.iter().any(|t| t == cable) {
+            return false;
+        }
+        // Pure `output = _CABLE` is a source, not a sink.
+        if k.to_lowercase() == "output" && v.trim() == cable {
+            return false;
+        }
+        true
+    })
+}
+
+fn compute_cable_hops(patch: &Patch, src_token: &str, sink_token: &str) -> u8 {
+    let src_indices: Vec<usize> = patch
+        .sections
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| section_contains_token(s, src_token))
+        .map(|(i, _)| i)
+        .collect();
+    let sink_indices: HashSet<usize> = patch
+        .sections
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| section_contains_token(s, sink_token))
+        .map(|(i, _)| i)
+        .collect();
+
+    if src_indices.is_empty() || sink_indices.is_empty() {
+        return 0;
+    }
+    // Direct co-location in same section => 0 hops (no cable needed).
+    if src_indices.iter().any(|i| sink_indices.contains(i)) {
+        return 0;
+    }
+    // Build adjacency producer -> consumers via circuit_outputs + sink scan.
+    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (prod_idx, outputs) in patch.circuit_outputs.iter().enumerate() {
+        if outputs.is_empty() {
+            continue;
+        }
+        for cable in outputs {
+            for (cons_idx, section) in patch.sections.iter().enumerate() {
+                if cons_idx == prod_idx {
+                    continue;
+                }
+                if section_consumes_cable(section, cable) {
+                    adj.entry(prod_idx).or_default().push(cons_idx);
+                }
+            }
+        }
+    }
+    // Dedup adjacency lists for deterministic BFS.
+    for v in adj.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+    // BFS from all src sections.
+    let mut queue: VecDeque<(usize, u8)> = VecDeque::new();
+    let mut visited: HashSet<usize> = HashSet::new();
+    for &s in &src_indices {
+        queue.push_back((s, 0));
+        visited.insert(s);
+    }
+    while let Some((node, dist)) = queue.pop_front() {
+        if let Some(neigh) = adj.get(&node) {
+            for &n in neigh {
+                if visited.contains(&n) {
+                    continue;
+                }
+                let next_dist = dist.saturating_add(1);
+                if sink_indices.contains(&n) {
+                    return next_dist;
+                }
+                visited.insert(n);
+                queue.push_back((n, next_dist));
+            }
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Tests — three scenarios from the spec
 // ---------------------------------------------------------------------------
 
@@ -428,5 +743,118 @@ mod tests {
         let geo = loaded.unwrap();
         assert!(!geo.racks.is_empty());
         assert!(geo.grids.contains_key("b32"));
+    }
+
+    // ---- BindingFeatures scenario tests (task 1.2) ----
+
+    #[test]
+    fn binding_features_far_direct_wire_e4_4_to_m4_2() {
+        let geo = test_geometry();
+        // Direct wire: src and sink in same section, no cable hops.
+        let content = "[p2b8]\n[copy]\n    src = E4.4\n    dst = M4.2\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("far_direct"))
+            .expect("patch parses");
+        let feat = BindingFeatures::from_tokens("E4.4", "M4.2", &geo, &patch)
+            .expect("both tokens resolve");
+        // Large distance across rack.
+        assert!(
+            feat.euclidean > 8.0,
+            "far wire E4.4->M4.2 should be large, got {}",
+            feat.euclidean
+        );
+        assert_eq!(feat.cable_hops, 0, "direct wire must have 0 cable hops");
+        assert!(!feat.adjacent);
+        assert!(!feat.same_controller);
+        // src_xy and sink_xy must match geometry resolve.
+        assert_eq!(feat.src_xy, geo.resolve("E4.4").unwrap());
+        assert_eq!(feat.sink_xy, geo.resolve("M4.2").unwrap());
+        // Manhattan should be |dx|+|dy|.
+        let dx = (feat.src_xy.0 as i16 - feat.sink_xy.0 as i16).abs() as u8;
+        let dy = (feat.src_xy.1 as i16 - feat.sink_xy.1 as i16).abs() as u8;
+        assert_eq!(feat.manhattan, dx + dy);
+        // Kind encoding.
+        assert_eq!(feat.src_kind, token_kind_u8("E4.4"));
+        assert_eq!(feat.sink_kind, token_kind_u8("M4.2"));
+    }
+
+    #[test]
+    fn binding_features_adjacent_pair_b1_17_b1_18() {
+        let geo = test_geometry();
+        let content = "[p2b8]\n[copy]\n    a = B1.17\n    b = B1.18\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("adjacent"))
+            .expect("patch parses");
+        let feat = BindingFeatures::from_tokens("B1.17", "B1.18", &geo, &patch)
+            .expect("both tokens resolve");
+        assert!(
+            (feat.euclidean - 1.0).abs() < 1e-6,
+            "adjacent B1.17->B1.18 distance 1, got {}",
+            feat.euclidean
+        );
+        assert_eq!(feat.manhattan, 1);
+        assert!(feat.adjacent, "B1.17 and B1.18 should be adjacent");
+        assert!(feat.same_controller, "same B32 controller");
+        assert!(feat.same_rack, "same rack");
+        assert_eq!(feat.cable_hops, 0);
+    }
+
+    #[test]
+    fn binding_features_via_cable_pair() {
+        let geo = test_geometry();
+        // Distant target reached through one cable hop.
+        let content = "[p2b8]\n\
+             [src]\n    output = _WIRE\n    src = E4.4\n\
+             [sink]\n    input = _WIRE\n    dst = M4.2\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("via_cable"))
+            .expect("patch parses");
+        let feat = BindingFeatures::from_tokens("E4.4", "M4.2", &geo, &patch)
+            .expect("both tokens resolve");
+        assert!(
+            feat.euclidean > 8.0,
+            "via-cable pair should still be far, got {}",
+            feat.euclidean
+        );
+        assert!(
+            feat.cable_hops > 0,
+            "via-cable pair must have cable_hops>0, got {}",
+            feat.cable_hops
+        );
+        assert_eq!(feat.cable_hops, 1);
+        // Adjacent false for far pair.
+        assert!(!feat.adjacent);
+    }
+
+    #[test]
+    fn binding_features_via_cable_two_hops() {
+        let geo = test_geometry();
+        let content = "[p2b8]\n\
+             [src]\n    output = _A\n    src = E4.4\n\
+             [mid]\n    input = _A\n    output = _B\n\
+             [sink]\n    input = _B\n    dst = M4.2\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("two_hops"))
+            .expect("patch parses");
+        let feat = BindingFeatures::from_tokens("E4.4", "M4.2", &geo, &patch)
+            .expect("both tokens resolve");
+        assert_eq!(feat.cable_hops, 2, "two cable hops via _A -> _B");
+    }
+
+    #[test]
+    fn binding_features_none_when_token_unresolvable() {
+        let geo = test_geometry();
+        let content = "[p2b8]\n[copy]\n    a = B1.1\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert!(BindingFeatures::from_tokens("B1.1", "ZZ99", &geo, &patch).is_none());
+        assert!(BindingFeatures::from_tokens("ZZ99", "B1.1", &geo, &patch).is_none());
+    }
+
+    #[test]
+    fn binding_features_co_located_led_button() {
+        let geo = test_geometry();
+        let content = "[p2b8]\n[copy]\n    a = L1.1\n    b = B1.1\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("colo")).unwrap();
+        let feat = BindingFeatures::from_tokens("L1.1", "B1.1", &geo, &patch).unwrap();
+        assert!((feat.euclidean).abs() < 1e-6);
+        assert_eq!(feat.manhattan, 0);
+        assert!(!feat.adjacent); // distance 0 is not adjacent (distance 1)
+        assert_eq!(feat.src_xy, feat.sink_xy);
     }
 }
