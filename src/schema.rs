@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // Embedded source of truth
 // ---------------------------------------------------------------------------
 
-const CIRCUITS_JSON: &str = include_str!("../ext/droid-lsp/src/circuits.json");
+const CIRCUITS_JSON: &str = include_str!("../ext/droid-lsp/droid-lsp/src/circuits.json");
 
 // ---------------------------------------------------------------------------
 // Raw JSON shapes (serde mirror of circuits.json)
