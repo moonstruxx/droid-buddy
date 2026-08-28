@@ -81,29 +81,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     };
                     let digit = c.to_digit(10).unwrap() as u8;
                     if (1..=max).contains(&digit) && app.cycle_edit_layer(digit) {
-                        if let Some(inf) = app.editing_influence() {
-                            if let Some(ed) = app.editing.as_ref() {
-                                match &ed.kind {
-                                    crate::app::EditKind::Hw { token, layer } => {
-                                        app.status_message = format!(
-                                            "{} / Group{} → {} ckts / {} cables",
-                                            token,
-                                            layer,
-                                            inf.influenced_nodes.len(),
-                                            inf.influenced_edges.len()
-                                        );
-                                    }
-                                    crate::app::EditKind::Circuit { node } => {
-                                        app.status_message = format!(
-                                            "{}:{} → {} ckts / {} cables",
-                                            node.0,
-                                            node.1,
-                                            inf.influenced_nodes.len(),
-                                            inf.influenced_edges.len()
-                                        );
-                                    }
-                                }
-                            }
+                        if let Some(line) = app.editing_status_line(
+                            settings.labels.layers_enabled,
+                            settings.labels.max_shift_layer,
+                        ) {
+                            app.status_message = line;
                         }
                         return false;
                     }
@@ -183,14 +165,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         .and_then(|p| app.label_store.circuit_label(p, &node.id))
                         .unwrap_or_default();
                     app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
-                    if let Some(inf) = app.editing_influence() {
-                        app.status_message = format!(
-                            "{}:{} → {} ckts / {} cables",
-                            node.id.0,
-                            node.id.1,
-                            inf.influenced_nodes.len(),
-                            inf.influenced_edges.len()
-                        );
+                    let s = crate::config::load(
+                        &crate::theme::canonical_theme_name,
+                        crate::theme::THEMES,
+                    );
+                    if let Some(line) =
+                        app.editing_status_line(s.labels.layers_enabled, s.labels.max_shift_layer)
+                    {
+                        app.status_message = line;
                     } else {
                         app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
                     }
@@ -239,14 +221,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                             .and_then(|p| app.label_store.circuit_label(p, &nid))
                             .unwrap_or_default();
                         app.editing = Some(crate::app::EditState::new_circuit(nid.clone(), draft));
-                        if let Some(inf) = app.editing_influence() {
-                            app.status_message = format!(
-                                "{}:{} → {} ckts / {} cables",
-                                nid.0,
-                                nid.1,
-                                inf.influenced_nodes.len(),
-                                inf.influenced_edges.len()
-                            );
+                        let settings2 = crate::config::load(
+                            &crate::theme::canonical_theme_name,
+                            crate::theme::THEMES,
+                        );
+                        if let Some(line) = app.editing_status_line(
+                            settings2.labels.layers_enabled,
+                            settings2.labels.max_shift_layer,
+                        ) {
+                            app.status_message = line;
                         } else {
                             app.status_message = format!("Editing circuit {}:{}", nid.0, nid.1);
                         }
@@ -283,14 +266,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         .and_then(|p| app.label_store.hw_label(p, &token, layer))
                         .unwrap_or_default();
                     app.editing = Some(crate::app::EditState::new_hw(token.clone(), layer, draft));
-                    if let Some(inf) = app.editing_influence() {
-                        app.status_message = format!(
-                            "{} / Group{} → {} ckts / {} cables",
-                            token,
-                            layer,
-                            inf.influenced_nodes.len(),
-                            inf.influenced_edges.len()
-                        );
+                    if let Some(line) = app.editing_status_line(
+                        settings.labels.layers_enabled,
+                        settings.labels.max_shift_layer,
+                    ) {
+                        app.status_message = line;
                     } else {
                         app.status_message = format!("Editing {} / Group{}", token, layer);
                     }
@@ -590,7 +570,19 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         .get(&node.id)
                         .cloned()
                         .unwrap_or_default();
-                    app.editing = Some(crate::app::EditState::new_circuit(node.id, draft));
+                    app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
+                    let settings = crate::config::load(
+                        &crate::theme::canonical_theme_name,
+                        crate::theme::THEMES,
+                    );
+                    if let Some(line) = app.editing_status_line(
+                        settings.labels.layers_enabled,
+                        settings.labels.max_shift_layer,
+                    ) {
+                        app.status_message = line;
+                    } else {
+                        app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
+                    }
                     return false;
                 }
             }
@@ -611,7 +603,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // Map line to section index via sections' spans - approximate: pick section containing target line.
                 let mut counts: std::collections::HashMap<String, usize> =
                     std::collections::HashMap::new();
-                for (_idx, section) in patch.sections.iter().enumerate() {
+                for section in patch.sections.iter() {
                     let entry = counts.entry(section.name.clone()).or_insert(0);
                     let nid = (section.name.clone(), *entry);
                     // First section as fallback when no better mapping.
@@ -621,7 +613,19 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                             .get(&nid)
                             .cloned()
                             .unwrap_or_default();
-                        app.editing = Some(crate::app::EditState::new_circuit(nid, draft));
+                        app.editing = Some(crate::app::EditState::new_circuit(nid.clone(), draft));
+                        let settings = crate::config::load(
+                            &crate::theme::canonical_theme_name,
+                            crate::theme::THEMES,
+                        );
+                        if let Some(line) = app.editing_status_line(
+                            settings.labels.layers_enabled,
+                            settings.labels.max_shift_layer,
+                        ) {
+                            app.status_message = line;
+                        } else {
+                            app.status_message = format!("Editing circuit {}:{}", nid.0, nid.1);
+                        }
                         return false;
                     }
                     *entry += 1;
@@ -633,20 +637,37 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             if let Some(patch) = app.patch.as_ref() {
                 if let Some(comp) = patch.hw_components.get(idx) {
                     let token = comp.id.clone();
-                    let layer = match app.active_shift {
+                    let settings = crate::config::load(
+                        &crate::theme::canonical_theme_name,
+                        crate::theme::THEMES,
+                    );
+                    let max = settings.labels.max_shift_layer.clamp(1, 8);
+                    let raw_layer = match app.active_shift {
                         Some(ShiftGroup::Group1) => 1,
                         Some(ShiftGroup::Group2) => 2,
                         Some(ShiftGroup::Group3) => 3,
                         Some(ShiftGroup::Group4) => 4,
                         None => 1,
                     };
+                    let layer = if settings.labels.layers_enabled {
+                        raw_layer.clamp(1, max)
+                    } else {
+                        1
+                    };
                     let draft = app
-                        .current_hw_store()
-                        .get(&token)
-                        .and_then(|m| m.get(&layer))
-                        .cloned()
+                        .current_patch_path
+                        .as_ref()
+                        .and_then(|p| app.label_store.hw_label(p, &token, layer))
                         .unwrap_or_default();
-                    app.editing = Some(crate::app::EditState::new_hw(token, layer, draft));
+                    app.editing = Some(crate::app::EditState::new_hw(token.clone(), layer, draft));
+                    if let Some(line) = app.editing_status_line(
+                        settings.labels.layers_enabled,
+                        settings.labels.max_shift_layer,
+                    ) {
+                        app.status_message = line;
+                    } else {
+                        app.status_message = format!("Editing {} / Group{}", token, layer);
+                    }
                     return false;
                 }
             }

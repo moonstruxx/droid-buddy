@@ -13,20 +13,20 @@
 
 - [x] 3.1 Implement overlay-eating priority in `handler.rs` (overlay > picker > prefix > graph > source > panels) and `e` entry for focused panel token / source header instance / hovered graph node <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/handler.rs] -->
 - [x] 3.2 Implement in-overlay keys (char append/delete, `1..N` layer switch, `Enter`/`Esc`, arrows) and save path <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/handler.rs] -->
-- [ ] 3.3 Surface status `B3.17 / Group2 → N ckts / M cables` with structural hue and clamp handling <!-- agent: layout-designer-engineer.build, depends_on: [2.2], touches: [src/handler.rs, src/app.rs] -->
+- [x] 3.3 Surface status `B3.17 / Group2 → N ckts / M cables` with structural hue and clamp handling <!-- agent: layout-designer-engineer.build, depends_on: [2.2], touches: [src/handler.rs, src/app.rs] -->
 
 ## 4. Rendering — overrides + overlay
 
-- [ ] 4.1 Override HW panel cell labels via `display_label` (boxed + TextCell, `layers_enabled`/`max` aware) preserving geometry/`component_rects` <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 2.1], touches: [src/ui.rs] -->
-- [ ] 4.2 Override source header and graph node titles via circuit label (FULL+FILTERED) <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/ui.rs] -->
-- [ ] 4.3 Render centered single-field overlay z-layer (1-line input + hint in modifier hue, `graph_edge_error` red precedence kept) responsive per width <!-- agent: layout-designer-engineer.build, depends_on: [3.2], touches: [src/ui.rs] -->
+- [x] 4.1 Override HW panel cell labels via `display_label` (boxed + TextCell, `layers_enabled`/`max` aware) preserving geometry/`component_rects` <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 2.1], touches: [src/ui.rs] -->
+- [x] 4.2 Override source header and graph node titles via circuit label (FULL+FILTERED) <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/ui.rs] -->
+- [x] 4.3 Render centered single-field overlay z-layer (1-line input + hint in modifier hue, `graph_edge_error` red precedence kept) responsive per width <!-- agent: layout-designer-engineer.build, depends_on: [3.2], touches: [src/ui.rs] -->
 
 ## 5. Tests, snapshots & gallery
 
-- [ ] 5.1 Unit tests for `display_label` fallback/clamp/disabled coercion, store round-trip, circuit override, and `I4:` empty fixture <!-- agent: horst-engineer.build, depends_on: [1.2, 1.3], touches: [src/patch.rs, src/config.rs, src/app.rs] -->
-- [ ] 5.2 Regression `TestBackend` snapshots for overlay + label overrides per theme/width (panels/source/graph, Group2, disabled) <!-- agent: horst-engineer.build, depends_on: [4.3], touches: [src/regression.rs, src/snapshots/**] -->
-- [ ] 5.3 Regenerate `evidence/gallery` and verify `cargo fmt --check` + `cargo clippy` + `cargo test --locked` + `cargo insta test --check` + `cargo build --release --locked` zero warnings <!-- agent: horst-engineer.fast, depends_on: [5.2], touches: [] -->
+- [x] 5.1 Unit tests for `display_label` fallback/clamp/disabled coercion, store round-trip, circuit override, and `I4:` empty fixture <!-- agent: horst-engineer.build, depends_on: [1.2, 1.3], touches: [src/patch.rs, src/config.rs, src/app.rs] -->
+- [x] 5.2 Regression `TestBackend` snapshots for overlay + label overrides per theme/width (panels/source/graph, Group2, disabled) <!-- agent: horst-engineer.build, depends_on: [4.3], touches: [src/regression.rs, src/snapshots/**] -->
+- [x] 5.3 Regenerate `evidence/gallery` and verify `cargo fmt --check` + `cargo clippy` + `cargo test --locked` + `cargo insta test --check` + `cargo build --release --locked` zero warnings <!-- agent: horst-engineer.fast, depends_on: [5.2], touches: [] -->
 
 ## 6. Docs
 
-- [ ] 6.1 Regenerate `ARCHITECTURE.md`/`DESIGN.md` and guardrails for labels overlay and `[labels]` config <!-- agent: rusty-engineer.fast, depends_on: [5.3], touches: [ARCHITECTURE.md, DESIGN.md, .agents/skills/ob-guardrails-project/SKILL.md] -->
+- [x] 6.1 Regenerate `ARCHITECTURE.md`/`DESIGN.md` and guardrails for labels overlay and `[labels]` config <!-- agent: rusty-engineer.fast, depends_on: [5.3], touches: [ARCHITECTURE.md, DESIGN.md, .agents/skills/ob-guardrails-project/SKILL.md] -->

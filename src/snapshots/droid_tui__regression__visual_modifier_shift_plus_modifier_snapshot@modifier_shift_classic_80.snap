@@ -6,24 +6,24 @@ expression: ansi
 │                      DROID: modifier_switch_passthrough                      │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ P2B8 [SHIFT 1] ──────────────────────────────────────────────────────────────┐
-│     ○ B1.1          ○ L1.1          ○ B1.2          ○ L1.2                   │
+│  ○ Button B1.1    ○ LED L1.1     ○ Button B1.2    ○ LED L1.2                 │
 │       OFF             OFF             OFF             OFF                    │
 │                                                                              │
-│     ○ B1.3          ○ L1.3          ○ B1.4          ○ L1.4                   │
+│  ○ Button B1.3    ○ LED L1.3     ○ Button B1.4    ○ LED L1.4                 │
 │       OFF             OFF             OFF             OFF                    │
 │                                                                              │
-│     ○ B1.5          ○ L1.5          ○ B1.6          ○ L1.6                   │
+│  ○ Button B1.5    ○ LED L1.5     ○ Button B1.6    ○ LED L1.6                 │
 │       OFF             OFF             OFF             OFF                    │
 │                                                                              │
-│     ○ B1.7          ○ L1.7          ○ B1.8          ○ L1.8                   │
+│  ○ Button B1.7    ○ LED L1.7     ○ Button B1.8    ○ LED L1.8                 │
 │       OFF             OFF             OFF             OFF                    │
 │                                                                              │
-│     ◉ P1.1          ◉ P1.2                                                   │
+│   ◉ Pot P1.1      ◉ Pot P1.2                                                 │
 │       0%              0%                                                     │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ CV I/O [SHIFT 1] ────────────────────────────────────────────────────────────┐
-│    ← Copy O1    ← Quantizer O2    ← Switch O4                                │
+│   ← Output O1     ← Output O2     ← Output O4                                │
 │     CV OUT          CV OUT          CV OUT                                   │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
