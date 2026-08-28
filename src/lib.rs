@@ -8,6 +8,7 @@ pub mod graph;
 pub mod handler;
 pub mod latency;
 pub mod layout;
+pub mod optimize;
 pub mod patch;
 pub mod schema;
 pub mod theme;
