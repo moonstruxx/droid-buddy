@@ -140,6 +140,18 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
+            crossterm::event::KeyCode::Char('d') => {
+                // `g d` opens picker for B patch (patch-diff-viewer).
+                app.diff_picker_active = true;
+                app.showing_picker = true;
+                if app.picker_dir.as_os_str().is_empty() {
+                    app.picker_dir = std::env::current_dir().unwrap_or_default();
+                }
+                app.picker_index = 0;
+                app.refresh_picker_entries();
+                app.prefix = None;
+                return false;
+            }
             crossterm::event::KeyCode::Esc => {
                 app.prefix = None;
                 return false;
@@ -147,6 +159,22 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             _ => {
                 app.prefix = None;
             }
+        }
+    }
+
+    // Diff overlay Esc handling: clear scope first, then overlay (before viewer/graph/quad Esc).
+    if matches!(key.code, crossterm::event::KeyCode::Esc) {
+        if app.diff_scope.is_some() {
+            app.diff_scope = None;
+            app.status_message = String::from("Diff scope cleared");
+            app.prefix = None;
+            return false;
+        }
+        if app.diff_showing {
+            app.diff_showing = false;
+            app.status_message = String::from("Diff hidden");
+            app.prefix = None;
+            return false;
         }
     }
 
@@ -700,6 +728,30 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             });
             false
         }
+        crossterm::event::KeyCode::Char('d') if key.modifiers.is_empty() => {
+            if app.diff_report.is_some() {
+                app.toggle_diff_showing();
+                if app.diff_showing {
+                    app.diff_scope = app.selected_component.clone();
+                    if let Some(report) = &app.diff_report {
+                        app.status_message = format!(
+                            "Diff shown: +{} -{} ~{} cables, +{} -{} ~{} nodes",
+                            report.added_cables.len(),
+                            report.removed_cables.len(),
+                            report.changed_cables.len(),
+                            report.added_nodes.len(),
+                            report.removed_nodes.len(),
+                            report.changed_nodes.len()
+                        );
+                    } else {
+                        app.status_message = String::from("Diff shown");
+                    }
+                } else {
+                    app.status_message = String::from("Diff hidden");
+                }
+            }
+            false
+        }
         crossterm::event::KeyCode::Char('1') => {
             app.active_shift = Some(ShiftGroup::Group1);
             app.status_message = String::from("Shift 1 active");
@@ -1195,6 +1247,7 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
     match key.code {
         crossterm::event::KeyCode::Esc => {
             app.showing_picker = false;
+            app.diff_picker_active = false;
             false
         }
         crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
@@ -1219,6 +1272,28 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                     app.picker_dir = selected_path;
                     app.picker_index = 0;
                     app.refresh_picker_entries();
+                } else if app.diff_picker_active {
+                    match app.load_diff_patch(&selected_path) {
+                        Ok(()) => {
+                            if let Some(report) = &app.diff_report {
+                                app.status_message = format!(
+                                    "Diff loaded: +{} -{} ~{} cables, +{} -{} ~{} nodes",
+                                    report.added_cables.len(),
+                                    report.removed_cables.len(),
+                                    report.changed_cables.len(),
+                                    report.added_nodes.len(),
+                                    report.removed_nodes.len(),
+                                    report.changed_nodes.len()
+                                );
+                            }
+                            app.selected_file = Some(selected_path);
+                            app.showing_picker = false;
+                            app.diff_picker_active = false;
+                        }
+                        Err(e) => {
+                            app.status_message = format!("Failed to load diff patch: {}", e);
+                        }
+                    }
                 } else {
                     match Patch::from_ini_file(&selected_path) {
                         Ok(patch) => {

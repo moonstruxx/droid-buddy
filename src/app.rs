@@ -266,6 +266,7 @@ fn labels_file_path() -> Option<PathBuf> {
 
 use ratatui::layout::Rect;
 
+use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::graph::{Cluster, Graph, NodeId};
 use crate::layout;
@@ -482,6 +483,16 @@ pub struct App {
     /// Canonical absolute path of the currently loaded patch, if any. Drives
     /// per-patch bucket lookup (`LabelStore::canonical_key`) without content hashing.
     pub current_patch_path: Option<PathBuf>,
+    /// Second patch for structural diff (`g d` picker). `None` until a B patch is loaded.
+    pub diff_patch: Option<Patch>,
+    /// Structural diff report between `patch` (A) and `diff_patch` (B).
+    pub diff_report: Option<DiffReport>,
+    /// Whether the diff overlay is currently shown (`d` toggles).
+    pub diff_showing: bool,
+    /// Optional component-scoped filter token (`None` = patch-wide).
+    pub diff_scope: Option<String>,
+    /// True while the picker was opened via `g d` to load the B patch.
+    pub diff_picker_active: bool,
 }
 
 impl App {
@@ -531,6 +542,11 @@ impl App {
             label_store: LabelStore::load(),
             editing: None,
             current_patch_path: None,
+            diff_patch: None,
+            diff_report: None,
+            diff_showing: false,
+            diff_scope: None,
+            diff_picker_active: false,
         }
     }
 
@@ -561,9 +577,52 @@ impl App {
     /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
     /// minimap/source-pane geometry yet (renderer will publish on next frame).
     /// Clears inline edit overlay and current patch path (sample/demo loads).
+    pub fn clear_diff(&mut self) {
+        self.diff_patch = None;
+        self.diff_report = None;
+        self.diff_showing = false;
+        self.diff_scope = None;
+        self.diff_picker_active = false;
+    }
+
+    pub fn toggle_diff_showing(&mut self) {
+        if self.diff_report.is_some() {
+            self.diff_showing = !self.diff_showing;
+        }
+    }
+
+    pub fn load_diff_patch(&mut self, path: &Path) -> Result<(), String> {
+        let new_patch = Patch::from_ini_file(path).map_err(|e| e.to_string())?;
+        let report = if let Some(base) = &self.patch {
+            crate::diff::diff_patches(base, &new_patch)
+        } else {
+            DiffReport::default()
+        };
+        let added_cables = report.added_cables.len();
+        let removed_cables = report.removed_cables.len();
+        let changed_cables = report.changed_cables.len();
+        let added_nodes = report.added_nodes.len();
+        let removed_nodes = report.removed_nodes.len();
+        let changed_nodes = report.changed_nodes.len();
+        self.diff_patch = Some(new_patch);
+        self.diff_report = Some(report);
+        self.diff_showing = true;
+        self.diff_scope = self.selected_component.clone();
+        self.events.dispatch(&Event::DiffComputed {
+            added_cables,
+            removed_cables,
+            changed_cables,
+            added_nodes,
+            removed_nodes,
+            changed_nodes,
+        });
+        Ok(())
+    }
+
     pub fn load_patch(&mut self, patch: Patch) {
         self.reset_graph_state();
         self.reset_quad_state();
+        self.clear_diff();
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
