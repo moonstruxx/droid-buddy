@@ -142,6 +142,9 @@ pub struct App {
     pub showing_quad: bool,
     /// Which of the four quad panes has keyboard focus.
     pub quad_focus: QuadFocus,
+    /// Global processing pause (`p`): while true, state-mutating actions are
+    /// blocked and selection-driven influence is cleared (never computed).
+    pub processing_paused: bool,
     /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
     pub active_modifier_var: Option<String>,
     /// Forward influence result for the active modifier, if any.
@@ -192,6 +195,7 @@ impl App {
             events: EventBus::default(),
             showing_quad: false,
             quad_focus: QuadFocus::default(),
+            processing_paused: false,
             active_modifier_var: None,
             influence: None,
             filtered_graph: None,
@@ -239,6 +243,7 @@ impl App {
         self.viewer_focus = ViewerFocus::Panels;
         self.minimap_rect = None;
         self.source_pane_rect = None;
+        self.processing_paused = false;
     }
 
     /// Build the signal-flow graph from the current patch and run a fresh full
@@ -387,6 +392,10 @@ impl App {
     /// to the FULL graph, and emits `InfluenceRecomputed`. With no selection
     /// or no derived vars the influence and filtered state are cleared.
     pub fn recompute_influence(&mut self) {
+        if self.processing_paused {
+            self.clear_influence_state();
+            return;
+        }
         let Some(patch) = self.patch.as_ref().cloned() else {
             self.clear_influence_state();
             return;
@@ -451,6 +460,19 @@ impl App {
         if let Some(graph) = self.graph.as_mut() {
             graph.highlighted_nodes.clear();
             graph.highlighted_edges.clear();
+        }
+    }
+
+    /// Toggle the global processing pause, reporting the new state in the
+    /// status bar and clearing influence on pause so nothing is computed or
+    /// shown while paused.
+    pub fn toggle_processing_pause(&mut self) {
+        self.processing_paused = !self.processing_paused;
+        if self.processing_paused {
+            self.clear_influence_state();
+            self.status_message = String::from("Processing paused (p to resume)");
+        } else {
+            self.status_message = String::from("Processing enabled (p to pause)");
         }
     }
 
@@ -827,5 +849,55 @@ mod tests {
         app.viewer_split_ratio = 0.7;
         app.adjust_viewer_split_ratio(0.1);
         assert_eq!(app.viewer_split_ratio, 0.7);
+    }
+
+    #[test]
+    fn processing_pause_toggles_status_message() {
+        let mut app = App::new();
+        app.toggle_processing_pause();
+        assert!(app.processing_paused);
+        assert_eq!(app.status_message, "Processing paused (p to resume)");
+        app.toggle_processing_pause();
+        assert!(!app.processing_paused);
+        assert_eq!(app.status_message, "Processing enabled (p to pause)");
+    }
+
+    #[test]
+    fn load_patch_resets_processing_pause() {
+        let mut app = App::new();
+        app.toggle_processing_pause();
+        assert!(app.processing_paused);
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        assert!(!app.processing_paused, "pause reset on load");
+    }
+
+    #[test]
+    fn pausing_clears_selection_driven_influence() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        assert!(app.influence.is_some());
+        assert!(app.active_modifier_var.is_some());
+        app.toggle_processing_pause();
+        assert!(app.processing_paused);
+        assert!(app.influence.is_none(), "influence cleared on pause");
+        assert!(app.active_modifier_var.is_none());
+    }
+
+    #[test]
+    fn recompute_influence_cleared_and_never_computed_while_paused() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(patch);
+        app.toggle_processing_pause();
+        app.select_component(String::from("B1.1"));
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert!(
+            app.influence.is_none(),
+            "no influence computed while paused"
+        );
+        assert!(app.active_modifier_var.is_none());
     }
 }

@@ -500,17 +500,21 @@ fn render_component(
         }
         ComponentKind::Switch => {
             let state = match &comp.state {
+                // A value-driven switch mirrors knob/encoder percentage display.
+                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
                 ComponentState::On => String::from("ON"),
                 _ => String::from("OFF"),
             };
             (
-                if matches!(comp.state, ComponentState::On) {
+                if matches!(comp.state, ComponentState::Value(_)) {
+                    "◉"
+                } else if matches!(comp.state, ComponentState::On) {
                     "▣"
                 } else {
                     "□"
                 },
                 state,
-                theme::active().button,
+                theme::active().switch,
             )
         }
         ComponentKind::Encoder => {
@@ -3148,6 +3152,126 @@ mod led_box_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod switch_rendering_tests {
+    use super::*;
+    use crate::patch::Patch;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A patch whose only hardware component is a switch (S token), so glyph
+    /// lookups in the rendered buffer are unambiguous.
+    fn switch_app(id: &str) -> App {
+        let content = format!("[copy]\n    select = {id}\n");
+        let patch = Patch::from_ini_str(&content, String::from("t")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app
+    }
+
+    fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
+        buffer_for(app, width, height)
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn glyph_fg(buffer: &ratatui::buffer::Buffer, glyph: &str) -> Option<Color> {
+        buffer
+            .content()
+            .iter()
+            .find(|c| c.symbol() == glyph)
+            .map(|c| c.fg)
+    }
+
+    fn set_state(app: &mut App, id: &str, state: ComponentState) {
+        let comp = app
+            .patch
+            .as_mut()
+            .unwrap()
+            .hw_components
+            .iter_mut()
+            .find(|c| c.id == id)
+            .unwrap();
+        comp.state = state;
+    }
+
+    // mono keeps switch (DarkGray) distinct from button (White), so the glyph
+    // color proves the switch token is used rather than the button token.
+    #[test]
+    fn value_state_switch_renders_percentage_in_switch_token() {
+        theme::set_test_theme(Some(theme::Theme::mono()));
+        let mut app = switch_app("S1.1");
+        set_state(&mut app, "S1.1", ComponentState::Value(0.35));
+
+        let buffer = buffer_for(&mut app, 80, 24);
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("35%"),
+            "Value-state switch should render the percentage, got: {text}"
+        );
+        assert_eq!(
+            glyph_fg(&buffer, "◉"),
+            Some(theme::Theme::mono().switch),
+            "filled glyph must use the switch token"
+        );
+        theme::set_test_theme(None);
+    }
+
+    #[test]
+    fn on_off_switches_keep_glyph_and_label_rendering() {
+        // Default (classic) palette: switch == button, so classic output is
+        // byte-identical to the previous button-token rendering.
+        let mut app = switch_app("S1.1");
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            ComponentState::Off
+        );
+
+        let buffer = buffer_for(&mut app, 80, 24);
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("□"), "Off switch keeps the hollow glyph");
+        assert!(text.contains("OFF"), "Off switch keeps the OFF label");
+        assert_eq!(glyph_fg(&buffer, "□"), Some(theme::Theme::classic().switch));
+        assert_eq!(
+            theme::Theme::classic().switch,
+            theme::Theme::classic().button
+        );
+
+        set_state(&mut app, "S1.1", ComponentState::On);
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(
+            text.contains("▣"),
+            "On switch keeps the filled-square glyph"
+        );
+        assert!(text.contains("ON"), "On switch keeps the ON label");
+    }
+
+    #[test]
+    fn off_switch_uses_switch_token_not_button_token() {
+        theme::set_test_theme(Some(theme::Theme::mono()));
+        let mut app = switch_app("S1.1");
+        let buffer = buffer_for(&mut app, 80, 24);
+        let fg = glyph_fg(&buffer, "□").expect("Off switch glyph must render");
+        assert_eq!(
+            fg,
+            theme::Theme::mono().switch,
+            "Off switch must take the switch token"
+        );
+        assert_ne!(fg, theme::Theme::mono().button);
+        theme::set_test_theme(None);
+    }
+}
+
 #[cfg(test)]
 mod graph_view_tests {
     use super::*;
