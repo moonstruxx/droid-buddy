@@ -22,6 +22,15 @@ pub enum Event {
     TopologyError(TopologyIssue),
     /// The modifier influence walk was (re)computed for the selected token.
     InfluenceRecomputed(InfluenceSubtree),
+    /// A structural diff was computed between two patches.
+    DiffComputed {
+        added_cables: usize,
+        removed_cables: usize,
+        changed_cables: usize,
+        added_nodes: usize,
+        removed_nodes: usize,
+        changed_nodes: usize,
+    },
 }
 
 /// Handle identifying one registered subscriber, for later removal.
@@ -105,6 +114,7 @@ mod tests {
                 Event::GraphRebuilt => 1,
                 Event::TopologyError(_) => 2,
                 Event::InfluenceRecomputed(_) => 3,
+                Event::DiffComputed { .. } => 4,
             });
         });
 
