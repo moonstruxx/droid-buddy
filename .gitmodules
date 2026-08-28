@@ -1,0 +1,3 @@
+[submodule "ext/droid-lsp"]
+	path = ext/droid-lsp
+	url = https://github.com/moonstruxx/droid-lsp
