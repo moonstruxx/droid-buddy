@@ -1,6 +1,268 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+
+const LABELS_DIR_NAME: &str = "droid-tui";
+const LABELS_FILE_NAME: &str = "labels.toml";
+
+/// Per-patch buckets: `hw` (token → layer → label) + `circuits` (NodeId `"name:idx"` → label).
+/// Empty-string labels are treated as absent by `Patch::display_label` / `circuit_label`
+/// and may be pruned on save; deserialization supplies empty maps when absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchLabels {
+    #[serde(default)]
+    pub hw: HashMap<String, BTreeMap<u8, String>>,
+    #[serde(default)]
+    pub circuits: HashMap<String, String>,
+}
+
+/// XDG label store for `~/.config/droid-tui/labels.toml`.
+///
+/// File shape mirrors the spec:
+/// ```toml
+/// [patches."/abs/path"]
+/// hw."B3.17" = {1="...",2="..."}
+/// circuits."motorfader:12" = "..."
+/// ```
+/// Keyed by canonicalized absolute path strings (canonicalize via
+/// `Path::canonicalize` fallback to absolute, not content hash).
+/// Warn-once on corrupt TOML (fallback empty store), atomic tmp→rename,
+/// same contract as `config.rs`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelStore {
+    #[serde(default)]
+    pub patches: HashMap<String, PatchLabels>,
+}
+
+impl LabelStore {
+    /// Canonicalize `path` to an absolute string key: real canonical path when
+    /// the file exists, otherwise an absolute join against `current_dir`.
+    pub fn canonical_key(path: &Path) -> String {
+        if let Ok(canonical) = path.canonicalize() {
+            return canonical.to_string_lossy().to_string();
+        }
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        };
+        absolute.to_string_lossy().to_string()
+    }
+
+    /// Encode a `(circuit, instance)` pair as the TOML key `"circuit:instance"`.
+    pub fn encode_node_id(name: &str, instance: usize) -> String {
+        format!("{name}:{instance}")
+    }
+
+    /// Decode a `"circuit:instance"` key. Returns `None` on malformed suffix.
+    pub fn decode_node_id(key: &str) -> Option<(String, usize)> {
+        let (name, idx) = key.rsplit_once(':')?;
+        let instance = idx.parse::<usize>().ok()?;
+        Some((name.to_string(), instance))
+    }
+
+    /// Bucket for `patch_path`, if present.
+    pub fn patch_labels(&self, patch_path: &Path) -> Option<&PatchLabels> {
+        let key = Self::canonical_key(patch_path);
+        self.patches.get(&key)
+    }
+
+    /// Mutable bucket for `patch_path`, creating it when absent.
+    pub fn patch_labels_mut(&mut self, patch_path: &Path) -> &mut PatchLabels {
+        let key = Self::canonical_key(patch_path);
+        self.patches.entry(key).or_default()
+    }
+
+    /// Load the XDG store. Missing file yields empty store; malformed TOML
+    /// warns once on stderr and yields empty store (mirrors `config.rs`).
+    pub fn load() -> Self {
+        match labels_file_path() {
+            Some(path) => Self::load_from(&path),
+            None => Self::default(),
+        }
+    }
+
+    /// Load from an explicit file path (test injection point). Warn-once
+    /// contract: each call emits at most one stderr warning.
+    pub fn load_from(path: &Path) -> Self {
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(_) => return Self::default(),
+        };
+        match toml::from_str(&raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                eprintln!(
+                    "warning: ignoring malformed labels file {}: {err}",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Save to the discovered XDG path.
+    pub fn save(&self) -> io::Result<()> {
+        let dir = labels_dir(
+            env::var_os("XDG_CONFIG_HOME").as_deref(),
+            env::var_os("HOME").as_deref(),
+        )
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "cannot determine config directory ($XDG_CONFIG_HOME or $HOME)",
+            )
+        })?;
+        self.save_to_dir(&dir)
+    }
+
+    /// Atomically write as `labels.toml` inside `dir` (tmp→rename), creating
+    /// the directory tree on demand. Empty/whitespace entries are pruned so
+    /// `I4:`-style empty slots do not persist and `display_label` can fall
+    /// through to derived.
+    pub fn save_to_dir(&self, dir: &Path) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
+        // Prune empty/whitespace-only labels and empty buckets so the file
+        // stays minimal and empty-slot coverage (`I4:`) is preserved on round-trip.
+        let mut pruned = Self {
+            patches: HashMap::new(),
+        };
+        for (k, bucket) in &self.patches {
+            let mut hw: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+            for (token, layers) in &bucket.hw {
+                let kept: BTreeMap<u8, String> = layers
+                    .iter()
+                    .filter_map(|(layer, label)| {
+                        let trimmed = label.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some((*layer, trimmed.to_string()))
+                        }
+                    })
+                    .collect();
+                if !kept.is_empty() {
+                    hw.insert(token.clone(), kept);
+                }
+            }
+            let circuits: HashMap<String, String> = bucket
+                .circuits
+                .iter()
+                .filter_map(|(key, label)| {
+                    let trimmed = label.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some((key.clone(), trimmed.to_string()))
+                    }
+                })
+                .collect();
+            if hw.is_empty() && circuits.is_empty() {
+                continue;
+            }
+            pruned
+                .patches
+                .insert(k.clone(), PatchLabels { hw, circuits });
+        }
+        let body = toml::to_string(&pruned)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        let target = dir.join(LABELS_FILE_NAME);
+        let tmp = dir.join(format!("{LABELS_FILE_NAME}.tmp"));
+        fs::write(&tmp, body)?;
+        if let Err(err) = fs::rename(&tmp, &target) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Convenience: save to an explicit file path (atomic tmp→rename beside the file).
+    pub fn save_to(&self, path: &Path) -> io::Result<()> {
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() {
+                fs::create_dir_all(dir)?;
+            }
+            // Delegate to dir-based writer when path is inside an XDG-style dir;
+            // otherwise write beside `path` atomically.
+            if path.file_name().is_some_and(|n| n == LABELS_FILE_NAME) {
+                return self.save_to_dir(dir);
+            }
+        }
+        let pruned = Self {
+            patches: self.patches.clone(),
+        };
+        let body = toml::to_string(&pruned)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        let tmp = path.with_extension("toml.tmp");
+        fs::write(&tmp, body)?;
+        if let Err(err) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Convenience for HW: get label for `(patch, token, layer)` respecting
+    /// trimmed emptiness (None = absent/fall through).
+    pub fn hw_label(&self, patch_path: &Path, token: &str, layer: u8) -> Option<String> {
+        self.patch_labels(patch_path)
+            .and_then(|b| b.hw.get(token))
+            .and_then(|m| m.get(&layer))
+            .and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            })
+    }
+
+    /// Convenience for circuits: get label for `(patch, NodeId)`.
+    pub fn circuit_label(&self, patch_path: &Path, node: &(String, usize)) -> Option<String> {
+        let key = Self::encode_node_id(&node.0, node.1);
+        self.patch_labels(patch_path)
+            .and_then(|b| b.circuits.get(&key))
+            .and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            })
+    }
+}
+
+fn labels_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = match xdg_config_home {
+        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
+        _ => {
+            let home = home?;
+            if home.is_empty() {
+                return None;
+            }
+            PathBuf::from(home).join(".config")
+        }
+    };
+    Some(base.join(LABELS_DIR_NAME))
+}
+
+fn labels_file_path() -> Option<PathBuf> {
+    let dir = labels_dir(
+        env::var_os("XDG_CONFIG_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )?;
+    Some(dir.join(LABELS_FILE_NAME))
+}
 
 use ratatui::layout::Rect;
 
