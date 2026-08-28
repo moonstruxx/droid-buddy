@@ -3204,6 +3204,198 @@ fn visual_diff_graph_highlight_snapshot() {
     insta::assert_snapshot!("diff_html_row", row);
 }
 
+// ── validation fixture matrix (patch-validation 3.2) ──────────────────────────
+
+const VALIDATION_FIXTURES: &[(&str, &str)] = &[
+    ("unknown_circuit", "unknown_circuit"),
+    ("duplicate_param", "duplicate_param"),
+    ("unknown_param", "unknown_param"),
+    ("invalid_jack", "invalid_jack"),
+    ("missing_required", "missing_required"),
+    ("undefined_cable", "undefined_cable"),
+    ("duplicate_cable", "duplicate_cable"),
+    ("unused_cable", "unused_cable"),
+    ("ram_overflow", "ram_overflow"),
+];
+
+fn validation_issues_for(fixture: &str) -> Vec<crate::validation::ValidationIssue> {
+    let path = format!("fixtures/validation/{fixture}.ini");
+    let patch =
+        Patch::from_ini_file(Path::new(&path)).unwrap_or_else(|e| panic!("{path} must parse: {e}"));
+    let schema = crate::schema::load_schema();
+    crate::validation::validate_patch(&patch, &schema)
+}
+
+fn assert_has_code(fixture: &str, expected_code: &str) {
+    let issues = validation_issues_for(fixture);
+    let codes: Vec<_> = issues.iter().map(|i| i.code.as_str()).collect();
+    assert!(
+        codes.contains(&expected_code),
+        "{fixture}.ini must emit code={expected_code}, got codes={codes:?} issues={issues:#?}"
+    );
+    // sorted deterministic
+    for w in issues.windows(2) {
+        assert!(
+            w[0] <= w[1],
+            "{fixture}.ini issues not sorted: {:?} vs {:?}",
+            w[0],
+            w[1]
+        );
+    }
+}
+
+#[test]
+fn regression_validation_fixtures_parse_and_have_hardware() {
+    // Every validation fixture must parse and contain a [p2b8] hardware section.
+    for (fixture, _) in VALIDATION_FIXTURES {
+        let path = format!("fixtures/validation/{fixture}.ini");
+        let patch = Patch::from_ini_file(Path::new(&path))
+            .unwrap_or_else(|e| panic!("{path} must parse: {e}"));
+        assert!(
+            !patch.hw_components.is_empty(),
+            "{fixture}.ini must have hardware components via [p2b8]"
+        );
+        assert!(
+            !patch.raw_lines.is_empty(),
+            "{fixture}.ini must have raw_lines"
+        );
+    }
+}
+
+#[test]
+fn regression_validation_fixture_unknown_circuit() {
+    assert_has_code("unknown_circuit", "unknown_circuit");
+    let issues = validation_issues_for("unknown_circuit");
+    let item = issues.iter().find(|i| i.code == "unknown_circuit").unwrap();
+    assert_eq!(item.severity, crate::validation::Severity::Error);
+    assert!(
+        item.message.contains("unknowncircuit"),
+        "message should mention circuit: {}",
+        item.message
+    );
+}
+
+#[test]
+fn regression_validation_fixture_duplicate_param() {
+    assert_has_code("duplicate_param", "duplicate_param");
+    let issues = validation_issues_for("duplicate_param");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == "duplicate_param"
+                && i.severity == crate::validation::Severity::Warning)
+    );
+}
+
+#[test]
+fn regression_validation_fixture_unknown_param() {
+    assert_has_code("unknown_param", "unknown_param");
+    let issues = validation_issues_for("unknown_param");
+    assert!(issues
+        .iter()
+        .any(|i| i.code == "unknown_param" && i.severity == crate::validation::Severity::Error));
+}
+
+#[test]
+fn regression_validation_fixture_invalid_jack() {
+    assert_has_code("invalid_jack", "invalid_jack");
+    let issues = validation_issues_for("invalid_jack");
+    let item = issues.iter().find(|i| i.code == "invalid_jack").unwrap();
+    assert_eq!(item.severity, crate::validation::Severity::Warning);
+    assert!(
+        item.message.contains("B33.1"),
+        "expected B33.1 in {}",
+        item.message
+    );
+}
+
+#[test]
+fn regression_validation_fixture_missing_required() {
+    assert_has_code("missing_required", "missing_required");
+    let issues = validation_issues_for("missing_required");
+    // algoquencer requires clock
+    assert!(issues
+        .iter()
+        .any(|i| i.message.contains("clock") || i.code == "missing_required"));
+}
+
+#[test]
+fn regression_validation_fixture_undefined_cable() {
+    assert_has_code("undefined_cable", "undefined_cable");
+}
+
+#[test]
+fn regression_validation_fixture_duplicate_cable() {
+    assert_has_code("duplicate_cable", "duplicate_cable");
+    let issues = validation_issues_for("duplicate_cable");
+    assert!(issues.iter().any(|i| i.message.contains("_X")));
+    // duplicate must not also be unused
+    assert!(
+        !issues.iter().any(|i| i.code == "unused_cable"),
+        "duplicate should not also be unused"
+    );
+}
+
+#[test]
+fn regression_validation_fixture_unused_cable() {
+    assert_has_code("unused_cable", "unused_cable");
+    let issues = validation_issues_for("unused_cable");
+    let item = issues.iter().find(|i| i.code == "unused_cable").unwrap();
+    assert_eq!(item.severity, crate::validation::Severity::Hint);
+    assert!(item.message.contains("_UNUSED"));
+}
+
+#[test]
+fn regression_validation_fixture_ram_overflow() {
+    assert_has_code("ram_overflow", "ram_overflow");
+    let issues = validation_issues_for("ram_overflow");
+    let ram: Vec<_> = issues.iter().filter(|i| i.code == "ram_overflow").collect();
+    assert!(
+        !ram.is_empty(),
+        "ram_overflow fixture must have at least one ram_overflow"
+    );
+    for r in &ram {
+        assert_eq!(r.severity, crate::validation::Severity::Error);
+        assert_eq!(r.span.line, 0);
+        assert!(
+            r.message.contains("bytes of RAM"),
+            "ram message: {}",
+            r.message
+        );
+    }
+    // Should have two (master16 + master18) or at least one
+    assert!(!ram.is_empty() && ram.len() <= 2, "ram len {:?}", ram.len());
+}
+
+#[test]
+fn regression_validation_fixture_matrix_all_nine_present() {
+    // Full matrix smoke: every fixture yields its primary code.
+    assert_eq!(VALIDATION_FIXTURES.len(), 9, "must have 9 fixtures");
+    for (fixture, code) in VALIDATION_FIXTURES {
+        assert_has_code(fixture, code);
+    }
+    // Cross-check: fixtures directory contains exactly these 9 files
+    let entries = std::fs::read_dir("fixtures/validation").unwrap();
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            e.path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+        })
+        .collect();
+    names.sort();
+    let mut expected: Vec<String> = VALIDATION_FIXTURES
+        .iter()
+        .map(|(a, _)| a.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        names, expected,
+        "fixtures/validation must contain exactly 9 expected files"
+    );
+}
+
 #[test]
 fn visual_diff_changed_node_marker_snapshot() {
     // Param-level diff: same topology, one node's non-cable param differs -> title "*"

@@ -31,6 +31,9 @@ pub enum Event {
         removed_nodes: usize,
         changed_nodes: usize,
     },
+    /// Patch validation completed on load; `count` is total issues,
+    /// `error_count` those with `Severity::Error` that gate the load.
+    ValidationCompleted { count: usize, error_count: usize },
 }
 
 /// Handle identifying one registered subscriber, for later removal.
@@ -104,6 +107,23 @@ mod tests {
     }
 
     #[test]
+    fn validation_completed_dispatch() {
+        let mut bus = EventBus::new();
+        let received = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let store = std::rc::Rc::clone(&received);
+        bus.subscribe(move |event| {
+            if let Event::ValidationCompleted { count, error_count } = event {
+                store.borrow_mut().push((*count, *error_count));
+            }
+        });
+        bus.dispatch(&Event::ValidationCompleted {
+            count: 3,
+            error_count: 1,
+        });
+        assert_eq!(*received.borrow(), vec![(3, 1)]);
+    }
+
+    #[test]
     fn events_are_delivered_in_dispatch_order() {
         let mut bus = EventBus::new();
         let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -115,15 +135,20 @@ mod tests {
                 Event::TopologyError(_) => 2,
                 Event::InfluenceRecomputed(_) => 3,
                 Event::DiffComputed { .. } => 4,
+                Event::ValidationCompleted { .. } => 5,
             });
         });
 
         bus.dispatch(&Event::GraphRebuilt);
         bus.dispatch(&Event::NodeMoved((String::from("osc"), 0)));
         bus.dispatch(&Event::TopologyError(issue("_BUS")));
+        bus.dispatch(&Event::ValidationCompleted {
+            count: 1,
+            error_count: 0,
+        });
         bus.dispatch(&Event::GraphRebuilt);
 
-        assert_eq!(*order.borrow(), vec![1, 0, 2, 1]);
+        assert_eq!(*order.borrow(), vec![1, 0, 2, 5, 1]);
     }
 
     #[test]
