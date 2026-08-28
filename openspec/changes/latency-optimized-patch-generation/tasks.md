@@ -8,7 +8,7 @@
 
 ## Task 1.2 — Pure optimizer core
 
-- [ ] Create src/optimize.rs: up to 3 candidate orderings (banner-preserving min-sum default, global min-sum, min-max) minimizing the shared objective, with same-name relative-order preservation and banner-scope default; deterministic, bounded search; evaluate via latency.rs summaries <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/optimize.rs, src/lib.rs] -->
+- [x] Create src/optimize.rs: up to 3 candidate orderings (banner-preserving min-sum default, global min-sum, min-max) minimizing the shared objective, with same-name relative-order preservation and banner-scope default; deterministic, bounded search; evaluate via latency.rs summaries <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/optimize.rs, src/lib.rs] -->
 
 **details**: `CandidateOrdering { label, order: Vec<usize>, before: LatencySummary, after: LatencySummary }`, `generate_candidates(patch, cost, scope) -> Vec<CandidateOrdering>` (≤3, best first). Objective `Σ ((t−s) mod N)×AVG` via `forward_latency` (unchanged metric). Search: seeded permutation (node-id hashes, no RNG), bounded iterations (~2000 local-search steps). Wire `pub mod optimize;` into lib.rs. Tests: determinism, brute-force equivalence N ≤ 8, same-name order, banner scope, min-max bound.
 
