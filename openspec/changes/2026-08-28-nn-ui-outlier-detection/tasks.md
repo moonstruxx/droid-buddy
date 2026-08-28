@@ -2,7 +2,7 @@
 
 ## 1. Data & Fitting (offline, tooling)
 
-- [ ] 1.1 Rebalance synthetic label pool + document label semantics <!-- agent: devops-engineer.build, depends_on: [], touches: [tools/build_features.py, corpus/features.csv] -->
+- [x] 1.1 Rebalance synthetic label pool + document label semantics <!-- agent: devops-engineer.build, depends_on: [], touches: [tools/build_features.py, corpus/features.csv] -->
       · BAD_POOL currently E/B-sourced only → 50 B-sourced outliers escape the 8.0 rule and any model overfits the generator (design D3)
       · add near-distance + cross-controller + non-E cases; keep `random.Random(SEED)` determinism; regenerate corpus/features.csv in the same run
       · verify: `python3 tools/build_features.py` regenerates the CSV (schema unchanged), and `git diff corpus/features.csv` shows label rebalancing, not schema drift
