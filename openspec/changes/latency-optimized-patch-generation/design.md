@@ -43,6 +43,14 @@ impl CostModel {
 - Default stays `AVG ∝ ramsize(circuit)` (today's heuristic).
 - `config.toml` gains `[latency]`: `per_circuit = { "circuit-name" = <f32> }` (empty/absent = heuristic). Real values are a later user task; the shape is the deliverable.
 
+### D2.1 — Implementation notes (task 1.1, shipped)
+
+- `CostModel` lives in `latency.rs` next to `forward_latency` (pure, no terminal dep); `overrides` are keyed **lowercased** (case-insensitive circuit names), and `circuit_avg` falls back to the private `heuristic_avg` (the ramsize-proportional default moved verbatim out of `graph.rs::compute_latency`).
+- Ownership: `App.cost_model` is built once in `main::run` via `CostModel::from_config(&settings)` (config loads before terminal init) and passed by reference into every `Graph::build_from_patch(patch, clusters, &cost)` call — no global state.
+- `Settings` drops `Eq` (f32 values in `per_circuit` are not `Eq`); `Latency` derives `Default` (empty map).
+- Serde serializes the map as a nested TOML table `[latency.per_circuit]` on save; the inline `per_circuit = { ... }` form parses to the identical structure. Both round-trip.
+- Tests: override wins / absent falls back / case-insensitive + per-instance override / unknown circuit → unit cost / config parse + save round-trip + absent-section default.
+
 ## D3 — Constraints
 
 - **Same-name relative order preserved**: instances of a repeated section name (`[button]` × 8) keep their mutual order in every candidate — instance numbers (DROID saved-state keys, manual 11.1) never reshuffle. Implemented as a projection: the search permutes *instance classes*, and within a class order is fixed.
