@@ -1142,7 +1142,7 @@ const KNOWN_CONTROLLER_SECTIONS: [&str; 7] = [
 /// digit and not preceded by an alphanumeric/underscore character, so that
 /// e.g. `_ENV1_DECAY_POT` (letter preceded by another letter) is not
 /// mistaken for a token. See design.md Decision 2.
-fn scan_hw_tokens(value: &str) -> Vec<String> {
+pub(crate) fn scan_hw_tokens(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0;

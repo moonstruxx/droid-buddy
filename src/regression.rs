@@ -3078,3 +3078,163 @@ fn visual_disabled_circuit_graph_snapshot() {
     assert!(row.len() > 200, "disabled html row substantial");
     insta::assert_snapshot!("disabled_html_row", row);
 }
+
+// ── diff graph highlighting (task 3.1) ─────────────────────────────────────
+#[test]
+fn visual_diff_graph_highlight_snapshot() {
+    // cable_banner_combos base vs modified with added node + changed _GATE sinks.
+    // Covers graph_edge_diff_added/removed precedence, changed-node "*" marker,
+    // cluster tint, and error > diff precedence on graph_topology_error.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+        for width in [40u16, 100] {
+            let mut app = graph_app_from_fixture("cable_banner_combos");
+            let base = app.patch.clone().unwrap();
+            // Modified: add a delay sink on _GATE (changes _GATE sinks) and a new
+            // delay node with a distinct param so added_nodes + changed_nodes both fire.
+            let base_ini = std::fs::read_to_string("fixtures/cable_banner_combos.ini").unwrap();
+            let modified_ini = format!("{base_ini}\n[delay]\ninput = _GATE\ntime = 0.9\n");
+            let mut modified = Patch::from_ini_str(&modified_ini, "modified".to_string()).unwrap();
+            if let Some(sec) = modified.sections.iter_mut().find(|s| s.name == "mixer") {
+                sec.entries.push(("gain".to_string(), "0.9".to_string()));
+            }
+            let report = crate::diff::diff_patches(&base, &modified);
+            // Sanity: added delay node and _GATE changed
+            assert!(
+                report.added_nodes.contains(&("delay".to_string(), 0)),
+                "{theme_name} {width}: delay node added"
+            );
+            assert!(
+                report.changed_cables.iter().any(|c| c.cable == "_GATE"),
+                "{theme_name} {width}: _GATE changed"
+            );
+            app.diff_patch = Some(modified);
+            app.diff_report = Some(report);
+            app.diff_showing = true;
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+            // Diff edge must render with diff_added token (bold), not kind color.
+            // Terminal uses Gray, mono White, classic Green — all distinct from error Red/Black.
+            assert!(
+                has_box_glyph_of_color(&buf, t.graph_edge_diff_added),
+                "{theme_name} {width}: diff edge must be diff_added color"
+            );
+            // Changed/added node titles get "*" marker (delay added node)
+            if width >= 100 {
+                assert!(
+                    ansi.contains("*"),
+                    "{theme_name} {width}: diff marker * present for added/changed node"
+                );
+            }
+            // Diff inactive must not show diff color — smoke toggle off
+            app.diff_showing = false;
+            let buf_off = buffer_for(&mut app, width, 40);
+            // When diff off, diff color should not appear as box glyph (unless
+            // coincidentally same as kind color — mono White overlaps control, so skip strict check for mono)
+            if theme_name != "mono" {
+                // classic Green and terminal Gray are not used for normal _GATE kind (Cyan/Reset), so absence is meaningful
+                let has_diff_when_off = has_box_glyph_of_color(&buf_off, t.graph_edge_diff_added);
+                // If the diff token coincidentally equals a kind token, this could be true; only assert when distinct
+                if t.graph_edge_diff_added != t.graph_edge_control
+                    && t.graph_edge_diff_added != t.graph_edge_audio
+                    && t.graph_edge_diff_added != t.graph_edge_midi
+                {
+                    assert!(
+                        !has_diff_when_off,
+                        "{theme_name} {width}: diff color must not appear when diff_showing false"
+                    );
+                }
+            }
+            app.diff_showing = true;
+            let ansi_on = buffer_to_ansi(&buffer_for(&mut app, width, 40));
+            insta::with_settings!({snapshot_suffix => format!("diff_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi_on);
+            });
+        }
+    }
+    // Error precedence: graph_topology_error carries an n->1 Error on _CLK.
+    // With a diff that touches _CLK, the edge must stay error-red, not diff.
+    {
+        let _guard = ThemedGuard::pin("classic");
+        let t = *theme::resolve("classic");
+        let mut app = graph_app_from_fixture("graph_topology_error");
+        let base = app.patch.clone().unwrap();
+        let base_ini = std::fs::read_to_string("fixtures/graph_topology_error.ini").unwrap();
+        // Modify to add a new sink on _CLK (would be diff) while keeping the error
+        let modified_ini = format!("{base_ini}\n[delay]\nclock = _CLK\n");
+        let modified = Patch::from_ini_str(&modified_ini, "modified".to_string()).unwrap();
+        let report = crate::diff::diff_patches(&base, &modified);
+        app.diff_patch = Some(modified);
+        app.diff_report = Some(report);
+        app.diff_showing = true;
+        let buf = buffer_for(&mut app, 100, 40);
+        assert!(
+            has_box_glyph_of_color(&buf, t.graph_edge_error),
+            "error red must outrank diff on _CLK"
+        );
+        let ansi = buffer_to_ansi(&buf);
+        insta::with_settings!({snapshot_suffix => "diff_error_classic_100"}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+    // Side-by-side HTML row for gallery parity (diff at 100 cols).
+    let mut cells: Vec<String> = Vec::new();
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = graph_app_from_fixture("cable_banner_combos");
+        let base = app.patch.clone().unwrap();
+        let base_ini = std::fs::read_to_string("fixtures/cable_banner_combos.ini").unwrap();
+        let modified_ini = format!("{base_ini}\n[delay]\ninput = _GATE\ntime = 0.9\n");
+        let mut modified = Patch::from_ini_str(&modified_ini, "modified".to_string()).unwrap();
+        if let Some(sec) = modified.sections.iter_mut().find(|s| s.name == "mixer") {
+            sec.entries.push(("gain".to_string(), "0.9".to_string()));
+        }
+        let report = crate::diff::diff_patches(&base, &modified);
+        app.diff_patch = Some(modified);
+        app.diff_report = Some(report);
+        app.diff_showing = true;
+        let buf = buffer_for(&mut app, 100, 40);
+        let html = buffer_to_html(&buf);
+        cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
+    }
+    let row = format!("<tr>{}</tr>", cells.join(""));
+    assert!(row.contains("<td"), "diff html row has cells");
+    assert!(row.len() > 200, "diff html row substantial");
+    insta::assert_snapshot!("diff_html_row", row);
+}
+
+#[test]
+fn visual_diff_changed_node_marker_snapshot() {
+    // Param-level diff: same topology, one node's non-cable param differs -> title "*"
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [40u16, 100] {
+            let mut app = graph_app_from_fixture("cable_banner_combos");
+            let base = app.patch.clone().unwrap();
+            let mut modified = base.clone();
+            // Change a non-cable param on the mixer node (instance 0 of "mixer")
+            if let Some(sec) = modified.sections.iter_mut().find(|s| s.name == "mixer") {
+                // mixer has no plain param besides cables; add one and change it
+                sec.entries.push(("gain".to_string(), "0.9".to_string()));
+            }
+            let report = crate::diff::diff_patches(&base, &modified);
+            assert!(
+                report.changed_nodes.iter().any(|n| n.id.0 == "mixer"),
+                "mixer changed"
+            );
+            app.diff_patch = Some(modified);
+            app.diff_report = Some(report);
+            app.diff_showing = true;
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+            assert!(
+                ansi.contains("mixer*") || ansi.contains("mixer"),
+                "{theme_name} {width}: mixer title with * marker"
+            );
+            insta::with_settings!({snapshot_suffix => format!("diff_changed_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}

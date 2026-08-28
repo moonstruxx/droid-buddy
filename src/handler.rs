@@ -733,7 +733,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.toggle_diff_showing();
                 if app.diff_showing {
                     app.diff_scope = app.selected_component.clone();
-                    if let Some(report) = &app.diff_report {
+                    if let Some(scoped) = app.status_for_scope() {
+                        app.status_message = scoped;
+                    } else if let Some(report) = &app.diff_report {
                         app.status_message = format!(
                             "Diff shown: +{} -{} ~{} cables, +{} -{} ~{} nodes",
                             report.added_cables.len(),
@@ -1275,7 +1277,9 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                 } else if app.diff_picker_active {
                     match app.load_diff_patch(&selected_path) {
                         Ok(()) => {
-                            if let Some(report) = &app.diff_report {
+                            if let Some(scoped) = app.status_for_scope() {
+                                app.status_message = scoped;
+                            } else if let Some(report) = &app.diff_report {
                                 app.status_message = format!(
                                     "Diff loaded: +{} -{} ~{} cables, +{} -{} ~{} nodes",
                                     report.added_cables.len(),
