@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add `switch` semantic token to `Theme` + palettes (`classic`=white byte-identical, `terminal`=Reset, `mono`=dark-gray distinct from button gray) and verify per-palette resolution via `theme.rs` tests <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/theme.rs] -->
 - [x] 1.2 Render Switch cells with the `switch` token and `◉ {:.0}%` for `ComponentState::Value`, keeping `▣ ON`/`□ OFF` for On/Off, and verify per-theme `TestBackend` buffer tests <!-- agent: layout-designer-engineer.build, depends_on: [1.1], touches: [src/ui.rs] -->
-- [ ] 1.3 Add/extend regression snapshots for switch value rendering across fixtures × classic/mono and verify `cargo insta test --check` passes <!-- agent: horst-engineer.build, depends_on: [1.2], touches: [src/regression.rs, src/snapshots/**] -->
+- [x] 1.3 Add/extend regression snapshots for switch value rendering across fixtures × classic/mono and verify `cargo insta test --check` passes <!-- agent: horst-engineer.build, depends_on: [1.2], touches: [src/regression.rs, src/snapshots/**] -->
 
 ## 2. Global processing pause
 

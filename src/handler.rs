@@ -223,6 +223,29 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.toggle_processing_pause();
                 return false;
             }
+            crossterm::event::KeyCode::Char('x') => {
+                let Some(idx) = app.hovered_graph_node else {
+                    return false;
+                };
+                let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
+                    return false;
+                };
+                let now_disabled =
+                    app.toggle_circuit_processing(&node.circuit, node.instance_index);
+                app.rebuild_graph();
+                if now_disabled {
+                    app.status_message = format!(
+                        "Processing disabled: {} {}",
+                        node.circuit, node.instance_index
+                    );
+                } else {
+                    app.status_message = format!(
+                        "Processing enabled: {} {}",
+                        node.circuit, node.instance_index
+                    );
+                }
+                return false;
+            }
             _ => {}
         }
     }
@@ -635,6 +658,14 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
 /// D1/D7). No other app state is touched during a drag.
 fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
     match mouse.kind {
+        MouseEventKind::Moved => {
+            let hit = app
+                .graph_node_rects
+                .iter()
+                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
+                .map(|(idx, _)| *idx);
+            app.hovered_graph_node = hit;
+        }
         MouseEventKind::Down(MouseButton::Left) => {
             let hit = app
                 .graph_node_rects
@@ -642,8 +673,10 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
                 .map(|(idx, _)| *idx);
             let Some(node_index) = hit else {
+                app.hovered_graph_node = None;
                 return;
             };
+            app.hovered_graph_node = Some(node_index);
             // Record the grab offset so the node follows the pointer without
             // jumping to the grab point on the first drag delta.
             if let Some((px, py)) = app.graph_positions.get(node_index).copied() {
@@ -2213,5 +2246,112 @@ mod tests {
         handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused, "p live in the source pane");
         assert_eq!(app.status_message, "Processing paused (p to resume)");
+    }
+
+    fn app_with_graph() -> App {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.showing_graph);
+        // Simulate renderer publishing node rects so hover hit-testing would work;
+        // for keyboard `x` tests we set hovered_graph_node directly, but populate
+        // rects anyway for completeness.
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        app.graph_node_rects = (0..node_count)
+            .map(|i| (i, Rect::new(i as u16 * 22, 0, 22, 5)))
+            .collect();
+        app
+    }
+
+    #[test]
+    fn graph_x_disables_hovered_node_and_rebuilds() {
+        let mut app = app_with_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        app.hovered_graph_node = Some(0);
+        let before_positions = app.graph_positions.clone();
+        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        assert!(app.showing_graph, "x must not close the graph surface");
+        assert!(
+            app.disabled_circuits
+                .contains(&(node.circuit.clone(), node.instance_index)),
+            "hovered circuit should be disabled"
+        );
+        assert_eq!(
+            app.status_message,
+            format!(
+                "Processing disabled: {} {}",
+                node.circuit, node.instance_index
+            )
+        );
+        assert!(app.graph.is_some(), "graph rebuilt after toggle");
+        assert_eq!(
+            app.graph.as_ref().unwrap().nodes.len(),
+            before_positions.len(),
+            "node count preserved after rebuild"
+        );
+    }
+
+    #[test]
+    fn graph_x_second_press_reenables_hovered_node() {
+        let mut app = app_with_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        app.hovered_graph_node = Some(0);
+        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        assert!(app
+            .disabled_circuits
+            .contains(&(node.circuit.clone(), node.instance_index)));
+        // Second x on same hovered node re-enables.
+        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        assert!(
+            !app.disabled_circuits
+                .contains(&(node.circuit.clone(), node.instance_index)),
+            "second x re-enables"
+        );
+        assert_eq!(
+            app.status_message,
+            format!(
+                "Processing enabled: {} {}",
+                node.circuit, node.instance_index
+            )
+        );
+        assert!(app.showing_graph);
+    }
+
+    #[test]
+    fn graph_x_no_hover_is_silent_noop() {
+        let mut app = app_with_graph();
+        app.hovered_graph_node = None;
+        let status_before = app.status_message.clone();
+        let disabled_before = app.disabled_circuits.clone();
+        let positions_before = app.graph_positions.clone();
+        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        assert_eq!(
+            app.status_message, status_before,
+            "no status change when nothing hovered"
+        );
+        assert_eq!(app.disabled_circuits, disabled_before);
+        assert_eq!(
+            app.graph_positions, positions_before,
+            "no rebuild when no hover"
+        );
+        assert!(app.showing_graph);
+    }
+
+    #[test]
+    fn graph_p_still_toggles_pause_while_graph_open() {
+        let mut app = app_with_graph();
+        assert!(!app.processing_paused);
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(
+            app.processing_paused,
+            "p must toggle pause on graph surface"
+        );
+        assert_eq!(app.status_message, "Processing paused (p to resume)");
+        assert!(app.showing_graph, "p must not close the graph");
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(!app.processing_paused);
+        assert_eq!(app.status_message, "Processing enabled (p to pause)");
     }
 }
