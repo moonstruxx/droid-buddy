@@ -140,6 +140,49 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             _ => return false,
         }
     }
+    // Optimizer menu overlay (`g o`): while open it eats keys — j/k
+    // navigate, Enter previews, r restores, s exports, Esc closes (+restore
+    // if previewing). Priority after validation, before everything else.
+    if let Some(state) = app.optimizer.as_ref() {
+        let len = state.candidates.len();
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                app.optimizer_close();
+                return false;
+            }
+            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+                if let Some(state) = app.optimizer.as_mut() {
+                    if state.cursor + 1 < len {
+                        state.cursor += 1;
+                    }
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+                if let Some(state) = app.optimizer.as_mut() {
+                    if state.cursor > 0 {
+                        state.cursor -= 1;
+                    }
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Enter => {
+                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
+                app.optimizer_preview(idx);
+                return false;
+            }
+            crossterm::event::KeyCode::Char('r') => {
+                app.optimizer_restore();
+                return false;
+            }
+            crossterm::event::KeyCode::Char('s') => {
+                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
+                app.optimizer_export(idx);
+                return false;
+            }
+            _ => return false,
+        }
+    }
     // `e` toggles validation modal open when not already showing and issues exist.
     // Respects label-edit priority: if a hovered node/component or source header
     // would consume `e` for label editing, let that handler run instead.
@@ -207,6 +250,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 app.picker_index = 0;
                 app.refresh_picker_entries();
+                app.prefix = None;
+                return false;
+            }
+            crossterm::event::KeyCode::Char('o') => {
+                // `g o` generates + opens the optimizer menu (design D5).
+                app.open_optimizer();
                 app.prefix = None;
                 return false;
             }
@@ -1558,6 +1607,145 @@ mod tests {
         // Further presses clamp at the lower bound.
         handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.3);
+    }
+
+    /// Open the optimizer menu via `g` then `o`.
+    fn open_optimizer(app: &mut App) {
+        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
+        handle_event(key(crossterm::event::KeyCode::Char('o')), app);
+        assert!(app.optimizer.is_some());
+    }
+
+    #[test]
+    fn g_o_opens_optimizer_menu_with_candidates() {
+        let mut app = app_with_fixture();
+        open_optimizer(&mut app);
+        let state = app.optimizer.as_ref().unwrap();
+        assert!(!state.candidates.is_empty());
+        assert!(state.candidates.len() <= 3);
+        assert_eq!(state.cursor, 0);
+        assert_eq!(
+            state.original_order.len(),
+            app.patch.as_ref().unwrap().sections.len()
+        );
+    }
+
+    #[test]
+    fn g_o_without_patch_shows_hint_and_keeps_menu_closed() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
+        assert!(app.optimizer.is_none());
+        assert!(
+            app.status_message.contains("No patch loaded"),
+            "unexpected status: {:?}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn optimizer_jk_navigate_and_enter_previews_and_restores() {
+        let mut app = app_with_fixture();
+        open_optimizer(&mut app);
+        let n = app.optimizer.as_ref().unwrap().candidates.len();
+        if n < 2 {
+            return;
+        }
+        // j moves down (wraps at the end), k moves up.
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().cursor, 1);
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().cursor, 0);
+
+        // Enter previews candidate 0: sections reordered, graph rebuilt.
+        let original: Vec<String> = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        let previewed = app.optimizer.as_ref().unwrap().previewing;
+        assert_eq!(previewed, Some(0));
+        assert!(app.graph.is_some());
+        assert!(
+            app.status_message.contains("Preview:"),
+            "unexpected status: {:?}",
+            app.status_message
+        );
+
+        // r restores the original order.
+        handle_event(key(crossterm::event::KeyCode::Char('r')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().previewing, None);
+        let restored: Vec<String> = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn optimizer_esc_closes_and_restores_preview() {
+        let mut app = app_with_fixture();
+        open_optimizer(&mut app);
+        let original: Vec<String> = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(app.optimizer.as_ref().unwrap().previewing.is_some());
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.optimizer.is_none());
+        let after: Vec<String> = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(after, original, "Esc must restore the file order");
+    }
+
+    #[test]
+    fn optimizer_export_writes_latopt_file_next_to_source() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = std::fs::read_to_string("fixtures/cable_banner_combos.ini").unwrap();
+        let src = dir.path().join("patch.ini");
+        std::fs::write(&src, &content).unwrap();
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.current_patch_path = Some(src.clone());
+        open_optimizer(&mut app);
+        let n = app.optimizer.as_ref().unwrap().candidates.len();
+        if n == 0 {
+            return;
+        }
+        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        let dest = dir.path().join("patch-latopt.ini");
+        assert!(
+            dest.exists(),
+            "expected exported file at {:?}",
+            dest.display()
+        );
+        // The export re-parses and keeps the same section set.
+        let reparsed = Patch::from_ini_file(&dest).unwrap();
+        assert_eq!(
+            reparsed.sections.len(),
+            app.patch.as_ref().unwrap().sections.len()
+        );
     }
 
     #[test]

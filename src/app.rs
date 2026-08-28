@@ -271,6 +271,7 @@ use crate::events::{Event, EventBus};
 use crate::graph::{Cluster, Graph, NodeId};
 use crate::latency::CostModel;
 use crate::layout;
+use crate::optimize::{CandidateOrdering, OptimizeScope};
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
 use crate::schema::load_schema;
@@ -322,6 +323,25 @@ impl EditState {
 /// the next event arrives.
 pub struct PrefixState {
     pub started: Instant,
+}
+
+/// Open `g o` optimizer menu state: the candidate orderings plus the menu
+/// cursor and preview bookkeeping. `previewing` holds the candidate index
+/// whose order is currently applied to `Patch.sections` (reordering happens
+/// in place); `original_order` is the identity permutation captured when the
+/// menu opened, used to restore.
+#[derive(Debug, Clone)]
+pub struct OptimizerState {
+    /// Up to three candidate orderings, best first (design D1/D5).
+    pub candidates: Vec<CandidateOrdering>,
+    /// Menu cursor into `candidates`.
+    pub cursor: usize,
+    /// Index of the candidate currently previewed (its order is applied to
+    /// `Patch.sections`), if any.
+    pub previewing: Option<usize>,
+    /// Identity permutation `0..n` captured when the menu opened; applying it
+    /// to `Patch.sections` restores the file order.
+    pub original_order: Vec<usize>,
 }
 
 /// Grabbed-node state for a graph drag (design D1/D7). Holds the index of the
@@ -512,6 +532,8 @@ pub struct App {
     pub showing_validation: bool,
     /// Cursor into `validation_issues` while the modal is open.
     pub validation_cursor: usize,
+    /// Open `g o` optimizer menu state. `None` when the menu is closed.
+    pub optimizer: Option<OptimizerState>,
 }
 
 impl App {
@@ -571,6 +593,7 @@ impl App {
             validation_issues: Vec::new(),
             showing_validation: false,
             validation_cursor: 0,
+            optimizer: None,
         }
     }
 
@@ -699,6 +722,150 @@ impl App {
         Ok(())
     }
 
+    /// Generate candidate orderings for the loaded patch and open the `g o`
+    /// optimizer menu (design D5). Returns `false` (with a status hint) when
+    /// no patch is loaded or it has no sections to reorder.
+    pub fn open_optimizer(&mut self) -> bool {
+        let Some(patch) = &self.patch else {
+            self.status_message = String::from("No patch loaded. Press 'l' to load.");
+            return false;
+        };
+        if patch.sections.is_empty() {
+            self.status_message = String::from("Nothing to optimize — no sections.");
+            return false;
+        }
+        let candidates =
+            crate::optimize::generate_candidates(patch, &self.cost_model, OptimizeScope::MinMax);
+        let original_order: Vec<usize> = (0..patch.sections.len()).collect();
+        self.optimizer = Some(OptimizerState {
+            candidates,
+            cursor: 0,
+            previewing: None,
+            original_order,
+        });
+        self.status_message = String::from(
+            "Optimizer: j/k select · Enter preview · r restore · s export · Esc close",
+        );
+        true
+    }
+
+    /// Reorder `patch.sections` by `order` (`order[i]` = original section
+    /// index at file position `i`). Requires sections to be in original file
+    /// order — callers restore first when a preview is active.
+    fn apply_section_order(&mut self, order: &[usize]) {
+        if let Some(patch) = self.patch.as_mut() {
+            let sections = std::mem::take(&mut patch.sections);
+            patch.sections = order.iter().map(|&i| sections[i].clone()).collect();
+        }
+    }
+
+    /// Inverse permutation of `order` (`inv[order[i]] = i`), used to undo a
+    /// previewed ordering.
+    fn inverse_order(order: &[usize]) -> Vec<usize> {
+        let mut inv = vec![0; order.len()];
+        for (i, &o) in order.iter().enumerate() {
+            inv[o] = i;
+        }
+        inv
+    }
+
+    /// Undo the active preview (inverse of the previewed candidate's order),
+    /// leaving `patch.sections` in file order. No-op when nothing is previewed.
+    fn restore_optimizer_order(&mut self) {
+        let Some(state) = self.optimizer.as_ref() else {
+            return;
+        };
+        let Some(idx) = state.previewing else {
+            return;
+        };
+        let Some(order) = state.candidates.get(idx).map(|c| c.order.clone()) else {
+            return;
+        };
+        self.apply_section_order(&Self::inverse_order(&order));
+        if let Some(state) = self.optimizer.as_mut() {
+            state.previewing = None;
+        }
+    }
+
+    /// Preview candidate `idx` (design D5): restore the file order, apply the
+    /// candidate's section order in place, and rebuild the graph so the
+    /// latency ramp recolors live (`Event::GraphRebuilt`).
+    pub fn optimizer_preview(&mut self, idx: usize) {
+        let (order, label) = match self.optimizer.as_ref().and_then(|s| s.candidates.get(idx)) {
+            Some(c) => (c.order.clone(), c.label.clone()),
+            None => return,
+        };
+        self.restore_optimizer_order();
+        self.apply_section_order(&order);
+        if let Some(state) = self.optimizer.as_mut() {
+            state.previewing = Some(idx);
+        }
+        self.rebuild_graph();
+        self.status_message = format!("Preview: {label}");
+    }
+
+    /// Restore the original section order (`r`), rebuilding the graph when a
+    /// preview was active.
+    pub fn optimizer_restore(&mut self) {
+        let was_previewing = self
+            .optimizer
+            .as_ref()
+            .is_some_and(|s| s.previewing.is_some());
+        self.restore_optimizer_order();
+        if was_previewing {
+            self.rebuild_graph();
+        }
+        self.status_message = String::from("Original order restored");
+    }
+
+    /// Export the selected candidate (`s`, design D5/D4): write a reordered
+    /// copy of the patch to `<stem>-latopt.ini` next to the source file
+    /// (write_to_ini auto-suffixes on collision). Returns the written path;
+    /// `None` with a status hint when there is no source file to save next to.
+    pub fn optimizer_export(&mut self, idx: usize) -> Option<PathBuf> {
+        let state = self.optimizer.as_ref()?;
+        let candidate = state.candidates.get(idx)?;
+        let patch = self.patch.as_ref()?;
+        let source = self.current_patch_path.as_ref()?;
+        let stem = source
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| String::from("patch"));
+        let dest = source.with_file_name(format!("{stem}-latopt.ini"));
+        let mut out = patch.clone();
+        let sections = std::mem::take(&mut out.sections);
+        out.sections = candidate
+            .order
+            .iter()
+            .map(|&i| sections[i].clone())
+            .collect();
+        match out.write_to_ini(source, &dest) {
+            Ok(written) => {
+                self.status_message =
+                    format!("Exported {} → {}", candidate.label, written.display());
+                Some(written)
+            }
+            Err(e) => {
+                self.status_message = format!("Export failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Close the optimizer menu (`Esc`): restore the file order if a preview
+    /// is active, then drop the menu state.
+    pub fn optimizer_close(&mut self) {
+        let was_previewing = self
+            .optimizer
+            .as_ref()
+            .is_some_and(|s| s.previewing.is_some());
+        self.restore_optimizer_order();
+        if was_previewing {
+            self.rebuild_graph();
+        }
+        self.optimizer = None;
+    }
+
     /// Clear validation state (no issues, modal hidden, cursor 0).
     pub fn clear_validation(&mut self) {
         self.validation_issues.clear();
@@ -809,6 +976,7 @@ impl App {
         self.reset_graph_state();
         self.reset_quad_state();
         self.clear_diff();
+        self.optimizer = None;
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
@@ -892,6 +1060,7 @@ impl App {
         self.reset_graph_state();
         self.reset_quad_state();
         self.clear_diff();
+        self.optimizer = None;
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
