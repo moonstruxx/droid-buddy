@@ -8,9 +8,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use crate::patch::{InfluenceSubtree, Patch};
-
 use crate::geometry::{BindingFeatures, RackGeometry};
+use crate::latency::{forward_latency, LatencyData};
+use crate::patch::{InfluenceSubtree, Patch};
+use crate::schema::load_schema;
 
 /// Euclidean distance threshold in B32-grid units above which a direct
 /// (zero-hop) hardware binding is considered a wiring outlier.
@@ -86,6 +87,11 @@ pub struct Graph {
     /// Reserved for task 2.2 (design D4): the slot is always empty today so
     /// validation results can travel with the graph once the pass is added.
     pub validation: Vec<TopologyIssue>,
+    /// Forward-loop latency (design D1/D2): one [`EdgeLatency`] per edge,
+    /// parallel to `edges` by index, plus the aggregate summary. Computed at
+    /// build time by [`Graph::build_from_patch`] like `validate_topology`;
+    /// `None` for hand-built or empty graphs (no nodes or no edges).
+    pub latency: Option<LatencyData>,
     /// Highlight sets for FULL graph rendering when an influence is active.
     /// `highlighted_nodes` are `NodeId`s from `InfluenceSubtree::influenced_nodes`;
     /// `highlighted_edges` are cable names from `InfluenceSubtree::influenced_edges`
@@ -118,11 +124,13 @@ impl Graph {
         let node_by_name = name_to_first_node(&nodes);
         let edges = build_edges(patch, &node_by_name);
         let validation = validate_topology(patch);
+        let latency = compute_latency(&nodes, &edges);
         Graph {
             nodes,
             edges,
             clusters: clusters.to_vec(),
             validation,
+            latency,
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
         }
@@ -197,10 +205,54 @@ impl Graph {
             edges,
             clusters,
             validation,
+            latency: None,
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
         }
     }
+}
+
+/// Compute forward-loop latency as a graph-build step (design D2), mirroring
+/// `validate_topology`. `None` when there is nothing to measure (no nodes or
+/// no edges); otherwise `Some` with one [`LatencyData`] per edge, in
+/// `Graph.edges` order.
+///
+/// AVG is RAM-derived (design D1/spec): `AVG(circuit) ∝ ramsize(circuit)`,
+/// scaled by the largest schema `available_memory` value so a patch filling
+/// the loop budget maps to the ~190µs loop. Unknown circuits (not in the
+/// schema) fall back to unit cost 1.0 — only synthetic test graphs reach it,
+/// since a validated patch cannot contain unknown circuits. Lookups are
+/// `HashMap::get` by circuit name (never iteration order) and edges are
+/// iterated by index, so the result is deterministic across runs.
+fn compute_latency(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<LatencyData> {
+    if nodes.is_empty() || edges.is_empty() {
+        return None;
+    }
+    // File order == processing order; `section_index` is the processing
+    // position consumed by `forward_latency`.
+    let node_positions: Vec<(NodeId, usize)> = nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.section_index))
+        .collect();
+    let schema = load_schema();
+    // Largest master budget: deterministic and stable across schema key renames.
+    let loop_budget = schema.available_memory.values().copied().max().unwrap_or(0);
+    let circuit_avg = |id: &NodeId| -> f32 {
+        let ramsize = schema
+            .circuits
+            .get(&id.0.to_lowercase())
+            .map_or(0, |def| def.ramsize);
+        if ramsize == 0 || loop_budget == 0 {
+            1.0
+        } else {
+            ramsize as f32 / loop_budget as f32
+        }
+    };
+    let (lat_edges, summary) = forward_latency(edges, &node_positions, circuit_avg);
+    Some(LatencyData {
+        edges: lat_edges,
+        summary,
+    })
 }
 
 /// Build one node per section, assigning distinct instance indices to
@@ -774,6 +826,82 @@ mod tests {
         // copy chain cables present
         assert!(sub.influenced_edges.contains("_COPY1"));
         assert!(sub.influenced_edges.contains("_COPY2"));
+    }
+
+    #[test]
+    fn latency_populated_parallel_to_edges_after_build() {
+        let graph = build(
+            "[p2b8]\n\
+             [src]\n    output = _CLK\n\
+             [sink1]\n    input = _CLK\n\
+             [sink2]\n    input = _CLK\n\
+             [sink3]\n    input = _CLK\n",
+            &[],
+        );
+        let latency = graph
+            .latency
+            .expect("graph with cables must carry latency data");
+        // One EdgeLatency per edge, indexed back into graph.edges in order.
+        assert_eq!(latency.edges.len(), graph.edges.len());
+        for (i, l) in latency.edges.iter().enumerate() {
+            assert_eq!(l.edge_index, i, "edge {i} latency must index graph.edges");
+        }
+        // src (section 1) fans out to sinks at sections 2..4: all forward.
+        // The synthetic circuits are unknown to the schema, so AVG falls back
+        // to unit cost and latencies are 1×, 2×, 3× one loop step.
+        assert_eq!(latency.summary.back_edge_count, 0);
+        assert_eq!(latency.summary.max, 3.0);
+        assert_eq!(latency.summary.avg, 2.0);
+    }
+
+    #[test]
+    fn latency_summary_counts_mixed_forward_and_back_edges() {
+        // Three forward edges (1 step each) plus one back-edge wrapping the
+        // loop: _BACK is produced by [b] (section 3) and consumed by [e]
+        // (section 1), so L = ((1 − 3) mod 6) × AVG = 4 × unit cost.
+        let graph = build(
+            "[p2b8]\n\
+             [e]\n    input = _BACK\n\
+             [a]\n    output = _A\n\
+             [b]\n    input = _A\n    output = _BACK\n    output = _B\n\
+             [c]\n    input = _B\n    output = _C\n\
+             [d]\n    input = _C\n",
+            &[],
+        );
+        let latency = graph
+            .latency
+            .expect("graph with cables must carry latency data");
+        assert_eq!(latency.edges.len(), 4);
+        let back: Vec<_> = latency.edges.iter().filter(|l| l.is_back_edge).collect();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].latency, 4.0);
+        assert_eq!(latency.summary.back_edge_count, 1);
+        assert_eq!(latency.summary.max, 4.0);
+        assert_eq!(latency.summary.avg, (4.0 + 1.0 + 1.0 + 1.0) / 4.0);
+    }
+
+    #[test]
+    fn latency_none_for_degenerate_or_empty_graphs() {
+        // No cables → no edges → nothing to measure.
+        let graph = build("[p2b8]\n[copy]\n", &[]);
+        assert_eq!(graph.latency, None);
+        // The hand-built default Graph carries no latency either.
+        assert_eq!(Graph::default().latency, None);
+    }
+
+    #[test]
+    fn filtered_clears_latency_while_highlights_keep_it() {
+        let content =
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let graph = Graph::build_from_patch(&patch, &[]);
+        assert!(graph.latency.is_some());
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        // The induced subgraph has a different edge set; latency is not
+        // recomputed there.
+        assert_eq!(graph.filtered_influence(&sub).latency, None);
+        // with_highlights keeps the full graph's topology, so latency survives.
+        assert_eq!(graph.with_highlights(&sub).latency, graph.latency);
     }
 }
 /// Fixture-driven suite through the public `Graph::build_from_patch` entry

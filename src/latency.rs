@@ -42,6 +42,24 @@ pub struct LatencySummary {
     pub back_edge_count: usize,
 }
 
+/// Per-graph latency result (design D2): per-edge latencies parallel to
+/// `Graph.edges` plus the aggregate summary. `Graph.latency` is `None` when
+/// there is nothing to measure (no nodes or no edges), so a `LatencyData`
+/// always describes a non-empty edge list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatencyData {
+    /// Per-edge latency, parallel to `Graph.edges` by index.
+    pub edges: Vec<EdgeLatency>,
+    /// Aggregate over `edges`.
+    pub summary: LatencySummary,
+}
+
+// `Graph` derives `Eq`, which `LatencyData` must support despite its f32
+// fields (`latency`/`avg`/`max`). The values are computed from integer RAM
+// sizes, never NaN, so `==` is a genuine equivalence relation here and a
+// manual marker impl is sound.
+impl Eq for LatencyData {}
+
 /// Compute per-edge forward-loop latency and the aggregate summary.
 ///
 /// - `edges` — the graph's edges, in `Graph.edges` order; each result's
