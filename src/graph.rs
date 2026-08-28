@@ -10,6 +10,14 @@ use std::ops::Range;
 
 use crate::patch::{InfluenceSubtree, Patch};
 
+use crate::geometry::{BindingFeatures, RackGeometry};
+
+/// Euclidean distance threshold in B32-grid units above which a direct
+/// (zero-hop) hardware binding is considered a wiring outlier.
+/// Tuned against the real corpus: 8.0 flags the MFS-drum E4.4→M4 far wire
+/// (~15 units) but not adjacent B1.17→B1.18 (1 unit) nor co-located L→B (0).
+const WIRING_DISTANCE_THRESHOLD: f32 = 8.0;
+
 /// A node's identity: `(circuit_name, instance_index)`.
 ///
 /// Repeated section names are distinct circuit instances (e.g. two `[copy]`
@@ -270,6 +278,12 @@ fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<Graph
 /// highlight; they never block building or viewing.
 fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
     let mut issues = Vec::new();
+    // ---- wiring-outlier check (Track 1 hard invariant) ----
+    // Best-effort: if geometry fails to load (e.g. missing file in tests),
+    // skip the check without failing topology validation.
+    if let Ok(geometry) = RackGeometry::load() {
+        issues.extend(validate_wiring_outliers(patch, &geometry));
+    }
     for (cable, entry) in &patch.cable_index {
         match entry.sources.len() {
             0 => issues.push(TopologyIssue {
@@ -292,6 +306,105 @@ fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
         }
     }
     issues
+}
+
+fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<TopologyIssue> {
+    let mut outliers = Vec::new();
+    let mut seen_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for section in &patch.sections {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, value) in &section.entries {
+            for tok in scan_hw_tokens_for_graph(value) {
+                if seen.insert(tok.clone()) {
+                    // Only consider tokens the geometry can resolve
+                    if geometry.resolve(&tok).is_some() {
+                        tokens.push(tok);
+                    }
+                }
+            }
+        }
+        if tokens.len() < 2 {
+            continue;
+        }
+        tokens.sort();
+        // Unordered pairs within the same section = direct wiring
+        for i in 0..tokens.len() {
+            for j in (i + 1)..tokens.len() {
+                let a = &tokens[i];
+                let b = &tokens[j];
+                // Canonical ordering to deduplicate across sections
+                let key = if a < b {
+                    (a.clone(), b.clone())
+                } else {
+                    (b.clone(), a.clone())
+                };
+                if !seen_pairs.insert(key.clone()) {
+                    continue;
+                }
+                let Some(feat) = BindingFeatures::from_tokens(a, b, geometry, patch) else {
+                    continue;
+                };
+                // Co-located L->B has distance 0, adjacent has distance 1 -> never outlier
+                if feat.adjacent || feat.euclidean < 1e-6 {
+                    continue;
+                }
+                if feat.euclidean > WIRING_DISTANCE_THRESHOLD && feat.cable_hops == 0 {
+                    outliers.push(TopologyIssue {
+                        cable: format!("{}->{}", a, b),
+                        severity: TopologySeverity::Warning,
+                        message: format!(
+                            "wiring outlier: {} -> {} distance {:.1} (threshold {:.1}) hops {}",
+                            a, b, feat.euclidean, WIRING_DISTANCE_THRESHOLD, feat.cable_hops
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    outliers
+}
+
+const HW_TOKEN_LETTERS_GRAPH: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M', 'R', 'G'];
+
+fn scan_hw_tokens_for_graph(value: &str) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
+        let starts_token = HW_TOKEN_LETTERS_GRAPH.contains(&c)
+            && i + 1 < chars.len()
+            && chars[i + 1].is_ascii_digit()
+            && boundary_ok;
+        if starts_token {
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < chars.len()
+                && chars[i] == '.'
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+            {
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            let clean_end = i >= chars.len()
+                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
+            if clean_end {
+                tokens.push(chars[start..i].iter().collect());
+            }
+            continue;
+        }
+        i += 1;
+    }
+    tokens
 }
 
 #[cfg(test)]
@@ -485,6 +598,61 @@ mod tests {
             Some(&TopologySeverity::Warning),
             "dangling cable must be a warning"
         );
+    }
+
+    #[test]
+    fn wiring_outlier_far_direct_flagged() {
+        // E4.4 (left encoder) directly to M4.2 (fader) without cable -> flagged
+        let graph = build("[p2b8]\n[copy]\n    src = E4.4\n    dst = M4.2\n", &[]);
+        let outlier = graph
+            .validation
+            .iter()
+            .find(|iss| iss.message.contains("wiring outlier"));
+        assert!(
+            outlier.is_some(),
+            "far direct E4.4->M4.2 must be flagged, got {:?}",
+            graph.validation
+        );
+        let iss = outlier.unwrap();
+        assert_eq!(iss.severity, TopologySeverity::Warning);
+        assert!(iss.cable.contains("E4.4") && iss.cable.contains("M4.2"));
+    }
+
+    #[test]
+    fn wiring_outlier_via_cable_not_flagged() {
+        let graph = build(
+            "[p2b8]\n[src]\n    output = _WIRE\n    src = E4.4\n[sink]\n    input = _WIRE\n    dst = M4.2\n",
+            &[],
+        );
+        let has_outlier = graph
+            .validation
+            .iter()
+            .any(|iss| iss.message.contains("wiring outlier"));
+        assert!(
+            !has_outlier,
+            "via-cable E4.4->M4.2 must NOT be flagged, got {:?}",
+            graph.validation
+        );
+    }
+
+    #[test]
+    fn wiring_outlier_adjacent_not_flagged() {
+        let graph = build("[p2b8]\n[copy]\n    a = B1.17\n    b = B1.18\n", &[]);
+        let has_outlier = graph
+            .validation
+            .iter()
+            .any(|iss| iss.message.contains("wiring outlier"));
+        assert!(!has_outlier, "adjacent B1.17->B1.18 must NOT be flagged");
+    }
+
+    #[test]
+    fn wiring_outlier_co_located_led_button_not_flagged() {
+        let graph = build("[p2b8]\n[copy]\n    a = L1.17\n    b = B1.17\n", &[]);
+        let has_outlier = graph
+            .validation
+            .iter()
+            .any(|iss| iss.message.contains("wiring outlier"));
+        assert!(!has_outlier, "co-located L1.17->B1.17 must NOT be flagged");
     }
 
     #[test]
