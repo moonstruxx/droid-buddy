@@ -23,4 +23,4 @@
 
 ## 5. Docs
 
-- [ ] 5.1 Regenerate `ARCHITECTURE.md`/`DESIGN.md` and guardrails via `/make-architecture`/`/make-design`/`/make-guardrails` and verify docs mention processing pause (`p`), per-circuit toggle (`x`), and the switch token/value rendering <!-- agent: rusty-engineer.fast, depends_on: [4.3], touches: [ARCHITECTURE.md, DESIGN.md, .agents/skills/ob-guardrails-project/SKILL.md] -->
+- [x] 5.1 Regenerate `ARCHITECTURE.md`/`DESIGN.md` and guardrails via `/make-architecture`/`/make-design`/`/make-guardrails` and verify docs mention processing pause (`p`), per-circuit toggle (`x`), and the switch token/value rendering <!-- agent: rusty-engineer.fast, depends_on: [4.3], touches: [ARCHITECTURE.md, DESIGN.md, .agents/skills/ob-guardrails-project/SKILL.md] -->
