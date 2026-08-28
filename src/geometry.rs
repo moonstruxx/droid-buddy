@@ -347,7 +347,7 @@ impl BindingFeatures {
     }
 }
 
-fn token_kind_u8(token: &str) -> u8 {
+pub(crate) fn token_kind_u8(token: &str) -> u8 {
     match token.chars().next().map(|c| c.to_ascii_uppercase()) {
         Some('B') => 0,
         Some('L') => 1,

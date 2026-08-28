@@ -27,6 +27,7 @@ TARGET_VARIANTS = 2000
 BAD_COUNT = 350
 CORPUS_GOOD = Path("corpus/good")
 CSV_PATH = Path("corpus/features.csv")
+INFLUENCE_STATS_PATH = Path("tools/influence_stats.txt")
 FIXTURES_DIR = Path("fixtures")
 GEOM_PATH = Path("rack_geometry.json")
 
@@ -400,6 +401,157 @@ def binding_features(src_token, sink_token, geom, sections, circuit_outputs, par
         "adjacent": int(adjacent),
         "cable_hops": cable_hops,
     }
+
+# ---------------------------------------------------------------------------
+# influence_subtree replica (mirrors src/patch.rs influence_subtree_with_disabled)
+# ---------------------------------------------------------------------------
+# Used by the per-token z-score second opinion (design D4): compute the size
+# (number of influenced circuit instances) of each hardware token's influence
+# subtree over the corpus, then bake per-kind mean/std into the artifact.
+
+def build_node_ids_py(sections):
+    """NodeId (name, instance) parallel to sections; mirrors patch.rs build_node_ids."""
+    counts = {}
+    ids = []
+    for sec in sections:
+        name = sec["name"]
+        idx = counts.get(name, 0)
+        counts[name] = idx + 1
+        ids.append((name, idx))
+    return ids
+
+def hw_token_to_vars_py(sections, circuit_outputs, hw_token):
+    """Root _VARs for a token; mirrors patch.rs hw_token_to_vars (7-letter scan)."""
+    seen = set()
+    vars_ = []
+    for idx, sec in enumerate(sections):
+        has_token = any(
+            hw_token in scan_hw_tokens_patch(v) for k, v in sec["entries"]
+        )
+        if has_token and idx < len(circuit_outputs):
+            for var in circuit_outputs[idx]:
+                if var not in seen:
+                    seen.add(var)
+                    vars_.append(var)
+    vars_.sort()
+    return vars_
+
+def influence_subtree_size(sections, circuit_outputs, root_vars):
+    """Size = number of influenced circuit instances; mirrors patch.rs
+    influence_subtree_with_disabled (no circuits disabled) BFS."""
+    node_ids = build_node_ids_py(sections)
+    roots = sorted(set(root_vars))
+    if not roots:
+        return 0
+    from collections import deque
+    queue = deque(roots)
+    visited_cables = set()
+    visited_nodes = set()
+    influenced_nodes = set()
+    while queue:
+        cable = queue.popleft()
+        if cable in visited_cables:
+            continue
+        visited_cables.add(cable)
+        # per-param sink entries for this cable, deterministic sort
+        sink_entries = []
+        for idx, sec in enumerate(sections):
+            for k, v in sec["entries"]:
+                k_lower = k.lower()
+                if k_lower == "output":
+                    names = scan_internal_tokens(v)
+                    if len(names) == 1 and names[0] == cable:
+                        continue
+                if cable in scan_internal_tokens(v):
+                    nid = node_ids[idx] if idx < len(node_ids) else (sec["name"], 0)
+                    sink_entries.append((nid, idx, k_lower))
+        sink_entries.sort(key=lambda t: (t[0][0], t[2], t[1]))
+        seen_sink = set()
+        for nid, sink_idx, param_key in sink_entries:
+            key = (nid, param_key)
+            if key in seen_sink:
+                continue
+            seen_sink.add(key)
+            if nid in visited_nodes:
+                influenced_nodes.add(nid)
+                continue
+            visited_nodes.add(nid)
+            influenced_nodes.add(nid)
+            if sink_idx < len(circuit_outputs):
+                outputs = sorted(circuit_outputs[sink_idx])
+                for out in outputs:
+                    if out not in visited_cables and out not in queue:
+                        queue.append(out)
+    return len(influenced_nodes)
+
+def collect_influence_stats(good_files):
+    """Per-token-kind mean/std of influence_subtree size over the corpus.
+    Population std (divides by n), deterministic: files sorted, tokens in scan
+    order, kinds emitted sorted. Returns {kind_u8: (mean, std, n)} and the raw
+    per-kind size lists for calibration."""
+    per_kind = {}
+    for pf in sorted(good_files):
+        txt = pf.read_text(errors="ignore")
+        sections = parse_ini_sections(txt)
+        circuit_outputs = collect_circuit_outputs(sections)
+        # distinct tokens in file order (scan across all entry values)
+        tokens = []
+        seen = set()
+        for sec in sections:
+            for k, v in sec["entries"]:
+                for t in scan_hw_tokens_patch(v):
+                    if t not in seen:
+                        seen.add(t)
+                        tokens.append(t)
+        for tok in tokens:
+            kind = token_kind_u8(tok)
+            if kind == 255:
+                continue
+            vars_ = hw_token_to_vars_py(sections, circuit_outputs, tok)
+            size = influence_subtree_size(sections, circuit_outputs, vars_)
+            per_kind.setdefault(kind, []).append(size)
+    stats = {}
+    for kind in sorted(per_kind):
+        sizes = per_kind[kind]
+        n = len(sizes)
+        mean = sum(sizes) / n
+        var = sum((x - mean) ** 2 for x in sizes) / n
+        std = math.sqrt(var)
+        stats[kind] = (mean, std, n)
+    return stats, per_kind
+
+
+def write_influence_stats(stats):
+    """Write tools/influence_stats.txt: per-kind mean/std/n rows with a
+    self-referential pinned sha (same pattern as fit_outlier_model.py).
+    Deterministic: kinds emitted sorted."""
+    header = "\n".join([
+        "# droid_tui per-token-kind influence_subtree size statistics (design D4)",
+        "# Fitted by tools/build_features.py on corpus/good (SEED 42, deterministic)",
+        "#",
+        "# Columns (whitespace-separated, one row per token kind, '#' comments allowed):",
+        "#   kind mean std n",
+        "# kind: token-kind u8 as in geometry.rs token_kind_u8 (0=B 1=L 2=P 3=O 4=I 5=E 6=S 7=G 8=M/R)",
+        "# mean/std: population mean and standard deviation of influence_subtree",
+        "#   size (number of influenced circuit instances) across corpus tokens.",
+        "# z = (size - mean) / std; std <= 1e-6 -> no z-score (skip).",
+        "# Artifact sha256: ",
+    ])
+
+    def write(pin):
+        body = "\n".join(
+            f"{kind} {mean:.6f} {std:.6f} {n}"
+            for kind, (mean, std, n) in sorted(stats.items())
+        )
+        INFLUENCE_STATS_PATH.write_text(header + pin + "\n\n" + body + "\n")
+
+    write("")  # placeholder pin
+    pin = hashlib.sha256(INFLUENCE_STATS_PATH.read_bytes()).hexdigest()
+    write(pin)
+    pin = hashlib.sha256(INFLUENCE_STATS_PATH.read_bytes()).hexdigest()
+    assert pin == hashlib.sha256(INFLUENCE_STATS_PATH.read_bytes()).hexdigest()
+    return pin
+
 
 # ---------------------------------------------------------------------------
 # Corpus generation
@@ -917,6 +1069,12 @@ def main():
     # Report for output discipline
     print(f"METHOD={method}")
     print(f"GOOD={good_count}")
+    # Step 4 per-token influence stats (design D4 second opinion)
+    stats, per_kind = collect_influence_stats(good_files)
+    pin = write_influence_stats(stats)
+    print(f"INFLUENCE_STATS={INFLUENCE_STATS_PATH}  {len(stats)} kinds  sha256 {pin}", file=sys.stderr)
+    print(f"INFLUENCE_KINDS={sorted(stats.keys())}")
+    print(f"INFLUENCE_STATS_SHA={pin}")
     print(f"BAD={bad_count}")
     print(f"TOTAL={len(all_rows)}")
     print(f"HASH={h}")
