@@ -49,6 +49,11 @@ pub struct Theme {
     pub graph_edge_dim: Color,
     pub graph_edge_diff_added: Color,
     pub graph_edge_diff_removed: Color,
+    pub validation_error: Color,
+    pub validation_warning: Color,
+    pub validation_hint: Color,
+    pub validation_modal_border: Color,
+    pub validation_selected_bg: Color,
 }
 
 impl Theme {
@@ -98,6 +103,11 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::Green,
             graph_edge_diff_removed: Color::Magenta,
+            validation_error: Color::Red,
+            validation_warning: Color::Yellow,
+            validation_hint: Color::Cyan,
+            validation_modal_border: Color::Red,
+            validation_selected_bg: Color::DarkGray,
         }
     }
 
@@ -145,6 +155,11 @@ impl Theme {
             graph_edge_dim: Color::Reset,
             graph_edge_diff_added: Color::Gray,
             graph_edge_diff_removed: Color::DarkGray,
+            validation_error: Color::Reset,
+            validation_warning: Color::Reset,
+            validation_hint: Color::Reset,
+            validation_modal_border: Color::Reset,
+            validation_selected_bg: Color::Reset,
         }
     }
 
@@ -200,6 +215,11 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::White,
             graph_edge_diff_removed: Color::Gray,
+            validation_error: Color::White,
+            validation_warning: Color::Gray,
+            validation_hint: Color::DarkGray,
+            validation_modal_border: Color::White,
+            validation_selected_bg: Color::Black,
         }
     }
 }

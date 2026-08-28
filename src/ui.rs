@@ -70,7 +70,161 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // graph_edge_error red kept for influence elsewhere.
     if app.editing.is_some() {
         render_overlay(frame, app);
+    } else if app.showing_validation {
+        render_validation_modal(frame, app, frame.area());
     }
+}
+
+/// Validation modal overlay — centered 60% width, 70% height, listing
+/// `validation_issues` sorted by (line,col). Style follows `render_picker`
+/// overlay pattern: `Clear` + rounded `Block` + `Paragraph` lines.
+/// Header: "Validation (N) — e:toggle j/k:navigate Enter:jump Esc:close".
+/// Each row: `L{line}:{col} [E/W/H] [code] message` with severity color via
+/// `validation_error/warning/hint` tokens, selected row highlighted via
+/// `validation_selected_bg` + bold, non-selected dimmed. Empty state when
+/// no issues (should not normally be shown while modal is open).
+fn render_validation_modal(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let is_narrow = area.width < QUAD_WIDTH_THRESHOLD;
+    let modal_width = if is_narrow {
+        area.width.saturating_sub(4).max(24)
+    } else {
+        (area.width * 60 / 100).clamp(40, 80).max(24)
+    };
+    let modal_height = if is_narrow {
+        area.height.saturating_sub(4).max(10)
+    } else {
+        (area.height * 70 / 100).clamp(12, 40).max(10)
+    };
+    let x = area.x + area.width.saturating_sub(modal_width) / 2;
+    let y = area.y + area.height.saturating_sub(modal_height) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+    frame.render_widget(Clear, modal_area);
+
+    let count = app.validation_issues.len();
+    let err = app
+        .validation_issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .count();
+    let warn = app
+        .validation_issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Warning)
+        .count();
+    let hint = count.saturating_sub(err + warn);
+    let title = if count == 0 {
+        String::from(" Validation (0) ")
+    } else {
+        format!(" Validation ({count}) {err}E {warn}W {hint}H ")
+    };
+    let header_hint = " e:toggle j/k:navigate Enter:jump Esc:close ";
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .title_bottom(Line::from(Span::styled(
+            header_hint,
+            Style::default().fg(theme::active().muted),
+        )))
+        .border_style(Style::default().fg(theme::active().validation_modal_border));
+
+    let inner = block.inner(modal_area);
+    // Reserve one line for header is handled by block border; inner height is usable rows.
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, modal_area);
+        return;
+    }
+
+    if count == 0 {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No validation issues",
+            Style::default().fg(theme::active().muted),
+        )))
+        .alignment(Alignment::Center)
+        .block(block);
+        frame.render_widget(empty, modal_area);
+        return;
+    }
+
+    // Build lines for all issues; viewport window is scrolled to keep cursor visible.
+    let max_rows = inner.height as usize;
+    let cursor = app.validation_cursor.min(count.saturating_sub(1));
+    let start = if count <= max_rows || cursor < max_rows / 2 {
+        0
+    } else if cursor + max_rows / 2 >= count {
+        count - max_rows
+    } else {
+        cursor - max_rows / 2
+    };
+    let end = (start + max_rows).min(count);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(end - start);
+    for idx in start..end {
+        let issue = &app.validation_issues[idx];
+        let is_selected = idx == cursor;
+        let (sev_label, sev_color) = match issue.severity {
+            crate::validation::Severity::Error => ("E", theme::active().validation_error),
+            crate::validation::Severity::Warning => ("W", theme::active().validation_warning),
+            crate::validation::Severity::Hint => ("H", theme::active().validation_hint),
+        };
+        // Spec format: L{line}:{col} [E/W/H] [code] message — line/col are 1-based for user display
+        let loc = format!("L{}:{}", issue.span.line + 1, issue.span.col_start + 1);
+        // Truncate message to fit inner width; reserve space for loc+sev+code
+        let prefix_len = loc.len() + 6 + issue.code.len() + 2; // " [] [] " overhead approx
+        let avail = (inner.width as usize)
+            .saturating_sub(prefix_len)
+            .saturating_sub(1);
+        let msg = if avail == 0 {
+            String::new()
+        } else if issue.message.len() > avail {
+            let mut t = issue.message[..avail.saturating_sub(1)].to_string();
+            t.push('…');
+            t
+        } else {
+            issue.message.clone()
+        };
+        let sev_span = Span::styled(
+            format!("[{sev_label}]"),
+            Style::default().fg(sev_color).add_modifier(Modifier::BOLD),
+        );
+        let loc_span = Span::styled(loc, Style::default().fg(theme::active().text));
+        let code_span = Span::styled(
+            format!("[{}]", issue.code),
+            Style::default().fg(theme::active().muted),
+        );
+        let msg_span = Span::styled(msg, Style::default().fg(theme::active().text));
+        let spans = vec![
+            loc_span,
+            Span::raw(" "),
+            sev_span,
+            Span::raw(" "),
+            code_span,
+            Span::raw(" "),
+            msg_span,
+        ];
+        // Highlight selected row via background + bold; dim non-selected
+        let row_style = if is_selected {
+            Style::default()
+                .bg(theme::active().validation_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        // Apply row_style as background to all spans via line style later; keep sev color foreground.
+        // To preserve sev color, we style line with row bg and keep spans fg.
+        let mut line = Line::from(spans);
+        line.style = row_style;
+        // Re-apply severity bold+color which was overwritten by line.style bg — merge by restyling sev span
+        // Keep line bg but ensure sev span still has its fg; ratatui composes.
+        lines.push(line);
+        let _ = is_selected; // suppress unused warning if lint
+    }
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, modal_area);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {

@@ -8,8 +8,10 @@ pub mod graph;
 pub mod handler;
 pub mod layout;
 pub mod patch;
+pub mod schema;
 pub mod theme;
 pub mod ui;
+pub mod validation;
 
 #[cfg(test)]
 pub mod regression;

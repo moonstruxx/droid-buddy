@@ -103,6 +103,64 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         return handle_picker_event(key, app);
     }
 
+    // Validation modal overlay: priority third (overlay > picker > validation).
+    // When open it eats all keys; j/k navigate, Esc/e close, Enter jumps to source.
+    if app.showing_validation {
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                app.showing_validation = false;
+                return false;
+            }
+            crossterm::event::KeyCode::Char('e') if key.modifiers.is_empty() => {
+                app.showing_validation = false;
+                return false;
+            }
+            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+                if app.validation_cursor + 1 < app.validation_issues.len() {
+                    app.validation_cursor += 1;
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+                if app.validation_cursor > 0 {
+                    app.validation_cursor -= 1;
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Enter => {
+                if let Some(issue) = app.validation_issues.get(app.validation_cursor).cloned() {
+                    app.source_scroll = issue.span.line;
+                    // Open source viewer and focus it so the jumped span is visible.
+                    app.showing_viewer = true;
+                    app.viewer_focus = ViewerFocus::Source;
+                    app.showing_validation = false;
+                }
+                return false;
+            }
+            _ => return false,
+        }
+    }
+    // `e` toggles validation modal open when not already showing and issues exist.
+    // Respects label-edit priority: if a hovered node/component or source header
+    // would consume `e` for label editing, let that handler run instead.
+    if matches!(key.code, crossterm::event::KeyCode::Char('e'))
+        && key.modifiers.is_empty()
+        && !app.validation_issues.is_empty()
+        && !app.showing_validation
+    {
+        let has_label_target = app.hovered_graph_node.is_some()
+            || app.hovered_component.is_some()
+            || (app.showing_viewer && app.viewer_focus == ViewerFocus::Source)
+            || (app.showing_quad && app.quad_focus == QuadFocus::Source);
+        if !has_label_target {
+            app.showing_validation = true;
+            if app.validation_cursor >= app.validation_issues.len() {
+                app.validation_cursor = 0;
+            }
+            return false;
+        }
+    }
+
     // Lazy prefix timeout: a prefix that outlived its window cancels itself
     // and the current key is processed normally below.
     if app
