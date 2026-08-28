@@ -264,6 +264,27 @@ fn setup_quad_modifier_b1(app: &mut App) {
     app.open_quad();
 }
 
+fn setup_modifier_arpeggio1(app: &mut App) {
+    *app = app_from_fixture("arpeggio1");
+    app.select_component(String::from("B1.1"));
+}
+
+fn setup_modifier_source_navigation(app: &mut App) {
+    *app = app_from_fixture("source_navigation");
+    app.select_component(String::from("B1.1"));
+}
+
+fn setup_modifier_cable_banner(app: &mut App) {
+    *app = app_from_fixture("cable_banner_combos");
+    app.select_component(String::from("B1.1"));
+}
+
+fn setup_modifier_shift(app: &mut App) {
+    *app = app_from_fixture("modifier_switch_passthrough");
+    app.select_component(String::from("B1.1"));
+    app.active_shift = Some(ShiftGroup::Group1);
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -362,6 +383,63 @@ const SCENARIOS: &[Scenario] = &[
         width: 80,
         height: 40,
         setup: setup_quad_modifier_b1,
+    },
+    // ── modifier highlight matrix (task 5.1/5.2): B1.1 influence at 80/120 ─────
+    Scenario {
+        id: "modifier_arpeggio1_80",
+        label: "arpeggio1 · width 80 · MOD B1.1 wash",
+        width: 80,
+        height: 40,
+        setup: setup_modifier_arpeggio1,
+    },
+    Scenario {
+        id: "modifier_arpeggio1_120",
+        label: "arpeggio1 · width 120 · MOD B1.1 wash",
+        width: 120,
+        height: 40,
+        setup: setup_modifier_arpeggio1,
+    },
+    Scenario {
+        id: "modifier_source_navigation_80",
+        label: "source_navigation · width 80 · MOD B1.1 wash",
+        width: 80,
+        height: 40,
+        setup: setup_modifier_source_navigation,
+    },
+    Scenario {
+        id: "modifier_source_navigation_120",
+        label: "source_navigation · width 120 · MOD B1.1 wash",
+        width: 120,
+        height: 40,
+        setup: setup_modifier_source_navigation,
+    },
+    Scenario {
+        id: "modifier_cable_banner_80",
+        label: "cable_banner_combos · width 80 · MOD B1.1 wash",
+        width: 80,
+        height: 40,
+        setup: setup_modifier_cable_banner,
+    },
+    Scenario {
+        id: "modifier_cable_banner_120",
+        label: "cable_banner_combos · width 120 · MOD B1.1 wash",
+        width: 120,
+        height: 40,
+        setup: setup_modifier_cable_banner,
+    },
+    Scenario {
+        id: "modifier_shift_80",
+        label: "modifier_switch_passthrough · width 80 · MOD B1.1 + SHIFT1 coexistence",
+        width: 80,
+        height: 40,
+        setup: setup_modifier_shift,
+    },
+    Scenario {
+        id: "modifier_shift_120",
+        label: "modifier_switch_passthrough · width 120 · MOD B1.1 + SHIFT1 coexistence",
+        width: 120,
+        height: 40,
+        setup: setup_modifier_shift,
     },
 ];
 
