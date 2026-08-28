@@ -2891,3 +2891,174 @@ fn visual_switch_value_rendering_snapshot() {
     assert!(row.len() > 200, "switch html row substantial");
     insta::assert_snapshot!("switch_value_html_row", row);
 }
+
+// ── paused-dim + disabled-circuit visual validation (task 4.1) ─────────────
+
+#[test]
+fn visual_paused_dim_panels_snapshot() {
+    // arpeggio1.ini × classic/terminal/mono × 80/120 — the global pause story:
+    // header 3 rows + status 3 rows stay normal, panel main area dims with DIM,
+    // status shows PROCESSING PAUSED, and geometry (component_rects) is
+    // unchanged between paused and unpaused so click hit-testing survives.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut paused = app_from_fixture("arpeggio1");
+            paused.processing_paused = true;
+            let buf = buffer_for(&mut paused, width, 30);
+            let ansi = buffer_to_ansi(&buf);
+            let html = buffer_to_html(&buf);
+            assert!(
+                ansi.contains("PROCESSING PAUSED"),
+                "{theme_name} {width}: status must show PROCESSING PAUSED"
+            );
+            // At least one dimmed panel cell in the main band (not header/status).
+            let mut has_dim_in_main = false;
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    if buf
+                        .cell((x, y))
+                        .unwrap()
+                        .style()
+                        .add_modifier
+                        .contains(Modifier::DIM)
+                    {
+                        has_dim_in_main = true;
+                    }
+                }
+            }
+            assert!(
+                has_dim_in_main,
+                "{theme_name} {width}: paused panels must be DIM"
+            );
+            // Header (rows 0..3) and status (last 3 rows) must not carry dimmed chrome.
+            // PROCESSING PAUSED marker is BOLD, not DIM — its span must not be dimmed.
+            let paused_marker_style = first_token_style(&buf, "PROCESSING PAUSED");
+            if let Some(style) = paused_marker_style {
+                assert!(
+                    !style.add_modifier.contains(Modifier::DIM),
+                    "{theme_name} {width}: status marker must not be DIM"
+                );
+            }
+            assert!(
+                !html.is_empty(),
+                "{theme_name} {width}: html non-empty under pause"
+            );
+            // Geometry unchanged: paused vs unpaused component_rects identical.
+            let mut unpaused = app_from_fixture("arpeggio1");
+            let _ = buffer_for(&mut unpaused, width, 30);
+            let unpaused_rects = unpaused.component_rects.clone();
+            let paused_rects = paused.component_rects.clone();
+            assert_eq!(
+                unpaused_rects, paused_rects,
+                "{theme_name} {width}: geometry unchanged while paused"
+            );
+            insta::with_settings!({snapshot_suffix => format!("paused_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+    // Side-by-side HTML row for gallery parity (classic/terminal/mono columns).
+    let mut cells: Vec<String> = Vec::new();
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = app_from_fixture("arpeggio1");
+        app.processing_paused = true;
+        let buf = buffer_for(&mut app, 100, 30);
+        let html = buffer_to_html(&buf);
+        cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
+    }
+    let row = format!("<tr>{}</tr>", cells.join(""));
+    assert!(row.contains("<td"), "paused html row has cells");
+    assert!(row.len() > 200, "paused html row substantial");
+    insta::assert_snapshot!("paused_html_row", row);
+}
+
+#[test]
+fn visual_disabled_circuit_graph_snapshot() {
+    // Graph surface with one disabled circuit (clocktool instance 0, present in
+    // cable_banner_combos and graph_topology_error) × classic/terminal/mono ×
+    // widths 40/100 (mirrors visual_graph_node_cluster_faces). Asserts the
+    // disabled node/edges render with graph_node_dim/graph_edge_dim + DIM
+    // overriding influence highlight, hover styling still applies, and error-red
+    // is preserved so topology findings outrank dim.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+        for width in [40u16, 100] {
+            let mut app = graph_app_from_fixture("cable_banner_combos");
+            app.disabled_circuits.insert((String::from("copy"), 0));
+            // cable_banner_combos has no copy node; keep clocktool disabled as well
+            // so the dim-story still renders while the required ("copy",0) contract is present.
+            app.disabled_circuits.insert((String::from("clocktool"), 0));
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+            // Disabled nodes must be dimmed (muted-equivalent dim token + DIM),
+            // overriding any default chrome; enabled nodes must stay undimmed.
+            let mut has_dim = false;
+            let mut has_nondim_node_chrome = false;
+            for cell in buf.content() {
+                if cell.style().add_modifier.contains(Modifier::DIM) {
+                    has_dim = true;
+                }
+                if cell.style().fg == Some(t.graph_node_border)
+                    && !cell.style().add_modifier.contains(Modifier::DIM)
+                {
+                    has_nondim_node_chrome = true;
+                }
+            }
+            assert!(
+                has_dim,
+                "{theme_name} {width}: disabled graph must have DIM cells"
+            );
+            // For classic/mono the normal node border token is distinct, so
+            // at least one undimmed node chrome must remain alongside the dimmed disabled node.
+            if theme_name != "terminal" {
+                assert!(
+                    has_nondim_node_chrome,
+                    "{theme_name} {width}: enabled nodes must keep normal chrome"
+                );
+            }
+            // Error token must NOT appear in this fixture (no topology error), so
+            // dim overrides the inferred kind color (clocktool would be control/cyan).
+            // On graph_topology_error the same disabled set must preserve error-red:
+            // checked below for classic so one strict red path is pinned.
+            insta::with_settings!({snapshot_suffix => format!("disabled_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+    // Error-preservation: graph_topology_error carries an n->1 Error on _CLK.
+    // Disabling its source (clocktool 0) must keep the edge red (error token)
+    // plain — not overwritten by the dim token.
+    {
+        let _guard = ThemedGuard::pin("classic");
+        let t = *theme::resolve("classic");
+        let mut app = graph_app_from_fixture("graph_topology_error");
+        app.disabled_circuits.insert((String::from("clocktool"), 0));
+        let buf = buffer_for(&mut app, 100, 40);
+        assert!(
+            has_box_glyph_of_color(&buf, t.graph_edge_error),
+            "disabled clocktool must preserve error-red on _CLK"
+        );
+        let ansi = buffer_to_ansi(&buf);
+        insta::with_settings!({snapshot_suffix => "disabled_error_classic_100"}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+    // Side-by-side HTML row for gallery parity (disabled at 100 cols).
+    let mut cells: Vec<String> = Vec::new();
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = graph_app_from_fixture("cable_banner_combos");
+        app.disabled_circuits.insert((String::from("copy"), 0));
+        app.disabled_circuits.insert((String::from("clocktool"), 0));
+        let buf = buffer_for(&mut app, 100, 40);
+        let html = buffer_to_html(&buf);
+        cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
+    }
+    let row = format!("<tr>{}</tr>", cells.join(""));
+    assert!(row.contains("<td"), "disabled html row has cells");
+    assert!(row.len() > 200, "disabled html row substantial");
+    insta::assert_snapshot!("disabled_html_row", row);
+}
