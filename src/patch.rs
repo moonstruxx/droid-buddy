@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +94,15 @@ pub struct Patch {
     /// Verbatim raw lines including comments and blank lines, in file order.
     #[serde(default)]
     pub raw_lines: Vec<String>,
+    /// Whether the source used `\r\n` line endings. `str::lines()` strips the
+    /// `\r` during parsing, so `write_to_ini` must know the original style to
+    /// round-trip byte-identically.
+    #[serde(default)]
+    pub raw_uses_crlf: bool,
+    /// Whether the source ended with a final line terminator. Also normalized
+    /// away by `str::lines()`; re-added on write.
+    #[serde(default)]
+    pub raw_has_trailing_newline: bool,
     /// Every boundary-aware hardware-token hit with its source span, in
     /// reading order (top-to-bottom, left-to-right).
     #[serde(default)]
@@ -429,6 +438,8 @@ impl Patch {
             modules: Vec::new(),
             sections: Vec::new(),
             raw_lines: Vec::new(),
+            raw_uses_crlf: false,
+            raw_has_trailing_newline: false,
             token_spans: Vec::new(),
             occurrence_index: HashMap::new(),
             modifier_index: HashMap::new(),
@@ -568,6 +579,78 @@ impl Patch {
         Self::from_ini_str(&content, name)
     }
 
+    /// Write the current section order as a lossless `.ini` file (D4).
+    ///
+    /// `source` is the path the patch was loaded from: the writer refuses to
+    /// overwrite it, canonicalized comparison, so this is save-as only. An
+    /// existing `dest` is auto-suffixed (`foo.ini` → `foo-1.ini` → …) rather
+    /// than overwritten, and the write is atomic (temp file + rename, same
+    /// pattern as `LabelStore`). Returns the path actually written.
+    pub fn write_to_ini(&self, source: &Path, dest: &Path) -> Result<PathBuf, String> {
+        if canonical_str(source) == canonical_str(dest) {
+            return Err(format!(
+                "refusing to overwrite the source patch {} (save-as only)",
+                source.display()
+            ));
+        }
+        let body = self.render_ini()?;
+        let target = unique_dest(dest);
+        if let Some(dir) = target.parent() {
+            if !dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("failed to create {}: {}", dir.display(), e))?;
+            }
+        }
+        let mut tmp = target.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, body)
+            .map_err(|e| format!("failed to write {}: {}", tmp.display(), e))?;
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "failed to rename {} → {}: {}",
+                tmp.display(),
+                target.display(),
+                e
+            ));
+        }
+        Ok(target)
+    }
+
+    /// Reconstruct the full `.ini` text from `raw_lines` in the current section
+    /// order: preamble first, then each section's block, joined with the
+    /// source's line ending and re-appended trailing terminator.
+    fn render_ini(&self) -> Result<String, String> {
+        // Defensive: a deserialized `Patch` could carry header spans outside
+        // `raw_lines`; refuse instead of indexing out of bounds.
+        if let Some(bad) = self
+            .sections
+            .iter()
+            .find(|s| s.header_span.line >= self.raw_lines.len())
+        {
+            return Err(format!(
+                "section [{}] header line {} out of range ({} raw lines)",
+                bad.name,
+                bad.header_span.line,
+                self.raw_lines.len()
+            ));
+        }
+        let (preamble, blocks) = block_slice_by_headers(&self.raw_lines, &self.sections);
+        let sep = if self.raw_uses_crlf { "\r\n" } else { "\n" };
+        let mut body: Vec<&str> = Vec::with_capacity(self.raw_lines.len());
+        body.extend(preamble.iter().map(|&l| self.raw_lines[l].as_str()));
+        for block in &blocks {
+            body.extend(block.iter().map(|&l| self.raw_lines[l].as_str()));
+        }
+        let tail = if self.raw_has_trailing_newline {
+            sep
+        } else {
+            ""
+        };
+        Ok(format!("{}{}", body.join(sep), tail))
+    }
+
     /// Parse DROID `.ini` patch content into a `Patch`.
     ///
     /// Real DROID patches repeat section names (e.g. many `[button]` sections
@@ -579,6 +662,8 @@ impl Patch {
         }
 
         let raw_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let raw_uses_crlf = content.contains("\r\n");
+        let raw_has_trailing_newline = content.ends_with('\n');
         let sections = parse_ini_sections(content);
         if sections.is_empty() {
             return Err(String::from("No circuit sections found in patch file"));
@@ -775,6 +860,8 @@ impl Patch {
             ],
             sections,
             raw_lines,
+            raw_uses_crlf,
+            raw_has_trailing_newline,
             token_spans,
             occurrence_index,
             modifier_index,
@@ -1749,9 +1836,115 @@ fn add_component(
     });
 }
 
+/// Partition `raw_lines` into per-section blocks by header line (D4).
+///
+/// Each section's block is a contiguous line range: the consecutive comment
+/// run immediately above its header (the banner, which travels with the
+/// section below it) + the header line + everything after it up to the next
+/// section's banner — comments and blanks included, so in-section comments
+/// never migrate to a neighbour. The preamble — lines before the first header
+/// — is returned separately and always written first. `blocks[i]` corresponds
+/// to `sections[i]` regardless of the order the caller stores them in, so a
+/// reordered `Patch.sections` writes its blocks reordered.
+fn block_slice_by_headers(
+    raw_lines: &[String],
+    sections: &[IniSection],
+) -> (Vec<usize>, Vec<Vec<usize>>) {
+    // Header lines in original file order: (header line, section index).
+    let mut by_line: Vec<(usize, usize)> = sections
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.header_span.line, i))
+        .collect();
+    by_line.sort_unstable();
+    let first_header = by_line.first().map(|&(l, _)| l).unwrap_or(0);
+    let preamble: Vec<usize> = (0..first_header).collect();
+    // Banner start per file position: the first line of the consecutive
+    // comment run immediately above each header. The first section has none
+    // (its comment run is the preamble).
+    let banner_start: Vec<usize> = by_line
+        .iter()
+        .enumerate()
+        .map(|(pos, &(header_line, _))| {
+            if pos == 0 {
+                return header_line;
+            }
+            let mut start = header_line;
+            while start > 0 && is_comment_line(&raw_lines[start - 1]) {
+                start -= 1;
+            }
+            start
+        })
+        .collect();
+    let mut blocks: Vec<Vec<usize>> = vec![Vec::new(); sections.len()];
+    for (pos, &(header_line, sec_idx)) in by_line.iter().enumerate() {
+        let block = &mut blocks[sec_idx];
+        // Banner (comments immediately above the header) travels with this
+        // section; the first section gets none (those lines are the preamble).
+        block.extend(banner_start[pos]..header_line);
+        block.push(header_line);
+        // Body: everything after the header up to the next section's banner,
+        // comments and blanks included.
+        let end = by_line
+            .get(pos + 1)
+            .map(|&(_, next_idx)| banner_start[pos + 1])
+            .unwrap_or(raw_lines.len());
+        block.extend(header_line + 1..end);
+    }
+    (preamble, blocks)
+}
+
+/// Whole-line `#` comment or `# ---- Name ----` banner (trimmed start).
+fn is_comment_line(line: &str) -> bool {
+    line.trim_start().starts_with('#')
+}
+
+/// Canonicalized absolute path string for identity comparison: real canonical
+/// path when the file exists, otherwise an absolute join against `current_dir`.
+/// Mirrors `LabelStore::canonical_key`, which `patch` cannot import (layered
+/// dependency direction).
+fn canonical_str(path: &Path) -> String {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical.to_string_lossy().to_string();
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute.to_string_lossy().to_string()
+}
+
+/// First free auto-suffix of `dest` (`foo.ini` → `foo-1.ini` → `foo-2.ini` …)
+/// when `dest` already exists; `dest` itself when it does not.
+fn unique_dest(dest: &Path) -> PathBuf {
+    if !dest.exists() {
+        return dest.to_path_buf();
+    }
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut n = 1usize;
+    loop {
+        let candidate = dest.with_file_name(format!("{stem}-{n}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn led_association_captured_for_button_with_led() {
@@ -3016,6 +3209,166 @@ button = B1.3
                 col_start: 7,
                 col_end: 9
             }
+        );
+    }
+
+    // ---- lossless writer (task 1.3 / D4) ----
+
+    fn temp_source(dir: &TempDir, content: &str, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(format!("fixtures/{name}")).unwrap()
+    }
+
+    #[test]
+    fn write_round_trip_is_byte_identical() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let dest = dir.path().join("out.ini");
+        let written = patch.write_to_ini(&src, &dest).unwrap();
+        assert_eq!(written, dest);
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&src).unwrap());
+    }
+
+    #[test]
+    fn write_round_trip_without_trailing_newline() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("led_pairs.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let dest = dir.path().join("out.ini");
+        patch.write_to_ini(&src, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&src).unwrap());
+    }
+
+    #[test]
+    fn write_round_trip_crlf_source() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("alg27_2.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let dest = dir.path().join("out.ini");
+        patch.write_to_ini(&src, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&src).unwrap());
+    }
+
+    #[test]
+    fn write_reordered_banner_travels_with_section() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let mut patch = Patch::from_ini_file(&src).unwrap();
+        // Move `clocktool` (whose block owns the `# ---- Mixer ----` banner)
+        // ahead of `button`; the banner must travel with it.
+        let clocktool = patch
+            .sections
+            .iter()
+            .position(|s| s.name == "clocktool")
+            .unwrap();
+        let section = patch.sections.remove(clocktool);
+        patch.sections.insert(0, section);
+        let dest = dir.path().join("out.ini");
+        patch.write_to_ini(&src, &dest).unwrap();
+        let out = std::fs::read_to_string(&dest).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        let clocktool_idx = lines
+            .iter()
+            .position(|l| *l == "[clocktool]")
+            .expect("reordered output contains [clocktool]");
+        assert_eq!(lines[clocktool_idx - 1], "# ---- Mixer ----");
+    }
+
+    #[test]
+    fn write_reordered_sections_reparse_to_same_sections() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let mut patch = Patch::from_ini_file(&src).unwrap();
+        let original: Vec<String> = patch.sections.iter().map(|s| s.name.clone()).collect();
+        patch.sections.reverse();
+        let dest = dir.path().join("out.ini");
+        patch.write_to_ini(&src, &dest).unwrap();
+        let out = std::fs::read_to_string(&dest).unwrap();
+        let reparsed = Patch::from_ini_str(&out, String::from("t")).unwrap();
+        let names: Vec<String> = reparsed.sections.iter().map(|s| s.name.clone()).collect();
+        let mut expected = original;
+        expected.reverse();
+        assert_eq!(names, expected);
+        // Entries survive the reorder intact, in their new order.
+        for (i, sec) in reparsed.sections.iter().enumerate() {
+            assert_eq!(sec.entries, patch.sections[i].entries);
+        }
+    }
+
+    #[test]
+    fn write_refuses_source_path() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let err = patch.write_to_ini(&src, &src).unwrap_err();
+        assert!(err.contains("refusing"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn write_refuses_canonicalized_source_path() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        // Different spelling, same canonical path (dir/./source.ini).
+        let alias = dir.path().join(".").join("source.ini");
+        let err = patch.write_to_ini(&src, &alias).unwrap_err();
+        assert!(err.contains("refusing"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn write_auto_suffixes_existing_destination() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let dest = dir.path().join("out-latopt.ini");
+        std::fs::write(&dest, "occupied").unwrap();
+        let written = patch.write_to_ini(&src, &dest).unwrap();
+        assert_eq!(written, dir.path().join("out-latopt-1.ini"));
+        // The occupied destination is left untouched.
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "occupied");
+        assert_eq!(
+            std::fs::read(&written).unwrap(),
+            std::fs::read(&src).unwrap()
+        );
+    }
+
+    #[test]
+    fn write_auto_suffix_increments_past_taken_names() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let content = String::from_utf8(fixture_bytes("cable_banner_combos.ini")).unwrap();
+        let src = temp_source(&dir, &content, "source.ini");
+        let patch = Patch::from_ini_file(&src).unwrap();
+        let dest = dir.path().join("out.ini");
+        std::fs::write(&dest, "occupied").unwrap();
+        std::fs::write(dir.path().join("out-1.ini"), "occupied").unwrap();
+        let written = patch.write_to_ini(&src, &dest).unwrap();
+        assert_eq!(written, dir.path().join("out-2.ini"));
+        assert_eq!(
+            std::fs::read(&written).unwrap(),
+            std::fs::read(&src).unwrap()
         );
     }
 }
