@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::Path;
 
@@ -128,6 +128,11 @@ pub struct Patch {
     /// order (file appearance, sorted per section for stability).
     #[serde(default)]
     pub circuit_outputs: Vec<Vec<String>>,
+    /// Preamble HW-token labels parsed from leading `# TOKEN: label` comments
+    /// before the first section (layer 1 only, human commentary). `I4:` with
+    /// empty value produces no entry and falls through to derived.
+    #[serde(default)]
+    pub preamble_labels: HashMap<String, String>,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -430,7 +435,118 @@ impl Patch {
             cable_index: HashMap::new(),
             banner_groups: Vec::new(),
             circuit_outputs: Vec::new(),
+            preamble_labels: HashMap::new(),
         }
+    }
+
+    /// Derived HW label fallback for any token (e.g. "Button B3.17", "Input I4").
+    fn derived_label(token: &str) -> String {
+        match token_kind(token) {
+            Some(ComponentKind::Button) => format!("Button {token}"),
+            Some(ComponentKind::Led) => format!("LED {token}"),
+            Some(ComponentKind::Knob) => format!("Pot {token}"),
+            Some(ComponentKind::Encoder) => format!("Encoder {token}"),
+            Some(ComponentKind::Switch) => format!("Switch {token}"),
+            Some(ComponentKind::CvIn) => format!("Input {token}"),
+            Some(ComponentKind::CvOut) => format!("Output {token}"),
+            None => {
+                // Gate tokens (G*) and unknown prefixes fall back to raw token.
+                if token.starts_with('G') && leading_number(token).is_some() {
+                    format!("Gate {token}")
+                } else {
+                    token.to_string()
+                }
+            }
+        }
+    }
+
+    /// Coerce requested shift through clamping + `layers_enabled`.
+    fn effective_shift(shift: u8, layers_enabled: bool, max_shift_layer: u8) -> u8 {
+        let clamped_max = max_shift_layer.clamp(1, 8);
+        let clamped = shift.clamp(1, clamped_max);
+        if layers_enabled {
+            clamped
+        } else {
+            1
+        }
+    }
+
+    /// Pure HW label resolver with fallback chain
+    /// `store[layer] → store[1] → preamble[1] → derived` and
+    /// `max_shift_layer`/`layers_enabled` coercion. `hw_store` is the per-patch
+    /// `hw` bucket (`token → layer → label`). Empty/whitespace-only stored
+    /// labels are treated as absent (fall through).
+    pub fn display_label(
+        &self,
+        token: &str,
+        shift: u8,
+        layers_enabled: bool,
+        max_shift_layer: u8,
+        hw_store: &HashMap<String, BTreeMap<u8, String>>,
+    ) -> String {
+        let effective = Self::effective_shift(shift, layers_enabled, max_shift_layer);
+        if let Some(per_token) = hw_store.get(token) {
+            if let Some(v) = per_token.get(&effective).and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            }) {
+                return v;
+            }
+            if effective != 1 {
+                if let Some(v) = per_token.get(&1).and_then(|s| {
+                    let t = s.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                }) {
+                    return v;
+                }
+            }
+        }
+        if let Some(v) = self.preamble_labels.get(token).and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }) {
+            return v;
+        }
+        Self::derived_label(token)
+    }
+
+    /// Pure circuit label lookup: stored per-instance override if present and
+    /// non-empty, otherwise `None` (caller falls back to circuit name).
+    pub fn circuit_label(
+        &self,
+        node: &NodeId,
+        circuit_store: &HashMap<NodeId, String>,
+    ) -> Option<String> {
+        circuit_store.get(node).and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+    }
+
+    /// Convenience: circuit label with derived fallback to `node.0` (circuit name).
+    pub fn circuit_display_label(
+        &self,
+        node: &NodeId,
+        circuit_store: &HashMap<NodeId, String>,
+    ) -> String {
+        self.circuit_label(node, circuit_store)
+            .unwrap_or_else(|| node.0.clone())
     }
 
     /// Get components belonging to a specific shift group
@@ -645,6 +761,7 @@ impl Patch {
         let cable_index = collect_cable_index(&sections);
         let banner_groups = collect_banner_groups(&raw_lines, &sections);
         let circuit_outputs = collect_circuit_outputs(&sections);
+        let preamble_labels = parse_preamble_labels(&raw_lines);
 
         Ok(Patch {
             name,
@@ -664,6 +781,7 @@ impl Patch {
             cable_index,
             banner_groups,
             circuit_outputs,
+            preamble_labels,
         })
     }
 
@@ -1481,6 +1599,59 @@ fn titlecase(s: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+fn is_preamble_token(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, 'B' | 'L' | 'P' | 'O' | 'I' | 'E' | 'S' | 'G') {
+        return false;
+    }
+    let rest: String = chars.collect();
+    // Must start with digit; allow leading digits, optional .digits
+    let mut parts = rest.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    if major.is_empty() || !major.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(minor) => {
+            if minor.is_empty() || !minor.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            parts.next().is_none()
+        }
+    }
+}
+
+fn parse_preamble_labels(raw_lines: &[String]) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for raw in raw_lines {
+        let trimmed = raw.trim_start();
+        let Some(after_hash) = trimmed.strip_prefix('#') else {
+            continue;
+        };
+        let after_hash = after_hash.trim_start();
+        let Some(colon) = after_hash.find(':') else {
+            continue;
+        };
+        let token_candidate = after_hash[..colon].trim();
+        if !is_preamble_token(token_candidate) {
+            continue;
+        }
+        let label = after_hash[colon + 1..].trim();
+        if label.is_empty() {
+            continue;
+        }
+        out.entry(token_candidate.to_string())
+            .or_insert_with(|| label.to_string());
+    }
+    out
 }
 
 fn add_component(
