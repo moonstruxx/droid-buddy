@@ -900,6 +900,26 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    // Latency legend on the graph surface (design D2): the summary mean/max
+    // plus the back-edge count, in the legend token. The 190µs figure is a
+    // fixed prose constant for the human loop-time reference, not a computed
+    // value.
+    if app.showing_graph {
+        if let Some(data) = app.graph.as_ref().and_then(|g| g.latency.as_ref()) {
+            let legend = format!(
+                "latency avg {:.1} / max {:.1} (1 loop \u{2248} 190\u{b5}s) | {} back edge(s)",
+                data.summary.avg, data.summary.max, data.summary.back_edge_count
+            );
+            spans.push(Span::raw(" | "));
+            spans.push(Span::styled(
+                legend,
+                Style::default()
+                    .fg(theme::active().graph_edge_latency_legend)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
     // Display scale and orientation permanently in the status bar
     spans.push(Span::raw(" | "));
     spans.push(Span::styled(
@@ -1081,6 +1101,7 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // Copyable state read before the borrow split below.
     let hovered = app.hovered_graph_node;
+    let latency_coloring = app.latency_coloring;
 
     // Split `app` field borrows so reading the graph and publishing cluster
     // rects (a renderer→handler handoff) coexist within one frame.
@@ -1128,6 +1149,8 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             disabled: Some(disabled_circuits),
             diff_report: diff_report_ref,
             diff_showing,
+            latency: graph.latency.as_ref(),
+            latency_coloring,
         },
     );
     for (i, node) in graph.nodes.iter().enumerate() {
@@ -1321,6 +1344,19 @@ fn cable_color_with_diff(
     }
 }
 
+/// Ramp stop for a cable's latency (design D2):
+/// `round(L / (N×AVG) × (stops−1))` where `L` is the edge latency, `N` the
+/// edge count, and `AVG` the summary mean, clamped to `stops−1` so any
+/// latency at or past the normalization lands on the hottest stop. Degenerate
+/// inputs (no edges or zero mean) collapse to the cold end.
+fn latency_ramp_index(latency: f32, edge_count: usize, avg: f32, stops: usize) -> usize {
+    if edge_count == 0 || avg <= 0.0 || stops == 0 {
+        return 0;
+    }
+    let normalized = latency / (edge_count as f32 * avg) * (stops as f32 - 1.0);
+    (normalized.round() as usize).min(stops - 1)
+}
+
 /// The box-drawing glyph for a polyline cell given which orthogonal neighbors
 /// also belong to the polyline. A cell with a single neighbor gets a straight
 /// run along that axis; its missing neighbor is the port, covered by the node.
@@ -1378,6 +1414,11 @@ struct GraphEdgeOpts<'a> {
     disabled: Option<&'a HashSet<(String, usize)>>,
     diff_report: Option<&'a crate::diff::DiffReport>,
     diff_showing: bool,
+    /// Per-edge latency (design D2), parallel to `graph.edges` by index.
+    latency: Option<&'a crate::latency::LatencyData>,
+    /// When true the latency ramp replaces the cable-kind color for non-error,
+    /// non-diff cables (error > diff > ramp > kind precedence).
+    latency_coloring: bool,
 }
 
 fn render_graph_edges_with_highlight(
@@ -1399,8 +1440,10 @@ fn render_graph_edges_with_highlight(
         disabled,
         diff_report,
         diff_showing,
+        latency,
+        latency_coloring,
     } = opts;
-    for edge in &graph.edges {
+    for (edge_index, edge) in graph.edges.iter().enumerate() {
         let (Some(src), Some(sink)) = (
             graph.nodes.iter().position(|n| n.id == edge.source),
             graph.nodes.iter().position(|n| n.id == edge.sink),
@@ -1485,8 +1528,31 @@ fn render_graph_edges_with_highlight(
                 (theme::active().graph_edge_dim, Modifier::DIM)
             }
         } else {
+            // Latency ramp replaces the kind color when coloring is on
+            // (error > diff > ramp > kind); a back-edge always lands on the
+            // hottest stop (design D2).
+            let latency_color = latency.and_then(|data| {
+                if !latency_coloring {
+                    return None;
+                }
+                let entry = data.edges.get(edge_index)?;
+                let ramp = theme::active().graph_edge_latency_ramp();
+                let stop = if entry.is_back_edge {
+                    ramp.len() - 1
+                } else {
+                    latency_ramp_index(
+                        entry.latency,
+                        data.edges.len(),
+                        data.summary.avg,
+                        ramp.len(),
+                    )
+                };
+                Some(ramp[stop])
+            });
             (
-                cable_color_with_diff(graph, &edge.cable, diff_report, diff_showing),
+                latency_color.unwrap_or_else(|| {
+                    cable_color_with_diff(graph, &edge.cable, diff_report, diff_showing)
+                }),
                 Modifier::empty(),
             )
         };
@@ -1899,6 +1965,8 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
             disabled: Some(&disabled),
             diff_report: None,
             diff_showing: false,
+            latency: graph.latency.as_ref(),
+            latency_coloring: app.latency_coloring,
         },
     );
     for (i, node) in graph.nodes.iter().enumerate() {
@@ -4326,6 +4394,33 @@ mod graph_view_tests {
     }
 
     #[test]
+    fn latency_ramp_index_maps_low_to_cold_and_max_to_hot() {
+        // Formula from 2.1: round(L / (N × AVG) × (stops − 1)), clamped to the
+        // last stop. Lowest latency lands on stop 0; a latency that spans the
+        // whole range lands on the hottest stop.
+        assert_eq!(latency_ramp_index(0.0, 4, 0.5, 5), 0, "cold end");
+        assert_eq!(
+            latency_ramp_index(4.0 * 0.5, 4, 0.5, 5),
+            4,
+            "full-range latency hits the hot end"
+        );
+        // Past the range clamps to the last stop.
+        assert_eq!(latency_ramp_index(100.0, 4, 0.5, 5), 4, "clamped hot");
+        // Monotonic: higher latency never lands on a colder stop.
+        let mut last = 0usize;
+        for i in 0..=10 {
+            let l = i as f32 * 0.2;
+            let idx = latency_ramp_index(l, 4, 0.5, 5);
+            assert!(idx >= last, "latency {l} must not map colder than {last}");
+            last = idx;
+        }
+        // Degenerate inputs stay on the cold end instead of panicking.
+        assert_eq!(latency_ramp_index(1.0, 0, 0.5, 5), 0, "no edges");
+        assert_eq!(latency_ramp_index(1.0, 4, 0.0, 5), 0, "no avg");
+        assert_eq!(latency_ramp_index(1.0, 4, 0.5, 0), 0, "no stops");
+    }
+
+    #[test]
     fn cable_color_maps_each_inferred_kind_to_its_token() {
         let graph = Graph {
             nodes: vec![
@@ -4479,6 +4574,9 @@ mod graph_view_tests {
         // graph_app puts clocktool in "Pulsar" and osc in "Steady", so _CLK is
         // a cluster-spanning cable and must still draw its polyline.
         let mut app = graph_app();
+        // The cluster-spanning test targets the kind-color polyline, not the
+        // latency ramp; disable ramp coloring so `_CLK` renders its control token.
+        app.latency_coloring = false;
         let buf = buffer_for(&mut app, 120, 40);
         assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
         assert!(
@@ -4821,6 +4919,9 @@ mod graph_view_tests {
     fn graph_without_disabled_circuits_renders_without_dim_drift() {
         let mut app = graph_app();
         assert!(app.disabled_circuits.is_empty());
+        // The kind token is the baseline this test pins; ramp coloring would
+        // re-color `_CLK`, so turn it off to keep the assertion about dims.
+        app.latency_coloring = false;
         let buf = buffer_for(&mut app, 120, 40);
         // No dimming anywhere: the disabled-circuit path must be inert unless
         // a circuit actually is disabled (no drift vs. prior rendering).

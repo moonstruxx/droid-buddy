@@ -491,6 +491,11 @@ pub struct App {
     pub diff_report: Option<DiffReport>,
     /// Whether the diff overlay is currently shown (`d` toggles).
     pub diff_showing: bool,
+    /// Whether cable edges are colored by the forward-loop latency ramp on the
+    /// graph surface (`c` toggles). A view preference: like `viewer_split_ratio`
+    /// it persists across `load_patch` (unlike `processing_paused`/`disabled_circuits`,
+    /// which reset because they describe transient processing state).
+    pub latency_coloring: bool,
     /// Optional component-scoped filter token (`None` = patch-wide).
     pub diff_scope: Option<String>,
     /// True while the picker was opened via `g d` to load the B patch.
@@ -553,6 +558,7 @@ impl App {
             diff_patch: None,
             diff_report: None,
             diff_showing: false,
+            latency_coloring: true,
             diff_scope: None,
             diff_picker_active: false,
             validation_issues: Vec::new(),
@@ -600,6 +606,32 @@ impl App {
         if self.diff_report.is_some() {
             self.diff_showing = !self.diff_showing;
         }
+    }
+
+    /// Toggle cable latency coloring on the graph surface, reporting the new
+    /// state in the status bar. The ramp replaces the kind colors while on and
+    /// kind colors return while off; error/diff precedence is unchanged.
+    pub fn toggle_latency_coloring(&mut self) {
+        self.latency_coloring = !self.latency_coloring;
+        self.status_message = if self.latency_coloring {
+            String::from("Latency coloring on (c to toggle)")
+        } else {
+            String::from("Latency coloring off (c to toggle)")
+        };
+    }
+
+    /// Hover status for a graph node that is the sink of a back-edge (design
+    /// D2): `reads _CABLE 1 loop behind`. Returns `None` when the node is not a
+    /// back-edge sink, so the caller leaves the previous status untouched.
+    pub fn back_edge_hover_status(&self, node_index: usize) -> Option<String> {
+        let graph = self.graph.as_ref()?;
+        let node = graph.nodes.get(node_index)?;
+        let data = graph.latency.as_ref()?;
+        let cable = data.edges.iter().filter(|l| l.is_back_edge).find_map(|l| {
+            let edge = graph.edges.get(l.edge_index)?;
+            (edge.sink == node.id).then(|| edge.cable.clone())
+        })?;
+        Some(format!("reads {} 1 loop behind", cable))
     }
 
     /// View of `diff_report` filtered through `diff_scope` (if any).
@@ -1580,6 +1612,39 @@ mod tests {
     }
 
     #[test]
+    fn back_edge_hover_status_reports_loop_behind_for_sink() {
+        // graph_latency_backedge.ini: `_LOOP` is produced by the later [lfo]
+        // and consumed by the earlier [contour] — the one back-edge. Hovering
+        // the contour node must surface `reads _LOOP 1 loop behind`; hovering
+        // the lfo (a plain forward sink of `_GATE`) must leave status None.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/graph_latency_backedge.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let graph = app.graph.as_ref().unwrap();
+        let contour_idx = graph
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "contour")
+            .expect("contour node");
+        let lfo_idx = graph
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "lfo")
+            .expect("lfo node");
+
+        assert_eq!(
+            app.back_edge_hover_status(contour_idx).as_deref(),
+            Some("reads _LOOP 1 loop behind")
+        );
+        assert_eq!(
+            app.back_edge_hover_status(lfo_idx),
+            None,
+            "a plain forward sink has no back-edge hint"
+        );
+    }
+
+    #[test]
     fn open_graph_without_patch_yields_empty_graph() {
         let mut app = App::new();
         app.open_graph();
@@ -1845,6 +1910,36 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         assert!(!app.processing_paused, "pause reset on load");
+    }
+
+    #[test]
+    fn latency_coloring_defaults_to_true() {
+        let app = App::new();
+        assert!(app.latency_coloring, "latency coloring on by default");
+    }
+
+    #[test]
+    fn toggle_latency_coloring_flips_flag_and_status() {
+        let mut app = App::new();
+        app.toggle_latency_coloring();
+        assert!(!app.latency_coloring);
+        assert_eq!(app.status_message, "Latency coloring off (c to toggle)");
+        app.toggle_latency_coloring();
+        assert!(app.latency_coloring);
+        assert_eq!(app.status_message, "Latency coloring on (c to toggle)");
+    }
+
+    #[test]
+    fn latency_coloring_persists_across_patch_loads() {
+        // A view preference like `viewer_split_ratio`: the choice of how to
+        // color the graph surface survives loading a different patch, unlike
+        // transient processing state (`processing_paused`/`disabled_circuits`).
+        let mut app = App::new();
+        app.toggle_latency_coloring();
+        assert!(!app.latency_coloring);
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        assert!(!app.latency_coloring, "view preference kept across loads");
     }
 
     #[test]

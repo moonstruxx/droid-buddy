@@ -18,6 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 
 use crate::app::{App, SourceViewMode, ViewerFocus};
+use crate::graph::TopologySeverity;
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::patch::{ComponentState, Patch, ShiftGroup};
 use crate::ui::render;
@@ -2260,6 +2261,9 @@ fn visual_graph_edge_kinds_colors_snapshot() {
     let _guard = ThemedGuard::pin("classic");
     let t = *theme::resolve("classic");
     let mut app = graph_app_from_fixture("graph_edge_kinds");
+    // This test pins the kind-color mapping; latency ramp coloring (on by
+    // default) would re-color every forward edge to the same cold stop.
+    app.latency_coloring = false;
     let buf = buffer_for(&mut app, 100, 40);
 
     assert!(
@@ -2304,6 +2308,247 @@ fn visual_graph_topology_error_highlight_snapshot() {
     insta::with_settings!({snapshot_suffix => "graph_topology_error_classic_100"}, {
         insta::assert_snapshot!(ansi);
     });
+}
+
+// ── latency snapshot matrix (task 2.2) ──────────────────────────────────
+// Four latency fixtures × classic/terminal/mono × widths 100/40, mirroring
+// the graph-surface matrix above. 2.1's latency ramp may or may not have
+// landed when these run; the snapshots lock whatever stable cable colors the
+// renderer emits, and the data-level assertions pin the latency *shape* each
+// fixture is meant to exercise (forward vs back edges) independently of the
+// ramp. Back-edge cables always land at the red end of the ramp once 2.1
+// lands; until then they render by kind like any other edge.
+
+#[test]
+fn visual_graph_latency_chain_snapshot() {
+    // graph_latency_chain.ini: linear clocktool -> copy -> mixer -> contour
+    // chain. Every source section precedes its sink (all forward, adjacent),
+    // so all cables sit at the low end of the latency ramp and no edge wraps
+    // the loop.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [100u16, 40] {
+            let mut app = graph_app_from_fixture("graph_latency_chain");
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            insta::with_settings!({
+                snapshot_suffix => format!("graph_latency_chain_{theme_name}_{width}")
+            }, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn visual_graph_latency_fanout_snapshot() {
+    // graph_latency_fanout.ini: one clocktool source fanning out to sinks at
+    // file-order distances 1, 2, 3 — mixed forward latencies across the mid
+    // ramp, no back-edges.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [100u16, 40] {
+            let mut app = graph_app_from_fixture("graph_latency_fanout");
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            insta::with_settings!({
+                snapshot_suffix => format!("graph_latency_fanout_{theme_name}_{width}")
+            }, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn visual_graph_latency_backedge_snapshot() {
+    // graph_latency_backedge.ini: `_LOOP` produced by a later section ([lfo])
+    // and consumed by an earlier one ([contour]) — a loop-wrapping back-edge
+    // that lands at the red end of the latency ramp. `_GATE` stays forward.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [100u16, 40] {
+            let mut app = graph_app_from_fixture("graph_latency_backedge");
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            insta::with_settings!({
+                snapshot_suffix => format!("graph_latency_backedge_{theme_name}_{width}")
+            }, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn visual_graph_latency_error_snapshot() {
+    // graph_latency_error.ini: an n -> 1 Error (`_BUS`, clocktool + copy) and
+    // a dangling-sink Warning (`_ORPHAN`) coexisting with healthy forward
+    // cables. Error precedence keeps `_BUS` on `graph_edge_error` while `_CLK`
+    // and `_MIX` color by kind (latency ramp once 2.1 lands).
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [100u16, 40] {
+            let mut app = graph_app_from_fixture("graph_latency_error");
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            insta::with_settings!({
+                snapshot_suffix => format!("graph_latency_error_{theme_name}_{width}")
+            }, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn regression_graph_latency_chain_data() {
+    // All-forward adjacent chain: every edge forward, zero back-edges, and a
+    // flat summary whose max equals the heaviest single adjacent hop.
+    let app = graph_app_from_fixture("graph_latency_chain");
+    let latency = app.graph.as_ref().unwrap().latency.as_ref().unwrap();
+
+    assert_eq!(latency.summary.back_edge_count, 0);
+    assert!(
+        latency.edges.iter().all(|l| !l.is_back_edge),
+        "chain must contain no back-edges"
+    );
+    // Real ramsizes keep the loop well under budget; adjacent hops cost ~µs.
+    assert!(latency.summary.max < 1.0, "max = {}", latency.summary.max);
+    // Every edge is exactly one loop step: its latency equals its producing
+    // circuit's AVG (ramsize / loop budget), never a multiple of it.
+    let schema = crate::schema::load_schema();
+    let loop_budget = schema.available_memory.values().copied().max().unwrap_or(0);
+    let avg_of = |node: &crate::graph::NodeId| -> f32 {
+        let ramsize = schema
+            .circuits
+            .get(&node.0.to_lowercase())
+            .map_or(0, |def| def.ramsize);
+        if ramsize == 0 || loop_budget == 0 {
+            1.0
+        } else {
+            ramsize as f32 / loop_budget as f32
+        }
+    };
+    let graph = app.graph.as_ref().unwrap();
+    for l in &latency.edges {
+        let source_avg = avg_of(&graph.edges[l.edge_index].source);
+        assert!(
+            (l.latency - source_avg).abs() < f32::EPSILON,
+            "edge {} must be one adjacent hop (latency {} ≈ AVG {})",
+            graph.edges[l.edge_index].cable,
+            l.latency,
+            source_avg
+        );
+    }
+}
+
+#[test]
+fn regression_graph_latency_fanout_data() {
+    // Same source, sinks at distances 1/2/3: mixed forward latencies, no
+    // back-edges, spread wider than the chain (max strictly above avg).
+    let app = graph_app_from_fixture("graph_latency_fanout");
+    let latency = app.graph.as_ref().unwrap().latency.as_ref().unwrap();
+
+    assert_eq!(latency.summary.back_edge_count, 0);
+    let lats: Vec<f32> = latency.edges.iter().map(|l| l.latency).collect();
+    assert_eq!(lats.len(), 3, "one edge per fan-out sink");
+    let distinct = {
+        let mut v = lats.clone();
+        v.dedup();
+        v.len()
+    };
+    assert!(distinct >= 2, "fan-out must span multiple ramp stops");
+    assert!(
+        latency.summary.max > latency.summary.avg,
+        "mixed distances spread the summary"
+    );
+}
+
+#[test]
+fn regression_graph_latency_backedge_data() {
+    // `_LOOP` wraps the loop (source after sink) → exactly one back-edge; the
+    // `_GATE` edges stay forward.
+    let app = graph_app_from_fixture("graph_latency_backedge");
+    let graph = app.graph.as_ref().unwrap();
+    let latency = graph.latency.as_ref().unwrap();
+
+    assert_eq!(latency.summary.back_edge_count, 1);
+    let back: Vec<_> = latency.edges.iter().filter(|l| l.is_back_edge).collect();
+    assert_eq!(back.len(), 1);
+    assert_eq!(
+        graph.edges[back[0].edge_index].cable, "_LOOP",
+        "the wrapping cable must be the back-edge"
+    );
+    assert!(
+        back[0].latency >= latency.summary.max,
+        "the wrapped edge must sit at the top of the latency range"
+    );
+}
+
+#[test]
+fn regression_graph_latency_error_data() {
+    // Findings ride on real cables: `_BUS` is an n -> 1 Error, `_ORPHAN` a
+    // dangling-sink Warning; `_CLK`/`_MIX` are healthy forward cables.
+    let app = graph_app_from_fixture("graph_latency_error");
+    let graph = app.graph.as_ref().unwrap();
+
+    let bus = graph
+        .validation
+        .iter()
+        .find(|i| i.cable == "_BUS")
+        .expect("_BUS must carry a topology finding");
+    assert_eq!(bus.severity, TopologySeverity::Error);
+    let orphan = graph
+        .validation
+        .iter()
+        .find(|i| i.cable == "_ORPHAN")
+        .expect("_ORPHAN must carry a topology finding");
+    assert_eq!(orphan.severity, TopologySeverity::Warning);
+    assert!(
+        !graph
+            .validation
+            .iter()
+            .any(|i| i.cable == "_CLK" || i.cable == "_MIX"),
+        "healthy cables must carry no findings"
+    );
+
+    let latency = graph.latency.as_ref().unwrap();
+    assert_eq!(latency.summary.back_edge_count, 0);
+    // The n -> 1 `_BUS` produces two edges (clocktool -> mixer, copy -> mixer).
+    assert_eq!(graph.edges.iter().filter(|e| e.cable == "_BUS").count(), 2);
+}
+
+#[test]
+fn visual_graph_latency_error_precedence_color() {
+    // Error precedence (classic): the `_BUS` edges render with the error token
+    // (red) while the healthy `_CLK` (control cyan) and `_MIX` (audio green)
+    // cables keep their kind colors in the same frame.
+    let _guard = ThemedGuard::pin("classic");
+    let t = *theme::resolve("classic");
+    let mut app = graph_app_from_fixture("graph_latency_error");
+    let buf = buffer_for(&mut app, 100, 40);
+
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_error),
+        "n -> 1 cable edges render with the error token (red)"
+    );
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_control),
+        "healthy _CLK control edge keeps its kind color"
+    );
+    // The short mixer -> contour hop is fully covered by the node frames, so
+    // the `_MIX` audio color survives only on its port glyph.
+    assert!(
+        buf.content()
+            .iter()
+            .any(|cell| cell.fg == t.graph_edge_audio && matches!(cell.symbol(), "●" | "◉")),
+        "healthy _MIX audio edge keeps its kind color at its ports"
+    );
 }
 
 #[test]

@@ -49,6 +49,17 @@ pub struct Theme {
     pub graph_edge_dim: Color,
     pub graph_edge_diff_added: Color,
     pub graph_edge_diff_removed: Color,
+    /// Cable latency ramp (design D2): 5 cold→hot stops used to color
+    /// non-error cables by forward-loop latency when `App.latency_coloring` is
+    /// on. `graph_edge_latency_0` is the lowest-latency end, `_4` the hottest
+    /// (back-edge) end.
+    pub graph_edge_latency_0: Color,
+    pub graph_edge_latency_1: Color,
+    pub graph_edge_latency_2: Color,
+    pub graph_edge_latency_3: Color,
+    pub graph_edge_latency_4: Color,
+    /// Descriptive text color for the graph latency legend/status line.
+    pub graph_edge_latency_legend: Color,
     pub validation_error: Color,
     pub validation_warning: Color,
     pub validation_hint: Color,
@@ -103,6 +114,13 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::Green,
             graph_edge_diff_removed: Color::Magenta,
+            // Cold (blue) → hot (red) latency ramp through the ANSI-16 hues.
+            graph_edge_latency_0: Color::Blue,
+            graph_edge_latency_1: Color::Cyan,
+            graph_edge_latency_2: Color::Green,
+            graph_edge_latency_3: Color::Yellow,
+            graph_edge_latency_4: Color::Red,
+            graph_edge_latency_legend: Color::Blue,
             validation_error: Color::Red,
             validation_warning: Color::Yellow,
             validation_hint: Color::Cyan,
@@ -155,6 +173,12 @@ impl Theme {
             graph_edge_dim: Color::Reset,
             graph_edge_diff_added: Color::Gray,
             graph_edge_diff_removed: Color::DarkGray,
+            graph_edge_latency_0: Color::Reset,
+            graph_edge_latency_1: Color::Reset,
+            graph_edge_latency_2: Color::Reset,
+            graph_edge_latency_3: Color::Reset,
+            graph_edge_latency_4: Color::Reset,
+            graph_edge_latency_legend: Color::Reset,
             validation_error: Color::Reset,
             validation_warning: Color::Reset,
             validation_hint: Color::Reset,
@@ -215,12 +239,36 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::White,
             graph_edge_diff_removed: Color::Gray,
+            // Grayscale latency ramp: four ANSI grays darkening toward the hot
+            // end, with `Reset` (bright terminal default) as the hottest stop so
+            // back-edges pop against the dim mid-ramp cables. Only four gray
+            // shades exist, so Reset is the neutral fifth, mirroring
+            // `graph_edge_unknown`.
+            graph_edge_latency_0: Color::White,
+            graph_edge_latency_1: Color::Gray,
+            graph_edge_latency_2: Color::DarkGray,
+            graph_edge_latency_3: Color::Black,
+            graph_edge_latency_4: Color::Reset,
+            graph_edge_latency_legend: Color::Gray,
             validation_error: Color::White,
             validation_warning: Color::Gray,
             validation_hint: Color::DarkGray,
             validation_modal_border: Color::White,
             validation_selected_bg: Color::Black,
         }
+    }
+
+    /// The five latency-ramp stops in order (cold → hot). A cable's color is
+    /// `ramp[round(L / (N×AVG) × (stops−1))]`, clamped to `stops−1`, so the
+    /// hottest stop also covers every latency past the normalization.
+    pub const fn graph_edge_latency_ramp(&self) -> [Color; 5] {
+        [
+            self.graph_edge_latency_0,
+            self.graph_edge_latency_1,
+            self.graph_edge_latency_2,
+            self.graph_edge_latency_3,
+            self.graph_edge_latency_4,
+        ]
     }
 }
 
@@ -413,8 +461,65 @@ mod tests {
             t.graph_edge_midi,
             t.graph_edge_unknown,
             t.graph_edge_error,
+            // `graph_edge_diff_added/removed` are intentionally Gray/DarkGray
+            // (diff needs distinguishability even in the colorless terminal
+            // theme); latency ramp + legend are all Reset.
+            t.graph_edge_latency_0,
+            t.graph_edge_latency_1,
+            t.graph_edge_latency_2,
+            t.graph_edge_latency_3,
+            t.graph_edge_latency_4,
+            t.graph_edge_latency_legend,
         ] {
             assert_eq!(color, Color::Reset);
+        }
+        // The two diff tokens are the documented terminal exceptions: distinct
+        // grays so added/removed cables stay tellable at the terminal's
+        // default palette.
+        assert_eq!(t.graph_edge_diff_added, Color::Gray);
+        assert_eq!(t.graph_edge_diff_removed, Color::DarkGray);
+    }
+
+    #[test]
+    fn every_palette_exposes_five_ramp_stops_and_a_legend_token() {
+        for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
+            assert_eq!(theme.graph_edge_latency_ramp().len(), 5);
+        }
+        // Legend token present per palette.
+        assert_eq!(Theme::classic().graph_edge_latency_legend, Color::Blue);
+        assert_eq!(Theme::terminal().graph_edge_latency_legend, Color::Reset);
+        assert_eq!(Theme::mono().graph_edge_latency_legend, Color::Gray);
+    }
+
+    #[test]
+    fn classic_latency_ramp_orders_blue_to_red_by_hue() {
+        let ramp = Theme::classic().graph_edge_latency_ramp();
+        assert_eq!(ramp[0], Color::Blue, "cold end must be blue");
+        assert_eq!(ramp[4], Color::Red, "hot end must be red");
+        // Monotonic cold→hot progression: each stop steps toward red through
+        // cyan → green → yellow.
+        assert_eq!(ramp[1], Color::Cyan);
+        assert_eq!(ramp[2], Color::Green);
+        assert_eq!(ramp[3], Color::Yellow);
+    }
+
+    #[test]
+    fn mono_latency_ramp_stops_are_pairwise_distinct_and_colorless() {
+        let ramp = Theme::mono().graph_edge_latency_ramp();
+        for (i, a) in ramp.iter().enumerate() {
+            for b in &ramp[i + 1..] {
+                assert_ne!(a, b, "latency ramp stops must be pairwise distinct");
+            }
+        }
+        // All stops are grayscale (or the neutral Reset fallback), never a hue.
+        for stop in ramp {
+            assert!(
+                matches!(
+                    stop,
+                    Color::Black | Color::DarkGray | Color::Gray | Color::White | Color::Reset
+                ),
+                "mono latency stop {stop:?} must be grayscale/neutral"
+            );
         }
     }
 

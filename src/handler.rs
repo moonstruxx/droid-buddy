@@ -495,6 +495,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.toggle_processing_pause();
                 return false;
             }
+            crossterm::event::KeyCode::Char('c') => {
+                // Bare `c` toggles cable latency coloring on the graph surface;
+                // Ctrl+C (quit) is matched above with its modifier guard.
+                app.toggle_latency_coloring();
+                return false;
+            }
             crossterm::event::KeyCode::Char('x') => {
                 let Some(idx) = app.hovered_graph_node else {
                     return false;
@@ -1085,6 +1091,14 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
                 .map(|(idx, _)| *idx);
             app.hovered_graph_node = hit;
+            // Back-edge sink hover (design D2): surface "reads _X 1 loop
+            // behind" in the status bar; non-back-edge hovers leave the
+            // previous status untouched.
+            if let Some(idx) = hit {
+                if let Some(text) = app.back_edge_hover_status(idx) {
+                    app.status_message = text;
+                }
+            }
         }
         MouseEventKind::Down(MouseButton::Left) => {
             let hit = app
@@ -2661,6 +2675,23 @@ mod tests {
         // Hover and selection keep working.
         assert_eq!(app.hovered_component, Some(0));
         assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+    }
+
+    #[test]
+    fn c_key_toggles_latency_coloring_on_graph_surface() {
+        // Bare `c` flips the graph-surface cable coloring; it must never
+        // collide with Ctrl+C (quit), which carries a modifier.
+        let mut app = app_with_fixture();
+        assert!(app.latency_coloring, "on by default");
+        app.open_graph();
+
+        handle_event(key(crossterm::event::KeyCode::Char('c')), &mut app);
+        assert!(!app.latency_coloring);
+        assert_eq!(app.status_message, "Latency coloring off (c to toggle)");
+
+        handle_event(key(crossterm::event::KeyCode::Char('c')), &mut app);
+        assert!(app.latency_coloring);
+        assert_eq!(app.status_message, "Latency coloring on (c to toggle)");
     }
 
     #[test]

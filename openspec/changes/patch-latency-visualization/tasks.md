@@ -11,6 +11,8 @@
 
 ## Task 1.2 — Graph integration
 
+- [x] done
+
 - **agent**: rusty-engineer.build
 - **depends_on**: 1.1
 - **touches**: `src/graph.rs`, `src/latency.rs`
@@ -18,12 +20,16 @@
 
 ## Task 2.1 — Theme ramp + graph cable coloring
 
+- [x] done
+
 - **agent**: layout-designer-engineer.build
 - **depends_on**: 1.2
 - **touches**: `src/theme.rs`, `src/ui.rs`, `src/app.rs`, `src/handler.rs`
 - **details**: Add `graph_edge_latency` ramp tokens (blue→red, ~5 stops) + `graph_edge_latency_legend` per theme (classic/terminal/mono, mono grayscale pairwise-distinct). Color cables in `render_graph` by `ramp[round(L/(N×AVG)×(stops−1))]` for non-error cables (error precedence unchanged). Legend/status line `latency avg X / max Y (1 loop ≈ 190µs)` + back-edge count; hover on a back-edge sink shows `reads _X 1 loop behind`. Add `App.latency_coloring: bool` (default true) + toggle key on the graph surface.
 
 ## Task 2.2 — Regression snapshot matrix
+
+- [x] done
 
 - **agent**: horst-engineer.build
 - **depends_on**: 1.2
