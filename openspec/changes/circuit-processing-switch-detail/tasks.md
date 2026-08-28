@@ -17,7 +17,7 @@
 
 ## 4. Tests, snapshots & gallery
 
-- [ ] 4.1 Add regression harness for paused-dim and disabled-circuit scenarios (pause toggle, disabled node/edge dim, influence cut) × themes × widths, verify `cargo insta test --check` <!-- agent: horst-engineer.build, depends_on: [2.2, 3.3], touches: [src/regression.rs, src/snapshots/**] -->
+- [x] 4.1 Add regression harness for paused-dim and disabled-circuit scenarios (pause toggle, disabled node/edge dim, influence cut) × themes × widths, verify `cargo insta test --check` <!-- agent: horst-engineer.build, depends_on: [2.2, 3.3], touches: [src/regression.rs, src/snapshots/**] -->
 - [ ] 4.2 Regenerate ephemeral gallery (`cargo run --bin snapshot-gallery` or `cargo test -- --generate-gallery`) and verify `evidence/gallery/index.html` shows paused-dim and switch-value rows <!-- agent: horst-engineer.build, depends_on: [4.1], touches: [evidence/gallery/**, src/gallery.rs] -->
 - [ ] 4.3 Full verification: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo insta test --check`, `cargo build --release --locked` and verify zero warnings <!-- agent: horst-engineer.fast, depends_on: [4.2], touches: [] -->
 
