@@ -286,6 +286,11 @@ fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
                 format!(" {} ", name),
             ),
         };
+        // Global pause de-emphasizes the whole panel surface (borders and
+        // titles of panel and per-module blocks) with the same DIM modifier
+        // shift-dimming uses. Colors and geometry stay untouched, so hit rects
+        // and non-paused output are unaffected.
+        let border_style = dim_style(border_style, app.processing_paused);
 
         let block = Block::default()
             .title(title)
@@ -400,6 +405,7 @@ fn render_component_grid(
                 comp,
                 is_hovered,
                 is_shift_active,
+                app.processing_paused,
                 patch,
             );
             // Published rect is the real rendered cell (comp_chunks[col_i]).
@@ -467,6 +473,7 @@ fn render_component(
     comp: &crate::patch::HwComponent,
     is_hovered: bool,
     is_shift_active: bool,
+    paused: bool,
     patch: &crate::patch::Patch,
 ) {
     let (symbol, state_text, fg_color): (&str, String, Color) = match comp.kind {
@@ -541,14 +548,17 @@ fn render_component(
         }
     };
 
-    let hover_style = if is_hovered {
-        Style::default()
-            .fg(fg_color)
-            .bg(theme::active().muted)
-            .add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default().fg(fg_color)
-    };
+    let hover_style = dim_style(
+        if is_hovered {
+            Style::default()
+                .fg(fg_color)
+                .bg(theme::active().muted)
+                .add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(fg_color)
+        },
+        paused,
+    );
 
     // If this component owns a LED, render a bordered box (3 rows tall).
     if let Some(led_id) = &comp.led {
@@ -565,14 +575,17 @@ fn render_component(
         };
 
         // Hover styling applied to box content/border, same convention as text path.
-        let display_style = if is_hovered {
-            Style::default()
-                .fg(fg_color)
-                .bg(theme::active().muted)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().fg(fg_color)
-        };
+        let display_style = dim_style(
+            if is_hovered {
+                Style::default()
+                    .fg(fg_color)
+                    .bg(theme::active().muted)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().fg(fg_color)
+            },
+            paused,
+        );
 
         // controller-panels spec §"Box LED-associated elements": one bordered
         // cell, border colored by the element's kind, showing the element's
@@ -608,7 +621,7 @@ fn render_component(
             ]),
             Line::from(Span::styled(
                 state_text,
-                Style::default().fg(theme::active().muted),
+                dim_style(Style::default().fg(theme::active().muted), paused),
             )),
             Line::from(Span::raw("")), // third row filler so the 3‑row area is fully occupied
         ];
@@ -630,6 +643,18 @@ fn shift_color(group: ShiftGroup) -> Color {
     }
 }
 
+/// Apply the shared de-emphasis modifier (DIM) used by shift-dimming (panel
+/// borders) and graph highlight-dimming (unhighlighted edges/nodes). While
+/// global processing is paused the whole panel surface is dimmed this way;
+/// colors are left untouched so non-paused output stays byte-identical.
+fn dim_style(style: Style, paused: bool) -> Style {
+    if paused {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    }
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::styled(
         if app.prefix.is_some() {
@@ -639,6 +664,18 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         },
         Style::default().fg(theme::active().text),
     )];
+
+    // Explicit pause marker: a bold accent "stop" span so the paused state is
+    // visible even in short terminals where the status message is truncated.
+    if app.processing_paused {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            "PROCESSING PAUSED",
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     if let Some(group) = app.active_shift {
         spans.push(Span::raw(" | "));
@@ -3269,6 +3306,157 @@ mod switch_rendering_tests {
         );
         assert_ne!(fg, theme::Theme::mono().button);
         theme::set_test_theme(None);
+    }
+}
+
+#[cfg(test)]
+mod paused_rendering_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::patch::Patch;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn text_of(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn cells_with_dim(buffer: &ratatui::buffer::Buffer) -> Vec<(u16, u16)> {
+        let mut out = Vec::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer
+                    .cell((x, y))
+                    .unwrap()
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::DIM)
+                {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    fn arpeggio_app(paused: bool) -> App {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.processing_paused = paused;
+        app
+    }
+
+    #[test]
+    fn panels_render_dim_while_paused_header_and_status_normal() {
+        let mut app = arpeggio_app(true);
+        let buffer = buffer_for(&mut app, 80, 40);
+        assert!(
+            text_of(&buffer).contains("PROCESSING PAUSED"),
+            "status bar must show the pause marker"
+        );
+
+        let dim_rows: HashSet<u16> = cells_with_dim(&buffer)
+            .into_iter()
+            .map(|(_, y)| y)
+            .collect();
+        assert!(
+            !dim_rows.is_empty(),
+            "panel surface must be dimmed while paused"
+        );
+        // Layout: header 3 rows, main area, status bar 3 rows. Dimming is
+        // allowed only inside the panel main area.
+        let main_top = 3u16;
+        let main_bottom = 40u16.saturating_sub(3);
+        for &y in &dim_rows {
+            assert!(
+                (main_top..main_bottom).contains(&y),
+                "only panel rows may be dimmed (row {y}); header/status must stay normal"
+            );
+        }
+        assert!(
+            dim_rows
+                .iter()
+                .any(|&y| (main_top..main_bottom).contains(&y)),
+            "expected at least one dimmed panel cell"
+        );
+    }
+
+    #[test]
+    fn boxed_led_cell_dims_while_paused() {
+        let content = std::fs::read_to_string("fixtures/led_pairs.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.processing_paused = true;
+        let buffer = buffer_for(&mut app, 80, 40);
+        let boxed = buffer
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "◉" || c.symbol() == "○");
+        let cell = boxed.expect("boxed LED cell must render a LED glyph");
+        assert!(
+            cell.style().add_modifier.contains(Modifier::DIM),
+            "boxed LED glyph must be dimmed while paused"
+        );
+    }
+
+    #[test]
+    fn resuming_processing_un_dims_and_hides_marker() {
+        let mut app = arpeggio_app(true);
+        let paused_buf = buffer_for(&mut app, 80, 40);
+        assert!(!cells_with_dim(&paused_buf).is_empty());
+        assert!(text_of(&paused_buf).contains("PROCESSING PAUSED"));
+
+        app.processing_paused = false;
+        let resumed_buf = buffer_for(&mut app, 80, 40);
+        assert!(
+            cells_with_dim(&resumed_buf).is_empty(),
+            "no DIM anywhere once processing resumes (no shift active)"
+        );
+        assert!(!text_of(&resumed_buf).contains("PROCESSING PAUSED"));
+    }
+
+    #[test]
+    fn pause_roundtrip_is_byte_identical_to_never_paused() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut never = App::new();
+        never.load_patch(patch.clone());
+        let never_buf = buffer_for(&mut never, 80, 40);
+
+        let mut cycled = App::new();
+        cycled.load_patch(patch);
+        cycled.processing_paused = true;
+        cycled.processing_paused = false;
+        let cycled_buf = buffer_for(&mut cycled, 80, 40);
+
+        assert_eq!(never_buf, cycled_buf);
+    }
+
+    #[test]
+    fn pause_leaves_hit_rects_unchanged() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut normal = App::new();
+        normal.load_patch(patch.clone());
+        buffer_for(&mut normal, 80, 40);
+        let normal_rects = normal.component_rects.clone();
+
+        let mut paused = App::new();
+        paused.load_patch(patch);
+        paused.processing_paused = true;
+        buffer_for(&mut paused, 80, 40);
+        assert_eq!(normal_rects, paused.component_rects);
     }
 }
 
