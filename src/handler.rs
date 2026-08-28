@@ -121,6 +121,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.refresh_picker_entries();
                 return false;
             }
+            crossterm::event::KeyCode::Char('p') => {
+                app.toggle_processing_pause();
+                return false;
+            }
             crossterm::event::KeyCode::Char('t') if app.quad_focus == QuadFocus::Source => {
                 app.source_view_mode = match app.source_view_mode {
                     SourceViewMode::Raw => SourceViewMode::Prettified,
@@ -215,6 +219,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.refresh_picker_entries();
                 return false;
             }
+            crossterm::event::KeyCode::Char('p') => {
+                app.toggle_processing_pause();
+                return false;
+            }
             _ => {}
         }
     }
@@ -278,6 +286,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.picker_dir = std::env::current_dir().unwrap_or_default();
                 app.picker_index = 0;
                 app.refresh_picker_entries();
+                return false;
+            }
+            // Pause toggle stays live when source focused (global q/l level).
+            if matches!(key.code, crossterm::event::KeyCode::Char('p')) {
+                app.toggle_processing_pause();
                 return false;
             }
             match key.code {
@@ -345,6 +358,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.picker_dir = std::env::current_dir().unwrap_or_default();
             app.picker_index = 0;
             app.refresh_picker_entries();
+            false
+        }
+        crossterm::event::KeyCode::Char('p') => {
+            app.toggle_processing_pause();
             false
         }
         crossterm::event::KeyCode::Char('g') => {
@@ -421,16 +438,19 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     .and_then(|p| p.hw_components.get(idx))
                     .map(|c| c.id.clone());
                 if let Some(token) = token_id {
-                    if let Some(patch) = &mut app.patch {
-                        if let Some(comp) = patch.hw_components.get_mut(idx) {
-                            toggle_component(comp);
-                            app.status_message = format!("Toggled: {}", comp.label);
+                    if !app.processing_paused {
+                        if let Some(patch) = &mut app.patch {
+                            if let Some(comp) = patch.hw_components.get_mut(idx) {
+                                toggle_component(comp);
+                                app.status_message = format!("Toggled: {}", comp.label);
+                            }
                         }
                     }
                     // Commit interaction: toggle AND select. Selection jumps
                     // source_scroll to first occurrence via App::select_component.
                     // Jump happens even while viewer is closed so reopen lands
                     // at the correct line (initial-position rule reapplies).
+                    // While paused the toggle is skipped but selection still works.
                     app.select_component(token);
                 }
             }
@@ -532,10 +552,12 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     .and_then(|p| p.hw_components.get(idx))
                     .map(|c| c.id.clone());
                 if let Some(token) = token_id {
-                    if let Some(patch) = &mut app.patch {
-                        if let Some(comp) = patch.hw_components.get_mut(idx) {
-                            toggle_component(comp);
-                            app.status_message = format!("Toggled: {}", comp.label);
+                    if !app.processing_paused {
+                        if let Some(patch) = &mut app.patch {
+                            if let Some(comp) = patch.hw_components.get_mut(idx) {
+                                toggle_component(comp);
+                                app.status_message = format!("Toggled: {}", comp.label);
+                            }
                         }
                     }
                     app.select_component(token);
@@ -582,18 +604,22 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
         }
         MouseEventKind::ScrollUp => {
             if let Some(idx) = hit {
-                if let Some(patch) = &mut app.patch {
-                    if let Some(comp) = patch.hw_components.get_mut(idx) {
-                        adjust_value(comp, 0.05);
+                if !app.processing_paused {
+                    if let Some(patch) = &mut app.patch {
+                        if let Some(comp) = patch.hw_components.get_mut(idx) {
+                            adjust_value(comp, 0.05);
+                        }
                     }
                 }
             }
         }
         MouseEventKind::ScrollDown => {
             if let Some(idx) = hit {
-                if let Some(patch) = &mut app.patch {
-                    if let Some(comp) = patch.hw_components.get_mut(idx) {
-                        adjust_value(comp, -0.05);
+                if !app.processing_paused {
+                    if let Some(patch) = &mut app.patch {
+                        if let Some(comp) = patch.hw_components.get_mut(idx) {
+                            adjust_value(comp, -0.05);
+                        }
                     }
                 }
             }
@@ -2086,5 +2112,106 @@ mod tests {
         let bot = app2.source_scroll;
         assert!(top <= bot, "minimap top <= bottom");
         assert!(top <= 5, "top near BOF");
+    }
+
+    // ── Task 2.1: global processing pause (`p`) ──
+
+    #[test]
+    fn p_toggles_processing_pause_with_status() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(app.processing_paused);
+        assert_eq!(app.status_message, "Processing paused (p to resume)");
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(!app.processing_paused);
+        assert_eq!(app.status_message, "Processing enabled (p to pause)");
+    }
+
+    #[test]
+    fn p_toggles_pause_while_graph_open() {
+        let mut app = app_with_fixture();
+        app.open_graph();
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(app.processing_paused, "p live on the graph surface");
+        assert!(app.showing_graph);
+        assert_eq!(app.status_message, "Processing paused (p to resume)");
+    }
+
+    #[test]
+    fn p_noop_while_picker_open() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(!app.processing_paused, "picker swallows p");
+    }
+
+    #[test]
+    fn enter_and_space_do_not_mutate_while_paused() {
+        let mut app = app_with_fixture();
+        app.hovered_component = Some(0);
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "Enter must not toggle while paused"
+        );
+        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "Space must not toggle while paused"
+        );
+        // Selection still works while paused.
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+    }
+
+    #[test]
+    fn mouse_click_toggle_blocked_while_paused() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "mouse toggle blocked while paused"
+        );
+        // Hover and selection keep working.
+        assert_eq!(app.hovered_component, Some(0));
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+    }
+
+    #[test]
+    fn scroll_adjustment_blocked_while_paused() {
+        let content = "[pot]\n    pot = P1.1\n    output = _X\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!(v.abs() < 1e-6, "scroll blocked while paused"),
+            _ => panic!("expected Value state"),
+        }
+        handle_mouse_event(mouse(MouseEventKind::ScrollDown, 5, 1), &mut app);
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!(v.abs() < 1e-6, "scroll blocked while paused"),
+            _ => panic!("expected Value state"),
+        }
+    }
+
+    #[test]
+    fn p_toggles_pause_while_viewer_open_source_focused() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(app.processing_paused, "p live in the source pane");
+        assert_eq!(app.status_message, "Processing paused (p to resume)");
     }
 }
