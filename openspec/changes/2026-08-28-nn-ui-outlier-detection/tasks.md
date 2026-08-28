@@ -6,7 +6,7 @@
       · BAD_POOL currently E/B-sourced only → 50 B-sourced outliers escape the 8.0 rule and any model overfits the generator (design D3)
       · add near-distance + cross-controller + non-E cases; keep `random.Random(SEED)` determinism; regenerate corpus/features.csv in the same run
       · verify: `python3 tools/build_features.py` regenerates the CSV (schema unchanged), and `git diff corpus/features.csv` shows label rebalancing, not schema drift
-- [ ] 1.2 Offline fit + evaluation script → distilled artifact <!-- agent: devops-engineer.build, depends_on: [1.1], touches: [tools/fit_outlier_model.py, tools/outlier_artifact.*] -->
+- [x] 1.2 Offline fit + evaluation script → distilled artifact <!-- agent: devops-engineer.build, depends_on: [1.1], touches: [tools/fit_outlier_model.py, tools/outlier_artifact.*] -->
       · stdlib-only `tools/fit_outlier_model.py`: fit bounded decision table (≤ few KB, design D1) on rebalanced features.csv; holdout precision/recall report vs the current 8.0 rule; emit the artifact file consumed by `include_str!`
       · gate: precision ≥ 0.60 at recall ≥ 0.86 on holdout; fallback row preserves the threshold rule (design D1)
       · verify: script exits 0 and prints the precision/recall report meeting the gate; artifact file exists with a stable byte content
