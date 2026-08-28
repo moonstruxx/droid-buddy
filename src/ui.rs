@@ -969,10 +969,12 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         area,
         graph,
         &node_rects,
-        None,
-        Some(disabled_circuits),
-        diff_report_ref,
-        diff_showing,
+        GraphEdgeOpts {
+            highlight: None,
+            disabled: Some(disabled_circuits),
+            diff_report: diff_report_ref,
+            diff_showing,
+        },
     );
     for (i, node) in graph.nodes.iter().enumerate() {
         let node_rect = node_rects[i];
@@ -1134,12 +1136,6 @@ fn cable_kind(graph: &Graph, cable: &str) -> CableKind {
     }
 }
 
-/// The fg color for a cable's edge: the topology-error highlight when any
-/// issue references the cable, else the inferred-kind token.
-fn cable_color(graph: &Graph, cable: &str) -> Color {
-    cable_color_with_diff(graph, cable, None, false)
-}
-
 fn cable_color_with_diff(
     graph: &Graph,
     cable: &str,
@@ -1217,7 +1213,17 @@ fn polyline_cells(x_s: i16, y_s: i16, x_t: i16, y_t: i16) -> Vec<(i16, i16)> {
 /// port cells for a clean join. When two polylines share a cell the later
 /// edge in `graph.edges` wins, keeping crossings deterministic.
 fn render_graph_edges(frame: &mut Frame, area: Rect, graph: &Graph, node_rects: &[Rect]) {
-    render_graph_edges_with_highlight(frame, area, graph, node_rects, None, None, None, false);
+    render_graph_edges_with_highlight(frame, area, graph, node_rects, GraphEdgeOpts::default());
+}
+
+/// Grouped options for `render_graph_edges_with_highlight` to stay under
+/// clippy's 7-argument limit.
+#[derive(Default)]
+struct GraphEdgeOpts<'a> {
+    highlight: Option<&'a HashSet<String>>,
+    disabled: Option<&'a HashSet<(String, usize)>>,
+    diff_report: Option<&'a crate::diff::DiffReport>,
+    diff_showing: bool,
 }
 
 fn render_graph_edges_with_highlight(
@@ -1225,10 +1231,7 @@ fn render_graph_edges_with_highlight(
     area: Rect,
     graph: &Graph,
     node_rects: &[Rect],
-    highlight: Option<&HashSet<String>>,
-    disabled: Option<&HashSet<(String, usize)>>,
-    diff_report: Option<&crate::diff::DiffReport>,
-    diff_showing: bool,
+    opts: GraphEdgeOpts<'_>,
 ) {
     // kitty-gfx optional: when feature enabled and terminal is kitty, we would
     // emit inline image escapes instead of box-drawing. Fallback is box-drawing.
@@ -1237,6 +1240,12 @@ fn render_graph_edges_with_highlight(
         // Stub: kitty image rendering would replace this path; for now fallback
         // to box-drawing so feature flag never breaks non-kitty terminals.
     }
+    let GraphEdgeOpts {
+        highlight,
+        disabled,
+        diff_report,
+        diff_showing,
+    } = opts;
     for edge in &graph.edges {
         let (Some(src), Some(sink)) = (
             graph.nodes.iter().position(|n| n.id == edge.source),
@@ -1731,10 +1740,12 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
         inner,
         &graph,
         &node_rects,
-        highlight_edges.as_ref(),
-        Some(&disabled),
-        None,
-        false,
+        GraphEdgeOpts {
+            highlight: highlight_edges.as_ref(),
+            disabled: Some(&disabled),
+            diff_report: None,
+            diff_showing: false,
+        },
     );
     for (i, node) in graph.nodes.iter().enumerate() {
         let nr = node_rects[i];
@@ -4189,11 +4200,23 @@ mod graph_view_tests {
             validation: vec![],
             ..Default::default()
         };
-        assert_eq!(cable_color(&graph, "_CLK"), Color::Cyan, "control");
-        assert_eq!(cable_color(&graph, "_AUD"), Color::Green, "audio");
-        assert_eq!(cable_color(&graph, "_NOTE"), Color::Magenta, "midi");
         assert_eq!(
-            cable_color(&graph, "_MISSING"),
+            cable_color_with_diff(&graph, "_CLK", None, false),
+            Color::Cyan,
+            "control"
+        );
+        assert_eq!(
+            cable_color_with_diff(&graph, "_AUD", None, false),
+            Color::Green,
+            "audio"
+        );
+        assert_eq!(
+            cable_color_with_diff(&graph, "_NOTE", None, false),
+            Color::Magenta,
+            "midi"
+        );
+        assert_eq!(
+            cable_color_with_diff(&graph, "_MISSING", None, false),
             Color::DarkGray,
             "no producing edge -> unknown"
         );
@@ -4212,14 +4235,17 @@ mod graph_view_tests {
             validation: vec![],
             ..Default::default()
         };
-        assert_eq!(cable_color(&graph, "_CLK"), Color::Cyan);
+        assert_eq!(
+            cable_color_with_diff(&graph, "_CLK", None, false),
+            Color::Cyan
+        );
         graph.validation.push(TopologyIssue {
             cable: "_CLK".into(),
             severity: TopologySeverity::Error,
             message: "n -> 1".into(),
         });
         assert_eq!(
-            cable_color(&graph, "_CLK"),
+            cable_color_with_diff(&graph, "_CLK", None, false),
             Color::Red,
             "a referenced cable renders with the error token"
         );
@@ -4562,7 +4588,7 @@ mod graph_view_tests {
         }
 
         // _MOD is not incident to the disabled node: kind color, no dim.
-        let kind_color = cable_color(app.graph.as_ref().unwrap(), "_MOD");
+        let kind_color = cable_color_with_diff(app.graph.as_ref().unwrap(), "_MOD", None, false);
         let mod_cells = cable_owned_cells(&buf, &app, "_MOD");
         assert!(!mod_cells.is_empty(), "_MOD polyline must draw owned cells");
         for cell in mod_cells {

@@ -324,8 +324,8 @@ impl BindingFeatures {
         let sink_xy = geometry.resolve(sink_token)?;
         let euclidean = RackGeometry::distance(src_xy, sink_xy);
         let manhattan = {
-            let dx = (src_xy.0 as i16 - sink_xy.0 as i16).abs() as u16;
-            let dy = (src_xy.1 as i16 - sink_xy.1 as i16).abs() as u16;
+            let dx = (src_xy.0 as i16 - sink_xy.0 as i16).unsigned_abs();
+            let dy = (src_xy.1 as i16 - sink_xy.1 as i16).unsigned_abs();
             (dx + dy).min(255) as u8
         };
         let adjacent = RackGeometry::is_adjacent(src_xy, sink_xy);
@@ -783,8 +783,8 @@ mod tests {
         assert_eq!(feat.src_xy, geo.resolve("E4.4").unwrap());
         assert_eq!(feat.sink_xy, geo.resolve("M4.2").unwrap());
         // Manhattan should be |dx|+|dy|.
-        let dx = (feat.src_xy.0 as i16 - feat.sink_xy.0 as i16).abs() as u8;
-        let dy = (feat.src_xy.1 as i16 - feat.sink_xy.1 as i16).abs() as u8;
+        let dx = (feat.src_xy.0 as i16 - feat.sink_xy.0 as i16).unsigned_abs() as u8;
+        let dy = (feat.src_xy.1 as i16 - feat.sink_xy.1 as i16).unsigned_abs() as u8;
         assert_eq!(feat.manhattan, dx + dy);
         // Kind encoding.
         assert_eq!(feat.src_kind, token_kind_u8("E4.4"));
