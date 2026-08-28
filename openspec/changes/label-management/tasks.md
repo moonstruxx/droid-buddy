@@ -7,7 +7,7 @@
 ## 2. App state & persistence
 
 - [x] 2.1 Wire `LabelStore` into `App` (`label_store`, `editing: Option<EditState>`, `load_patch` bucket load, `recompute_influence` for overlay status) <!-- agent: rusty-engineer.build, depends_on: [1.3], touches: [src/app.rs] -->
-- [ ] 2.2 Add overlay draft lifecycle (`Enter` save + atomic rewrite, `Esc` cancel, `1..N` layer cycle preserving per-layer drafts) with unit tests <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/app.rs] -->
+- [x] 2.2 Add overlay draft lifecycle (`Enter` save + atomic rewrite, `Esc` cancel, `1..N` layer cycle preserving per-layer drafts) with unit tests <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/app.rs] -->
 
 ## 3. Interaction — overlay as event eater
 
