@@ -3675,3 +3675,79 @@ fn visual_diff_changed_node_marker_snapshot() {
         }
     }
 }
+
+// ── optimizer menu + preview snapshots (task 3.2) ───────────────────────────
+
+/// Open the optimizer menu on a fixture app via `g o` (the handler path, so
+/// the snapshot covers real candidate generation + state).
+fn optimizer_app_from_fixture(name: &str) -> App {
+    let mut app = app_from_fixture(name);
+    handle_event(key(KeyCode::Char('g')), &mut app);
+    handle_event(key(KeyCode::Char('o')), &mut app);
+    assert!(app.optimizer.is_some(), "optimizer menu should be open");
+    app
+}
+
+#[test]
+fn visual_optimizer_menu_snapshot() {
+    // optimizer_latency.ini: scrambled chain so candidates differ from the
+    // identity; the menu lists them with before/after avg/max/back-edges.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [60u16, 100] {
+            let mut app = optimizer_app_from_fixture("optimizer_latency");
+            let buf = buffer_for(&mut app, width, 30);
+            let ansi = buffer_to_ansi(&buf);
+            assert!(
+                ansi.contains("Optimizer"),
+                "{theme_name} {width}: menu title"
+            );
+            assert!(
+                ansi.contains("back-edges"),
+                "{theme_name} {width}: candidate summary line"
+            );
+            assert!(
+                ansi.contains("avg"),
+                "{theme_name} {width}: avg before→after"
+            );
+            insta::with_settings!({snapshot_suffix => format!("optimizer_menu_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
+#[test]
+fn visual_optimizer_preview_recolor_snapshot() {
+    // Previewing the best candidate reorders sections + rebuilds the graph;
+    // with latency coloring on, the ramp recolors (wrapped edges cool down).
+    // Drive the preview through the App API (menu closed) so the snapshot
+    // subject is the recolored graph face, not the menu modal.
+    for &theme_name in theme::THEMES {
+        if theme_name == "terminal" {
+            continue; // faces already covered; keep the matrix light
+        }
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = app_from_fixture("optimizer_latency");
+        assert!(app.open_optimizer(), "{theme_name}: menu opens");
+        app.optimizer_preview(0);
+        assert_eq!(
+            app.optimizer.as_ref().unwrap().previewing,
+            Some(0),
+            "{theme_name}: candidate 0 previewed"
+        );
+        // Drop the menu so the graph face is the snapshot subject; the
+        // previewed section order stays applied (the writer's source of truth).
+        app.optimizer = None;
+        app.open_graph();
+        let buf = buffer_for(&mut app, 100, 40);
+        let ansi = buffer_to_ansi(&buf);
+        assert!(
+            ansi.contains("╭"),
+            "{theme_name}: graph node frame in preview"
+        );
+        insta::with_settings!({snapshot_suffix => format!("optimizer_preview_{theme_name}")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+}
