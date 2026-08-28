@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -159,6 +160,11 @@ pub struct App {
     pub filtered_node_rects: Vec<(usize, Rect)>,
     /// In-progress drag for the FILTERED pane, mirroring `graph_drag`.
     pub filtered_drag: Option<GraphDrag>,
+    /// Circuits whose processing is disabled, keyed by `(circuit name,
+    /// instance index)`. Disabled circuits stay influenced but act as a dead
+    /// end in the influence walk: nothing downstream of them is reached.
+    /// Cleared on every `load_patch`.
+    pub disabled_circuits: HashSet<(String, usize)>,
 }
 
 impl App {
@@ -203,6 +209,7 @@ impl App {
             filtered_cluster_rects: Vec::new(),
             filtered_node_rects: Vec::new(),
             filtered_drag: None,
+            disabled_circuits: HashSet::new(),
         }
     }
 
@@ -244,6 +251,7 @@ impl App {
         self.minimap_rect = None;
         self.source_pane_rect = None;
         self.processing_paused = false;
+        self.disabled_circuits.clear();
     }
 
     /// Build the signal-flow graph from the current patch and run a fresh full
@@ -385,7 +393,8 @@ impl App {
     /// Recompute the influence subtree for the currently selected hardware token.
     ///
     /// Derivation follows `Patch::hw_token_to_vars` (boundary-aware scan) and
-    /// `Patch::influence_subtree` (structural hops, cycle-safe, deterministic).
+    /// `Patch::influence_subtree_with_disabled` (structural hops, cycle-safe,
+    /// deterministic; circuits in `disabled_circuits` are dead ends).
     /// When a non-empty root set exists the method builds `filtered_graph` via
     /// `Graph::filtered_influence` and solves it independently with
     /// `layout::solve_filtered` for a compact FILTERED pane, applies highlights
@@ -410,7 +419,7 @@ impl App {
             return;
         }
         self.active_modifier_var = Some(vars[0].clone());
-        let subtree = patch.influence_subtree(&vars);
+        let subtree = patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits);
         self.influence = Some(subtree.clone());
         // Only (re)build full-graph state when a graph already exists or quad
         // is open. Otherwise keep influence without eagerly constructing a graph
@@ -474,6 +483,24 @@ impl App {
         } else {
             self.status_message = String::from("Processing enabled (p to pause)");
         }
+    }
+
+    /// Toggle per-circuit processing for the circuit instance `(name,
+    /// instance)`, returning the new disabled state. Influence is recomputed
+    /// so the set immediately reflects the dead end. While globally paused
+    /// `recompute_influence` keeps influence cleared, so the toggle only
+    /// flips the set.
+    pub fn toggle_circuit_processing(&mut self, name: &str, instance: usize) -> bool {
+        let key = (name.to_string(), instance);
+        let now_disabled = if self.disabled_circuits.contains(&key) {
+            self.disabled_circuits.remove(&key);
+            false
+        } else {
+            self.disabled_circuits.insert(key);
+            true
+        };
+        self.recompute_influence();
+        now_disabled
     }
 
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
@@ -899,5 +926,70 @@ mod tests {
             "no influence computed while paused"
         );
         assert!(app.active_modifier_var.is_none());
+    }
+
+    #[test]
+    fn new_app_has_empty_disabled_circuits() {
+        let app = App::new();
+        assert!(app.disabled_circuits.is_empty());
+    }
+
+    #[test]
+    fn load_patch_clears_disabled_circuits() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        assert!(app.toggle_circuit_processing("arpeggio", 0));
+        assert_eq!(app.disabled_circuits.len(), 1);
+
+        let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(second);
+        assert!(
+            app.disabled_circuits.is_empty(),
+            "disabled set reset on load"
+        );
+    }
+
+    #[test]
+    fn disabled_circuit_cuts_influence_downstream_but_keeps_own_cells() {
+        // B1.1 -> _CHAIN1 -> [copy](9) -> _CHAIN2 -> [switch](5) in
+        // source_navigation.ini. Disabling the intermediate copy must leave it
+        // (and its hardware cells) influenced while cutting the switch out.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+
+        let sub = app.influence.as_ref().unwrap();
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 9)));
+        assert!(sub.influenced_nodes.contains(&(String::from("switch"), 5)));
+        assert!(sub.influenced_edges.contains("_CHAIN1"));
+        assert!(sub.influenced_edges.contains("_CHAIN2"));
+
+        let now_disabled = app.toggle_circuit_processing("copy", 9);
+        assert!(now_disabled, "toggle returns the new disabled state");
+        assert!(app.disabled_circuits.contains(&(String::from("copy"), 9)));
+
+        let sub = app.influence.as_ref().unwrap();
+        assert!(
+            sub.influenced_nodes.contains(&(String::from("copy"), 9)),
+            "disabled circuit itself stays influenced"
+        );
+        assert!(
+            !sub.influenced_nodes.contains(&(String::from("switch"), 5)),
+            "downstream circuit cut from influence"
+        );
+        assert!(sub.influenced_edges.contains("_CHAIN1"));
+        assert!(
+            !sub.influenced_edges.contains("_CHAIN2"),
+            "produced cable of disabled circuit not propagated"
+        );
+
+        let now_disabled = app.toggle_circuit_processing("copy", 9);
+        assert!(!now_disabled, "second toggle re-enables");
+        assert!(app.disabled_circuits.is_empty());
+        let sub = app.influence.as_ref().unwrap();
+        assert!(sub.influenced_nodes.contains(&(String::from("switch"), 5)));
+        assert!(sub.influenced_edges.contains("_CHAIN2"));
     }
 }

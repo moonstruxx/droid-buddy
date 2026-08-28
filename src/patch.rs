@@ -769,16 +769,28 @@ impl Patch {
         vars
     }
 
-    /// Forward BFS influence walk from `root_vars`.
+    /// Forward BFS influence walk from `root_vars` with no circuits disabled.
+    pub fn influence_subtree(&self, root_vars: &[String]) -> InfluenceSubtree {
+        self.influence_subtree_with_disabled(root_vars, &HashSet::new())
+    }
+
+    /// Forward BFS influence walk from `root_vars`, treating every circuit in
+    /// `disabled` as a dead end.
     ///
     /// Queue is cables (`VecDeque<String>`). `visited_cables` + `visited_nodes`
     /// make it cycle-safe. Iteration over cable sinks is deterministic:
     /// sinks are collected per-param and sorted by `(section_name, param_key,
     /// section_index)` (D9). Hop eligibility is structural — any sink circuit
     /// that has an output port (`circuit_outputs[sink_idx]` non-empty) — not an
-    /// allowlist. Leaf termination when sink has no output.
-    /// Pure, no terminal IO.
-    pub fn influence_subtree(&self, root_vars: &[String]) -> InfluenceSubtree {
+    /// allowlist. A circuit in `disabled` is still marked influenced, but its
+    /// produced cables are never enqueued, so downstream influence stops there
+    /// (per-circuit processing toggle). Leaf termination when sink has no
+    /// output. Pure, no terminal IO.
+    pub fn influence_subtree_with_disabled(
+        &self,
+        root_vars: &[String],
+        disabled: &HashSet<NodeId>,
+    ) -> InfluenceSubtree {
         if root_vars.is_empty() {
             return InfluenceSubtree::default();
         }
@@ -845,13 +857,17 @@ impl Patch {
                 }
                 influenced_nodes.insert(nid.clone());
                 // Structural hop: if sink has output ports, queue its outputs.
-                if let Some(outputs) = self.circuit_outputs.get(sink_idx) {
-                    if !outputs.is_empty() {
-                        let mut sorted_outputs = outputs.clone();
-                        sorted_outputs.sort();
-                        for out in sorted_outputs {
-                            if !visited_cables.contains(&out) && !queue.contains(&out) {
-                                queue.push_back(out);
+                // A disabled circuit is a dead end — its own cells stay
+                // influenced, but nothing downstream of it is reached.
+                if !disabled.contains(&nid) {
+                    if let Some(outputs) = self.circuit_outputs.get(sink_idx) {
+                        if !outputs.is_empty() {
+                            let mut sorted_outputs = outputs.clone();
+                            sorted_outputs.sort();
+                            for out in sorted_outputs {
+                                if !visited_cables.contains(&out) && !queue.contains(&out) {
+                                    queue.push_back(out);
+                                }
                             }
                         }
                     }
@@ -2340,6 +2356,55 @@ button = B1.3
         let sub = patch.influence_subtree(&[String::from("_ORPHAN")]);
         assert!(sub.influenced_edges.contains("_ORPHAN"));
         assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+    }
+
+    #[test]
+    fn influence_disabled_circuit_is_dead_end_keeps_own_cells() {
+        // copy(0) on the path _A -> _B is disabled: it stays influenced, but
+        // sink must no longer be reached and _B must not be recorded.
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let disabled: HashSet<NodeId> = HashSet::from([(String::from("copy"), 0)]);
+        let sub = patch.influence_subtree_with_disabled(&[String::from("_A")], &disabled);
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+        assert!(!sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_edges.contains("_A"));
+        assert!(!sub.influenced_edges.contains("_B"));
+    }
+
+    #[test]
+    fn influence_disabled_repeated_instance_only_cuts_that_instance() {
+        // Two parallel copy instances consuming _A: disabling instance 1 must
+        // not affect instance 0's propagation through _B.
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[copy]\n    input = _A\n    output = _C\n[sinkb]\n    input = _B\n[sinkc]\n    input = _C\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let disabled: HashSet<NodeId> = HashSet::from([(String::from("copy"), 1)]);
+        let sub = patch.influence_subtree_with_disabled(&[String::from("_A")], &disabled);
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 1)));
+        assert!(sub.influenced_nodes.contains(&(String::from("sinkb"), 0)));
+        assert!(!sub.influenced_nodes.contains(&(String::from("sinkc"), 0)));
+        assert!(sub.influenced_edges.contains("_B"));
+        assert!(!sub.influenced_edges.contains("_C"));
+    }
+
+    #[test]
+    fn influence_subtree_with_empty_disabled_matches_default_walk() {
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let sub = patch.influence_subtree(&[String::from("_A")]);
+        let sub_empty =
+            patch.influence_subtree_with_disabled(&[String::from("_A")], &HashSet::new());
+        assert_eq!(sub, sub_empty);
     }
 
     #[test]

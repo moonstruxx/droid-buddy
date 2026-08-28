@@ -19,7 +19,7 @@ use ratatui::Terminal;
 
 use crate::app::{App, SourceViewMode, ViewerFocus};
 use crate::handler::{handle_event, handle_mouse_event};
-use crate::patch::{Patch, ShiftGroup};
+use crate::patch::{ComponentState, Patch, ShiftGroup};
 use crate::ui::render;
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -1471,6 +1471,17 @@ fn first_token_style(buffer: &Buffer, token: &str) -> Option<Style> {
     None
 }
 
+/// Foreground color of the first cell carrying `glyph`, or None. Row-major,
+/// so with a switch panel first the value-switch `◉` is found before a
+/// knob's `◉`.
+fn glyph_fg(buffer: &Buffer, glyph: &str) -> Option<Color> {
+    buffer
+        .content()
+        .iter()
+        .find(|c| c.symbol() == glyph)
+        .map(|c| c.fg)
+}
+
 /// Whether any box-drawing glyph is drawn in `fg` (and `modifier`, when given).
 fn has_border_glyph(buffer: &Buffer, fg: Color, modifier: Option<Modifier>) -> bool {
     const GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
@@ -2794,4 +2805,89 @@ fn visual_modifier_shift_plus_modifier_snapshot() {
             });
         }
     }
+}
+
+// ── switch detail regression harness (task 1.3) ──────────────────────────
+// switch_value.ini: an S-token Switch in `ComponentState::Value` renders
+// `◉ {:.0}%` in the `switch` token. classic keeps switch == button so its
+// face is byte-identical to the pre-token rendering; mono's DarkGray switch
+// provably differs from the White button/knob in the same grid. S1.2 pins
+// the retained `▣ ON` baseline beside the percentage. HTML row mirrors the
+// visual gallery row convention.
+
+fn switch_value_app() -> App {
+    let mut app = app_from_fixture("switch_value");
+    for comp in &mut app.patch.as_mut().unwrap().hw_components {
+        match comp.id.as_str() {
+            "S1.1" => comp.state = ComponentState::Value(0.35),
+            "S1.2" => comp.state = ComponentState::On,
+            _ => {}
+        }
+    }
+    app
+}
+
+#[test]
+fn visual_switch_value_rendering_snapshot() {
+    // 1.3: switch_value.ini × classic/mono × 80/120 — the switch detail story
+    // lives in classic (byte-identical baseline) and mono (switch token
+    // distinct from button); terminal resets every token so it adds nothing.
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+        for width in [80u16, 120] {
+            let mut app = switch_value_app();
+            let buf = buffer_for(&mut app, width, 30);
+            let ansi = buffer_to_ansi(&buf);
+            let html = buffer_to_html(&buf);
+
+            // Face: the Value-state switch shows the percentage (knob parity)
+            // and the On switch keeps the ▣ ON baseline beside it.
+            assert!(
+                ansi.contains("35%"),
+                "{theme_name} {width}: Value switch percentage rendered\n{ansi}"
+            );
+            assert!(
+                ansi.contains("▣") && ansi.contains("ON"),
+                "{theme_name} {width}: On switch baseline retained\n{ansi}"
+            );
+            // Style: the value-switch glyph takes the switch token (mono's
+            // DarkGray, distinct from the White button/knob in this frame).
+            assert_eq!(
+                glyph_fg(&buf, "◉"),
+                Some(t.switch),
+                "{theme_name} {width}: value glyph uses the switch token"
+            );
+            if theme_name == "classic" {
+                assert_eq!(
+                    t.switch, t.button,
+                    "classic: switch token byte-identical to button"
+                );
+            } else {
+                assert_ne!(
+                    t.switch, t.button,
+                    "mono: switch token distinct from button"
+                );
+            }
+            assert!(!html.is_empty(), "{theme_name} {width}: html non-empty");
+
+            insta::with_settings!({snapshot_suffix => format!("switch_value_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+
+    // Side-by-side HTML gallery row (classic/mono columns) for gallery parity.
+    let mut cells: Vec<String> = Vec::new();
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = switch_value_app();
+        let buf = buffer_for(&mut app, 100, 30);
+        let html = buffer_to_html(&buf);
+        cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
+    }
+    let row = format!("<tr>{}</tr>", cells.join(""));
+    assert!(row.contains("<td"), "switch html row has cells");
+    assert!(row.len() > 200, "switch html row substantial");
+    insta::assert_snapshot!("switch_value_html_row", row);
 }
