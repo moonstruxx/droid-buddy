@@ -8,6 +8,7 @@ use ratatui::style::Color;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub button: Color,
+    pub switch: Color,
     pub knob: Color,
     pub cv_in: Color,
     pub cv_out: Color,
@@ -54,6 +55,9 @@ impl Theme {
     pub const fn classic() -> Self {
         Self {
             button: Color::White,
+            // Byte-identical to the previous button-color rendering of Switch
+            // cells so the classic palette keeps existing snapshots unchanged.
+            switch: Color::White,
             knob: Color::Magenta,
             cv_in: Color::Cyan,
             cv_out: Color::Green,
@@ -98,6 +102,7 @@ impl Theme {
     pub const fn terminal() -> Self {
         Self {
             button: Color::Reset,
+            switch: Color::Reset,
             knob: Color::Reset,
             cv_in: Color::Reset,
             cv_out: Color::Reset,
@@ -142,6 +147,9 @@ impl Theme {
     pub const fn mono() -> Self {
         Self {
             button: Color::White,
+            // DarkGray so switches stay tellable apart from buttons (White)
+            // in the grayscale palette.
+            switch: Color::DarkGray,
             knob: Color::White,
             cv_in: Color::Gray,
             cv_out: Color::Gray,
@@ -304,6 +312,7 @@ mod tests {
     fn classic_matches_previous_hardcoded_colors() {
         let t = Theme::classic();
         assert_eq!(t.button, Color::White);
+        assert_eq!(t.switch, Color::White);
         assert_eq!(t.knob, Color::Magenta);
         assert_eq!(t.cv_in, Color::Cyan);
         assert_eq!(t.cv_out, Color::Green);
@@ -343,6 +352,7 @@ mod tests {
         let t = Theme::terminal();
         for color in [
             t.button,
+            t.switch,
             t.knob,
             t.cv_in,
             t.cv_out,
@@ -378,6 +388,22 @@ mod tests {
         ] {
             assert_eq!(color, Color::Reset);
         }
+    }
+
+    #[test]
+    fn switch_token_resolves_per_palette() {
+        let classic = Theme::classic();
+        let terminal = Theme::terminal();
+        let mono = Theme::mono();
+        // Classic keeps the previous switch/button color byte-identical so
+        // existing snapshots don't change.
+        assert_eq!(classic.switch, Color::White);
+        assert_eq!(classic.switch, classic.button);
+        // Terminal defers every token to the user's terminal.
+        assert_eq!(terminal.switch, Color::Reset);
+        // Mono gives switches their own shade, distinct from button's gray.
+        assert_eq!(mono.switch, Color::DarkGray);
+        assert_ne!(mono.switch, mono.button);
     }
 
     #[test]
