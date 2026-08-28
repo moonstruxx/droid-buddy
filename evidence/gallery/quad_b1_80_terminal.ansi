@@ -3,34 +3,34 @@
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Panels ──────────────────────────────────────┐┌ Source [raw] ────────────────┐
 │┌ P2B8 ──────────────────────────────────────┐││    button = B1.1             │
-││     ○ B1.1          ○ L1.1                 │││    output = _TRIG            │
+││  ○ Button B1.1    ○ LED L1.1               │││    output = _TRIG            │
 ││       OFF             OFF                  │││                              │
-││     ○ B1.2          ○ L1.2                 │││[copy]                        │
+││  ○ Button B1.2    ○ LED L1.2               │││[copy]                        │
 ││       OFF             OFF                  │││    input = B1.1              │
 ││                                            │││    output = _EXTRA           │
-││     ○ B1.3          ○ L1.3                 │││                              │
+││  ○ Button B1.3    ○ LED L1.3               │││                              │
 ││       OFF             OFF                  │││[clocktool]                   │
-││     ○ B1.4          ○ L1.4                 │││    output = _BASE            │
+││  ○ Button B1.4    ○ LED L1.4               │││    output = _BASE            │
 ││       OFF             OFF                  │││                              │
 ││                                            │││# direct consumption: _BASE co│
-││     ○ B1.5          ○ L1.5                 │││[copy]                        │
+││  ○ Button B1.5    ○ LED L1.5               │││[copy]                        │
 ││       OFF             OFF                  │││    input = _BASE             │
-││     ○ B1.6          ○ L1.6                 │││    output = O1               │
+││  ○ Button B1.6    ○ LED L1.6               │││    output = O1               │
 ││       OFF             OFF                  │││                              │
 ││                                            │││[contour]                     │
-││     ○ B1.7          ○ L1.7                 │││    input = _BASE             │
+││  ○ Button B1.7    ○ LED L1.7               │││    input = _BASE             │
 ││       OFF             OFF                  │││                              │
-││     ○ B1.8          ○ L1.8                 │││# copy chain: _TRIG -> _COPY1 │
+││  ○ Button B1.8    ○ LED L1.8               │││# copy chain: _TRIG -> _COPY1 │
 ││       OFF             OFF                  │││[copy]                        │
 ││                                            │││    input = _TRIG             │
-││     ◉ P1.1          ◉ P1.2                 │││    output = _COPY1           │
+││   ◉ Pot P1.1      ◉ Pot P1.2               │││    output = _COPY1           │
 ││       0%              0%                   │││                              │
 │└────────────────────────────────────────────┘││[copy]                        │
 │┌ CV I/O ────────────────────────────────────┐││    input = _COPY1            │
-││    ← Copy O1    ← Quantizer O2             │││    output = _COPY2           │
+││   ← Output O1     ← Output O2              │││    output = _COPY2           │
 ││     CV OUT          CV OUT                 │││                              │
 ││                                            │││[contour]                     │
-││   ← Switch O4                              │││    input = _COPY2            │
+││   ← Output O4                              │││    input = _COPY2            │
 ││     CV OUT                                 │││                              │
 ││                                            │││# indirect via switch: _TRIG -│
 │└────────────────────────────────────────────┘││[switch]                      │

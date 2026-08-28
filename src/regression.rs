@@ -1657,11 +1657,27 @@ fn visual_controller_panels_arpeggio_snapshot() {
             );
             // Each P2B8 button gets a distinct, unclipped identifier — not
             // all clipped to the same "P2B8 Button 1." (droid_tui-p2x).
+            // Panel cells render Patch::display_label(token, shift) so the
+            // expected text is the preamble/label-store override, not the raw token.
+            let hw_store = app.current_hw_store();
             for i in 1..=8 {
                 let tok = format!("B1.{i}");
+                let expected = patch.display_label(&tok, 1, true, 4, &hw_store);
+                // Preamble labels like "[DIR] Direction up..." exceed COMPONENT_WIDTH;
+                // the cell truncates, but the bracket tag prefix remains distinct.
+                let short = expected
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(&expected)
+                    .to_string();
+                let needle = if short.len() <= 8 {
+                    short
+                } else {
+                    expected.chars().take(6).collect()
+                };
                 assert!(
-                    ansi.contains(&tok),
-                    "{theme_name} {width}: {tok} label not clipped/merged"
+                    ansi.contains(&needle) || ansi.contains(&tok),
+                    "{theme_name} {width}: {tok} -> {expected} (needle {needle}) label not clipped/merged"
                 );
             }
 

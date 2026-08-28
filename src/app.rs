@@ -761,6 +761,75 @@ impl App {
         true
     }
 
+    /// Effective layer for the current HW edit after `max_shift_layer` clamp and
+    /// `layers_enabled` coercion (`false` forces 1). Returns `None` for circuit
+    /// edits or when not editing.
+    pub fn effective_edit_layer(&self, layers_enabled: bool, max_shift_layer: u8) -> Option<u8> {
+        match self.editing.as_ref()?.kind {
+            EditKind::Hw { layer, .. } => {
+                let max = max_shift_layer.clamp(1, 8);
+                if layers_enabled {
+                    Some(layer.clamp(1, max))
+                } else {
+                    Some(1)
+                }
+            }
+            EditKind::Circuit { .. } => None,
+        }
+    }
+
+    /// Formatted overlay status for the current edit, clamped to `max_shift_layer`
+    /// and `layers_enabled`. HW: `"B3.17 / Group2 → N ckts / M cables"` with
+    /// structural counts (or `"Editing B3.17 / Group2"` when uninfluenced).
+    /// Circuit: `"motorfader:12 → N ckts / M cables"`. Returns `None` when not
+    /// editing. Uses `editing_influence` (structural BFS, disabled dead ends).
+    pub fn editing_status_line(&self, layers_enabled: bool, max_shift_layer: u8) -> Option<String> {
+        let editing = self.editing.as_ref()?;
+        match &editing.kind {
+            EditKind::Hw { token, layer } => {
+                let max = max_shift_layer.clamp(1, 8);
+                let eff = if layers_enabled {
+                    (*layer).clamp(1, max)
+                } else {
+                    1
+                };
+                if let Some(inf) = self.editing_influence() {
+                    Some(format!(
+                        "{} / Group{} \u{2192} {} ckts / {} cables",
+                        token,
+                        eff,
+                        inf.influenced_nodes.len(),
+                        inf.influenced_edges.len()
+                    ))
+                } else {
+                    Some(format!("Editing {} / Group{}", token, eff))
+                }
+            }
+            EditKind::Circuit { node } => {
+                if let Some(inf) = self.editing_influence() {
+                    Some(format!(
+                        "{}:{} \u{2192} {} ckts / {} cables",
+                        node.0,
+                        node.1,
+                        inf.influenced_nodes.len(),
+                        inf.influenced_edges.len()
+                    ))
+                } else {
+                    Some(format!("Editing circuit {}:{}", node.0, node.1))
+                }
+            }
+        }
+    }
+
+    /// Token that drives `modifier_hue` for the overlay status: the HW token for
+    /// `Hw` edits, the circuit name for `Circuit` edits, `None` when not editing.
+    pub fn editing_hue_token(&self) -> Option<String> {
+        match self.editing.as_ref()?.kind {
+            EditKind::Hw { ref token, .. } => Some(token.clone()),
+            EditKind::Circuit { ref node } => Some(node.0.clone()),
+        }
+    }
+
     /// Structural influence for the currently edited datum, if any, using the
     /// same BFS as `recompute_influence` (cycle-safe, `disabled_circuits` dead
     /// ends). Drives the overlay status `TOKEN / GroupN -> N ckts / M cables`
@@ -1789,5 +1858,352 @@ mod tests {
         app.commit_edit_to_dir(dir.path()).unwrap();
         assert!(app.editing.is_none());
         assert!(app.label_store.patches.is_empty());
+    }
+
+    // ── label-management 5.1: LabelStore round-trip, canonicalization, circuit override ──
+
+    #[test]
+    fn label_store_encode_decode_node_id_round_trips() {
+        assert_eq!(
+            LabelStore::decode_node_id(&LabelStore::encode_node_id("motorfader", 12)),
+            Some(("motorfader".to_string(), 12))
+        );
+        assert_eq!(
+            LabelStore::decode_node_id(&LabelStore::encode_node_id("copy", 0)),
+            Some(("copy".to_string(), 0))
+        );
+        // Malformed.
+        assert_eq!(LabelStore::decode_node_id("no_colon"), None);
+        assert_eq!(LabelStore::decode_node_id("motorfader:"), None);
+        assert_eq!(LabelStore::decode_node_id("motorfader:abc"), None);
+        // Circuit names may contain colon? rsplit_once splits last colon.
+        assert_eq!(
+            LabelStore::decode_node_id("my:circuit:3"),
+            Some(("my:circuit".to_string(), 3))
+        );
+    }
+
+    #[test]
+    fn label_store_canonical_key_for_existing_vs_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("patch.ini");
+        std::fs::write(&file, "[button]\nbutton = B1.1\n").unwrap();
+        let key_existing = LabelStore::canonical_key(&file);
+        // Existing file canonicalizes to absolute canonical path.
+        assert!(key_existing.ends_with("patch.ini"));
+        assert!(std::path::Path::new(&key_existing).is_absolute());
+
+        // Missing file: still absolute via current_dir join, no panic.
+        let missing = dir.path().join("missing.ini");
+        let key_missing = LabelStore::canonical_key(&missing);
+        assert!(key_missing.ends_with("missing.ini"));
+        assert!(std::path::Path::new(&key_missing).is_absolute());
+
+        // Relative path canonicalization branch.
+        let rel = std::path::Path::new("relative/patch.ini");
+        let key_rel = LabelStore::canonical_key(rel);
+        assert!(std::path::Path::new(&key_rel).is_absolute());
+    }
+
+    #[test]
+    fn label_store_round_trip_hw_and_circuit_atomic_and_pruned() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "patch".to_string()).unwrap();
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch);
+
+        // HW layer 1 and 2, plus circuit label.
+        app.editing = Some(EditState::new_hw(
+            "B3.17".to_string(),
+            1,
+            "  [RATC]  ".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        app.editing = Some(EditState::new_hw(
+            "B3.17".to_string(),
+            2,
+            "[RATC2]".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        app.editing = Some(EditState::new_circuit(
+            ("motorfader".to_string(), 12),
+            " T1 Accu ".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+
+        // Trimmed.
+        assert_eq!(
+            app.label_store.hw_label(&patch_path, "B3.17", 1),
+            Some("[RATC]".to_string())
+        );
+        assert_eq!(
+            app.label_store.hw_label(&patch_path, "B3.17", 2),
+            Some("[RATC2]".to_string())
+        );
+        assert_eq!(
+            app.label_store
+                .circuit_label(&patch_path, &("motorfader".to_string(), 12)),
+            Some("T1 Accu".to_string())
+        );
+        // Atomic: no stray tmp.
+        assert!(!dir.path().join("labels.toml.tmp").exists());
+        // Persisted file contains trimmed values.
+        let body = std::fs::read_to_string(dir.path().join("labels.toml")).unwrap();
+        assert!(body.contains("[RATC]"));
+        assert!(body.contains("T1 Accu"));
+        assert!(!body.contains("  [RATC]  "), "should be trimmed");
+
+        // Round-trip reload.
+        let reloaded = LabelStore::load_from(&dir.path().join("labels.toml"));
+        assert_eq!(
+            reloaded.hw_label(&patch_path, "B3.17", 1),
+            Some("[RATC]".to_string())
+        );
+        assert_eq!(
+            reloaded.circuit_label(&patch_path, &("motorfader".to_string(), 12)),
+            Some("T1 Accu".to_string())
+        );
+
+        // Empty/whitespace pruning: layer 2 whitespace removed, circuit whitespace pruned.
+        let mut with_empty = reloaded.clone();
+        with_empty
+            .patches
+            .get_mut(&LabelStore::canonical_key(&patch_path))
+            .unwrap()
+            .hw
+            .get_mut("B3.17")
+            .unwrap()
+            .insert(2, "   ".to_string());
+        with_empty
+            .patches
+            .get_mut(&LabelStore::canonical_key(&patch_path))
+            .unwrap()
+            .circuits
+            .insert(
+                LabelStore::encode_node_id("motorfader", 12),
+                "   ".to_string(),
+            );
+        with_empty.save_to_dir(dir.path()).unwrap();
+        let pruned = LabelStore::load_from(&dir.path().join("labels.toml"));
+        assert_eq!(pruned.hw_label(&patch_path, "B3.17", 2), None);
+        assert_eq!(
+            pruned.hw_label(&patch_path, "B3.17", 1),
+            Some("[RATC]".to_string())
+        );
+        // Circuit pruned -> absent.
+        assert_eq!(
+            pruned.circuit_label(&patch_path, &("motorfader".to_string(), 12)),
+            None
+        );
+    }
+
+    #[test]
+    fn label_store_two_patches_isolated() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let a_path = dir.path().join("a.ini");
+        let b_path = dir.path().join("b.ini");
+        std::fs::write(&a_path, "[button]\nbutton = B1.1\n").unwrap();
+        std::fs::write(&b_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch_a = Patch::from_ini_str("[button]\nbutton = B1.1\n", "a".to_string()).unwrap();
+        let patch_b = Patch::from_ini_str("[button]\nbutton = B1.1\n", "b".to_string()).unwrap();
+
+        let mut app_a = App::new();
+        app_a.label_store = LabelStore::default();
+        app_a.load_patch_at(&a_path, patch_a);
+        app_a.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            1,
+            "A-label".to_string(),
+        ));
+        app_a.commit_edit_to_dir(dir.path()).unwrap();
+
+        // Reload store for second patch.
+        let mut app_b = App::new();
+        app_b.label_store = LabelStore::load_from(&dir.path().join("labels.toml"));
+        app_b.load_patch_at(&b_path, patch_b);
+        // B untouched.
+        assert_eq!(app_b.label_store.hw_label(&b_path, "B1.1", 1), None);
+        assert_eq!(
+            app_b.label_store.hw_label(&a_path, "B1.1", 1),
+            Some("A-label".to_string())
+        );
+        // Editing B does not affect A.
+        app_b.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            1,
+            "B-label".to_string(),
+        ));
+        app_b.commit_edit_to_dir(dir.path()).unwrap();
+        let reloaded = LabelStore::load_from(&dir.path().join("labels.toml"));
+        assert_eq!(
+            reloaded.hw_label(&a_path, "B1.1", 1),
+            Some("A-label".to_string())
+        );
+        assert_eq!(
+            reloaded.hw_label(&b_path, "B1.1", 1),
+            Some("B-label".to_string())
+        );
+        // Verify via Patch::display_label that the isolation is respected.
+        let empty_patch =
+            Patch::from_ini_str("[button]\nbutton = B1.1\n", "t".to_string()).unwrap();
+        let hw_a = reloaded
+            .patch_labels(&a_path)
+            .map(|b| b.hw.clone())
+            .unwrap_or_default();
+        let hw_b = reloaded
+            .patch_labels(&b_path)
+            .map(|b| b.hw.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            empty_patch.display_label("B1.1", 1, true, 4, &hw_a),
+            "A-label"
+        );
+        assert_eq!(
+            empty_patch.display_label("B1.1", 1, true, 4, &hw_b),
+            "B-label"
+        );
+    }
+
+    #[test]
+    fn label_store_circuit_override_drives_display_via_app() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[motorfader]\nled = L1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[motorfader]\nled = L1.1\n", "patch".to_string()).unwrap();
+        let node: NodeId = ("motorfader".to_string(), 0);
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch.clone());
+
+        // No circuit label yet -> display falls back to circuit name.
+        let empty = app.current_circuit_store();
+        assert_eq!(patch.circuit_display_label(&node, &empty), "motorfader");
+
+        app.editing = Some(EditState::new_circuit(node.clone(), "T1 Accu".to_string()));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        let store = app.current_circuit_store();
+        assert_eq!(patch.circuit_display_label(&node, &store), "T1 Accu");
+        assert_eq!(
+            patch.circuit_label(&node, &store),
+            Some("T1 Accu".to_string())
+        );
+
+        // Source/header and graph node both use same store; instance matters.
+        let other_node: NodeId = ("motorfader".to_string(), 1);
+        assert_eq!(
+            patch.circuit_display_label(&other_node, &store),
+            "motorfader"
+        );
+    }
+
+    #[test]
+    fn label_store_malformed_toml_falls_back_empty_warn_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("labels.toml");
+        std::fs::write(&path, "not valid toml = [").unwrap();
+        let loaded = LabelStore::load_from(&path);
+        assert!(loaded.patches.is_empty());
+        // Missing file also yields empty.
+        let missing = dir.path().join("nope.toml");
+        assert!(LabelStore::load_from(&missing).patches.is_empty());
+    }
+
+    #[test]
+    fn label_store_current_stores_empty_without_patch_path() {
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        // No load_patch_at path set -> empty stores.
+        assert!(app.current_hw_store().is_empty());
+        assert!(app.current_circuit_store().is_empty());
+        // Load patch without path also empty.
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "t".to_string()).unwrap();
+        app.load_patch(patch);
+        assert!(app.current_hw_store().is_empty());
+    }
+
+    #[test]
+    fn label_store_hw_and_circuit_helpers_trim_whitespace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("p.ini");
+        std::fs::write(&path, "[button]\nbutton = B1.1\n").unwrap();
+        let mut store = LabelStore::default();
+        store.patches.insert(
+            LabelStore::canonical_key(&path),
+            PatchLabels {
+                hw: {
+                    let mut m = HashMap::new();
+                    let mut inner = std::collections::BTreeMap::new();
+                    inner.insert(1, "   ".to_string());
+                    inner.insert(2, "  kept  ".to_string());
+                    m.insert("B1.1".to_string(), inner);
+                    m
+                },
+                circuits: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        LabelStore::encode_node_id("motorfader", 0),
+                        "   ".to_string(),
+                    );
+                    m.insert(
+                        LabelStore::encode_node_id("motorfader", 1),
+                        "  T1  ".to_string(),
+                    );
+                    m
+                },
+            },
+        );
+        assert_eq!(store.hw_label(&path, "B1.1", 1), None);
+        assert_eq!(store.hw_label(&path, "B1.1", 2), Some("kept".to_string()));
+        assert_eq!(
+            store.circuit_label(&path, &("motorfader".to_string(), 0)),
+            None
+        );
+        assert_eq!(
+            store.circuit_label(&path, &("motorfader".to_string(), 1)),
+            Some("T1".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_edit_layer_and_status_respect_clamp_and_disabled() {
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        // No editing -> None.
+        assert_eq!(app.effective_edit_layer(true, 4), None);
+        assert_eq!(app.editing_status_line(true, 4), None);
+        assert_eq!(app.editing_hue_token(), None);
+
+        // HW edit layer 6 with max 4 -> effective 4 when enabled, 1 when disabled.
+        app.editing = Some(EditState::new_hw("B3.17".to_string(), 6, "x".to_string()));
+        assert_eq!(app.effective_edit_layer(true, 4), Some(4));
+        assert_eq!(app.effective_edit_layer(false, 4), Some(1));
+        assert_eq!(app.effective_edit_layer(true, 20), Some(6)); // 20 clamped to 8, 6 within
+        assert_eq!(app.effective_edit_layer(true, 0), Some(1)); // max 0 clamped to 1
+                                                                // Circuit edit -> None.
+        app.editing = Some(EditState::new_circuit(
+            ("motorfader".to_string(), 12),
+            "T1".to_string(),
+        ));
+        assert_eq!(app.effective_edit_layer(true, 4), None);
+        assert_eq!(app.editing_hue_token(), Some("motorfader".to_string()));
+        // HW hue token.
+        app.editing = Some(EditState::new_hw("B3.17".to_string(), 2, "x".to_string()));
+        assert_eq!(app.editing_hue_token(), Some("B3.17".to_string()));
+        // Status line mentions Group with clamped value.
+        let line = app.editing_status_line(true, 4).unwrap();
+        assert!(line.contains("B3.17 / Group2"), "line: {line}");
+        let clamped = {
+            app.editing = Some(EditState::new_hw("B3.17".to_string(), 8, "x".to_string()));
+            app.editing_status_line(true, 4).unwrap()
+        };
+        assert!(clamped.contains("Group4"), "clamped to max 4: {clamped}");
+        let disabled = {
+            app.editing = Some(EditState::new_hw("B3.17".to_string(), 3, "x".to_string()));
+            app.editing_status_line(false, 4).unwrap()
+        };
+        assert!(disabled.contains("Group1"), "disabled forces 1: {disabled}");
     }
 }

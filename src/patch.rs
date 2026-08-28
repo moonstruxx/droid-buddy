@@ -2630,4 +2630,219 @@ button = B1.3
         assert!(union.influenced_edges.contains("_TRIG"));
         assert!(union.influenced_edges.contains("_EXTRA"));
     }
+
+    // ── label-management 5.1: display_label / circuit_label / I4 empty ──
+
+    fn hw_store(pairs: &[(&str, u8, &str)]) -> HashMap<String, BTreeMap<u8, String>> {
+        let mut out: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+        for (token, layer, label) in pairs {
+            out.entry(token.to_string())
+                .or_default()
+                .insert(*layer, label.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn display_label_derived_fallback_for_unknown_token() {
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "t".to_string()).unwrap();
+        let empty: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+        assert_eq!(
+            patch.display_label("B9.9", 1, true, 4, &empty),
+            "Button B9.9"
+        );
+        assert_eq!(patch.display_label("I4", 1, true, 4, &empty), "Input I4");
+        assert_eq!(patch.display_label("O3", 1, true, 4, &empty), "Output O3");
+        assert_eq!(patch.display_label("G1.1", 1, true, 4, &empty), "Gate G1.1");
+        assert_eq!(
+            patch.display_label("S2.1", 1, true, 4, &empty),
+            "Switch S2.1"
+        );
+        assert_eq!(patch.display_label("X1", 1, true, 4, &empty), "X1");
+    }
+
+    #[test]
+    fn display_label_store_layer_exact_hit() {
+        let patch = Patch::from_ini_str("[button]\nbutton = B3.17\n", "t".to_string()).unwrap();
+        let store = hw_store(&[("B3.17", 2, "[RATC2]")]);
+        assert_eq!(patch.display_label("B3.17", 2, true, 4, &store), "[RATC2]");
+        assert_eq!(
+            patch.display_label("B3.17", 1, true, 4, &store),
+            "Button B3.17"
+        );
+    }
+
+    #[test]
+    fn display_label_store_fallback_layer_to_1() {
+        let patch = Patch::from_ini_str("[button]\nbutton = B3.17\n", "t".to_string()).unwrap();
+        let store = hw_store(&[("B3.17", 1, "[RATC]")]);
+        assert_eq!(patch.display_label("B3.17", 2, true, 4, &store), "[RATC]");
+        assert_eq!(patch.display_label("B3.17", 3, true, 4, &store), "[RATC]");
+    }
+
+    #[test]
+    fn display_label_preamble_fallback_when_store_absent() {
+        let patch = Patch::from_ini_str(
+            "#  B3.17: [RATC]\n[button]\nbutton = B3.17\n",
+            "t".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            patch.preamble_labels.get("B3.17").map(String::as_str),
+            Some("[RATC]")
+        );
+        let empty: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+        assert_eq!(patch.display_label("B3.17", 1, true, 4, &empty), "[RATC]");
+        assert_eq!(patch.display_label("B3.17", 2, true, 4, &empty), "[RATC]");
+    }
+
+    #[test]
+    fn display_label_store_overrides_preamble() {
+        let patch = Patch::from_ini_str(
+            "#  B3.17: [RATC]\n[button]\nbutton = B3.17\n",
+            "t".to_string(),
+        )
+        .unwrap();
+        let store = hw_store(&[("B3.17", 2, "[RATC2]")]);
+        assert_eq!(patch.display_label("B3.17", 2, true, 4, &store), "[RATC2]");
+        assert_eq!(patch.display_label("B3.17", 1, true, 4, &store), "[RATC]");
+        let both = hw_store(&[("B3.17", 1, "[STORE1]"), ("B3.17", 2, "[RATC2]")]);
+        assert_eq!(patch.display_label("B3.17", 1, true, 4, &both), "[STORE1]");
+        assert_eq!(patch.display_label("B3.17", 2, true, 4, &both), "[RATC2]");
+    }
+
+    #[test]
+    fn display_label_empty_and_whitespace_store_treated_as_absent() {
+        let patch = Patch::from_ini_str(
+            "#  B3.17: [RATC]\n[button]\nbutton = B3.17\n",
+            "t".to_string(),
+        )
+        .unwrap();
+        let empty_ws = hw_store(&[("B3.17", 2, "   "), ("B3.17", 1, "")]);
+        assert_eq!(
+            patch.display_label("B3.17", 2, true, 4, &empty_ws),
+            "[RATC]"
+        );
+        let patch_no_pre =
+            Patch::from_ini_str("[button]\nbutton = B3.17\n", "t".to_string()).unwrap();
+        let ws_only = hw_store(&[("B3.17", 1, "   "), ("B3.17", 2, "")]);
+        assert_eq!(
+            patch_no_pre.display_label("B3.17", 2, true, 4, &ws_only),
+            "Button B3.17"
+        );
+    }
+
+    #[test]
+    fn display_label_max_shift_layer_clamping() {
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "t".to_string()).unwrap();
+        let store = hw_store(&[("B1.1", 1, "L1"), ("B1.1", 4, "L4"), ("B1.1", 8, "L8")]);
+        assert_eq!(patch.display_label("B1.1", 8, true, 4, &store), "L4");
+        assert_eq!(patch.display_label("B1.1", 8, true, 8, &store), "L8");
+        assert_eq!(patch.display_label("B1.1", 8, true, 20, &store), "L8");
+        assert_eq!(patch.display_label("B1.1", 5, true, 0, &store), "L1");
+        assert_eq!(patch.display_label("B1.1", 0, true, 4, &store), "L1");
+    }
+
+    #[test]
+    fn display_label_layers_disabled_coerces_to_1() {
+        let patch = Patch::from_ini_str(
+            "#  B3.17: [RATC]\n[button]\nbutton = B3.17\n",
+            "t".to_string(),
+        )
+        .unwrap();
+        let store = hw_store(&[("B3.17", 1, "[RATC]"), ("B3.17", 2, "[RATC2]")]);
+        assert_eq!(patch.display_label("B3.17", 2, false, 4, &store), "[RATC]");
+        assert_eq!(patch.display_label("B3.17", 8, false, 4, &store), "[RATC]");
+        let only2 = hw_store(&[("B3.17", 2, "[RATC2]")]);
+        assert_eq!(patch.display_label("B3.17", 2, false, 4, &only2), "[RATC]");
+        assert_eq!(patch.display_label("B3.17", 2, false, 0, &store), "[RATC]");
+    }
+
+    #[test]
+    fn display_label_i4_empty_preamble_falls_to_derived() {
+        let patch = Patch::from_ini_file(Path::new("fixtures/label_i4_empty.ini")).unwrap();
+        assert!(
+            !patch.preamble_labels.contains_key("I4"),
+            "empty I4: must not produce a preamble entry; got {:?}",
+            patch.preamble_labels.get("I4")
+        );
+        assert_eq!(
+            patch.preamble_labels.get("B1.1").map(String::as_str),
+            Some("[PREAMBLE] from empty-slot fixture")
+        );
+        let empty: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+        assert_eq!(patch.display_label("I4", 2, true, 4, &empty), "Input I4");
+        assert_eq!(patch.display_label("I4", 1, true, 4, &empty), "Input I4");
+        let ws = hw_store(&[("I4", 1, "   "), ("I4", 2, "")]);
+        assert_eq!(patch.display_label("I4", 2, true, 4, &ws), "Input I4");
+    }
+
+    #[test]
+    fn display_label_i4_inline_empty_fallback_chain() {
+        let patch =
+            Patch::from_ini_str("#  I4:\n[button]\nbutton = I4\n", "t".to_string()).unwrap();
+        assert!(!patch.preamble_labels.contains_key("I4"));
+        let empty: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+        assert_eq!(patch.display_label("I4", 2, true, 4, &empty), "Input I4");
+    }
+
+    #[test]
+    fn circuit_label_override_and_empty_handling() {
+        let patch = Patch::from_ini_str(
+            "[motorfader]\nled = L1.1\n[motorfader]\nled = L1.2\n",
+            "t".to_string(),
+        )
+        .unwrap();
+        let mut store: HashMap<NodeId, String> = HashMap::new();
+        assert_eq!(
+            patch.circuit_label(&("motorfader".to_string(), 0), &store),
+            None
+        );
+        assert_eq!(
+            patch.circuit_display_label(&("motorfader".to_string(), 0), &store),
+            "motorfader"
+        );
+        store.insert(("motorfader".to_string(), 12), "  T1 Accu  ".to_string());
+        assert_eq!(
+            patch.circuit_label(&("motorfader".to_string(), 12), &store),
+            Some("T1 Accu".to_string())
+        );
+        assert_eq!(
+            patch.circuit_display_label(&("motorfader".to_string(), 12), &store),
+            "T1 Accu"
+        );
+        store.insert(("motorfader".to_string(), 1), "   ".to_string());
+        assert_eq!(
+            patch.circuit_label(&("motorfader".to_string(), 1), &store),
+            None
+        );
+        assert_eq!(
+            patch.circuit_display_label(&("motorfader".to_string(), 1), &store),
+            "motorfader"
+        );
+        store.insert(("motorfader".to_string(), 0), "A".to_string());
+        // overwrite trimmed value for instance 0 test still A
+        store.insert(("motorfader".to_string(), 0), "A".to_string());
+        store.insert(("motorfader".to_string(), 1), "B".to_string());
+        assert_eq!(
+            patch.circuit_label(&("motorfader".to_string(), 0), &store),
+            Some("A".to_string())
+        );
+        assert_eq!(
+            patch.circuit_label(&("motorfader".to_string(), 1), &store),
+            Some("B".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_shift_clamp_and_disabled() {
+        assert_eq!(Patch::effective_shift(2, true, 4), 2);
+        assert_eq!(Patch::effective_shift(8, true, 4), 4);
+        assert_eq!(Patch::effective_shift(0, true, 4), 1);
+        assert_eq!(Patch::effective_shift(2, true, 20), 2);
+        assert_eq!(Patch::effective_shift(9, true, 20), 8);
+        assert_eq!(Patch::effective_shift(5, true, 0), 1);
+        assert_eq!(Patch::effective_shift(2, false, 4), 1);
+        assert_eq!(Patch::effective_shift(8, false, 4), 1);
+    }
 }

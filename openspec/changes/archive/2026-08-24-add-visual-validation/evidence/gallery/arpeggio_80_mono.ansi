@@ -2,24 +2,24 @@
 │                               DROID: arpeggio1                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ P2B8 ────────────────────────────────────────────────────────────────────────┐
-│○ P2B8 Button 1.               ○ P2B8 Button 1.               ○ P2B8 Button 1.│
-│      OFF ○                          OFF ○                          OFF ○     │
-│       OFF                            OFF                            OFF      │
-│                ○ P2B8 Button 1                ○ P2B8 Button 1                │
-│                     OFF ○                          OFF ○                     │
-│                      OFF                            OFF                      │
-│○ P2B8 Button 1.               ○ P2B8 Button 1.               ○ P2B8 Button 1.│
-│      OFF ○                          OFF ○                          OFF ○     │
-│       OFF                            OFF                            OFF      │
-│                 ◉ P2B8 Knob 1.1 ◉ P2B8 Knob 1.2                              │
-│                       0%              0%                                     │
+│┌ ○ [DIR] Direc┐┌ ○ [PNG] Enabl┐┌ ○ [FLY] Switc┐┌ ○ [OCT] Set o┐              │
+││     OFF ○    ││     OFF ○    ││     OFF ○    ││     OFF ○    │              │
+│└──────────────┘└──────────────┘└──────────────┘└──────────────┘              │
+│┌ ○ [DRP] When ┐┌ ○ [STA] Enfor┐┌ ○ [TRI] Switc┐┌ ○ [MIN] Switc┐              │
+││     OFF ○    ││     OFF ○    ││     OFF ○    ││     OFF ○    │              │
+│└──────────────┘└──────────────┘└──────────────┘└──────────────┘              │
+│◉ [SPE] Speed of◉ [PAT] Arpeggio                                              │
+│       0%              0%                                                     │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ CV I/O ──────────────────────────────────────────────────────────────────────┐
-│    ← Copy O3       → Copy I1       ← Copy O1     ← Arpeggio O4               │
+│← [ENV] envelope→ [CLK] optional← [CLK] internal← [V/O] pitch (V              │
 │     CV OUT           CV IN          CV OUT          CV OUT                   │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
+
+
+
 
 
 

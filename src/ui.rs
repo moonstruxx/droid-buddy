@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, QuadFocus, SourceViewMode, ViewerFocus};
@@ -62,6 +62,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         render_main(frame, chunks[1], app);
         render_status(frame, chunks[2], app);
+    }
+
+    // Edit overlay is the top z-layer above any base content (picker has
+    // absolute precedence and already returned). Centered, single-field,
+    // responsive via QUAD_WIDTH_THRESHOLD; hint in modifier hue with
+    // graph_edge_error red kept for influence elsewhere.
+    if app.editing.is_some() {
+        render_overlay(frame, app);
     }
 }
 
@@ -380,6 +388,13 @@ fn render_component_grid(
         .flex(Flex::Start)
         .split(area);
 
+    // HW label override: per-patch store + [labels] config (layers_enabled / max_shift_layer)
+    // with Patch::display_label fallback chain. Geometry untouched — rects equal drawn cells.
+    let hw_store = app.current_hw_store();
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    let layers_enabled = settings.labels.layers_enabled;
+    let max_shift_layer = settings.labels.max_shift_layer;
+
     for (row_i, row) in components.chunks(cols).enumerate() {
         if row_i >= row_chunks.len() {
             break;
@@ -399,10 +414,25 @@ fn render_component_grid(
             let is_hovered = app.hovered_component == Some(global_idx);
             let is_shift_active =
                 comp.shift_group.is_some() && comp.shift_group == app.active_shift;
+            let shift: u8 = match comp.shift_group {
+                Some(ShiftGroup::Group1) => 1,
+                Some(ShiftGroup::Group2) => 2,
+                Some(ShiftGroup::Group3) => 3,
+                Some(ShiftGroup::Group4) => 4,
+                None => 1,
+            };
+            // Hand-built patches (Patch::sample, empty sections) keep their
+            // bespoke labels ("TRIG A") — display_label would derive "btn_1".
+            let display_label = if patch.sections.is_empty() && !comp.label.is_empty() {
+                comp.label.clone()
+            } else {
+                patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store)
+            };
             render_component(
                 frame,
                 comp_chunks[col_i],
                 comp,
+                &display_label,
                 is_hovered,
                 is_shift_active,
                 app.processing_paused,
@@ -467,10 +497,12 @@ fn panel_grid_size(
     (needed_w, needed_h)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_component(
     frame: &mut Frame,
     area: Rect,
     comp: &crate::patch::HwComponent,
+    display_label: &str,
     is_hovered: bool,
     is_shift_active: bool,
     paused: bool,
@@ -598,7 +630,7 @@ fn render_component(
             .borders(Borders::ALL)
             .border_style(display_style)
             .title_top(Line::styled(
-                format!(" {} {} ", symbol, comp.label),
+                format!(" {} {} ", symbol, display_label),
                 display_style,
             ));
         let inner = block.inner(area);
@@ -617,7 +649,7 @@ fn render_component(
             Line::from(vec![
                 Span::styled(symbol, hover_style),
                 Span::raw(" "),
-                Span::styled(&comp.label, hover_style),
+                Span::styled(display_label, hover_style),
             ]),
             Line::from(Span::styled(
                 state_text,
@@ -765,6 +797,81 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, picker_area);
 }
 
+fn render_overlay(frame: &mut Frame, app: &App) {
+    let Some(editing) = app.editing.as_ref() else {
+        return;
+    };
+    let area = frame.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let is_narrow = area.width < QUAD_WIDTH_THRESHOLD;
+    let overlay_width = if is_narrow {
+        area.width.saturating_sub(4).max(24)
+    } else {
+        (area.width * 60 / 100).clamp(40, 70).max(24)
+    };
+    let overlay_height: u16 = 5;
+    let x = area.x + area.width.saturating_sub(overlay_width) / 2;
+    let y = area.y + area.height.saturating_sub(overlay_height) / 2;
+    let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
+    frame.render_widget(Clear, overlay_area);
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    let layers_enabled = settings.labels.layers_enabled;
+    let max_shift_layer = settings.labels.max_shift_layer;
+    let status = app
+        .editing_status_line(layers_enabled, max_shift_layer)
+        .unwrap_or_default();
+    let hue_token = app.editing_hue_token();
+    let hue = hue_token
+        .as_deref()
+        .map(theme::modifier_hue)
+        .unwrap_or(theme::active().text);
+    let hint_style = Style::default().fg(hue);
+    let input_line = Line::from(vec![
+        Span::styled(
+            editing.draft.clone(),
+            Style::default().fg(theme::active().text),
+        ),
+        Span::styled(
+            "\u{258C}",
+            Style::default()
+                .fg(theme::active().text)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let hint_text = if status.is_empty() {
+        match &editing.kind {
+            crate::app::EditKind::Hw { .. } if layers_enabled => {
+                format!(
+                    "Enter save | Esc cancel | 1..{} layer",
+                    max_shift_layer.clamp(1, 8)
+                )
+            }
+            _ => "Enter save | Esc cancel".to_string(),
+        }
+    } else if is_narrow {
+        status.clone()
+    } else {
+        let suffix = match &editing.kind {
+            crate::app::EditKind::Hw { .. } if layers_enabled => {
+                format!(" | 1..{} layer", max_shift_layer.clamp(1, 8))
+            }
+            _ => String::new(),
+        };
+        format!("{} | Enter save | Esc cancel{}", status, suffix)
+    };
+    let hint_line = Line::from(Span::styled(hint_text, hint_style));
+    let paragraph = Paragraph::new(vec![input_line, hint_line]).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Edit Label ")
+            .border_style(Style::default().fg(hue)),
+    );
+    frame.render_widget(paragraph, overlay_area);
+}
+
 // ── Signal-flow graph view (task 5.1) ──────────────────────────────────────
 
 /// Width of a rounded node frame. Kept modest so nodes stay legible and many
@@ -795,6 +902,11 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         render_graph_empty(frame, area);
         return;
     }
+
+    // Circuit-label override for node titles (FULL pane): store + patch
+    // captured before the borrow split below.
+    let circuit_store = app.current_circuit_store();
+    let patch_for_title = app.patch.clone();
 
     // Copyable state read before the borrow split below.
     let hovered = app.hovered_graph_node;
@@ -847,6 +959,8 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             None,
             Some(disabled_circuits),
             hovered == Some(i),
+            patch_for_title.as_ref(),
+            Some(&circuit_store),
         );
     }
 }
@@ -904,6 +1018,20 @@ fn graph_node_title(node: &GraphNode) -> String {
         node.circuit.clone()
     } else {
         format!("{} {}", node.circuit, node.instance_index)
+    }
+}
+
+/// Circuit-label override for a node's title: `Patch::circuit_display_label`
+/// when a patch and store are available, otherwise the derived title.
+fn graph_node_display_title(
+    node: &GraphNode,
+    patch: Option<&crate::patch::Patch>,
+    circuit_store: Option<&HashMap<(String, usize), String>>,
+) -> String {
+    if let (Some(patch), Some(store)) = (patch, circuit_store) {
+        patch.circuit_display_label(&node.id, store)
+    } else {
+        graph_node_title(node)
     }
 }
 
@@ -1148,10 +1276,12 @@ fn render_graph_edges_with_highlight(
 /// an output marker on the right border for nodes that source them. A node
 /// can be both. Exact port-to-edge pairing is task 5.2; here the ports are
 /// simple presence markers.
+#[allow(dead_code)]
 fn render_graph_node(frame: &mut Frame, area: Rect, node: &GraphNode, graph: &Graph) {
-    render_graph_node_with_highlight(frame, area, node, graph, None, None, false);
+    render_graph_node_with_highlight(frame, area, node, graph, None, None, false, None, None);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_graph_node_with_highlight(
     frame: &mut Frame,
     area: Rect,
@@ -1160,6 +1290,8 @@ fn render_graph_node_with_highlight(
     highlight_nodes: Option<&HashSet<(String, usize)>>,
     disabled: Option<&HashSet<(String, usize)>>,
     hovered: bool,
+    patch: Option<&crate::patch::Patch>,
+    circuit_store: Option<&HashMap<(String, usize), String>>,
 ) {
     let is_disabled = disabled
         .map(|set| circuit_disabled(set, &node.circuit, node.instance_index))
@@ -1209,11 +1341,12 @@ fn render_graph_node_with_highlight(
             .bg(theme::active().muted)
             .add_modifier(Modifier::REVERSED);
     }
+    let title = graph_node_display_title(node, patch, circuit_store);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(graph_node_title(node))
+        .title(title)
         .title_style(title_style);
     frame.render_widget(block, area);
 
@@ -1423,6 +1556,9 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
         render_graph_empty(frame, inner);
         return;
     }
+    // Circuit label store for FULL node titles — captured before clone borrows.
+    let circuit_store = app.current_circuit_store();
+    let patch_for_title = app.patch.clone();
     // Need to split borrows: graph + positions + rect fields
     let graph = match app.graph.as_ref() {
         Some(g) => g.clone(),
@@ -1476,6 +1612,8 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
             highlight_nodes.as_ref(),
             Some(&disabled),
             hovered == Some(i),
+            patch_for_title.as_ref(),
+            Some(&circuit_store),
         );
     }
 }
@@ -1499,6 +1637,8 @@ fn render_quad_graph_filtered_content(frame: &mut Frame, area: Rect, app: &mut A
         frame.render_widget(msg, inner);
         return;
     }
+    let circuit_store = app.current_circuit_store();
+    let patch_for_title = app.patch.clone();
     let positions = app.filtered_positions.clone();
     let surface = inner;
     let node_rects = graph_node_rects(&positions, inner, &graph.nodes);
@@ -1514,7 +1654,17 @@ fn render_quad_graph_filtered_content(frame: &mut Frame, area: Rect, app: &mut A
     for (i, node) in graph.nodes.iter().enumerate() {
         let nr = node_rects[i];
         app.filtered_node_rects.push((i, nr));
-        render_graph_node(frame, nr, node, &graph);
+        render_graph_node_with_highlight(
+            frame,
+            nr,
+            node,
+            &graph,
+            None,
+            None,
+            false,
+            patch_for_title.as_ref(),
+            Some(&circuit_store),
+        );
     }
 }
 
@@ -1816,7 +1966,18 @@ fn render_source_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let names: Vec<String> = patch.sections.iter().map(|s| s.name.clone()).collect();
+    let circuit_store = app.current_circuit_store();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let names: Vec<String> = patch
+        .sections
+        .iter()
+        .map(|s| {
+            let idx = *counts.get(&s.name).unwrap_or(&0);
+            let node_id = (s.name.clone(), idx);
+            counts.insert(s.name.clone(), idx + 1);
+            patch.circuit_display_label(&node_id, &circuit_store)
+        })
+        .collect();
     let display_names = disambiguate_names(&names);
     let selected = sidebar_selected_index(app);
 
@@ -1829,7 +1990,7 @@ fn render_source_sidebar(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default().fg(theme::active().text)
             };
-            Line::from(Span::styled(name.as_str(), style))
+            Line::from(Span::styled(name.clone(), style))
         })
         .collect();
 
@@ -2072,14 +2233,20 @@ fn build_prettified_highlighted_lines(
     let circuits = patch.viewer_circuits();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let selected = app.selected_component.as_deref();
+    let circuit_store = app.current_circuit_store();
+    let mut counts: HashMap<String, usize> = HashMap::new();
     for circuit in &circuits {
+        let idx = *counts.get(&circuit.name).unwrap_or(&0);
+        let node_id = (circuit.name.clone(), idx);
+        let display_name = patch.circuit_display_label(&node_id, &circuit_store);
+        counts.insert(circuit.name.clone(), idx + 1);
         let color = circuit_color(&circuit.name);
 
         // Uniform interior width so every box gets one clean right border
         // (droid_tui-mzg). `w` is the widest content row; the box renders an
         // (w + 2)-wide inner strip so the top dashes, the entry padding and the
         // footer all share the same right edge.
-        let header_text = format!("─ {} ─", circuit.name);
+        let header_text = format!("─ {} ─", display_name);
         let mut w: usize = display_width(&header_text);
         for (key, value) in &circuit.entries {
             let entry_text = format!("{} = {}", key, value);
@@ -2093,7 +2260,7 @@ fn build_prettified_highlighted_lines(
             Span::styled("┌", Style::default().fg(color)),
             Span::styled("─ ", Style::default().fg(color)),
             Span::styled(
-                circuit.name.clone(),
+                display_name.clone(),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" ─", Style::default().fg(color)),

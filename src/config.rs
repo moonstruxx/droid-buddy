@@ -367,4 +367,133 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
         assert!(body.contains("theme = \"classic\""));
     }
+
+    // ── label-management 5.1: [labels] clamp / disabled / round-trip ──
+
+    #[test]
+    fn labels_defaults_when_table_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert!(loaded.labels.layers_enabled);
+        assert_eq!(loaded.labels.max_shift_layer, 4);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn labels_defaults_when_file_empty() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.labels, Labels::default());
+    }
+
+    #[test]
+    fn max_shift_layer_clamped_on_load() {
+        for (raw, expected) in [(0, 1), (1, 1), (4, 4), (8, 8), (20, 8), (255, 8)] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[labels]\nmax_shift_layer = {raw}\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.labels.max_shift_layer, expected,
+                "raw {raw} should clamp to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn layers_enabled_round_trips_and_preserves_clamp() {
+        let dir = TempDir::new().unwrap();
+        save_to_dir(
+            dir.path(),
+            &Settings {
+                theme: "classic".to_string(),
+                labels: Labels {
+                    layers_enabled: false,
+                    max_shift_layer: 20,
+                },
+            },
+        )
+        .unwrap();
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert!(!loaded.labels.layers_enabled);
+        assert_eq!(loaded.labels.max_shift_layer, 8);
+    }
+
+    #[test]
+    fn save_clamps_max_shift_layer_zero_and_large() {
+        for (raw, expected) in [(0, 1), (255, 8)] {
+            let dir = TempDir::new().unwrap();
+            save_to_dir(
+                dir.path(),
+                &Settings {
+                    theme: "classic".to_string(),
+                    labels: Labels {
+                        layers_enabled: true,
+                        max_shift_layer: raw,
+                    },
+                },
+            )
+            .unwrap();
+            let loaded = load_from(
+                &dir.path().join(CONFIG_FILE_NAME),
+                &test_canonical,
+                &TEST_CATALOG,
+            );
+            assert_eq!(loaded.labels.max_shift_layer, expected);
+        }
+    }
+
+    #[test]
+    fn labels_save_contains_table_and_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let settings = Settings {
+            theme: "terminal".to_string(),
+            labels: Labels {
+                layers_enabled: false,
+                max_shift_layer: 6,
+            },
+        };
+        save_to_dir(dir.path(), &settings).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[labels]"), "body: {body}");
+        assert!(body.contains("layers_enabled = false"));
+        assert!(body.contains("max_shift_layer = 6"));
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert!(!loaded.labels.layers_enabled);
+        assert_eq!(loaded.labels.max_shift_layer, 6);
+        assert_eq!(loaded.theme, "terminal");
+    }
+
+    #[test]
+    fn unknown_labels_keys_ignored() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[labels]\nmax_shift_layer = 4\nfuture = 123\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.labels.max_shift_layer, 4);
+    }
 }
