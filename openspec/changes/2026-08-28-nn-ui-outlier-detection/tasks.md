@@ -23,6 +23,6 @@
 
 ## 3. Regression & Proof
 
-- [ ] 3.1 Regression + proof tests <!-- agent: horst-engineer.build, depends_on: [2.2], touches: [src/regression.rs, fixtures/**] -->
+- [x] 3.1 Regression + proof tests <!-- agent: horst-engineer.build, depends_on: [2.2], touches: [src/regression.rs, fixtures/**] -->
       · precision/recall regression vs 8.0 on holdout (tooling output asserted in a test); invariant tests (adjacent / co-located / via-cable never flagged, miss → fallback); snapshot fixtures for the new warning channel
       · verify: `cargo test` (strict, incl. `cargo insta test --check`) passes; snapshot fixtures render the new warnings in the graph surface
