@@ -1,0 +1,37 @@
+{
+  "unit": "b32_pitch",
+  "racks": [
+    {
+      "id": "R1",
+      "y": 0,
+      "controllers": [
+        { "name": "R2C", "x": 0, "grid": "r2c" },
+        { "name": "E4", "x": 14, "grid": "e4" },
+        { "name": "B32", "x": 30, "grid": "b32" }
+      ]
+    },
+    {
+      "id": "R2",
+      "y": 12,
+      "controllers": [
+        { "name": "R2C", "x": 0, "grid": "r2c" },
+        { "name": "e4", "x": 14, "grid": "e4" },
+        { "name": "b32", "x": 30, "grid": "b32" }
+      ]
+    }
+  ],
+  "grids": {
+    "b32": { "kind": "matrix", "cols": 8, "rows": 4, "row_wise": true, "orientation": "vertical" },
+    "e4": { "kind": "stack", "count": 4, "pitch_y": 2 },
+    "r2c": { "kind": "singleton" }
+  },
+  "co_located": {
+    "L": "B"
+  },
+  "shared_grids": {
+    "B32": "b32",
+    "b32": "b32",
+    "E4": "e4",
+    "e4": "e4"
+  }
+}

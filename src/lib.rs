@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod events;
 pub mod gallery;
+pub mod geometry;
 pub mod graph;
 pub mod handler;
 pub mod layout;
