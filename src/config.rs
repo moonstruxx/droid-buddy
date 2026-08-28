@@ -15,9 +15,43 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_THEME: &str = "classic";
+pub const DEFAULT_LAYERS_ENABLED: bool = true;
+pub const DEFAULT_MAX_SHIFT_LAYER: u8 = 4;
+pub const MIN_SHIFT_LAYER: u8 = 1;
+pub const MAX_SHIFT_LAYER: u8 = 8;
 
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
+
+fn default_theme() -> String {
+    DEFAULT_THEME.to_string()
+}
+
+fn default_layers_enabled() -> bool {
+    DEFAULT_LAYERS_ENABLED
+}
+
+fn default_max_shift_layer() -> u8 {
+    DEFAULT_MAX_SHIFT_LAYER
+}
+
+/// Per-label configuration under `[labels]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Labels {
+    #[serde(default = "default_layers_enabled")]
+    pub layers_enabled: bool,
+    #[serde(default = "default_max_shift_layer")]
+    pub max_shift_layer: u8,
+}
+
+impl Default for Labels {
+    fn default() -> Self {
+        Self {
+            layers_enabled: default_layers_enabled(),
+            max_shift_layer: default_max_shift_layer(),
+        }
+    }
+}
 
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions).
@@ -25,16 +59,15 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 pub struct Settings {
     #[serde(default = "default_theme")]
     pub theme: String,
-}
-
-fn default_theme() -> String {
-    DEFAULT_THEME.to_string()
+    #[serde(default)]
+    pub labels: Labels,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            labels: Labels::default(),
         }
     }
 }
@@ -113,6 +146,10 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
             settings.theme = DEFAULT_THEME.to_string();
         }
     }
+    settings.labels.max_shift_layer = settings
+        .labels
+        .max_shift_layer
+        .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
     settings
 }
 
@@ -136,7 +173,12 @@ pub fn save(settings: &Settings) -> io::Result<()> {
 /// rename over the target (atomic on POSIX, design Decision 6).
 pub fn save_to_dir(dir: &Path, settings: &Settings) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let body = toml::to_string(settings)
+    let mut normalized = settings.clone();
+    normalized.labels.max_shift_layer = normalized
+        .labels
+        .max_shift_layer
+        .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    let body = toml::to_string(&normalized)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     let target = dir.join(CONFIG_FILE_NAME);
     let tmp = dir.join(format!("{CONFIG_FILE_NAME}.tmp"));
@@ -280,6 +322,7 @@ mod tests {
             dir.path(),
             &Settings {
                 theme: "mono".to_string(),
+                labels: Labels::default(),
             },
         )
         .unwrap();
@@ -308,6 +351,7 @@ mod tests {
             dir.path(),
             &Settings {
                 theme: "terminal".to_string(),
+                labels: Labels::default(),
             },
         )
         .unwrap();
