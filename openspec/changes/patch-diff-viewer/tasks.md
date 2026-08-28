@@ -2,7 +2,7 @@
 
 ## 1. Model — Order-Independent Structural Diff
 
-- [ ] 1.1 Implement `src/diff.rs`: pure `DiffReport` (`added_cables`, `removed_cables`, `changed_cables`, `added_nodes`, `removed_nodes`, `changed_nodes`) and `fn diff_patches(&Patch, &Patch) -> DiffReport` keyed by `HwComponent.id`, `NodeId=(circuit,instance_index)`, and cable name; wiring via `CableIndexEntry.sources` (set) + `sink_refs` (set of `(sink_circuit, sink_param)` resolved to NodeId); settings as per-NodeId `HashMap<param_key,param_value>`; deterministic sorted output; wire into `src/lib.rs` <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/diff.rs, src/lib.rs] -->
+- [x] 1.1 Implement `src/diff.rs`: pure `DiffReport` (`added_cables`, `removed_cables`, `changed_cables`, `added_nodes`, `removed_nodes`, `changed_nodes`) and `fn diff_patches(&Patch, &Patch) -> DiffReport` keyed by `HwComponent.id`, `NodeId=(circuit,instance_index)`, and cable name; wiring via `CableIndexEntry.sources` (set) + `sink_refs` (set of `(sink_circuit, sink_param)` resolved to NodeId); settings as per-NodeId `HashMap<param_key,param_value>`; deterministic sorted output; wire into `src/lib.rs` <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/diff.rs, src/lib.rs] -->
 - [ ] 1.2 Add `src/diff.rs#tests` + fixtures: reordered panels → equal; added/removed circuit; cable added; cable sink changed; changed param value; param reorder → equal; deterministic (order-independent) <!-- agent: horst-engineer.build, depends_on: [1.1], touches: [src/diff.rs#tests] -->
 
 ## 2. App Wiring + Picker
