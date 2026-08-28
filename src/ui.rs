@@ -796,6 +796,9 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // Copyable state read before the borrow split below.
+    let hovered = app.hovered_graph_node;
+
     // Split `app` field borrows so reading the graph and publishing cluster
     // rects (a renderer→handler handoff) coexist within one frame.
     let App {
@@ -803,6 +806,7 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         graph_positions,
         graph_cluster_rects,
         graph_node_rects: node_rect_field,
+        disabled_circuits,
         ..
     } = app;
     let Some(graph) = graph.as_ref() else {
@@ -824,11 +828,26 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     // Edges before nodes so node frames draw over the port cells.
-    render_graph_edges(frame, area, graph, &node_rects);
+    render_graph_edges_with_highlight(
+        frame,
+        area,
+        graph,
+        &node_rects,
+        None,
+        Some(disabled_circuits),
+    );
     for (i, node) in graph.nodes.iter().enumerate() {
         let node_rect = node_rects[i];
         node_rect_field.push((i, node_rect));
-        render_graph_node(frame, node_rect, node, graph);
+        render_graph_node_with_highlight(
+            frame,
+            node_rect,
+            node,
+            graph,
+            None,
+            Some(disabled_circuits),
+            hovered == Some(i),
+        );
     }
 }
 
@@ -886,6 +905,19 @@ fn graph_node_title(node: &GraphNode) -> String {
     } else {
         format!("{} {}", node.circuit, node.instance_index)
     }
+}
+
+/// Whether a circuit instance has processing disabled: `App.disabled_circuits`
+/// is keyed by `(circuit name, instance index)`, the same identity a
+/// `GraphNode` carries (`circuit` + `instance_index`).
+fn circuit_disabled(
+    disabled: &HashSet<(String, usize)>,
+    circuit: &str,
+    instance_index: usize,
+) -> bool {
+    disabled
+        .iter()
+        .any(|(name, idx)| name == circuit && *idx == instance_index)
 }
 
 /// Inferred cable type for edge coloring (design D8). DROID cables carry no
@@ -1007,7 +1039,7 @@ fn polyline_cells(x_s: i16, y_s: i16, x_t: i16, y_t: i16) -> Vec<(i16, i16)> {
 /// port cells for a clean join. When two polylines share a cell the later
 /// edge in `graph.edges` wins, keeping crossings deterministic.
 fn render_graph_edges(frame: &mut Frame, area: Rect, graph: &Graph, node_rects: &[Rect]) {
-    render_graph_edges_with_highlight(frame, area, graph, node_rects, None);
+    render_graph_edges_with_highlight(frame, area, graph, node_rects, None, None);
 }
 
 fn render_graph_edges_with_highlight(
@@ -1016,6 +1048,7 @@ fn render_graph_edges_with_highlight(
     graph: &Graph,
     node_rects: &[Rect],
     highlight: Option<&HashSet<String>>,
+    disabled: Option<&HashSet<(String, usize)>>,
 ) {
     // kitty-gfx optional: when feature enabled and terminal is kitty, we would
     // emit inline image escapes instead of box-drawing. Fallback is box-drawing.
@@ -1051,7 +1084,33 @@ fn render_graph_edges_with_highlight(
             .map(|set| set.contains(&edge.cable))
             .unwrap_or(false);
         let has_active_highlight = highlight.map(|s| !s.is_empty()).unwrap_or(false);
-        let (color, modifier) = if has_active_highlight {
+        let incident_disabled = disabled
+            .map(|set| {
+                circuit_disabled(
+                    set,
+                    &graph.nodes[src].circuit,
+                    graph.nodes[src].instance_index,
+                ) || circuit_disabled(
+                    set,
+                    &graph.nodes[sink].circuit,
+                    graph.nodes[sink].instance_index,
+                )
+            })
+            .unwrap_or(false);
+        let has_error = graph
+            .validation
+            .iter()
+            .any(|issue| issue.cable == edge.cable);
+        let (color, modifier) = if incident_disabled {
+            // Disabled circuit: dim overrides influence highlight, but a
+            // validation finding keeps the error color (error red > dim >
+            // influence > kind color).
+            if has_error {
+                (theme::active().graph_edge_error, Modifier::empty())
+            } else {
+                (theme::active().graph_edge_dim, Modifier::DIM)
+            }
+        } else if has_active_highlight {
             if is_highlighted {
                 (theme::active().graph_edge_highlight, Modifier::BOLD)
             } else {
@@ -1090,7 +1149,7 @@ fn render_graph_edges_with_highlight(
 /// can be both. Exact port-to-edge pairing is task 5.2; here the ports are
 /// simple presence markers.
 fn render_graph_node(frame: &mut Frame, area: Rect, node: &GraphNode, graph: &Graph) {
-    render_graph_node_with_highlight(frame, area, node, graph, None);
+    render_graph_node_with_highlight(frame, area, node, graph, None, None, false);
 }
 
 fn render_graph_node_with_highlight(
@@ -1099,12 +1158,25 @@ fn render_graph_node_with_highlight(
     node: &GraphNode,
     graph: &Graph,
     highlight_nodes: Option<&HashSet<(String, usize)>>,
+    disabled: Option<&HashSet<(String, usize)>>,
+    hovered: bool,
 ) {
+    let is_disabled = disabled
+        .map(|set| circuit_disabled(set, &node.circuit, node.instance_index))
+        .unwrap_or(false);
     let has_active = highlight_nodes.map(|s| !s.is_empty()).unwrap_or(false);
     let is_highlighted = highlight_nodes
         .map(|s| s.contains(&node.id))
         .unwrap_or(false);
-    let (border_color, title_color, extra_mod) = if has_active {
+    let (border_color, title_color, extra_mod) = if is_disabled {
+        // Disabled circuit: dim token + DIM override any influence highlight
+        // (dim > influence).
+        (
+            theme::active().graph_node_dim,
+            theme::active().graph_node_dim,
+            Modifier::DIM,
+        )
+    } else if has_active {
         if is_highlighted {
             (
                 theme::active().graph_node_highlight,
@@ -1125,12 +1197,24 @@ fn render_graph_node_with_highlight(
             Modifier::empty(),
         )
     };
+    let mut border_style = Style::default().fg(border_color).add_modifier(extra_mod);
+    let mut title_style = Style::default().fg(title_color).add_modifier(extra_mod);
+    if hovered {
+        // Hover emphasis (reversed on the muted background) stays visible on
+        // disabled and influenced nodes alike (hover > dim > influence).
+        border_style = border_style
+            .bg(theme::active().muted)
+            .add_modifier(Modifier::REVERSED);
+        title_style = title_style
+            .bg(theme::active().muted)
+            .add_modifier(Modifier::REVERSED);
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color).add_modifier(extra_mod))
+        .border_style(border_style)
         .title(graph_node_title(node))
-        .title_style(Style::default().fg(title_color).add_modifier(extra_mod));
+        .title_style(title_style);
     frame.render_widget(block, area);
 
     let is_sink = graph.edges.iter().any(|e| e.sink == node.id);
@@ -1345,6 +1429,8 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
         None => return,
     };
     let positions = app.graph_positions.clone();
+    let disabled = app.disabled_circuits.clone();
+    let hovered = app.hovered_graph_node;
     let surface = inner;
     let node_rects = graph_node_rects(&positions, inner, &graph.nodes);
     // Clusters
@@ -1371,11 +1457,26 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
     } else {
         Some(graph.highlighted_nodes.clone())
     };
-    render_graph_edges_with_highlight(frame, inner, &graph, &node_rects, highlight_edges.as_ref());
+    render_graph_edges_with_highlight(
+        frame,
+        inner,
+        &graph,
+        &node_rects,
+        highlight_edges.as_ref(),
+        Some(&disabled),
+    );
     for (i, node) in graph.nodes.iter().enumerate() {
         let nr = node_rects[i];
         app.graph_node_rects.push((i, nr));
-        render_graph_node_with_highlight(frame, nr, node, &graph, highlight_nodes.as_ref());
+        render_graph_node_with_highlight(
+            frame,
+            nr,
+            node,
+            &graph,
+            highlight_nodes.as_ref(),
+            Some(&disabled),
+            hovered == Some(i),
+        );
     }
 }
 
@@ -3952,5 +4053,299 @@ mod graph_view_tests {
             let mut app = graph_app();
             let _ = buffer_for(&mut app, w, h); // must not panic
         }
+    }
+
+    // ---- task 3.3 disabled-circuit dim rendering ----
+
+    /// The frame rect published for node `idx` in the last rendered frame.
+    fn node_rect_of(app: &App, idx: usize) -> Rect {
+        app.graph_node_rects
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, rect)| *rect)
+            .unwrap()
+    }
+
+    /// Corner cells of a node's rounded frame: never covered by ports or
+    /// edges, so they always carry the node's own border style.
+    fn node_corner_cells(rect: Rect) -> Vec<(u16, u16)> {
+        vec![
+            (rect.x, rect.y),
+            (rect.x + rect.width - 1, rect.y),
+            (rect.x, rect.y + rect.height - 1),
+            (rect.x + rect.width - 1, rect.y + rect.height - 1),
+        ]
+    }
+
+    /// Cells of the top-border title row (ratatui places a left-aligned block
+    /// title one column right of the corner).
+    fn node_title_cells(rect: Rect, title_len: u16) -> Vec<(u16, u16)> {
+        ((rect.x + 1)..(rect.x + 1 + title_len))
+            .map(|x| (x, rect.y))
+            .collect()
+    }
+
+    /// The cells of `cable`'s polyline that the edge itself owns in the
+    /// buffer: port cells (covered by node frames), cells shared with
+    /// later-drawn edges, and node-covered cells are excluded, mirroring
+    /// `assert_edge_drawn`.
+    fn cable_owned_cells(buf: &Buffer, app: &App, cable: &str) -> Vec<(u16, u16)> {
+        let graph = app.graph.as_ref().unwrap();
+        let area = graph_main_area(buf.area.width, buf.area.height);
+        let node_rects = graph_node_rects(&app.graph_positions, area, &graph.nodes);
+        let edge = graph.edges.iter().find(|e| e.cable == cable).unwrap();
+        let src = graph
+            .nodes
+            .iter()
+            .position(|n| n.id == edge.source)
+            .unwrap();
+        let sink = graph.nodes.iter().position(|n| n.id == edge.sink).unwrap();
+        let s = node_rects[src];
+        let t = node_rects[sink];
+        let port_s = (s.x + s.width - 1, s.y + s.height / 2);
+        let port_t = (t.x, t.y + t.height / 2);
+        let shared = other_cable_cells(buf, app, cable);
+        let node_covered: Vec<(u16, u16)> = node_rects
+            .iter()
+            .flat_map(|r| {
+                (r.x..r.x + r.width).flat_map(move |x| (r.y..r.y + r.height).map(move |y| (x, y)))
+            })
+            .collect();
+        edge_cells(buf, app, cable)
+            .into_iter()
+            .filter(|cell| {
+                *cell != port_s
+                    && *cell != port_t
+                    && !shared.contains(cell)
+                    && !node_covered.contains(cell)
+            })
+            .collect()
+    }
+
+    /// `clocktool` sources `_CLK` (with a validation finding) to `osc` and
+    /// `_AUD` to `vca`; `osc` sources `_MOD` to `vca`. Disabling `clocktool`
+    /// makes `_CLK` and `_AUD` incident while `_MOD` stays untouched.
+    fn three_node_graph() -> Graph {
+        Graph {
+            nodes: vec![
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+                node("vca", 0, "vca", 2),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".into(),
+                    source: ("clock".into(), 0),
+                    sink: ("osc".into(), 0),
+                },
+                GraphEdge {
+                    cable: "_AUD".into(),
+                    source: ("clock".into(), 0),
+                    sink: ("vca".into(), 0),
+                },
+                GraphEdge {
+                    cable: "_MOD".into(),
+                    source: ("osc".into(), 0),
+                    sink: ("vca".into(), 0),
+                },
+            ],
+            clusters: vec![],
+            validation: vec![TopologyIssue {
+                cable: "_CLK".into(),
+                severity: TopologySeverity::Error,
+                message: "n -> 1".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn disabled_node_frame_and_title_render_dim_enabled_nodes_normal() {
+        let mut app = graph_app();
+        app.disabled_circuits.insert((String::from("copy"), 0));
+        let buf = buffer_for(&mut app, 120, 40);
+        let graph = app.graph.as_ref().unwrap();
+        let copy_idx = graph
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "copy")
+            .unwrap();
+        let clock_idx = graph
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "clocktool")
+            .unwrap();
+        let theme = theme::active();
+
+        // Disabled node: frame corners and title dimmed with the dim token.
+        let rect = node_rect_of(&app, copy_idx);
+        for cell in node_corner_cells(rect)
+            .into_iter()
+            .chain(node_title_cells(rect, 4))
+        {
+            let c = buf.cell(cell).unwrap();
+            assert!(
+                c.modifier.contains(Modifier::DIM),
+                "disabled node cell {cell:?} must render dim: {c:?}"
+            );
+        }
+        for cell in node_corner_cells(rect) {
+            assert_eq!(
+                buf.cell(cell).unwrap().fg,
+                theme.graph_node_dim,
+                "disabled node border uses the dim token"
+            );
+        }
+
+        // Enabled node: no dim on frame or title, normal chrome tokens.
+        let rect = node_rect_of(&app, clock_idx);
+        for cell in node_corner_cells(rect)
+            .into_iter()
+            .chain(node_title_cells(rect, 9))
+        {
+            let c = buf.cell(cell).unwrap();
+            assert!(
+                !c.modifier.contains(Modifier::DIM),
+                "enabled node cell {cell:?} must not render dim: {c:?}"
+            );
+        }
+        assert_eq!(
+            buf.cell(node_corner_cells(rect)[0]).unwrap().fg,
+            theme.graph_node_border,
+            "enabled node border keeps its normal token"
+        );
+    }
+
+    #[test]
+    fn disabled_node_dims_incident_edges_but_error_red_wins() {
+        let mut app = graph_app_from(three_node_graph(), vec![(0.0, 0.5), (1.0, 0.0), (1.0, 1.0)]);
+        app.disabled_circuits.insert((String::from("clocktool"), 0));
+        let buf = buffer_for(&mut app, 120, 40);
+        let theme = theme::active();
+
+        // _AUD is incident to the disabled clocktool node without a finding:
+        // dim token + DIM modifier, influence-independent.
+        let aud = cable_owned_cells(&buf, &app, "_AUD");
+        assert!(!aud.is_empty(), "_AUD polyline must draw owned cells");
+        for cell in aud {
+            let c = buf.cell(cell).unwrap();
+            assert_eq!(
+                c.fg, theme.graph_edge_dim,
+                "incident edge _AUD cell {cell:?} must use the dim token"
+            );
+            assert!(
+                c.modifier.contains(Modifier::DIM),
+                "incident edge _AUD cell {cell:?} must render dim"
+            );
+        }
+
+        // _CLK is also incident but carries a validation finding: error red
+        // outranks dim and stays plain red.
+        let clk = cable_owned_cells(&buf, &app, "_CLK");
+        assert!(!clk.is_empty(), "_CLK polyline must draw owned cells");
+        for cell in clk {
+            let c = buf.cell(cell).unwrap();
+            assert_eq!(
+                c.fg, theme.graph_edge_error,
+                "error cable _CLK cell {cell:?} must keep the error token"
+            );
+            assert!(
+                !c.modifier.contains(Modifier::DIM),
+                "error cable _CLK cell {cell:?} must not be dimmed"
+            );
+        }
+
+        // _MOD is not incident to the disabled node: kind color, no dim.
+        let kind_color = cable_color(app.graph.as_ref().unwrap(), "_MOD");
+        let mod_cells = cable_owned_cells(&buf, &app, "_MOD");
+        assert!(!mod_cells.is_empty(), "_MOD polyline must draw owned cells");
+        for cell in mod_cells {
+            let c = buf.cell(cell).unwrap();
+            assert_eq!(
+                c.fg, kind_color,
+                "non-incident edge _MOD cell {cell:?} keeps its kind color"
+            );
+            assert!(
+                !c.modifier.contains(Modifier::DIM),
+                "non-incident edge _MOD cell {cell:?} must not be dimmed"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_node_under_hover_keeps_hover_styling() {
+        let mut app = graph_app();
+        app.disabled_circuits.insert((String::from("copy"), 0));
+        let copy_idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "copy")
+            .unwrap();
+        app.hovered_graph_node = Some(copy_idx);
+        let buf = buffer_for(&mut app, 120, 40);
+        let theme = theme::active();
+
+        // Hover emphasis stays visible on the disabled node: reversed on the
+        // muted background, with the disabled dim still present underneath.
+        let rect = node_rect_of(&app, copy_idx);
+        for cell in node_corner_cells(rect)
+            .into_iter()
+            .chain(node_title_cells(rect, 4))
+        {
+            let c = buf.cell(cell).unwrap();
+            assert!(
+                c.modifier.contains(Modifier::REVERSED),
+                "hovered disabled node cell {cell:?} must keep hover styling: {c:?}"
+            );
+            assert_eq!(
+                c.bg, theme.muted,
+                "hovered disabled node cell {cell:?} keeps the hover background"
+            );
+            assert!(
+                c.modifier.contains(Modifier::DIM),
+                "hovered disabled node cell {cell:?} stays marked disabled"
+            );
+        }
+
+        // No other node is hovered: no reversed frame cells elsewhere.
+        let clock_idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "clocktool")
+            .unwrap();
+        let rect = node_rect_of(&app, clock_idx);
+        for cell in node_corner_cells(rect) {
+            assert!(
+                !buf.cell(cell)
+                    .unwrap()
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "unhovered node must not render hover styling"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_without_disabled_circuits_renders_without_dim_drift() {
+        let mut app = graph_app();
+        assert!(app.disabled_circuits.is_empty());
+        let buf = buffer_for(&mut app, 120, 40);
+        // No dimming anywhere: the disabled-circuit path must be inert unless
+        // a circuit actually is disabled (no drift vs. prior rendering).
+        for (i, cell) in buf.content().iter().enumerate() {
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "cell {i} ({:?}) unexpectedly dimmed with no disabled circuits",
+                cell.symbol()
+            );
+        }
+        // Edge coloring unchanged: the kind token still applies.
+        assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
     }
 }
