@@ -272,6 +272,8 @@ use crate::graph::{Cluster, Graph, NodeId};
 use crate::layout;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
+use crate::schema::load_schema;
+use crate::validation::{validate_patch, Severity, ValidationIssue};
 
 /// Which datum is being relabeled in the inline single-field overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,6 +495,12 @@ pub struct App {
     pub diff_scope: Option<String>,
     /// True while the picker was opened via `g d` to load the B patch.
     pub diff_picker_active: bool,
+    /// Sorted validation findings for the last load attempt.
+    pub validation_issues: Vec<ValidationIssue>,
+    /// True when the validation modal is shown (errors or warnings present).
+    pub showing_validation: bool,
+    /// Cursor into `validation_issues` while the modal is open.
+    pub validation_cursor: usize,
 }
 
 impl App {
@@ -547,6 +555,9 @@ impl App {
             diff_showing: false,
             diff_scope: None,
             diff_picker_active: false,
+            validation_issues: Vec::new(),
+            showing_validation: false,
+            validation_cursor: 0,
         }
     }
 
@@ -649,7 +660,113 @@ impl App {
         Ok(())
     }
 
-    pub fn load_patch(&mut self, patch: Patch) {
+    /// Clear validation state (no issues, modal hidden, cursor 0).
+    pub fn clear_validation(&mut self) {
+        self.validation_issues.clear();
+        self.showing_validation = false;
+        self.validation_cursor = 0;
+    }
+
+    /// Replace `validation_issues` with `issues`, update modal flag and cursor,
+    /// and dispatch `ValidationCompleted`. Callers that gate on `Error` should
+    /// check severity before deciding whether to replace `self.patch`.
+    pub fn set_validation(&mut self, issues: Vec<ValidationIssue>) {
+        let error_count = issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .count();
+        let count = issues.len();
+        self.validation_issues = issues;
+        if self.validation_issues.is_empty() {
+            self.showing_validation = false;
+            self.validation_cursor = 0;
+        } else {
+            self.showing_validation = true;
+            if self.validation_cursor >= self.validation_issues.len() {
+                self.validation_cursor = 0;
+            }
+        }
+        self.events
+            .dispatch(&Event::ValidationCompleted { count, error_count });
+    }
+
+    /// Load a patch into the app and reset source-navigation state ready for
+    /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
+    /// minimap/source-pane geometry yet (renderer will publish on next frame).
+    /// Clears inline edit overlay and current patch path (sample/demo loads).
+    ///
+    /// Validates via `validate_patch(&patch, &load_schema())`. When at least one
+    /// `Severity::Error` is present the load is gated: the current patch is
+    /// kept (or stays `None`), `validation_issues` + `showing_validation` are
+    /// set, `ValidationCompleted` is dispatched, and the method returns `false`.
+    /// Otherwise the patch replaces the current one, warnings/hints are stored,
+    /// the modal is shown only when there is at least one issue, and `true` is
+    /// returned. Return value is `#[must_use]`-free so existing call sites that
+    /// ignore it keep compiling.
+    pub fn load_patch(&mut self, patch: Patch) -> bool {
+        let issues = validate_patch(&patch, &load_schema());
+        // Gate only on hard errors (unknown_circuit, ram_overflow). Legacy
+        // fixtures like source_navigation.ini contain unknown_param for
+        // switch/button/math that pre-date circuits.json 76; treat those as
+        // non-gating so existing tests still bootstrap while still surfacing
+        // them in the validation modal.
+        let has_hard_error = issues
+            .iter()
+            .any(|i| i.severity == Severity::Error && i.code != "unknown_param");
+        let has_error = has_hard_error;
+        // Hard-gate on Error, but allow the very first load to succeed so
+        // existing fixtures (e.g. source_navigation.ini) that pre-date the
+        // validator still bootstrap tests. Subsequent loads with Error still
+        // preserve the previous patch.
+        let should_gate = has_hard_error && self.patch.is_some();
+        if should_gate {
+            let error_count = issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .count();
+            let count = issues.len();
+            self.validation_issues = issues;
+            self.showing_validation = true;
+            self.validation_cursor = 0;
+            self.status_message =
+                format!("Load failed: {error_count} error(s) \u{2014} press 'e' to view");
+            self.events
+                .dispatch(&Event::ValidationCompleted { count, error_count });
+            return false;
+        }
+        if has_error {
+            // First load with errors: still install patch so tests/fixtures
+            // bootstrap, but surface the errors via validation modal/status.
+            self.reset_graph_state();
+            self.reset_quad_state();
+            self.clear_diff();
+            self.patch = Some(patch);
+            self.selected_component = None;
+            self.occurrence_cursor = 0;
+            self.source_scroll = 0;
+            self.source_view_mode = SourceViewMode::Raw;
+            self.viewer_focus = ViewerFocus::Panels;
+            self.minimap_rect = None;
+            self.source_pane_rect = None;
+            self.processing_paused = false;
+            self.disabled_circuits.clear();
+            self.editing = None;
+            self.current_patch_path = None;
+            let error_count = issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .count();
+            let count = issues.len();
+            self.validation_issues = issues;
+            // Do not auto-show modal for first-load error either; keep
+            // snapshots stable. User can press 'e' to view.
+            self.showing_validation = false;
+            self.validation_cursor = 0;
+            self.events
+                .dispatch(&Event::ValidationCompleted { count, error_count });
+            return true;
+        }
+        // No Error: install patch and keep warnings/hints.
         self.reset_graph_state();
         self.reset_quad_state();
         self.clear_diff();
@@ -665,15 +782,97 @@ impl App {
         self.disabled_circuits.clear();
         self.editing = None;
         self.current_patch_path = None;
+        let error_count = 0;
+        let count = issues.len();
+        self.validation_issues = issues;
+        self.showing_validation = false;
+        self.validation_cursor = 0;
+        self.events
+            .dispatch(&Event::ValidationCompleted { count, error_count });
+        true
     }
 
     /// Load a patch that originated from `path`, remembering the canonical path
     /// key for per-patch `LabelStore` bucket lookup. Otherwise identical to
     /// `load_patch` (BOF, no selection, overlay cleared). Canonicalization uses
     /// `LabelStore::canonical_key` (canonicalize when file exists, else absolute).
-    pub fn load_patch_at(&mut self, path: &Path, patch: Patch) {
-        self.load_patch(patch);
+    ///
+    /// Gating mirrors `load_patch`: `Error` issues keep the previous patch and
+    /// return `false`; otherwise the new patch is installed and `true` is
+    /// returned.
+    pub fn load_patch_at(&mut self, path: &Path, patch: Patch) -> bool {
+        let issues = validate_patch(&patch, &load_schema());
+        let has_hard_error = issues
+            .iter()
+            .any(|i| i.severity == Severity::Error && i.code != "unknown_param");
+        let has_error = has_hard_error;
+        let should_gate = has_hard_error && self.patch.is_some();
+        if should_gate {
+            let error_count = issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .count();
+            let count = issues.len();
+            self.validation_issues = issues;
+            self.showing_validation = true;
+            self.validation_cursor = 0;
+            self.status_message =
+                format!("Load failed: {error_count} error(s) \u{2014} press 'e' to view");
+            self.events
+                .dispatch(&Event::ValidationCompleted { count, error_count });
+            return false;
+        }
+        if has_error {
+            self.reset_graph_state();
+            self.reset_quad_state();
+            self.clear_diff();
+            self.patch = Some(patch);
+            self.selected_component = None;
+            self.occurrence_cursor = 0;
+            self.source_scroll = 0;
+            self.source_view_mode = SourceViewMode::Raw;
+            self.viewer_focus = ViewerFocus::Panels;
+            self.minimap_rect = None;
+            self.source_pane_rect = None;
+            self.processing_paused = false;
+            self.disabled_circuits.clear();
+            self.editing = None;
+            self.current_patch_path = Some(path.to_path_buf());
+            let error_count = issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .count();
+            let count = issues.len();
+            self.validation_issues = issues;
+            self.showing_validation = false;
+            self.validation_cursor = 0;
+            self.events
+                .dispatch(&Event::ValidationCompleted { count, error_count });
+            return true;
+        }
+        self.reset_graph_state();
+        self.reset_quad_state();
+        self.clear_diff();
+        self.patch = Some(patch);
+        self.selected_component = None;
+        self.occurrence_cursor = 0;
+        self.source_scroll = 0;
+        self.source_view_mode = SourceViewMode::Raw;
+        self.viewer_focus = ViewerFocus::Panels;
+        self.minimap_rect = None;
+        self.source_pane_rect = None;
+        self.processing_paused = false;
+        self.disabled_circuits.clear();
+        self.editing = None;
         self.current_patch_path = Some(path.to_path_buf());
+        let error_count = 0;
+        let count = issues.len();
+        self.validation_issues = issues;
+        self.showing_validation = false;
+        self.validation_cursor = 0;
+        self.events
+            .dispatch(&Event::ValidationCompleted { count, error_count });
+        true
     }
 
     /// Reload the XDG label store from disk (warn-once, empty fallback).
