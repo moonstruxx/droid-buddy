@@ -6,6 +6,7 @@
 //! resolution is injected as a function reference, so name-catalog
 //! validation can be wired to `theme.rs` at the call site.
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -53,14 +54,28 @@ impl Default for Labels {
     }
 }
 
+/// Per-circuit latency overrides under `[latency]`.
+///
+/// Keys are DROID circuit names; values override the ramsize-proportional
+/// per-circuit `AVG` in `latency::CostModel`. Empty or absent means the
+/// heuristic default applies.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Latency {
+    #[serde(default)]
+    pub per_circuit: HashMap<String, f32>,
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
-/// (forward-compatible with future versions).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// (forward-compatible with future versions). `Eq` is intentionally not
+/// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default)]
     pub labels: Labels,
+    #[serde(default)]
+    pub latency: Latency,
 }
 
 impl Default for Settings {
@@ -68,6 +83,7 @@ impl Default for Settings {
         Self {
             theme: default_theme(),
             labels: Labels::default(),
+            latency: Latency::default(),
         }
     }
 }
@@ -323,6 +339,7 @@ mod tests {
             &Settings {
                 theme: "mono".to_string(),
                 labels: Labels::default(),
+                latency: Latency::default(),
             },
         )
         .unwrap();
@@ -352,6 +369,7 @@ mod tests {
             &Settings {
                 theme: "terminal".to_string(),
                 labels: Labels::default(),
+                latency: Latency::default(),
             },
         )
         .unwrap();
@@ -422,6 +440,7 @@ mod tests {
                     layers_enabled: false,
                     max_shift_layer: 20,
                 },
+                latency: Latency::default(),
             },
         )
         .unwrap();
@@ -446,6 +465,7 @@ mod tests {
                         layers_enabled: true,
                         max_shift_layer: raw,
                     },
+                    latency: Latency::default(),
                 },
             )
             .unwrap();
@@ -466,6 +486,9 @@ mod tests {
             labels: Labels {
                 layers_enabled: false,
                 max_shift_layer: 6,
+            },
+            latency: Latency {
+                per_circuit: HashMap::from([("clocktool".to_string(), 2.0)]),
             },
         };
         save_to_dir(dir.path(), &settings).unwrap();
@@ -495,5 +518,56 @@ mod tests {
         .unwrap();
         let loaded = load_at(&dir);
         assert_eq!(loaded.labels.max_shift_layer, 4);
+    }
+
+    // ── latency-cost-model 1.1: [latency] per_circuit ──
+
+    #[test]
+    fn latency_per_circuit_parses_from_config() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[latency]\nper_circuit = { \"clocktool\" = 12.0, \"copy\" = 3.5 }\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.latency.per_circuit.get("clocktool"), Some(&12.0));
+        assert_eq!(loaded.latency.per_circuit.get("copy"), Some(&3.5));
+    }
+
+    #[test]
+    fn latency_absent_defaults_to_empty() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert!(loaded.latency.per_circuit.is_empty());
+    }
+
+    #[test]
+    fn latency_save_round_trips_through_load() {
+        let dir = TempDir::new().unwrap();
+        save_to_dir(
+            dir.path(),
+            &Settings {
+                theme: "classic".to_string(),
+                labels: Labels::default(),
+                latency: Latency {
+                    per_circuit: HashMap::from([("clocktool".to_string(), 2.5)]),
+                },
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[latency.per_circuit]"), "body: {body}");
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.latency.per_circuit.get("clocktool"), Some(&2.5));
     }
 }

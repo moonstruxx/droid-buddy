@@ -11,10 +11,18 @@
 //! Pure module: no terminal dependency, no I/O, no RNG. Edges are iterated by
 //! index and positions resolve through a node-order lookup, so identical input
 //! yields byte-identical output.
+//!
+//! [`CostModel`] is the shared per-circuit cost provider (design D2): config
+//! `[latency]` overrides layered over the ramsize-proportional default, used by
+//! both the coloring below and the optimizer so a cost change recolors and
+//! re-optimizes coherently. Pure data — the schema and node arrive as
+//! arguments, never read from global or `App` state.
 
 use std::collections::HashMap;
 
+use crate::config::Settings;
 use crate::graph::{GraphEdge, NodeId};
+use crate::schema::Schema;
 
 /// Per-edge latency, parallel to `Graph.edges` (`edge_index` is the index into
 /// the edges slice).
@@ -59,6 +67,59 @@ pub struct LatencyData {
 // sizes, never NaN, so `==` is a genuine equivalence relation here and a
 // manual marker impl is sound.
 impl Eq for LatencyData {}
+
+/// Shared per-circuit processing-cost provider (design D2).
+///
+/// Holds the config `[latency] per_circuit` overrides keyed by lowercased
+/// circuit name; [`CostModel::circuit_avg`] returns a configured override when
+/// present and otherwise the ramsize-proportional heuristic — today's default,
+/// preserved byte-for-byte. One instance is built from config at startup and
+/// passed into the graph build, so a config change recolors the latency ramp
+/// and (later) re-optimizes coherently.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CostModel {
+    /// Config `[latency] per_circuit` overrides, keyed by lowercased circuit
+    /// name. Empty = pure heuristic.
+    overrides: HashMap<String, f32>,
+}
+
+impl CostModel {
+    /// Per-circuit cost `AVG`: a configured override wins, otherwise the
+    /// ramsize-proportional heuristic (the producing circuit's RAM footprint
+    /// relative to the largest master budget).
+    pub fn circuit_avg(&self, node: &NodeId, schema: &Schema) -> f32 {
+        let circuit = node.0.to_lowercase();
+        if let Some(&avg) = self.overrides.get(&circuit) {
+            return avg;
+        }
+        heuristic_avg(&circuit, schema)
+    }
+
+    /// Build the provider from the `[latency]` config section. Empty or absent
+    /// `per_circuit` yields the pure heuristic model.
+    pub fn from_config(config: &Settings) -> CostModel {
+        CostModel {
+            overrides: config
+                .latency
+                .per_circuit
+                .iter()
+                .map(|(name, avg)| (name.to_lowercase(), *avg))
+                .collect(),
+        }
+    }
+}
+
+/// Default `AVG ∝ ramsize(circuit)`. Unknown circuits and zero budgets degrade
+/// to unit cost.
+fn heuristic_avg(circuit: &str, schema: &Schema) -> f32 {
+    let loop_budget = schema.available_memory.values().copied().max().unwrap_or(0);
+    let ramsize = schema.circuits.get(circuit).map_or(0, |def| def.ramsize);
+    if ramsize == 0 || loop_budget == 0 {
+        1.0
+    } else {
+        ramsize as f32 / loop_budget as f32
+    }
+}
 
 /// Compute per-edge forward-loop latency and the aggregate summary.
 ///
@@ -273,5 +334,70 @@ mod tests {
             latencies.iter().map(|l| l.edge_index).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
         );
+    }
+
+    // ── CostModel (design D2): override ?? ramsize heuristic ──
+
+    fn cost_from(overrides: &[(&str, f32)]) -> CostModel {
+        CostModel {
+            overrides: overrides
+                .iter()
+                .map(|(name, avg)| (name.to_string(), *avg))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn override_wins_over_heuristic() {
+        let schema = crate::schema::load_schema();
+        let node: NodeId = ("clocktool".to_string(), 0);
+        let model = cost_from(&[("clocktool", 42.0)]);
+        assert_eq!(model.circuit_avg(&node, &schema), 42.0);
+        assert_ne!(
+            model.circuit_avg(&node, &schema),
+            CostModel::default().circuit_avg(&node, &schema),
+            "the override must actually differ from the ramsize heuristic"
+        );
+    }
+
+    #[test]
+    fn absent_override_falls_back_to_heuristic() {
+        let schema = crate::schema::load_schema();
+        let node: NodeId = ("clocktool".to_string(), 0);
+        // No overrides (default settings) → the pure ramsize heuristic.
+        let model = CostModel::from_config(&crate::config::Settings::default());
+        assert_eq!(
+            model.circuit_avg(&node, &schema),
+            heuristic_avg("clocktool", &schema)
+        );
+    }
+
+    #[test]
+    fn from_config_reads_per_circuit_overrides_case_insensitively() {
+        let schema = crate::schema::load_schema();
+        let settings = crate::config::Settings {
+            theme: "classic".to_string(),
+            labels: crate::config::Labels::default(),
+            latency: crate::config::Latency {
+                per_circuit: HashMap::from([("CLOCKTOOL".to_string(), 7.5)]),
+            },
+        };
+        let model = CostModel::from_config(&settings);
+        assert_eq!(
+            model.circuit_avg(&("clocktool".to_string(), 0), &schema),
+            7.5
+        );
+        // Overrides apply to every instance of the circuit, not just instance 0.
+        assert_eq!(
+            model.circuit_avg(&("clocktool".to_string(), 2), &schema),
+            7.5
+        );
+    }
+
+    #[test]
+    fn unknown_circuit_without_override_degrades_to_unit_cost() {
+        let schema = crate::schema::load_schema();
+        let node: NodeId = ("not_a_circuit".to_string(), 0);
+        assert_eq!(CostModel::default().circuit_avg(&node, &schema), 1.0);
     }
 }
