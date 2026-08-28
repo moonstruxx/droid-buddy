@@ -20,7 +20,7 @@
 
 ## Task 2.1 — App state + `g o` menu + preview/export wiring
 
-- [ ] Add App.optimizer state (candidates, cursor, previewing, original_order) and handler wiring: `g o` generates + opens the menu, j/k navigate, Enter preview (reorder Patch.sections + rebuild graph + emit GraphRebuilt), r restore, s export via write_to_ini, Esc close (+restore if previewing); no-patch status hint <!-- agent: rusty-engineer.build, depends_on: [1.2, 1.3], touches: [src/app.rs, src/handler.rs] -->
+- [x] Add App.optimizer state (candidates, cursor, previewing, original_order) and handler wiring: `g o` generates + opens the menu, j/k navigate, Enter preview (reorder Patch.sections + rebuild graph + emit GraphRebuilt), r restore, s export via write_to_ini, Esc close (+restore if previewing); no-patch status hint <!-- agent: rusty-engineer.build, depends_on: [1.2, 1.3], touches: [src/app.rs, src/handler.rs] -->
 
 **details**: `OptimizerState { candidates, cursor, previewing: Option<usize>, original_order: Vec<usize> }`; preview mutates section order in place, restore reverses; export refuses source path; status shows candidate label / written path.
 
@@ -32,7 +32,7 @@
 
 ## Task 3.1 — Optimizer + writer unit tests
 
-- [ ] Unit-test the optimizer (brute-force equivalence N ≤ 8, determinism, same-name relative order, banner scope, min-max bound, empty/single-section) and the writer (byte-identical round-trip, comment/banner travel, reorder re-parse, source-path refusal, collision suffix) <!-- agent: horst-engineer.build, depends_on: [1.2, 1.3], touches: [src/optimize.rs, src/patch.rs] -->
+- [x] Unit-test the optimizer (brute-force equivalence N ≤ 8, determinism, same-name relative order, banner scope, min-max bound, empty/single-section) and the writer (byte-identical round-trip, comment/banner travel, reorder re-parse, source-path refusal, collision suffix) <!-- agent: horst-engineer.build, depends_on: [1.2, 1.3], touches: [src/optimize.rs, src/patch.rs] -->
 
 **details**: Brute-force cross-check enumerates all permutations for N ≤ 8 and asserts each candidate is no worse under the same constraints; full suite stays green (458 baseline + new).
 
