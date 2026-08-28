@@ -2,7 +2,7 @@
 
 ## Task 1.1 — FAS-indegree first-phase ranking
 
-- [ ] Add FAS-indegree first-phase ranking (`fas_indegree_seed`): compute per-section indegree over the cable-index edge set, Kahn-style rank with node-id-hash tie-break, and use it as the seed for the local-search variants in place of the topological-depth seed. Verify: `cargo test optimize::` — new test asserts the ranking places producers before consumers on a circular chain (back-edge count no worse than `seed_order`) and that the pass is linear in sections+edges. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/optimize.rs] -->
+- [x] Add FAS-indegree first-phase ranking (`fas_indegree_seed`): compute per-section indegree over the cable-index edge set, Kahn-style rank with node-id-hash tie-break, and use it as the seed for the local-search variants in place of the topological-depth seed. Verify: `cargo test optimize::` — new test asserts the ranking places producers before consumers on a circular chain (back-edge count no worse than `seed_order`) and that the pass is linear in sections+edges. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/optimize.rs] -->
 
 **details**: Follows design D1. The cable-index edge set is the same the graph uses (cable sources → sinks, preamble maps excluded). `generate_candidates` currently seeds each local variant via `seed_order` (topological depth); replace that seed with the FAS-indegree rank (same signature: `fn(&[Range<usize>], &[IniSection]) -> Vec<usize>`). Deterministic: Kahn queue with node-id-hash (`fnv1a`) tie-break — no RNG. No change to `evaluate_order` or `search_local`.
 
