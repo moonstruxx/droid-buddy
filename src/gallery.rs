@@ -16,7 +16,7 @@ use ratatui::Terminal;
 
 use crate::app::{App, ViewerFocus};
 use crate::handler::handle_event;
-use crate::patch::ShiftGroup;
+use crate::patch::{ComponentState, ShiftGroup};
 use crate::theme;
 use crate::ui::render;
 
@@ -285,6 +285,28 @@ fn setup_modifier_shift(app: &mut App) {
     app.active_shift = Some(ShiftGroup::Group1);
 }
 
+fn setup_switch_value(app: &mut App) {
+    *app = app_from_fixture("switch_value");
+    for comp in &mut app.patch.as_mut().unwrap().hw_components {
+        match comp.id.as_str() {
+            "S1.1" => comp.state = ComponentState::Value(0.35),
+            "S1.2" => comp.state = ComponentState::On,
+            _ => {}
+        }
+    }
+}
+
+fn setup_paused_dim(app: &mut App) {
+    *app = app_from_fixture("arpeggio1");
+    app.processing_paused = true;
+}
+
+fn setup_disabled_circuit_graph(app: &mut App) {
+    *app = app_from_fixture("cable_banner_combos");
+    app.open_graph();
+    app.disabled_circuits.insert((String::from("clocktool"), 0));
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -440,6 +462,27 @@ const SCENARIOS: &[Scenario] = &[
         width: 120,
         height: 40,
         setup: setup_modifier_shift,
+    },
+    Scenario {
+        id: "switch_value_100",
+        label: "switch_value · width 100 · switch renders token + Value %",
+        width: 100,
+        height: 30,
+        setup: setup_switch_value,
+    },
+    Scenario {
+        id: "paused_dim_100",
+        label: "arpeggio1 · width 100 · processing paused (panels dim)",
+        width: 100,
+        height: 30,
+        setup: setup_paused_dim,
+    },
+    Scenario {
+        id: "disabled_circuit_graph_100",
+        label: "cable_banner_combos · graph · clocktool disabled (dim node/edges)",
+        width: 100,
+        height: 40,
+        setup: setup_disabled_circuit_graph,
     },
 ];
 
