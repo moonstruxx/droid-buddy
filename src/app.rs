@@ -103,6 +103,10 @@ pub struct App {
     /// `graph_node_rects` entry until the matching Up; drives node repositioning
     /// + damped local re-settle (design D1).
     pub graph_drag: Option<GraphDrag>,
+    /// Hovered graph node index while the graph surface is open, updated on
+    /// mouse Moved via `graph_node_rects` hit-testing. `None` when the pointer
+    /// is not over a node or the graph is closed.
+    pub hovered_graph_node: Option<usize>,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -186,6 +190,7 @@ impl App {
             graph_cluster_rects: Vec::new(),
             graph_node_rects: Vec::new(),
             graph_drag: None,
+            hovered_graph_node: None,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -273,6 +278,7 @@ impl App {
         self.graph_cluster_rects.clear();
         self.graph_node_rects.clear();
         self.graph_drag = None;
+        self.hovered_graph_node = None;
         self.showing_graph = true;
         self.emit_graph_built();
     }
@@ -297,6 +303,49 @@ impl App {
     /// Close the graph view, leaving panel/source-viewer state untouched.
     pub fn close_graph(&mut self) {
         self.showing_graph = false;
+        self.hovered_graph_node = None;
+    }
+
+    /// Rebuild the graph from the current patch without toggling
+    /// `showing_graph`. Used after a per-circuit toggle so the renderer
+    /// reflects the new disabled state while staying on the surface.
+    pub fn rebuild_graph(&mut self) {
+        let (graph, positions) = match &self.patch {
+            Some(patch) => {
+                let clusters = clusters_from_patch(patch);
+                let graph = Graph::build_from_patch(patch, &clusters);
+                let positions = layout::solve(&graph);
+                (Some(graph), positions)
+            }
+            None => (Some(Graph::default()), Vec::new()),
+        };
+        self.graph = graph;
+        self.graph_positions = positions;
+        self.graph_cluster_rects.clear();
+        self.graph_node_rects.clear();
+        self.graph_drag = None;
+        // hover stays as-is (still valid index) but will be re-resolved
+        // on next mouse move; keep it so `x` status can reference it.
+        self.emit_graph_built();
+        // Re-apply influence highlights after rebuild so FILTERED stays in sync.
+        if self.influence.is_some() {
+            let influence = self.influence.clone();
+            if let Some(sub) = influence {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.highlighted_nodes = sub.influenced_nodes.clone();
+                    graph.highlighted_edges = sub.influenced_edges.clone();
+                }
+                if let Some(graph) = self.graph.as_ref() {
+                    let filtered = graph.filtered_influence(&sub);
+                    let positions = layout::solve_filtered(&filtered);
+                    self.filtered_graph = Some(filtered);
+                    self.filtered_positions = positions;
+                    self.filtered_node_rects.clear();
+                    self.filtered_cluster_rects.clear();
+                    self.filtered_drag = None;
+                }
+            }
+        }
     }
 
     /// Clear the renderer-published cluster rects each frame while the graph is
@@ -320,6 +369,7 @@ impl App {
         self.graph_cluster_rects.clear();
         self.graph_node_rects.clear();
         self.graph_drag = None;
+        self.hovered_graph_node = None;
     }
 
     /// Reset quad-view state on patch load, mirroring `reset_graph_state`.
