@@ -272,6 +272,22 @@ use crate::layout;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
 
+/// Which datum is being relabeled in the inline single-field overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditKind {
+    /// HW token at a specific shift layer (1..=max_shift_layer, clamped on read).
+    Hw { token: String, layer: u8 },
+    /// Circuit instance identified by `(circuit name, instance index)`.
+    Circuit { node: NodeId },
+}
+
+/// Inline edit overlay state for the label overlay (`e` to enter, `Enter`/`Esc`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditState {
+    pub kind: EditKind,
+    pub draft: String,
+}
+
 /// State of an armed vim-style prefix key (`g` pressed, awaiting the
 /// follow-up key). `started` drives the lazy timeout check performed when
 /// the next event arrives.
@@ -431,6 +447,16 @@ pub struct App {
     /// end in the influence walk: nothing downstream of them is reached.
     /// Cleared on every `load_patch`.
     pub disabled_circuits: HashSet<(String, usize)>,
+    /// Per-patch XDG label store (`~/.config/droid-tui/labels.toml`), keyed by
+    /// canonicalized absolute patch path. Loaded once at `App::new` via
+    /// `LabelStore::load()` (warn-once, empty fallback) and persisted atomically
+    /// on edit save.
+    pub label_store: LabelStore,
+    /// Inline single-field label-edit overlay state. `None` when not editing.
+    pub editing: Option<EditState>,
+    /// Canonical absolute path of the currently loaded patch, if any. Drives
+    /// per-patch bucket lookup (`LabelStore::canonical_key`) without content hashing.
+    pub current_patch_path: Option<PathBuf>,
 }
 
 impl App {
@@ -477,6 +503,9 @@ impl App {
             filtered_node_rects: Vec::new(),
             filtered_drag: None,
             disabled_circuits: HashSet::new(),
+            label_store: LabelStore::load(),
+            editing: None,
+            current_patch_path: None,
         }
     }
 
@@ -506,6 +535,7 @@ impl App {
     /// Load a patch into the app and reset source-navigation state ready for
     /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
     /// minimap/source-pane geometry yet (renderer will publish on next frame).
+    /// Clears inline edit overlay and current patch path (sample/demo loads).
     pub fn load_patch(&mut self, patch: Patch) {
         self.reset_graph_state();
         self.reset_quad_state();
@@ -519,6 +549,95 @@ impl App {
         self.source_pane_rect = None;
         self.processing_paused = false;
         self.disabled_circuits.clear();
+        self.editing = None;
+        self.current_patch_path = None;
+    }
+
+    /// Load a patch that originated from `path`, remembering the canonical path
+    /// key for per-patch `LabelStore` bucket lookup. Otherwise identical to
+    /// `load_patch` (BOF, no selection, overlay cleared). Canonicalization uses
+    /// `LabelStore::canonical_key` (canonicalize when file exists, else absolute).
+    pub fn load_patch_at(&mut self, path: &Path, patch: Patch) {
+        self.load_patch(patch);
+        self.current_patch_path = Some(path.to_path_buf());
+    }
+
+    /// Reload the XDG label store from disk (warn-once, empty fallback).
+    /// Useful when the file was mutated externally; `current_patch_path` bucket
+    /// lookup reflects the refreshed store on next `current_hw_store` call.
+    pub fn reload_label_store(&mut self) {
+        self.label_store = LabelStore::load();
+    }
+
+    /// HW bucket for the currently loaded patch, if any (cloned, empty when no
+    /// patch path or no bucket). Suitable for `Patch::display_label` fallback chain.
+    pub fn current_hw_store(&self) -> HashMap<String, BTreeMap<u8, String>> {
+        self.current_patch_path
+            .as_ref()
+            .and_then(|p| self.label_store.patch_labels(p))
+            .map(|b| b.hw.clone())
+            .unwrap_or_default()
+    }
+
+    /// Circuit bucket for the currently loaded patch as `NodeId -> label`,
+    /// decoded from the TOML `"circuit:instance"` keys. Empty when no patch
+    /// path or no bucket.
+    pub fn current_circuit_store(&self) -> HashMap<NodeId, String> {
+        let Some(path) = self.current_patch_path.as_ref() else {
+            return HashMap::new();
+        };
+        let Some(bucket) = self.label_store.patch_labels(path) else {
+            return HashMap::new();
+        };
+        let mut out = HashMap::new();
+        for (k, v) in &bucket.circuits {
+            if let Some((name, idx)) = LabelStore::decode_node_id(k) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    out.insert((name, idx), trimmed.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Structural influence for the currently edited datum, if any, using the
+    /// same BFS as `recompute_influence` (cycle-safe, `disabled_circuits` dead
+    /// ends). Drives the overlay status `TOKEN / GroupN -> N ckts / M cables`
+    /// and `modifier_hue` without mutating `self.influence`.
+    pub fn editing_influence(&self) -> Option<crate::patch::InfluenceSubtree> {
+        let patch = self.patch.as_ref()?;
+        let editing = self.editing.as_ref()?;
+        match &editing.kind {
+            EditKind::Hw { token, .. } => {
+                let vars = patch.hw_token_to_vars(token);
+                if vars.is_empty() {
+                    return None;
+                }
+                Some(patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits))
+            }
+            EditKind::Circuit { node } => {
+                // Roots are the output cables of this circuit instance.
+                // Re-derive NodeId -> section index mapping (same as patch.rs build_node_ids).
+                let mut counts: HashMap<String, usize> = HashMap::new();
+                let mut target_idx: Option<usize> = None;
+                for (idx, section) in patch.sections.iter().enumerate() {
+                    let entry = counts.entry(section.name.clone()).or_insert(0);
+                    let nid = (section.name.clone(), *entry);
+                    if &nid == node {
+                        target_idx = Some(idx);
+                        break;
+                    }
+                    *entry += 1;
+                }
+                let idx = target_idx?;
+                let roots = patch.circuit_outputs.get(idx).cloned().unwrap_or_default();
+                if roots.is_empty() {
+                    return None;
+                }
+                Some(patch.influence_subtree_with_disabled(&roots, &self.disabled_circuits))
+            }
+        }
     }
 
     /// Build the signal-flow graph from the current patch and run a fresh full
