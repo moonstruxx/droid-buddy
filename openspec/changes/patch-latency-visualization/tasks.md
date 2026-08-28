@@ -2,6 +2,8 @@
 
 ## Task 1.1 — Pure latency model
 
+- [x] done
+
 - **agent**: dermannmitdermachine-engineer.build
 - **depends_on**: —
 - **touches**: `src/latency.rs` (new), `src/lib.rs`
