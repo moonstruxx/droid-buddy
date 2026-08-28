@@ -22,7 +22,6 @@
     ]
   },
   "tools": {
-    "rtk": true,
     "quota": true,
     "caveman": false,
     "codegraph": false,

@@ -41,12 +41,6 @@ The marker sections below may contain instructions for selected optimization ski
 - Report blockers immediately.
 - Show progress when asked.
 
-<!-- OB-GUARDRAILS-RTK-START -->
-## RTK
-
-- Prefix ALL CLI commands with `rtk` (e.g. `rtk git diff`, `rtk pnpm test`). Read-only commands like `cat`, `ls`, `Get-Content` are exempt.
-<!-- OB-GUARDRAILS-RTK-END -->
-
 <!-- OB-GUARDRAILS-CODEGRAPH-START -->
 ## CodeGraph
 
