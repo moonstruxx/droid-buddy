@@ -17,7 +17,7 @@
       · `include_str!` the learned table (schema.rs embed precedent); score `BindingFeatures` → outlier Warning in the existing `TopologyIssue` channel
       · delegate the call site to the scorer with the invariant guards kept explicit (design D5): adjacent / co-located `L→B` / via-cable never flagged, miss → threshold fallback
       · verify: `cargo test` graph/geometry tests pass; new unit tests cover a scored-outlier case, a fallback case, and the invariant guards
-- [ ] 2.2 Second-opinion layer: per-token influence_subtree z-score <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1], touches: [src/patch.rs, src/graph.rs] -->
+- [x] 2.2 Second-opinion layer: per-token influence_subtree z-score <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1], touches: [src/patch.rs, src/graph.rs] -->
       · bake corpus per-token-kind mean/std of `influence_subtree` size into the artifact style (design D4); z-score beyond calibrated band → `TopologyIssue` Warning via the existing channel; never gates patch loading
       · verify: `cargo test` covers a flagged extreme-token case and a typical-token non-flag case (spec scenarios); patch still loads with the warning present
 
