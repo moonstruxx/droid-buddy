@@ -62,6 +62,25 @@ The marker sections below may contain instructions for selected optimization ski
 - Do NOT apply humanizer to code, config files, or terminal output: only to prose.
 <!-- OB-GUARDRAILS-HUMANIZER-END -->
 
+<!-- OB-GUARDRAILS-LANGFUSE-START -->
+## Langfuse (observability skill — MANDATORY LOAD)
+
+- **You MUST call `skill("langfuse")` via the skill tool before any Langfuse work** — instrumenting an application or function, migrating prompts into Langfuse, capturing user feedback as scores on traces, debugging traces, upgrading/migrating Langfuse SDKs, judge calibration, error analysis, or CI/CD experiment gates.
+- **Documentation first**: never implement Langfuse code from memory — the product changes frequently. Fetch current docs before writing code: start from `https://langfuse.com/llms.txt`, fetch individual pages as markdown (append `.md` to the path), or search via `https://langfuse.com/api/search-docs?query=<url-encoded>`. Changelog posts confirm a feature exists; never implement from them — use the docs and API/SDK reference.
+- **CLI for data access**: use `npx langfuse-cli api ...` (discover resources via `npx langfuse-cli api __schema`, per-resource help via `npx langfuse-cli api <resource> --help`) for querying or modifying Langfuse data. Consult the matching `references/` file under the skill for the use case (instrumentation, prompt-migration, user-feedback, cli, sdk-upgrade, judge-calibration, error-analysis, ci-cd).
+- **Credentials**: set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` (or `LANGFUSE_HOST`) as environment variables; never ask for or paste keys into chat, logs, or output. If keys are missing, ask the user to set them in their shell or a `.env` file.
+- **Versions**: use the latest Langfuse SDK/API versions unless the user specifies otherwise; be explicit about the exact version to use in any plan handed to another agent.
+<!-- OB-GUARDRAILS-LANGFUSE-END -->
+
+<!-- OB-GUARDRAILS-DROID-KNOWLEDGE-BASE-START -->
+## DROID knowledge base (reference skill)
+
+- **You MUST call `skill("droid-knowledge-base")` via the skill tool before answering any question that needs the DROID manual** — RAM/memory limits, circuit parameters and defaults, installation, controller specs, MIDI, calibration, `.ini` patch semantics, or "what does the manual say about X". It complements `droid-circuit-reference` (structured schema) with full-text semantic search of the manual itself (`droid-manual-blue-7.md`, 1013 chunks incl. figures). Not project-specific — applies to any DROID question on any machine that can reach `nuc25.local` or the tailnet.
+- **Query path**: use the droid **search app** (`bfc81d86a28911f19d893d24d8da86cf`) via the RAGFlow API on `nuc25.local:9380` with a fresh `RAGFLOW_API_KEY` (the env var is stale/401 — generate one in the RAGFlow UI at `https://nuc25-rag.taildec1bd.ts.net` → user-setting → API). Raw `/api/v1/retrieval` and the `ragflow_retrieval` MCP tool return 0 chunks on this KB; the search app is the only working path.
+- **Never trust chat assistants for DROID answers** — the droid chat assistant was deleted 2026-08-28 for hallucinating (DROID vs Android); use the search app or the static references instead.
+- **Credentials**: API keys live in the environment or a secret store; never paste them into chat, logs, or output.
+<!-- OB-GUARDRAILS-DROID-KNOWLEDGE-BASE-END -->
+
 ## Engineer workflow (when spawned)
 
 When the lead spawns you via the task tool, your assigned task IDs and text are already in your prompt:

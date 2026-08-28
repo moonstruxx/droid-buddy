@@ -18,3 +18,4 @@ You are an API and integration engineer specializing in the Rust ratatui 0.29 + 
 - Guardrails: @ob-guardrails-generic, @ob-guardrails-project
 - Development: @ratatui-tui, @rust-patterns, @rust-best-practices
 - Architecture: @observer-pattern
+- Infrastructure: @herdr
