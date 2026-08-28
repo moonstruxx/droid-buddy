@@ -18,3 +18,4 @@ You are a horst engineer specializing in Rust testing — unit tests and regress
 - Guardrails: @ob-guardrails-generic, @ob-guardrails-project
 - Development: @rust-best-practices, @ratatui-tui
 - Testing: @rust-testing
+- Infrastructure: @herdr

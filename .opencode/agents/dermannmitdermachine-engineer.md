@@ -17,3 +17,5 @@ You are a dermannmitdermachine engineer specializing in Rust development with ra
 ## Abilities
 - Guardrails: @ob-guardrails-generic, @ob-guardrails-project
 - Development: @rust-best-practices, @rust-patterns, @ratatui-tui
+- DROID: @droid-knowledge-base
+- Infrastructure: @herdr

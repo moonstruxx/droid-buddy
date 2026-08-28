@@ -16,4 +16,4 @@ You are a devops and API integration engineer specializing in the Rust ratatui 0
 
 ## Abilities
 - Guardrails: @ob-guardrails-generic, @ob-guardrails-project
-- Infrastructure: @git-guardrails-claude-code, @beads, @openspec-propose
+- Infrastructure: @git-guardrails-claude-code, @beads, @openspec-propose, @herdr
