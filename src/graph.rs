@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::geometry::{BindingFeatures, RackGeometry};
-use crate::latency::{forward_latency, LatencyData};
+use crate::latency::{forward_latency, CostModel, LatencyData};
 use crate::patch::{InfluenceSubtree, Patch};
 use crate::schema::load_schema;
 
@@ -113,18 +113,21 @@ impl Graph {
     ///   reference, producing one directed edge per (cable, sink).
     /// - `clusters` are stored verbatim; callers pass banner groups derived
     ///   from `Patch.banner_groups` (task 1.2).
+    /// - `cost` is the shared per-circuit cost provider (design D2) feeding
+    ///   the latency ramp; the caller (typically `App`) owns one built from
+    ///   `[latency]` config, keeping this module pure.
     ///
     /// Cable attribution is by section *name* (the cable index records names,
     /// not instance indices), so a name shared by several instances resolves
     /// to the first instance. Instance-accurate attribution is left to the
     /// topology-validation pass (task 2.2), which operates on the cable index
     /// entries by name, keeping that convention consistent.
-    pub fn build_from_patch(patch: &Patch, clusters: &[Cluster]) -> Graph {
+    pub fn build_from_patch(patch: &Patch, clusters: &[Cluster], cost: &CostModel) -> Graph {
         let nodes = build_nodes(patch);
         let node_by_name = name_to_first_node(&nodes);
         let edges = build_edges(patch, &node_by_name);
         let validation = validate_topology(patch);
-        let latency = compute_latency(&nodes, &edges);
+        let latency = compute_latency(&nodes, &edges, cost);
         Graph {
             nodes,
             edges,
@@ -224,7 +227,11 @@ impl Graph {
 /// since a validated patch cannot contain unknown circuits. Lookups are
 /// `HashMap::get` by circuit name (never iteration order) and edges are
 /// iterated by index, so the result is deterministic across runs.
-fn compute_latency(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<LatencyData> {
+fn compute_latency(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    cost: &CostModel,
+) -> Option<LatencyData> {
     if nodes.is_empty() || edges.is_empty() {
         return None;
     }
@@ -235,19 +242,9 @@ fn compute_latency(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<LatencyDa
         .map(|n| (n.id.clone(), n.section_index))
         .collect();
     let schema = load_schema();
-    // Largest master budget: deterministic and stable across schema key renames.
-    let loop_budget = schema.available_memory.values().copied().max().unwrap_or(0);
-    let circuit_avg = |id: &NodeId| -> f32 {
-        let ramsize = schema
-            .circuits
-            .get(&id.0.to_lowercase())
-            .map_or(0, |def| def.ramsize);
-        if ramsize == 0 || loop_budget == 0 {
-            1.0
-        } else {
-            ramsize as f32 / loop_budget as f32
-        }
-    };
+    // The provider merges config `[latency]` overrides over the
+    // ramsize-proportional heuristic; identical input stays deterministic.
+    let circuit_avg = |id: &NodeId| cost.circuit_avg(id, &schema);
     let (lat_edges, summary) = forward_latency(edges, &node_positions, circuit_avg);
     Some(LatencyData {
         edges: lat_edges,
@@ -465,7 +462,7 @@ mod tests {
 
     fn build(content: &str, clusters: &[Cluster]) -> Graph {
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        Graph::build_from_patch(&patch, clusters)
+        Graph::build_from_patch(&patch, clusters, &CostModel::default())
     }
 
     #[test]
@@ -712,7 +709,7 @@ mod tests {
         let content =
             "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[]);
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
         let sub = patch.influence_subtree(&[String::from("_A")]);
         let hl = graph.with_highlights(&sub);
         assert_eq!(hl.highlighted_nodes, sub.influenced_nodes);
@@ -729,7 +726,7 @@ mod tests {
     fn filtered_membership_is_induced_subgraph() {
         let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n[other]\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[]);
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
         let sub = patch.influence_subtree(&[String::from("_A")]);
         let filt = graph.filtered_influence(&sub);
         // nodes are strict subset
@@ -771,7 +768,7 @@ mod tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        let graph = Graph::build_from_patch(&patch, &clusters);
+        let graph = Graph::build_from_patch(&patch, &clusters, &CostModel::default());
         let sub = patch.influence_subtree(&[String::from("_A")]);
         let filt = graph.filtered_influence(&sub);
         // only G1 intersects influenced nodes (clocktool, copy); G2 ([other]) is excluded
@@ -783,7 +780,7 @@ mod tests {
     fn with_highlights_empty_subtree_clears_highlights() {
         let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[]);
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
         let empty = crate::patch::InfluenceSubtree::default();
         let hl = graph.with_highlights(&empty);
         assert!(hl.highlighted_nodes.is_empty());
@@ -806,7 +803,7 @@ mod tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        let graph = Graph::build_from_patch(&patch, &clusters);
+        let graph = Graph::build_from_patch(&patch, &clusters, &CostModel::default());
         let vars = patch.hw_token_to_vars("B1.1");
         // B1.1 drives _TRIG and _EXTRA → at least those two cables in union
         assert!(vars.contains(&String::from("_TRIG")));
@@ -894,7 +891,7 @@ mod tests {
         let content =
             "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[]);
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
         assert!(graph.latency.is_some());
         let sub = patch.influence_subtree(&[String::from("_A")]);
         // The induced subgraph has a different edge set; latency is not
@@ -925,7 +922,7 @@ mod fixture_tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        Graph::build_from_patch(&patch, &clusters)
+        Graph::build_from_patch(&patch, &clusters, &CostModel::default())
     }
 
     /// Cluster → `(title, section_range)` snapshot for a graph.
@@ -1119,7 +1116,7 @@ mod fixture_tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        let graph = Graph::build_from_patch(&patch, &clusters);
+        let graph = Graph::build_from_patch(&patch, &clusters, &CostModel::default());
 
         assert_eq!(
             cluster_spans(&graph),
