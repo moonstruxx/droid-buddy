@@ -38,6 +38,6 @@
 
 ## Task 3.2 — Regression snapshot matrix
 
-- [ ] Add fixtures + insta snapshots: optimizer menu modal (with candidates) and a preview-recoloring graph scenario, across classic/terminal/mono; `cargo insta test --check` stays the gate <!-- agent: horst-engineer.build, depends_on: [2.2], touches: [src/regression.rs, fixtures/] -->
+- [x] Add fixtures + insta snapshots: optimizer menu modal (with candidates) and a preview-recoloring graph scenario, across classic/terminal/mono; `cargo insta test --check` stays the gate <!-- agent: horst-engineer.build, depends_on: [2.2], touches: [src/regression.rs, fixtures/] -->
 
 **details**: New fixtures (reorderable patch with latency-relevant cables) and graph/menu snapshots; gallery scenario for the menu modal.
