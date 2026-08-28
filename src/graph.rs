@@ -8,16 +8,16 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use crate::geometry::{BindingFeatures, RackGeometry};
+use crate::geometry::{BindingFeatures, RackGeometry, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
 use crate::patch::{InfluenceSubtree, Patch};
 use crate::schema::load_schema;
 
-/// Euclidean distance threshold in B32-grid units above which a direct
-/// (zero-hop) hardware binding is considered a wiring outlier.
-/// Tuned against the real corpus: 8.0 flags the MFS-drum E4.4→M4 far wire
-/// (~15 units) but not adjacent B1.17→B1.18 (1 unit) nor co-located L→B (0).
-const WIRING_DISTANCE_THRESHOLD: f32 = 8.0;
+// Euclidean-distance wiring-outlier detection is delegated to the learned
+// decision table (`geometry::WiringOutlierScorer`, embedded artifact from
+// `tools/fit_outlier_model.py`) with a preserved threshold fallback — see
+// `validate_wiring_outliers`. Invariant guards (adjacent / co-located / via-
+// cable) stay explicit at the call site and never reach the scorer.
 
 /// A node's identity: `(circuit_name, instance_index)`.
 ///
@@ -358,6 +358,7 @@ fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
 }
 
 fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<TopologyIssue> {
+    let scorer = WiringOutlierScorer::embedded();
     let mut outliers = Vec::new();
     let mut seen_pairs: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
@@ -395,17 +396,19 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
                 let Some(feat) = BindingFeatures::from_tokens(a, b, geometry, patch) else {
                     continue;
                 };
-                // Co-located L->B has distance 0, adjacent has distance 1 -> never outlier
-                if feat.adjacent || feat.euclidean < 1e-6 {
+                // Invariant guards (design D5) — hard guarantees, never
+                // learned: adjacent, co-located L->B (distance 0) and
+                // via-cable bindings never reach the scorer.
+                if feat.adjacent || feat.euclidean < 1e-6 || feat.cable_hops != 0 {
                     continue;
                 }
-                if feat.euclidean > WIRING_DISTANCE_THRESHOLD && feat.cable_hops == 0 {
+                if scorer.is_outlier(&feat) {
                     outliers.push(TopologyIssue {
                         cable: format!("{}->{}", a, b),
                         severity: TopologySeverity::Warning,
                         message: format!(
-                            "wiring outlier: {} -> {} distance {:.1} (threshold {:.1}) hops {}",
-                            a, b, feat.euclidean, WIRING_DISTANCE_THRESHOLD, feat.cable_hops
+                            "wiring outlier: {} -> {} distance {:.1} hops {} (decision table)",
+                            a, b, feat.euclidean, feat.cable_hops
                         ),
                     });
                 }
