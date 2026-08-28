@@ -13,7 +13,7 @@
 
 ## 2. In-process Scoring (runtime)
 
-- [ ] 2.1 Embed artifact + pure Rust scorer in geometry/graph <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.2], touches: [src/geometry.rs, src/graph.rs] -->
+- [x] 2.1 Embed artifact + pure Rust scorer in geometry/graph <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.2], touches: [src/geometry.rs, src/graph.rs] -->
       · `include_str!` the learned table (schema.rs embed precedent); score `BindingFeatures` → outlier Warning in the existing `TopologyIssue` channel
       · delegate the call site to the scorer with the invariant guards kept explicit (design D5): adjacent / co-located `L→B` / via-cable never flagged, miss → threshold fallback
       · verify: `cargo test` graph/geometry tests pass; new unit tests cover a scored-outlier case, a fallback case, and the invariant guards
