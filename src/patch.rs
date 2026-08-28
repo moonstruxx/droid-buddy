@@ -1887,7 +1887,7 @@ fn block_slice_by_headers(
         // comments and blanks included.
         let end = by_line
             .get(pos + 1)
-            .map(|&(_, next_idx)| banner_start[pos + 1])
+            .map(|&(_, _next_idx)| banner_start[pos + 1])
             .unwrap_or(raw_lines.len());
         block.extend(header_line + 1..end);
     }
