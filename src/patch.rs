@@ -1007,6 +1007,22 @@ pub struct ViewerCircuit {
     pub entries: Vec<(String, String)>,
 }
 
+/// A single `key = value` entry with source spans.
+///
+/// `key` is lowercased for matching; `raw_key`/`raw_value` preserve the
+/// trimmed source text before lowercasing. Spans are byte-column ranges
+/// within the raw line (0-based, `[col_start, col_end)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IniEntry {
+    pub key: String,
+    pub value: String,
+    pub key_span: Span,
+    pub value_span: Span,
+    pub line: usize,
+    pub raw_key: String,
+    pub raw_value: String,
+}
+
 /// A raw section of a DROID `.ini` patch: the circuit name in brackets
 /// plus its ordered `key = value` entries. Repeated section names are kept
 /// as separate sections (design.md Decision 1).
@@ -1017,6 +1033,12 @@ pub struct IniSection {
     /// Source span of the header line (including brackets), 0-based.
     #[serde(default)]
     pub header_span: Span,
+    /// Per-entry spans parallel to `entries`. `entries` is kept for
+    /// backward compatibility with `diff.rs`/`graph.rs`/`ui.rs` callers
+    /// that destructure `Vec<(String,String)>`; new validation code should
+    /// use `detailed_entries` (`IniEntry` with `key_span`/`value_span`/`line`).
+    #[serde(default)]
+    pub detailed_entries: Vec<IniEntry>,
 }
 
 /// Strip a `#`-to-end-of-line comment (whole-line or inline).
@@ -1048,15 +1070,58 @@ fn parse_ini_sections(content: &str) -> Vec<IniSection> {
                     col_start,
                     col_end,
                 },
+                detailed_entries: Vec::new(),
             });
             continue;
         }
-        if let Some(eq_idx) = line.find('=') {
-            let key = line[..eq_idx].trim().to_lowercase();
-            let value = line[eq_idx + 1..].trim().to_string();
-            if let Some(section) = sections.last_mut() {
-                section.entries.push((key, value));
-            }
+        // Entry line: capture spans BEFORE lowercasing (byte columns, handle spaces around `=`).
+        let eq_pos = match stripped.find('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        // Require trimmed line also contains `=` to avoid stray `=` inside comments already stripped.
+        if !line.contains('=') {
+            continue;
+        }
+        let key_part = &stripped[..eq_pos];
+        let value_part = &stripped[eq_pos + 1..];
+        let raw_key = key_part.trim().to_string();
+        let raw_value = value_part.trim().to_string();
+        if raw_key.is_empty() {
+            continue;
+        }
+        // Byte-column spans within the raw line (stripped prefix of raw_line).
+        let key_col_start = key_part.find(raw_key.as_str()).unwrap_or(0);
+        let key_col_end = key_col_start + raw_key.len();
+        let value_col_start = if raw_value.is_empty() {
+            eq_pos + 1
+        } else {
+            eq_pos + 1 + value_part.find(raw_value.as_str()).unwrap_or(0)
+        };
+        let value_col_end = value_col_start + raw_value.len();
+        let key_lower = raw_key.to_lowercase();
+        let value_stored = raw_value.clone();
+        if let Some(section) = sections.last_mut() {
+            section
+                .entries
+                .push((key_lower.clone(), value_stored.clone()));
+            section.detailed_entries.push(IniEntry {
+                key: key_lower,
+                value: value_stored,
+                key_span: Span {
+                    line: line_idx,
+                    col_start: key_col_start,
+                    col_end: key_col_end,
+                },
+                value_span: Span {
+                    line: line_idx,
+                    col_start: value_col_start,
+                    col_end: value_col_end,
+                },
+                line: line_idx,
+                raw_key,
+                raw_value,
+            });
         }
     }
     sections
@@ -2844,5 +2909,113 @@ button = B1.3
         assert_eq!(Patch::effective_shift(5, true, 0), 1);
         assert_eq!(Patch::effective_shift(2, false, 4), 1);
         assert_eq!(Patch::effective_shift(8, false, 4), 1);
+    }
+
+    // --- per-entry spans (patch-validation 1.2) ---
+
+    #[test]
+    fn entry_spans_key_value_columns_for_simple_entry() {
+        let content = "[copy]\nknob = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let sec = &patch.sections[0];
+        assert_eq!(
+            sec.entries,
+            vec![(String::from("knob"), String::from("I1"))]
+        );
+        assert_eq!(sec.detailed_entries.len(), 1);
+        let e = &sec.detailed_entries[0];
+        assert_eq!(e.key, "knob");
+        assert_eq!(e.value, "I1");
+        assert_eq!(e.raw_key, "knob");
+        assert_eq!(e.raw_value, "I1");
+        assert_eq!(e.line, 1);
+        // "knob" at col 0..4, "I1" at col 7..9 in "knob = I1"
+        assert_eq!(
+            e.key_span,
+            Span {
+                line: 1,
+                col_start: 0,
+                col_end: 4
+            }
+        );
+        assert_eq!(
+            e.value_span,
+            Span {
+                line: 1,
+                col_start: 7,
+                col_end: 9
+            }
+        );
+    }
+
+    #[test]
+    fn entry_spans_handle_spaces_around_equals() {
+        let content = "[copy]\n  knob   =   I1  \n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let e = &patch.sections[0].detailed_entries[0];
+        // raw line: "  knob   =   I1  " -> key "knob" at 2..6, value "I1" at 13..15
+        assert_eq!(
+            e.key_span,
+            Span {
+                line: 1,
+                col_start: 2,
+                col_end: 6
+            }
+        );
+        assert_eq!(
+            e.value_span,
+            Span {
+                line: 1,
+                col_start: 13,
+                col_end: 15
+            }
+        );
+        assert_eq!(e.key, "knob");
+    }
+
+    #[test]
+    fn entry_spans_lowercase_key_preserves_raw() {
+        let content = "[copy]\nKnob = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let e = &patch.sections[0].detailed_entries[0];
+        assert_eq!(e.key, "knob");
+        assert_eq!(e.raw_key, "Knob");
+        assert_eq!(e.value, "I1");
+    }
+
+    #[test]
+    fn entry_spans_parallel_to_entries_and_line_numbers() {
+        let content = "[copy]\ninput = I1\noutput = O1\n[copy]\ninput = I2\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.sections.len(), 2);
+        assert_eq!(patch.sections[0].entries.len(), 2);
+        assert_eq!(patch.sections[0].detailed_entries.len(), 2);
+        assert_eq!(patch.sections[0].detailed_entries[0].line, 1);
+        assert_eq!(patch.sections[0].detailed_entries[1].line, 2);
+        assert_eq!(patch.sections[1].detailed_entries[0].line, 4);
+        // entries and detailed_entries must stay in sync
+        for sec in &patch.sections {
+            assert_eq!(sec.entries.len(), sec.detailed_entries.len());
+            for (pair, det) in sec.entries.iter().zip(sec.detailed_entries.iter()) {
+                assert_eq!(pair.0, det.key);
+                assert_eq!(pair.1, det.value);
+            }
+        }
+    }
+
+    #[test]
+    fn entry_spans_inline_comment_stripped_before_span_calc() {
+        let content = "[copy]\nknob = I1 # comment\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let e = &patch.sections[0].detailed_entries[0];
+        assert_eq!(e.value, "I1");
+        assert_eq!(
+            e.value_span,
+            Span {
+                line: 1,
+                col_start: 7,
+                col_end: 9
+            }
+        );
     }
 }
