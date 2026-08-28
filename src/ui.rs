@@ -72,6 +72,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_overlay(frame, app);
     } else if app.showing_validation {
         render_validation_modal(frame, app, frame.area());
+    } else if app.optimizer.is_some() {
+        render_optimizer_modal(frame, app, frame.area());
     }
 }
 
@@ -222,6 +224,114 @@ fn render_validation_modal(frame: &mut Frame, app: &App, area: Rect) {
         // Keep line bg but ensure sev span still has its fg; ratatui composes.
         lines.push(line);
         let _ = is_selected; // suppress unused warning if lint
+    }
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, modal_area);
+}
+
+/// Optimizer menu overlay (design D5) — centered, mirroring the validation
+/// modal pattern. Lists up to three candidates (variant label + before→after
+/// `avg`/`max`/back-edges), cursor highlighted via `optimizer_selected_bg`,
+/// with a hint line for j/k/Enter/s/r/Esc. The preview is already applied to
+/// `Patch.sections` by the handler; this modal only reflects state.
+fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let is_narrow = area.width < QUAD_WIDTH_THRESHOLD;
+    let modal_width = if is_narrow {
+        area.width.saturating_sub(4).max(24)
+    } else {
+        (area.width * 60 / 100).clamp(40, 80).max(24)
+    };
+    let modal_height = if is_narrow {
+        area.height.saturating_sub(4).max(10)
+    } else {
+        (area.height * 70 / 100).clamp(12, 40).max(10)
+    };
+    let x = area.x + area.width.saturating_sub(modal_width) / 2;
+    let y = area.y + area.height.saturating_sub(modal_height) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+    frame.render_widget(Clear, modal_area);
+
+    let state = app.optimizer.as_ref();
+    let Some(state) = state else {
+        return;
+    };
+    let count = state.candidates.len();
+    let title = format!(" Optimizer ({count}) ");
+    let header_hint = " j/k select · Enter preview · r restore · s export · Esc close ";
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .title_bottom(Line::from(Span::styled(
+            header_hint,
+            Style::default().fg(theme::active().muted),
+        )))
+        .border_style(Style::default().fg(theme::active().optimizer_modal_border));
+
+    let inner = block.inner(modal_area);
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, modal_area);
+        return;
+    }
+
+    if count == 0 {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No candidate orderings",
+            Style::default().fg(theme::active().muted),
+        )))
+        .alignment(Alignment::Center)
+        .block(block);
+        frame.render_widget(empty, modal_area);
+        return;
+    }
+
+    let cursor = state.cursor.min(count.saturating_sub(1));
+    let max_rows = inner.height as usize;
+    let start = if count <= max_rows || cursor < max_rows / 2 {
+        0
+    } else if cursor + max_rows / 2 >= count {
+        count - max_rows
+    } else {
+        cursor - max_rows / 2
+    };
+    let end = (start + max_rows).min(count);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(end - start);
+    for idx in start..end {
+        let candidate = &state.candidates[idx];
+        let is_selected = idx == cursor;
+        // Candidate line: `{label} avg X→Y · max A→B · back-edges N→M`.
+        let values = format!(
+            " avg {:.2}→{:.2} · max {:.2}→{:.2} · back-edges {}→{}",
+            candidate.before.avg,
+            candidate.after.avg,
+            candidate.before.max,
+            candidate.after.max,
+            candidate.before.back_edge_count,
+            candidate.after.back_edge_count
+        );
+        let label = Span::styled(
+            candidate.label.clone(),
+            Style::default().fg(theme::active().text),
+        );
+        let values = Span::styled(values, Style::default().fg(theme::active().muted));
+        let marker = Span::styled(
+            if is_selected { "▶ " } else { "   " },
+            Style::default().fg(theme::active().text),
+        );
+        let mut line = Line::from(vec![marker, label, values]);
+        if is_selected {
+            line.style = Style::default()
+                .bg(theme::active().optimizer_selected_bg)
+                .add_modifier(Modifier::BOLD);
+        } else {
+            line.style = Style::default().add_modifier(Modifier::DIM);
+        }
+        lines.push(line);
     }
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
@@ -2960,6 +3070,26 @@ mod tests {
         assert!(text.contains("CV I/O"));
         assert!(text.contains("TRIG A"));
         assert!(text.contains("CUTOFF"));
+    }
+
+    #[test]
+    fn renders_optimizer_menu_overlay_with_candidates() {
+        use crate::handler::handle_event;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        // Open the optimizer menu via `g o`.
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('o')), &mut app);
+        assert!(app.optimizer.is_some());
+        let text = rendered_text(&mut app, 100, 40);
+        assert!(text.contains("Optimizer"), "menu title missing");
+        assert!(text.contains("avg"), "candidate values missing");
+        assert!(text.contains("back-edges"), "back-edge counts missing");
+        assert!(text.contains("Esc close"), "hint line missing");
     }
 
     #[test]
