@@ -178,16 +178,24 @@ impl RackGeometry {
         if candidates.is_empty() {
             return None;
         }
-        // Select by module instance (instance 1 → first candidate, 2 → second, wrap)
-        let idx = (instance - 1) % candidates.len();
-        let (rack, slot) = candidates[idx];
-
-        // Lookup grid (case-insensitive)
+        // Lookup grid (case-insensitive) before selecting slot so we can
+        // handle singletons deterministically.
         let grid = self
             .grids
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(grid_key))
             .map(|(_, v)| v)?;
+        // Singleton controllers (r2c) represent a single physical jack column
+        // shared across all racks/instances. Cycling by instance would place
+        // I1 on R1 and O4 on R2 (12 units apart) — a bogus distance for CV I/O
+        // that physically sits on the same controller. Always pick the first
+        // matching slot (R1's R2C) deterministically.
+        let (rack, slot) = if matches!(grid, Grid::Singleton) {
+            candidates[0]
+        } else {
+            let idx = (instance - 1) % candidates.len();
+            candidates[idx]
+        };
 
         let (off_x, off_y) = match grid {
             Grid::Matrix {
@@ -409,6 +417,12 @@ fn controller_for_token<'a>(
     }
     if candidates.is_empty() {
         return None;
+    }
+    // Singleton r2c controllers (I/O/P/S/G) are a single physical column;
+    // do not cycle by instance — always resolve to the first matching slot
+    // (deterministically R1's R2C) so I1/O4/P1.2 all co-locate.
+    if grid_key.eq_ignore_ascii_case("r2c") {
+        return Some(candidates[0]);
     }
     let idx = (instance - 1) % candidates.len();
     Some(candidates[idx])
