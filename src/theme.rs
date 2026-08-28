@@ -65,6 +65,11 @@ pub struct Theme {
     pub validation_hint: Color,
     pub validation_modal_border: Color,
     pub validation_selected_bg: Color,
+    /// Optimizer menu (`g o`, design D5): border + selected-row background,
+    /// distinct from the validation modal since the menu is advisory (a
+    /// preview/export tool), not an error surface.
+    pub optimizer_modal_border: Color,
+    pub optimizer_selected_bg: Color,
 }
 
 impl Theme {
@@ -126,6 +131,8 @@ impl Theme {
             validation_hint: Color::Cyan,
             validation_modal_border: Color::Red,
             validation_selected_bg: Color::DarkGray,
+            optimizer_modal_border: Color::Blue,
+            optimizer_selected_bg: Color::DarkGray,
         }
     }
 
@@ -184,6 +191,8 @@ impl Theme {
             validation_hint: Color::Reset,
             validation_modal_border: Color::Reset,
             validation_selected_bg: Color::Reset,
+            optimizer_modal_border: Color::Reset,
+            optimizer_selected_bg: Color::Reset,
         }
     }
 
@@ -255,6 +264,8 @@ impl Theme {
             validation_hint: Color::DarkGray,
             validation_modal_border: Color::White,
             validation_selected_bg: Color::Black,
+            optimizer_modal_border: Color::White,
+            optimizer_selected_bg: Color::Black,
         }
     }
 
