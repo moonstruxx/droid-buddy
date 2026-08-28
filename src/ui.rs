@@ -646,6 +646,23 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    // Modifier status hint: MOD <tokens> → N cells / M cables in modifier hue.
+    // Shown when a modifier is active (single selected_component + influence).
+    // Orthogonal to shift border — both can coexist.
+    if let (Some(token), Some(influence)) =
+        (app.selected_component.as_deref(), app.influence.as_ref())
+    {
+        let n = influence.influenced_nodes.len();
+        let m = influence.influenced_edges.len();
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            format!("MOD {} → {} cells / {} cables", token, n, m),
+            Style::default()
+                .fg(theme::modifier_hue(token))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Display scale and orientation permanently in the status bar
     spans.push(Span::raw(" | "));
     spans.push(Span::styled(
@@ -2353,6 +2370,54 @@ mod tests {
         app.load_sample_patch();
         let text = rendered_text(&mut app, 80, 24);
         assert!(!text.contains("Prefix: g"));
+    }
+
+    #[test]
+    fn status_bar_shows_mod_hint_when_modifier_active() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(std::path::Path::new(
+            "fixtures/modifier_switch_passthrough.ini",
+        ))
+        .unwrap();
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        let text = rendered_text(&mut app, 100, 24);
+        assert!(
+            text.contains("MOD B1.1"),
+            "status should contain MOD hint for B1.1, got: {}",
+            text
+        );
+        assert!(text.contains("cells"), "hint should contain cells count");
+        assert!(text.contains("cables"), "hint should contain cables count");
+    }
+
+    #[test]
+    fn status_bar_omits_mod_hint_when_no_modifier_active() {
+        let mut app = App::new();
+        app.load_sample_patch();
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(!text.contains("MOD "), "no MOD hint when no selection");
+    }
+
+    #[test]
+    fn status_bar_shows_shift_and_mod_coexistence() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(std::path::Path::new(
+            "fixtures/modifier_switch_passthrough.ini",
+        ))
+        .unwrap();
+        app.load_patch(patch);
+        app.select_component(String::from("B1.1"));
+        app.active_shift = Some(crate::patch::ShiftGroup::Group1);
+        let text = rendered_text(&mut app, 100, 24);
+        assert!(
+            text.contains("SHIFT 1 ACTIVE"),
+            "shift border hint must remain"
+        );
+        assert!(
+            text.contains("MOD B1.1"),
+            "modifier hint must coexist with shift"
+        );
     }
 
     #[test]

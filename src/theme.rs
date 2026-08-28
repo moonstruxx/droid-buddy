@@ -266,6 +266,36 @@ pub fn set_test_theme(theme: Option<Theme>) {
     TEST_OVERRIDE.with(|slot| *slot.borrow_mut() = leaked);
 }
 
+/// Stable per-modifier hue: `hash(token) % 16` over ANSI-16 palette.
+/// Pure helper, no Theme mutation, no config key. Deterministic per run.
+/// Collisions tolerated. Keeps advisory hue distinct from `graph_edge_error` red
+/// by mapping through the 16 ANSI colors.
+pub fn modifier_hue(token: &str) -> Color {
+    let mut hash: u32 = 0;
+    for b in token.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    let idx = (hash % 16) as u8;
+    match idx {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        _ => Color::White,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
