@@ -12,7 +12,7 @@
 ## 3. Per-circuit processing toggle
 
 - [x] 3.1 Add `App.disabled_circuits: HashSet<(String, usize)>`; make the influence walk treat a disabled circuit as a dead end (its own cells stay influenced, outputs do not propagate); reset on `load_patch`; verify via `patch.rs`/`app.rs` unit tests <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/app.rs, src/patch.rs] -->
-- [ ] 3.2 Graph surface `x` key toggles processing for the hovered node's circuit (hit-test via `graph_node_rects`), rebuilds graph, recomputes influence, emits `GraphRebuilt`, shows status naming the circuit; no-hover is a silent no-op; verify via `handler.rs` tests <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/handler.rs, src/app.rs] -->
+- [x] 3.2 Graph surface `x` key toggles processing for the hovered node's circuit (hit-test via `graph_node_rects`), rebuilds graph, recomputes influence, emits `GraphRebuilt`, shows status naming the circuit; no-hover is a silent no-op; verify via `handler.rs` tests <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/handler.rs, src/app.rs] -->
 - [ ] 3.3 Render disabled graph nodes and incident edges dim (overriding influence highlight, hover styling kept) and verify via `ui.rs` buffer tests and graph snapshot deltas <!-- agent: layout-designer-engineer.build, depends_on: [3.2], touches: [src/ui.rs] -->
 
 ## 4. Tests, snapshots & gallery
