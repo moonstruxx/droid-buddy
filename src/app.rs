@@ -282,10 +282,35 @@ pub enum EditKind {
 }
 
 /// Inline edit overlay state for the label overlay (`e` to enter, `Enter`/`Esc`).
+///
+/// For `Hw` edits `layer_drafts` preserves per-layer unsaved drafts while
+/// the overlay is open so `1..N` layer cycling does not lose typed text
+/// (spec: map layer->draft). Only meaningful for `Hw`; empty for `Circuit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditState {
     pub kind: EditKind,
     pub draft: String,
+    pub layer_drafts: BTreeMap<u8, String>,
+}
+
+impl EditState {
+    /// Create a new HW edit state with an empty per-layer draft map.
+    pub fn new_hw(token: String, layer: u8, draft: String) -> Self {
+        Self {
+            kind: EditKind::Hw { token, layer },
+            draft,
+            layer_drafts: BTreeMap::new(),
+        }
+    }
+
+    /// Create a new circuit edit state.
+    pub fn new_circuit(node: NodeId, draft: String) -> Self {
+        Self {
+            kind: EditKind::Circuit { node },
+            draft,
+            layer_drafts: BTreeMap::new(),
+        }
+    }
 }
 
 /// State of an armed vim-style prefix key (`g` pressed, awaiting the
@@ -599,6 +624,141 @@ impl App {
             }
         }
         out
+    }
+
+    /// Cancel the inline edit overlay without persisting (`Esc`).
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+    }
+
+    /// Commit the inline edit overlay (`Enter`): trim the draft, prune when
+    /// empty (removing the layer entry, the token when no layers remain, and
+    /// the patch bucket when empty so `I4:` empty-slot coverage is preserved),
+    /// otherwise insert the trimmed label, then atomically rewrite
+    /// `labels.toml` via tmp→rename and clear the overlay. Returns the IO
+    /// result of the atomic write; the in-memory store is always updated.
+    pub fn commit_edit(&mut self) -> io::Result<()> {
+        let edit = match self.editing.clone() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        self.apply_edit_to_store(&edit);
+        let result = self.label_store.save();
+        self.editing = None;
+        result
+    }
+
+    /// Test injection point for `commit_edit`: mutate the same store entries
+    /// as `commit_edit` but atomically write into `dir` instead of the XDG
+    /// location. The overlay is cleared regardless of the write result.
+    pub fn commit_edit_to_dir(&mut self, dir: &Path) -> io::Result<()> {
+        let edit = match self.editing.clone() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        self.apply_edit_to_store(&edit);
+        let result = self.label_store.save_to_dir(dir);
+        self.editing = None;
+        result
+    }
+
+    fn apply_edit_to_store(&mut self, edit: &EditState) {
+        let Some(patch_path) = self.current_patch_path.clone() else {
+            return;
+        };
+        let trimmed = edit.draft.trim().to_string();
+        let is_empty = trimmed.is_empty();
+        match &edit.kind {
+            EditKind::Hw { token, layer } => {
+                let key = LabelStore::canonical_key(&patch_path);
+                if is_empty {
+                    if let Some(bucket) = self.label_store.patches.get_mut(&key) {
+                        if let Some(map) = bucket.hw.get_mut(token) {
+                            map.remove(layer);
+                            if map.is_empty() {
+                                bucket.hw.remove(token);
+                            }
+                        }
+                        if bucket.hw.is_empty() && bucket.circuits.is_empty() {
+                            self.label_store.patches.remove(&key);
+                        }
+                    }
+                } else {
+                    self.label_store
+                        .patches
+                        .entry(key)
+                        .or_default()
+                        .hw
+                        .entry(token.clone())
+                        .or_default()
+                        .insert(*layer, trimmed);
+                }
+            }
+            EditKind::Circuit { node } => {
+                let store_key = LabelStore::encode_node_id(&node.0, node.1);
+                let key = LabelStore::canonical_key(&patch_path);
+                if is_empty {
+                    if let Some(bucket) = self.label_store.patches.get_mut(&key) {
+                        bucket.circuits.remove(&store_key);
+                        if bucket.hw.is_empty() && bucket.circuits.is_empty() {
+                            self.label_store.patches.remove(&key);
+                        }
+                    }
+                } else {
+                    self.label_store
+                        .patches
+                        .entry(key)
+                        .or_default()
+                        .circuits
+                        .insert(store_key, trimmed);
+                }
+            }
+        }
+    }
+
+    /// Cycle the edited HW layer inside the overlay (`1..N` digit) while
+    /// preserving per-layer drafts in `EditState::layer_drafts`. Saves the
+    /// current draft under the current layer, switches `kind.layer` to
+    /// `new_layer`, and restores the draft for `new_layer` from the map when
+    /// present or from the persisted store (and `BTreeMap` insertion order
+    /// keeps the map deterministic). No-op when not editing HW or when
+    /// `new_layer` equals the current layer.
+    pub fn cycle_edit_layer(&mut self, new_layer: u8) -> bool {
+        // Extract current token/layer/draft without holding a mutable borrow
+        // across the store lookup.
+        let (token, current_layer, current_draft, mut preserved) = match &self.editing {
+            Some(state) => match &state.kind {
+                EditKind::Hw { token, layer } => (
+                    token.clone(),
+                    *layer,
+                    state.draft.clone(),
+                    state.layer_drafts.clone(),
+                ),
+                EditKind::Circuit { .. } => return false,
+            },
+            None => return false,
+        };
+        if current_layer == new_layer {
+            return false;
+        }
+        preserved.insert(current_layer, current_draft);
+        let next_draft = if let Some(d) = preserved.get(&new_layer).cloned() {
+            d
+        } else if let Some(path) = self.current_patch_path.as_ref() {
+            self.label_store
+                .hw_label(path, &token, new_layer)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if let Some(state) = self.editing.as_mut() {
+            if let EditKind::Hw { layer, .. } = &mut state.kind {
+                *layer = new_layer;
+            }
+            state.draft = next_draft;
+            state.layer_drafts = preserved;
+        }
+        true
     }
 
     /// Structural influence for the currently edited datum, if any, using the
@@ -1422,5 +1582,212 @@ mod tests {
         let sub = app.influence.as_ref().unwrap();
         assert!(sub.influenced_nodes.contains(&(String::from("switch"), 5)));
         assert!(sub.influenced_edges.contains("_CHAIN2"));
+    }
+
+    // ── 2.2 overlay draft lifecycle (Enter/ Esc / 1..N layer cycle) ──
+
+    #[test]
+    fn commit_edit_trims_and_prunes_via_atomic_write() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "patch".to_string()).unwrap();
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch);
+        app.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            2,
+            "  hello  ".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert!(app.editing.is_none(), "overlay cleared on Enter");
+        assert_eq!(
+            app.label_store.hw_label(&patch_path, "B1.1", 2),
+            Some("hello".to_string())
+        );
+        // Atomic write left no stray tmp file.
+        assert!(!dir.path().join("labels.toml.tmp").exists());
+        let body = std::fs::read_to_string(dir.path().join("labels.toml")).unwrap();
+        assert!(
+            body.contains("hello"),
+            "persisted toml contains trimmed label"
+        );
+        // Reload round-trips.
+        let reloaded = LabelStore::load_from(&dir.path().join("labels.toml"));
+        assert_eq!(
+            reloaded.hw_label(&patch_path, "B1.1", 2),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn commit_edit_empty_prunes_layer_and_token() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "patch".to_string()).unwrap();
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch);
+        // Seed two layers.
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 1, "a".to_string()));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 2, "b".to_string()));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        // Empty draft on layer 2 prunes that layer; layer 1 stays.
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 2, "   ".to_string()));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert_eq!(app.label_store.hw_label(&patch_path, "B1.1", 2), None);
+        assert_eq!(
+            app.label_store.hw_label(&patch_path, "B1.1", 1),
+            Some("a".to_string())
+        );
+        // Empty draft on last layer prunes token entirely.
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 1, "".to_string()));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert_eq!(app.label_store.hw_label(&patch_path, "B1.1", 1), None);
+        assert!(app.label_store.patch_labels(&patch_path).is_none());
+    }
+
+    #[test]
+    fn commit_edit_circuit_trim_and_empty_prune() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[motorfader]\nled = L1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[motorfader]\nled = L1.1\n", "patch".to_string()).unwrap();
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch);
+        app.editing = Some(EditState::new_circuit(
+            ("motorfader".to_string(), 0),
+            "  T1 Accu  ".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert_eq!(
+            app.label_store
+                .circuit_label(&patch_path, &("motorfader".to_string(), 0)),
+            Some("T1 Accu".to_string())
+        );
+        app.editing = Some(EditState::new_circuit(
+            ("motorfader".to_string(), 0),
+            "   ".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert_eq!(
+            app.label_store
+                .circuit_label(&patch_path, &("motorfader".to_string(), 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn cancel_edit_clears_overlay_without_mutating_store() {
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("p.ini");
+        std::fs::write(&patch_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "x".to_string()).unwrap();
+        app.load_patch_at(&patch_path, patch);
+        app.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            2,
+            "draft".to_string(),
+        ));
+        app.cancel_edit();
+        assert!(app.editing.is_none());
+        assert_eq!(app.label_store.hw_label(&patch_path, "B1.1", 2), None);
+    }
+
+    #[test]
+    fn layer_cycle_preserves_per_layer_drafts() {
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("p.ini");
+        std::fs::write(&patch_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "x".to_string()).unwrap();
+        app.load_patch_at(&patch_path, patch);
+        // Start editing layer 2 with initial draft "hello2".
+        app.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            2,
+            "hello2".to_string(),
+        ));
+        // Cycle to layer 3: preserves layer 2 draft, layer 3 starts empty (no store).
+        assert!(app.cycle_edit_layer(3));
+        assert_eq!(app.editing.as_ref().unwrap().draft, "");
+        assert_eq!(
+            app.editing.as_ref().unwrap().layer_drafts.get(&2).cloned(),
+            Some("hello2".to_string())
+        );
+        // Type in layer 3, cycle back to 2: layer 3 draft preserved, layer 2 restored.
+        app.editing.as_mut().unwrap().draft = "hello3".to_string();
+        assert!(app.cycle_edit_layer(2));
+        assert_eq!(app.editing.as_ref().unwrap().draft, "hello2");
+        assert_eq!(
+            app.editing.as_ref().unwrap().layer_drafts.get(&3).cloned(),
+            Some("hello3".to_string())
+        );
+        // Cycle to 3 again restores hello3.
+        assert!(app.cycle_edit_layer(3));
+        assert_eq!(app.editing.as_ref().unwrap().draft, "hello3");
+    }
+
+    #[test]
+    fn layer_cycle_loads_persisted_store_when_no_preserved_draft() {
+        let mut app = App::new();
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("p.ini");
+        std::fs::write(&patch_path, "[button]\nbutton = B1.1\n").unwrap();
+        let patch = Patch::from_ini_str("[button]\nbutton = B1.1\n", "x".to_string()).unwrap();
+        app.load_patch_at(&patch_path, patch);
+        app.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            1,
+            "ignored".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        // Seed layer 2 in store.
+        app.editing = Some(EditState::new_hw(
+            "B1.1".to_string(),
+            2,
+            "stored2".to_string(),
+        ));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        // New overlay on layer 1; cycling to 2 should load stored2 when no preserved draft.
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 1, "cur1".to_string()));
+        assert!(app.cycle_edit_layer(2));
+        assert_eq!(app.editing.as_ref().unwrap().draft, "stored2");
+    }
+
+    #[test]
+    fn layer_cycle_noop_for_circuit_and_when_not_editing() {
+        let mut app = App::new();
+        assert!(!app.cycle_edit_layer(2));
+        app.editing = Some(EditState::new_circuit(
+            ("motorfader".to_string(), 0),
+            "x".to_string(),
+        ));
+        assert!(!app.cycle_edit_layer(2));
+        // Same layer is also a no-op.
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 2, "h".to_string()));
+        assert!(!app.cycle_edit_layer(2));
+    }
+
+    #[test]
+    fn commit_without_patch_path_clears_overlay_without_panic() {
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        // No load_patch_at -> current_patch_path is None.
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 1, "hi".to_string()));
+        let dir = tempfile::TempDir::new().unwrap();
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert!(app.editing.is_none());
+        assert!(app.label_store.patches.is_empty());
     }
 }
