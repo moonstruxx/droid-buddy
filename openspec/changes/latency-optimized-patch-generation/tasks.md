@@ -26,7 +26,7 @@
 
 ## Task 2.2 — Candidate menu modal + status styling
 
-- [ ] Render the optimizer menu overlay (mirroring the validation-modal pattern), candidate summary lines with before/after values, theme tokens, and status surfacing; preview recoloring comes free from the existing latency ramp <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/ui.rs, src/theme.rs] -->
+- [x] Render the optimizer menu overlay (mirroring the validation-modal pattern), candidate summary lines with before/after values, theme tokens, and status surfacing; preview recoloring comes free from the existing latency ramp <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/ui.rs, src/theme.rs] -->
 
 **details**: Centered overlay listing candidates (variant label + `avg X→Y · max A→B · back-edges N→M`), cursor highlight, hint line for j/k/Enter/s/r/Esc; token additions per theme (classic/terminal/mono).
 
