@@ -844,7 +844,33 @@ def main():
             all_rows.append((*[feat[h] for h in HEADER[:-1]], 0))  # is_outlier 0
     good_count = len(all_rows)
     # Step 3 inject bads
-    BAD_POOL = [("E4.4","M4"), ("E4.4","M4.2"), ("E1.1","B2.1"), ("B1.1","B1.32"), ("E4.4","B1.32"), ("E1.2","B2.32"), ("E4.4","B32.1")]
+    # BAD_POOL label semantics: synthetic BAD bindings cover the terrain where the
+    # 8.0/hops-0 rule fails (design D3). The original pool was E/B-sourced only, so
+    # the classifier overfit the encoder source and ~50 B-sourced rows escaped the
+    # 8.0 threshold. Categories below mirror the measured failure modes:
+    #  - extreme E: far cross-controller encoder bindings (euclidean > 8) — kept so
+    #    recall on the existing outlier terrain is preserved
+    #  - same-controller near-8: the b32 grid caps intra-controller distance at ~7.6
+    #    (corner-to-corner), so these sit just under the 8.0 threshold and escape
+    #  - cross-controller near: adjacent-rack E4 controllers are only 6-8 units apart
+    #    (E1.4->E2.1 = 6.0, E1.3->E2.1 = 8.0 exactly at the boundary) — below 8.0 yet
+    #    physically implausible wiring
+    #  - non-E sources: B/P/S/O/I/G-sourced outliers so the source kind does not
+    #    collapse onto the encoder; B2.1->B1.32 / B1.1->B2.1 are the B-sourced
+    #    cross-controller cases that previously escaped
+    BAD_POOL = [
+        # extreme E (rule-catchable, recall preservation)
+        ("E4.4","M4"), ("E4.4","M4.2"), ("E1.1","B2.1"), ("E1.2","B2.32"), ("E4.4","B32.1"),
+        # same-controller near-8 (rule-missed: euclidean <= 8.0)
+        ("B1.1","B1.32"), ("B2.32","B2.1"), ("B1.1","B1.29"),
+        # cross-controller near-distance (rule-missed: euclidean <= 8.0)
+        ("E1.4","E2.1"), ("E1.3","E2.1"),
+        # cross-controller far, non-E sources
+        ("P1.1","P2.1"), ("S1","S2"), ("O1","O2"), ("I1","I2"), ("G1","G2"),
+        ("B2.1","B1.32"), ("B1.1","B2.1"),
+        # cross-controller far, E source
+        ("E1.1","E2.1"),
+    ]
     # To keep determinism, generate BAD_COUNT rows
     bad_rows=[]
     for i in range(BAD_COUNT):
