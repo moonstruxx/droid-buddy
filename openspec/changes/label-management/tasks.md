@@ -11,8 +11,8 @@
 
 ## 3. Interaction — overlay as event eater
 
-- [ ] 3.1 Implement overlay-eating priority in `handler.rs` (overlay > picker > prefix > graph > source > panels) and `e` entry for focused panel token / source header instance / hovered graph node <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/handler.rs] -->
-- [ ] 3.2 Implement in-overlay keys (char append/delete, `1..N` layer switch, `Enter`/`Esc`, arrows) and save path <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/handler.rs] -->
+- [x] 3.1 Implement overlay-eating priority in `handler.rs` (overlay > picker > prefix > graph > source > panels) and `e` entry for focused panel token / source header instance / hovered graph node <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/handler.rs] -->
+- [x] 3.2 Implement in-overlay keys (char append/delete, `1..N` layer switch, `Enter`/`Esc`, arrows) and save path <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/handler.rs] -->
 - [ ] 3.3 Surface status `B3.17 / Group2 → N ckts / M cables` with structural hue and clamp handling <!-- agent: layout-designer-engineer.build, depends_on: [2.2], touches: [src/handler.rs, src/app.rs] -->
 
 ## 4. Rendering — overrides + overlay
