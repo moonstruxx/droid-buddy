@@ -2,8 +2,8 @@
 
 ## 1. Rack Geometry
 
-- [ ] 1.1 Create `rack_geometry.json` (R1 horizontal case + R2 mixed rack; B32 4×8 row-wise, vertical mount; E4/e4 stack, L→B co-located whitelist; `B32==b32`/`E4==e4` shared grids) and a validation test that resolves `B1.17`→row 2 col 0 and confirms co-located `L1.17`/`B1.17` distance 0 <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [rack_geometry.json, src/geometry.rs, src/geometry.rs#tests] -->
-- [ ] 1.2 Implement `src/geometry.rs` (load `rack_geometry.json`, token→grid resolution, `BindingFeatures` with `src_xy`/`sink_xy`/`euclidean`/`manhattan`/`adjacent`/`same_controller`/`same_rack`/`cable_hops`) and verify geometry unit tests pass (far direct wire, adjacent pair, via-cable pair) <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/geometry.rs, src/lib.rs] -->
+- [x] 1.1 Create `rack_geometry.json` (R1 horizontal case + R2 mixed rack; B32 4×8 row-wise, vertical mount; E4/e4 stack, L→B co-located whitelist; `B32==b32`/`E4==e4` shared grids) and a validation test that resolves `B1.17`→row 2 col 0 and confirms co-located `L1.17`/`B1.17` distance 0 <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [rack_geometry.json, src/geometry.rs, src/geometry.rs#tests] -->
+- [x] 1.2 Implement `src/geometry.rs` (load `rack_geometry.json`, token→grid resolution, `BindingFeatures` with `src_xy`/`sink_xy`/`euclidean`/`manhattan`/`adjacent`/`same_controller`/`same_rack`/`cable_hops`) and verify geometry unit tests pass (far direct wire, adjacent pair, via-cable pair) <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/geometry.rs, src/lib.rs] -->
 
 ## 2. Track 1 — Hard Invariant
 
