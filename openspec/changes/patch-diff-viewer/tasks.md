@@ -11,8 +11,8 @@
 
 ## 3. Graph + Source Highlighting
 
-- [ ] 3.1 Add `theme.rs` tokens `graph_edge_diff_added`/`graph_edge_diff_removed` wired into `classic`/`terminal`/`mono`; extend `ui.rs:render_graph` `cable_color()` precedence to `error` > `diff` > modifier > `CableKind`; node-title marker for changed `NodeId` params; cluster tint when all members added/removed; source-pane per-param `+`/`-` markers; add snapshot matrix (`classic`/`terminal`/`mono` × widths) in `regression.rs` <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/theme.rs, src/ui.rs, src/regression.rs] -->
+- [x] 3.1 Add `theme.rs` tokens `graph_edge_diff_added`/`graph_edge_diff_removed` wired into `classic`/`terminal`/`mono`; extend `ui.rs:render_graph` `cable_color()` precedence to `error` > `diff` > modifier > `CableKind`; node-title marker for changed `NodeId` params; cluster tint when all members added/removed; source-pane per-param `+`/`-` markers; add snapshot matrix (`classic`/`terminal`/`mono` × widths) in `regression.rs` <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/theme.rs, src/ui.rs, src/regression.rs] -->
 
 ## 4. Scoped Filter
 
-- [ ] 4.1 Implement `scope_report(report, token, patch)` filter in `src/diff.rs` (retain cables/params intersecting selected token's influence); status hint `Diff scope: <token> (N cables)`; verify `cargo test` + `cargo clippy` green <!-- agent: api-engineer.build, depends_on: [2.1], touches: [src/diff.rs, src/handler.rs] -->
+- [x] 4.1 Implement `scope_report(report, token, patch)` filter in `src/diff.rs` (retain cables/params intersecting selected token's influence); status hint `Diff scope: <token> (N cables)`; verify `cargo test` + `cargo clippy` green <!-- agent: api-engineer.build, depends_on: [2.1], touches: [src/diff.rs, src/handler.rs] -->

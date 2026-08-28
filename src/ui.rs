@@ -736,6 +736,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    if let Some(hint) = app.status_for_scope() {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            hint,
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Display scale and orientation permanently in the status bar
     spans.push(Span::raw(" | "));
     spans.push(Span::styled(
@@ -908,6 +918,13 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     let circuit_store = app.current_circuit_store();
     let patch_for_title = app.patch.clone();
 
+    // Diff state captured before borrow split (clone for borrow-friendly access).
+    // When `diff_scope` is set, use the filtered (scoped) report so graph
+    // highlights match the status hint's cable count.
+    let diff_showing = app.diff_showing;
+    let diff_report_owned = app.filtered_report();
+    let diff_report_ref = diff_report_owned.as_ref();
+
     // Copyable state read before the borrow split below.
     let hovered = app.hovered_graph_node;
 
@@ -936,7 +953,14 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     for (i, cluster) in graph.clusters.iter().enumerate() {
         if let Some(rect) = graph_cluster_rect(cluster, &graph.nodes, &node_rects, surface) {
             graph_cluster_rects.push((i, rect));
-            render_graph_cluster_frame(frame, rect, cluster);
+            render_graph_cluster_frame_with_diff(
+                frame,
+                rect,
+                cluster,
+                diff_report_ref,
+                diff_showing,
+                &graph.nodes,
+            );
         }
     }
     // Edges before nodes so node frames draw over the port cells.
@@ -947,6 +971,8 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         &node_rects,
         None,
         Some(disabled_circuits),
+        diff_report_ref,
+        diff_showing,
     );
     for (i, node) in graph.nodes.iter().enumerate() {
         let node_rect = node_rects[i];
@@ -961,6 +987,8 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             hovered == Some(i),
             patch_for_title.as_ref(),
             Some(&circuit_store),
+            diff_report_ref,
+            diff_showing,
         );
     }
 }
@@ -1109,9 +1137,31 @@ fn cable_kind(graph: &Graph, cable: &str) -> CableKind {
 /// The fg color for a cable's edge: the topology-error highlight when any
 /// issue references the cable, else the inferred-kind token.
 fn cable_color(graph: &Graph, cable: &str) -> Color {
+    cable_color_with_diff(graph, cable, None, false)
+}
+
+fn cable_color_with_diff(
+    graph: &Graph,
+    cable: &str,
+    diff_report: Option<&crate::diff::DiffReport>,
+    diff_showing: bool,
+) -> Color {
     let theme = theme::active();
     if graph.validation.iter().any(|issue| issue.cable == cable) {
         return theme.graph_edge_error;
+    }
+    if diff_showing {
+        if let Some(report) = diff_report {
+            if report.added_cables.contains(&cable.to_string()) {
+                return theme.graph_edge_diff_added;
+            }
+            if report.removed_cables.contains(&cable.to_string()) {
+                return theme.graph_edge_diff_removed;
+            }
+            if report.changed_cables.iter().any(|c| c.cable == cable) {
+                return theme.graph_edge_diff_added;
+            }
+        }
     }
     match cable_kind(graph, cable) {
         CableKind::Control => theme.graph_edge_control,
@@ -1167,7 +1217,7 @@ fn polyline_cells(x_s: i16, y_s: i16, x_t: i16, y_t: i16) -> Vec<(i16, i16)> {
 /// port cells for a clean join. When two polylines share a cell the later
 /// edge in `graph.edges` wins, keeping crossings deterministic.
 fn render_graph_edges(frame: &mut Frame, area: Rect, graph: &Graph, node_rects: &[Rect]) {
-    render_graph_edges_with_highlight(frame, area, graph, node_rects, None, None);
+    render_graph_edges_with_highlight(frame, area, graph, node_rects, None, None, None, false);
 }
 
 fn render_graph_edges_with_highlight(
@@ -1177,6 +1227,8 @@ fn render_graph_edges_with_highlight(
     node_rects: &[Rect],
     highlight: Option<&HashSet<String>>,
     disabled: Option<&HashSet<(String, usize)>>,
+    diff_report: Option<&crate::diff::DiffReport>,
+    diff_showing: bool,
 ) {
     // kitty-gfx optional: when feature enabled and terminal is kitty, we would
     // emit inline image escapes instead of box-drawing. Fallback is box-drawing.
@@ -1229,6 +1281,27 @@ fn render_graph_edges_with_highlight(
             .validation
             .iter()
             .any(|issue| issue.cable == edge.cable);
+        let has_diff = diff_showing
+            && diff_report.is_some_and(|r| {
+                r.added_cables.contains(&edge.cable)
+                    || r.removed_cables.contains(&edge.cable)
+                    || r.changed_cables.iter().any(|c| c.cable == edge.cable)
+            });
+        let diff_color = if has_diff {
+            diff_report.and_then(|r| {
+                if r.added_cables.contains(&edge.cable) {
+                    Some(theme::active().graph_edge_diff_added)
+                } else if r.removed_cables.contains(&edge.cable) {
+                    Some(theme::active().graph_edge_diff_removed)
+                } else if r.changed_cables.iter().any(|c| c.cable == edge.cable) {
+                    Some(theme::active().graph_edge_diff_added)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         let (color, modifier) = if incident_disabled {
             // Disabled circuit: dim overrides influence highlight, but a
             // validation finding keeps the error color (error red > dim >
@@ -1238,6 +1311,10 @@ fn render_graph_edges_with_highlight(
             } else {
                 (theme::active().graph_edge_dim, Modifier::DIM)
             }
+        } else if has_error {
+            (theme::active().graph_edge_error, Modifier::empty())
+        } else if let Some(dc) = diff_color {
+            (dc, Modifier::BOLD)
         } else if has_active_highlight {
             if is_highlighted {
                 (theme::active().graph_edge_highlight, Modifier::BOLD)
@@ -1245,7 +1322,10 @@ fn render_graph_edges_with_highlight(
                 (theme::active().graph_edge_dim, Modifier::DIM)
             }
         } else {
-            (cable_color(graph, &edge.cable), Modifier::empty())
+            (
+                cable_color_with_diff(graph, &edge.cable, diff_report, diff_showing),
+                Modifier::empty(),
+            )
         };
         let style = Style::default().fg(color).add_modifier(modifier);
         let (ax, ay, aw, ah) = (
@@ -1278,7 +1358,9 @@ fn render_graph_edges_with_highlight(
 /// simple presence markers.
 #[allow(dead_code)]
 fn render_graph_node(frame: &mut Frame, area: Rect, node: &GraphNode, graph: &Graph) {
-    render_graph_node_with_highlight(frame, area, node, graph, None, None, false, None, None);
+    render_graph_node_with_highlight(
+        frame, area, node, graph, None, None, false, None, None, None, false,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1292,6 +1374,8 @@ fn render_graph_node_with_highlight(
     hovered: bool,
     patch: Option<&crate::patch::Patch>,
     circuit_store: Option<&HashMap<(String, usize), String>>,
+    diff_report: Option<&crate::diff::DiffReport>,
+    diff_showing: bool,
 ) {
     let is_disabled = disabled
         .map(|set| circuit_disabled(set, &node.circuit, node.instance_index))
@@ -1341,7 +1425,19 @@ fn render_graph_node_with_highlight(
             .bg(theme::active().muted)
             .add_modifier(Modifier::REVERSED);
     }
-    let title = graph_node_display_title(node, patch, circuit_store);
+    let mut title = graph_node_display_title(node, patch, circuit_store);
+    if diff_showing {
+        if let Some(report) = diff_report {
+            if report.changed_nodes.iter().any(|n| n.id == node.id) {
+                title = format!("{}*", title);
+            } else if report.added_nodes.contains(&node.id)
+                || report.removed_nodes.contains(&node.id)
+            {
+                // Added/removed nodes also get a marker for visibility
+                title = format!("{}*", title);
+            }
+        }
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1408,13 +1504,50 @@ fn graph_cluster_rect(
 /// Draw a cluster's bordered container. The implicit unnamed group (empty
 /// title) renders as a plain bordered area without a title.
 fn render_graph_cluster_frame(frame: &mut Frame, rect: Rect, cluster: &Cluster) {
+    render_graph_cluster_frame_with_diff(frame, rect, cluster, None, false, &[]);
+}
+
+fn render_graph_cluster_frame_with_diff(
+    frame: &mut Frame,
+    rect: Rect,
+    cluster: &Cluster,
+    diff_report: Option<&crate::diff::DiffReport>,
+    diff_showing: bool,
+    nodes: &[GraphNode],
+) {
+    let mut border_color = theme::active().graph_cluster_border;
+    let mut title_color = theme::active().graph_cluster_title;
+    if diff_showing {
+        if let Some(report) = diff_report {
+            // Tint when all member NodeIds are added or all removed.
+            let member_ids: Vec<(String, usize)> = nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| cluster.section_range.contains(&n.section_index))
+                .map(|(_, n)| n.id.clone())
+                .collect();
+            if !member_ids.is_empty() {
+                let all_added = member_ids.iter().all(|id| report.added_nodes.contains(id));
+                let all_removed = member_ids
+                    .iter()
+                    .all(|id| report.removed_nodes.contains(id));
+                if all_added {
+                    border_color = theme::active().graph_edge_diff_added;
+                    title_color = theme::active().graph_edge_diff_added;
+                } else if all_removed {
+                    border_color = theme::active().graph_edge_diff_removed;
+                    title_color = theme::active().graph_edge_diff_removed;
+                }
+            }
+        }
+    }
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::active().graph_cluster_border));
+        .border_style(Style::default().fg(border_color));
     if !cluster.title.is_empty() {
         block = block
             .title(cluster.title.as_str())
-            .title_style(Style::default().fg(theme::active().graph_cluster_title));
+            .title_style(Style::default().fg(title_color));
     }
     frame.render_widget(block, rect);
 }
@@ -1600,6 +1733,8 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
         &node_rects,
         highlight_edges.as_ref(),
         Some(&disabled),
+        None,
+        false,
     );
     for (i, node) in graph.nodes.iter().enumerate() {
         let nr = node_rects[i];
@@ -1614,6 +1749,8 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
             hovered == Some(i),
             patch_for_title.as_ref(),
             Some(&circuit_store),
+            None,
+            false,
         );
     }
 }
@@ -1664,6 +1801,8 @@ fn render_quad_graph_filtered_content(frame: &mut Frame, area: Rect, app: &mut A
             false,
             patch_for_title.as_ref(),
             Some(&circuit_store),
+            None,
+            false,
         );
     }
 }

@@ -99,6 +99,101 @@ fn node_settings(patch: &Patch) -> HashMap<NodeId, BTreeMap<String, String>> {
 }
 
 // ---------------------------------------------------------------------------
+// scope filtering
+// ---------------------------------------------------------------------------
+
+/// Filter a [`DiffReport`] to only those cables/nodes that intersect the
+/// selected hardware token's influence subtree.
+///
+/// Influence is derived via `Patch::hw_token_to_vars` (boundary-aware) and
+/// `Patch::influence_subtree` (transitive forward BFS over `cable_index` +
+/// `circuit_outputs`, cycle-safe).  A diff entry is retained when it touches
+/// an influenced cable or an influenced/originating circuit instance.
+/// Returns sorted, deterministic outputs.  An unknown token yields an empty
+/// report.
+pub fn scope_report(report: &DiffReport, token: &str, patch: &Patch) -> DiffReport {
+    let vars = patch.hw_token_to_vars(token);
+    if vars.is_empty() {
+        return DiffReport::default();
+    }
+    let subtree = patch.influence_subtree(&vars);
+    let influenced_edges = &subtree.influenced_edges;
+    let influenced_nodes = &subtree.influenced_nodes;
+
+    // NodeIds of sections that directly contain the token — the originating
+    // circuits.  They stay in scope even though `influence_subtree` only marks
+    // downstream sinks, not the sources.
+    let node_ids = build_node_ids(&patch.sections);
+    let mut token_nodes: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for (sec, nid) in patch.sections.iter().zip(node_ids.iter()) {
+        let has_token = sec
+            .entries
+            .iter()
+            .any(|(_, v)| crate::patch::scan_hw_tokens(v).iter().any(|t| t == token));
+        if has_token {
+            token_nodes.insert(nid.clone());
+        }
+    }
+    // Also include hw_components whose id == token?  `scan_hw_tokens` already
+    // covers param values, but a token may appear as a bare `button = B1.1`
+    // which is captured there too.  No extra hw_components scan needed.
+
+    let mut added_cables: Vec<String> = report
+        .added_cables
+        .iter()
+        .filter(|c| influenced_edges.contains(*c))
+        .cloned()
+        .collect();
+    let mut removed_cables: Vec<String> = report
+        .removed_cables
+        .iter()
+        .filter(|c| influenced_edges.contains(*c))
+        .cloned()
+        .collect();
+    let mut changed_cables: Vec<ChangedCable> = report
+        .changed_cables
+        .iter()
+        .filter(|cc| influenced_edges.contains(&cc.cable))
+        .cloned()
+        .collect();
+
+    let mut added_nodes: Vec<NodeId> = report
+        .added_nodes
+        .iter()
+        .filter(|nid| influenced_nodes.contains(*nid) || token_nodes.contains(*nid))
+        .cloned()
+        .collect();
+    let mut removed_nodes: Vec<NodeId> = report
+        .removed_nodes
+        .iter()
+        .filter(|nid| influenced_nodes.contains(*nid) || token_nodes.contains(*nid))
+        .cloned()
+        .collect();
+    let mut changed_nodes: Vec<ChangedNode> = report
+        .changed_nodes
+        .iter()
+        .filter(|cn| influenced_nodes.contains(&cn.id) || token_nodes.contains(&cn.id))
+        .cloned()
+        .collect();
+
+    added_cables.sort();
+    removed_cables.sort();
+    changed_cables.sort();
+    added_nodes.sort();
+    removed_nodes.sort();
+    changed_nodes.sort();
+
+    DiffReport {
+        added_cables,
+        removed_cables,
+        changed_cables,
+        added_nodes,
+        removed_nodes,
+        changed_nodes,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // public
 // ---------------------------------------------------------------------------
 
@@ -498,5 +593,104 @@ mod tests {
         let b = p(ini);
         let r = diff_patches(&a, &b);
         assert_eq!(r, DiffReport::default());
+    }
+
+    // ------------------------------------------------------------------
+    // scope_report tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn scope_report_filters_by_token_influence() {
+        // Base patch: two independent chains
+        // B1.1 -> _CLK -> lfo,  B1.2 -> _OTHER -> env
+        let a = p("[p2b8]\n\
+             [clk]\nbutton = B1.1\noutput = _CLK\n\
+             [lfo]\nbutton = I1.1\ninput = _CLK\nrate = 0.5\n\
+             [clk2]\nbutton = B1.2\noutput = _OTHER\n\
+             [env]\nbutton = I1.2\ninput = _OTHER\ndecay = 0.2\n");
+        // B adds a new cable _EXTRA on the B1.1 chain and changes lfo rate,
+        // plus adds a new cable _EXTRA2 on the B1.2 chain
+        let b = p("[p2b8]\n\
+             [clk]\nbutton = B1.1\noutput = _CLK\n\
+             [lfo]\nbutton = I1.1\ninput = _CLK\nrate = 0.9\n\
+             [extra]\nbutton = I1.3\ninput = _CLK\n\
+             [clk2]\nbutton = B1.2\noutput = _OTHER\n\
+             [env]\nbutton = I1.2\ninput = _OTHER\ndecay = 0.8\n");
+        let full = diff_patches(&a, &b);
+        // Full has changed_nodes for lfo and env (and maybe more)
+        assert!(full.changed_nodes.len() >= 2);
+        // Scope to B1.1 should keep only lfo-related diff, not env
+        let scoped = scope_report(&full, "B1.1", &b);
+        // lfo = ("lfo",0) should be present, env should not
+        assert!(
+            scoped
+                .changed_nodes
+                .iter()
+                .any(|cn| cn.id == ("lfo".to_string(), 0)),
+            "B1.1 scope must include lfo, got {:?}",
+            scoped.changed_nodes
+        );
+        assert!(
+            !scoped
+                .changed_nodes
+                .iter()
+                .any(|cn| cn.id == ("env".to_string(), 0)),
+            "B1.1 scope must NOT include env, got {:?}",
+            scoped.changed_nodes
+        );
+        assert!(scoped.changed_nodes.len() < full.changed_nodes.len());
+        // Scoped is subset of full
+        for nid in &scoped.added_nodes {
+            assert!(full.added_nodes.contains(nid));
+        }
+        for c in &scoped.added_cables {
+            assert!(full.added_cables.contains(c));
+        }
+    }
+
+    #[test]
+    fn scope_report_unknown_token_returns_empty() {
+        let a = p("[p2b8]\n[lfo]\nbutton = B1.1\nrate = 0.5\n");
+        let b = p("[p2b8]\n[lfo]\nbutton = B1.1\nrate = 0.9\n[env]\nbutton = B1.2\ndecay = 0.2\n");
+        let full = diff_patches(&a, &b);
+        assert!(!full.changed_nodes.is_empty() || !full.added_nodes.is_empty());
+        let scoped = scope_report(&full, "B9.9", &b);
+        assert_eq!(
+            scoped,
+            DiffReport::default(),
+            "unknown token must yield empty report"
+        );
+    }
+
+    #[test]
+    fn scope_report_subset_and_sorted() {
+        let a = p("[p2b8]\n[clk]\nbutton = B1.1\noutput = _CLK\n[lfo]\ninput = _CLK\nrate = 0.1\n");
+        let b = p("[p2b8]\n[clk]\nbutton = B1.1\noutput = _CLK\n[lfo]\ninput = _CLK\nrate = 0.9\n[env]\nbutton = B1.2\ndecay = 0.2\n");
+        let full = diff_patches(&a, &b);
+        let scoped = scope_report(&full, "B1.1", &b);
+        // subset check
+        for c in &scoped.added_cables {
+            assert!(full.added_cables.contains(c));
+        }
+        for c in &scoped.removed_cables {
+            assert!(full.removed_cables.contains(c));
+        }
+        // sorted
+        let mut s = scoped.added_cables.clone();
+        s.sort();
+        assert_eq!(scoped.added_cables, s);
+        let mut s2 = scoped.added_nodes.clone();
+        s2.sort();
+        assert_eq!(scoped.added_nodes, s2);
+    }
+
+    #[test]
+    fn scope_report_deterministic() {
+        let a = p("[p2b8]\n[clk]\nbutton = B1.1\noutput = _CLK\n[lfo]\ninput = _CLK\nrate = 0.5\n");
+        let b = p("[p2b8]\n[clk]\nbutton = B1.1\noutput = _CLK\n[lfo]\ninput = _CLK\nrate = 0.9\n");
+        let full = diff_patches(&a, &b);
+        let s1 = scope_report(&full, "B1.1", &b);
+        let s2 = scope_report(&full, "B1.1", &b);
+        assert_eq!(s1, s2);
     }
 }

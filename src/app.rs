@@ -591,6 +591,36 @@ impl App {
         }
     }
 
+    /// View of `diff_report` filtered through `diff_scope` (if any).
+    /// Returns `None` when no diff is loaded; returns the full report when
+    /// unscoped, otherwise `scope_report` against the base `patch`.
+    pub fn filtered_report(&self) -> Option<crate::diff::DiffReport> {
+        let report = self.diff_report.as_ref()?;
+        if let (Some(token), Some(patch)) = (self.diff_scope.as_deref(), self.patch.as_ref()) {
+            Some(crate::diff::scope_report(report, token, patch))
+        } else {
+            Some(report.clone())
+        }
+    }
+
+    pub fn diff_scope_cable_count(&self) -> usize {
+        if let Some(r) = self.filtered_report() {
+            r.added_cables.len() + r.removed_cables.len() + r.changed_cables.len()
+        } else {
+            0
+        }
+    }
+
+    pub fn status_for_scope(&self) -> Option<String> {
+        if self.diff_showing {
+            if let Some(token) = self.diff_scope.as_deref() {
+                let n = self.diff_scope_cable_count();
+                return Some(format!("Diff scope: {} ({} cables)", token, n));
+            }
+        }
+        None
+    }
+
     pub fn load_diff_patch(&mut self, path: &Path) -> Result<(), String> {
         let new_patch = Patch::from_ini_file(path).map_err(|e| e.to_string())?;
         let report = if let Some(base) = &self.patch {
