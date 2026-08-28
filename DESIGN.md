@@ -101,6 +101,7 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 - **State is always visible.** Every component shows its current state inline: buttons and switches show ON/OFF with filled/outline glyphs, knobs and encoders show a percentage, CV I/O shows direction arrows, LEDs show a filled/outline dot.
 - **Color is semantic, not decorative.** Each component kind has one color (knobs magenta, CV in cyan, CV out green, LEDs red) and each shift group has one color (1 yellow, 2 cyan, 3 magenta, 4 green). The same color means the same thing everywhere it appears.
 - **Shift is a spotlight.** When a shift key (1–4) is held, panels containing that shift group get a bold colored border with a `[SHIFT n]` marker in the title; all other panels dim. The status bar repeats the active shift in its group color. The user always knows what a shift key will affect.
+- **Modifier is a wash.** Selecting a modifier hardware token tints every influenced panel cell (boxed + text) with a background wash in `hash(token)%16` hue; unaffected cells dim. Source `select` spans and graph edges/nodes reuse the same hue; status shows `MOD B1.1 → N cells / M cables` in that hue. Rendering priority is `graph_edge_error` (red) > modifier hue > `CableKind`; shift border + modifier wash coexist.
 - **Interaction is forgiving.** Hover reverses the component's colors; click toggles; scroll adjusts values in small steps (±0.05). Keyboard and mouse are interchangeable — the same component is targeted whether reached by `j`/`k` navigation or by pointing.
 
 ## Theming
@@ -152,10 +153,11 @@ Glyphs by kind:
 - Panel layout follows the display orientation: panels stack vertically in portrait and arrange horizontally in landscape.
 - Panel borders are dark gray by default.
 - With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim to dark gray.
+- With a modifier active (e.g. `B1.1`→`_TRIG`): influenced cells (boxed LED-cells and text cells inside modules) render with a background wash in `hash(token)%16` modifier hue; unaffected cells dim slightly. Rendering priority is `graph_edge_error` (red) > modifier hue > `CableKind`. Modifier background wash is orthogonal to shift borders — both can coexist (yellow shift border + modifier hue cell bg, e.g. `SHIFT 1` + `B1.1`). Interaction: `Mouse Down` without mods = momentary preview (cleared on `Up`/`Leave`), `Ctrl+Shift+Click` (alias `Ctrl+Click`) = toggle latched, `m` = keyboard alias for hovered component, `Esc` clears shift + modifier; single-var today, additive `MOD B1.1+B1.2 → N cells / M cables` is aspirational.
 
 ## Status Bar
 
-A dark-gray band at the bottom, bordered, left-aligned. It shows the current status message in white, appends ` | SHIFT n ACTIVE` in the group color, bold, when a shift is active, and permanently displays the current display settings as `Scale: <factor> | Orientation: <Portrait|Landscape>`.
+A dark-gray band at the bottom, bordered, left-aligned. It shows the current status message in white, appends ` | SHIFT n ACTIVE` in the group color, bold, when a shift is active, appends ` | MOD B1.1 → N cells / M cables` in the modifier hue (bold) when a modifier is active (both can coexist), and permanently displays the current display settings as `Scale: <factor> | Orientation: <Portrait|Landscape>`. Mouse `Down` = momentary modifier preview, `Ctrl+Shift+Click` (or `Ctrl+Click`) = toggle latched, `m` = keyboard alias, `Esc` clears shift + modifier.
 
 ## File Picker
 

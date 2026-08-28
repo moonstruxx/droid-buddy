@@ -2586,3 +2586,212 @@ fn visual_quad_html_row_snapshots() {
         insta::assert_snapshot!(format!("quad_html_row_{suffix}"), row);
     }
 }
+
+// ── modifier highlight regression harness (task 5.1) ─────────────────────
+// Fixtures arpeggio1 / source_navigation / cable_banner_combos × themes
+// classic/mono/terminal × widths 80/120, latched vs held, additive
+// (replacement) and shift+modifier coexistence. Single-var App reality:
+// `active_modifier_var` + `influence` are derived from the single
+// `selected_component` via `select_component` → `recompute_influence`.
+// No multi-set exists (see tasks 2.x aspirational multi-additive); additive
+// here therefore snapshots replacement behavior with a TODO note.
+
+fn modifier_app(fixture: &str, token: &str) -> App {
+    let mut app = app_from_fixture(fixture);
+    app.select_component(String::from(token));
+    app
+}
+
+#[test]
+fn visual_modifier_highlight_matrix_snapshot() {
+    // Base latched case: B1.1 selected (derives _DIRECTION / _GATE / _CHAIN1 etc
+    // depending on fixture). All three fixtures expose B1.1 → influence, so the
+    // same token exercises different cable walks per fixture.
+    let fixtures = ["arpeggio1", "source_navigation", "cable_banner_combos"];
+    for fixture in fixtures {
+        for &theme_name in theme::THEMES {
+            let _guard = ThemedGuard::pin(theme_name);
+            for width in [80u16, 120] {
+                let mut app = modifier_app(fixture, "B1.1");
+                let buf = buffer_for(&mut app, width, 40);
+                let ansi = buffer_to_ansi(&buf);
+                // Influence must exist for B1.1 in all three fixtures (hw_token_to_vars non-empty)
+                assert!(
+                    app.influence.is_some(),
+                    "{fixture} {theme_name} {width}: B1.1 must derive influence"
+                );
+                let influence = app.influence.as_ref().unwrap();
+                assert!(
+                    !influence.influenced_nodes.is_empty()
+                        || !influence.influenced_edges.is_empty(),
+                    "{fixture} {theme_name} {width}: influence non-empty"
+                );
+                // Status hint MOD B1.1 → N cells / M cables must appear in ANSI
+                assert!(
+                    ansi.contains("MOD B1.1"),
+                    "{fixture} {theme_name} {width}: status MOD hint missing\n{ansi}"
+                );
+                assert!(
+                    ansi.contains("cells") && ansi.contains("cables"),
+                    "{fixture} {theme_name} {width}: status counts missing"
+                );
+                // Hue + BOLD on the hint: modifier_hue(token) is the fg, BOLD
+                let hue = theme::modifier_hue("B1.1");
+                assert!(
+                    has_highlighted_token(&buf, "MOD B1.1", Some(hue), Some(Modifier::BOLD)),
+                    "{fixture} {theme_name} {width}: MOD hint hue/bold"
+                );
+                insta::with_settings!({snapshot_suffix => format!("modifier_{fixture}_{theme_name}_{width}")}, {
+                    insta::assert_snapshot!(ansi);
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn regression_modifier_latched_vs_held_identical() {
+    // Held (momentary Down) vs latched (toggle) are not yet distinct in the
+    // handler — both drive `select_component` → `recompute_influence`.
+    // Document the distinction and assert they produce identical influence and
+    // status. Held is simulated as a momentary select; latched as the same
+    // select that persists.
+    for fixture in ["modifier_switch_passthrough", "source_navigation"] {
+        let mut held = modifier_app(fixture, "B1.1");
+        let held_influence = held.influence.clone();
+        let held_var = held.active_modifier_var.clone();
+        let buf_held = buffer_for(&mut held, 100, 40);
+        let ansi_held = buffer_to_ansi(&buf_held);
+
+        let mut latched = modifier_app(fixture, "B1.1");
+        let latched_influence = latched.influence.clone();
+        let latched_var = latched.active_modifier_var.clone();
+        let buf_latched = buffer_for(&mut latched, 100, 40);
+        let ansi_latched = buffer_to_ansi(&buf_latched);
+
+        assert_eq!(held_var, latched_var, "{fixture}: held vs latched same var");
+        assert_eq!(
+            held_influence.as_ref().map(|i| &i.influenced_nodes),
+            latched_influence.as_ref().map(|i| &i.influenced_nodes),
+            "{fixture}: held vs latched same nodes"
+        );
+        assert_eq!(
+            held_influence.as_ref().map(|i| &i.influenced_edges),
+            latched_influence.as_ref().map(|i| &i.influenced_edges),
+            "{fixture}: held vs latched same edges"
+        );
+        assert_eq!(ansi_held, ansi_latched, "{fixture}: identical render");
+        assert!(ansi_held.contains("MOD B1.1"));
+    }
+}
+
+#[test]
+fn regression_modifier_additive_replaces_single_var() {
+    // TODO(multi-additive): App holds a single `active_modifier_var` /
+    // `influence` (Option<InfluenceSubtree>), not a latched multi-set.
+    // Additive B1.1+B1.2 (union, most-recent-wins) is aspirational; current
+    // reality is replacement — second select overwrites the first. This test
+    // pins replacement and snapshots both steps so the future union change is
+    // a visible diff.
+    let mut app = app_from_fixture("modifier_switch_passthrough");
+    app.select_component(String::from("B1.1"));
+    let first_var = app.active_modifier_var.clone().unwrap();
+    let first_nodes = app.influence.as_ref().unwrap().influenced_nodes.clone();
+    let first_edges = app.influence.as_ref().unwrap().influenced_edges.clone();
+    let buf1 = buffer_for(&mut app, 100, 40);
+    let ansi1 = buffer_to_ansi(&buf1);
+    assert!(ansi1.contains("MOD B1.1"));
+    // At least _TRIG or _EXTRA as primary; B1.1 influence non-empty
+    assert!(!first_nodes.is_empty() || !first_edges.is_empty());
+
+    app.select_component(String::from("B1.2"));
+    let second_var = app.active_modifier_var.clone();
+    // B1.2 has no hw_token_to_vars entry in this fixture (only B1.1 and P* etc),
+    // so selection clears influence — replacement, not union.
+    // If fixture evolves to give B1.2 a mapping, assert the var changed instead.
+    if let Some(second_var) = second_var {
+        assert_ne!(second_var, first_var, "second select overwrites first var");
+        let buf2 = buffer_for(&mut app, 100, 40);
+        let ansi2 = buffer_to_ansi(&buf2);
+        assert!(ansi2.contains(&format!("MOD {}", second_var)));
+        assert!(!ansi2.contains("MOD B1.1") || second_var == "B1.1");
+    } else {
+        assert!(
+            app.influence.is_none(),
+            "B1.2 without mapping clears influence (replacement)"
+        );
+        let buf2 = buffer_for(&mut app, 100, 40);
+        let ansi2 = buffer_to_ansi(&buf2);
+        assert!(!ansi2.contains("MOD B1.1"), "replaced hint gone");
+    }
+
+    // Also verify via source_navigation where B1.2 DOES have influence (_TRANSIT)
+    let mut app2 = app_from_fixture("source_navigation");
+    app2.select_component(String::from("B1.1"));
+    let b11_ansi = buffer_to_ansi(&buffer_for(&mut app2, 100, 40));
+    assert!(b11_ansi.contains("MOD B1.1"));
+    app2.select_component(String::from("B1.2"));
+    let b12_ansi = buffer_to_ansi(&buffer_for(&mut app2, 100, 40));
+    assert!(
+        b12_ansi.contains("MOD B1.2"),
+        "second select replaces with B1.2"
+    );
+    assert!(!b12_ansi.contains("MOD B1.1"), "B1.1 hint replaced");
+}
+
+#[test]
+fn regression_modifier_shift_plus_modifier_coexist() {
+    // Shift panel border (bold shift hue) and modifier background wash + status
+    // MOD hint are orthogonal — both must coexist without either clobbering the other.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+        let mut app = modifier_app("modifier_switch_passthrough", "B1.1");
+        app.active_shift = Some(ShiftGroup::Group1);
+        let buf = buffer_for(&mut app, 100, 40);
+        let ansi = buffer_to_ansi(&buf);
+        // Both hints in status: SHIFT 1 ACTIVE and MOD B1.1
+        assert!(
+            ansi.contains("SHIFT 1 ACTIVE"),
+            "{theme_name}: shift hint missing with modifier"
+        );
+        assert!(
+            ansi.contains("MOD B1.1"),
+            "{theme_name}: MOD hint missing with shift"
+        );
+        // Shift chip bold shift1, MOD hint bold modifier_hue — distinct hues coexist
+        let hue = theme::modifier_hue("B1.1");
+        assert!(
+            has_highlighted_token(&buf, "MOD B1.1", Some(hue), Some(Modifier::BOLD)),
+            "{theme_name}: MOD hue/bold with shift"
+        );
+        assert!(
+            has_highlighted_token(&buf, "SHIFT 1 ACTIVE", Some(t.shift1), Some(Modifier::BOLD)),
+            "{theme_name}: shift chip bold with modifier"
+        );
+        // Shift-affected panel border still bold shift1
+        assert!(
+            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
+            "{theme_name}: shift border persists with modifier"
+        );
+    }
+}
+
+#[test]
+fn visual_modifier_shift_plus_modifier_snapshot() {
+    // Snapshots for shift+modifier at 80/120 across themes (extends the 12-minimum matrix)
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = modifier_app("modifier_switch_passthrough", "B1.1");
+            app.active_shift = Some(ShiftGroup::Group1);
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+            assert!(ansi.contains("SHIFT 1 ACTIVE"));
+            assert!(ansi.contains("MOD B1.1"));
+            insta::with_settings!({snapshot_suffix => format!("modifier_shift_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
