@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add `[labels]` config (`layers_enabled=true`, `max_shift_layer=4` clamped 1..8) to `config.rs` with XDG load/save, warn-once and defaults <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/config.rs] -->
 - [x] 1.2 Add pure `Patch::display_label` + `circuit_label` with fallback chain `store[layer]→store[1]→preamble[1]→derived` and `max_shift_layer`/`layers_enabled` coercion in `patch.rs` <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/patch.rs] -->
-- [ ] 1.3 Add `LabelStore` model (XDG `labels.toml`, per-patch buckets `hw` + `circuits`, atomic tmp→rename, path-key canonicalization, warn-once) + `I4:` empty-slot coverage <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.2], touches: [src/app.rs] -->
+- [x] 1.3 Add `LabelStore` model (XDG `labels.toml`, per-patch buckets `hw` + `circuits`, atomic tmp→rename, path-key canonicalization, warn-once) + `I4:` empty-slot coverage <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.2], touches: [src/app.rs] -->
 
 ## 2. App state & persistence
 
