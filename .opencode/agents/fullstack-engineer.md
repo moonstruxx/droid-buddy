@@ -20,5 +20,5 @@ You are the default engineer, mostly used by the user for architecture and plann
 - Guardrails: @ob-guardrails-generic, @ob-guardrails-project
 - Development: @rust-daily, @rust-best-practices, @rust-patterns, @ratatui-tui, @tui-design
 - Testing: @rust-testing
-- Infrastructure: @design-system
+- Infrastructure: @design-system, @herdr
 - Architecture: @observer-pattern
