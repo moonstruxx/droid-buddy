@@ -269,6 +269,7 @@ use ratatui::layout::Rect;
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::graph::{Cluster, Graph, NodeId};
+use crate::latency::CostModel;
 use crate::layout;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
@@ -491,6 +492,11 @@ pub struct App {
     pub diff_report: Option<DiffReport>,
     /// Whether the diff overlay is currently shown (`d` toggles).
     pub diff_showing: bool,
+    /// Per-circuit processing-cost provider feeding the latency ramp (design
+    /// D2). One instance is built from `[latency]` config at startup and passed
+    /// into every graph build, so a config change recolors and re-optimizes
+    /// coherently.
+    pub cost_model: CostModel,
     /// Whether cable edges are colored by the forward-loop latency ramp on the
     /// graph surface (`c` toggles). A view preference: like `viewer_split_ratio`
     /// it persists across `load_patch` (unlike `processing_paused`/`disabled_circuits`,
@@ -559,6 +565,7 @@ impl App {
             diff_report: None,
             diff_showing: false,
             latency_coloring: true,
+            cost_model: CostModel::default(),
             diff_scope: None,
             diff_picker_active: false,
             validation_issues: Vec::new(),
@@ -1197,7 +1204,7 @@ impl App {
         let (graph, positions) = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
-                let graph = Graph::build_from_patch(patch, &clusters);
+                let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
                 let positions = layout::solve(&graph);
                 (Some(graph), positions)
             }
@@ -1243,7 +1250,7 @@ impl App {
         let (graph, positions) = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
-                let graph = Graph::build_from_patch(patch, &clusters);
+                let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
                 let positions = layout::solve(&graph);
                 (Some(graph), positions)
             }
@@ -1322,7 +1329,7 @@ impl App {
             let (graph, positions) = match &self.patch {
                 Some(patch) => {
                     let clusters = clusters_from_patch(patch);
-                    let graph = Graph::build_from_patch(patch, &clusters);
+                    let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
                     let positions = layout::solve(&graph);
                     (Some(graph), positions)
                 }
@@ -1407,7 +1414,7 @@ impl App {
         let needs_graph = self.graph.is_some() || self.showing_quad;
         if needs_graph && self.graph.is_none() {
             let clusters = clusters_from_patch(&patch);
-            let graph = Graph::build_from_patch(&patch, &clusters);
+            let graph = Graph::build_from_patch(&patch, &clusters, &self.cost_model);
             let positions = layout::solve(&graph);
             self.graph = Some(graph);
             self.graph_positions = positions;

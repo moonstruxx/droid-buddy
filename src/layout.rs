@@ -752,7 +752,8 @@ mod tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        let full = Graph::build_from_patch(&patch, &clusters);
+        let full =
+            Graph::build_from_patch(&patch, &clusters, &crate::latency::CostModel::default());
         let vars = patch.hw_token_to_vars("B1.1");
         let sub = patch.influence_subtree(&vars);
         let filtered = full.filtered_influence(&sub);

@@ -6,6 +6,7 @@ use crossterm::execute;
 use ratatui::DefaultTerminal;
 
 use droid_tui::app::App;
+use droid_tui::latency::CostModel;
 use droid_tui::ui::render;
 use droid_tui::{config, handler, theme};
 
@@ -27,15 +28,19 @@ fn main() -> Result<()> {
         previous_hook(info);
     }));
 
-    let result = run(terminal);
+    let result = run(terminal, &settings);
 
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
 
-fn run(mut terminal: DefaultTerminal) -> Result<()> {
+fn run(mut terminal: DefaultTerminal, settings: &config::Settings) -> Result<()> {
     let mut app = App::new();
+    // The shared per-circuit cost provider (design D2): config `[latency]`
+    // overrides layered over the ramsize heuristic, consumed by every graph
+    // build so latency coloring and the optimizer stay coherent.
+    app.cost_model = CostModel::from_config(settings);
 
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
