@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
+use std::collections::HashMap;
+
 use crate::app::{
     is_entry_selectable, App, GraphDrag, PrefixState, QuadFocus, SourceViewMode, ViewerFocus,
 };
@@ -41,7 +43,79 @@ fn open_embedded_viewer(app: &mut App) {
 }
 
 /// Handle keyboard input. Returns true if the app should quit.
+/// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
+    // Inline label-edit overlay eats all keys (highest priority: overlay > picker > prefix > graph > source > panels).
+    if app.editing.is_some() {
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                app.cancel_edit();
+                app.status_message = String::from("Edit cancelled");
+                return false;
+            }
+            crossterm::event::KeyCode::Enter => {
+                match app.commit_edit() {
+                    Ok(()) => app.status_message = String::from("Label saved"),
+                    Err(e) => app.status_message = format!("Save failed: {e}"),
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Backspace => {
+                if let Some(state) = app.editing.as_mut() {
+                    state.draft.pop();
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if c.is_ascii_digit() && c != '0' {
+                    let settings = crate::config::load(
+                        &crate::theme::canonical_theme_name,
+                        crate::theme::THEMES,
+                    );
+                    let max = if settings.labels.layers_enabled {
+                        settings.labels.max_shift_layer.clamp(1, 8)
+                    } else {
+                        1
+                    };
+                    let digit = c.to_digit(10).unwrap() as u8;
+                    if (1..=max).contains(&digit) && app.cycle_edit_layer(digit) {
+                        if let Some(inf) = app.editing_influence() {
+                            if let Some(ed) = app.editing.as_ref() {
+                                match &ed.kind {
+                                    crate::app::EditKind::Hw { token, layer } => {
+                                        app.status_message = format!(
+                                            "{} / Group{} → {} ckts / {} cables",
+                                            token,
+                                            layer,
+                                            inf.influenced_nodes.len(),
+                                            inf.influenced_edges.len()
+                                        );
+                                    }
+                                    crate::app::EditKind::Circuit { node } => {
+                                        app.status_message = format!(
+                                            "{}:{} → {} ckts / {} cables",
+                                            node.0,
+                                            node.1,
+                                            inf.influenced_nodes.len(),
+                                            inf.influenced_edges.len()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                }
+                if let Some(state) = app.editing.as_mut() {
+                    state.draft.push(c);
+                }
+                return false;
+            }
+            _ => return false,
+        }
+    }
     // If file picker is showing, handle picker navigation
     if app.showing_picker {
         return handle_picker_event(key, app);
@@ -90,6 +164,138 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             _ => {
                 app.prefix = None;
+            }
+        }
+    }
+
+    // Label edit overlay entry: `e` (lowercase, no mods) with priority graph hover > source header > panel hover.
+    if matches!(key.code, crossterm::event::KeyCode::Char('e'))
+        && key.modifiers.is_empty()
+        && app.patch.is_some()
+    {
+        // 1) Graph hovered node -> Circuit
+        if let Some(idx) = app.hovered_graph_node {
+            if let Some(graph) = app.graph.as_ref() {
+                if let Some(node) = graph.nodes.get(idx).cloned() {
+                    let draft = app
+                        .current_patch_path
+                        .as_ref()
+                        .and_then(|p| app.label_store.circuit_label(p, &node.id))
+                        .unwrap_or_default();
+                    app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
+                    if let Some(inf) = app.editing_influence() {
+                        app.status_message = format!(
+                            "{}:{} → {} ckts / {} cables",
+                            node.id.0,
+                            node.id.1,
+                            inf.influenced_nodes.len(),
+                            inf.influenced_edges.len()
+                        );
+                    } else {
+                        app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
+                    }
+                    return false;
+                }
+            }
+        }
+        // Also check filtered graph when quad filtered focused
+        if app.showing_quad {
+            if let Some(fg) = app.filtered_graph.as_ref() {
+                // Use filtered_positions hit? For now reuse hovered_graph_node for full; filtered drag has no hover index.
+                // Fall through to source/panel if no full hover.
+                let _ = fg;
+            }
+        }
+        // 2) Source header focused -> Circuit instance at source_scroll
+        let source_focused = (app.showing_viewer && app.viewer_focus == ViewerFocus::Source)
+            || (app.showing_quad && app.quad_focus == QuadFocus::Source);
+        if source_focused {
+            if let Some(patch) = app.patch.as_ref() {
+                let line = app.source_scroll;
+                let mut chosen: Option<usize> = None;
+                for (i, sec) in patch.sections.iter().enumerate() {
+                    if sec.header_span.line <= line {
+                        chosen = Some(i);
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(idx) = chosen {
+                    let name = patch.sections[idx].name.clone();
+                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    let mut node: Option<(String, usize)> = None;
+                    for (i, sec) in patch.sections.iter().enumerate() {
+                        let entry = counts.entry(sec.name.clone()).or_insert(0);
+                        if i == idx {
+                            node = Some((name.clone(), *entry));
+                            break;
+                        }
+                        *entry += 1;
+                    }
+                    if let Some(nid) = node {
+                        let draft = app
+                            .current_patch_path
+                            .as_ref()
+                            .and_then(|p| app.label_store.circuit_label(p, &nid))
+                            .unwrap_or_default();
+                        app.editing = Some(crate::app::EditState::new_circuit(nid.clone(), draft));
+                        if let Some(inf) = app.editing_influence() {
+                            app.status_message = format!(
+                                "{}:{} → {} ckts / {} cables",
+                                nid.0,
+                                nid.1,
+                                inf.influenced_nodes.len(),
+                                inf.influenced_edges.len()
+                            );
+                        } else {
+                            app.status_message = format!("Editing circuit {}:{}", nid.0, nid.1);
+                        }
+                        return false;
+                    }
+                }
+            }
+        }
+        // 3) Panel hovered component -> HW token with current shift layer
+        if let Some(hover) = app.hovered_component {
+            if let Some(patch) = app.patch.as_ref() {
+                if let Some(comp) = patch.hw_components.get(hover) {
+                    let token = comp.id.clone();
+                    let settings = crate::config::load(
+                        &crate::theme::canonical_theme_name,
+                        crate::theme::THEMES,
+                    );
+                    let max = settings.labels.max_shift_layer.clamp(1, 8);
+                    let raw_layer = match app.active_shift {
+                        Some(crate::patch::ShiftGroup::Group1) => 1,
+                        Some(crate::patch::ShiftGroup::Group2) => 2,
+                        Some(crate::patch::ShiftGroup::Group3) => 3,
+                        Some(crate::patch::ShiftGroup::Group4) => 4,
+                        None => 1,
+                    };
+                    let layer = if settings.labels.layers_enabled {
+                        raw_layer.clamp(1, max)
+                    } else {
+                        1
+                    };
+                    let draft = app
+                        .current_patch_path
+                        .as_ref()
+                        .and_then(|p| app.label_store.hw_label(p, &token, layer))
+                        .unwrap_or_default();
+                    app.editing = Some(crate::app::EditState::new_hw(token.clone(), layer, draft));
+                    if let Some(inf) = app.editing_influence() {
+                        app.status_message = format!(
+                            "{} / Group{} → {} ckts / {} cables",
+                            token,
+                            layer,
+                            inf.influenced_nodes.len(),
+                            inf.influenced_edges.len()
+                        );
+                    } else {
+                        app.status_message = format!("Editing {} / Group{}", token, layer);
+                    }
+                    return false;
+                }
             }
         }
     }
@@ -369,6 +575,84 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         // (Esc/Tab/t already consumed).
     }
 
+    // Label edit overlay entry (`e` on focused datum): overlay > picker > prefix > graph > source > panels.
+    // Priority: graph hovered node -> viewer source header -> panel hovered token.
+    if matches!(key.code, crossterm::event::KeyCode::Char('e'))
+        && key.modifiers.is_empty()
+        && app.editing.is_none()
+    {
+        // Graph surface takes precedence when open.
+        if app.showing_graph {
+            if let Some(idx) = app.hovered_graph_node {
+                if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() {
+                    let draft = app
+                        .current_circuit_store()
+                        .get(&node.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    app.editing = Some(crate::app::EditState::new_circuit(node.id, draft));
+                    return false;
+                }
+            }
+        }
+        // Source header (quad or viewer) — resolve to section instance at source focus.
+        if (app.showing_viewer && app.viewer_focus == ViewerFocus::Source)
+            || (app.showing_quad && app.quad_focus == QuadFocus::Source)
+        {
+            if let Some(patch) = app.patch.as_ref() {
+                // Use selected component's section or fallback to first section.
+                let target_idx = app
+                    .selected_component
+                    .as_ref()
+                    .and_then(|tok| patch.occurrence_index.get(tok))
+                    .and_then(|spans| spans.first())
+                    .map(|s| s.line)
+                    .unwrap_or(0);
+                // Map line to section index via sections' spans - approximate: pick section containing target line.
+                let mut counts: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for (_idx, section) in patch.sections.iter().enumerate() {
+                    let entry = counts.entry(section.name.clone()).or_insert(0);
+                    let nid = (section.name.clone(), *entry);
+                    // First section as fallback when no better mapping.
+                    if target_idx == 0 {
+                        let draft = app
+                            .current_circuit_store()
+                            .get(&nid)
+                            .cloned()
+                            .unwrap_or_default();
+                        app.editing = Some(crate::app::EditState::new_circuit(nid, draft));
+                        return false;
+                    }
+                    *entry += 1;
+                }
+            }
+        }
+        // Panel hovered token (fallback) - requires patch and hover.
+        if let Some(idx) = app.hovered_component {
+            if let Some(patch) = app.patch.as_ref() {
+                if let Some(comp) = patch.hw_components.get(idx) {
+                    let token = comp.id.clone();
+                    let layer = match app.active_shift {
+                        Some(ShiftGroup::Group1) => 1,
+                        Some(ShiftGroup::Group2) => 2,
+                        Some(ShiftGroup::Group3) => 3,
+                        Some(ShiftGroup::Group4) => 4,
+                        None => 1,
+                    };
+                    let draft = app
+                        .current_hw_store()
+                        .get(&token)
+                        .and_then(|m| m.get(&layer))
+                        .cloned()
+                        .unwrap_or_default();
+                    app.editing = Some(crate::app::EditState::new_hw(token, layer, draft));
+                    return false;
+                }
+            }
+        }
+    }
+
     match key.code {
         crossterm::event::KeyCode::Char('q') => true,
         crossterm::event::KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -495,6 +779,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
 /// adjust knob/fader values. Hit-testing uses `app.component_rects`, which
 /// the renderer rebuilds every frame from the actual on-screen layout.
 pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
+    if app.editing.is_some() {
+        return;
+    }
     if app.showing_picker {
         return;
     }
