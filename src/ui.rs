@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, QuadFocus, SourceViewMode, ViewerFocus};
+use crate::app::{is_picker_parent_entry, App, QuadFocus, SourceViewMode, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::theme;
@@ -1136,14 +1136,19 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, path)| {
             let is_selected = i == app.picker_index;
-            let file_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
+            // The parent entry is a bare ".." sentinel with no file name;
+            // render it as ".." instead of an empty label.
+            let display = if is_picker_parent_entry(path) {
+                "..".to_string()
+            } else {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            };
 
             let prefix = if is_selected { "▶ " } else { "  " };
 
-            format!("{}{}", prefix, file_name)
+            format!("{}{}", prefix, display)
         })
         .collect();
 

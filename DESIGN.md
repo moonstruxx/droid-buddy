@@ -142,7 +142,7 @@ The choice persists in `$XDG_CONFIG_HOME/droid-tui/config.toml` as `theme = "…
 
 ## Component Anatomy
 
-Each component occupies a fixed cell of 16 columns × 3 rows. A scale factor is tracked through fixed presets of 50 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends) and reported in the status bar as `Scaling: N%`; it does not currently resize the rendered cells — components always render at 16×3 and the published hit rects match that fixed size.
+Each component occupies a fixed cell of 16 columns × 3 rows. A scale factor is tracked through fixed presets of 75 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends) and reported in the status bar as `Scaling: N%`; the 75 % floor keeps module cells at a boxable width. It does not currently resize the rendered cells — components always render at 16×3 and the published hit rects match that fixed size.
 
 Components without a parse-time LED association render as two-line text cells:
 

@@ -599,16 +599,40 @@ impl App {
 
     pub fn refresh_picker_entries(&mut self) {
         self.picker_entries.clear();
-        // Add ".." for parent directory (unless at root)
-        if let Some(parent) = self.picker_dir.parent() {
-            self.picker_entries.push(parent.to_path_buf());
+        // Parent-directory entry rendered as "..", only when there is a real
+        // parent to navigate up into (the filesystem root has none). The
+        // sentinel is a bare ".." path, which `file_name()` reports as `None`,
+        // so consumers detect it via `is_picker_parent_entry`.
+        if self
+            .picker_dir
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty())
+        {
+            self.picker_entries.push(PathBuf::from(".."));
         }
-        // Read directory entries
+        // Read directory entries. `read_dir` order is arbitrary, so collect
+        // into groups and sort directories first, then `.ini` files, then any
+        // remaining files.
         if let Ok(entries) = std::fs::read_dir(&self.picker_dir) {
+            let mut dirs = Vec::new();
+            let mut inis = Vec::new();
+            let mut others = Vec::new();
             for entry in entries.flatten() {
                 let path = entry.path();
-                self.picker_entries.push(path);
+                if path.metadata().is_ok_and(|m| m.is_dir()) {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "ini") {
+                    inis.push(path);
+                } else {
+                    others.push(path);
+                }
             }
+            dirs.sort();
+            inis.sort();
+            others.sort();
+            self.picker_entries.extend(dirs);
+            self.picker_entries.extend(inis);
+            self.picker_entries.extend(others);
         }
         // Scale factor affects entry density: with higher scale, show fewer entries
         // to prevent overcrowding the picker UI
@@ -1734,23 +1758,33 @@ fn clusters_from_patch(patch: &Patch) -> Vec<Cluster> {
         .collect()
 }
 
-/// Check if a file picker entry is selectable (.ini files or directories)
+/// True when `path` is the picker's parent-directory sentinel (a bare `..`
+/// component). `Path::file_name()` returns `None` for such paths, so this
+/// component check is the single detector used by the picker renderer, the
+/// selectability gate, and the Enter-up navigation.
+pub fn is_picker_parent_entry(path: &Path) -> bool {
+    matches!(
+        path.components().next_back(),
+        Some(std::path::Component::ParentDir)
+    )
+}
+
+/// Check if a file picker entry is selectable (.ini files or directories).
+/// The parent `..` sentinel is always selectable; it carries no file name, so
+/// it must be checked before the `file_name` branch.
 pub fn is_entry_selectable(path: &Path) -> bool {
-    match path.file_name() {
-        Some(name) => {
-            if name == ".." {
-                true // parent directory entry is always selectable
-            } else {
-                let is_dir = path.metadata().is_ok_and(|m| m.is_dir());
-                if is_dir {
-                    true
-                } else {
-                    // .ini files are selectable, others are not
-                    path.extension().is_some_and(|ext| ext == "ini")
-                }
-            }
-        }
-        None => false,
+    if is_picker_parent_entry(path) {
+        return true; // parent directory entry is always selectable
+    }
+    if path.file_name().is_none() {
+        return false;
+    }
+    let is_dir = path.metadata().is_ok_and(|m| m.is_dir());
+    if is_dir {
+        true
+    } else {
+        // .ini files are selectable, others are not
+        path.extension().is_some_and(|ext| ext == "ini")
     }
 }
 
@@ -2764,5 +2798,57 @@ mod tests {
             app.editing_status_line(false, 4).unwrap()
         };
         assert!(disabled.contains("Group1"), "disabled forces 1: {disabled}");
+    }
+
+    #[test]
+    fn refresh_picker_entries_labels_parent_and_sorts_dirs_first() {
+        let mut app = App::new();
+        app.picker_dir = PathBuf::from("fixtures/picker_test");
+        app.refresh_picker_entries();
+        // Parent sentinel is the first entry, rendered as "..".
+        assert!(is_picker_parent_entry(&app.picker_entries[0]));
+        assert_eq!(app.picker_entries[0], PathBuf::from(".."));
+        // Entries sort directories first, then .ini files, then other files.
+        let names: Vec<String> = app
+            .picker_entries
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "..",
+                "fixtures/picker_test/subdir",
+                "fixtures/picker_test/patch_a.ini",
+                "fixtures/picker_test/readme.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_picker_entries_has_no_parent_entry_at_filesystem_root() {
+        let mut app = App::new();
+        app.picker_dir = PathBuf::from("/");
+        app.refresh_picker_entries();
+        assert!(
+            app.picker_entries
+                .iter()
+                .all(|p| !is_picker_parent_entry(p)),
+            "no '..' entry at the filesystem root"
+        );
+    }
+
+    #[test]
+    fn is_entry_selectable_treats_parent_sentinel_dirs_and_inis_as_selectable() {
+        assert!(is_entry_selectable(Path::new("..")));
+        assert!(is_entry_selectable(Path::new(
+            "fixtures/picker_test/subdir"
+        )));
+        assert!(is_entry_selectable(Path::new(
+            "fixtures/picker_test/patch_a.ini"
+        )));
+        assert!(!is_entry_selectable(Path::new(
+            "fixtures/picker_test/readme.txt"
+        )));
     }
 }

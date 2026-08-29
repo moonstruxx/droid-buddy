@@ -862,6 +862,21 @@ fn regression_picker_precedence() {
     let _ = buffer_for(&mut app, 120, 40);
 }
 
+#[test]
+fn visual_picker_parent_entry_snapshot() {
+    // droid_tui-8zw: the picker's parent entry renders as ".." (not the
+    // parent dir's plain name) and real entries sort dirs-first then .ini.
+    let _guard = ThemedGuard::pin("classic");
+    let mut app = App::new();
+    app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
+    app.showing_picker = true;
+    app.refresh_picker_entries();
+    let buf = buffer_for(&mut app, 100, 30);
+    insta::with_settings!({snapshot_suffix => "picker_parent_entry"}, {
+        insta::assert_snapshot!(buffer_to_ansi(&buf));
+    });
+}
+
 // ── viewer live interaction (main window unblocked, droid_tui-0lw) ─────
 
 #[test]
