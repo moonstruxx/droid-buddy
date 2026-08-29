@@ -942,6 +942,13 @@ mod tests {
         assert_eq!(layout.modules[1].module_instance, Some(2));
         assert_eq!(layout.modules[0].geometry_key, "p2b8");
         assert_eq!(layout.modules[1].geometry_key, "p2b8");
+        // Both faceplates sit at the real p2b8 width (5 HP = 25.4 mm).
+        assert_close(layout.modules[0].rect_mm.w_mm, 25.4);
+        assert_close(layout.modules[1].rect_mm.w_mm, 25.4);
+        assert_eq!(layout.modules[0].width_hp, 5.0);
+        assert_eq!(layout.modules[1].width_hp, 5.0);
+        assert_eq!(layout.modules[0].key(), "P2B8 1");
+        assert_eq!(layout.modules[1].key(), "P2B8 2");
         assert_close(layout.modules[1].rect_mm.x_mm, 25.9);
         assert_close(layout.total_width_mm, 51.3);
 
@@ -1017,6 +1024,7 @@ mod tests {
         assert_eq!(m.geometry_key, "");
         assert_eq!(m.controller, "Controller 5");
         assert_close(m.rect_mm.w_mm, 25.4);
+        assert_close(m.width_hp, 5.0); // the documented 5 HP fallback
         assert_close(m.rect_mm.h_mm, 128.5);
         assert!(
             layout.cell_for(0, "B5.1").is_none(),
@@ -1048,6 +1056,7 @@ mod tests {
         // The fallback data source carries the documented defaults.
         let fb = ControllerGeometry::fallback();
         assert_close(fb.fallback_width_mm(), 25.4);
+        assert_close(fb.fallback_width_hp(), 5.0);
         assert_close(fb.fallback_height_mm(), 128.5);
         assert_close(fb.chain_gap_mm(), 0.5);
         // build() over the fallback source never panics for unknown controllers.
@@ -1073,6 +1082,86 @@ mod tests {
         assert!(p2b8.element_cells.contains_key("B"));
         assert!(p2b8.element_cells.contains_key("L"));
         assert!(p2b8.element_cells.contains_key("P"));
+    }
+
+    #[test]
+    fn missing_geometry_entry_is_detectable_without_panic() {
+        // A controller name that resolves to a geometry key with no data
+        // entry: resolution still succeeds (the direct names need no data)
+        // while the entry lookup returns None — `build`'s fallback arm
+        // handles exactly this condition instead of panicking.
+        let fb = ControllerGeometry::fallback(); // empty `controllers` map
+        assert_eq!(fb.resolve_controller("G8").as_deref(), Some("g8"));
+        assert!(fb.controller("g8").is_none());
+    }
+
+    #[test]
+    fn all_geometry_data_is_sane() {
+        // Full data-sanity matrix (task 1.2): every controller entry has
+        // positive dimensions and every element cell lies inside its module
+        // rect — across all 15 entries, not just the p2b8 smoke subset.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        assert!(data.controllers.len() >= 15, "matrix must not be vacuous");
+        assert_close(data.hp_mm(), 5.08);
+        for (key, entry) in &data.controllers {
+            assert!(entry.width_mm > 0.0, "{key}: width_mm not positive");
+            assert!(entry.height_mm > 0.0, "{key}: height_mm not positive");
+            assert!(entry.width_hp > 0.0, "{key}: width_hp not positive");
+            assert!(matches!(entry.he, 1 | 3), "{key}: he must be 1 or 3");
+            for (family, cells) in &entry.element_cells {
+                assert!(!cells.is_empty(), "{key}: family {family} has no cells");
+                for c in cells {
+                    let cell_desc = format!("{key}/{family}/{}", c.label);
+                    assert!(
+                        c.w_mm > 0.0 && c.h_mm > 0.0,
+                        "{cell_desc}: cell size not positive"
+                    );
+                    assert!(
+                        c.x_mm >= 0.0 && c.y_mm >= 0.0,
+                        "{cell_desc}: cell origin negative"
+                    );
+                    assert!(
+                        c.x_mm + c.w_mm <= entry.width_mm + 1e-6,
+                        "{cell_desc}: exceeds module width"
+                    );
+                    assert!(
+                        c.y_mm + c.h_mm <= entry.height_mm + 1e-6,
+                        "{cell_desc}: exceeds module height"
+                    );
+                    assert!(!c.label.is_empty(), "{key}: empty cell label");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn b32_resolves_to_4x8_grid() {
+        // The manual's B32 button grid: 4 columns × 8 rows, 32 buttons.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let b32 = data.controller("b32").expect("b32 entry");
+        let buttons = &b32.element_cells["B"];
+        let cols: std::collections::BTreeSet<u32> = buttons.iter().map(|c| c.col).collect();
+        let rows: std::collections::BTreeSet<u32> = buttons.iter().map(|c| c.row).collect();
+        assert_eq!(buttons.len(), 32, "b32 must carry 32 buttons");
+        assert_eq!(cols.len(), 4, "b32 must resolve to 4 columns");
+        assert_eq!(rows.len(), 8, "b32 must resolve to 8 rows");
+        assert!(cols.iter().all(|&c| c < 4), "column indices must be 0..4");
+        assert!(rows.iter().all(|&r| r < 8), "row indices must be 0..8");
+        let pairs: std::collections::BTreeSet<(u32, u32)> =
+            buttons.iter().map(|c| (c.col, c.row)).collect();
+        assert_eq!(pairs.len(), 32, "4x8 grid complete: no gaps, no duplicates");
+
+        // Model proof: a Notebuttons patch resolves to b32 and reaches the
+        // last cell of the 4x8 grid; button 33 is out of range.
+        let p = patch("[notebuttons]\n    button = B1.1\n");
+        let layout = PhysicalLayout::build(&p);
+        assert_eq!(layout.modules[0].geometry_key, "b32");
+        let last = layout.cell_for(0, "B1.32").expect("B1.32 on the 4x8 grid");
+        assert_eq!(last.label, "B1.32");
+        assert!(
+            layout.cell_for(0, "B1.33").is_none(),
+            "33rd button is out of the 4x8 grid"
+        );
     }
 
     // ---- rack model (task 2.3) ----
