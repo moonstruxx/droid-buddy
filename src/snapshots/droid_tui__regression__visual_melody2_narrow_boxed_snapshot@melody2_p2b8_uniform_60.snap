@@ -1,0 +1,154 @@
+---
+source: src/regression.rs
+expression: buffer_to_ansi(&buf)
+---
+┌──────────────────────────────────────────────────────────┐
+│                 DROID: droid_mpfs5melody2                │
+└──────────────────────────────────────────────────────────┘
+┌ P2B8 ────────────────────────────────────────────────────┐
+│  ○ Button B1.1    ○ LED L1.1     ○ Button B1.2           │
+│       OFF             OFF             OFF                │
+│                                                          │
+│   ○ LED L1.2     ○ Button B1.3    ○ LED L1.3             │
+│       OFF             OFF             OFF                │
+│                                                          │
+│  ○ Button B1.4    ○ LED L1.4     ○ Button B1.5           │
+│       OFF             OFF             OFF                │
+│                                                          │
+│   ○ LED L1.5     ○ Button B1.6    ○ LED L1.6             │
+│       OFF             OFF             OFF                │
+│                                                          │
+│  ○ Button B1.7    ○ LED L1.7     ○ Button B1.8           │
+│       OFF             OFF             OFF                │
+│                                                          │
+│   ○ LED L1.8      ◉ Pot P1.1      ◉ Pot P1.2             │
+│       OFF             0%              0%                 │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ CV I/O ──────────────────────────────────────────────────┐
+│→ [CLK] Global …← [t2 P] Modula…   ← [t2 fcv]             │
+│      CV IN          CV OUT          CV OUT               │
+│                                                          │
+│← [t2 velo] Pit…← [t1 filt en] …  → [RST] Scale           │
+│     CV OUT          CV OUT           CV IN               │
+│                                                          │
+│← [t1 velo env]…   ← [T3 Vel]                             │
+│     CV OUT          CV OUT                               │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Controller 6 ────────────────────────────────────────────┐
+│ □ [DispMaster]   □ [GLBL Mute]   □ Switch S6.1           │
+│       OFF             OFF             OFF                │
+│                                                          │
+│  □ Switch S6.6   □ Switch S6.7   □ Switch S6.8           │
+│       OFF             OFF             OFF                │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Encoder ─────────────────────────────────────────────────┐
+│  ○ Button B4.1   ○ Button B4.2   ○ Button B4.3           │
+│       OFF             OFF             OFF                │
+│                                                          │
+│  ○ Button B4.4  ◉ Encoder E4.1  ◉ Encoder E4.2           │
+│       OFF             0%              0%                 │
+│                                                          │
+│ ◉ Encoder E4.3  ◉ Encoder E4.4    ○ LED L4.1             │
+│       0%              0%              OFF                │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Controller 3 ────────────────────────────────────────────┐
+│┌ ○ [CLR/ S/E] ┐┌ ○ [reset/LS …┐┌ ○ [LS: S/E C…┐          │
+││     OFF ○    ││     OFF ○    ││     OFF ○    │          │
+│└──────────────┘└──────────────┘└──────────────┘          │
+│┌ ○ [LS: CP] ──┐┌ ○ [Track 1] …┐   ○ LED L3.29            │
+││     OFF ○    ││     OFF ○    │       OFF                │
+│└──────────────┘└──────────────┘                          │
+│┌ ○ [Track 2] …┐   ○ LED L3.30  ┌ ○ [TON] Tona…┐          │
+││     OFF ○    │       OFF      │     OFF ○    │          │
+│└──────────────┘                └──────────────┘          │
+│┌ ○ [swing] Me…┐┌ ○ [TRK] Trac…┐┌ ○ [PERF] Per…┐          │
+││     OFF ○    ││     OFF ○    ││     OFF ○    │          │
+│└──────────────┘└──────────────┘└──────────────┘          │
+│○ [VELO] Veloci…○ [NOTE] Set mo…○ [FCV] If enab…          │
+│       OFF             OFF             OFF                │
+│                                                          │
+│┌ ○ [REP] Numb…┐┌ ○ [PAT] Patt…┐┌ ○ [RAND] Pit…┐          │
+││     OFF ○    ││     OFF ○    ││     OFF ○    │          │
+│└──────────────┘└──────────────┘└──────────────┘          │
+│┌ ○ [GL] Gate …┐┌ ○ [RATC] Num…┐┌ ○ [PROB] Gat…┐          │
+││     OFF ○    ││     OFF ○    ││     OFF ○    │          │
+│└──────────────┘└──────────────┘└──────────────┘          │
+│┌ ○ [ACT] Set …┐   ○ LED L3.25     ○ LED L3.27            │
+││     OFF ○    │       OFF             OFF                │
+│└──────────────┘                                          │
+│   ○ LED L3.28  ┌ ○ [S/E] Set …┐    ○ [LUCKY]             │
+│       OFF      │     OFF ○    │       OFF                │
+│                └──────────────┘                          │
+│○ [COPY] Copy c…┌ ○ [AAAB] Swi…┐┌ ○ [CHRO] Dis…┐          │
+│       OFF      │     OFF ○    ││     OFF ○    │          │
+│                └──────────────┘└──────────────┘          │
+│○ [ARP] Switch …   ○ LED L3.9   ○ [Preset A] Ct…          │
+│       OFF             OFF             OFF                │
+│                                                          │
+│   ○ LED L3.1   ○ [Preset B] Ct…   ○ LED L3.2             │
+│       OFF             OFF             OFF                │
+│                                                          │
+│○ [Preset C] Ct…   ○ LED L3.3   ○ [Preset D] Ct…          │
+│       OFF             OFF             OFF                │
+│                                                          │
+│   ○ LED L3.4                                             │
+│       OFF                                                │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Pot ─────────────────────────────────────────────────────┐
+│○ [Lucky] Switc…┌ ○ [ROOT/CVS]…┐┌ ○ [3RD/SPREA…┐          │
+│       OFF      │     OFF ○    ││     OFF ○    │          │
+│                └──────────────┘└──────────────┘          │
+│┌ ○ [5TH/DRIFT…┐┌ ○ [7TH/RAND]…┐┌ ○ [9TH/RATC]…┐          │
+││     OFF ○    ││     OFF ○    ││     OFF ○    │          │
+│└──────────────┘└──────────────┘└──────────────┘          │
+│┌ ○ [11TH/REP]…┐┌ ○ [13TH/GATE…┐◉ [RANGE/REPEAT…          │
+││     OFF ○    ││     OFF ○    │       0%                 │
+│└──────────────┘└──────────────┘                          │
+│◉ [BASE/RATCH] …                                          │
+│       0%                                                 │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌──────────────────────────────────────────────────────────┐
+│No patch loaded. Press 'l' to load. | Scale: 1.0 | Orienta│
+└──────────────────────────────────────────────────────────┘

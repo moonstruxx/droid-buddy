@@ -187,6 +187,12 @@ fn setup_arpeggio(app: &mut App) {
     app.load_patch(patch);
 }
 
+fn setup_melody2(app: &mut App) {
+    let patch =
+        crate::patch::Patch::from_ini_file(Path::new("fixtures/droid_mpfs5melody2.ini")).unwrap();
+    app.load_patch(patch);
+}
+
 fn setup_led_pairs(app: &mut App) {
     *app = led_pairs_app();
 }
@@ -328,6 +334,20 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 40,
         setup: setup_led_pairs,
+    },
+    Scenario {
+        id: "melody2_narrow_40",
+        label: "droid_mpfs5melody2 · width 40 · boxed-cell fallback + ellipsis",
+        width: 40,
+        height: 30,
+        setup: setup_melody2,
+    },
+    Scenario {
+        id: "melody2_p2b8_uniform_60",
+        label: "droid_mpfs5melody2 · width 60 · uniform P2B8 rows",
+        width: 60,
+        height: 150,
+        setup: setup_melody2,
     },
     Scenario {
         id: "viewer_closed_100",
