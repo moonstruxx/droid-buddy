@@ -2072,6 +2072,84 @@ fn visual_numbered_led_pairs_snapshot() {
 }
 
 #[test]
+fn visual_joined_boxes_kinds_snapshot() {
+    // 2.2 (droid_tui-8kr): every control kind with a resolvable LED
+    // association — pot/knob, encoder, switch, fader (M models as Knob) —
+    // must render as one boxed cell with the LED folded into the interior
+    // row; associated LEDs never render as standalone cells.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = app_from_fixture("led_pairs_kinds");
+        let buf = buffer_for(&mut app, 80, 40);
+        let ansi = buffer_to_ansi(&buf);
+
+        // Parser associated every control kind, both numbered (ledN suffix
+        // pair) and bare (led =) styles.
+        let patch = app.patch.as_ref().unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            find("P1.1").led.as_deref(),
+            Some("L1.1"),
+            "{theme_name}: pot numbered"
+        );
+        assert_eq!(
+            find("E1.1").led.as_deref(),
+            Some("L1.2"),
+            "{theme_name}: encoder numbered"
+        );
+        assert_eq!(
+            find("S1.1").led.as_deref(),
+            Some("L1.3"),
+            "{theme_name}: switch numbered"
+        );
+        assert_eq!(
+            find("M1.1").led.as_deref(),
+            Some("L1.4"),
+            "{theme_name}: fader numbered"
+        );
+        assert_eq!(
+            find("P1.2").led.as_deref(),
+            Some("L1.5"),
+            "{theme_name}: pot bare"
+        );
+        assert_eq!(
+            find("E1.2").led.as_deref(),
+            Some("L1.6"),
+            "{theme_name}: encoder bare"
+        );
+        assert_eq!(
+            find("S1.2").led.as_deref(),
+            Some("L1.7"),
+            "{theme_name}: switch bare"
+        );
+        assert_eq!(
+            find("M1.2").led.as_deref(),
+            Some("L1.8"),
+            "{theme_name}: fader bare"
+        );
+
+        // All eight LEDs folded into their control's box: no standalone cell.
+        let rect_ids: Vec<String> = app
+            .component_rects
+            .iter()
+            .map(|(idx, _)| patch.hw_components[*idx].id.clone())
+            .collect();
+        for led in [
+            "L1.1", "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
+        ] {
+            assert!(
+                !rect_ids.contains(&String::from(led)),
+                "{theme_name}: LED {led} must be folded, not standalone"
+            );
+        }
+
+        insta::with_settings!({snapshot_suffix => format!("joined_boxes_kinds_{theme_name}_80")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+}
+
+#[test]
 fn visual_viewer_layout_open_closed_snapshot() {
     // 1.3 part B: source_navigation.ini viewer open/closed at width 100
     for &theme_name in theme::THEMES {
