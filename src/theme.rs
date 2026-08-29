@@ -634,4 +634,13 @@ mod tests {
         assert_eq!(*active(), Theme::terminal());
         set_test_theme(None);
     }
+
+    #[test]
+    fn all_palettes_define_render_outlier_warning() {
+        // Task 3.1: the advisory render-outlier status-hint token exists in
+        // every palette (classic yellow / terminal reset / mono white).
+        assert_eq!(Theme::classic().render_outlier_warning, Color::Yellow);
+        assert_eq!(Theme::terminal().render_outlier_warning, Color::Reset);
+        assert_eq!(Theme::mono().render_outlier_warning, Color::White);
+    }
 }
