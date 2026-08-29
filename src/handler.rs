@@ -3045,4 +3045,41 @@ mod tests {
         assert!(!app.processing_paused);
         assert_eq!(app.status_message, "Processing enabled (p to pause)");
     }
+
+    #[test]
+    fn render_outlier_hint_never_blocks_input_or_loading() {
+        use crate::ui::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // Degraded render (arpeggio1 wants 228 cols; frame is 80) must not
+        // block load_patch, must show the advisory hint in the status bar,
+        // and must never intercept keyboard input.
+        let mut app = App::new();
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        assert!(
+            app.load_patch(patch),
+            "degraded render must not block load_patch"
+        );
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("Renders degraded at 80 cols"),
+            "hint must render while the degraded patch is loaded"
+        );
+
+        // Keyboard input keeps flowing while the hint is visible.
+        handle_event(key(crossterm::event::KeyCode::Char('-')), &mut app);
+        assert_eq!(app.scale_factor, 0.75, "keyboard input not intercepted");
+    }
 }

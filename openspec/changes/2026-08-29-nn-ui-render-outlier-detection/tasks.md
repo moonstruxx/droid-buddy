@@ -30,7 +30,7 @@
 
 ## 4. Regression & Gate
 
-- [ ] 4.1 Regression + proof tests <!-- agent: horst-engineer.build, depends_on: [2.2, 3.1], touches: [src/regression.rs, fixtures/**] -->
+- [x] 4.1 Regression + proof tests <!-- agent: horst-engineer.build, depends_on: [2.2, 3.1], touches: [src/regression.rs, fixtures/**] -->
       · holdout precision/recall regression vs the heuristic baseline (tooling output asserted in a test); invariant matrix (native-fit never flagged, baseline-clean never flagged, miss → fallback); snapshot fixtures for the new status-hint channel; gallery scenario flagged in the matrix
       · verify: `cargo test` (strict, incl. `cargo insta test --check`) passes; snapshot fixtures render the new warning channel
 - [ ] 4.2 Full verification gate <!-- agent: horst-engineer.fast, depends_on: [3.2, 4.1], touches: [] -->
