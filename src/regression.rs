@@ -4600,3 +4600,84 @@ fn outlier_graph_renders_both_warning_channels_with_error_token() {
         insta::assert_snapshot!(ansi);
     });
 }
+
+// ── physical skeleton snapshot matrix (task 3.3) ────────────────────────
+
+#[test]
+fn visual_physical_skeleton_arpeggio_snapshot() {
+    // 3.3: skeleton frames for arpeggio1.ini (one [p2b8] controller plus the
+    // CV I/O master faceplate) × classic/terminal/mono × 80/120. Skeleton ON
+    // renders module outlines + `·` element cells (geometry only) and
+    // publishes physical_skeleton_rects for the 5.1 coincidence tests; the
+    // wrapped-panel OFF frames stay pinned by
+    // visual_controller_panels_arpeggio_snapshot, unchanged.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("arpeggio1");
+            app.physical_show_skeleton = true;
+            let buf = buffer_for(&mut app, width, 30);
+            let ansi = buffer_to_ansi(&buf);
+            let html = buffer_to_html(&buf);
+
+            // Element-cell markers (`·` glyph) are the skeleton's face.
+            assert!(
+                ansi.contains('\u{00B7}'),
+                "{theme_name} {width}: element-cell markers in skeleton\n{ansi}"
+            );
+            // Module outline: bordered frame per faceplate.
+            assert!(
+                ansi.contains('┌'),
+                "{theme_name} {width}: module outline frame missing\n{ansi}"
+            );
+            // Published cell rects drive the 5.1 coincidence proof.
+            assert!(
+                !app.physical_skeleton_rects.is_empty(),
+                "{theme_name} {width}: skeleton rects published"
+            );
+            assert!(!html.is_empty(), "{theme_name} {width}: html non-empty");
+
+            insta::with_settings!(
+                {snapshot_suffix => format!("physical_skeleton_arpeggio_{theme_name}_{width}")},
+                { insta::assert_snapshot!(ansi); }
+            );
+        }
+    }
+}
+
+#[test]
+fn visual_physical_skeleton_multi_module_snapshot() {
+    // 3.3: two bare [p2b8] instances must yield two side-by-side faceplates
+    // in the skeleton too (the 5.1 faceplate-path proof), each at its real
+    // 5 HP width — not one flat chain.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("multi_module_p2b8");
+            app.physical_show_skeleton = true;
+            let buf = buffer_for(&mut app, width, 40);
+            let ansi = buffer_to_ansi(&buf);
+
+            assert!(
+                ansi.contains('\u{00B7}'),
+                "{theme_name} {width}: element-cell markers in skeleton\n{ansi}"
+            );
+            // Two distinct module faceplates publish rects (module indices 0
+            // and 1), proving the repeated-instance chain stays separate.
+            let modules: std::collections::HashSet<usize> = app
+                .physical_skeleton_rects
+                .iter()
+                .map(|(m, _, _)| *m)
+                .collect();
+            assert!(
+                modules.len() >= 2,
+                "{theme_name} {width}: two p2b8 faceplates published (got {modules:?})"
+            );
+
+            insta::with_settings!(
+                {snapshot_suffix => format!("physical_skeleton_multi_module_{theme_name}_{width}")},
+                { insta::assert_snapshot!(ansi); }
+            );
+        }
+    }
+}
