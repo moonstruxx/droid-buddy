@@ -149,13 +149,14 @@ Components without a parse-time LED association render as two-line text cells:
 - **Row 1**: a state glyph followed by the component label (e.g. `● TRIG A`).
 - **Row 2**: the state text (ON/OFF, percentage, CV IN/CV OUT), rendered in muted gray.
 
-**Boxed cells for LED-associated components.** When a component's `.ini` section declares an LED association — a bare `led = L.N` entry, or a numbered circuit param `ledN = L.M` (e.g. `led11 = L1.1`) that shares its numeric suffix with a same-suffix element entry (`button11 = B1.1`, `pot11 = P1.1`) in the same section, the DROID convention for circuits like `matrixmixer` — the association is parsed into `HwComponent.led` and the component renders as one bordered box filling its full cell instead of a bare text cell:
+**Boxed cells for LED-associated components.** When a component's `.ini` section declares an LED association — a bare `led = L.N` entry, or a numbered circuit param `ledN = L.M` (e.g. `led11 = L1.1`) that shares its numeric suffix with a same-suffix element entry (`button11 = B1.1`, `pot11 = P1.1`, `encoder11 = E1.1`, `switch11 = S1.1`, `fader11 = M1.1`) in the same section, the DROID convention for circuits like `matrixmixer` — the association is parsed into `HwComponent.led` and the component renders as one bordered box filling its full cell instead of a bare text cell. The boxed path covers every control kind that can carry a resolvable LED association: each kind renders its own state inside the box (button/switch ON/OFF glyph, knob/encoder/fader percentage). At cell widths narrower than the box content, the content shrinks to fit inside a complete box or the cell falls back to unboxed two-line rendering — partial border fragments never appear:
 
 - The box border uses the owning component's kind color — button/switch white, knob/encoder magenta, CV in cyan, CV out green, LED red.
 - The element symbol + label live in the box's top title row, drawn inside the border row; the single interior row holds the element state text plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED component's live state — one state, not a second textual LED state.
 - Hover applies the same reversed/dark-gray emphasis to box content and border that text cells use.
 - Components whose LED id does not resolve to an existing LED component fall back to the unlit glyph/state.
 - LEDs referenced this way are never rendered as standalone grid cells; only unreferenced LEDs appear on their own.
+- Over-long labels truncate with a trailing ellipsis (`…`) while cell geometry and hit rects stay unchanged.
 
 Glyphs by kind:
 
@@ -174,6 +175,7 @@ Glyphs by kind:
 - A panel whose components come from more than one circuit instance is subdivided into per-instance module sub-blocks, each a bordered block titled with the controller name and instance number (e.g. ` P2B8 1 `, ` P2B8 2 `), stacked vertically; within a module, components flow left-to-right and wrap to additional rows at the panel's column width. A single-instance panel renders as one flat grid, and CV I/O is never subdivided.
 - Panel layout follows the display orientation: panels stack vertically in portrait and arrange horizontally in landscape.
 - Panel borders are dark gray by default.
+- Same-kind component rows keep a uniform vertical rhythm; boxed (height 3) and unboxed (height 2) cells do not create irregular gaps between rows.
 - With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim to dark gray.
 - With a modifier active (e.g. `B1.1`→`_TRIG`): influenced cells (boxed LED-cells and text cells inside modules) render with a background wash in `hash(token)%16` modifier hue; unaffected cells dim slightly. Rendering priority is `graph_edge_error` (red) > modifier hue > `CableKind`. Modifier background wash is orthogonal to shift borders — both can coexist (yellow shift border + modifier hue cell bg, e.g. `SHIFT 1` + `B1.1`). Interaction: `Mouse Down` without mods = momentary preview (cleared on `Up`/`Leave`), `Ctrl+Shift+Click` (alias `Ctrl+Click`) = toggle latched, `m` = keyboard alias for hovered component, `Esc` clears shift + modifier; single-var today, additive `MOD B1.1+B1.2 → N cells / M cables` is aspirational.
 - With labels: HW panel cells show `display_label(token, shift)` (`store[layer]→store[1]→preamble[1]→derived`, `effective_shift` clamped 1..8, `layers_enabled=false` coerces to layer 1); source section headers and graph node titles show `circuit_label` override in both FULL and FILTERED panes when present. The centered single-field edit overlay (1-line input + hint) reuses the same `modifier_hue` for its hint/status `B3.17 / Group<N> → N ckts / M cables` (shift-blind structural `influence_subtree`, `graph_edge_error` red > modifier hue), responsive per width (`graph_edge_error` red precedence kept); `e` enters, `1..N` cycles Group layer preserving per-layer drafts, `Enter` saves (atomic `labels.toml` rewrite), `Esc` cancels.
@@ -184,7 +186,7 @@ A dark-gray band at the bottom, bordered, left-aligned. It shows the current sta
 
 ## File Picker
 
-An overlay centered in the terminal, roughly 70% of the width and 50% of the height, with a blue-bordered block titled ` File Picker `. Entries are listed with a `▶` marker on the selected row. The picker is a functional browser: directories and `.ini` files are selectable, other files are not.
+An overlay centered in the terminal, roughly 70% of the width and 50% of the height, with a blue-bordered block titled ` File Picker `. Entries are listed with a `▶` marker on the selected row. The picker is a functional browser: directories and `.ini` files are selectable, other files are not. When not at the filesystem root, the parent-directory entry is the first entry, rendered as `..`, and Enter on it navigates up without closing the picker; at the root no `..` entry appears. Entries sort directories first, then `.ini` files.
 
 ## Source Viewer
 
