@@ -978,6 +978,17 @@ fn led_pairs_app() -> App {
     app
 }
 
+/// App loaded with the melody sequencer fixture: boxed Controller 3 B3.x
+/// cells (led associations), a bare `[p2b8]` panel (18 same-kind cells), and
+/// over-long labels — the fixture the panel-rendering defects were observed
+/// on.
+fn melody2_app() -> App {
+    let patch = Patch::from_ini_file(Path::new("fixtures/droid_mpfs5melody2.ini")).unwrap();
+    let mut app = App::new();
+    app.load_patch(patch);
+    app
+}
+
 /// Rect the last real render published for `token`'s component.
 fn rect_for(app: &App, token: &str) -> Rect {
     let idx = idx_for(app, token);
@@ -1420,6 +1431,170 @@ fn regression_narrow_terminal_boxed_layout_no_panic() {
         app.showing_viewer = true;
         let _ = buffer_for(&mut app, w, h);
     }
+}
+
+#[test]
+fn regression_narrow_width_boxed_cells_no_stray_fragments() {
+    // Boxed LED cells (Controller 3 B3.x in melody2) must never emit partial
+    // border fragments when the panel is narrower than the nominal 16-col
+    // cell (droid_tui-wsu): each boxed cell either renders a complete box
+    // bounded by its published rect or falls back to unboxed text.
+    for (w, h) in [
+        (100u16, 40u16),
+        (40, 24),
+        (26, 16),
+        (18, 14),
+        (16, 12),
+        (14, 12),
+    ] {
+        let mut app = melody2_app();
+        let buf = buffer_for(&mut app, w, h);
+
+        // Every line that opens a box (┌/└) also closes it (┐/┘) — no stray
+        // corner fragment anywhere in the frame.
+        for y in 0..h {
+            let line: String = (0..w)
+                .map(|x| {
+                    buf.cell((x, y))
+                        .unwrap()
+                        .symbol()
+                        .chars()
+                        .next()
+                        .unwrap_or(' ')
+                })
+                .collect();
+            assert!(
+                !line.contains('┌') || line.contains('┐'),
+                "width {w}: line {y} opens a box without closing it"
+            );
+            assert!(
+                !line.contains('└') || line.contains('┘'),
+                "width {w}: line {y} closes a box without opening it"
+            );
+        }
+
+        // Boxed cells that still have room for a box draw all four corners on
+        // their published rect; cells too narrow or too squashed for a box
+        // fell back to text, so no box border sits at the cell's top-left.
+        let patch = app.patch.as_ref().unwrap();
+        for (idx, r) in &app.component_rects {
+            let comp = &patch.hw_components[*idx];
+            if comp.led.is_none() {
+                continue; // plain text cell
+            }
+            if r.width >= 8 && r.height >= 3 {
+                for (x, y, corner) in [
+                    (r.x, r.y, '┌'),
+                    (r.x + r.width - 1, r.y, '┐'),
+                    (r.x, r.y + r.height - 1, '└'),
+                    (r.x + r.width - 1, r.y + r.height - 1, '┘'),
+                ] {
+                    assert_eq!(
+                        buf.cell((x, y)).unwrap().symbol(),
+                        corner.to_string(),
+                        "width {w}: boxed cell {r:?} corner"
+                    );
+                }
+            } else {
+                assert_ne!(
+                    buf.cell((r.x, r.y)).unwrap().symbol(),
+                    "┌",
+                    "width {w}: boxed cell {r:?} fell back but still draws a box"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn regression_status_bar_segments_once() {
+    // droid_tui-rma: the status bar composes each segment exactly once — the
+    // duplication used to render as "Scale: 1.0 | Orientation: Landscape |
+    // Scale: 1.0 | Orientation: …".
+    let mut app = melody2_app();
+    let buf = buffer_for(&mut app, 120, 24);
+    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert_eq!(
+        text.matches("Scale: 1.0").count(),
+        1,
+        "Scale segment must appear exactly once"
+    );
+    assert_eq!(
+        text.matches("Orientation: Portrait").count(),
+        1,
+        "Orientation segment must appear exactly once"
+    );
+}
+
+#[test]
+fn regression_p2b8_panel_uniform_rows() {
+    // droid_tui-irf: same-kind rows inside a panel keep one uniform vertical
+    // rhythm — boxed-vs-unboxed height differences and wrapping must not
+    // create extra blank rows (observed after B1.2/B1.5/B1.7). P2B8 in
+    // melody2 is a bare `[p2b8]` section: 8 buttons + 8 LEDs + 2 knobs of
+    // the same 3-row cell height, wrapping by panel width. The tall frame
+    // gives every panel its full requested height, so the P2B8 grid renders
+    // at its nominal 3-row cells and any blank gutter between rows would
+    // break the exact step.
+    let mut app = melody2_app();
+    let buf = buffer_for(&mut app, 60, 150);
+    let patch = app.patch.as_ref().unwrap();
+    let mut p2b8_ys: Vec<u16> = app
+        .component_rects
+        .iter()
+        .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
+        .map(|(_, r)| r.y)
+        .collect();
+    p2b8_ys.sort_unstable();
+    p2b8_ys.dedup();
+    assert!(
+        p2b8_ys.len() >= 2,
+        "P2B8 must wrap into multiple rows, got {p2b8_ys:?}"
+    );
+    for pair in p2b8_ys.windows(2) {
+        assert_eq!(
+            pair[1] - pair[0],
+            3,
+            "P2B8 rows must be contiguous 3-row cells (no extra blank rows), got {p2b8_ys:?}"
+        );
+    }
+    // Every cell in the panel is the same 16x3 grid size at this frame.
+    let mut p2b8_sizes: Vec<(u16, u16)> = app
+        .component_rects
+        .iter()
+        .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
+        .map(|(_, r)| (r.width, r.height))
+        .collect();
+    p2b8_sizes.sort_unstable();
+    p2b8_sizes.dedup();
+    assert_eq!(
+        p2b8_sizes,
+        vec![(16, 3)],
+        "P2B8 cells must share one uniform size"
+    );
+    let _ = buf;
+}
+
+#[test]
+fn visual_melody2_narrow_boxed_snapshot() {
+    // droid_tui-wsu + droid_tui-lsd: boxed Controller 3 B3.x cells at a
+    // narrow terminal width stay complete and ellipsized — no stray corner
+    // fragments, no hard-cut labels glued to the border edge.
+    let _guard = ThemedGuard::pin("classic");
+    let mut app = melody2_app();
+    for (w, h) in [(40u16, 30u16), (17, 30)] {
+        let buf = buffer_for(&mut app, w, h);
+        let ansi = buffer_to_ansi(&buf);
+        insta::with_settings!({snapshot_suffix => format!("melody2_narrow_{w}")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+    // droid_tui-irf: the tall frame gives every panel its full height, so the
+    // P2B8 panel shows its uniform 3-row cell rhythm with no blank gutters.
+    let buf = buffer_for(&mut app, 60, 150);
+    insta::with_settings!({snapshot_suffix => "melody2_p2b8_uniform_60"}, {
+        insta::assert_snapshot!(buffer_to_ansi(&buf));
+    });
 }
 
 // ── theme regression (config-store task 3.3) ─────────────────────────────
