@@ -862,6 +862,21 @@ fn regression_picker_precedence() {
     let _ = buffer_for(&mut app, 120, 40);
 }
 
+#[test]
+fn visual_picker_parent_entry_snapshot() {
+    // droid_tui-8zw: the picker's parent entry renders as ".." (not the
+    // parent dir's plain name) and real entries sort dirs-first then .ini.
+    let _guard = ThemedGuard::pin("classic");
+    let mut app = App::new();
+    app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
+    app.showing_picker = true;
+    app.refresh_picker_entries();
+    let buf = buffer_for(&mut app, 100, 30);
+    insta::with_settings!({snapshot_suffix => "picker_parent_entry"}, {
+        insta::assert_snapshot!(buffer_to_ansi(&buf));
+    });
+}
+
 // ── viewer live interaction (main window unblocked, droid_tui-0lw) ─────
 
 #[test]
@@ -973,6 +988,17 @@ fn regression_viewer_live_interaction() {
 /// section materializes the standalone L1.* LED components.
 fn led_pairs_app() -> App {
     let patch = Patch::from_ini_file(Path::new("fixtures/led_pairs.ini")).unwrap();
+    let mut app = App::new();
+    app.load_patch(patch);
+    app
+}
+
+/// App loaded with the melody sequencer fixture: boxed Controller 3 B3.x
+/// cells (led associations), a bare `[p2b8]` panel (18 same-kind cells), and
+/// over-long labels — the fixture the panel-rendering defects were observed
+/// on.
+fn melody2_app() -> App {
+    let patch = Patch::from_ini_file(Path::new("fixtures/droid_mpfs5melody2.ini")).unwrap();
     let mut app = App::new();
     app.load_patch(patch);
     app
@@ -1420,6 +1446,170 @@ fn regression_narrow_terminal_boxed_layout_no_panic() {
         app.showing_viewer = true;
         let _ = buffer_for(&mut app, w, h);
     }
+}
+
+#[test]
+fn regression_narrow_width_boxed_cells_no_stray_fragments() {
+    // Boxed LED cells (Controller 3 B3.x in melody2) must never emit partial
+    // border fragments when the panel is narrower than the nominal 16-col
+    // cell (droid_tui-wsu): each boxed cell either renders a complete box
+    // bounded by its published rect or falls back to unboxed text.
+    for (w, h) in [
+        (100u16, 40u16),
+        (40, 24),
+        (26, 16),
+        (18, 14),
+        (16, 12),
+        (14, 12),
+    ] {
+        let mut app = melody2_app();
+        let buf = buffer_for(&mut app, w, h);
+
+        // Every line that opens a box (┌/└) also closes it (┐/┘) — no stray
+        // corner fragment anywhere in the frame.
+        for y in 0..h {
+            let line: String = (0..w)
+                .map(|x| {
+                    buf.cell((x, y))
+                        .unwrap()
+                        .symbol()
+                        .chars()
+                        .next()
+                        .unwrap_or(' ')
+                })
+                .collect();
+            assert!(
+                !line.contains('┌') || line.contains('┐'),
+                "width {w}: line {y} opens a box without closing it"
+            );
+            assert!(
+                !line.contains('└') || line.contains('┘'),
+                "width {w}: line {y} closes a box without opening it"
+            );
+        }
+
+        // Boxed cells that still have room for a box draw all four corners on
+        // their published rect; cells too narrow or too squashed for a box
+        // fell back to text, so no box border sits at the cell's top-left.
+        let patch = app.patch.as_ref().unwrap();
+        for (idx, r) in &app.component_rects {
+            let comp = &patch.hw_components[*idx];
+            if comp.led.is_none() {
+                continue; // plain text cell
+            }
+            if r.width >= 8 && r.height >= 3 {
+                for (x, y, corner) in [
+                    (r.x, r.y, '┌'),
+                    (r.x + r.width - 1, r.y, '┐'),
+                    (r.x, r.y + r.height - 1, '└'),
+                    (r.x + r.width - 1, r.y + r.height - 1, '┘'),
+                ] {
+                    assert_eq!(
+                        buf.cell((x, y)).unwrap().symbol(),
+                        corner.to_string(),
+                        "width {w}: boxed cell {r:?} corner"
+                    );
+                }
+            } else {
+                assert_ne!(
+                    buf.cell((r.x, r.y)).unwrap().symbol(),
+                    "┌",
+                    "width {w}: boxed cell {r:?} fell back but still draws a box"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn regression_status_bar_segments_once() {
+    // droid_tui-rma: the status bar composes each segment exactly once — the
+    // duplication used to render as "Scale: 1.0 | Orientation: Landscape |
+    // Scale: 1.0 | Orientation: …".
+    let mut app = melody2_app();
+    let buf = buffer_for(&mut app, 120, 24);
+    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert_eq!(
+        text.matches("Scale: 1.0").count(),
+        1,
+        "Scale segment must appear exactly once"
+    );
+    assert_eq!(
+        text.matches("Orientation: Portrait").count(),
+        1,
+        "Orientation segment must appear exactly once"
+    );
+}
+
+#[test]
+fn regression_p2b8_panel_uniform_rows() {
+    // droid_tui-irf: same-kind rows inside a panel keep one uniform vertical
+    // rhythm — boxed-vs-unboxed height differences and wrapping must not
+    // create extra blank rows (observed after B1.2/B1.5/B1.7). P2B8 in
+    // melody2 is a bare `[p2b8]` section: 8 buttons + 8 LEDs + 2 knobs of
+    // the same 3-row cell height, wrapping by panel width. The tall frame
+    // gives every panel its full requested height, so the P2B8 grid renders
+    // at its nominal 3-row cells and any blank gutter between rows would
+    // break the exact step.
+    let mut app = melody2_app();
+    let buf = buffer_for(&mut app, 60, 150);
+    let patch = app.patch.as_ref().unwrap();
+    let mut p2b8_ys: Vec<u16> = app
+        .component_rects
+        .iter()
+        .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
+        .map(|(_, r)| r.y)
+        .collect();
+    p2b8_ys.sort_unstable();
+    p2b8_ys.dedup();
+    assert!(
+        p2b8_ys.len() >= 2,
+        "P2B8 must wrap into multiple rows, got {p2b8_ys:?}"
+    );
+    for pair in p2b8_ys.windows(2) {
+        assert_eq!(
+            pair[1] - pair[0],
+            3,
+            "P2B8 rows must be contiguous 3-row cells (no extra blank rows), got {p2b8_ys:?}"
+        );
+    }
+    // Every cell in the panel is the same 16x3 grid size at this frame.
+    let mut p2b8_sizes: Vec<(u16, u16)> = app
+        .component_rects
+        .iter()
+        .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
+        .map(|(_, r)| (r.width, r.height))
+        .collect();
+    p2b8_sizes.sort_unstable();
+    p2b8_sizes.dedup();
+    assert_eq!(
+        p2b8_sizes,
+        vec![(16, 3)],
+        "P2B8 cells must share one uniform size"
+    );
+    let _ = buf;
+}
+
+#[test]
+fn visual_melody2_narrow_boxed_snapshot() {
+    // droid_tui-wsu + droid_tui-lsd: boxed Controller 3 B3.x cells at a
+    // narrow terminal width stay complete and ellipsized — no stray corner
+    // fragments, no hard-cut labels glued to the border edge.
+    let _guard = ThemedGuard::pin("classic");
+    let mut app = melody2_app();
+    for (w, h) in [(40u16, 30u16), (17, 30)] {
+        let buf = buffer_for(&mut app, w, h);
+        let ansi = buffer_to_ansi(&buf);
+        insta::with_settings!({snapshot_suffix => format!("melody2_narrow_{w}")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+    // droid_tui-irf: the tall frame gives every panel its full height, so the
+    // P2B8 panel shows its uniform 3-row cell rhythm with no blank gutters.
+    let buf = buffer_for(&mut app, 60, 150);
+    insta::with_settings!({snapshot_suffix => "melody2_p2b8_uniform_60"}, {
+        insta::assert_snapshot!(buffer_to_ansi(&buf));
+    });
 }
 
 // ── theme regression (config-store task 3.3) ─────────────────────────────
@@ -1876,6 +2066,84 @@ fn visual_numbered_led_pairs_snapshot() {
         );
 
         insta::with_settings!({snapshot_suffix => format!("numbered_led_pairs_{theme_name}_80")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+}
+
+#[test]
+fn visual_joined_boxes_kinds_snapshot() {
+    // 2.2 (droid_tui-8kr): every control kind with a resolvable LED
+    // association — pot/knob, encoder, switch, fader (M models as Knob) —
+    // must render as one boxed cell with the LED folded into the interior
+    // row; associated LEDs never render as standalone cells.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = app_from_fixture("led_pairs_kinds");
+        let buf = buffer_for(&mut app, 80, 40);
+        let ansi = buffer_to_ansi(&buf);
+
+        // Parser associated every control kind, both numbered (ledN suffix
+        // pair) and bare (led =) styles.
+        let patch = app.patch.as_ref().unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            find("P1.1").led.as_deref(),
+            Some("L1.1"),
+            "{theme_name}: pot numbered"
+        );
+        assert_eq!(
+            find("E1.1").led.as_deref(),
+            Some("L1.2"),
+            "{theme_name}: encoder numbered"
+        );
+        assert_eq!(
+            find("S1.1").led.as_deref(),
+            Some("L1.3"),
+            "{theme_name}: switch numbered"
+        );
+        assert_eq!(
+            find("M1.1").led.as_deref(),
+            Some("L1.4"),
+            "{theme_name}: fader numbered"
+        );
+        assert_eq!(
+            find("P1.2").led.as_deref(),
+            Some("L1.5"),
+            "{theme_name}: pot bare"
+        );
+        assert_eq!(
+            find("E1.2").led.as_deref(),
+            Some("L1.6"),
+            "{theme_name}: encoder bare"
+        );
+        assert_eq!(
+            find("S1.2").led.as_deref(),
+            Some("L1.7"),
+            "{theme_name}: switch bare"
+        );
+        assert_eq!(
+            find("M1.2").led.as_deref(),
+            Some("L1.8"),
+            "{theme_name}: fader bare"
+        );
+
+        // All eight LEDs folded into their control's box: no standalone cell.
+        let rect_ids: Vec<String> = app
+            .component_rects
+            .iter()
+            .map(|(idx, _)| patch.hw_components[*idx].id.clone())
+            .collect();
+        for led in [
+            "L1.1", "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
+        ] {
+            assert!(
+                !rect_ids.contains(&String::from(led)),
+                "{theme_name}: LED {led} must be folded, not standalone"
+            );
+        }
+
+        insta::with_settings!({snapshot_suffix => format!("joined_boxes_kinds_{theme_name}_80")}, {
             insta::assert_snapshot!(ansi);
         });
     }
