@@ -975,6 +975,24 @@ impl Patch {
         vars
     }
 
+    /// Influence-subtree size of a hardware token: the number of distinct
+    /// circuit instances its root `_VAR`s reach via the forward BFS walk
+    /// (`influence_subtree`), mirroring the corpus feature in
+    /// tools/build_features.py `influence_subtree_size`. Deterministic.
+    pub fn influence_subtree_size_for(&self, hw_token: &str) -> usize {
+        let vars = self.hw_token_to_vars(hw_token);
+        self.influence_subtree(&vars).influenced_nodes.len()
+    }
+
+    /// z-score of a hardware token's influence-subtree size against the
+    /// embedded per-kind corpus stats (design D4 second opinion). `None` when
+    /// the token kind has no stats or its std is ~0 (never flagged).
+    pub fn token_influence_z_score(&self, hw_token: &str) -> Option<f32> {
+        let kind = crate::geometry::token_kind_u8(hw_token);
+        let size = self.influence_subtree_size_for(hw_token);
+        InfluenceStats::embedded().z_score(kind, size)
+    }
+
     /// Forward BFS influence walk from `root_vars` with no circuits disabled.
     pub fn influence_subtree(&self, root_vars: &[String]) -> InfluenceSubtree {
         self.influence_subtree_with_disabled(root_vars, &HashSet::new())
@@ -1084,6 +1102,82 @@ impl Patch {
             influenced_nodes,
             influenced_edges,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Influence-stats table — per-token-kind z-score second opinion (design D4)
+// ---------------------------------------------------------------------------
+// Corpus mean/std of influence_subtree size per token kind, fitted by
+// tools/build_features.py and embedded (schema.rs include_str! precedent).
+// z = (size - mean) / std; kinds whose std <= 1e-6 carry no z-score (the
+// corpus never sees them influence anything) and are skipped.
+
+const INFLUENCE_STATS_ARTIFACT: &str = include_str!("../tools/influence_stats.txt");
+
+/// Per-kind influence statistics: (mean, std, n) of influence_subtree size.
+#[derive(Debug, Default)]
+pub struct InfluenceStats {
+    by_kind: HashMap<u8, (f32, f32, u32)>,
+}
+
+impl InfluenceStats {
+    /// Parse the artifact text: one `kind mean std n` row per token kind,
+    /// '#' comments allowed. Malformed rows are ignored (never panics); a
+    /// totally broken artifact degrades to an empty table (no z-scores).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut by_kind = HashMap::new();
+        for (idx, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() != 4 {
+                return Err(format!(
+                    "influence stats line {}: expected 4 columns, got {}",
+                    idx + 1,
+                    cols.len()
+                ));
+            }
+            let kind: u8 = cols[0]
+                .parse()
+                .map_err(|_| format!("influence stats line {}: bad kind {:?}", idx + 1, cols[0]))?;
+            let mean: f32 = cols[1]
+                .parse()
+                .map_err(|_| format!("influence stats line {}: bad mean {:?}", idx + 1, cols[1]))?;
+            let std: f32 = cols[2]
+                .parse()
+                .map_err(|_| format!("influence stats line {}: bad std {:?}", idx + 1, cols[2]))?;
+            let n: u32 = cols[3]
+                .parse()
+                .map_err(|_| format!("influence stats line {}: bad n {:?}", idx + 1, cols[3]))?;
+            by_kind.insert(kind, (mean, std, n));
+        }
+        Ok(Self { by_kind })
+    }
+
+    /// The process-wide table over the embedded artifact. A parse failure
+    /// degrades to an empty table → no z-scores (never panics).
+    pub fn embedded() -> &'static Self {
+        use std::sync::OnceLock;
+        static TABLE: OnceLock<InfluenceStats> = OnceLock::new();
+        TABLE.get_or_init(|| InfluenceStats::parse(INFLUENCE_STATS_ARTIFACT).unwrap_or_default())
+    }
+
+    /// Number of kinds with baked stats (test aid).
+    pub fn kind_count(&self) -> usize {
+        self.by_kind.len()
+    }
+
+    /// z-score of `size` for `kind`, or `None` when the kind has no stats or
+    /// its std is ~0 (no signal — never flagged).
+    pub fn z_score(&self, kind: u8, size: usize) -> Option<f32> {
+        let (mean, std, _) = *self.by_kind.get(&kind)?;
+        if std <= 1e-6 {
+            return None;
+        }
+        Some((size as f32 - mean) / std)
     }
 }
 

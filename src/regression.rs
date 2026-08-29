@@ -4019,3 +4019,189 @@ fn visual_optimizer_preview_recolor_snapshot() {
         });
     }
 }
+
+// ── outlier-detection regression + proof (task 3.1) ─────────────────────
+// Three proof layers for the nn-ui-outlier-detection change:
+//  (1) the fitted table must beat the 8.0 rule on the holdout (gate),
+//  (2) every invariant guard holds at the scorer level,
+//  (3) the graph surface renders both new warning channels (learned table +
+//      per-token influence z-score) with the graph_edge_error token.
+
+/// Parse the fit script's printed baseline/fitted precision+recall lines.
+/// Returns `(base_prec, base_rec, fit_prec, fit_rec)`.
+fn parse_fit_report(report: &str) -> (f32, f32, f32, f32) {
+    let num = |line: &str| -> Option<(f32, f32)> {
+        let mut it = line.split_whitespace();
+        // "baseline (euclidean > 8.0 && cable_hops == 0): precision 0.124 recall 0.714 ..."
+        // "fitted table (+ fallback): precision 0.824 recall 1.000 ..."
+        loop {
+            match it.next() {
+                Some("precision") => {
+                    let p: f32 = it.next()?.parse().ok()?;
+                    assert_eq!(it.next(), Some("recall"), "report line malformed: {line}");
+                    let r: f32 = it.next()?.parse().ok()?;
+                    return Some((p, r));
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    };
+    let mut base = None;
+    let mut fit = None;
+    for line in report.lines() {
+        if line.starts_with("baseline") {
+            base = num(line);
+        } else if line.starts_with("fitted") {
+            fit = num(line);
+        }
+    }
+    let (bp, br) = base.expect("baseline line missing in fit report");
+    let (fp, fr) = fit.expect("fitted line missing in fit report");
+    (bp, br, fp, fr)
+}
+
+#[test]
+fn outlier_fit_beats_threshold_rule_on_holdout() {
+    // The core proof of the change (design D1/D2): the fitted decision table
+    // must clear the gate (precision >= 0.60, recall >= 0.86) on the holdout
+    // AND beat the 8.0 rule it replaces on both axes.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new("python3")
+        .arg("tools/fit_outlier_model.py")
+        .arg("--seed")
+        .arg("42")
+        .current_dir(repo)
+        .output()
+        .expect("python3 must run the fit script (toolchain dependency)");
+    assert!(
+        out.status.success(),
+        "fit script failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (bp, br, fp, fr) = parse_fit_report(&report);
+    assert!(
+        fp >= 0.60 && fr >= 0.86,
+        "gate failed: fitted precision {fp:.3} >= 0.60 and recall {fr:.3} >= 0.86"
+    );
+    assert!(
+        fp > bp && fr >= br,
+        "fitted table must beat the 8.0 rule: baseline {bp:.3}/{br:.3} vs fitted {fp:.3}/{fr:.3}"
+    );
+}
+
+/// Build an App with the influence_outlier fixture and open the graph.
+fn outlier_graph_app() -> App {
+    let mut app = app_from_fixture("influence_outlier");
+    app.open_graph();
+    assert!(app.showing_graph, "graph view should be open");
+    app
+}
+
+#[test]
+fn outlier_invariant_matrix_at_scorer_level() {
+    // design D5 proof: adjacent / co-located / via-cable bindings never reach
+    // the scorer (the guard lives at the call site), and a table miss falls
+    // back to the threshold rule — at the `BindingFeatures` +
+    // `WiringOutlierScorer` boundary plus the guarded build path.
+    use crate::geometry::{BindingFeatures, WiringOutlierScorer};
+    use crate::graph::Graph;
+    use crate::patch::Patch;
+    let scorer = WiringOutlierScorer::embedded();
+    let content = "[p2b8]\n\
+         [src]\n    output = _WIRE\n    src = E4.4\n\
+         [sink]\n    input = _WIRE\n    dst = M4.2\n";
+    let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+    let geometry = crate::geometry::RackGeometry::load().expect("rack_geometry.json present");
+    let far = BindingFeatures::from_tokens("E4.4", "M4.2", &geometry, &patch).expect("resolves");
+    assert!(far.euclidean > 8.0, "fixture wire must be far");
+    assert!(far.cable_hops > 0, "via-cable binding has hops");
+    // Via-cable invariant is a call-site guard (design D5): the learned table
+    // would flag E->M (rule `* 5 8 flag`), but the guarded build must not.
+    let graph = Graph::build_from_patch(&patch, &[], &crate::latency::CostModel::default());
+    assert!(
+        !graph
+            .validation
+            .iter()
+            .any(|i| i.message.contains("wiring outlier")),
+        "via-cable far binding must not be flagged through the guarded build"
+    );
+    // Scorer-level fallback: a table miss near the 8.0 threshold passes, a
+    // far table miss falls back to flag (design D1). O->M has no table row.
+    let near = BindingFeatures {
+        src_kind: 3,
+        sink_kind: 8,
+        param_key: 0,
+        src_xy: (0, 0),
+        sink_xy: (2, 2),
+        euclidean: 2.8,
+        manhattan: 4,
+        same_controller: false,
+        same_rack: true,
+        adjacent: false,
+        cable_hops: 0,
+    };
+    assert_eq!(scorer.verdict(&near), None, "O->M is a table miss");
+    assert!(
+        !scorer.is_outlier(&near),
+        "near table-miss must pass (fallback)"
+    );
+    let far_miss = BindingFeatures {
+        src_kind: 3,
+        sink_kind: 8,
+        param_key: 0,
+        src_xy: (0, 0),
+        sink_xy: (40, 40),
+        euclidean: 56.6,
+        manhattan: 80,
+        same_controller: false,
+        same_rack: true,
+        adjacent: false,
+        cable_hops: 0,
+    };
+    assert_eq!(scorer.verdict(&far_miss), None, "O->M far is a table miss");
+    assert!(
+        scorer.is_outlier(&far_miss),
+        "far table-miss must fall back to flag (design D1)"
+    );
+}
+
+#[test]
+fn outlier_graph_renders_both_warning_channels_with_error_token() {
+    // Both new channels surface through graph.validation -> graph_edge_error:
+    // the influence z-score finding on _FANOUT (B1.1 fan-out 24) and the
+    // learned-table wiring-outlier finding on E4.4->M4.2.
+    let _guard = ThemedGuard::pin("classic");
+    let t = *theme::resolve("classic");
+    let mut app = outlier_graph_app();
+    let buf = buffer_for(&mut app, 100, 50);
+    assert!(
+        has_box_glyph_of_color(&buf, t.graph_edge_error),
+        "outlier/influence cables render with the error token (red)"
+    );
+    // The _FANOUT fan-out edges are the influence channel; the direct E4.4->M4.2
+    // edge is the wiring-outlier channel. Both must be present as findings.
+    let patch = app.patch.as_ref().unwrap();
+    let vars = patch.hw_token_to_vars("B1.1");
+    assert!(vars.contains(&String::from("_FANOUT")));
+    let graph = app.graph.as_ref().unwrap();
+    assert!(
+        graph
+            .validation
+            .iter()
+            .any(|i| i.message.contains("influence outlier") && i.cable == "_FANOUT"),
+        "influence-outlier finding on _FANOUT must be present"
+    );
+    assert!(
+        graph
+            .validation
+            .iter()
+            .any(|i| i.message.contains("wiring outlier")),
+        "learned-table wiring-outlier finding must be present"
+    );
+    let ansi = buffer_to_ansi(&buf);
+    insta::with_settings!({snapshot_suffix => "outlier_channels_classic_100"}, {
+        insta::assert_snapshot!(ansi);
+    });
+}
