@@ -488,6 +488,18 @@ pub struct App {
     /// coincidence contract — 5.1 compares full-view element rects 1:1
     /// against these at the same scale/offset.
     pub physical_skeleton_rects: Vec<(usize, usize, Rect)>,
+    /// Viewport state of the physical presentation (design D5): pan offset in
+    /// screen cells and zoom. `physical_zoom` is derived from the `+`/`-`
+    /// scale presets (`scale_factor / 100`, linked by the skeleton renderer);
+    /// `physical_offset` is mutated by panning (4.3's wheel wiring). Both
+    /// reset on patch load like `physical_show_skeleton`.
+    pub physical_offset: (f32, f32),
+    pub physical_zoom: f32,
+    /// Screen size (w, h) in cells of the whole rack under the current
+    /// mapping, published by the skeleton renderer each frame
+    /// (renderer-owns-geometry contract). `physical_overflow` compares it
+    /// against the visible area for the 4.3 wheel-pan wiring.
+    pub physical_rack_size: (u16, u16),
     /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
     pub active_modifier_var: Option<String>,
     /// Forward influence result for the active modifier, if any.
@@ -585,6 +597,9 @@ impl App {
             processing_paused: false,
             physical_show_skeleton: false,
             physical_skeleton_rects: Vec::new(),
+            physical_offset: (0.0, 0.0),
+            physical_zoom: 1.0,
+            physical_rack_size: (0, 0),
             active_modifier_var: None,
             influence: None,
             filtered_graph: None,
@@ -946,6 +961,24 @@ impl App {
     /// the modal is shown only when there is at least one issue, and `true` is
     /// returned. Return value is `#[must_use]`-free so existing call sites that
     /// ignore it keep compiling.
+    /// True when the rack overflows `area` on each axis (design D5): the
+    /// wheel then pans instead of adjusting knob/fader values. Uses the rack
+    /// screen size the skeleton renderer published last frame.
+    pub fn physical_overflow(&self, area: Rect) -> (bool, bool) {
+        (
+            self.physical_rack_size.0 > area.width,
+            self.physical_rack_size.1 > area.height,
+        )
+    }
+
+    /// Pan the physical view by `(dx, dy)` screen cells (design D5). A pure
+    /// offset mutation — callers decide when overflow makes panning
+    /// appropriate (4.3's wheel wiring).
+    pub fn physical_pan_by(&mut self, dx: f32, dy: f32) {
+        self.physical_offset.0 += dx;
+        self.physical_offset.1 += dy;
+    }
+
     pub fn load_patch(&mut self, patch: Patch) -> bool {
         let issues = validate_patch(&patch, &load_schema());
         // Gate only on hard errors (unknown_circuit, ram_overflow). Legacy
@@ -993,6 +1026,8 @@ impl App {
             self.source_pane_rect = None;
             self.processing_paused = false;
             self.physical_show_skeleton = false;
+            self.physical_offset = (0.0, 0.0);
+            self.physical_zoom = 1.0;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = None;
@@ -1024,6 +1059,9 @@ impl App {
         self.minimap_rect = None;
         self.source_pane_rect = None;
         self.processing_paused = false;
+        self.physical_show_skeleton = false;
+        self.physical_offset = (0.0, 0.0);
+        self.physical_zoom = 1.0;
         self.disabled_circuits.clear();
         self.editing = None;
         self.current_patch_path = None;
@@ -1081,6 +1119,8 @@ impl App {
             self.source_pane_rect = None;
             self.processing_paused = false;
             self.physical_show_skeleton = false;
+            self.physical_offset = (0.0, 0.0);
+            self.physical_zoom = 1.0;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = Some(path.to_path_buf());
@@ -1109,6 +1149,9 @@ impl App {
         self.minimap_rect = None;
         self.source_pane_rect = None;
         self.processing_paused = false;
+        self.physical_show_skeleton = false;
+        self.physical_offset = (0.0, 0.0);
+        self.physical_zoom = 1.0;
         self.disabled_circuits.clear();
         self.editing = None;
         self.current_patch_path = Some(path.to_path_buf());
@@ -1992,6 +2035,18 @@ mod tests {
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, 0);
         assert!(app.minimap_rect.is_none());
+    }
+
+    #[test]
+    fn physical_viewport_resets_on_patch_load() {
+        let mut app = App::new();
+        app.physical_offset = (9.0, 7.0);
+        app.physical_zoom = 2.0;
+        // The first load always installs the patch and resets the viewport;
+        // a gated re-load preserves state by design.
+        app.load_sample_patch();
+        assert_eq!(app.physical_offset, (0.0, 0.0));
+        assert_eq!(app.physical_zoom, 1.0);
     }
 
     #[test]

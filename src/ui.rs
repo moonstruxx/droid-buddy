@@ -391,12 +391,9 @@ fn render_empty(frame: &mut Frame, area: Rect) {
 pub(crate) const COMPONENT_WIDTH: u16 = 16;
 pub(crate) const COMPONENT_HEIGHT: u16 = 3;
 
-/// Aspect-compensated mm→chars mapping for the physical skeleton reference
-/// (design D4: rows/mm ≈ 2 × cols/mm). Fixed default until 4.1 replaces it
-/// with the full zoom/pan mapping — keep these constants isolated so that
-/// swap is a single call-site change.
-pub(crate) const PHYSICAL_COLS_PER_MM: f64 = 0.15;
-pub(crate) const PHYSICAL_ROWS_PER_MM: f64 = 0.3;
+// The mm→chars mapping (D4) lives in `crate::physical::ScreenMapping` — pure
+// model code, constants `PHYSICAL_COLS_PER_MM`/`PHYSICAL_ROWS_PER_MM`
+// included — and is applied only at render time (render_physical_skeleton).
 
 /// A boxed LED cell needs room for both border columns plus the interior
 /// state row; below this width the bordered cell degrades to the unboxed
@@ -419,17 +416,147 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Render hardware components grouped into physical controller panels
-/// (P2B8, Faderbank, Notebuttons, CV I/O, ...) that mirror the hardware
-/// layout, wrapping components onto extra rows when a panel doesn't fit
-/// the terminal width. See controller-panels/spec.md.
-/// Geometry-only skeleton of the physical chain (task 3.1, design D7):
-/// module outlines + element cells, no labels or state. Presentation switch
-/// of the main view (`physical_show_skeleton`, default OFF). Cell screen
-/// rects are published to `app.physical_skeleton_rects` for the 5.1
-/// coincidence tests; drawing is clipped to `area` so an over-tall module
-/// never bleeds into the header/status bar, while published rects keep the
-/// unclipped D5 formula (mm × factor, origin 0,0) that 4.2 will share.
+/// Geometry-only rack skeleton of the physical presentation (design D7/D11):
+/// case outline, fold bars, mount regions, module outlines, and element
+/// cells — no labels or state. `cells` carries the port direction so the
+/// renderer picks the in/out port marker glyph/color (4.1 token swap).
+pub(crate) struct SkeletonGeometry {
+    /// Whole-case outline rect (rack mm bounds under the mapping).
+    pub case_rect: Rect,
+    /// Horizontal fold-bar dividers at row boundaries, labeled with the
+    /// row below the fold (1-based).
+    pub fold_bars: Vec<(Rect, String)>,
+    /// Attached top/side mount regions (bordered rects; empty for the
+    /// default case).
+    pub mounts: Vec<Rect>,
+    /// Module outline rects keyed by module index into the chain.
+    pub module_rects: Vec<(usize, Rect)>,
+    /// Element-cell rects keyed by (module index, cell index = position in
+    /// the module's `components`), with the cell's port marker.
+    pub cells: Vec<(usize, usize, Rect, PortMark)>,
+    /// Whole-rack screen size (w, h) under the current mapping — overflow
+    /// detection compares it against the visible area (D5).
+    pub rack_screen: (u16, u16),
+}
+
+/// What an element cell draws in the skeleton: a plain cell dot or an in/out
+/// port marker (CV jacks on the master faceplate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortMark {
+    Cell,
+    PortIn,
+    PortOut,
+}
+
+/// Compute the rack skeleton's screen geometry under the current mapping
+/// (D5 formula: screen = mm × factor × zoom − offset). Kept separate from
+/// drawing so tests can assert fold bars, case outline, and multi-row
+/// offsets without a terminal buffer.
+pub(crate) fn physical_skeleton_geometry(
+    rack: &crate::physical::RackLayout,
+    chain: &crate::physical::PhysicalLayout,
+    mapping: &crate::physical::ScreenMapping,
+) -> SkeletonGeometry {
+    let rack_mm = crate::physical::RectMm {
+        x_mm: 0.0,
+        y_mm: 0.0,
+        w_mm: rack.total_width_mm,
+        h_mm: rack.total_height_mm,
+    };
+    let case_rect = screen_rect_of(mapping.mm_to_screen(rack_mm));
+    let (rack_w, rack_h) = mapping.screen_size(rack_mm);
+
+    let fold_bars = rack
+        .fold_bars
+        .iter()
+        .map(|f| {
+            (
+                screen_rect_of(mapping.mm_to_screen(f.rect_mm)),
+                format!(" {}", f.after_row + 2),
+            )
+        })
+        .collect();
+
+    let mounts = [
+        rack.mounts.top,
+        rack.mounts.side_left,
+        rack.mounts.side_right,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|m| screen_rect_of(mapping.mm_to_screen(m)))
+    .collect();
+
+    let mut module_rects = Vec::new();
+    let mut cells = Vec::new();
+    for row in &rack.rows {
+        for placed in &row.modules {
+            // Packing keeps placed rects at y 0 within the row; the row's
+            // `y_mm` carries the rack-absolute offset (below the previous
+            // rows and their fold bars).
+            let abs_y_mm = row.y_mm + placed.rect_mm.y_mm;
+            module_rects.push((
+                placed.module_index,
+                screen_rect_of(mapping.mm_to_screen(crate::physical::RectMm {
+                    x_mm: placed.rect_mm.x_mm,
+                    y_mm: abs_y_mm,
+                    w_mm: placed.rect_mm.w_mm,
+                    h_mm: placed.rect_mm.h_mm,
+                })),
+            ));
+            let module = &chain.modules[placed.module_index];
+            for (cell_index, component) in module.components.iter().enumerate() {
+                let Some(cell) = chain.cell_for(placed.module_index, &component.id) else {
+                    continue;
+                };
+                if cell.element.is_none() {
+                    continue; // not a faceplate element cell (e.g. fallback)
+                }
+                let mark = match cell.kind_letter {
+                    Some('I') => PortMark::PortIn,
+                    Some('O') => PortMark::PortOut,
+                    _ => PortMark::Cell,
+                };
+                // Cells are module-relative; the row offset plus the placed
+                // x make the rack-absolute position.
+                let rect = screen_rect_of(mapping.mm_to_screen(crate::physical::RectMm {
+                    x_mm: placed.rect_mm.x_mm + cell.rect_mm.x_mm,
+                    y_mm: abs_y_mm + cell.rect_mm.y_mm,
+                    w_mm: cell.rect_mm.w_mm,
+                    h_mm: cell.rect_mm.h_mm,
+                }));
+                cells.push((placed.module_index, cell_index, rect, mark));
+            }
+        }
+    }
+
+    SkeletonGeometry {
+        case_rect,
+        fold_bars,
+        mounts,
+        module_rects,
+        cells,
+        rack_screen: (rack_w.round() as u16, rack_h.round() as u16),
+    }
+}
+
+/// Round an f64 screen quad to a ratatui `Rect` (sizes at least 1×1 so
+/// degenerate mm slivers still draw a marker).
+fn screen_rect_of((x, y, w, h): (f64, f64, f64, f64)) -> Rect {
+    Rect::new(
+        x.round() as u16,
+        y.round() as u16,
+        (w.round() as u16).max(1),
+        (h.round() as u16).max(1),
+    )
+}
+
+/// Rack-aware skeleton renderer (D9/D10/D11): case outline, fold bars, mount
+/// regions, modules into their rack rows, element cells (· for elements, ◀/▶
+/// for in/out CV ports). Geometry only — no labels/states. The rack config
+/// comes from `RackSpec::default_case` until task 4.4 lands `[physical.rack]`.
+/// Published `physical_skeleton_rects` come from the SAME mapping the drawing
+/// uses (renderer-owns-geometry contract, D5).
 fn render_physical_skeleton(
     frame: &mut Frame,
     area: Rect,
@@ -437,86 +564,121 @@ fn render_physical_skeleton(
     app: &mut App,
 ) {
     app.physical_skeleton_rects.clear();
-    let layout = crate::physical::PhysicalLayout::build(patch);
-    let outline = Style::default().fg(theme::active().graph_node_border);
-    let cell_style = Style::default().fg(theme::active().graph_port_input);
+    // Zoom linkage: the existing `+`/`-` scale presets (0.75–2.0 ratio,
+    // 75–200 %) drive the physical zoom — the ratio IS the zoom (4.3
+    // reworks the keys; the state linkage lives here).
+    app.physical_zoom = app.scale_factor;
 
-    for (module_index, module) in layout.modules.iter().enumerate() {
-        let rect = module_screen_rect(module);
+    let chain = crate::physical::PhysicalLayout::build(patch);
+    let rack =
+        crate::physical::RackLayout::pack(&chain, &crate::physical::RackSpec::default_case(&chain));
+    let mapping = crate::physical::ScreenMapping::new(
+        crate::physical::PHYSICAL_COLS_PER_MM,
+        crate::physical::PHYSICAL_ROWS_PER_MM,
+        app.physical_zoom as f64,
+        app.physical_offset.0 as f64,
+        app.physical_offset.1 as f64,
+    );
+    let geom = physical_skeleton_geometry(&rack, &chain, &mapping);
+    app.physical_rack_size = geom.rack_screen;
+    app.physical_skeleton_rects = geom
+        .cells
+        .iter()
+        .map(|&(module_index, cell_index, rect, _)| (module_index, cell_index, rect))
+        .collect();
+
+    let t = theme::active();
+    let module_outline = Style::default().fg(t.physical_skeleton_module_outline);
+    let cell_style = Style::default().fg(t.physical_skeleton_cell);
+    let port_in_style = Style::default().fg(t.physical_skeleton_port_in);
+    let port_out_style = Style::default().fg(t.physical_skeleton_port_out);
+    // Interim: D11 dedicates case/fold-bar/mount tokens with the full view
+    // (4.2); the skeleton reuses the enclosing-structure graph tokens.
+    let case_style = Style::default().fg(t.graph_cluster_border);
+    let fold_style = Style::default().fg(t.muted);
+
+    // Case outline wrapping all rows (D11).
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(case_style),
+        geom.case_rect.intersection(area),
+    );
+
+    // Attached mount regions (empty for the default case, D9).
+    for mount in &geom.mounts {
+        let clipped = mount.intersection(area);
+        if clipped.width == 0 || clipped.height == 0 {
+            continue;
+        }
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(case_style),
+            clipped,
+        );
+    }
+
+    // Fold-bar dividers at row boundaries, labeled with the row below (D11).
+    for (fold_rect, label) in &geom.fold_bars {
+        render_fold_bar(frame, area, *fold_rect, label, fold_style);
+    }
+
+    // Modules into their rack rows.
+    for &(_, rect) in &geom.module_rects {
         let clipped = rect.intersection(area);
         if clipped.width == 0 || clipped.height == 0 {
             continue;
         }
-        // Module outline: a simple bordered frame in the node-border token
-        // (task 3.2 swaps in a dedicated `physical_skeleton_*` token).
         frame.render_widget(
-            Block::default().borders(Borders::ALL).border_style(outline),
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(module_outline),
             clipped,
         );
+    }
 
-        for (cell_index, component) in module.components.iter().enumerate() {
-            let Some(cell) = layout.cell_for(module_index, &component.id) else {
-                continue;
-            };
-            if cell.element.is_none() {
-                continue; // not a faceplate element cell (e.g. fallback)
-            }
-            let cell_rect = cell_screen_rect(module, cell);
-            let cell_clipped = cell_rect.intersection(area);
-            if cell_clipped.width == 0 || cell_clipped.height == 0 {
-                continue;
-            }
-            // Element cell: a small filled glyph at the cell's top-left
-            // screen cell (sub-char cells collapse onto one screen cell).
-            frame
-                .buffer_mut()
-                .set_string(cell_clipped.x, cell_clipped.y, "\u{00B7}", cell_style);
-            app.physical_skeleton_rects
-                .push((module_index, cell_index, cell_rect));
+    // Element cells: · for elements, ◀/▶ for in/out CV ports (4.1 token swap).
+    for &(_, _, cell_rect, mark) in &geom.cells {
+        let clipped = cell_rect.intersection(area);
+        if clipped.width == 0 || clipped.height == 0 {
+            continue;
         }
+        let (glyph, style) = match mark {
+            PortMark::Cell => ("\u{00B7}", cell_style),
+            PortMark::PortIn => ("\u{25C0}", port_in_style),
+            PortMark::PortOut => ("\u{25B6}", port_out_style),
+        };
+        frame
+            .buffer_mut()
+            .set_string(clipped.x, clipped.y, glyph, style);
     }
 }
 
-/// Screen rect of a module under the fixed skeleton mapping (D5 formula,
-/// offset 0, zoom 1).
-fn module_screen_rect(module: &crate::physical::PhysicalModule) -> Rect {
-    mm_to_screen(
-        module.rect_mm.x_mm,
-        module.rect_mm.y_mm,
-        module.rect_mm.w_mm,
-        module.rect_mm.h_mm,
-    )
+/// A fold-bar divider: a horizontal line of ─ across the divider rect with
+/// the row label at its start.
+fn render_fold_bar(frame: &mut Frame, area: Rect, rect: Rect, label: &str, style: Style) {
+    let clipped = rect.intersection(area);
+    if clipped.width == 0 || clipped.height == 0 {
+        return;
+    }
+    let y = clipped.y + clipped.height / 2;
+    let line = "\u{2500}".repeat(clipped.width as usize);
+    frame
+        .buffer_mut()
+        .set_stringn(clipped.x, y, &line, clipped.width as usize, style);
+    if clipped.width > 1 {
+        let labeled = format!("{label} ");
+        frame
+            .buffer_mut()
+            .set_stringn(clipped.x + 1, y, &labeled, labeled.len(), style);
+    }
 }
 
-/// Screen rect of an element cell: the cell sits inside its module, so its
-/// chain-absolute mm position is the module offset plus the cell offset
-/// (cells in `PhysicalLayout` are module-relative).
-fn cell_screen_rect(
-    module: &crate::physical::PhysicalModule,
-    cell: &crate::physical::ElementCell,
-) -> Rect {
-    mm_to_screen(
-        module.rect_mm.x_mm + cell.rect_mm.x_mm,
-        module.rect_mm.y_mm + cell.rect_mm.y_mm,
-        cell.rect_mm.w_mm,
-        cell.rect_mm.h_mm,
-    )
-}
-
-/// The shared mm→screen formula (task 3.1 default): screen = mm × factor,
-/// origin (0,0), rounded to integer cells, at least 1×1. 4.1 replaces the
-/// fixed factors with zoom/pan — this stays the single formula the skeleton
-/// and (later) the full view publish from, keeping the 5.1 coincidence
-/// contract exact by construction.
-fn mm_to_screen(x_mm: f64, y_mm: f64, w_mm: f64, h_mm: f64) -> Rect {
-    Rect::new(
-        (x_mm * PHYSICAL_COLS_PER_MM).round() as u16,
-        (y_mm * PHYSICAL_ROWS_PER_MM).round() as u16,
-        ((w_mm * PHYSICAL_COLS_PER_MM).round() as u16).max(1),
-        ((h_mm * PHYSICAL_ROWS_PER_MM).round() as u16).max(1),
-    )
-}
-
+/// Render hardware components grouped into physical controller panels
+/// (P2B8, Faderbank, Notebuttons, CV I/O, ...) that mirror the hardware
+/// layout, wrapping components onto extra rows when a panel doesn't fit
+/// the terminal width. See controller-panels/spec.md.
 fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -3397,6 +3559,121 @@ mod tests {
         assert_eq!(app.status_message, "Skeleton: off");
         let off_again = rendered_main_text(&mut app, 120, 40);
         assert_eq!(off_again, off_main, "OFF main view must be byte-identical");
+    }
+
+    #[test]
+    fn skeleton_rack_geometry_has_case_outline_and_fold_bars() {
+        use crate::physical::{RackLayout, RackRow, RackSpec, ScreenMapping};
+        use std::collections::HashMap;
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let chain = crate::physical::PhysicalLayout::build(&patch);
+
+        // Default single-row case: case outline present, no mounts/fold bars.
+        let rack = RackLayout::pack(&chain, &RackSpec::default_case(&chain));
+        let geom = physical_skeleton_geometry(&rack, &chain, &ScreenMapping::default());
+        assert!(
+            geom.case_rect.width > 0 && geom.case_rect.height > 0,
+            "case outline missing"
+        );
+        assert!(geom.mounts.is_empty(), "default case has no mounts");
+        assert!(
+            geom.fold_bars.is_empty(),
+            "single-row rack has no fold bars"
+        );
+        assert!(!geom.module_rects.is_empty(), "modules missing");
+        assert!(!geom.cells.is_empty(), "element cells missing");
+
+        // Two-row rack: the row boundary gets a fold bar labeled with the row
+        // below; row 1's modules sit below row 0 + the fold bar.
+        let hp = (chain.total_width_mm / chain.hp_mm).ceil().max(1.0);
+        let spec = RackSpec {
+            rows: vec![
+                RackRow {
+                    he: 3,
+                    hp,
+                    label: None,
+                },
+                RackRow {
+                    he: 3,
+                    hp,
+                    label: None,
+                },
+            ],
+            assign: HashMap::from([("CV I/O".to_string(), 1)]),
+            ..RackSpec::default_case(&chain)
+        };
+        let two = RackLayout::pack(&chain, &spec);
+        let geom2 = physical_skeleton_geometry(&two, &chain, &ScreenMapping::default());
+        assert_eq!(geom2.fold_bars.len(), 1, "one fold bar between two rows");
+        let (fold_rect, label) = &geom2.fold_bars[0];
+        assert!(
+            fold_rect.width > 0 && fold_rect.height > 0,
+            "degenerate fold bar"
+        );
+        assert!(
+            label.contains('2'),
+            "fold bar labeled with the row below: {label}"
+        );
+        let row0_bottom = two.rows[0].y_mm
+            + two.rows[0]
+                .modules
+                .iter()
+                .map(|m| m.rect_mm.y_mm + m.rect_mm.h_mm)
+                .fold(f64::MIN, f64::max);
+        let row1_top = two.rows[1].y_mm
+            + two.rows[1]
+                .modules
+                .iter()
+                .map(|m| m.rect_mm.y_mm)
+                .fold(f64::MAX, f64::min);
+        assert!(
+            row1_top >= row0_bottom + two.fold_bar_height_mm,
+            "row 1 below row 0 + fold bar"
+        );
+    }
+
+    #[test]
+    fn skeleton_renders_cv_port_markers() {
+        use crate::handler::handle_event;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(app.physical_show_skeleton);
+        let text = rendered_text(&mut app, 120, 40);
+        assert!(text.contains('\u{25C0}'), "port-in marker (◀) missing");
+        assert!(text.contains('\u{25B6}'), "port-out marker (▶) missing");
+    }
+
+    #[test]
+    fn physical_viewport_state_pans_and_reports_overflow() {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.physical_show_skeleton = true;
+        rendered_text(&mut app, 120, 40); // publishes rack size + cell rects
+        assert!(
+            app.physical_rack_size.0 > 0 && app.physical_rack_size.1 > 0,
+            "rack size not published"
+        );
+        assert_eq!(
+            app.physical_overflow(Rect::new(0, 0, 120, 40)),
+            (false, false),
+            "rack fits a 120×40 area at zoom 1"
+        );
+        assert!(
+            app.physical_overflow(Rect::new(0, 0, 120, 20)).1,
+            "rack taller than the area overflows vertically"
+        );
+        app.physical_pan_by(5.0, 3.0);
+        assert_eq!(app.physical_offset, (5.0, 3.0));
+        app.physical_pan_by(-1.0, -2.0);
+        assert_eq!(app.physical_offset, (4.0, 1.0));
     }
 
     #[test]

@@ -887,6 +887,111 @@ impl RackLayout {
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// mm→screen mapping (D4/D5)
+// ---------------------------------------------------------------------------
+
+/// Default aspect-compensated mm→chars factors (D4): terminal cells are ~2:1
+/// (wider than tall), so rows/mm ≈ 2 × cols/mm keeps physical proportions.
+pub const PHYSICAL_COLS_PER_MM: f64 = 0.15;
+pub const PHYSICAL_ROWS_PER_MM: f64 = 0.3;
+
+/// The pure mm→screen mapping of the physical presentation (D4/D5). No
+/// terminal dependency: screen rects are returned as f64 character-cell
+/// coordinates and rounded only at draw time. One formula drives both the
+/// skeleton reference and (later) the full view, keeping the 5.1 coincidence
+/// contract exact by construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenMapping {
+    pub cols_per_mm: f64,
+    pub rows_per_mm: f64,
+    pub zoom: f64,
+    pub offset_x: f64,
+    pub offset_y: f64,
+}
+
+impl Default for ScreenMapping {
+    fn default() -> Self {
+        Self {
+            cols_per_mm: PHYSICAL_COLS_PER_MM,
+            rows_per_mm: PHYSICAL_ROWS_PER_MM,
+            zoom: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
+}
+
+impl ScreenMapping {
+    pub fn new(
+        cols_per_mm: f64,
+        rows_per_mm: f64,
+        zoom: f64,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> Self {
+        Self {
+            cols_per_mm,
+            rows_per_mm,
+            zoom,
+            offset_x,
+            offset_y,
+        }
+    }
+
+    /// mm rect → screen rect `(x, y, w, h)` in character cells (D5:
+    /// screen = mm × factor × zoom − offset; size is scale-only, no offset).
+    pub fn mm_to_screen(&self, mm: RectMm) -> (f64, f64, f64, f64) {
+        (
+            mm.x_mm * self.cols_per_mm * self.zoom - self.offset_x,
+            mm.y_mm * self.rows_per_mm * self.zoom - self.offset_y,
+            mm.w_mm * self.cols_per_mm * self.zoom,
+            mm.h_mm * self.rows_per_mm * self.zoom,
+        )
+    }
+
+    /// Inverse of `mm_to_screen` for a screen point (the round-trip test and
+    /// the zoom-anchor math both use it).
+    pub fn screen_to_mm(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            (x + self.offset_x) / (self.cols_per_mm * self.zoom),
+            (y + self.offset_y) / (self.rows_per_mm * self.zoom),
+        )
+    }
+
+    /// Zoom about a fixed screen anchor: returns a mapping with `new_zoom`
+    /// and the offset adjusted so the mm point under `(ax, ay)` stays at the
+    /// same screen position. Deterministic pure math (no RNG).
+    pub fn zoom_about(&self, new_zoom: f64, ax: f64, ay: f64) -> Self {
+        let (mx, my) = self.screen_to_mm(ax, ay);
+        Self {
+            zoom: new_zoom,
+            offset_x: mx * self.cols_per_mm * new_zoom - ax,
+            offset_y: my * self.rows_per_mm * new_zoom - ay,
+            ..*self
+        }
+    }
+
+    /// Pan by `(dx, dy)` screen cells: screen coords shift linearly by
+    /// exactly `(dx, dy)` (and the inverse shifts the other way).
+    pub fn pan(&self, dx: f64, dy: f64) -> Self {
+        Self {
+            offset_x: self.offset_x + dx,
+            offset_y: self.offset_y + dy,
+            ..*self
+        }
+    }
+
+    /// Screen size `(w, h)` in cells of an mm rect under this mapping —
+    /// overflow detection compares this against the visible area.
+    pub fn screen_size(&self, mm: RectMm) -> (f64, f64) {
+        (
+            mm.w_mm * self.cols_per_mm * self.zoom,
+            mm.h_mm * self.rows_per_mm * self.zoom,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,6 +1004,141 @@ mod tests {
         assert!(
             (a - b).abs() < 1e-9,
             "expected {a} to be within 1e-9 of {b}"
+        );
+    }
+
+    #[test]
+    fn screen_mapping_round_trips_mm_to_screen_to_mm() {
+        let mm = RectMm {
+            x_mm: 3.5,
+            y_mm: 12.0,
+            w_mm: 8.0,
+            h_mm: 4.0,
+        };
+        // Default mapping (offset 0, zoom 1).
+        let m = ScreenMapping::default();
+        let (x, y, w, h) = m.mm_to_screen(mm);
+        assert_close(w, mm.w_mm * m.cols_per_mm);
+        assert_close(h, mm.h_mm * m.rows_per_mm);
+        let (mx, my) = m.screen_to_mm(x, y);
+        assert_close(mx, mm.x_mm);
+        assert_close(my, mm.y_mm);
+        // With zoom + offset too.
+        let m2 = ScreenMapping::new(0.15, 0.3, 1.5, 7.0, 3.0);
+        let (x2, y2, w2, h2) = m2.mm_to_screen(mm);
+        assert_close(w2, mm.w_mm * 0.15 * 1.5);
+        assert_close(h2, mm.h_mm * 0.3 * 1.5);
+        let (mx2, my2) = m2.screen_to_mm(x2, y2);
+        assert_close(mx2, mm.x_mm);
+        assert_close(my2, mm.y_mm);
+    }
+
+    #[test]
+    fn screen_mapping_zoom_about_keeps_anchor_fixed() {
+        let m = ScreenMapping::default();
+        let (ax, ay) = (40.0, 12.0);
+        let (amx, amy) = m.screen_to_mm(ax, ay);
+        let z = m.zoom_about(2.0, ax, ay);
+        assert_close(z.zoom, 2.0);
+        let (nx, ny, _, _) = z.mm_to_screen(RectMm {
+            x_mm: amx,
+            y_mm: amy,
+            w_mm: 1.0,
+            h_mm: 1.0,
+        });
+        assert_close(nx, ax);
+        assert_close(ny, ay);
+        // Deterministic pure math: repeated calls agree bit-for-bit.
+        assert_eq!(z, m.zoom_about(2.0, ax, ay));
+    }
+
+    #[test]
+    fn screen_mapping_pan_shifts_screen_coords_linearly() {
+        let m = ScreenMapping::new(0.15, 0.3, 1.0, 2.0, 4.0);
+        let mm = RectMm {
+            x_mm: 10.0,
+            y_mm: 20.0,
+            w_mm: 5.0,
+            h_mm: 6.0,
+        };
+        let (x0, y0, w0, h0) = m.mm_to_screen(mm);
+        let p = m.pan(7.0, 11.0);
+        let (x1, y1, w1, h1) = p.mm_to_screen(mm);
+        // offset + Δ shifts screen coords by −Δ (screen = mm × f × zoom −
+        // offset): content moves up/left as the offset grows.
+        assert_close(x1, x0 - 7.0);
+        assert_close(y1, y0 - 11.0);
+        assert_close(w1, w0);
+        assert_close(h1, h0);
+        // Inverse shifts the other way: the mm point that now lands on the
+        // original screen position is Δ further along in mm.
+        let (mx1, my1) = p.screen_to_mm(x0, y0);
+        assert_close(mx1, mm.x_mm + 7.0 / (0.15 * 1.0));
+        assert_close(my1, mm.y_mm + 11.0 / (0.3 * 1.0));
+    }
+
+    #[test]
+    fn screen_mapping_multi_row_offsets_include_fold_bars() {
+        // Row 1 sits below row 0 plus exactly one fold bar: pack a two-row
+        // rack and map both rows' module rects — the screen gap must equal
+        // the mm gap × rows_per_mm × zoom (D4/D11).
+        let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
+        let chain = PhysicalLayout::build(&p);
+        let spec = RackSpec {
+            rows: vec![
+                RackRow {
+                    he: 3,
+                    hp: 12.0,
+                    label: None,
+                },
+                RackRow {
+                    he: 3,
+                    hp: 12.0,
+                    label: None,
+                },
+            ],
+            assign: HashMap::from([("CV I/O".to_string(), 1)]),
+            ..RackSpec::default_case(&chain)
+        };
+        let rack = RackLayout::pack(&chain, &spec);
+        let fold = rack
+            .fold_bars
+            .iter()
+            .find(|f| f.after_row == 0)
+            .expect("fold bar after row 0");
+        assert_close(fold.rect_mm.h_mm, FOLD_BAR_HEIGHT_MM);
+        // Rows carry the rack-absolute y; placed rects stay at y 0 within
+        // their row. Row 1 sits below row 0 plus exactly one fold bar.
+        let row0 = &rack.rows[0];
+        let row1 = &rack.rows[1];
+        assert_close(row1.y_mm - (row0.y_mm + row0.height_mm), FOLD_BAR_HEIGHT_MM);
+        let p0 = row0.modules[0].rect_mm;
+        let p1 = row1.modules[0].rect_mm;
+        let y0_abs = row0.y_mm + p0.y_mm;
+        let y1_abs = row1.y_mm + p1.y_mm;
+        assert_close(y1_abs - (y0_abs + p0.h_mm), FOLD_BAR_HEIGHT_MM);
+
+        // Mapping the rack-absolute rects: the screen gap equals the mm gap
+        // × rows_per_mm (the mapping is uniform in mm, D4).
+        let m = ScreenMapping::default();
+        let abs0 = RectMm {
+            x_mm: p0.x_mm,
+            y_mm: y0_abs,
+            w_mm: p0.w_mm,
+            h_mm: p0.h_mm,
+        };
+        let abs1 = RectMm {
+            x_mm: p1.x_mm,
+            y_mm: y1_abs,
+            w_mm: p1.w_mm,
+            h_mm: p1.h_mm,
+        };
+        let (_, sy0, _, _) = m.mm_to_screen(abs0);
+        let (_, sy1, _, _) = m.mm_to_screen(abs1);
+        assert_close(sy1 - sy0, (y1_abs - y0_abs) * m.rows_per_mm);
+        assert_close(
+            sy1 - (sy0 + abs0.h_mm * m.rows_per_mm),
+            FOLD_BAR_HEIGHT_MM * m.rows_per_mm,
         );
     }
 
