@@ -8,6 +8,7 @@ The main view groups components into logical controller panels wrapped into unif
 
 - **Per-controller physical geometry data**: mm-derived module specs (HP → 5.08 mm per HP), element cell positions per element family, chain gaps; acquired from the DROID manual + knowledge base; resolves the B32 orientation conflict (manual 4×8).
 - **Pure grid model (`src/physical.rs`)**: `PhysicalLayout::build(patch)` — ordered controller chain → module rects + element cells in mm; cell lookup by hardware token; repeated circuit instances become side-by-side faceplates.
+- **User-defined rack/case**: configurable case — ordered rows (HE + HP each), optional top-mount and side-mount TE sections; controllers auto-pack into rows by width in chain order with per-module row overrides; the case outline and fold bars at row boundaries render in both views.
 - **Skeleton reference mode**: geometry-only render (module outlines + element cells — only the important visual characteristics), toggleable, theme-tokened; the validation ground truth.
 - **1:1 main view (BREAKING for the wrapped-panel view)**: components render onto the grid cells, replacing the wrapped-panel main view; uniform mm→chars mapping with aspect compensation, zoom levels, pan/scroll for overflow; LED-folding + boxed cells and the `component_rects` hit-testing contract preserved.
 - **Verification**: coincidence tests (every full-render element rect equals its skeleton cell) plus gallery skeleton | full side-by-side rows.
@@ -16,7 +17,7 @@ The main view groups components into logical controller panels wrapped into unif
 
 ### New Capabilities
 
-- `physical-scale-model`: physical grid model (per-controller mm geometry, chain order, element cells), skeleton reference render, 1:1 main view, pan/zoom interaction, and geometry-coincidence verification.
+- `physical-scale-model`: physical grid model (per-controller mm geometry, chain order, element cells), rack/case model (rows, TE mounts, auto-pack + per-module overrides), skeleton reference render, 1:1 main view with fold-bar rendering, pan/zoom interaction, and geometry-coincidence verification.
 
 ### Modified Capabilities
 
@@ -32,7 +33,7 @@ The main view groups components into logical controller panels wrapped into unif
 - `controller_geometry.json` (new data file, `rack_geometry.json` pattern) — per-controller mm specs.
 - `src/ui.rs` — skeleton renderer + 1:1 main renderer (replaces the `render_patch_grouped` wrapping path).
 - `src/app.rs` / `src/handler.rs` — physical-view state (pan offset, zoom, mode), keys.
-- `src/config.rs` — optional `[physical]` defaults.
+- `src/config.rs` — optional `[physical]` + `[physical.rack]` defaults (zoom, pan/scroll, rack rows / TE mounts / assignments).
 - `src/theme.rs` — skeleton tokens in classic/mono/terminal.
 - `src/regression.rs` + `fixtures/**` — coincidence proof tests + snapshots.
 - `src/bin/snapshot-gallery.rs` — skeleton | full rows in the visual matrix.

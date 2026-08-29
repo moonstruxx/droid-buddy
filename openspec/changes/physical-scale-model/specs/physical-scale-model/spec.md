@@ -58,6 +58,35 @@ The system SHALL render components onto the physical grid cells as the main view
 - **WHEN** the user changes zoom
 - **THEN** the whole rack scales uniformly around a fixed anchor.
 
+#### Scenario: Fold bar shows row structure
+
+- **WHEN** the rack has more than one row
+- **THEN** the case outline wraps the whole rack and a fold-bar divider is rendered at each row boundary, in both skeleton and full presentation.
+
+### Requirement: Rack model
+
+The system SHALL model the case/rack as an ordered set of rows — each with a height (HE: 1 or 3), a width (HP), and an optional label — plus optional top-mount and side-mount sections (in TE); modules are assigned to rows by auto-packing in chain order, overridable per module.
+
+#### Scenario: Auto-pack fills rows in chain order
+
+- **WHEN** a rack has rows and a chain of controllers
+- **THEN** controllers pack left-to-right into row 0 until the next module would exceed the row's HP, which then starts row 1, and so on.
+
+#### Scenario: Per-module override
+
+- **WHEN** the config assigns a module to a specific row
+- **THEN** the module is placed in that row regardless of auto-pack; an out-of-range override falls back to auto-pack.
+
+#### Scenario: User-defined case
+
+- **WHEN** the user configures `[physical.rack]` with rows and TE mounts
+- **THEN** the physical view renders the case structure (rows, top/side mount regions) with the modules inside.
+
+#### Scenario: Default case
+
+- **WHEN** no rack config is given
+- **THEN** a single row wide enough for the whole chain is used.
+
 ### Requirement: Coincidence verification
 
 The system SHALL verify the full render against the skeleton: tests assert every full-render element rect coincides with its skeleton cell, and the gallery matrix renders skeleton | full side by side.
