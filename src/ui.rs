@@ -362,9 +362,19 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_main(frame: &mut Frame, area: Rect, app: &mut App) {
     app.component_rects.clear();
+    app.physical_skeleton_rects.clear();
     let patch_ref = app.patch.clone();
     match patch_ref {
-        Some(patch) => render_patch(frame, area, &patch, app),
+        Some(patch) => {
+            // Skeleton is a presentation switch of the main view (D7), not a
+            // new surface: OFF (default) keeps the wrapped-panel view byte-
+            // identical until 4.2 replaces it with the physical render.
+            if app.physical_show_skeleton {
+                render_physical_skeleton(frame, area, &patch, app);
+            } else {
+                render_patch_grouped(frame, area, &patch, app);
+            }
+        }
         None => render_empty(frame, area),
     }
 }
@@ -380,6 +390,13 @@ fn render_empty(frame: &mut Frame, area: Rect) {
 // exact layout constants so extractor and renderer cannot drift (design D2).
 pub(crate) const COMPONENT_WIDTH: u16 = 16;
 pub(crate) const COMPONENT_HEIGHT: u16 = 3;
+
+/// Aspect-compensated mm→chars mapping for the physical skeleton reference
+/// (design D4: rows/mm ≈ 2 × cols/mm). Fixed default until 4.1 replaces it
+/// with the full zoom/pan mapping — keep these constants isolated so that
+/// swap is a single call-site change.
+pub(crate) const PHYSICAL_COLS_PER_MM: f64 = 0.15;
+pub(crate) const PHYSICAL_ROWS_PER_MM: f64 = 0.3;
 
 /// A boxed LED cell needs room for both border columns plus the interior
 /// state row; below this width the bordered cell degrades to the unboxed
@@ -406,8 +423,98 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 /// (P2B8, Faderbank, Notebuttons, CV I/O, ...) that mirror the hardware
 /// layout, wrapping components onto extra rows when a panel doesn't fit
 /// the terminal width. See controller-panels/spec.md.
-fn render_patch(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app: &mut App) {
-    render_patch_grouped(frame, area, patch, app);
+/// Geometry-only skeleton of the physical chain (task 3.1, design D7):
+/// module outlines + element cells, no labels or state. Presentation switch
+/// of the main view (`physical_show_skeleton`, default OFF). Cell screen
+/// rects are published to `app.physical_skeleton_rects` for the 5.1
+/// coincidence tests; drawing is clipped to `area` so an over-tall module
+/// never bleeds into the header/status bar, while published rects keep the
+/// unclipped D5 formula (mm × factor, origin 0,0) that 4.2 will share.
+fn render_physical_skeleton(
+    frame: &mut Frame,
+    area: Rect,
+    patch: &crate::patch::Patch,
+    app: &mut App,
+) {
+    app.physical_skeleton_rects.clear();
+    let layout = crate::physical::PhysicalLayout::build(patch);
+    let outline = Style::default().fg(theme::active().graph_node_border);
+    let cell_style = Style::default().fg(theme::active().graph_port_input);
+
+    for (module_index, module) in layout.modules.iter().enumerate() {
+        let rect = module_screen_rect(module);
+        let clipped = rect.intersection(area);
+        if clipped.width == 0 || clipped.height == 0 {
+            continue;
+        }
+        // Module outline: a simple bordered frame in the node-border token
+        // (task 3.2 swaps in a dedicated `physical_skeleton_*` token).
+        frame.render_widget(
+            Block::default().borders(Borders::ALL).border_style(outline),
+            clipped,
+        );
+
+        for (cell_index, component) in module.components.iter().enumerate() {
+            let Some(cell) = layout.cell_for(module_index, &component.id) else {
+                continue;
+            };
+            if cell.element.is_none() {
+                continue; // not a faceplate element cell (e.g. fallback)
+            }
+            let cell_rect = cell_screen_rect(module, cell);
+            let cell_clipped = cell_rect.intersection(area);
+            if cell_clipped.width == 0 || cell_clipped.height == 0 {
+                continue;
+            }
+            // Element cell: a small filled glyph at the cell's top-left
+            // screen cell (sub-char cells collapse onto one screen cell).
+            frame
+                .buffer_mut()
+                .set_string(cell_clipped.x, cell_clipped.y, "\u{00B7}", cell_style);
+            app.physical_skeleton_rects
+                .push((module_index, cell_index, cell_rect));
+        }
+    }
+}
+
+/// Screen rect of a module under the fixed skeleton mapping (D5 formula,
+/// offset 0, zoom 1).
+fn module_screen_rect(module: &crate::physical::PhysicalModule) -> Rect {
+    mm_to_screen(
+        module.rect_mm.x_mm,
+        module.rect_mm.y_mm,
+        module.rect_mm.w_mm,
+        module.rect_mm.h_mm,
+    )
+}
+
+/// Screen rect of an element cell: the cell sits inside its module, so its
+/// chain-absolute mm position is the module offset plus the cell offset
+/// (cells in `PhysicalLayout` are module-relative).
+fn cell_screen_rect(
+    module: &crate::physical::PhysicalModule,
+    cell: &crate::physical::ElementCell,
+) -> Rect {
+    mm_to_screen(
+        module.rect_mm.x_mm + cell.rect_mm.x_mm,
+        module.rect_mm.y_mm + cell.rect_mm.y_mm,
+        cell.rect_mm.w_mm,
+        cell.rect_mm.h_mm,
+    )
+}
+
+/// The shared mm→screen formula (task 3.1 default): screen = mm × factor,
+/// origin (0,0), rounded to integer cells, at least 1×1. 4.1 replaces the
+/// fixed factors with zoom/pan — this stays the single formula the skeleton
+/// and (later) the full view publish from, keeping the 5.1 coincidence
+/// contract exact by construction.
+fn mm_to_screen(x_mm: f64, y_mm: f64, w_mm: f64, h_mm: f64) -> Rect {
+    Rect::new(
+        (x_mm * PHYSICAL_COLS_PER_MM).round() as u16,
+        (y_mm * PHYSICAL_ROWS_PER_MM).round() as u16,
+        ((w_mm * PHYSICAL_COLS_PER_MM).round() as u16).max(1),
+        ((h_mm * PHYSICAL_ROWS_PER_MM).round() as u16).max(1),
+    )
 }
 
 fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app: &mut App) {
@@ -3161,6 +3268,25 @@ mod tests {
             .collect()
     }
 
+    /// Buffer text of the main content area only (between the 3-row header
+    /// and the 3-row status bar) — used to assert the skeleton toggle leaves
+    /// the wrapped-panel main view byte-identical while the status message
+    /// legitimately changes.
+    fn rendered_main_text(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .skip((3 * width) as usize)
+            .take(((height - 6) * width) as usize)
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
     #[test]
     fn renders_empty_state_without_panic() {
         let mut app = App::new();
@@ -3208,6 +3334,69 @@ mod tests {
             app.patch = Some(patch.clone());
             render_at(&mut app, w, h);
         }
+    }
+
+    #[test]
+    fn skeleton_renders_module_outlines_and_publishes_cell_rects() {
+        use crate::handler::handle_event;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(app.physical_show_skeleton, "s toggles skeleton on");
+        assert_eq!(app.status_message, "Skeleton: on");
+
+        let text = rendered_text(&mut app, 120, 40);
+        assert!(
+            !app.physical_skeleton_rects.is_empty(),
+            "skeleton publishes cell rects"
+        );
+        // Module outlines draw border glyphs; element cells draw the · marker.
+        assert!(text.contains('\u{2502}'), "module outline column missing");
+        assert!(text.contains('\u{00B7}'), "element cell markers missing");
+        // Published rects are non-degenerate and on-screen at 120×40.
+        for &(module_idx, cell_idx, rect) in &app.physical_skeleton_rects {
+            assert!(rect.width > 0 && rect.height > 0, "degenerate cell rect");
+            assert!(rect.y < 40, "cell below screen: {rect:?}");
+            let _ = (module_idx, cell_idx);
+        }
+    }
+
+    #[test]
+    fn skeleton_toggle_restores_the_wrapped_panel_frame() {
+        use crate::handler::handle_event;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // OFF is the default: the pre-change wrapped-panel main view, no
+        // skeleton markers and no published rects.
+        let off_main = rendered_main_text(&mut app, 120, 40);
+        assert!(app.physical_skeleton_rects.is_empty());
+        assert!(
+            !off_main.contains('\u{00B7}'),
+            "skeleton marker in OFF main view"
+        );
+
+        // ON switches presentation and publishes skeleton cell rects.
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(app.physical_show_skeleton);
+        let on_main = rendered_main_text(&mut app, 120, 40);
+        assert!(!app.physical_skeleton_rects.is_empty());
+        assert_ne!(on_main, off_main, "skeleton frame must differ");
+
+        // OFF again restores the exact pre-change main view (no regression).
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(!app.physical_show_skeleton);
+        assert_eq!(app.status_message, "Skeleton: off");
+        let off_again = rendered_main_text(&mut app, 120, 40);
+        assert_eq!(off_again, off_main, "OFF main view must be byte-identical");
     }
 
     #[test]
