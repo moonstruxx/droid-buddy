@@ -1,0 +1,4520 @@
+{
+  "meta": {
+    "unit": "mm",
+    "hp_mm": 5.08,
+    "he_mm": {
+      "1": 43.3,
+      "3": 128.5
+    },
+    "families": {
+      "B": "button",
+      "P": "pot",
+      "F": "fader",
+      "E": "encoder",
+      "S": "switch",
+      "L": "LED",
+      "CV": "jack (CV/gate)"
+    },
+    "chain_gaps_mm": {
+      "inter_module": 0.5,
+      "master_to_controller": 0.5
+    },
+    "defaults": {
+      "he": 3,
+      "fallback_width_hp": 5,
+      "fallback_width_mm": 25.4
+    },
+    "source": "droid-manual-blue-7 (ch. 6 controllers, 7 G8, 8 X7, 9 MASTER18, 10 R2M/R2C, 14 hardware) + documented/reasonable pitch values where the manual gives no millimetre positions; see per-controller `notes`",
+    "chain_gaps_note": "assumption: Eurorack panels mount adjacent with ~0.5 mm tolerance gap; the manual specifies no fixed master->controller spacing (ribbon cable, arbitrary length), so the model renders the chain contiguously with the inter-module gap",
+    "fallback_note": "unknown/missing controller type falls back to 5 HP (average controller width) + warn, per design D6"
+  },
+  "controllers": {
+    "master": {
+      "he": 3,
+      "width_hp": 8,
+      "width_mm": 40.64,
+      "height_mm": 128.5,
+      "token_counts": {
+        "CV": 16,
+        "L": 16,
+        "B": 1
+      },
+      "grids": [
+        {
+          "family": "L",
+          "cols": 4,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 20,
+          "pitch_x_mm": 8.0,
+          "pitch_y_mm": 8.0,
+          "w_mm": 3,
+          "h_mm": 3
+        },
+        {
+          "family": "B",
+          "cols": 1,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 31.0,
+          "y0_mm": 20,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 0,
+          "w_mm": 7,
+          "h_mm": 7
+        },
+        {
+          "family": "CV",
+          "cols": 4,
+          "rows": 4,
+          "order": "col_major",
+          "x0_mm": 2.54,
+          "y0_mm": 60,
+          "pitch_x_mm": 8.5,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "note": "cols 0-1 = inputs I1..I8, cols 2-3 = outputs O1..O8; inputs numbered down the left column (I1..I4) then the right (I5..I8)"
+        }
+      ],
+      "element_cells": {
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 20.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 10.54,
+            "y_mm": 20.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 18.54,
+            "y_mm": 20.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 26.54,
+            "y_mm": 20.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R4"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 2.54,
+            "y_mm": 28.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R5"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 10.54,
+            "y_mm": 28.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R6"
+          },
+          {
+            "col": 2,
+            "row": 1,
+            "x_mm": 18.54,
+            "y_mm": 28.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R7"
+          },
+          {
+            "col": 3,
+            "row": 1,
+            "x_mm": 26.54,
+            "y_mm": 28.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R8"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 2.54,
+            "y_mm": 36.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R9"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 10.54,
+            "y_mm": 36.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R10"
+          },
+          {
+            "col": 2,
+            "row": 2,
+            "x_mm": 18.54,
+            "y_mm": 36.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R11"
+          },
+          {
+            "col": 3,
+            "row": 2,
+            "x_mm": 26.54,
+            "y_mm": 36.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R12"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 2.54,
+            "y_mm": 44.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R13"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 10.54,
+            "y_mm": 44.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R14"
+          },
+          {
+            "col": 2,
+            "row": 3,
+            "x_mm": 18.54,
+            "y_mm": 44.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R15"
+          },
+          {
+            "col": 3,
+            "row": 3,
+            "x_mm": 26.54,
+            "y_mm": 44.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "R16"
+          }
+        ],
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 31.0,
+            "y_mm": 20,
+            "w_mm": 7,
+            "h_mm": 7,
+            "label": "SD reload"
+          }
+        ],
+        "CV": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 60,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I1"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 2.54,
+            "y_mm": 73,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I2"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 2.54,
+            "y_mm": 86,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I3"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 2.54,
+            "y_mm": 99,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I4"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 11.04,
+            "y_mm": 60,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I5"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 11.04,
+            "y_mm": 73,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I6"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 11.04,
+            "y_mm": 86,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I7"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 11.04,
+            "y_mm": 99,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "in",
+            "label": "I8"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 19.54,
+            "y_mm": 60,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O1"
+          },
+          {
+            "col": 2,
+            "row": 1,
+            "x_mm": 19.54,
+            "y_mm": 73,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O2"
+          },
+          {
+            "col": 2,
+            "row": 2,
+            "x_mm": 19.54,
+            "y_mm": 86,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O3"
+          },
+          {
+            "col": 2,
+            "row": 3,
+            "x_mm": 19.54,
+            "y_mm": 99,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O4"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 28.04,
+            "y_mm": 60,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O5"
+          },
+          {
+            "col": 3,
+            "row": 1,
+            "x_mm": 28.04,
+            "y_mm": 73,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O6"
+          },
+          {
+            "col": 3,
+            "row": 2,
+            "x_mm": 28.04,
+            "y_mm": 86,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O7"
+          },
+          {
+            "col": 3,
+            "row": 3,
+            "x_mm": 28.04,
+            "y_mm": 99,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "O8"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 8 HP; 8 CV in (I1..I8) + 8 CV out (O1..O8); 16 full-color LEDs R1..R16 arranged 4x4, rows 1-2 = input LEDs, rows 3-4 = output LEDs (register table); SD reload button. Assumed: pitches/margins (LED pitch 8 mm, jack pitch 8.5x13 mm, 0.1\" side margin, 12 mm screw zones)."
+    },
+    "master18": {
+      "he": 3,
+      "width_hp": 6,
+      "width_mm": 30.48,
+      "height_mm": 128.5,
+      "token_counts": {
+        "CV": 14,
+        "B": 1
+      },
+      "grids": [
+        {
+          "family": "CV",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 1.5,
+          "y0_mm": 30,
+          "pitch_x_mm": 8.5,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "kind": "cv_out"
+        },
+        {
+          "family": "CV",
+          "cols": 1,
+          "rows": 2,
+          "order": "row_wise",
+          "x0_mm": 18.5,
+          "y0_mm": 30,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "kind": "gate_in"
+        },
+        {
+          "family": "CV",
+          "cols": 1,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 18.5,
+          "y0_mm": 56,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "kind": "gate_out"
+        },
+        {
+          "family": "B",
+          "cols": 1,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 22.5,
+          "y0_mm": 20,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 0,
+          "w_mm": 7,
+          "h_mm": 7
+        }
+      ],
+      "element_cells": {
+        "CV": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 1.5,
+            "y_mm": 30,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 10.0,
+            "y_mm": 30,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O2"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 1.5,
+            "y_mm": 43,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O3"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 10.0,
+            "y_mm": 43,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O4"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 1.5,
+            "y_mm": 56,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O5"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 10.0,
+            "y_mm": 56,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O6"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 1.5,
+            "y_mm": 69,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O7"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 10.0,
+            "y_mm": 69,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "cv_out",
+            "label": "O8"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 18.5,
+            "y_mm": 30,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "gate_in",
+            "label": "Gin1"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 18.5,
+            "y_mm": 43,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "gate_in",
+            "label": "Gin2"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 18.5,
+            "y_mm": 56,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "gate_out",
+            "label": "Gout1"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 18.5,
+            "y_mm": 69,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "gate_out",
+            "label": "Gout2"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 18.5,
+            "y_mm": 82,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "gate_out",
+            "label": "Gout3"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 18.5,
+            "y_mm": 95,
+            "w_mm": 7,
+            "h_mm": 7,
+            "kind": "gate_out",
+            "label": "Gout4"
+          }
+        ],
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 22.5,
+            "y_mm": 20,
+            "w_mm": 7,
+            "h_mm": 7,
+            "label": "SD reload"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 6 HP; 8 CV out (O1..O8), 2 gate inputs, 4 gate outputs (G1.1..G1.4 on the master18, see G8 chapter register numbering), MicroSD reload button. No LEDs (manual lists none). Assumed: pitches/margins; gate in/out jack grouping (right column)."
+    },
+    "g8": {
+      "he": 3,
+      "width_hp": 4,
+      "width_mm": 20.32,
+      "height_mm": 128.5,
+      "token_counts": {
+        "CV": 8,
+        "L": 8
+      },
+      "grids": [
+        {
+          "family": "CV",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 2.0,
+          "y0_mm": 30,
+          "pitch_x_mm": 7.5,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "note": "tristate gate jacks (input or output)"
+        },
+        {
+          "family": "L",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 2.0,
+          "y0_mm": 22,
+          "pitch_x_mm": 7.5,
+          "pitch_y_mm": 13,
+          "w_mm": 2,
+          "h_mm": 2,
+          "note": "one LED above each jack; R17..R48 for G8s 1-4 (offset by chain slot)"
+        }
+      ],
+      "element_cells": {
+        "CV": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.0,
+            "y_mm": 30,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 9.5,
+            "y_mm": 30,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.2"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 2.0,
+            "y_mm": 43,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.3"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 9.5,
+            "y_mm": 43,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.4"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 2.0,
+            "y_mm": 56,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.5"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 9.5,
+            "y_mm": 56,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.6"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 2.0,
+            "y_mm": 69,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.7"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 9.5,
+            "y_mm": 69,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "inout",
+            "label": "G1.8"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.0,
+            "y_mm": 22,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R17"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 9.5,
+            "y_mm": 22,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R18"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 2.0,
+            "y_mm": 35,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R19"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 9.5,
+            "y_mm": 35,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R20"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 2.0,
+            "y_mm": 48,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R21"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 9.5,
+            "y_mm": 48,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R22"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 2.0,
+            "y_mm": 61,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R23"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 9.5,
+            "y_mm": 61,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "R24"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 4 HP; 8 tristate gate jacks (G registers, dot notation per chain slot), 8 multicolor LEDs (R17..R24 first G8). Assumed: pitches/margins; LED above each jack."
+    },
+    "x7": {
+      "he": 3,
+      "width_hp": 4,
+      "width_mm": 20.32,
+      "height_mm": 128.5,
+      "token_counts": {
+        "CV": 4,
+        "L": 8,
+        "S": 1
+      },
+      "grids": [
+        {
+          "family": "S",
+          "cols": 1,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 8.2,
+          "y0_mm": 12,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 0,
+          "w_mm": 5,
+          "h_mm": 14,
+          "note": "3-position USB switch (left SD / middle off / right MIDI)"
+        },
+        {
+          "family": "CV",
+          "cols": 1,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 6.66,
+          "y0_mm": 40,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "note": "gate outputs G9..G12 (master); G1.5..G1.8 with a master18"
+        },
+        {
+          "family": "L",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 13.5,
+          "y0_mm": 40,
+          "pitch_x_mm": 3.0,
+          "pitch_y_mm": 13,
+          "w_mm": 1,
+          "h_mm": 1,
+          "note": "R49..R56 for X7s 1-4 (offset by chain slot)"
+        }
+      ],
+      "element_cells": {
+        "S": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 8.2,
+            "y_mm": 12,
+            "w_mm": 5,
+            "h_mm": 14,
+            "label": "USB"
+          }
+        ],
+        "CV": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 6.66,
+            "y_mm": 40,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "G9"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 6.66,
+            "y_mm": 53,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "G10"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 6.66,
+            "y_mm": 66,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "G11"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 6.66,
+            "y_mm": 79,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "out",
+            "label": "G12"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 13.5,
+            "y_mm": 40,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R49"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 16.5,
+            "y_mm": 40,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R50"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 13.5,
+            "y_mm": 53,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R51"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 16.5,
+            "y_mm": 53,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R52"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 13.5,
+            "y_mm": 66,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R53"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 16.5,
+            "y_mm": 66,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R54"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 13.5,
+            "y_mm": 79,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R55"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 16.5,
+            "y_mm": 79,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "R56"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 4 HP; 7 ports (USB-C, MIDI TRS in/out, 4 gate outputs G9..G12), 3-position USB switch, 8 LEDs (R49..R56). USB-C + MIDI TRS jacks are physical ports, not patch-addressable cells \u2014 noted, not modelled. Assumed: pitches/margins."
+    },
+    "r2m": {
+      "he": 3,
+      "width_hp": 2,
+      "width_mm": 10.16,
+      "height_mm": 128.5,
+      "token_counts": {
+        "CV": 2
+      },
+      "grids": [
+        {
+          "family": "CV",
+          "cols": 1,
+          "rows": 2,
+          "order": "row_wise",
+          "x0_mm": 1.58,
+          "y0_mm": 45,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "note": "3.5 mm serial bridge jacks \u2014 transparent to patches, no tokens"
+        }
+      ],
+      "element_cells": {
+        "CV": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 1.58,
+            "y_mm": 45,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "serial",
+            "label": "serial in"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 1.58,
+            "y_mm": 58,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "serial",
+            "label": "serial out"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo patch-cable bridge, transparent to patches \u2014 no hardware tokens exist). Assumed: pitches/margins."
+    },
+    "r2c": {
+      "he": 3,
+      "width_hp": 2,
+      "width_mm": 10.16,
+      "height_mm": 128.5,
+      "token_counts": {
+        "CV": 2
+      },
+      "grids": [
+        {
+          "family": "CV",
+          "cols": 1,
+          "rows": 2,
+          "order": "row_wise",
+          "x0_mm": 1.58,
+          "y0_mm": 45,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 13,
+          "w_mm": 7,
+          "h_mm": 7,
+          "note": "3.5 mm serial bridge jacks \u2014 transparent to patches, no tokens"
+        }
+      ],
+      "element_cells": {
+        "CV": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 1.58,
+            "y_mm": 45,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "serial",
+            "label": "serial in"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 1.58,
+            "y_mm": 58,
+            "w_mm": 7,
+            "h_mm": 7,
+            "dir": "serial",
+            "label": "serial out"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo patch-cable bridge, transparent to patches \u2014 no hardware tokens exist). Assumed: pitches/margins."
+    },
+    "p2b8": {
+      "he": 3,
+      "width_hp": 5,
+      "width_mm": 25.4,
+      "height_mm": 128.5,
+      "token_counts": {
+        "P": 2,
+        "B": 8,
+        "L": 8
+      },
+      "grids": [
+        {
+          "family": "P",
+          "size": "big",
+          "cols": 2,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 14,
+          "pitch_x_mm": 10,
+          "pitch_y_mm": 0,
+          "w_mm": 12,
+          "h_mm": 12
+        },
+        {
+          "family": "B",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 3.5,
+          "y0_mm": 45,
+          "pitch_x_mm": 9.2,
+          "pitch_y_mm": 15,
+          "w_mm": 8,
+          "h_mm": 8
+        },
+        {
+          "family": "L",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 6.0,
+          "y0_mm": 47.5,
+          "pitch_x_mm": 9.2,
+          "pitch_y_mm": 15,
+          "w_mm": 3,
+          "h_mm": 3,
+          "note": "LED inside each button"
+        }
+      ],
+      "element_cells": {
+        "P": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.2"
+          }
+        ],
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 3.5,
+            "y_mm": 45,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.7,
+            "y_mm": 45,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.2"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 3.5,
+            "y_mm": 60,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.3"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 12.7,
+            "y_mm": 60,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.4"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 3.5,
+            "y_mm": 75,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.5"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 12.7,
+            "y_mm": 75,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.6"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 3.5,
+            "y_mm": 90,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.7"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 12.7,
+            "y_mm": 90,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.8"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 6.0,
+            "y_mm": 47.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 15.2,
+            "y_mm": 47.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.2"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 6.0,
+            "y_mm": 62.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.3"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 15.2,
+            "y_mm": 62.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.4"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 6.0,
+            "y_mm": 77.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.5"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 15.2,
+            "y_mm": 77.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.6"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 6.0,
+            "y_mm": 92.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.7"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 15.2,
+            "y_mm": 92.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.8"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 5 HP; two pots P1.1..P1.2, eight buttons B1.1..B1.8 with LEDs L1.1..L1.8. Assumed: pitches/margins (pot pitch 10 mm, button pitch 9.2x15 mm); row-wise button numbering."
+    },
+    "p4b2": {
+      "he": 3,
+      "width_hp": 5,
+      "width_mm": 25.4,
+      "height_mm": 128.5,
+      "token_counts": {
+        "P": 4,
+        "B": 2,
+        "L": 2
+      },
+      "grids": [
+        {
+          "family": "P",
+          "size": "big",
+          "cols": 2,
+          "rows": 2,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 14,
+          "pitch_x_mm": 10,
+          "pitch_y_mm": 15,
+          "w_mm": 12,
+          "h_mm": 12
+        },
+        {
+          "family": "B",
+          "cols": 2,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 3.5,
+          "y0_mm": 55,
+          "pitch_x_mm": 9.2,
+          "pitch_y_mm": 0,
+          "w_mm": 8,
+          "h_mm": 8
+        },
+        {
+          "family": "L",
+          "cols": 2,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 6.0,
+          "y0_mm": 57.5,
+          "pitch_x_mm": 9.2,
+          "pitch_y_mm": 0,
+          "w_mm": 3,
+          "h_mm": 3,
+          "note": "LED inside each button"
+        }
+      ],
+      "element_cells": {
+        "P": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.2"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 2.54,
+            "y_mm": 29,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.3"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 12.54,
+            "y_mm": 29,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.4"
+          }
+        ],
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 3.5,
+            "y_mm": 55,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.7,
+            "y_mm": 55,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.2"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 6.0,
+            "y_mm": 57.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 15.2,
+            "y_mm": 57.5,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.2"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 5 HP; four pots P1.1..P1.4, two buttons B1.1..B1.2 with LEDs. Assumed: pitches/margins (same pot class as P2B8)."
+    },
+    "p10": {
+      "he": 3,
+      "width_hp": 5,
+      "width_mm": 25.4,
+      "height_mm": 128.5,
+      "token_counts": {
+        "P": 10
+      },
+      "grids": [
+        {
+          "family": "P",
+          "size": "big",
+          "cols": 2,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 14,
+          "pitch_x_mm": 10,
+          "pitch_y_mm": 0,
+          "w_mm": 12,
+          "h_mm": 12
+        },
+        {
+          "family": "P",
+          "size": "small",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 3.5,
+          "y0_mm": 42,
+          "pitch_x_mm": 9.2,
+          "pitch_y_mm": 15,
+          "w_mm": 9,
+          "h_mm": 9
+        }
+      ],
+      "element_cells": {
+        "P": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "size": "big",
+            "label": "P1.2"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 3.5,
+            "y_mm": 42,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.3"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.7,
+            "y_mm": 42,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.4"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 3.5,
+            "y_mm": 57,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.5"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 12.7,
+            "y_mm": 57,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.6"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 3.5,
+            "y_mm": 72,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.7"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 12.7,
+            "y_mm": 72,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.8"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 3.5,
+            "y_mm": 87,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.9"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 12.7,
+            "y_mm": 87,
+            "w_mm": 9,
+            "h_mm": 9,
+            "size": "small",
+            "label": "P1.10"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 5 HP; two big pots (P2B8 class, P1.1..P1.2) and eight small pots P1.3..P1.10. Assumed: pitches/margins; row-wise numbering (faceplate text-image shows 3..10 in 2 columns)."
+    },
+    "s10": {
+      "he": 3,
+      "width_hp": 5,
+      "width_mm": 25.4,
+      "height_mm": 128.5,
+      "token_counts": {
+        "S": 10
+      },
+      "grids": [
+        {
+          "family": "S",
+          "kind": "rotary",
+          "cols": 2,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 14,
+          "pitch_x_mm": 10,
+          "pitch_y_mm": 0,
+          "w_mm": 12,
+          "h_mm": 12,
+          "note": "8-position rotary switches"
+        },
+        {
+          "family": "S",
+          "kind": "small",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 3.5,
+          "y0_mm": 42,
+          "pitch_x_mm": 9.2,
+          "pitch_y_mm": 15,
+          "w_mm": 8,
+          "h_mm": 12,
+          "note": "3-position toggle switches"
+        }
+      ],
+      "element_cells": {
+        "S": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "kind": "rotary",
+            "label": "S1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.54,
+            "y_mm": 14,
+            "w_mm": 12,
+            "h_mm": 12,
+            "kind": "rotary",
+            "label": "S1.2"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 3.5,
+            "y_mm": 42,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.3"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.7,
+            "y_mm": 42,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.4"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 3.5,
+            "y_mm": 57,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.5"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 12.7,
+            "y_mm": 57,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.6"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 3.5,
+            "y_mm": 72,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.7"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 12.7,
+            "y_mm": 72,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.8"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 3.5,
+            "y_mm": 87,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.9"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 12.7,
+            "y_mm": 87,
+            "w_mm": 8,
+            "h_mm": 12,
+            "kind": "small",
+            "label": "S1.10"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 5 HP; two 8-position rotary switches S1.1..S1.2 and eight 3-position switches S1.3..S1.10. Assumed: pitches/margins; row-wise numbering."
+    },
+    "p8s8": {
+      "he": 3,
+      "width_hp": 8,
+      "width_mm": 40.64,
+      "height_mm": 128.5,
+      "token_counts": {
+        "F": 8,
+        "L": 8,
+        "S": 8
+      },
+      "grids": [
+        {
+          "family": "F",
+          "cols": 8,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 16,
+          "pitch_x_mm": 4.35,
+          "pitch_y_mm": 0,
+          "w_mm": 4.2,
+          "h_mm": 22,
+          "note": "20 mm travel sliders (P registers); LED inside slider"
+        },
+        {
+          "family": "L",
+          "cols": 8,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 3.64,
+          "y0_mm": 17.1,
+          "pitch_x_mm": 4.35,
+          "pitch_y_mm": 0,
+          "w_mm": 2,
+          "h_mm": 2,
+          "note": "LED inside each slider cap"
+        },
+        {
+          "family": "S",
+          "cols": 8,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 48,
+          "pitch_x_mm": 4.35,
+          "pitch_y_mm": 0,
+          "w_mm": 5,
+          "h_mm": 12,
+          "note": "3-position toggle switches"
+        }
+      ],
+      "element_cells": {
+        "F": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 6.89,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 11.24,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 15.59,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.4"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 19.94,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.5"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 24.29,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.6"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 28.64,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.7"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 32.99,
+            "y_mm": 16,
+            "w_mm": 4.2,
+            "h_mm": 22,
+            "note": "sliders addressed via P registers",
+            "label": "P1.8"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 3.64,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 7.99,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 12.34,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 16.69,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.4"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 21.04,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.5"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 25.39,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.6"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 29.74,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.7"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 34.09,
+            "y_mm": 17.1,
+            "w_mm": 2,
+            "h_mm": 2,
+            "label": "L1.8"
+          }
+        ],
+        "S": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 6.89,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 11.24,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 15.59,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.4"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 19.94,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.5"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 24.29,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.6"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 28.64,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.7"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 32.99,
+            "y_mm": 48,
+            "w_mm": 5,
+            "h_mm": 12,
+            "label": "S1.8"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 8 HP; eight Alpha sliders 20 mm travel (P1.1..P1.8, slider LEDs L1.1..L1.8 defaulting to position), eight 3-pos toggle switches below (S1.1..S1.8). Assumed: pitches/margins; slider pitch 4.35 mm (dense 1 HP-class packing)."
+    },
+    "b32": {
+      "he": 3,
+      "width_hp": 10,
+      "width_mm": 50.8,
+      "height_mm": 128.5,
+      "token_counts": {
+        "B": 32,
+        "L": 32
+      },
+      "grids": [
+        {
+          "family": "B",
+          "cols": 4,
+          "rows": 8,
+          "order": "row_wise",
+          "x0_mm": 3.1,
+          "y0_mm": 12,
+          "pitch_x_mm": 11.15,
+          "pitch_y_mm": 12.8,
+          "w_mm": 9,
+          "h_mm": 9,
+          "note": "4 cols x 8 rows per the manual faceplate text-image (buttons labelled 1..32 row-wise; 'a column of eight buttons')"
+        },
+        {
+          "family": "L",
+          "cols": 4,
+          "rows": 8,
+          "order": "row_wise",
+          "x0_mm": 6.1,
+          "y0_mm": 15,
+          "pitch_x_mm": 11.15,
+          "pitch_y_mm": 12.8,
+          "w_mm": 3,
+          "h_mm": 3,
+          "note": "LED inside each button; 4 brightness levels only"
+        }
+      ],
+      "element_cells": {
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 3.1,
+            "y_mm": 12.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 14.25,
+            "y_mm": 12.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 25.4,
+            "y_mm": 12.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 36.55,
+            "y_mm": 12.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.4"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 3.1,
+            "y_mm": 24.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.5"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 14.25,
+            "y_mm": 24.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.6"
+          },
+          {
+            "col": 2,
+            "row": 1,
+            "x_mm": 25.4,
+            "y_mm": 24.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.7"
+          },
+          {
+            "col": 3,
+            "row": 1,
+            "x_mm": 36.55,
+            "y_mm": 24.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.8"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 3.1,
+            "y_mm": 37.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.9"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 14.25,
+            "y_mm": 37.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.10"
+          },
+          {
+            "col": 2,
+            "row": 2,
+            "x_mm": 25.4,
+            "y_mm": 37.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.11"
+          },
+          {
+            "col": 3,
+            "row": 2,
+            "x_mm": 36.55,
+            "y_mm": 37.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.12"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 3.1,
+            "y_mm": 50.4,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.13"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 14.25,
+            "y_mm": 50.4,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.14"
+          },
+          {
+            "col": 2,
+            "row": 3,
+            "x_mm": 25.4,
+            "y_mm": 50.4,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.15"
+          },
+          {
+            "col": 3,
+            "row": 3,
+            "x_mm": 36.55,
+            "y_mm": 50.4,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.16"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 3.1,
+            "y_mm": 63.2,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.17"
+          },
+          {
+            "col": 1,
+            "row": 4,
+            "x_mm": 14.25,
+            "y_mm": 63.2,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.18"
+          },
+          {
+            "col": 2,
+            "row": 4,
+            "x_mm": 25.4,
+            "y_mm": 63.2,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.19"
+          },
+          {
+            "col": 3,
+            "row": 4,
+            "x_mm": 36.55,
+            "y_mm": 63.2,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.20"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 3.1,
+            "y_mm": 76.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.21"
+          },
+          {
+            "col": 1,
+            "row": 5,
+            "x_mm": 14.25,
+            "y_mm": 76.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.22"
+          },
+          {
+            "col": 2,
+            "row": 5,
+            "x_mm": 25.4,
+            "y_mm": 76.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.23"
+          },
+          {
+            "col": 3,
+            "row": 5,
+            "x_mm": 36.55,
+            "y_mm": 76.0,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.24"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 3.1,
+            "y_mm": 88.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.25"
+          },
+          {
+            "col": 1,
+            "row": 6,
+            "x_mm": 14.25,
+            "y_mm": 88.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.26"
+          },
+          {
+            "col": 2,
+            "row": 6,
+            "x_mm": 25.4,
+            "y_mm": 88.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.27"
+          },
+          {
+            "col": 3,
+            "row": 6,
+            "x_mm": 36.55,
+            "y_mm": 88.8,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.28"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 3.1,
+            "y_mm": 101.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.29"
+          },
+          {
+            "col": 1,
+            "row": 7,
+            "x_mm": 14.25,
+            "y_mm": 101.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.30"
+          },
+          {
+            "col": 2,
+            "row": 7,
+            "x_mm": 25.4,
+            "y_mm": 101.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.31"
+          },
+          {
+            "col": 3,
+            "row": 7,
+            "x_mm": 36.55,
+            "y_mm": 101.6,
+            "w_mm": 9,
+            "h_mm": 9,
+            "label": "B1.32"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 6.1,
+            "y_mm": 15.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 17.25,
+            "y_mm": 15.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 28.4,
+            "y_mm": 15.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 39.55,
+            "y_mm": 15.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.4"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 6.1,
+            "y_mm": 27.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.5"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 17.25,
+            "y_mm": 27.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.6"
+          },
+          {
+            "col": 2,
+            "row": 1,
+            "x_mm": 28.4,
+            "y_mm": 27.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.7"
+          },
+          {
+            "col": 3,
+            "row": 1,
+            "x_mm": 39.55,
+            "y_mm": 27.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.8"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 6.1,
+            "y_mm": 40.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.9"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 17.25,
+            "y_mm": 40.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.10"
+          },
+          {
+            "col": 2,
+            "row": 2,
+            "x_mm": 28.4,
+            "y_mm": 40.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.11"
+          },
+          {
+            "col": 3,
+            "row": 2,
+            "x_mm": 39.55,
+            "y_mm": 40.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.12"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 6.1,
+            "y_mm": 53.4,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.13"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 17.25,
+            "y_mm": 53.4,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.14"
+          },
+          {
+            "col": 2,
+            "row": 3,
+            "x_mm": 28.4,
+            "y_mm": 53.4,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.15"
+          },
+          {
+            "col": 3,
+            "row": 3,
+            "x_mm": 39.55,
+            "y_mm": 53.4,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.16"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 6.1,
+            "y_mm": 66.2,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.17"
+          },
+          {
+            "col": 1,
+            "row": 4,
+            "x_mm": 17.25,
+            "y_mm": 66.2,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.18"
+          },
+          {
+            "col": 2,
+            "row": 4,
+            "x_mm": 28.4,
+            "y_mm": 66.2,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.19"
+          },
+          {
+            "col": 3,
+            "row": 4,
+            "x_mm": 39.55,
+            "y_mm": 66.2,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.20"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 6.1,
+            "y_mm": 79.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.21"
+          },
+          {
+            "col": 1,
+            "row": 5,
+            "x_mm": 17.25,
+            "y_mm": 79.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.22"
+          },
+          {
+            "col": 2,
+            "row": 5,
+            "x_mm": 28.4,
+            "y_mm": 79.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.23"
+          },
+          {
+            "col": 3,
+            "row": 5,
+            "x_mm": 39.55,
+            "y_mm": 79.0,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.24"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 6.1,
+            "y_mm": 91.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.25"
+          },
+          {
+            "col": 1,
+            "row": 6,
+            "x_mm": 17.25,
+            "y_mm": 91.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.26"
+          },
+          {
+            "col": 2,
+            "row": 6,
+            "x_mm": 28.4,
+            "y_mm": 91.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.27"
+          },
+          {
+            "col": 3,
+            "row": 6,
+            "x_mm": 39.55,
+            "y_mm": 91.8,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.28"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 6.1,
+            "y_mm": 104.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.29"
+          },
+          {
+            "col": 1,
+            "row": 7,
+            "x_mm": 17.25,
+            "y_mm": 104.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.30"
+          },
+          {
+            "col": 2,
+            "row": 7,
+            "x_mm": 28.4,
+            "y_mm": 104.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.31"
+          },
+          {
+            "col": 3,
+            "row": 7,
+            "x_mm": 39.55,
+            "y_mm": 104.6,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.32"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 10 HP; 32 buttons B1.1..B1.32 with LEDs L1.1..L1.32, faceplate labelled 1..32 as 4 cols x 8 rows (resolves the 8x4 orientation conflict). Assumed: pitches/margins."
+    },
+    "e4": {
+      "he": 3,
+      "width_hp": 6,
+      "width_mm": 30.48,
+      "height_mm": 128.5,
+      "token_counts": {
+        "E": 4,
+        "B": 4,
+        "L": 128
+      },
+      "grids": [
+        {
+          "family": "E",
+          "cols": 4,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 0.9,
+          "y0_mm": 54,
+          "pitch_x_mm": 7.0,
+          "pitch_y_mm": 0,
+          "w_mm": 7,
+          "h_mm": 7,
+          "note": "96-step encoders; reduced side margins (dense panel), adjacent LED rings overlap by 1 mm"
+        },
+        {
+          "family": "B",
+          "cols": 4,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.9,
+          "y0_mm": 56,
+          "pitch_x_mm": 7.0,
+          "pitch_y_mm": 0,
+          "w_mm": 3,
+          "h_mm": 3,
+          "note": "push button integrated in each encoder"
+        }
+      ],
+      "element_cells": {
+        "E": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 0.9,
+            "y_mm": 54,
+            "w_mm": 7,
+            "h_mm": 7,
+            "label": "E1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 7.9,
+            "y_mm": 54,
+            "w_mm": 7,
+            "h_mm": 7,
+            "label": "E1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 14.9,
+            "y_mm": 54,
+            "w_mm": 7,
+            "h_mm": 7,
+            "label": "E1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 21.9,
+            "y_mm": 54,
+            "w_mm": 7,
+            "h_mm": 7,
+            "label": "E1.4"
+          }
+        ],
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.9,
+            "y_mm": 56,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "B1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 9.9,
+            "y_mm": 56,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "B1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 16.9,
+            "y_mm": 56,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "B1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 23.9,
+            "y_mm": 56,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "B1.4"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 0.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 1.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 2.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 3.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L4"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 4.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L5"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 5.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L6"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 6.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L7"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 7.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L8"
+          },
+          {
+            "col": 8,
+            "row": 0,
+            "x_mm": 8.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L9"
+          },
+          {
+            "col": 8,
+            "row": 1,
+            "x_mm": 8.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L10"
+          },
+          {
+            "col": 8,
+            "row": 2,
+            "x_mm": 8.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L11"
+          },
+          {
+            "col": 8,
+            "row": 3,
+            "x_mm": 8.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L12"
+          },
+          {
+            "col": 8,
+            "row": 4,
+            "x_mm": 8.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L13"
+          },
+          {
+            "col": 8,
+            "row": 5,
+            "x_mm": 8.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L14"
+          },
+          {
+            "col": 8,
+            "row": 6,
+            "x_mm": 8.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L15"
+          },
+          {
+            "col": 8,
+            "row": 7,
+            "x_mm": 8.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L16"
+          },
+          {
+            "col": 8,
+            "row": 8,
+            "x_mm": 8.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L17"
+          },
+          {
+            "col": 7,
+            "row": 8,
+            "x_mm": 7.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L18"
+          },
+          {
+            "col": 6,
+            "row": 8,
+            "x_mm": 6.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L19"
+          },
+          {
+            "col": 5,
+            "row": 8,
+            "x_mm": 5.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L20"
+          },
+          {
+            "col": 4,
+            "row": 8,
+            "x_mm": 4.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L21"
+          },
+          {
+            "col": 3,
+            "row": 8,
+            "x_mm": 3.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L22"
+          },
+          {
+            "col": 2,
+            "row": 8,
+            "x_mm": 2.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L23"
+          },
+          {
+            "col": 1,
+            "row": 8,
+            "x_mm": 1.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L24"
+          },
+          {
+            "col": 0,
+            "row": 8,
+            "x_mm": 0.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L25"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 0.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L26"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 0.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L27"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 0.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L28"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 0.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L29"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 0.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L30"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 0.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L31"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 0.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L32"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 7.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L33"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 8.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L34"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 9.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L35"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 10.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L36"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 11.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L37"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 12.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L38"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 13.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L39"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 14.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L40"
+          },
+          {
+            "col": 8,
+            "row": 0,
+            "x_mm": 15.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L41"
+          },
+          {
+            "col": 8,
+            "row": 1,
+            "x_mm": 15.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L42"
+          },
+          {
+            "col": 8,
+            "row": 2,
+            "x_mm": 15.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L43"
+          },
+          {
+            "col": 8,
+            "row": 3,
+            "x_mm": 15.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L44"
+          },
+          {
+            "col": 8,
+            "row": 4,
+            "x_mm": 15.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L45"
+          },
+          {
+            "col": 8,
+            "row": 5,
+            "x_mm": 15.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L46"
+          },
+          {
+            "col": 8,
+            "row": 6,
+            "x_mm": 15.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L47"
+          },
+          {
+            "col": 8,
+            "row": 7,
+            "x_mm": 15.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L48"
+          },
+          {
+            "col": 8,
+            "row": 8,
+            "x_mm": 15.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L49"
+          },
+          {
+            "col": 7,
+            "row": 8,
+            "x_mm": 14.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L50"
+          },
+          {
+            "col": 6,
+            "row": 8,
+            "x_mm": 13.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L51"
+          },
+          {
+            "col": 5,
+            "row": 8,
+            "x_mm": 12.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L52"
+          },
+          {
+            "col": 4,
+            "row": 8,
+            "x_mm": 11.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L53"
+          },
+          {
+            "col": 3,
+            "row": 8,
+            "x_mm": 10.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L54"
+          },
+          {
+            "col": 2,
+            "row": 8,
+            "x_mm": 9.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L55"
+          },
+          {
+            "col": 1,
+            "row": 8,
+            "x_mm": 8.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L56"
+          },
+          {
+            "col": 0,
+            "row": 8,
+            "x_mm": 7.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L57"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 7.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L58"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 7.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L59"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 7.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L60"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 7.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L61"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 7.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L62"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 7.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L63"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 7.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L64"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 14.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L65"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 15.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L66"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 16.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L67"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 17.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L68"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 18.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L69"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 19.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L70"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 20.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L71"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 21.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L72"
+          },
+          {
+            "col": 8,
+            "row": 0,
+            "x_mm": 22.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L73"
+          },
+          {
+            "col": 8,
+            "row": 1,
+            "x_mm": 22.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L74"
+          },
+          {
+            "col": 8,
+            "row": 2,
+            "x_mm": 22.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L75"
+          },
+          {
+            "col": 8,
+            "row": 3,
+            "x_mm": 22.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L76"
+          },
+          {
+            "col": 8,
+            "row": 4,
+            "x_mm": 22.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L77"
+          },
+          {
+            "col": 8,
+            "row": 5,
+            "x_mm": 22.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L78"
+          },
+          {
+            "col": 8,
+            "row": 6,
+            "x_mm": 22.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L79"
+          },
+          {
+            "col": 8,
+            "row": 7,
+            "x_mm": 22.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L80"
+          },
+          {
+            "col": 8,
+            "row": 8,
+            "x_mm": 22.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L81"
+          },
+          {
+            "col": 7,
+            "row": 8,
+            "x_mm": 21.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L82"
+          },
+          {
+            "col": 6,
+            "row": 8,
+            "x_mm": 20.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L83"
+          },
+          {
+            "col": 5,
+            "row": 8,
+            "x_mm": 19.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L84"
+          },
+          {
+            "col": 4,
+            "row": 8,
+            "x_mm": 18.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L85"
+          },
+          {
+            "col": 3,
+            "row": 8,
+            "x_mm": 17.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L86"
+          },
+          {
+            "col": 2,
+            "row": 8,
+            "x_mm": 16.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L87"
+          },
+          {
+            "col": 1,
+            "row": 8,
+            "x_mm": 15.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L88"
+          },
+          {
+            "col": 0,
+            "row": 8,
+            "x_mm": 14.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L89"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 14.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L90"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 14.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L91"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 14.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L92"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 14.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L93"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 14.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L94"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 14.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L95"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 14.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L96"
+          },
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 21.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L97"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 22.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L98"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 23.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L99"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 24.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L100"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 25.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L101"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 26.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L102"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 27.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L103"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 28.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L104"
+          },
+          {
+            "col": 8,
+            "row": 0,
+            "x_mm": 29.4,
+            "y_mm": 53.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L105"
+          },
+          {
+            "col": 8,
+            "row": 1,
+            "x_mm": 29.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L106"
+          },
+          {
+            "col": 8,
+            "row": 2,
+            "x_mm": 29.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L107"
+          },
+          {
+            "col": 8,
+            "row": 3,
+            "x_mm": 29.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L108"
+          },
+          {
+            "col": 8,
+            "row": 4,
+            "x_mm": 29.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L109"
+          },
+          {
+            "col": 8,
+            "row": 5,
+            "x_mm": 29.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L110"
+          },
+          {
+            "col": 8,
+            "row": 6,
+            "x_mm": 29.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L111"
+          },
+          {
+            "col": 8,
+            "row": 7,
+            "x_mm": 29.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L112"
+          },
+          {
+            "col": 8,
+            "row": 8,
+            "x_mm": 29.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L113"
+          },
+          {
+            "col": 7,
+            "row": 8,
+            "x_mm": 28.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L114"
+          },
+          {
+            "col": 6,
+            "row": 8,
+            "x_mm": 27.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L115"
+          },
+          {
+            "col": 5,
+            "row": 8,
+            "x_mm": 26.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L116"
+          },
+          {
+            "col": 4,
+            "row": 8,
+            "x_mm": 25.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L117"
+          },
+          {
+            "col": 3,
+            "row": 8,
+            "x_mm": 24.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L118"
+          },
+          {
+            "col": 2,
+            "row": 8,
+            "x_mm": 23.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L119"
+          },
+          {
+            "col": 1,
+            "row": 8,
+            "x_mm": 22.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L120"
+          },
+          {
+            "col": 0,
+            "row": 8,
+            "x_mm": 21.4,
+            "y_mm": 61.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L121"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 21.4,
+            "y_mm": 60.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L122"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 21.4,
+            "y_mm": 59.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L123"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 21.4,
+            "y_mm": 58.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L124"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 21.4,
+            "y_mm": 57.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L125"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 21.4,
+            "y_mm": 56.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L126"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 21.4,
+            "y_mm": 55.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L127"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 21.4,
+            "y_mm": 54.5,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L128"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 6 HP; four 96-step encoders E1.1..E1.4 each surrounded by a square of 32 multicolor LEDs ('square of 32' \u2014 4 rings x 32 = 128), push buttons in the encoder shafts (B1.1..B1.4); L1.1..L1.128 (rings 1..32, 33..64, ... per encoder). Assumed: pitches/margins (dense panel, reduced side margins); ring = perimeter of a 9x9 LED grid, 1.125 mm pitch."
+    },
+    "m4": {
+      "he": 3,
+      "width_hp": 14,
+      "width_mm": 71.12,
+      "height_mm": 128.5,
+      "token_counts": {
+        "F": 4,
+        "B": 4,
+        "L": 4
+      },
+      "grids": [
+        {
+          "family": "F",
+          "cols": 4,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 16,
+          "pitch_x_mm": 17.0,
+          "pitch_y_mm": 0,
+          "w_mm": 7,
+          "h_mm": 62,
+          "note": "ALPS 60 mm action motorized faders (P registers)"
+        },
+        {
+          "family": "B",
+          "cols": 4,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 88,
+          "pitch_x_mm": 17.0,
+          "pitch_y_mm": 0,
+          "w_mm": 12,
+          "h_mm": 18,
+          "kind": "touch",
+          "note": "touch plates below each fader (B registers)"
+        },
+        {
+          "family": "L",
+          "cols": 4,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 2.54,
+          "y0_mm": 110,
+          "pitch_x_mm": 17.0,
+          "pitch_y_mm": 0,
+          "w_mm": 3,
+          "h_mm": 3,
+          "note": "RGB LED below each touch plate (L + R registers)"
+        }
+      ],
+      "element_cells": {
+        "F": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 16,
+            "w_mm": 7,
+            "h_mm": 62,
+            "note": "motor faders addressed via P registers",
+            "label": "P1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 19.54,
+            "y_mm": 16,
+            "w_mm": 7,
+            "h_mm": 62,
+            "note": "motor faders addressed via P registers",
+            "label": "P1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 36.54,
+            "y_mm": 16,
+            "w_mm": 7,
+            "h_mm": 62,
+            "note": "motor faders addressed via P registers",
+            "label": "P1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 53.54,
+            "y_mm": 16,
+            "w_mm": 7,
+            "h_mm": 62,
+            "note": "motor faders addressed via P registers",
+            "label": "P1.4"
+          }
+        ],
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 88,
+            "w_mm": 12,
+            "h_mm": 18,
+            "kind": "touch",
+            "label": "B1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 19.54,
+            "y_mm": 88,
+            "w_mm": 12,
+            "h_mm": 18,
+            "kind": "touch",
+            "label": "B1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 36.54,
+            "y_mm": 88,
+            "w_mm": 12,
+            "h_mm": 18,
+            "kind": "touch",
+            "label": "B1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 53.54,
+            "y_mm": 88,
+            "w_mm": 12,
+            "h_mm": 18,
+            "kind": "touch",
+            "label": "B1.4"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.54,
+            "y_mm": 110,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 19.54,
+            "y_mm": 110,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 36.54,
+            "y_mm": 110,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 53.54,
+            "y_mm": 110,
+            "w_mm": 3,
+            "h_mm": 3,
+            "label": "L1.4"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 14 HP; four ALPS 60 mm motor faders (P1.1..P1.4), touch plate with integrated RGB LED below each fader (B1.1..B1.4, L1.1..L1.4, R1.1..R1.4). Assumed: pitches/margins (fader pitch 17 mm)."
+    },
+    "db8e": {
+      "he": 3,
+      "width_hp": 6,
+      "width_mm": 30.48,
+      "height_mm": 128.5,
+      "token_counts": {
+        "B": 8,
+        "E": 1,
+        "L": 32
+      },
+      "grids": [
+        {
+          "family": "B",
+          "cols": 2,
+          "rows": 4,
+          "order": "row_wise",
+          "x0_mm": 2.0,
+          "y0_mm": 38,
+          "pitch_x_mm": 10,
+          "pitch_y_mm": 16,
+          "w_mm": 8,
+          "h_mm": 8,
+          "note": "8 push buttons; no LEDs on the buttons (manual silent)"
+        },
+        {
+          "family": "E",
+          "cols": 1,
+          "rows": 1,
+          "order": "row_wise",
+          "x0_mm": 21.4,
+          "y0_mm": 56,
+          "pitch_x_mm": 0,
+          "pitch_y_mm": 0,
+          "w_mm": 8,
+          "h_mm": 8,
+          "note": "rotary encoder (same as E4)"
+        }
+      ],
+      "element_cells": {
+        "B": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 2.0,
+            "y_mm": 38,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 12.0,
+            "y_mm": 38,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.2"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 2.0,
+            "y_mm": 54,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.3"
+          },
+          {
+            "col": 1,
+            "row": 1,
+            "x_mm": 12.0,
+            "y_mm": 54,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.4"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 2.0,
+            "y_mm": 70,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.5"
+          },
+          {
+            "col": 1,
+            "row": 2,
+            "x_mm": 12.0,
+            "y_mm": 70,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.6"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 2.0,
+            "y_mm": 86,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.7"
+          },
+          {
+            "col": 1,
+            "row": 3,
+            "x_mm": 12.0,
+            "y_mm": 86,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "B1.8"
+          }
+        ],
+        "E": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 21.4,
+            "y_mm": 56,
+            "w_mm": 8,
+            "h_mm": 8,
+            "label": "E1.1"
+          }
+        ],
+        "L": [
+          {
+            "col": 0,
+            "row": 0,
+            "x_mm": 21.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L1"
+          },
+          {
+            "col": 1,
+            "row": 0,
+            "x_mm": 22.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L2"
+          },
+          {
+            "col": 2,
+            "row": 0,
+            "x_mm": 23.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L3"
+          },
+          {
+            "col": 3,
+            "row": 0,
+            "x_mm": 24.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L4"
+          },
+          {
+            "col": 4,
+            "row": 0,
+            "x_mm": 25.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L5"
+          },
+          {
+            "col": 5,
+            "row": 0,
+            "x_mm": 26.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L6"
+          },
+          {
+            "col": 6,
+            "row": 0,
+            "x_mm": 27.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L7"
+          },
+          {
+            "col": 7,
+            "row": 0,
+            "x_mm": 28.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L8"
+          },
+          {
+            "col": 8,
+            "row": 0,
+            "x_mm": 29.4,
+            "y_mm": 56,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L9"
+          },
+          {
+            "col": 8,
+            "row": 1,
+            "x_mm": 29.4,
+            "y_mm": 57.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L10"
+          },
+          {
+            "col": 8,
+            "row": 2,
+            "x_mm": 29.4,
+            "y_mm": 58.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L11"
+          },
+          {
+            "col": 8,
+            "row": 3,
+            "x_mm": 29.4,
+            "y_mm": 59.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L12"
+          },
+          {
+            "col": 8,
+            "row": 4,
+            "x_mm": 29.4,
+            "y_mm": 60.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L13"
+          },
+          {
+            "col": 8,
+            "row": 5,
+            "x_mm": 29.4,
+            "y_mm": 61.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L14"
+          },
+          {
+            "col": 8,
+            "row": 6,
+            "x_mm": 29.4,
+            "y_mm": 62.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L15"
+          },
+          {
+            "col": 8,
+            "row": 7,
+            "x_mm": 29.4,
+            "y_mm": 63.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L16"
+          },
+          {
+            "col": 8,
+            "row": 8,
+            "x_mm": 29.4,
+            "y_mm": 64.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L17"
+          },
+          {
+            "col": 7,
+            "row": 8,
+            "x_mm": 28.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L18"
+          },
+          {
+            "col": 6,
+            "row": 8,
+            "x_mm": 27.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L19"
+          },
+          {
+            "col": 5,
+            "row": 8,
+            "x_mm": 26.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L20"
+          },
+          {
+            "col": 4,
+            "row": 8,
+            "x_mm": 25.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L21"
+          },
+          {
+            "col": 3,
+            "row": 8,
+            "x_mm": 24.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L22"
+          },
+          {
+            "col": 2,
+            "row": 8,
+            "x_mm": 23.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L23"
+          },
+          {
+            "col": 1,
+            "row": 8,
+            "x_mm": 22.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L24"
+          },
+          {
+            "col": 0,
+            "row": 8,
+            "x_mm": 21.4,
+            "y_mm": 64,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L25"
+          },
+          {
+            "col": 0,
+            "row": 7,
+            "x_mm": 21.4,
+            "y_mm": 63.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L26"
+          },
+          {
+            "col": 0,
+            "row": 6,
+            "x_mm": 21.4,
+            "y_mm": 62.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L27"
+          },
+          {
+            "col": 0,
+            "row": 5,
+            "x_mm": 21.4,
+            "y_mm": 61.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L28"
+          },
+          {
+            "col": 0,
+            "row": 4,
+            "x_mm": 21.4,
+            "y_mm": 60.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L29"
+          },
+          {
+            "col": 0,
+            "row": 3,
+            "x_mm": 21.4,
+            "y_mm": 59.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L30"
+          },
+          {
+            "col": 0,
+            "row": 2,
+            "x_mm": 21.4,
+            "y_mm": 58.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L31"
+          },
+          {
+            "col": 0,
+            "row": 1,
+            "x_mm": 21.4,
+            "y_mm": 57.0,
+            "w_mm": 1,
+            "h_mm": 1,
+            "label": "L32"
+          }
+        ]
+      },
+      "notes": "Manual-documented: 6 HP; display (D, not rendered \u2014 non-goal), eight push buttons B1.1..B1.8, one rotary encoder E1.1 with an LED square of 32 multicolor LEDs (same as E4, L1.1..L1.32). Assumed: pitches/margins; display area in the upper region is reserved, not modelled."
+    }
+  }
+}
