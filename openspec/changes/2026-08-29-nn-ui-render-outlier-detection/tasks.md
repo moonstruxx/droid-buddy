@@ -11,11 +11,11 @@
 
 ## 2. Offline Fit & Embedding
 
-- [ ] 2.1 Offline corpus build + fit/distill → render artifact <!-- agent: devops-engineer.build, depends_on: [1.2], touches: [tools/build_rendermetrics.py, tools/fit_render_model.py, corpus/rendermetrics.csv, tools/render_artifact.*] -->
+- [x] 2.1 Offline corpus build + fit/distill → render artifact <!-- agent: devops-engineer.build, depends_on: [1.2], touches: [tools/build_rendermetrics.py, tools/fit_render_model.py, corpus/rendermetrics.csv, tools/render_artifact.*] -->
       · stdlib-only Python replica of the extractor (D4) generating `corpus/rendermetrics.csv` (corpus × widths 80/100/120 × themes, known-good + injected known-bad, `random.Random(42)` determinism); `tools/fit_render_model.py` fits the bounded decision table (≤ few KB, design D1) with holdout precision/recall vs the heuristic baseline; emits the artifact consumed by `include_str!`
       · gate: precision ≥ 0.60 at recall ≥ 0.86 on holdout; fallback row preserves the baseline rule (D5); schema stable vs the Rust side
       · verify: scripts exit 0 and print the precision/recall report meeting the gate; artifact file exists with stable byte content; `git diff corpus/rendermetrics.csv` shows label balancing, not schema drift
-- [ ] 2.2 Embed artifact + pure Rust scorer <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1, 1.1], touches: [src/rendermetrics.rs] -->
+- [x] 2.2 Embed artifact + pure Rust scorer <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1, 1.1], touches: [src/rendermetrics.rs] -->
       · `include_str!` the learned table; `score_render(features) → Option<RenderOutlier>` with invariant guards explicit (native-fit never flagged, baseline-clean never flagged, miss → heuristic fallback, D5); schema-drift check between the embedded table and the extractor
       · verify: `cargo test` covers a scored-outlier case, a fallback case, and both invariant guards; Python↔Rust extractor agreement test on a sampled corpus
 
