@@ -935,7 +935,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             };
             let next = PRESETS[(idx + step) % PRESETS.len()];
             app.scale_factor = next;
-            app.status_message = format!("Scaling: {}%", (next * 100.0) as u32);
+            // The physical renderers link `physical_zoom` from `scale_factor`
+            // every frame; sync it here so the status hint below shows the
+            // new zoom immediately instead of lagging one frame.
+            app.physical_zoom = next;
+            app.status_message = app
+                .physical_status_hint()
+                .unwrap_or_else(|| format!("Scaling: {}%", (next * 100.0) as u32));
             false
         }
         crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
@@ -965,11 +971,34 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+        crossterm::event::KeyCode::Up => {
+            // Physical-view pan (4.3): arrows pan the rack toward the
+            // pressed direction when it overflows the main area; otherwise
+            // they keep their panel-navigation meaning. j/k always navigate.
+            if !app.physical_pan_if_overflow(0, -1) {
+                navigate(app, -1);
+            }
+            false
+        }
+        crossterm::event::KeyCode::Down => {
+            if !app.physical_pan_if_overflow(0, 1) {
+                navigate(app, 1);
+            }
+            false
+        }
+        crossterm::event::KeyCode::Left => {
+            app.physical_pan_if_overflow(-1, 0);
+            false
+        }
+        crossterm::event::KeyCode::Right => {
+            app.physical_pan_if_overflow(1, 0);
+            false
+        }
+        crossterm::event::KeyCode::Char('k') => {
             navigate(app, -1);
             false
         }
-        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+        crossterm::event::KeyCode::Char('j') => {
             navigate(app, 1);
             false
         }
@@ -1115,22 +1144,32 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
             }
         }
         MouseEventKind::ScrollUp => {
-            if let Some(idx) = hit {
-                if !app.processing_paused {
-                    if let Some(patch) = &mut app.patch {
-                        if let Some(comp) = patch.hw_components.get_mut(idx) {
-                            adjust_value(comp, 0.05);
+            // Physical-view wheel-pan (4.3): when the rack overflows
+            // vertically the wheel pans instead of adjusting the hovered
+            // knob/fader value (design D5; `physical_pan_if_overflow` also
+            // gates viewer/quad/graph surfaces away).
+            let panned = app.physical_pan_if_overflow(0, -1);
+            if !panned {
+                if let Some(idx) = hit {
+                    if !app.processing_paused {
+                        if let Some(patch) = &mut app.patch {
+                            if let Some(comp) = patch.hw_components.get_mut(idx) {
+                                adjust_value(comp, 0.05);
+                            }
                         }
                     }
                 }
             }
         }
         MouseEventKind::ScrollDown => {
-            if let Some(idx) = hit {
-                if !app.processing_paused {
-                    if let Some(patch) = &mut app.patch {
-                        if let Some(comp) = patch.hw_components.get_mut(idx) {
-                            adjust_value(comp, -0.05);
+            let panned = app.physical_pan_if_overflow(0, 1);
+            if !panned {
+                if let Some(idx) = hit {
+                    if !app.processing_paused {
+                        if let Some(patch) = &mut app.patch {
+                            if let Some(comp) = patch.hw_components.get_mut(idx) {
+                                adjust_value(comp, -0.05);
+                            }
                         }
                     }
                 }
@@ -1549,6 +1588,111 @@ mod tests {
             ComponentState::Value(v) => assert!(v.abs() < 1e-6),
             _ => panic!("expected Value state"),
         }
+    }
+
+    /// A patch-loaded app whose rack overflows a deterministic 80×24 main
+    /// viewport on both axes (4.3 pan tests).
+    fn app_with_overflowing_rack() -> App {
+        let mut app = app_with_fixture();
+        app.physical_rack_size = (200, 100);
+        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        app
+    }
+
+    #[test]
+    fn arrow_pan_pans_toward_pressed_direction_when_rack_overflows() {
+        let mut app = app_with_overflowing_rack();
+        // Right/Down pan positive (screen content shifts opposite, D5);
+        // Left/Up reverse. Panning must not move the keyboard cursor.
+        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        assert_eq!(app.physical_offset, (8.0, 0.0));
+        assert_eq!(app.hovered_component, None, "pan must not navigate");
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.physical_offset, (8.0, 8.0));
+        handle_event(key(crossterm::event::KeyCode::Left), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 8.0));
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 0.0));
+        assert_eq!(
+            app.status_message,
+            "Physical 100% \u{B7} Pan 0/0 \u{B7} Skeleton: off"
+        );
+    }
+
+    #[test]
+    fn arrow_keys_preserve_navigation_when_rack_fits() {
+        let mut app = app_with_fixture();
+        app.physical_rack_size = (40, 10);
+        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        // Rack fits the viewport: Down/Up navigate, Left/Right stay no-ops.
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.hovered_component, Some(1));
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert_eq!(app.hovered_component, Some(0));
+        handle_event(key(crossterm::event::KeyCode::Left), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 0.0));
+    }
+
+    #[test]
+    fn arrow_pan_gated_off_in_viewer_and_graph_surfaces() {
+        let mut app = app_with_overflowing_rack();
+        // Viewer open (Panels focus): arrows keep panel navigation.
+        app.showing_viewer = true;
+        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 0.0));
+        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        assert_eq!(app.hovered_component, Some(1));
+
+        // Graph surface: arrows do not pan the (hidden) physical view.
+        app.showing_viewer = false;
+        app.showing_graph = true;
+        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 0.0));
+    }
+
+    #[test]
+    fn wheel_pans_when_rack_overflows_and_adjusts_knob_otherwise() {
+        let content = "[pot]\n    pot = P1.1\n    output = _X\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        app.physical_rack_size = (200, 100);
+        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+
+        // Vertical overflow forces panning even over a hovered knob cell;
+        // scroll up pans up (negative offset) and leaves the value alone.
+        handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
+        assert_eq!(app.physical_offset, (0.0, -8.0));
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!(v.abs() < 1e-6, "pan must not adjust"),
+            _ => panic!("expected Value state"),
+        }
+        handle_mouse_event(mouse(MouseEventKind::ScrollDown, 5, 1), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 0.0));
+
+        // Rack fits: the wheel adjusts the hovered knob as before.
+        app.physical_rack_size = (40, 10);
+        handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!((v - 0.05).abs() < 1e-6),
+            _ => panic!("expected Value state"),
+        }
+    }
+
+    #[test]
+    fn zoom_shows_physical_status_hint_with_patch_loaded() {
+        let mut app = app_with_fixture();
+        // `+` climbs one preset (100% → 150%) and folds the zoom into the
+        // physical segment instead of the legacy "Scaling: N%" message.
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 1.5);
+        assert_eq!(app.physical_zoom, 1.5);
+        assert_eq!(
+            app.status_message,
+            "Physical 150% \u{B7} Pan 0/0 \u{B7} Skeleton: off"
+        );
     }
 
     #[test]

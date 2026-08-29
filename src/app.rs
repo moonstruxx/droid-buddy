@@ -264,6 +264,7 @@ fn labels_file_path() -> Option<PathBuf> {
     Some(dir.join(LABELS_FILE_NAME))
 }
 
+use crossterm::terminal;
 use ratatui::layout::Rect;
 
 use crate::diff::DiffReport;
@@ -507,6 +508,12 @@ pub struct App {
     /// (renderer-owns-geometry contract). `physical_overflow` compares it
     /// against the visible area for the 4.3 wheel-pan wiring.
     pub physical_rack_size: (u16, u16),
+    /// Main-panel viewport the physical view renders into, published by the
+    /// renderer (renderer-owns-geometry contract, like `minimap_rect`). The
+    /// 4.3 pan wiring compares the published rack size against it via
+    /// `physical_main_area()`; until a render has run the live terminal size
+    /// is the fallback. Reset on patch load with the other viewport state.
+    pub physical_viewport: Option<Rect>,
     /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
     pub active_modifier_var: Option<String>,
     /// Forward influence result for the active modifier, if any.
@@ -608,6 +615,7 @@ impl App {
             physical_offset: (0.0, 0.0),
             physical_zoom: 1.0,
             physical_rack_size: (0, 0),
+            physical_viewport: None,
             active_modifier_var: None,
             influence: None,
             filtered_graph: None,
@@ -987,6 +995,68 @@ impl App {
         self.physical_offset.1 += dy;
     }
 
+    /// One step of physical-view panning in screen cells (4.3): arrow keys
+    /// and the mouse wheel move the viewport by this amount per press/tick.
+    pub const PHYSICAL_PAN_STEP: f32 = 8.0;
+
+    /// The main-panel viewport the physical view renders into (the
+    /// `chunks[1]` band of `render()`: header 3 rows, status 3 rows). The
+    /// renderer publishes the exact rect each frame; until then the live
+    /// terminal size is the best estimate, so pan stays correct on the very
+    /// first frame and in headless handler tests that never render.
+    pub fn physical_main_area(&self) -> Rect {
+        match self.physical_viewport {
+            Some(rect) => rect,
+            None => {
+                let (w, h) = terminal::size().unwrap_or((80, 24));
+                Rect::new(0, 3, w, h.saturating_sub(6))
+            }
+        }
+    }
+
+    /// Pan one step along the pressed axis only when the rack overflows the
+    /// visible main area on that axis (4.3). `dir_x`/`dir_y` are ±1 or 0 in
+    /// key direction (Right/Down positive, Left/Up negative); screen content
+    /// shifts by the opposite sign (D5). Returns whether it panned so callers
+    /// keep the existing navigate/wheel-adjust fallback otherwise. The pan
+    /// applies only to the plain main view — viewer/quad/graph surfaces keep
+    /// their own arrow and wheel semantics (no-interference priority).
+    pub fn physical_pan_if_overflow(&mut self, dir_x: i32, dir_y: i32) -> bool {
+        if self.showing_viewer || self.showing_quad || self.showing_graph {
+            return false;
+        }
+        let area = self.physical_main_area();
+        let (ox, oy) = self.physical_overflow(area);
+        let dx = dir_x as f32 * Self::PHYSICAL_PAN_STEP;
+        let dy = dir_y as f32 * Self::PHYSICAL_PAN_STEP;
+        if (dx != 0.0 && !ox) || (dy != 0.0 && !oy) {
+            return false;
+        }
+        self.physical_pan_by(dx, dy);
+        if let Some(hint) = self.physical_status_hint() {
+            self.status_message = hint;
+        }
+        true
+    }
+
+    /// Physical-view status hint (4.3), composed once: `Physical N% · Pan
+    /// x/y · Skeleton: on|off`. `None` without a patch — the physical view
+    /// does not exist then, so zoom/scale keep their legacy messages.
+    pub fn physical_status_hint(&self) -> Option<String> {
+        self.patch.as_ref()?;
+        Some(format!(
+            "Physical {}% \u{B7} Pan {:.0}/{:.0} \u{B7} Skeleton: {}",
+            (self.physical_zoom * 100.0) as u32,
+            self.physical_offset.0,
+            self.physical_offset.1,
+            if self.physical_show_skeleton {
+                "on"
+            } else {
+                "off"
+            },
+        ))
+    }
+
     pub fn load_patch(&mut self, patch: Patch) -> bool {
         let issues = validate_patch(&patch, &load_schema());
         // Gate only on hard errors (unknown_circuit, ram_overflow). Legacy
@@ -1036,6 +1106,7 @@ impl App {
             self.physical_show_skeleton = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
+            self.physical_viewport = None;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = None;
@@ -1070,6 +1141,7 @@ impl App {
         self.physical_show_skeleton = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
+        self.physical_viewport = None;
         self.disabled_circuits.clear();
         self.editing = None;
         self.current_patch_path = None;
@@ -1129,6 +1201,7 @@ impl App {
             self.physical_show_skeleton = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
+            self.physical_viewport = None;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = Some(path.to_path_buf());
@@ -1160,6 +1233,7 @@ impl App {
         self.physical_show_skeleton = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
+        self.physical_viewport = None;
         self.disabled_circuits.clear();
         self.editing = None;
         self.current_patch_path = Some(path.to_path_buf());
@@ -2050,11 +2124,72 @@ mod tests {
         let mut app = App::new();
         app.physical_offset = (9.0, 7.0);
         app.physical_zoom = 2.0;
+        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
         // The first load always installs the patch and resets the viewport;
         // a gated re-load preserves state by design.
         app.load_sample_patch();
         assert_eq!(app.physical_offset, (0.0, 0.0));
         assert_eq!(app.physical_zoom, 1.0);
+        assert_eq!(app.physical_viewport, None);
+    }
+
+    #[test]
+    fn physical_pan_if_overflow_gates_on_the_pressed_axis() {
+        let mut app = App::new();
+        app.patch = Some(Patch::from_ini_str("[a]\n    out1 = B1.1\n", String::from("a")).unwrap());
+        app.physical_rack_size = (200, 100);
+        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        // Both axes overflow: panning works along each.
+        assert!(app.physical_pan_if_overflow(1, 0));
+        assert_eq!(app.physical_offset, (8.0, 0.0));
+        assert!(app.physical_pan_if_overflow(0, 1));
+        assert_eq!(app.physical_offset, (8.0, 8.0));
+        // Horizontal axis fits now: the horizontal pan is a no-op while the
+        // vertical one still overflows.
+        app.physical_rack_size = (40, 100);
+        assert!(!app.physical_pan_if_overflow(1, 0));
+        assert_eq!(app.physical_offset, (8.0, 8.0));
+        assert!(app.physical_pan_if_overflow(0, 1));
+        assert_eq!(app.physical_offset, (8.0, 16.0));
+    }
+
+    #[test]
+    fn physical_pan_skipped_under_viewer_quad_graph() {
+        let mut app = App::new();
+        app.patch = Some(Patch::from_ini_str("[a]\n    out1 = B1.1\n", String::from("a")).unwrap());
+        app.physical_rack_size = (200, 100);
+        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        // Each open surface independently suppresses panning.
+        app.showing_viewer = true;
+        assert!(!app.physical_pan_if_overflow(1, 0));
+        app.showing_viewer = false;
+        app.showing_quad = true;
+        assert!(!app.physical_pan_if_overflow(1, 0));
+        app.showing_quad = false;
+        app.showing_graph = true;
+        assert!(!app.physical_pan_if_overflow(1, 0));
+        app.showing_graph = false;
+        // Plain main view pans again.
+        assert!(app.physical_pan_if_overflow(1, 0));
+        assert_eq!(app.physical_offset, (8.0, 0.0));
+    }
+
+    #[test]
+    fn physical_status_hint_requires_a_patch_and_reflects_viewport_state() {
+        let mut app = App::new();
+        assert_eq!(app.physical_status_hint(), None);
+        app.load_sample_patch();
+        assert_eq!(
+            app.physical_status_hint().as_deref(),
+            Some("Physical 100% \u{B7} Pan 0/0 \u{B7} Skeleton: off")
+        );
+        app.physical_offset = (12.0, -4.0);
+        app.physical_zoom = 1.5;
+        app.physical_show_skeleton = true;
+        assert_eq!(
+            app.physical_status_hint().as_deref(),
+            Some("Physical 150% \u{B7} Pan 12/-4 \u{B7} Skeleton: on")
+        );
     }
 
     #[test]
