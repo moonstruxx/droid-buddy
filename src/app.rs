@@ -2851,4 +2851,18 @@ mod tests {
             "fixtures/picker_test/readme.txt"
         )));
     }
+
+    #[test]
+    fn load_patch_never_blocked_by_render_outlier() {
+        // A patch whose render is degraded at every common terminal width
+        // (arpeggio1 wants 228 cols) must still load: the render-outlier hint
+        // is an advisory status-channel span, never a gating error.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(
+            app.load_patch(patch),
+            "degraded render must not block load_patch"
+        );
+        assert!(app.patch.is_some());
+    }
 }

@@ -30,5 +30,5 @@ expression: ansi
   │                                                                                              │
   │                                                                                              │
 ┌─╰ j/k select · Enter preview · r restore · s export · Esc close ───────────────────────────────╯─┐
-│Optimizer: j/k select · Enter preview · r restore · s export · Esc close | Scale: 1.0 | Orientatio│
+│Optimizer: j/k select · Enter preview · r restore · s export · Esc close | Renders degraded at 100│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

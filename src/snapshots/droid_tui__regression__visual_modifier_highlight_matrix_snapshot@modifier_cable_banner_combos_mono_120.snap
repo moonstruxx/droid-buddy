@@ -1,6 +1,5 @@
 ---
 source: src/regression.rs
-assertion_line: 2656
 expression: ansi
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -41,5 +40,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | MOD B1.1 → 2 cells / 2 cables | Scale: 1.0 | Orientation: Portrait              │
+│No patch loaded. Press 'l' to load. | MOD B1.1 → 2 cells / 2 cables | Renders degraded at 120 cols — use ≥ 36 cols or │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

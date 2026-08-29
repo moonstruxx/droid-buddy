@@ -9,6 +9,7 @@ use ratatui::Frame;
 use crate::app::{is_picker_parent_entry, App, QuadFocus, SourceViewMode, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
+use crate::rendermetrics::{score_render, RenderFeatures};
 use crate::theme;
 
 const QUAD_WIDTH_THRESHOLD: u16 = 120;
@@ -375,14 +376,16 @@ fn render_empty(frame: &mut Frame, area: Rect) {
     frame.render_widget(msg, area);
 }
 
-const COMPONENT_WIDTH: u16 = 16;
-const COMPONENT_HEIGHT: u16 = 3;
+// pub(crate): the render-metrics extractor (src/rendermetrics.rs) mirrors these
+// exact layout constants so extractor and renderer cannot drift (design D2).
+pub(crate) const COMPONENT_WIDTH: u16 = 16;
+pub(crate) const COMPONENT_HEIGHT: u16 = 3;
 
 /// A boxed LED cell needs room for both border columns plus the interior
 /// state row; below this width the bordered cell degrades to the unboxed
 /// two-line rendering instead of emitting clipped border fragments
 /// (droid_tui-wsu).
-const BOX_MIN_WIDTH: u16 = 8;
+pub(crate) const BOX_MIN_WIDTH: u16 = 8;
 
 /// Truncate `s` to at most `max_chars` terminal columns, appending `…`
 /// (U+2026) when it overflows (droid_tui-lsd). Char-aware so multi-byte
@@ -1020,6 +1023,29 @@ fn dim_style(style: Style, paused: bool) -> Style {
     }
 }
 
+/// Per-frame render-outlier recommendation (task 3.1, design D5): score the
+/// loaded patch at the current width/theme and return the advisory hint span
+/// when degraded. Re-evaluated every frame so a resize that changes the
+/// verdict updates the hint immediately — `None` when healthy (spec: healthy
+/// render shows no hint), when no patch is loaded, or when the scorer reports
+/// schema drift (design D1: a broken artifact must not spam the status bar).
+fn render_outlier_hint(app: &App, width: u16) -> Option<Span<'static>> {
+    let patch = app.patch.as_ref()?;
+    let features = RenderFeatures::extract(patch, width, theme::active());
+    match score_render(&features) {
+        Ok(Some(outlier)) => Some(Span::styled(
+            format!(
+                "Renders degraded at {width} cols \u{2014} use \u{2265} {} cols or reduce scale",
+                outlier.recommended_width
+            ),
+            Style::default()
+                .fg(theme::active().render_outlier_warning)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Ok(None) | Err(_) => None,
+    }
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::styled(
         if app.prefix.is_some() {
@@ -1077,6 +1103,13 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(theme::active().accent)
                 .add_modifier(Modifier::BOLD),
         ));
+    }
+
+    // Advisory render-outlier hint (design D5): never gates, never blocks —
+    // a pure status-channel span in its dedicated token.
+    if let Some(hint) = render_outlier_hint(app, area.width) {
+        spans.push(Span::raw(" | "));
+        spans.push(hint);
     }
 
     // Latency legend on the graph surface (design D2): the summary mean/max
@@ -2346,7 +2379,7 @@ fn render_panels_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-const MINIMAP_WIDTH: u16 = 3;
+pub(crate) const MINIMAP_WIDTH: u16 = 3;
 
 fn should_show_minimap(source_pane_area: Rect, total_area: Rect, app: &App) -> bool {
     if app.patch.is_none() {
@@ -3959,6 +3992,178 @@ mod tests {
                 app.minimap_rect.is_some(),
                 should_show,
                 "minimap visibility at width {w} expected {should_show}"
+            );
+        }
+    }
+
+    // ── render-outlier status hint (task 3.1) ────────────────────────────
+
+    /// Pins a palette for the calling thread and restores the default on
+    /// drop, mirroring regression.rs's `ThemedGuard` for status-channel tests.
+    struct ThemePin;
+
+    impl ThemePin {
+        fn pin(name: &str) -> Self {
+            crate::theme::set_test_theme(Some(*crate::theme::resolve(name)));
+            Self
+        }
+    }
+
+    impl Drop for ThemePin {
+        fn drop(&mut self) {
+            crate::theme::set_test_theme(None);
+        }
+    }
+
+    fn arpeggio_app() -> App {
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app
+    }
+
+    /// Style of the first cell of the first occurrence of `token` in the
+    /// buffer (row-major), or None when the token is not rendered.
+    fn token_style(buffer: &ratatui::buffer::Buffer, token: &str) -> Option<ratatui::style::Style> {
+        let area = buffer.area;
+        let want: Vec<char> = token.chars().collect();
+        for y in 0..area.height {
+            let chars: Vec<char> = (0..area.width)
+                .map(|x| {
+                    buffer
+                        .cell((x, y))
+                        .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                        .unwrap_or(' ')
+                })
+                .collect();
+            if chars.len() < want.len() {
+                continue;
+            }
+            for start in 0..=chars.len() - want.len() {
+                if chars[start..start + want.len()] == want[..] {
+                    return buffer.cell((start as u16, y)).map(|c| c.style());
+                }
+            }
+        }
+        None
+    }
+
+    /// The status channel: the last three rows (border, content, border) of
+    /// the frame, trimmed like regression.rs's `buffer_to_ansi`.
+    fn status_rows_to_ansi(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        let mut rows = Vec::new();
+        for y in area.height.saturating_sub(3)..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            rows.push(line.trim_end().to_string());
+        }
+        while rows.last().is_some_and(|r| r.is_empty()) {
+            rows.pop();
+        }
+        rows.join("\n")
+    }
+
+    #[test]
+    fn status_bar_shows_render_outlier_hint_when_degraded() {
+        // arpeggio1 wants 228 cols; at 80 the render is predicted degraded and
+        // the status bar must surface the advisory hint in the dedicated token.
+        // Note: the status row is 80 cols wide, so the tail of the hint is
+        // truncated by the paragraph — assert the visible substring.
+        let _pin = ThemePin::pin("classic");
+        let mut app = arpeggio_app();
+        let buf = buffer_for(&mut app, 80, 30);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("Renders degraded at 80 cols") && text.contains("\u{2265} 228"),
+            "degraded render must show the hint: {text:?}"
+        );
+        let style = token_style(&buf, "Renders degraded").expect("hint rendered");
+        assert_eq!(
+            style.fg,
+            Some(crate::theme::resolve("classic").render_outlier_warning),
+            "hint rides the render_outlier_warning token"
+        );
+        assert!(
+            style.add_modifier.contains(ratatui::style::Modifier::BOLD),
+            "hint is a bold advisory span"
+        );
+    }
+
+    #[test]
+    fn status_bar_healthy_render_shows_no_hint() {
+        // At or above native fit (228) the render is healthy in classic
+        // (overflow 0, contrast 5.252 \u{2265} 4.5): no hint (spec: healthy
+        // render shows no hint), even with the same patch loaded.
+        let _pin = ThemePin::pin("classic");
+        let mut app = arpeggio_app();
+        let buf = buffer_for(&mut app, 240, 30);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            !text.contains("Renders degraded"),
+            "healthy render must not show the hint: {text:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hint_tracks_width_verdict_per_frame() {
+        // The recommendation is re-evaluated per frame: the same loaded app
+        // flips to a hint at 80 cols and back to none at 240 cols (classic —
+        // mono would flag contrast at every width), so a terminal resize can
+        // never leave the hint stale.
+        let _pin = ThemePin::pin("classic");
+        let mut app = arpeggio_app();
+        let narrow = buffer_for(&mut app, 80, 30);
+        let narrow_text: String = narrow.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            narrow_text.contains("Renders degraded at 80 cols"),
+            "narrow frame must hint: {narrow_text:?}"
+        );
+        let wide = buffer_for(&mut app, 240, 30);
+        let wide_text: String = wide.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            !wide_text.contains("Renders degraded"),
+            "wide frame must not hint: {wide_text:?}"
+        );
+    }
+
+    #[test]
+    fn render_outlier_status_hint_snapshot_matrix() {
+        // Task 3.1 verify: the status-hint channel renders in every palette at
+        // widths 80/100/120 (arpeggio1 is degraded at all three — min 228).
+        for &theme_name in crate::theme::THEMES {
+            let _pin = ThemePin::pin(theme_name);
+            for width in [80u16, 100, 120] {
+                let mut app = arpeggio_app();
+                let buf = buffer_for(&mut app, width, 30);
+                let channel = status_rows_to_ansi(&buf);
+                insta::with_settings!({snapshot_suffix => format!("render_outlier_{theme_name}_{width}")}, {
+                    insta::assert_snapshot!(channel);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn hint_token_color_per_palette() {
+        // The hint rides the render_outlier_warning token in every palette:
+        // classic yellow, terminal Reset (owns its colors), mono white.
+        for &theme_name in crate::theme::THEMES {
+            let _pin = ThemePin::pin(theme_name);
+            let mut app = arpeggio_app();
+            let buf = buffer_for(&mut app, 80, 30);
+            let style = token_style(&buf, "Renders degraded").expect("hint rendered");
+            assert_eq!(
+                style.fg,
+                Some(crate::theme::resolve(theme_name).render_outlier_warning),
+                "hint token color for {theme_name}"
+            );
+            assert!(
+                style.add_modifier.contains(ratatui::style::Modifier::BOLD),
+                "hint bold for {theme_name}"
             );
         }
     }

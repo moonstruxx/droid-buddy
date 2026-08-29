@@ -1,0 +1,18 @@
+# droid_tui per-token-kind influence_subtree size statistics (design D4)
+# Fitted by tools/build_features.py on corpus/good (SEED 42, deterministic)
+#
+# Columns (whitespace-separated, one row per token kind, '#' comments allowed):
+#   kind mean std n
+# kind: token-kind u8 as in geometry.rs token_kind_u8 (0=B 1=L 2=P 3=O 4=I 5=E 6=S 7=G 8=M/R)
+# mean/std: population mean and standard deviation of influence_subtree
+#   size (number of influenced circuit instances) across corpus tokens.
+# z = (size - mean) / std; std <= 1e-6 -> no z-score (skip).
+# Artifact sha256: 61d25800e555addcfe618a13997ad1e58edcbc286166742a80e345cf4c9d54a1
+
+0 1.497511 7.113372 4822
+1 1.047726 4.103868 3122
+2 0.054945 0.760280 1456
+3 0.000000 0.000000 2176
+4 0.197411 2.485530 309
+5 8.250000 2.817357 8
+6 0.000000 0.000000 287

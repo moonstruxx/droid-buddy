@@ -8,16 +8,16 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use crate::geometry::{BindingFeatures, RackGeometry};
+use crate::geometry::{BindingFeatures, RackGeometry, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
 use crate::patch::{InfluenceSubtree, Patch};
 use crate::schema::load_schema;
 
-/// Euclidean distance threshold in B32-grid units above which a direct
-/// (zero-hop) hardware binding is considered a wiring outlier.
-/// Tuned against the real corpus: 8.0 flags the MFS-drum E4.4→M4 far wire
-/// (~15 units) but not adjacent B1.17→B1.18 (1 unit) nor co-located L→B (0).
-const WIRING_DISTANCE_THRESHOLD: f32 = 8.0;
+// Euclidean-distance wiring-outlier detection is delegated to the learned
+// decision table (`geometry::WiringOutlierScorer`, embedded artifact from
+// `tools/fit_outlier_model.py`) with a preserved threshold fallback — see
+// `validate_wiring_outliers`. Invariant guards (adjacent / co-located / via-
+// cable) stay explicit at the call site and never reach the scorer.
 
 /// A node's identity: `(circuit_name, instance_index)`.
 ///
@@ -333,6 +333,8 @@ fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
     if let Ok(geometry) = RackGeometry::load() {
         issues.extend(validate_wiring_outliers(patch, &geometry));
     }
+    // ---- per-token influence second opinion (design D4) ----
+    issues.extend(validate_influence_outliers(patch));
     for (cable, entry) in &patch.cable_index {
         match entry.sources.len() {
             0 => issues.push(TopologyIssue {
@@ -358,6 +360,7 @@ fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
 }
 
 fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<TopologyIssue> {
+    let scorer = WiringOutlierScorer::embedded();
     let mut outliers = Vec::new();
     let mut seen_pairs: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
@@ -395,17 +398,19 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
                 let Some(feat) = BindingFeatures::from_tokens(a, b, geometry, patch) else {
                     continue;
                 };
-                // Co-located L->B has distance 0, adjacent has distance 1 -> never outlier
-                if feat.adjacent || feat.euclidean < 1e-6 {
+                // Invariant guards (design D5) — hard guarantees, never
+                // learned: adjacent, co-located L->B (distance 0) and
+                // via-cable bindings never reach the scorer.
+                if feat.adjacent || feat.euclidean < 1e-6 || feat.cable_hops != 0 {
                     continue;
                 }
-                if feat.euclidean > WIRING_DISTANCE_THRESHOLD && feat.cable_hops == 0 {
+                if scorer.is_outlier(&feat) {
                     outliers.push(TopologyIssue {
                         cable: format!("{}->{}", a, b),
                         severity: TopologySeverity::Warning,
                         message: format!(
-                            "wiring outlier: {} -> {} distance {:.1} (threshold {:.1}) hops {}",
-                            a, b, feat.euclidean, WIRING_DISTANCE_THRESHOLD, feat.cable_hops
+                            "wiring outlier: {} -> {} distance {:.1} hops {} (decision table)",
+                            a, b, feat.euclidean, feat.cable_hops
                         ),
                     });
                 }
@@ -413,6 +418,43 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
         }
     }
     outliers
+}
+
+/// z-score band: a token whose influence-subtree size exceeds mean + 3σ for
+/// its kind is flagged as a `Warning` (design D4 second opinion). Calibrated
+/// against the corpus stats embedded from tools/build_features.py.
+const INFLUENCE_ZSCORE_BAND: f32 = 3.0;
+
+/// Per-token influence second opinion (design D4): every distinct hardware
+/// token in the patch is z-scored against the embedded per-kind corpus stats
+/// of influence-subtree size. Tokens beyond the calibrated band produce a
+/// `TopologyIssue` Warning attached to the token's first root `_VAR` cable so
+/// the renderer's error-highlight token colors it. Never gates patch loading
+/// (warnings only). Deterministic: tokens sorted, first root var (sorted).
+fn validate_influence_outliers(patch: &Patch) -> Vec<TopologyIssue> {
+    let mut tokens: Vec<&str> = patch.hw_components.iter().map(|c| c.id.as_str()).collect();
+    tokens.sort_unstable();
+    tokens.dedup();
+    let mut issues = Vec::new();
+    for token in tokens {
+        let Some(z) = patch.token_influence_z_score(token) else {
+            continue;
+        };
+        if z <= INFLUENCE_ZSCORE_BAND {
+            continue;
+        }
+        let vars = patch.hw_token_to_vars(token);
+        let cable = vars.first().cloned().unwrap_or_else(|| token.to_string());
+        let size = patch.influence_subtree_size_for(token);
+        issues.push(TopologyIssue {
+            cable,
+            severity: TopologySeverity::Warning,
+            message: format!(
+                "influence outlier: token {token} reaches {size} circuit(s), z={z:.1} (band {INFLUENCE_ZSCORE_BAND:.0})"
+            ),
+        });
+    }
+    issues
 }
 
 const HW_TOKEN_LETTERS_GRAPH: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M', 'R', 'G'];
@@ -1157,7 +1199,10 @@ mod fixture_tests {
         // `_CHANSEL` is consumed in real params but produced by no `output =`:
         // a genuine dangling reference (externally sourced in the real patch).
         // Cables with exactly one source (_PULSARCLOCK, _MATRIXSEL, _MATRIXEDIT)
-        // are not flagged.
+        // are not flagged by the topology (dangling/n→1) channel. `_MATRIXSEL`
+        // additionally carries the per-token influence second opinion (design
+        // D4): its root var pot P3.2 reaches 7 circuits, an extreme outlier for
+        // kind P (mean 0.055, std 0.76) — a Warning that never gates loading.
         let graph = fixture_graph("alg27_2.ini");
         let by_cable: HashMap<&str, TopologySeverity> = graph
             .validation
@@ -1170,7 +1215,72 @@ mod fixture_tests {
             "dangling _CHANSEL must be a warning"
         );
         assert_eq!(by_cable.get("_PULSARCLOCK"), None);
-        assert_eq!(by_cable.get("_MATRIXSEL"), None);
         assert_eq!(by_cable.get("_MATRIXEDIT"), None);
+        // _MATRIXSEL: the dangling channel stays silent, the influence
+        // second opinion fires (P3.2 → _MATRIXSEL, z≈9.1 > 3.0 band).
+        let matr = graph.validation.iter().find(|i| i.cable == "_MATRIXSEL");
+        assert!(
+            matr.is_some() && matr.unwrap().message.contains("influence outlier"),
+            "_MATRIXSEL carries the P3.2 influence-outlier finding"
+        );
+        assert_eq!(matr.unwrap().severity, TopologySeverity::Warning);
+    }
+
+    #[test]
+    fn influence_outlier_extreme_token_flagged() {
+        // Spec scenario: a hardware token whose influence subtree is an extreme
+        // outlier for its token kind → the associated cable renders with the
+        // error-highlight token and the finding is a Warning. A button driving
+        // 24 fan-out circuits is far beyond the B-kind corpus band (mean 1.5,
+        // std 7.1 → z ≈ 3.2).
+        let mut content = String::from(
+            "[p2b8]\n\
+             [button]\n    button = B1.1\n    output = _A\n",
+        );
+        for i in 0..24 {
+            content.push_str(&format!("[copy]\n    input = _A\n    output = _OUT{i}\n"));
+        }
+        let patch = Patch::from_ini_str(&content, String::from("extreme")).unwrap();
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let z = patch
+            .token_influence_z_score("B1.1")
+            .expect("B-kind has stats");
+        assert!(
+            z > 3.0,
+            "button driving 24 circuits must exceed the z-band, got {z:.2}"
+        );
+        let finding = graph
+            .validation
+            .iter()
+            .find(|i| i.message.contains("influence outlier"));
+        assert!(
+            finding.is_some(),
+            "extreme-token patch must produce an influence warning"
+        );
+        assert_eq!(finding.unwrap().severity, TopologySeverity::Warning);
+        assert!(finding.unwrap().cable.contains("_A"));
+    }
+
+    #[test]
+    fn influence_outlier_typical_token_not_flagged() {
+        // Spec scenario: every token within the calibrated band → no additional
+        // topology warning. A button driving one copy circuit stays near the
+        // B-kind mean (z ≈ 0).
+        let content = "[p2b8]\n\
+             [button]\n    button = B1.1\n    output = _A\n\
+             [copy]\n    input = _A\n    output = _OUT\n";
+        let patch = Patch::from_ini_str(content, String::from("typical")).unwrap();
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let z = patch
+            .token_influence_z_score("B1.1")
+            .expect("B-kind has stats");
+        assert!(z <= 3.0, "typical button must stay in band, got {z:.2}");
+        assert!(
+            !graph
+                .validation
+                .iter()
+                .any(|i| i.message.contains("influence outlier")),
+            "typical patch must not produce an influence warning"
+        );
     }
 }
