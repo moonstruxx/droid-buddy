@@ -31,7 +31,15 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        # GENERATE_GALLERY=1 makes the regression gallery hook materialize
+        # evidence/gallery/ during the test run (arg form `--generate-gallery`
+        # is rejected by libtest as an unknown option).
+        run: GENERATE_GALLERY=1 cargo test --locked
+
+      - name: Assert gallery render-outlier flags
+        # Fails when the scorer flags nothing: a broken extractor/artifact
+        # would produce no `degraded` marker in the generated gallery.
+        run: grep -q 'class="degraded"' evidence/gallery/index.html
 
       - name: Insta strict gate
         run: cargo insta test --check

@@ -40,5 +40,5 @@ expression: ansi
 │                   │                    │                                                         │
 │                   ╰────────────────────╯                                                         │
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│Preview: banner (default) | latency avg 1.0 / max 1.0 (1 loop ≈ 190µs) | 0 back edge(s) | Scale: 1│
+│Preview: banner (default) | Renders degraded at 100 cols — use ≥ 36 cols or reduce scale | latency│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

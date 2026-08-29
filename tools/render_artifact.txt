@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "feature_names": [
+    "components",
+    "panels",
+    "modules",
+    "min_width",
+    "overflow_cols",
+    "fallback_rate",
+    "sidebar_hidden",
+    "minimap_hidden",
+    "min_contrast"
+  ],
+  "degraded_bands": [
+    {
+      "feature": "overflow_cols",
+      "min": 1.0,
+      "max": 1000000000.0,
+      "degraded": true
+    },
+    {
+      "feature": "min_contrast",
+      "min": 0.0,
+      "max": 4.5,
+      "degraded": true
+    }
+  ],
+  "baseline_min_width_factor": 1.0,
+  "seed": 42
+}

@@ -150,5 +150,5 @@ expression: buffer_to_ansi(&buf)
 
 
 ┌──────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Scale: 1.0 | Orienta│
+│No patch loaded. Press 'l' to load. | Renders degraded at │
 └──────────────────────────────────────────────────────────┘

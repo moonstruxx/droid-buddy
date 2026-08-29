@@ -40,5 +40,5 @@ expression: ansi
 │                    │                                                                             │
 ╰────────────────────╯                                                                             │
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | latency avg 0.0 / max 0.0 (1 loop ≈ 190µs) | 0 back edge(s) │
+│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 36 cols or reduce scale│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
