@@ -777,7 +777,8 @@ impl Patch {
             // serial-position-dependent numbering is already encoded by the
             // patch author, so the parser reads it directly rather than
             // deriving it. Match suffix against any hardware-token-valued
-            // sibling entry (buttonN, potN, ...) in the same section.
+            // sibling entry (buttonN, potN, encoderN, switchN, faderN, ...)
+            // in the same section, covering every schema ledN group.
             let mut element_by_suffix: HashMap<&str, &str> = HashMap::new();
             for (key, value) in &section.entries {
                 // A `led*` key is the LED side of a pair, never the element
@@ -1274,7 +1275,11 @@ fn collect_banner_groups(raw_lines: &[String], sections: &[IniSection]) -> Vec<B
     groups
 }
 
-const HW_TOKEN_LETTERS: [char; 7] = ['B', 'L', 'P', 'O', 'I', 'E', 'S'];
+/// Letters that start a hardware token id. `M` (M4 motor fader) is included
+/// because the signal-flow graph layer (graph.rs/geometry.rs) already treats
+/// `M<n>.<ch>` as valid hardware tokens for wiring-outlier detection; fader
+/// elements model as Knob (see `token_kind`).
+const HW_TOKEN_LETTERS: [char; 8] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M'];
 
 /// Section names that declare a physical, pluggable controller unit (as
 /// opposed to internal logic/CV circuits). See design.md Decision 3.
@@ -1288,7 +1293,7 @@ const KNOWN_CONTROLLER_SECTIONS: [&str; 7] = [
     "fadermatrix",
 ];
 
-/// Scan a value expression for DROID hardware tokens (`B1.1`, `O4`, `I1`, ...).
+/// Scan a value expression for DROID hardware tokens (`B1.1`, `O4`, `I1`, `M4.2`, ...).
 ///
 /// A match starts at a hardware-token letter immediately followed by a
 /// digit and not preceded by an alphanumeric/underscore character, so that
@@ -1719,6 +1724,11 @@ pub fn token_kind(id: &str) -> Option<ComponentKind> {
         'I' => Some(ComponentKind::CvIn),
         'E' => Some(ComponentKind::Encoder),
         'S' => Some(ComponentKind::Switch),
+        // Faders (M4 motor faders) are continuous value controls; they model
+        // as Knob because a dedicated Fader kind would require exhaustive
+        // match updates in ui.rs/handler.rs, which is rendering task 2.2's
+        // territory. graph.rs/geometry.rs already recognize M tokens.
+        'M' => Some(ComponentKind::Knob),
         _ => None,
     }
 }
@@ -2004,6 +2014,89 @@ mod tests {
                 .all(|c| c.led.as_deref() != Some("L2.4")),
             "led22 with no same-suffix element must not associate L2.4"
         );
+    }
+
+    #[test]
+    fn led_association_captured_for_pot_with_numbered_pair() {
+        let content = std::fs::read_to_string("fixtures/led_pairs_kinds.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs_kinds")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        // numbered pot1 / led1
+        assert_eq!(find("P1.1").led.as_deref(), Some("L1.1"));
+        // bare led = with pot element
+        assert_eq!(find("P1.2").led.as_deref(), Some("L1.5"));
+    }
+
+    #[test]
+    fn led_association_captured_for_encoder_with_numbered_pair() {
+        let content = std::fs::read_to_string("fixtures/led_pairs_kinds.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs_kinds")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        // numbered encoder1 / led1
+        assert_eq!(find("E1.1").led.as_deref(), Some("L1.2"));
+        // bare led = with encoder element
+        assert_eq!(find("E1.2").led.as_deref(), Some("L1.6"));
+    }
+
+    #[test]
+    fn led_association_captured_for_switch_with_numbered_pair() {
+        let content = std::fs::read_to_string("fixtures/led_pairs_kinds.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs_kinds")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        // numbered switch1 / led1
+        assert_eq!(find("S1.1").led.as_deref(), Some("L1.3"));
+        // bare led = with switch element
+        assert_eq!(find("S1.2").led.as_deref(), Some("L1.7"));
+    }
+
+    #[test]
+    fn led_association_captured_for_fader_with_numbered_pair() {
+        let content = std::fs::read_to_string("fixtures/led_pairs_kinds.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs_kinds")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        // numbered fader1 / led1
+        assert_eq!(find("M1.1").led.as_deref(), Some("L1.4"));
+        // bare led = with fader element
+        assert_eq!(find("M1.2").led.as_deref(), Some("L1.8"));
+    }
+
+    #[test]
+    fn fader_token_models_as_knob_component() {
+        // M (M4 motor fader) tokens are valid hardware tokens (graph layer
+        // precedent); they model as Knob until a dedicated Fader kind lands
+        // with the rendering work (task 2.2).
+        let content = std::fs::read_to_string("fixtures/led_pairs_kinds.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_pairs_kinds")).unwrap();
+        let m1_1 = patch.hw_components.iter().find(|c| c.id == "M1.1").unwrap();
+        assert_eq!(m1_1.kind, ComponentKind::Knob);
+        assert_eq!(m1_1.module_instance(), Some(1));
+    }
+
+    #[test]
+    fn faderbank_ledvalue_without_element_sibling_leaves_led_none() {
+        // Real DROID faderbank syntax: faders are implicit (firstfader), so
+        // ledvalueN has no same-suffix element entry to pair with — no
+        // association may be invented.
+        let content = "[faderbank]\nfirstfader = 1\nledvalue1 = L2.4\n";
+        let patch = Patch::from_ini_str(content, String::from("faderbank_leds")).unwrap();
+        assert!(
+            patch
+                .hw_components
+                .iter()
+                .all(|c| c.led.as_deref() != Some("L2.4")),
+            "ledvalue1 with no same-suffix element must not associate L2.4"
+        );
+    }
+
+    #[test]
+    fn ledvalue_param_pairs_with_same_suffix_button() {
+        // fadermatrix convention: ledvalue11 = L1.1 pairs with button11 = B1.1
+        // (both share the matrix-position suffix 11). ledvalueN is the LED
+        // family for faders; the element side is the button.
+        let content = "[fadermatrix]\nbutton11 = B1.1\nledvalue11 = L1.1\n";
+        let patch = Patch::from_ini_str(content, String::from("fadermatrix_leds")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(b1_1.led.as_deref(), Some("L1.1"));
     }
 
     #[test]
