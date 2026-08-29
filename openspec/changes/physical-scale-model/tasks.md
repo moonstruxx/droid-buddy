@@ -5,7 +5,7 @@
 - [x] 1.1 Acquire + encode per-controller physical geometry <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [controller_geometry.json, tools/acquire_geometry.py] -->
       · from the DROID manual + knowledge base (droid-knowledge-base skill): per-controller HP width (master 8 HP, DB8E 6 HP, R2M/R2C 2 HP each, P2B8/P4B2/P10/S10/P8S8/B32/E4/M4/CV) and element cell positions/sizes in mm (button/pot/fader/encoder/switch/LED/CV per family); chain gaps between master and controllers; resolve the B32 orientation conflict to the manual's 4 cols × 8 rows; encode as `controller_geometry.json` (`rack_geometry.json` pattern, mm as the unit); each controller type carries an `he` (1|3) default (controllers are 3 HE)
       · verify: the data file covers every controller type the schema knows; all dimensions positive; element cells lie within their module rect; a small script cross-checks declared cell grids against token-family counts
-- [ ] 1.2 Geometry data sanity tests <!-- agent: horst-engineer.fast, depends_on: [1.1, 2.1], touches: [controller_geometry.json, src/physical.rs] -->
+- [x] 1.2 Geometry data sanity tests <!-- agent: horst-engineer.fast, depends_on: [1.1, 2.1], touches: [controller_geometry.json, src/physical.rs] -->
       · load-time validation: every controller type present, positive mm, cells within module rect, B32 resolved 4×8; malformed/missing entry falls back (5 HP) without panic
       · verify: `cargo test` new data-sanity tests pass
 
@@ -17,16 +17,16 @@
 - [x] 2.3 Rack/case model + row assignment <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/physical.rs] -->
       · `RackSpec` (rows: he/hp/label, top_mount_te, side_mount_te, assign map) + `RackLayout::pack(chain)` → modules into rows: auto-pack in chain order (row fills until the next module would exceed its HP, then next row), per-module override, out-of-range override → auto fallback; fold-line mm positions at row boundaries; default single-row case wide enough for the chain; pure (no config parsing — that is 4.4)
       · verify: `cargo test` in-module unit tests (auto-pack fill/overflow, override placement, out-of-range fallback, fold-line positions, determinism)
-- [ ] 2.2 Grid-model unit tests <!-- agent: horst-engineer.build, depends_on: [2.1, 2.3], touches: [src/physical.rs] -->
+- [x] 2.2 Grid-model unit tests <!-- agent: horst-engineer.build, depends_on: [2.1, 2.3], touches: [src/physical.rs] -->
       · chain order matches patch declaration; element cells resolve per token family; two `[p2b8]` instances yield two faceplates at real widths; unknown controller falls back to 5 HP; deterministic across runs; rack packing: auto-pack fills row 0 then overflows to row 1, per-module override places correctly, out-of-range override falls back, fold lines at expected mm positions
       · verify: `cargo test` green; determinism asserted (identical layout on repeat)
 
 ## 3. Skeleton Reference
 
-- [ ] 3.1 Skeleton renderer + mode state <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/ui.rs, src/app.rs, src/handler.rs] -->
+- [x] 3.1 Skeleton renderer + mode state <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/ui.rs, src/app.rs, src/handler.rs] -->
       · geometry-only render: module outlines + element cells, no labels/states; mode flag on App; toggle key in handler; rendered from the same PhysicalLayout the full view uses; publishes skeleton cell rects for the coincidence tests
       · verify: `cargo test` renders skeleton for a fixture patch; toggle switches presentation back and forth; no handler priority regressions
-- [ ] 3.2 Skeleton theme tokens <!-- agent: layout-designer-engineer.fast, depends_on: [3.1], touches: [src/theme.rs] -->
+- [x] 3.2 Skeleton theme tokens <!-- agent: layout-designer-engineer.fast, depends_on: [3.1], touches: [src/theme.rs] -->
       · `physical_skeleton_*` tokens (module outline, element cell, port markers) in classic/mono/terminal, following the token-layer invariant (no `Color::` literals outside tests)
       · verify: tokens present in all three palettes; mono pairwise-distinct where they co-occur
 - [ ] 3.3 Skeleton snapshot coverage <!-- agent: horst-engineer.fast, depends_on: [3.1], touches: [src/regression.rs] -->
