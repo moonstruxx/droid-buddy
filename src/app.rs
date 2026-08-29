@@ -478,9 +478,10 @@ pub struct App {
     /// blocked and selection-driven influence is cleared (never computed).
     pub processing_paused: bool,
     /// True when the main panel shows the geometry-only physical skeleton
-    /// (design D7) instead of the wrapped-panel view. Presentation switch of
-    /// the main view, default OFF — the existing view is untouched until 4.2
-    /// replaces it. Reset on patch load like `processing_paused`.
+    /// (design D7) instead of the physical full render. Presentation switch
+    /// of the main view, default OFF — the physical full render is the
+    /// default main view since 4.2. Reset on patch load like
+    /// `processing_paused`.
     pub physical_show_skeleton: bool,
     /// Screen rects the skeleton renderer published last frame, keyed by
     /// (module index, cell index = position of the element in the module's
@@ -488,15 +489,21 @@ pub struct App {
     /// coincidence contract — 5.1 compares full-view element rects 1:1
     /// against these at the same scale/offset.
     pub physical_skeleton_rects: Vec<(usize, usize, Rect)>,
+    /// Screen rects the physical full renderer published last frame — the
+    /// same (module index, cell index, screen Rect) shape and order as
+    /// `physical_skeleton_rects`, computed from the same mapping and
+    /// geometry, so the D5 coincidence contract holds by construction
+    /// (5.1 compares the two vectors 1:1). Rebuilt every frame.
+    pub physical_full_rects: Vec<(usize, usize, Rect)>,
     /// Viewport state of the physical presentation (design D5): pan offset in
     /// screen cells and zoom. `physical_zoom` is derived from the `+`/`-`
-    /// scale presets (`scale_factor / 100`, linked by the skeleton renderer);
+    /// scale presets (ratio 0.75–2.0, linked by the renderers);
     /// `physical_offset` is mutated by panning (4.3's wheel wiring). Both
     /// reset on patch load like `physical_show_skeleton`.
     pub physical_offset: (f32, f32),
     pub physical_zoom: f32,
     /// Screen size (w, h) in cells of the whole rack under the current
-    /// mapping, published by the skeleton renderer each frame
+    /// mapping, published by the renderers each frame
     /// (renderer-owns-geometry contract). `physical_overflow` compares it
     /// against the visible area for the 4.3 wheel-pan wiring.
     pub physical_rack_size: (u16, u16),
@@ -597,6 +604,7 @@ impl App {
             processing_paused: false,
             physical_show_skeleton: false,
             physical_skeleton_rects: Vec::new(),
+            physical_full_rects: Vec::new(),
             physical_offset: (0.0, 0.0),
             physical_zoom: 1.0,
             physical_rack_size: (0, 0),
