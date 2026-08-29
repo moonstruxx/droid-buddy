@@ -6,7 +6,8 @@ use ratatui::layout::Rect;
 use std::collections::HashMap;
 
 use crate::app::{
-    is_entry_selectable, App, GraphDrag, PrefixState, QuadFocus, SourceViewMode, ViewerFocus,
+    is_entry_selectable, is_picker_parent_entry, App, GraphDrag, PrefixState, QuadFocus,
+    SourceViewMode, ViewerFocus,
 };
 use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
@@ -909,7 +910,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
         crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
             // Cycle through the scaling presets defined by the module-scaling spec.
-            const PRESETS: [f32; 4] = [0.5, 1.0, 1.5, 2.0];
+            // The floor is 0.75 so cells never shrink below the boxable width.
+            const PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
             let idx = PRESETS
                 .iter()
                 .position(|p| (p - app.scale_factor).abs() < f32::EPSILON)
@@ -1390,6 +1392,17 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                 if !is_entry_selectable(&selected_path) {
                     return false;
                 }
+                // Parent ".." sentinel: navigate up to the picker dir's parent.
+                // Handled before the metadata `is_dir` branch because a bare
+                // ".." path resolves against the process cwd, not picker_dir.
+                if is_picker_parent_entry(&selected_path) {
+                    if let Some(parent) = app.picker_dir.parent() {
+                        app.picker_dir = parent.to_path_buf();
+                        app.picker_index = 0;
+                        app.refresh_picker_entries();
+                    }
+                    return false;
+                }
                 let is_dir = selected_path.metadata().is_ok_and(|m| m.is_dir());
                 if is_dir {
                     app.picker_dir = selected_path;
@@ -1541,10 +1554,10 @@ mod tests {
     #[test]
     fn plus_and_minus_cycle_scale_presets_with_status() {
         let mut app = App::new();
-        // From the 100% default, '-' steps down one preset to 50%.
+        // From the 100% default, '-' steps down one preset to 75%.
         handle_event(key(crossterm::event::KeyCode::Char('-')), &mut app);
-        assert_eq!(app.scale_factor, 0.5);
-        assert_eq!(app.status_message, "Scaling: 50%");
+        assert_eq!(app.scale_factor, 0.75);
+        assert_eq!(app.status_message, "Scaling: 75%");
 
         // '+' climbs back through the presets.
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
@@ -1557,7 +1570,21 @@ mod tests {
 
         // At the top preset, '+' wraps around to the bottom.
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
-        assert_eq!(app.scale_factor, 0.5);
+        assert_eq!(app.scale_factor, 0.75);
+    }
+
+    #[test]
+    fn picker_enter_on_parent_entry_navigates_up_without_closing() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        assert!(
+            is_picker_parent_entry(&app.picker_entries[0]),
+            "parent entry is the '..' sentinel"
+        );
+        app.picker_index = 0;
+        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(app.showing_picker, "picker stays open when navigating up");
+        assert_eq!(app.picker_dir, std::path::PathBuf::from("fixtures"));
+        assert!(app.patch.is_none());
     }
 
     /// Open the embedded source viewer via `g` then `v`.

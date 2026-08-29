@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, QuadFocus, SourceViewMode, ViewerFocus};
+use crate::app::{is_picker_parent_entry, App, QuadFocus, SourceViewMode, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::theme;
@@ -378,6 +378,27 @@ fn render_empty(frame: &mut Frame, area: Rect) {
 const COMPONENT_WIDTH: u16 = 16;
 const COMPONENT_HEIGHT: u16 = 3;
 
+/// A boxed LED cell needs room for both border columns plus the interior
+/// state row; below this width the bordered cell degrades to the unboxed
+/// two-line rendering instead of emitting clipped border fragments
+/// (droid_tui-wsu).
+const BOX_MIN_WIDTH: u16 = 8;
+
+/// Truncate `s` to at most `max_chars` terminal columns, appending `…`
+/// (U+2026) when it overflows (droid_tui-lsd). Char-aware so multi-byte
+/// labels never split a glyph; the ellipsis counts as one column.
+fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    if display_width(s) <= max_chars {
+        s.to_string()
+    } else if max_chars == 0 {
+        String::new()
+    } else {
+        let mut out: String = s.chars().take(max_chars - 1).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
 /// Render hardware components grouped into physical controller panels
 /// (P2B8, Faderbank, Notebuttons, CV I/O, ...) that mirror the hardware
 /// layout, wrapping components onto extra rows when a panel doesn't fit
@@ -641,6 +662,12 @@ fn render_component_grid(
     let scaled_w = ((COMPONENT_WIDTH as f32 * app.scale_factor).round() as u16).max(8);
     let scaled_h = ((COMPONENT_HEIGHT as f32 * app.scale_factor).round() as u16).max(3);
     let cols = (area.width / scaled_w).max(1) as usize;
+    // A cell never exceeds its container: at a panel width below
+    // COMPONENT_WIDTH the nominal cell would draw its box over the panel
+    // border column, so the real cell width is clamped to the container
+    // (droid_tui-wsu). The published hit rect is this clamped cell, keeping
+    // hit-testing in lockstep with what is drawn.
+    let cell_w = scaled_w.min(area.width / cols as u16).max(1);
     let rows_for = |n: usize| -> u16 { (n.div_ceil(cols)).max(1) as u16 };
 
     let row_chunks = Layout::default()
@@ -665,7 +692,7 @@ fn render_component_grid(
         }
         let comp_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Length(scaled_w); row.len()])
+            .constraints(vec![Constraint::Length(cell_w); row.len()])
             .flex(Flex::Start)
             .split(row_chunks[row_i]);
 
@@ -856,75 +883,117 @@ fn render_component(
         paused,
     );
 
-    // If this component owns a LED, render a bordered box (3 rows tall).
+    // If this component owns a LED, render a bordered box (3 rows tall) —
+    // unless the cell is too narrow for a legible box, in which case it
+    // falls back to the unboxed two-line text cell (droid_tui-wsu).
     if let Some(led_id) = &comp.led {
-        // Look up the LED component by id — do not use .unwrap().
-        let led_component = patch.hw_components.iter().find(|c| c.id == led_id.as_str());
+        if area.width >= BOX_MIN_WIDTH && area.height >= COMPONENT_HEIGHT {
+            // Look up the LED component by id — do not use .unwrap().
+            let led_component = patch.hw_components.iter().find(|c| c.id == led_id.as_str());
 
-        let led_glyph = match led_component {
-            Some(led) => match &led.state {
-                ComponentState::On | ComponentState::Active => "◉",
-                _ => "○",
-            },
-            // LED not found in patch — fall back to unlit glyph.
-            None => "○",
-        };
+            let led_glyph = match led_component {
+                Some(led) => match &led.state {
+                    ComponentState::On | ComponentState::Active => "◉",
+                    _ => "○",
+                },
+                // LED not found in patch — fall back to unlit glyph.
+                None => "○",
+            };
 
-        // Hover styling applied to box content/border, same convention as text path.
-        let display_style = dim_style(
-            if is_hovered {
-                Style::default()
-                    .fg(fg_color)
-                    .bg(theme::active().muted)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default().fg(fg_color)
-            },
-            paused,
-        );
+            // Hover styling applied to box content/border, same convention as text path.
+            let display_style = dim_style(
+                if is_hovered {
+                    Style::default()
+                        .fg(fg_color)
+                        .bg(theme::active().muted)
+                        .add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(fg_color)
+                },
+                paused,
+            );
 
-        // controller-panels spec §"Box LED-associated elements": one bordered
-        // cell, border colored by the element's kind, showing the element's
-        // symbol, label, state, and the LED glyph reflecting the LED's state
-        // — a single state, not a second textual LED state (droid_tui-888).
-        // The 3-row cell has no room for a border plus multiple content
-        // lines, so the label lives in the top title (drawn inside the
-        // border row) and the single interior row holds state + LED glyph.
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(display_style)
-            .title_top(Line::styled(
-                format!(" {} {} ", symbol, display_label),
+            // controller-panels spec §"Box LED-associated elements": one bordered
+            // cell, border colored by the element's kind, showing the element's
+            // symbol, label, state, and the LED glyph reflecting the LED's state
+            // — a single state, not a second textual LED state (droid_tui-888).
+            // The 3-row cell has no room for a border plus multiple content
+            // lines, so the label lives in the top title (drawn inside the
+            // border row) and the single interior row holds state + LED glyph.
+            // The label is ellipsized to the border row's inner width so the
+            // closing corner never lands glued to a hard-cut word
+            // (droid_tui-lsd).
+            let label =
+                truncate_with_ellipsis(display_label, (area.width as usize).saturating_sub(5));
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(display_style)
+                .title_top(Line::styled(
+                    format!(" {} {} ", symbol, label),
+                    display_style,
+                ));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let line = Line::from(Span::styled(
+                format!("{} {}", state_text, led_glyph),
                 display_style,
             ));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let line = Line::from(Span::styled(
-            format!("{} {}", state_text, led_glyph),
-            display_style,
-        ));
-        let widget = Paragraph::new(line).alignment(Alignment::Center);
-        frame.render_widget(widget, inner);
+            let widget = Paragraph::new(line).alignment(Alignment::Center);
+            frame.render_widget(widget, inner);
+        } else {
+            render_text_cell(
+                frame,
+                area,
+                symbol,
+                display_label,
+                &state_text,
+                hover_style,
+                paused,
+            );
+        }
     } else {
-        // led: None — render the existing two‑line text cell into the 3‑row area.
-        // The Paragraph fills the available area; no gap is left below.
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(symbol, hover_style),
-                Span::raw(" "),
-                Span::styled(display_label, hover_style),
-            ]),
-            Line::from(Span::styled(
-                state_text,
-                dim_style(Style::default().fg(theme::active().muted), paused),
-            )),
-            Line::from(Span::raw("")), // third row filler so the 3‑row area is fully occupied
-        ];
-
-        let widget = Paragraph::new(lines).alignment(Alignment::Center);
-        frame.render_widget(widget, area);
+        render_text_cell(
+            frame,
+            area,
+            symbol,
+            display_label,
+            &state_text,
+            hover_style,
+            paused,
+        );
     }
+}
+
+/// Render the unboxed two-line text cell (symbol + label over state) used
+/// for LED-less components and as the narrow-width fallback for boxed ones
+/// (droid_tui-wsu). The Paragraph fills the whole 3-row area, so no gap is
+/// left below; the label is ellipsized to the cell width (droid_tui-lsd).
+fn render_text_cell(
+    frame: &mut Frame,
+    area: Rect,
+    symbol: &str,
+    display_label: &str,
+    state_text: &str,
+    hover_style: Style,
+    paused: bool,
+) {
+    let label = truncate_with_ellipsis(display_label, (area.width as usize).saturating_sub(2));
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(symbol, hover_style),
+            Span::raw(" "),
+            Span::styled(label, hover_style),
+        ]),
+        Line::from(Span::styled(
+            state_text,
+            dim_style(Style::default().fg(theme::active().muted), paused),
+        )),
+        Line::from(Span::raw("")), // third row filler so the 3-row area is fully occupied
+    ];
+
+    let widget = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(widget, area);
 }
 
 /// Shift colors come from the theme's per-group tokens so themes can
@@ -1067,14 +1136,19 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, path)| {
             let is_selected = i == app.picker_index;
-            let file_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
+            // The parent entry is a bare ".." sentinel with no file name;
+            // render it as ".." instead of an empty label.
+            let display = if is_picker_parent_entry(path) {
+                "..".to_string()
+            } else {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            };
 
             let prefix = if is_selected { "▶ " } else { "  " };
 
-            format!("{}{}", prefix, file_name)
+            format!("{}{}", prefix, display)
         })
         .collect();
 
@@ -5064,5 +5138,24 @@ mod graph_view_tests {
         }
         // Edge coloring unchanged: the kind token still applies.
         assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
+    }
+
+    // ── label ellipsis (droid_tui-lsd) ────────────────────────────────────
+
+    #[test]
+    fn truncate_with_ellipsis_keeps_short_labels_and_appends_on_overflow() {
+        assert_eq!(truncate_with_ellipsis("short", 8), "short");
+        assert_eq!(truncate_with_ellipsis("exactly", 7), "exactly");
+        // Over-length: max_chars - 1 chars + the ellipsis.
+        assert_eq!(
+            truncate_with_ellipsis("[t2 P] Modulation", 14),
+            "[t2 P] Modula…"
+        );
+        assert_eq!(truncate_with_ellipsis("longlabel", 5), "long…");
+        // Multi-byte safe: ellipsis itself is a single char.
+        assert_eq!(truncate_with_ellipsis("αβγδε", 3), "αβ…");
+        // Degenerate maxima never panic and stay within the budget.
+        assert_eq!(truncate_with_ellipsis("x", 0), "");
+        assert_eq!(truncate_with_ellipsis("xy", 1), "…");
     }
 }
