@@ -340,6 +340,9 @@ pub struct PhysicalLayout {
     pub total_height_mm: f64,
     pub chain_gaps_mm: ChainGaps,
     pub hp_mm: f64,
+    /// HE -> height in mm ("1" -> 43.3, "3" -> 128.5); rack rows resolve
+    /// their height through this map (task 2.3).
+    pub he_mm: HashMap<String, f64>,
     pub fallback_width_mm: f64,
     pub fallback_height_mm: f64,
 }
@@ -565,6 +568,7 @@ impl PhysicalLayout {
             total_height_mm: total_height,
             chain_gaps_mm: data.meta.chain_gaps_mm.clone(),
             hp_mm: data.hp_mm(),
+            he_mm: data.meta.he_mm.clone(),
             fallback_width_mm: fallback_w,
             fallback_height_mm: fallback_h,
         }
@@ -587,6 +591,295 @@ impl PhysicalLayout {
             .find(|c| c.element == Some(element) && c.kind_letter == Some(kind_letter))
             .or_else(|| cells.iter().find(|c| c.element == Some(element)))
             .or_else(|| cells.get(element.checked_sub(1)? as usize))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rack / case model (task 2.3) — rows, TE mounts, row assignment
+// ---------------------------------------------------------------------------
+
+/// Height of the fold-bar divider at each row boundary in mm. A model
+/// constant the renderer maps with the same formula as the rows.
+pub const FOLD_BAR_HEIGHT_MM: f64 = 5.0;
+
+/// One case row. Height in HE (1 or 3), width in HP, optional label.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct RackRow {
+    #[serde(default)]
+    pub he: u32,
+    #[serde(default)]
+    pub hp: f64,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// The case/rack definition (D9/D10). Pure data — the `[physical.rack]`
+/// config parser (task 4.4) produces this from `config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct RackSpec {
+    /// Ordered rows. An empty list means "no rack configured" and packs as
+    /// the default single-row case wide enough for the whole chain.
+    #[serde(default)]
+    pub rows: Vec<RackRow>,
+    /// Width of the top-mount section in TE (1 TE = 1 HP = 5.08 mm).
+    #[serde(default)]
+    pub top_mount_te: f64,
+    /// Width of the side-mount sections in TE.
+    #[serde(default)]
+    pub side_mount_te: f64,
+    /// Per-module override: module key -> 0-based row index. An out-of-range
+    /// row falls back to auto-pack. Key format is `"{controller} {instance}"`
+    /// with a 1-based instance for humans (e.g. "P2B8 1"); the master
+    /// faceplate has no instance and uses the bare controller name
+    /// ("CV I/O"). See `PhysicalModule::key`.
+    #[serde(default)]
+    pub assign: HashMap<String, usize>,
+}
+
+impl RackSpec {
+    /// The out-of-box case (D9): a single 3-HE row wide enough for the whole
+    /// chain, no mounts, no overrides.
+    pub fn default_case(chain: &PhysicalLayout) -> Self {
+        let he = chain.modules.iter().map(|m| m.he).max().unwrap_or(3).max(1);
+        let hp = (chain.total_width_mm / chain.hp_mm.max(0.001))
+            .ceil()
+            .max(1.0);
+        Self {
+            rows: vec![RackRow {
+                he,
+                hp,
+                label: None,
+            }],
+            top_mount_te: 0.0,
+            side_mount_te: 0.0,
+            assign: HashMap::new(),
+        }
+    }
+}
+
+impl PhysicalModule {
+    /// Identity key for `RackSpec.assign`: controller + 1-based instance
+    /// ("P2B8 1"), or the bare controller name when the faceplate carries no
+    /// instance (the CV I/O master). Unique within a chain by construction.
+    pub fn key(&self) -> String {
+        match self.module_instance {
+            Some(n) => format!("{} {}", self.controller, n),
+            None => self.controller.clone(),
+        }
+    }
+}
+
+/// Row height in mm for a HE value, from the loaded `he_mm` map
+/// (fallback_height_mm for unknown HE values).
+fn row_height_mm(chain: &PhysicalLayout, he: u32) -> f64 {
+    chain
+        .he_mm
+        .get(&he.to_string())
+        .copied()
+        .filter(|h| *h > 0.0)
+        .unwrap_or(chain.fallback_height_mm)
+}
+
+/// A module placed into a rack row (absolute mm position).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PlacedModule {
+    /// Module key (see `PhysicalModule::key`), e.g. "P2B8 1".
+    pub key: String,
+    /// Index into `PhysicalLayout::modules`.
+    pub module_index: usize,
+    /// Absolute mm rect within the rack.
+    pub rect_mm: RectMm,
+    /// True when placed via `RackSpec::assign` instead of auto-pack.
+    pub overridden: bool,
+}
+
+/// A resolved row of the rack: its spec plus the modules assigned to it.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RackRowPlacement {
+    pub he: u32,
+    pub hp: f64,
+    pub label: Option<String>,
+    /// Y offset of the row's top edge in mm (below the top mount, after the
+    /// previous row's fold bar).
+    pub y_mm: f64,
+    /// Row height in mm (`he_mm[he]`).
+    pub height_mm: f64,
+    /// Modules in chain order (overrides never reorder within a row).
+    pub modules: Vec<PlacedModule>,
+    /// Used width in mm (module widths + inter-module gaps).
+    pub fill_width_mm: f64,
+}
+
+/// A horizontal fold-bar divider at a row boundary (D11).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct FoldBar {
+    /// 0-based index of the row this boundary sits after.
+    pub after_row: usize,
+    /// Divider rect: spans the rows region, height = FOLD_BAR_HEIGHT_MM.
+    pub rect_mm: RectMm,
+}
+
+/// Attached case sections (D11): top and side mount regions in mm.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct RackMounts {
+    #[serde(default)]
+    pub top: Option<RectMm>,
+    #[serde(default)]
+    pub side_left: Option<RectMm>,
+    #[serde(default)]
+    pub side_right: Option<RectMm>,
+}
+
+/// The resolved rack: rows with placed modules, fold bars, mounts, and the
+/// overall mm bounds the renderer maps to screen (task 4.1).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RackLayout {
+    pub rows: Vec<RackRowPlacement>,
+    pub fold_bars: Vec<FoldBar>,
+    pub mounts: RackMounts,
+    pub total_width_mm: f64,
+    pub total_height_mm: f64,
+    pub fold_bar_height_mm: f64,
+}
+
+impl RackLayout {
+    /// Pack the chain into the rack's rows (D10).
+    ///
+    /// Modules auto-pack in chain order: the current row fills left-to-right
+    /// until the next module would exceed the row's HP (capacity = hp ×
+    /// hp_mm), then the next row starts; the last row accepts overflow. A
+    /// `spec.assign` override forces a module into a row regardless of fit;
+    /// an out-of-range override falls back to auto-pack. Overrides never
+    /// reorder modules within a row. An empty `spec.rows` materializes the
+    /// default single-row case. Deterministic — the assign map is consulted
+    /// by key only, never iterated.
+    pub fn pack(chain: &PhysicalLayout, spec: &RackSpec) -> Self {
+        let spec = if spec.rows.is_empty() {
+            RackSpec::default_case(chain)
+        } else {
+            spec.clone()
+        };
+        let hp_mm = chain.hp_mm.max(0.001);
+        let gap = chain.chain_gaps_mm.inter_module.max(0.0);
+
+        // Row assignment: fills[i] = used mm width; placements[i] in chain order.
+        let mut fills = vec![0.0; spec.rows.len()];
+        let mut placements: Vec<Vec<PlacedModule>> = vec![Vec::new(); spec.rows.len()];
+        let mut cursor = 0usize;
+
+        for (module_index, module) in chain.modules.iter().enumerate() {
+            let key = module.key();
+            let override_row = spec
+                .assign
+                .get(&key)
+                .copied()
+                .filter(|&r| r < spec.rows.len());
+            let row = match override_row {
+                Some(r) => r,
+                None => {
+                    let mut r = cursor;
+                    loop {
+                        let capacity = spec.rows[r].hp * hp_mm;
+                        let x = if fills[r] > 0.0 {
+                            fills[r] + gap
+                        } else {
+                            fills[r]
+                        };
+                        if x + module.rect_mm.w_mm <= capacity || r + 1 >= spec.rows.len() {
+                            break r;
+                        }
+                        r += 1;
+                    }
+                }
+            };
+            let x = if fills[row] > 0.0 {
+                fills[row] + gap
+            } else {
+                fills[row]
+            };
+            placements[row].push(PlacedModule {
+                key,
+                module_index,
+                rect_mm: RectMm {
+                    x_mm: x,
+                    y_mm: 0.0,
+                    w_mm: module.rect_mm.w_mm,
+                    h_mm: module.rect_mm.h_mm,
+                },
+                overridden: override_row.is_some(),
+            });
+            fills[row] = x + module.rect_mm.w_mm;
+            if override_row.is_none() {
+                cursor = row;
+            }
+        }
+
+        // Vertical mm geometry: top mount, then rows separated by fold bars.
+        let rows_width = spec.rows.iter().map(|r| r.hp * hp_mm).fold(0.0, f64::max);
+        let top_mount_h = spec.top_mount_te * hp_mm;
+        let side_mount_w = spec.side_mount_te * hp_mm;
+
+        let mut y = top_mount_h;
+        let mut rows: Vec<RackRowPlacement> = Vec::with_capacity(spec.rows.len());
+        let mut fold_bars: Vec<FoldBar> = Vec::new();
+        for (i, row) in spec.rows.iter().enumerate() {
+            rows.push(RackRowPlacement {
+                he: row.he,
+                hp: row.hp,
+                label: row.label.clone(),
+                y_mm: y,
+                height_mm: row_height_mm(chain, row.he),
+                modules: std::mem::take(&mut placements[i]),
+                fill_width_mm: fills[i],
+            });
+            y += rows[i].height_mm;
+            if i + 1 < spec.rows.len() {
+                fold_bars.push(FoldBar {
+                    after_row: i,
+                    rect_mm: RectMm {
+                        x_mm: 0.0,
+                        y_mm: y,
+                        w_mm: rows_width,
+                        h_mm: FOLD_BAR_HEIGHT_MM,
+                    },
+                });
+                y += FOLD_BAR_HEIGHT_MM;
+            }
+        }
+
+        let rows_region_h = y - top_mount_h;
+        let total_height = y;
+        let total_width = rows_width + 2.0 * side_mount_w;
+
+        let mounts = RackMounts {
+            top: (spec.top_mount_te > 0.0).then_some(RectMm {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                w_mm: rows_width,
+                h_mm: top_mount_h,
+            }),
+            side_left: (side_mount_w > 0.0).then_some(RectMm {
+                x_mm: 0.0,
+                y_mm: top_mount_h,
+                w_mm: side_mount_w,
+                h_mm: rows_region_h,
+            }),
+            side_right: (side_mount_w > 0.0).then_some(RectMm {
+                x_mm: rows_width,
+                y_mm: top_mount_h,
+                w_mm: side_mount_w,
+                h_mm: rows_region_h,
+            }),
+        };
+
+        Self {
+            rows,
+            fold_bars,
+            mounts,
+            total_width_mm: total_width,
+            total_height_mm: total_height,
+            fold_bar_height_mm: FOLD_BAR_HEIGHT_MM,
+        }
     }
 }
 
@@ -780,5 +1073,142 @@ mod tests {
         assert!(p2b8.element_cells.contains_key("B"));
         assert!(p2b8.element_cells.contains_key("L"));
         assert!(p2b8.element_cells.contains_key("P"));
+    }
+
+    // ---- rack model (task 2.3) ----
+
+    /// p2b8 (5 HP, 25.4 mm) + CV I/O master (8 HP, 40.64 mm).
+    fn two_module_chain() -> PhysicalLayout {
+        PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"))
+    }
+
+    fn spec(rows: &[(u32, f64)], assign: &[(&str, usize)]) -> RackSpec {
+        RackSpec {
+            rows: rows
+                .iter()
+                .map(|&(he, hp)| RackRow {
+                    he,
+                    hp,
+                    label: None,
+                })
+                .collect(),
+            top_mount_te: 0.0,
+            side_mount_te: 0.0,
+            assign: assign.iter().map(|&(k, r)| (String::from(k), r)).collect(),
+        }
+    }
+
+    #[test]
+    fn module_key_format_is_controller_plus_instance() {
+        let chain = two_module_chain();
+        assert_eq!(chain.modules[0].key(), "P2B8 1");
+        assert_eq!(chain.modules[1].key(), "CV I/O");
+    }
+
+    #[test]
+    fn auto_pack_fills_row_0_then_overflows_to_row_1() {
+        let chain = two_module_chain();
+        let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[]));
+        assert_eq!(rack.rows.len(), 2);
+        assert_eq!(rack.rows[0].modules.len(), 1);
+        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
+        assert_close(rack.rows[0].modules[0].rect_mm.x_mm, 0.0);
+        assert!(!rack.rows[0].modules[0].overridden);
+        assert_eq!(rack.rows[1].modules.len(), 1);
+        assert_eq!(rack.rows[1].modules[0].key, "CV I/O");
+        assert_close(rack.rows[1].modules[0].rect_mm.x_mm, 0.0);
+        assert_close(rack.rows[0].fill_width_mm, 25.4);
+        assert_close(rack.rows[1].fill_width_mm, 40.64);
+    }
+
+    #[test]
+    fn default_single_row_holds_whole_chain() {
+        let chain = two_module_chain();
+        let rack = RackLayout::pack(&chain, &RackSpec::default());
+        assert_eq!(rack.rows.len(), 1);
+        let row = &rack.rows[0];
+        assert_eq!(row.he, 3);
+        assert_close(row.hp, 14.0); // ceil(66.54 / 5.08)
+        assert_eq!(row.modules.len(), 2);
+        assert_eq!(row.modules[0].key, "P2B8 1");
+        assert_eq!(row.modules[1].key, "CV I/O");
+        assert_close(row.modules[1].rect_mm.x_mm, 25.9);
+        assert_close(row.fill_width_mm, 66.54);
+        assert_close(rack.total_width_mm, 71.12); // 14 HP case
+        assert!(rack.fold_bars.is_empty());
+    }
+
+    #[test]
+    fn override_places_module_into_row_regardless_of_fit() {
+        let chain = two_module_chain();
+        let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 1)]));
+        // p2b8 forced to row 1; master auto-packs row 0 (cursor unaffected).
+        assert_eq!(rack.rows[0].modules[0].key, "CV I/O");
+        assert_eq!(rack.rows[1].modules[0].key, "P2B8 1");
+        assert!(rack.rows[1].modules[0].overridden);
+        assert!(!rack.rows[0].modules[0].overridden);
+    }
+
+    #[test]
+    fn out_of_range_override_falls_back_to_auto_pack() {
+        let chain = two_module_chain();
+        let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 5)]));
+        assert_eq!(rack.rows[0].modules.len(), 1);
+        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
+        assert!(!rack.rows[0].modules[0].overridden);
+        assert_eq!(rack.rows[1].modules[0].key, "CV I/O");
+    }
+
+    #[test]
+    fn fold_lines_at_row_boundaries() {
+        let chain = two_module_chain();
+        let rack = RackLayout::pack(&chain, &spec(&[(3, 5.0), (3, 5.0), (3, 5.0)], &[]));
+        // p2b8 fits row 0 exactly (25.4 == 25.4); master (40.64) overflows to row 2.
+        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
+        assert!(rack.rows[1].modules.is_empty());
+        assert_eq!(rack.rows[2].modules[0].key, "CV I/O");
+        assert_eq!(rack.fold_bars.len(), 2);
+        let b0 = &rack.fold_bars[0];
+        assert_eq!(b0.after_row, 0);
+        assert_close(b0.rect_mm.y_mm, 128.5);
+        assert_close(b0.rect_mm.h_mm, 5.0);
+        assert_close(b0.rect_mm.w_mm, 25.4);
+        let b1 = &rack.fold_bars[1];
+        assert_eq!(b1.after_row, 1);
+        assert_close(b1.rect_mm.y_mm, 262.0);
+        assert_close(rack.rows[1].y_mm, 133.5);
+        assert_close(rack.rows[2].y_mm, 267.0);
+        assert_close(rack.total_height_mm, 395.5);
+        assert_close(rack.fold_bar_height_mm, FOLD_BAR_HEIGHT_MM);
+    }
+
+    #[test]
+    fn mounts_attach_as_regions() {
+        let chain = two_module_chain();
+        let mut s = spec(&[(3, 10.0)], &[]);
+        s.top_mount_te = 2.0;
+        s.side_mount_te = 1.0;
+        let rack = RackLayout::pack(&chain, &s);
+        let top = rack.mounts.top.expect("top mount");
+        assert_close(top.y_mm, 0.0);
+        assert_close(top.h_mm, 10.16);
+        assert_close(top.w_mm, 50.8);
+        let left = rack.mounts.side_left.expect("left mount");
+        assert_close(left.w_mm, 5.08);
+        assert_close(left.h_mm, 128.5); // rows region below the top mount
+        let right = rack.mounts.side_right.expect("right mount");
+        assert_close(right.x_mm, 50.8);
+        assert_close(rack.rows[0].y_mm, 10.16);
+        assert_close(rack.total_width_mm, 60.96);
+        assert_close(rack.total_height_mm, 138.66);
+    }
+
+    #[test]
+    fn rack_packing_is_deterministic() {
+        let chain = two_module_chain();
+        let s = spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 1)]);
+        let a = RackLayout::pack(&chain, &s);
+        let b = RackLayout::pack(&chain, &s);
+        assert_eq!(a, b);
     }
 }

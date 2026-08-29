@@ -2,7 +2,7 @@
 
 ## 1. Geometry Data
 
-- [ ] 1.1 Acquire + encode per-controller physical geometry <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [controller_geometry.json, tools/acquire_geometry.py] -->
+- [x] 1.1 Acquire + encode per-controller physical geometry <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [controller_geometry.json, tools/acquire_geometry.py] -->
       · from the DROID manual + knowledge base (droid-knowledge-base skill): per-controller HP width (master 8 HP, DB8E 6 HP, R2M/R2C 2 HP each, P2B8/P4B2/P10/S10/P8S8/B32/E4/M4/CV) and element cell positions/sizes in mm (button/pot/fader/encoder/switch/LED/CV per family); chain gaps between master and controllers; resolve the B32 orientation conflict to the manual's 4 cols × 8 rows; encode as `controller_geometry.json` (`rack_geometry.json` pattern, mm as the unit); each controller type carries an `he` (1|3) default (controllers are 3 HE)
       · verify: the data file covers every controller type the schema knows; all dimensions positive; element cells lie within their module rect; a small script cross-checks declared cell grids against token-family counts
 - [ ] 1.2 Geometry data sanity tests <!-- agent: horst-engineer.fast, depends_on: [1.1, 2.1], touches: [controller_geometry.json, src/physical.rs] -->
@@ -11,10 +11,10 @@
 
 ## 2. Grid Model
 
-- [ ] 2.1 Pure grid model module <!-- agent: rusty-engineer.build, depends_on: [1.1], touches: [src/physical.rs, src/lib.rs] -->
+- [x] 2.1 Pure grid model module <!-- agent: rusty-engineer.build, depends_on: [1.1], touches: [src/physical.rs, src/lib.rs] -->
       · `src/physical.rs` (no terminal dependency, mirrors geometry.rs/graph.rs): `PhysicalLayout::build(&Patch)` → ordered controller chain from declaration order; per-controller module rects in mm; element cell lookup per HwToken; repeated circuit instances → separate faceplates (module_instance-aware); load geometry data with fallback + warn
       · verify: `cargo test` in-module unit tests (chain order, cell lookup per family, multi-instance faceplates, fallback)
-- [ ] 2.3 Rack/case model + row assignment <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/physical.rs] -->
+- [x] 2.3 Rack/case model + row assignment <!-- agent: rusty-engineer.build, depends_on: [2.1], touches: [src/physical.rs] -->
       · `RackSpec` (rows: he/hp/label, top_mount_te, side_mount_te, assign map) + `RackLayout::pack(chain)` → modules into rows: auto-pack in chain order (row fills until the next module would exceed its HP, then next row), per-module override, out-of-range override → auto fallback; fold-line mm positions at row boundaries; default single-row case wide enough for the chain; pure (no config parsing — that is 4.4)
       · verify: `cargo test` in-module unit tests (auto-pack fill/overflow, override placement, out-of-range fallback, fold-line positions, determinism)
 - [ ] 2.2 Grid-model unit tests <!-- agent: horst-engineer.build, depends_on: [2.1, 2.3], touches: [src/physical.rs] -->
