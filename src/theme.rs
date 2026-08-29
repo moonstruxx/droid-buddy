@@ -60,6 +60,13 @@ pub struct Theme {
     pub graph_edge_latency_4: Color,
     /// Descriptive text color for the graph latency legend/status line.
     pub graph_edge_latency_legend: Color,
+    /// Physical skeleton reference (design D7): module outline, element cell,
+    /// and in/out port markers. Dedicated tokens so the skeleton render stops
+    /// borrowing graph tokens (task 3.2; 4.1 swaps the renderer onto these).
+    pub physical_skeleton_module_outline: Color,
+    pub physical_skeleton_cell: Color,
+    pub physical_skeleton_port_in: Color,
+    pub physical_skeleton_port_out: Color,
     pub validation_error: Color,
     pub validation_warning: Color,
     pub validation_hint: Color,
@@ -130,6 +137,12 @@ impl Theme {
             graph_edge_latency_3: Color::Yellow,
             graph_edge_latency_4: Color::Red,
             graph_edge_latency_legend: Color::Blue,
+            // Mirrors the graph tokens the 3.1 skeleton renderer reused, so the
+            // 4.1 swap onto these stays visually neutral in classic.
+            physical_skeleton_module_outline: Color::White,
+            physical_skeleton_cell: Color::Cyan,
+            physical_skeleton_port_in: Color::Cyan,
+            physical_skeleton_port_out: Color::Green,
             validation_error: Color::Red,
             validation_warning: Color::Yellow,
             validation_hint: Color::Cyan,
@@ -193,6 +206,10 @@ impl Theme {
             graph_edge_latency_3: Color::Reset,
             graph_edge_latency_4: Color::Reset,
             graph_edge_latency_legend: Color::Reset,
+            physical_skeleton_module_outline: Color::Reset,
+            physical_skeleton_cell: Color::Reset,
+            physical_skeleton_port_in: Color::Reset,
+            physical_skeleton_port_out: Color::Reset,
             validation_error: Color::Reset,
             validation_warning: Color::Reset,
             validation_hint: Color::Reset,
@@ -267,6 +284,12 @@ impl Theme {
             graph_edge_latency_3: Color::Black,
             graph_edge_latency_4: Color::Reset,
             graph_edge_latency_legend: Color::Gray,
+            // Skeleton outline/cell/ports co-occur on one screen and carry no
+            // other distinguishing cue, so they stay pairwise distinct in mono.
+            physical_skeleton_module_outline: Color::White,
+            physical_skeleton_cell: Color::DarkGray,
+            physical_skeleton_port_in: Color::Gray,
+            physical_skeleton_port_out: Color::Black,
             validation_error: Color::White,
             validation_warning: Color::Gray,
             validation_hint: Color::DarkGray,
@@ -492,6 +515,10 @@ mod tests {
             t.graph_edge_latency_3,
             t.graph_edge_latency_4,
             t.graph_edge_latency_legend,
+            t.physical_skeleton_module_outline,
+            t.physical_skeleton_cell,
+            t.physical_skeleton_port_in,
+            t.physical_skeleton_port_out,
         ] {
             assert_eq!(color, Color::Reset);
         }
@@ -642,5 +669,39 @@ mod tests {
         assert_eq!(Theme::classic().render_outlier_warning, Color::Yellow);
         assert_eq!(Theme::terminal().render_outlier_warning, Color::Reset);
         assert_eq!(Theme::mono().render_outlier_warning, Color::White);
+    }
+
+    #[test]
+    fn all_palettes_define_skeleton_tokens() {
+        // Task 3.2: physical skeleton tokens (design D7) exist in every
+        // palette — classic mirrors the graph tokens 3.1 reused so the 4.1
+        // swap is neutral, terminal defers to the terminal, mono keeps the
+        // co-occurring outline/cell/ports pairwise distinct.
+        let classic = Theme::classic();
+        let terminal = Theme::terminal();
+        let mono = Theme::mono();
+        assert_eq!(classic.physical_skeleton_module_outline, Color::White);
+        assert_eq!(classic.physical_skeleton_cell, Color::Cyan);
+        assert_eq!(classic.physical_skeleton_port_in, Color::Cyan);
+        assert_eq!(classic.physical_skeleton_port_out, Color::Green);
+        for color in [
+            terminal.physical_skeleton_module_outline,
+            terminal.physical_skeleton_cell,
+            terminal.physical_skeleton_port_in,
+            terminal.physical_skeleton_port_out,
+        ] {
+            assert_eq!(color, Color::Reset);
+        }
+        let skeleton = [
+            mono.physical_skeleton_module_outline,
+            mono.physical_skeleton_cell,
+            mono.physical_skeleton_port_in,
+            mono.physical_skeleton_port_out,
+        ];
+        for (i, a) in skeleton.iter().enumerate() {
+            for b in &skeleton[i + 1..] {
+                assert_ne!(a, b, "skeleton tokens must be pairwise distinct in mono");
+            }
+        }
     }
 }
