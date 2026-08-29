@@ -477,6 +477,17 @@ pub struct App {
     /// Global processing pause (`p`): while true, state-mutating actions are
     /// blocked and selection-driven influence is cleared (never computed).
     pub processing_paused: bool,
+    /// True when the main panel shows the geometry-only physical skeleton
+    /// (design D7) instead of the wrapped-panel view. Presentation switch of
+    /// the main view, default OFF — the existing view is untouched until 4.2
+    /// replaces it. Reset on patch load like `processing_paused`.
+    pub physical_show_skeleton: bool,
+    /// Screen rects the skeleton renderer published last frame, keyed by
+    /// (module index, cell index = position of the element in the module's
+    /// `components` in declaration order). Rebuilt every frame; the D5
+    /// coincidence contract — 5.1 compares full-view element rects 1:1
+    /// against these at the same scale/offset.
+    pub physical_skeleton_rects: Vec<(usize, usize, Rect)>,
     /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
     pub active_modifier_var: Option<String>,
     /// Forward influence result for the active modifier, if any.
@@ -572,6 +583,8 @@ impl App {
             showing_quad: false,
             quad_focus: QuadFocus::default(),
             processing_paused: false,
+            physical_show_skeleton: false,
+            physical_skeleton_rects: Vec::new(),
             active_modifier_var: None,
             influence: None,
             filtered_graph: None,
@@ -979,6 +992,7 @@ impl App {
             self.minimap_rect = None;
             self.source_pane_rect = None;
             self.processing_paused = false;
+            self.physical_show_skeleton = false;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = None;
@@ -1066,6 +1080,7 @@ impl App {
             self.minimap_rect = None;
             self.source_pane_rect = None;
             self.processing_paused = false;
+            self.physical_show_skeleton = false;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = Some(path.to_path_buf());

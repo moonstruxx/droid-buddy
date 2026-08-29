@@ -834,6 +834,18 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.toggle_processing_pause();
             false
         }
+        crossterm::event::KeyCode::Char('s') => {
+            // Skeleton toggle (`s`): presentation switch of the main view
+            // (task 3.1, design D7). Free in the normal-key path — the
+            // optimizer overlay's `s` (export) returns earlier.
+            app.physical_show_skeleton = !app.physical_show_skeleton;
+            app.status_message = if app.physical_show_skeleton {
+                String::from("Skeleton: on")
+            } else {
+                String::from("Skeleton: off")
+            };
+            false
+        }
         crossterm::event::KeyCode::Char('g') => {
             // Enter prefix mode; a repeated `g` re-arms the timer via the
             // cancel-and-fall-through path above.
