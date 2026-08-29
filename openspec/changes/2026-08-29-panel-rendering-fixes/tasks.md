@@ -30,6 +30,10 @@
 
 **details**: Acceptance: over-long labels end with `…`.
 
+## Task 1.6 — Minimum scale floor 75% (user request)
+
+- [ ] In `src/handler.rs` (≈:912): change the scale preset cycle from `[0.5, 1.0, 1.5, 2.0]` to `[0.75, 1.0, 1.5, 2.0]` so users cannot scale cells below the boxable width (boxed cells need ~8 cols; 75% → 12 cols, comfortable). Wrap-around at both ends stays. Update `plus_and_minus_cycle_scale_presets_with_status` (src/handler.rs ≈:1542) — expectations 0.5 → 0.75, bottom wrap target 0.75. Verify: `cargo test` green (preset-cycle test updated); status shows `Scaling: 75%`. <!-- agent: layout-designer-engineer.build, depends_on: [], touches: [src/handler.rs, src/regression.rs] -->
+
 ## Task 2.1 — Extended LED-association detection (droid_tui-8kr, part A)
 
 - [ ] In `src/patch.rs`: audit the LED-association detection (bare `led = L.N` plus numbered `ledN = L.M` suffix-paired with `buttonN`/`potN`) and extend the suffix-pairing to ALL element param families in the schema that reference an LED per element — encoderN, switchN, faderN, and any other `ledN` groups revealed by `src/schema.rs` param expansion (read-only reference). Verify: unit tests asserting association resolution per kind (pot+LED, encoder+LED, switch+LED, fader+LED) on patch fixtures; existing tests stay green. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/patch.rs, fixtures/] -->
