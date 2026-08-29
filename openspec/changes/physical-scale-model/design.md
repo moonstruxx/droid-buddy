@@ -41,6 +41,22 @@ No new full-screen surface: the skeleton toggle switches the main view's present
 - Gallery: skeleton | full rows in the matrix (visual proof per project requirement).
 - All deterministic (TestBackend, no RNG) — same guarantees as the existing visual matrix.
 
+### D9: Case/rack model
+
+The physical layout is a rack: an ordered list of rows (each `{ he: 1|3, hp, label? }`) plus optional `top_mount_te` and `side_mount_te` sections. The default case is a single row wide enough for the whole chain — out-of-box behavior is identical to a single-row rack, so no config is required to use the feature.
+
+### D10: Row assignment — auto-pack + per-module override
+
+Modules auto-pack in chain order (D3): row 0 fills left-to-right until the next module would exceed the row's HP, then it starts the next row. A per-module override map (`[physical.rack] assign = { "P2B8 1" = 1 }`) forces a module into a row; an out-of-range override falls back to auto-pack. Overrides do not reorder modules within a row.
+
+### D11: Fold-bar rendering
+
+The case is drawn as an outline wrapping all rows; each row boundary renders a horizontal fold-bar divider (the housing's fold point — "Zahnschiene") labeled with the row, in both skeleton and full presentation. Top/side mount sections render as attached regions with their own borders. Theme tokens: case border, fold bar, mount region.
+
+### D12: `[physical.rack]` config
+
+`config.toml` gains `[physical.rack]` (rows: array of `{he, hp, label?}`, `top_mount_te`, `side_mount_te`, `assign`: map) parsed with the existing injected-validation pattern (`config.rs`) into a `RackSpec` consumed by the pure model; malformed rows fall back to the default case with warn-once.
+
 ## Non-goals
 
 - No DB8E display rendering, no X7/G8/R2M-R2C element-level rendering beyond the data.
@@ -52,5 +68,6 @@ No new full-screen surface: the skeleton toggle switches the main view's present
 ## Risks
 
 - **Data accuracy**: element positions come from manual figures/specs; fallback widths cover gaps. Coincidence verification proves internal consistency, not physical truth — external accuracy is a data-quality task.
+- **Row overflow**: a controller wider than its assigned row renders clipped with a status hint; override validation warns at load.
 - **Overflow UX**: very wide racks need pan/zoom to be discoverable; status hints and the existing render-outlier hint channel mitigate.
 - **Snapshot churn**: the main-view face change invalidates existing panel snapshots — acceptable, `insta` review workflow applies.
