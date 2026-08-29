@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -363,16 +363,18 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 fn render_main(frame: &mut Frame, area: Rect, app: &mut App) {
     app.component_rects.clear();
     app.physical_skeleton_rects.clear();
+    app.physical_full_rects.clear();
     let patch_ref = app.patch.clone();
     match patch_ref {
         Some(patch) => {
-            // Skeleton is a presentation switch of the main view (D7), not a
-            // new surface: OFF (default) keeps the wrapped-panel view byte-
-            // identical until 4.2 replaces it with the physical render.
+            // Skeleton is a presentation switch of the main view (D7): OFF
+            // (default) renders the physical full view, ON the geometry-only
+            // skeleton. Both share the rack geometry + mapping, so only the
+            // cell interior differs (D11).
             if app.physical_show_skeleton {
                 render_physical_skeleton(frame, area, &patch, app);
             } else {
-                render_patch_grouped(frame, area, &patch, app);
+                render_physical_full(frame, area, &patch, app);
             }
         }
         None => render_empty(frame, area),
@@ -389,7 +391,6 @@ fn render_empty(frame: &mut Frame, area: Rect) {
 // pub(crate): the render-metrics extractor (src/rendermetrics.rs) mirrors these
 // exact layout constants so extractor and renderer cannot drift (design D2).
 pub(crate) const COMPONENT_WIDTH: u16 = 16;
-pub(crate) const COMPONENT_HEIGHT: u16 = 3;
 
 // The mm→chars mapping (D4) lives in `crate::physical::ScreenMapping` — pure
 // model code, constants `PHYSICAL_COLS_PER_MM`/`PHYSICAL_ROWS_PER_MM`
@@ -597,6 +598,39 @@ fn render_physical_skeleton(
     let case_style = Style::default().fg(t.graph_cluster_border);
     let fold_style = Style::default().fg(t.muted);
 
+    // Case outline, mount regions, fold bars, and module faceplate borders —
+    // shared with the full presentation (D11), only the cell interior differs.
+    render_rack_structure(frame, area, &geom, case_style, fold_style, module_outline);
+
+    // Element cells: · for elements, ◀/▶ for in/out CV ports (4.1 token swap).
+    for &(_, _, cell_rect, mark) in &geom.cells {
+        let clipped = cell_rect.intersection(area);
+        if clipped.width == 0 || clipped.height == 0 {
+            continue;
+        }
+        let (glyph, style) = match mark {
+            PortMark::Cell => ("\u{00B7}", cell_style),
+            PortMark::PortIn => ("\u{25C0}", port_in_style),
+            PortMark::PortOut => ("\u{25B6}", port_out_style),
+        };
+        frame
+            .buffer_mut()
+            .set_string(clipped.x, clipped.y, glyph, style);
+    }
+}
+
+/// Draw the rack structure shared by both physical presentations (D11):
+/// the case outline, attached mount regions, labeled fold bars at row
+/// boundaries, and each module's faceplate border. Only the cell interior
+/// differs between skeleton (`·`/port glyphs) and full (components).
+fn render_rack_structure(
+    frame: &mut Frame,
+    area: Rect,
+    geom: &SkeletonGeometry,
+    case_style: Style,
+    fold_style: Style,
+    module_outline: Style,
+) {
     // Case outline wrapping all rows (D11).
     frame.render_widget(
         Block::default()
@@ -637,21 +671,298 @@ fn render_physical_skeleton(
             clipped,
         );
     }
+}
 
-    // Element cells: · for elements, ◀/▶ for in/out CV ports (4.1 token swap).
-    for &(_, _, cell_rect, mark) in &geom.cells {
-        let clipped = cell_rect.intersection(area);
+/// Physical full presentation: the default main view (4.2). Shares the rack
+/// geometry + mapping with the skeleton — case, fold bars, mounts, and
+/// module faceplates are drawn by `render_rack_structure` — but the element
+/// cells carry the components themselves: state glyphs, labels where the
+/// cell has room, shift/hover/dim styling, and boxed cells when a component
+/// folds its LED in. Multi-circuit instances are separate side-by-side
+/// faceplates (the chain already groups by controller + instance).
+///
+/// Publishes `physical_full_rects` with the same construction as the
+/// skeleton's (the D5 coincidence contract, compared 1:1 by 5.1) and
+/// `component_rects` per component index for handler hit-testing.
+fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app: &mut App) {
+    app.physical_full_rects.clear();
+    // Zoom linkage shared with the skeleton: the `+`/`-` scale presets
+    // (0.75–2.0 ratio) drive the physical zoom.
+    app.physical_zoom = app.scale_factor;
+
+    let chain = crate::physical::PhysicalLayout::build(patch);
+    let rack =
+        crate::physical::RackLayout::pack(&chain, &crate::physical::RackSpec::default_case(&chain));
+    let mapping = crate::physical::ScreenMapping::new(
+        crate::physical::PHYSICAL_COLS_PER_MM,
+        crate::physical::PHYSICAL_ROWS_PER_MM,
+        app.physical_zoom as f64,
+        app.physical_offset.0 as f64,
+        app.physical_offset.1 as f64,
+    );
+    let geom = physical_skeleton_geometry(&rack, &chain, &mapping);
+    app.physical_rack_size = geom.rack_screen;
+    // Coincidence contract (D5): identical (module, cell, rect) construction
+    // to `physical_skeleton_rects` — same geometry, same mapping.
+    app.physical_full_rects = geom
+        .cells
+        .iter()
+        .map(|&(module_index, cell_index, rect, _)| (module_index, cell_index, rect))
+        .collect();
+
+    // hovered_component/click hit-testing is tracked as an index into
+    // patch.hw_components (the flat, parse-order list); components look that
+    // index back up regardless of which faceplate they render into.
+    let index_of: HashMap<&str, usize> = patch
+        .hw_components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id.as_str(), i))
+        .collect();
+
+    let t = theme::active();
+    let module_outline = Style::default().fg(t.physical_skeleton_module_outline);
+    let case_style = Style::default().fg(t.graph_cluster_border);
+    let fold_style = Style::default().fg(t.muted);
+
+    render_rack_structure(frame, area, &geom, case_style, fold_style, module_outline);
+
+    // Per-module faceplate title (controller [+ instance]) inside the module
+    // border, in the faceplate's top screw zone.
+    for &(module_idx, mrect) in &geom.module_rects {
+        let clipped = mrect.intersection(area);
+        if clipped.width < 3 || clipped.height < 2 {
+            continue;
+        }
+        let module = &chain.modules[module_idx];
+        let title = match module.module_instance {
+            Some(n) => format!("{} {}", module.controller, n),
+            None => module.controller.clone(),
+        };
+        let label = truncate_with_ellipsis(&title, (clipped.width as usize).saturating_sub(2));
+        let title_style = dim_style(
+            module_outline.add_modifier(Modifier::BOLD),
+            app.processing_paused,
+        );
+        frame.buffer_mut().set_stringn(
+            clipped.x + 1,
+            clipped.y + 1,
+            format!(" {label} "),
+            clipped.width as usize,
+            title_style,
+        );
+    }
+
+    // HW label override chain (same fallback logic the panel grid used):
+    // per-patch store + [labels] config, then Patch::display_label.
+    let hw_store = app.current_hw_store();
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    let layers_enabled = settings.labels.layers_enabled;
+    let max_shift_layer = settings.labels.max_shift_layer;
+
+    // Element cells carry their component: state glyph + label where the
+    // cell has room; boxed when the component folds an LED in and the cell
+    // fits a box.
+    for &(module_idx, cell_idx, rect, _) in &geom.cells {
+        let clipped = rect.intersection(area);
         if clipped.width == 0 || clipped.height == 0 {
             continue;
         }
-        let (glyph, style) = match mark {
-            PortMark::Cell => ("\u{00B7}", cell_style),
-            PortMark::PortIn => ("\u{25C0}", port_in_style),
-            PortMark::PortOut => ("\u{25B6}", port_out_style),
+        let comp = &chain.modules[module_idx].components[cell_idx];
+        let global_idx = index_of[comp.id.as_str()];
+        let is_hovered = app.hovered_component == Some(global_idx);
+        let is_shift_active = comp.shift_group.is_some() && comp.shift_group == app.active_shift;
+        let shift: u8 = match comp.shift_group {
+            Some(ShiftGroup::Group1) => 1,
+            Some(ShiftGroup::Group2) => 2,
+            Some(ShiftGroup::Group3) => 3,
+            Some(ShiftGroup::Group4) => 4,
+            None => 1,
         };
-        frame
-            .buffer_mut()
-            .set_string(clipped.x, clipped.y, glyph, style);
+        // Hand-built patches (Patch::sample, empty sections) keep their
+        // bespoke labels ("TRIG A") — display_label would derive "btn_1".
+        let display_label = if patch.sections.is_empty() && !comp.label.is_empty() {
+            comp.label.clone()
+        } else {
+            patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store)
+        };
+        let (symbol, state_text, fg_color) = physical_visuals(comp, is_shift_active);
+        let display_style = dim_style(
+            if is_hovered {
+                Style::default()
+                    .fg(fg_color)
+                    .bg(theme::active().muted)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().fg(fg_color)
+            },
+            app.processing_paused,
+        );
+        render_physical_cell(
+            frame,
+            clipped,
+            comp,
+            &symbol,
+            &display_label,
+            &state_text,
+            display_style,
+            app.processing_paused,
+            patch,
+        );
+        // Hit rect is the mapped cell the component rendered into (the same
+        // rect as `physical_full_rects`), so handler hit-testing stays in
+        // lockstep with what is drawn.
+        app.component_rects.push((global_idx, rect));
+    }
+}
+
+/// Per-kind component visuals for the physical cell renderer: state glyph,
+/// state text, and base color. Ports use the same ◀/▶ glyphs the skeleton
+/// draws so both presentations of a cell coincide (D11); buttons/switches
+/// keep their On/Off glyphs and knobs/encoders/faders their percentage, so
+/// toggle semantics survive the physical presentation.
+fn physical_visuals(
+    comp: &crate::patch::HwComponent,
+    is_shift_active: bool,
+) -> (String, String, Color) {
+    match comp.kind {
+        ComponentKind::Button => {
+            let on = matches!(comp.state, ComponentState::On);
+            (
+                if on { "●" } else { "○" }.into(),
+                if on { "ON" } else { "OFF" }.into(),
+                if is_shift_active {
+                    shift_color(comp.shift_group.expect("is_shift_active implies a group"))
+                } else {
+                    theme::active().button
+                },
+            )
+        }
+        ComponentKind::CvIn => (
+            String::from("◀"),
+            String::from("CV IN"),
+            theme::active().cv_in,
+        ),
+        ComponentKind::CvOut => (
+            String::from("▶"),
+            String::from("CV OUT"),
+            theme::active().cv_out,
+        ),
+        ComponentKind::Knob | ComponentKind::Encoder => {
+            let val = match &comp.state {
+                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
+                _ => String::from("---"),
+            };
+            (String::from("◉"), val, theme::active().knob)
+        }
+        ComponentKind::Switch => {
+            let (glyph, state) = match &comp.state {
+                ComponentState::Value(v) => ("◉", format!("{:.0}%", v * 100.0)),
+                ComponentState::On => ("▣", String::from("ON")),
+                _ => ("□", String::from("OFF")),
+            };
+            (glyph.into(), state, theme::active().switch)
+        }
+        ComponentKind::Led => {
+            let on = matches!(comp.state, ComponentState::On);
+            (
+                if on { "◉" } else { "○" }.into(),
+                if on { "ON" } else { "OFF" }.into(),
+                theme::active().led,
+            )
+        }
+    }
+}
+
+/// Render one component into its physical element cell. LED-folding is
+/// preserved from the panel renderer: a component that folds an LED in draws
+/// a boxed cell (border + "symbol label" title + "state led-glyph" interior)
+/// when the cell is wide/tall enough, falling back to the compact cell
+/// otherwise. The compact cell always draws the state glyph; the label
+/// shares the first row when there is room (ellipsized), and the state text
+/// takes the second row.
+#[allow(clippy::too_many_arguments)]
+fn render_physical_cell(
+    frame: &mut Frame,
+    area: Rect,
+    comp: &crate::patch::HwComponent,
+    symbol: &str,
+    label: &str,
+    state_text: &str,
+    display_style: Style,
+    paused: bool,
+    patch: &crate::patch::Patch,
+) {
+    if let Some(led_id) = &comp.led {
+        if area.width >= 5 && area.height >= 3 {
+            let led_glyph = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == led_id.as_str())
+                .map(|led| {
+                    if matches!(led.state, ComponentState::On | ComponentState::Active) {
+                        "◉"
+                    } else {
+                        "○"
+                    }
+                })
+                .unwrap_or("○");
+            // Border + title row + one interior row: label lives in the title
+            // (ellipsized to the border row's inner width), the interior
+            // holds state + LED glyph — the panel renderer's boxed-cell
+            // approach (droid_tui-888) ported into the physical cell.
+            let title = truncate_with_ellipsis(
+                &format!(" {symbol} {label} "),
+                (area.width as usize).saturating_sub(1),
+            );
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(display_style)
+                .title_top(Line::styled(title, display_style));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            if inner.width > 0 && inner.height > 0 {
+                let inner_line = truncate_with_ellipsis(
+                    &format!("{state_text} {led_glyph}"),
+                    inner.width as usize,
+                );
+                frame.buffer_mut().set_stringn(
+                    inner.x,
+                    inner.y,
+                    &inner_line,
+                    inner.width as usize,
+                    display_style,
+                );
+            }
+            return;
+        }
+    }
+
+    // Compact cell: glyph always; the label joins the first row when the
+    // cell is wide enough, ellipsized so it never spills past the cell.
+    let first = if area.width >= 3 {
+        let mut s = String::from(symbol);
+        let label_part = truncate_with_ellipsis(label, (area.width as usize).saturating_sub(2));
+        if !label_part.is_empty() {
+            s.push(' ');
+            s.push_str(&label_part);
+        }
+        s
+    } else {
+        String::from(symbol)
+    };
+    frame
+        .buffer_mut()
+        .set_stringn(area.x, area.y, &first, area.width as usize, display_style);
+    if area.height >= 2 {
+        let state = truncate_with_ellipsis(state_text, area.width as usize);
+        frame.buffer_mut().set_stringn(
+            area.x,
+            area.y + 1,
+            &state,
+            area.width as usize,
+            dim_style(Style::default().fg(theme::active().muted), paused),
+        );
     }
 }
 
@@ -673,599 +984,6 @@ fn render_fold_bar(frame: &mut Frame, area: Rect, rect: Rect, label: &str, style
             .buffer_mut()
             .set_stringn(clipped.x + 1, y, &labeled, labeled.len(), style);
     }
-}
-
-/// Render hardware components grouped into physical controller panels
-/// (P2B8, Faderbank, Notebuttons, CV I/O, ...) that mirror the hardware
-/// layout, wrapping components onto extra rows when a panel doesn't fit
-/// the terminal width. See controller-panels/spec.md.
-fn render_patch_grouped(frame: &mut Frame, area: Rect, patch: &crate::patch::Patch, app: &mut App) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    // hovered_component/click hit-testing are tracked as an index into
-    // patch.hw_components (the flat, parse-order list), not into any
-    // per-panel grouping, so components must be able to look that index
-    // back up regardless of which panel they render into.
-    let index_of: HashMap<&str, usize> = patch
-        .hw_components
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.id.as_str(), i))
-        .collect();
-
-    // Group components into controller panels, preserving the order in
-    // which panels and components first appear in the patch.
-    let mut panel_order: Vec<String> = Vec::new();
-    let mut panels: HashMap<String, Vec<&crate::patch::HwComponent>> = HashMap::new();
-    for comp in &patch.hw_components {
-        panels
-            .entry(comp.controller.clone())
-            .or_insert_with(|| {
-                panel_order.push(comp.controller.clone());
-                Vec::new()
-            })
-            .push(comp);
-    }
-
-    // Cell size now follows the active scale preset. The published hit rects
-    // are the real rendered cells (see render_component_grid), so scaling the
-    // layout keeps hit testing correct automatically (droid_tui-ro0).
-    let scaled_w = ((COMPONENT_WIDTH as f32 * app.scale_factor).round() as u16).max(8);
-    let scaled_h = ((COMPONENT_HEIGHT as f32 * app.scale_factor).round() as u16).max(3);
-
-    // Build a set of LED ids that are "folded" (referenced by another component
-    // and match an existing component id of kind Led). These LED components
-    // must be skipped as standalone grid cells; their owners render as boxes.
-    let folded_led_ids: HashSet<&str> = patch
-        .hw_components
-        .iter()
-        .filter(|c| c.led.is_some())
-        .filter_map(|c| c.led.as_deref())
-        .filter(|led_id| {
-            patch
-                .hw_components
-                .iter()
-                .any(|c| c.id == *led_id && c.kind == ComponentKind::Led)
-        })
-        .collect();
-
-    // Per-panel component lists with folded LEDs already filtered out, since
-    // those cells are skipped at render time and must not consume grid slots
-    // (rows_for/row_chunks) or count toward panel height.
-    let visible_panels: HashMap<&str, Vec<&crate::patch::HwComponent>> = panel_order
-        .iter()
-        .map(|name| {
-            let visible: Vec<&crate::patch::HwComponent> = panels[name]
-                .iter()
-                .filter(|c| {
-                    !(c.kind == ComponentKind::Led && folded_led_ids.contains(c.id.as_str()))
-                })
-                .copied()
-                .collect();
-            (name.as_str(), visible)
-        })
-        .collect();
-
-    // Split each panel's visible components into per-circuit module groups,
-    // preserving first-appearance order of each instance key (controller-
-    // panels/spec.md "Panel contains modules"). A panel with only one
-    // instance renders unchanged as a single flat grid — module sub-borders
-    // only appear when a panel genuinely mixes multiple circuit instances,
-    // matching the spec's "components from multiple circuits" condition.
-    // CV I/O never subdivides: its tokens are fixed jacks, not pluggable HP
-    // modules (DESIGN.md's controller glossary does not list CV I/O).
-    let module_groups: HashMap<&str, Vec<Vec<&crate::patch::HwComponent>>> = panel_order
-        .iter()
-        .map(|name| {
-            let visible = &visible_panels[name.as_str()];
-            let groups = if name == "CV I/O" {
-                vec![visible.clone()]
-            } else {
-                let mut order: Vec<u32> = Vec::new();
-                let mut by_instance: HashMap<u32, Vec<&crate::patch::HwComponent>> = HashMap::new();
-                for comp in visible {
-                    let key = comp.module_instance().unwrap_or(0);
-                    by_instance
-                        .entry(key)
-                        .or_insert_with(|| {
-                            order.push(key);
-                            Vec::new()
-                        })
-                        .push(*comp);
-                }
-                if order.len() <= 1 {
-                    vec![visible.clone()]
-                } else {
-                    order
-                        .into_iter()
-                        .map(|k| by_instance.remove(&k).unwrap())
-                        .collect()
-                }
-            };
-            (name.as_str(), groups)
-        })
-        .collect();
-
-    let num_panels = panel_order.len().max(1);
-    let landscape = app.orientation == crate::app::Orientation::Landscape;
-    // Size each panel to its actual grid content so it can never collapse into
-    // a 1:35 sliver. The per-panel column count is derived from the panel's
-    // real inner width (and scaled_w) below, not from the full area width.
-    let mut constraints: Vec<Constraint> = panel_order
-        .iter()
-        .map(|name| {
-            let groups = &module_groups[name.as_str()];
-            let (needed_w, needed_h) =
-                panel_grid_size(groups, landscape, area, scaled_w, scaled_h, num_panels);
-            let len = if landscape { needed_w } else { needed_h };
-            Constraint::Length(len)
-        })
-        .collect();
-    constraints.push(Constraint::Min(0));
-
-    let panel_direction = if app.orientation == crate::app::Orientation::Landscape {
-        Direction::Horizontal
-    } else {
-        Direction::Vertical
-    };
-
-    let panel_chunks = Layout::default()
-        .direction(panel_direction)
-        .constraints(constraints)
-        .flex(Flex::Start)
-        .split(area);
-
-    for (i, name) in panel_order.iter().enumerate() {
-        if i >= panel_chunks.len() {
-            break;
-        }
-        let groups = &module_groups[name.as_str()];
-
-        // A panel is "affected" when at least one of its components belongs
-        // to the currently active shift group; affected panels get a bold
-        // colored border, other panels dim while a shift is active, and all
-        // panels use the default border when no shift is active. See
-        // shift-visualization/spec.md.
-        let affected = app.active_shift.is_some()
-            && groups
-                .iter()
-                .flatten()
-                .any(|c| c.shift_group == app.active_shift);
-
-        let (border_style, title) = match app.active_shift {
-            Some(group) if affected => (
-                Style::default()
-                    .fg(shift_color(group))
-                    .add_modifier(Modifier::BOLD),
-                format!(" {} [SHIFT {}] ", name, group.key_label()),
-            ),
-            Some(_) => (
-                Style::default()
-                    .fg(theme::active().muted)
-                    .add_modifier(Modifier::DIM),
-                format!(" {} ", name),
-            ),
-            None => (
-                Style::default().fg(theme::active().muted),
-                format!(" {} ", name),
-            ),
-        };
-        // Global pause de-emphasizes the whole panel surface (borders and
-        // titles of panel and per-module blocks) with the same DIM modifier
-        // shift-dimming uses. Colors and geometry stay untouched, so hit rects
-        // and non-paused output are unaffected.
-        let border_style = dim_style(border_style, app.processing_paused);
-
-        let block = Block::default()
-            .title(title)
-            .title_style(border_style)
-            .borders(Borders::ALL)
-            .border_style(border_style);
-
-        let inner = block.inner(panel_chunks[i]);
-        frame.render_widget(block, panel_chunks[i]);
-
-        if inner.width == 0 || inner.height == 0 {
-            continue;
-        }
-
-        if groups.len() <= 1 {
-            render_component_grid(frame, inner, &groups[0], &index_of, app, patch);
-            continue;
-        }
-
-        // Subdivided: each module instance is its own bordered sub-block.
-        // Column count is taken from THIS block's real inner width so the grid
-        // never mis-wraps relative to its container.
-        let module_cols = (inner.width / scaled_w).max(1) as usize;
-        let module_constraints: Vec<Constraint> = groups
-            .iter()
-            .map(|g| {
-                let rows = (g.len().div_ceil(module_cols)).max(1) as u16;
-                Constraint::Length(rows * scaled_h + 2)
-            })
-            .collect();
-        let module_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(module_constraints)
-            .flex(Flex::Start)
-            .split(inner);
-
-        for (m_i, components) in groups.iter().enumerate() {
-            if m_i >= module_chunks.len() {
-                break;
-            }
-            let module_title = match components.first().and_then(|c| c.module_instance()) {
-                Some(n) => format!(" {} {} ", name, n),
-                None => format!(" {} ", name),
-            };
-            let module_block = Block::default()
-                .title(module_title)
-                .title_style(border_style)
-                .borders(Borders::ALL)
-                .border_style(border_style);
-            let module_inner = module_block.inner(module_chunks[m_i]);
-            frame.render_widget(module_block, module_chunks[m_i]);
-            if module_inner.width == 0 || module_inner.height == 0 {
-                continue;
-            }
-            render_component_grid(frame, module_inner, components, &index_of, app, patch);
-        }
-    }
-}
-
-/// Render one module's/panel's components into a grid within `area`.
-/// The column count is derived from the cell's actual inner width and the
-/// scaled cell size, so the published hit rect (`comp_chunks[col_i]`, the real
-/// rendered cell) always matches what is drawn and hover/selection stay correct
-/// at every scale preset (droid_tui-ro0). Shared by the flat (single-instance)
-/// panel path and the per-module path above.
-fn render_component_grid(
-    frame: &mut Frame,
-    area: Rect,
-    components: &[&crate::patch::HwComponent],
-    index_of: &HashMap<&str, usize>,
-    app: &mut App,
-    patch: &crate::patch::Patch,
-) {
-    // Cell size follows the live scale preset so the published hit rect
-    // (comp_chunks[col_i]) always equals the drawn cell.
-    let scaled_w = ((COMPONENT_WIDTH as f32 * app.scale_factor).round() as u16).max(8);
-    let scaled_h = ((COMPONENT_HEIGHT as f32 * app.scale_factor).round() as u16).max(3);
-    let cols = (area.width / scaled_w).max(1) as usize;
-    // A cell never exceeds its container: at a panel width below
-    // COMPONENT_WIDTH the nominal cell would draw its box over the panel
-    // border column, so the real cell width is clamped to the container
-    // (droid_tui-wsu). The published hit rect is this clamped cell, keeping
-    // hit-testing in lockstep with what is drawn.
-    let cell_w = scaled_w.min(area.width / cols as u16).max(1);
-    let rows_for = |n: usize| -> u16 { (n.div_ceil(cols)).max(1) as u16 };
-
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![
-            Constraint::Length(scaled_h);
-            rows_for(components.len()) as usize
-        ])
-        .flex(Flex::Start)
-        .split(area);
-
-    // HW label override: per-patch store + [labels] config (layers_enabled / max_shift_layer)
-    // with Patch::display_label fallback chain. Geometry untouched — rects equal drawn cells.
-    let hw_store = app.current_hw_store();
-    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
-    let layers_enabled = settings.labels.layers_enabled;
-    let max_shift_layer = settings.labels.max_shift_layer;
-
-    for (row_i, row) in components.chunks(cols).enumerate() {
-        if row_i >= row_chunks.len() {
-            break;
-        }
-        let comp_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Length(cell_w); row.len()])
-            .flex(Flex::Start)
-            .split(row_chunks[row_i]);
-
-        for (col_i, comp) in row.iter().enumerate() {
-            if col_i >= comp_chunks.len() {
-                break;
-            }
-
-            let global_idx = index_of[comp.id.as_str()];
-            let is_hovered = app.hovered_component == Some(global_idx);
-            let is_shift_active =
-                comp.shift_group.is_some() && comp.shift_group == app.active_shift;
-            let shift: u8 = match comp.shift_group {
-                Some(ShiftGroup::Group1) => 1,
-                Some(ShiftGroup::Group2) => 2,
-                Some(ShiftGroup::Group3) => 3,
-                Some(ShiftGroup::Group4) => 4,
-                None => 1,
-            };
-            // Hand-built patches (Patch::sample, empty sections) keep their
-            // bespoke labels ("TRIG A") — display_label would derive "btn_1".
-            let display_label = if patch.sections.is_empty() && !comp.label.is_empty() {
-                comp.label.clone()
-            } else {
-                patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store)
-            };
-            render_component(
-                frame,
-                comp_chunks[col_i],
-                comp,
-                &display_label,
-                is_hovered,
-                is_shift_active,
-                app.processing_paused,
-                patch,
-            );
-            // Published rect is the real rendered cell (comp_chunks[col_i]).
-            // Layout already uses the scaled cell size, so the hit rect stays
-            // exactly equal to the drawn cell at every scale preset.
-            app.component_rects.push((global_idx, comp_chunks[col_i]));
-        }
-    }
-}
-
-/// Compute the grid extent of one controller panel so it can be sized to its
-/// actual content instead of becoming a 1:35 sliver (droid_tui-7ik).
-///
-/// * `cols` is derived from the panel's *real* inner width, not the full area
-///   width, so the wrap count is correct inside narrow panels.
-/// * The cross-axis length is `needed_w` (Landscape, panels side-by-side) or
-///   `needed_h` (Portrait, panels stacked), each built from the live grid
-///   geometry rather than the sum of vertical extents.
-fn panel_grid_size(
-    groups: &[Vec<&crate::patch::HwComponent>],
-    landscape: bool,
-    area: Rect,
-    scaled_w: u16,
-    scaled_h: u16,
-    num_panels: usize,
-) -> (u16, u16) {
-    let subdivided = groups.len() > 1;
-    // Estimate this panel's inner width: full area width in Portrait (panels
-    // span the whole width); an equal share of the area in Landscape so panels
-    // stay narrow enough to sit side by side.
-    let inner_w_est = if landscape {
-        (area.width / num_panels as u16).max(scaled_w)
-    } else {
-        area.width.saturating_sub(2)
-    };
-    let cols = (inner_w_est / scaled_w).max(1) as usize;
-
-    let needed_w = if subdivided {
-        let module_cols = (inner_w_est.saturating_sub(2) / scaled_w).max(1) as usize;
-        (module_cols as u16) * scaled_w + 4
-    } else {
-        (cols as u16) * scaled_w + 2
-    };
-
-    let needed_h = if subdivided {
-        let module_cols = ((inner_w_est.saturating_sub(2)) / scaled_w).max(1) as usize;
-        let mut h: u16 = 2; // panel border
-        for g in groups {
-            let rows = (g.len().div_ceil(module_cols)).max(1) as u16;
-            h += rows * scaled_h + 2;
-        }
-        h
-    } else {
-        let n = groups.first().map(|g| g.len()).unwrap_or(0);
-        let rows = (n.div_ceil(cols)).max(1) as u16;
-        rows * scaled_h + 2
-    };
-
-    (needed_w, needed_h)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_component(
-    frame: &mut Frame,
-    area: Rect,
-    comp: &crate::patch::HwComponent,
-    display_label: &str,
-    is_hovered: bool,
-    is_shift_active: bool,
-    paused: bool,
-    patch: &crate::patch::Patch,
-) {
-    let (symbol, state_text, fg_color): (&str, String, Color) = match comp.kind {
-        ComponentKind::Button => {
-            let state = match &comp.state {
-                ComponentState::On => String::from("ON"),
-                _ => String::from("OFF"),
-            };
-            (
-                if matches!(comp.state, ComponentState::On) {
-                    "●"
-                } else {
-                    "○"
-                },
-                state,
-                if is_shift_active {
-                    shift_color(comp.shift_group.expect("is_shift_active implies a group"))
-                } else {
-                    theme::active().button
-                },
-            )
-        }
-        ComponentKind::CvIn => ("→", String::from("CV IN"), theme::active().cv_in),
-        ComponentKind::CvOut => ("←", String::from("CV OUT"), theme::active().cv_out),
-        ComponentKind::Knob => {
-            let val = match &comp.state {
-                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
-                _ => String::from("---"),
-            };
-            ("◉", val, theme::active().knob)
-        }
-        ComponentKind::Switch => {
-            let state = match &comp.state {
-                // A value-driven switch mirrors knob/encoder percentage display.
-                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
-                ComponentState::On => String::from("ON"),
-                _ => String::from("OFF"),
-            };
-            (
-                if matches!(comp.state, ComponentState::Value(_)) {
-                    "◉"
-                } else if matches!(comp.state, ComponentState::On) {
-                    "▣"
-                } else {
-                    "□"
-                },
-                state,
-                theme::active().switch,
-            )
-        }
-        ComponentKind::Encoder => {
-            let val = match &comp.state {
-                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
-                _ => String::from("---"),
-            };
-            ("◉", val, theme::active().knob)
-        }
-        ComponentKind::Led => {
-            let state = match &comp.state {
-                ComponentState::On => String::from("ON"),
-                _ => String::from("OFF"),
-            };
-            (
-                if matches!(comp.state, ComponentState::On) {
-                    "◉"
-                } else {
-                    "○"
-                },
-                state,
-                theme::active().led,
-            )
-        }
-    };
-
-    let hover_style = dim_style(
-        if is_hovered {
-            Style::default()
-                .fg(fg_color)
-                .bg(theme::active().muted)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().fg(fg_color)
-        },
-        paused,
-    );
-
-    // If this component owns a LED, render a bordered box (3 rows tall) —
-    // unless the cell is too narrow for a legible box, in which case it
-    // falls back to the unboxed two-line text cell (droid_tui-wsu).
-    if let Some(led_id) = &comp.led {
-        if area.width >= BOX_MIN_WIDTH && area.height >= COMPONENT_HEIGHT {
-            // Look up the LED component by id — do not use .unwrap().
-            let led_component = patch.hw_components.iter().find(|c| c.id == led_id.as_str());
-
-            let led_glyph = match led_component {
-                Some(led) => match &led.state {
-                    ComponentState::On | ComponentState::Active => "◉",
-                    _ => "○",
-                },
-                // LED not found in patch — fall back to unlit glyph.
-                None => "○",
-            };
-
-            // Hover styling applied to box content/border, same convention as text path.
-            let display_style = dim_style(
-                if is_hovered {
-                    Style::default()
-                        .fg(fg_color)
-                        .bg(theme::active().muted)
-                        .add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default().fg(fg_color)
-                },
-                paused,
-            );
-
-            // controller-panels spec §"Box LED-associated elements": one bordered
-            // cell, border colored by the element's kind, showing the element's
-            // symbol, label, state, and the LED glyph reflecting the LED's state
-            // — a single state, not a second textual LED state (droid_tui-888).
-            // The 3-row cell has no room for a border plus multiple content
-            // lines, so the label lives in the top title (drawn inside the
-            // border row) and the single interior row holds state + LED glyph.
-            // The label is ellipsized to the border row's inner width so the
-            // closing corner never lands glued to a hard-cut word
-            // (droid_tui-lsd).
-            let label =
-                truncate_with_ellipsis(display_label, (area.width as usize).saturating_sub(5));
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(display_style)
-                .title_top(Line::styled(
-                    format!(" {} {} ", symbol, label),
-                    display_style,
-                ));
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            let line = Line::from(Span::styled(
-                format!("{} {}", state_text, led_glyph),
-                display_style,
-            ));
-            let widget = Paragraph::new(line).alignment(Alignment::Center);
-            frame.render_widget(widget, inner);
-        } else {
-            render_text_cell(
-                frame,
-                area,
-                symbol,
-                display_label,
-                &state_text,
-                hover_style,
-                paused,
-            );
-        }
-    } else {
-        render_text_cell(
-            frame,
-            area,
-            symbol,
-            display_label,
-            &state_text,
-            hover_style,
-            paused,
-        );
-    }
-}
-
-/// Render the unboxed two-line text cell (symbol + label over state) used
-/// for LED-less components and as the narrow-width fallback for boxed ones
-/// (droid_tui-wsu). The Paragraph fills the whole 3-row area, so no gap is
-/// left below; the label is ellipsized to the cell width (droid_tui-lsd).
-fn render_text_cell(
-    frame: &mut Frame,
-    area: Rect,
-    symbol: &str,
-    display_label: &str,
-    state_text: &str,
-    hover_style: Style,
-    paused: bool,
-) {
-    let label = truncate_with_ellipsis(display_label, (area.width as usize).saturating_sub(2));
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(symbol, hover_style),
-            Span::raw(" "),
-            Span::styled(label, hover_style),
-        ]),
-        Line::from(Span::styled(
-            state_text,
-            dim_style(Style::default().fg(theme::active().muted), paused),
-        )),
-        Line::from(Span::raw("")), // third row filler so the 3-row area is fully occupied
-    ];
-
-    let widget = Paragraph::new(lines).alignment(Alignment::Center);
-    frame.render_widget(widget, area);
 }
 
 /// Shift colors come from the theme's per-group tokens so themes can
@@ -2373,7 +2091,7 @@ fn render_quad_panels_content(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     if let Some(patch) = app.patch.clone() {
-        render_patch_grouped(frame, inner, &patch, app);
+        render_physical_full(frame, inner, &patch, app);
     } else {
         render_empty(frame, inner);
     }
@@ -2642,7 +2360,7 @@ fn render_panels_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     if let Some(patch) = app.patch.clone() {
-        render_patch_grouped(frame, inner, &patch, app);
+        render_physical_full(frame, inner, &patch, app);
     } else {
         render_empty(frame, inner);
     }
@@ -3459,12 +3177,19 @@ mod tests {
     fn renders_sample_patch_components() {
         let mut app = App::new();
         app.load_sample_patch();
-        let text = rendered_text(&mut app, 80, 24);
+        // The physical view is a scale model: at zoom 1 a 5HP P2B8 faceplate
+        // is only ~4 cols wide, so titles are asserted at zoom 2.0. The
+        // sample patch's bespoke ids (btn_1, knob_1, ...) carry no DROID
+        // tokens, so its cells stay empty here — real-token fixtures assert
+        // the component glyphs (see the arpeggio-based tests).
+        app.scale_factor = 2.0;
+        let text = rendered_text(&mut app, 100, 80);
         assert!(text.contains("Demo Patch"));
-        assert!(text.contains("P2B8"));
-        assert!(text.contains("CV I/O"));
-        assert!(text.contains("TRIG A"));
-        assert!(text.contains("CUTOFF"));
+        // Module faceplate titles render in the physical full view.
+        assert!(text.contains("P2B8"), "P2B8 title missing. text={text:?}");
+        assert!(text.contains("CV I/O"), "CV I/O title missing");
+        // Case + module outlines frame the rack.
+        assert!(text.contains('\u{250C}'), "case outline (┌) missing");
     }
 
     #[test]
@@ -3528,7 +3253,7 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_toggle_restores_the_wrapped_panel_frame() {
+    fn skeleton_toggle_restores_the_physical_full_frame() {
         use crate::handler::handle_event;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
@@ -3537,10 +3262,14 @@ mod tests {
         app.patch = Some(patch);
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
-        // OFF is the default: the pre-change wrapped-panel main view, no
-        // skeleton markers and no published rects.
+        // OFF is the default: the physical full main view — no skeleton
+        // markers and no skeleton rects, but the full view publishes its own.
         let off_main = rendered_main_text(&mut app, 120, 40);
         assert!(app.physical_skeleton_rects.is_empty());
+        assert!(
+            !app.physical_full_rects.is_empty(),
+            "full view publishes cell rects"
+        );
         assert!(
             !off_main.contains('\u{00B7}'),
             "skeleton marker in OFF main view"
@@ -3559,6 +3288,32 @@ mod tests {
         assert_eq!(app.status_message, "Skeleton: off");
         let off_again = rendered_main_text(&mut app, 120, 40);
         assert_eq!(off_again, off_main, "OFF main view must be byte-identical");
+    }
+
+    #[test]
+    fn physical_full_rects_match_skeleton_rects() {
+        use crate::handler::handle_event;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // Full (default) at a fixed viewport: publishes the coincidence-contract
+        // rects (module, cell, screen Rect).
+        rendered_main_text(&mut app, 120, 40);
+        let full = app.physical_full_rects.clone();
+        assert!(!full.is_empty(), "full view publishes rects");
+
+        // Skeleton at the same viewport: same mapping + geometry, so the cell
+        // rects must coincide 1:1 (D5 — 5.1 compares these two vectors).
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        rendered_main_text(&mut app, 120, 40);
+        assert_eq!(
+            app.physical_skeleton_rects, full,
+            "full and skeleton cell rects must coincide 1:1 (D5)"
+        );
     }
 
     #[test]
@@ -4654,6 +4409,8 @@ mod led_box_tests {
         let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
         let mut app = App::new();
         app.patch = Some(patch.clone());
+        // Zoom 2.0 so the 5HP faceplate is wide enough for its title.
+        app.scale_factor = 2.0;
 
         render_at(&mut app, 80, 40);
 
@@ -4708,72 +4465,34 @@ mod led_box_tests {
 #[cfg(test)]
 mod switch_rendering_tests {
     use super::*;
-    use crate::patch::Patch;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
 
-    /// A patch whose only hardware component is a switch (S token), so glyph
-    /// lookups in the rendered buffer are unambiguous.
-    fn switch_app(id: &str) -> App {
-        let content = format!("[copy]\n    select = {id}\n");
-        let patch = Patch::from_ini_str(&content, String::from("t")).unwrap();
-        let mut app = App::new();
-        app.patch = Some(patch);
-        app
+    /// A switch component with the given state, as the physical cell
+    /// renderer's `physical_visuals` consumes it.
+    fn switch_component(state: ComponentState) -> crate::patch::HwComponent {
+        crate::patch::HwComponent {
+            id: String::from("S1.1"),
+            label: String::from("SW"),
+            kind: ComponentKind::Switch,
+            shift_group: None,
+            state,
+            controller: String::from("Other"),
+            led: None,
+        }
     }
 
-    fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
-        buffer_for(app, width, height)
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
-    }
-
-    fn glyph_fg(buffer: &ratatui::buffer::Buffer, glyph: &str) -> Option<Color> {
-        buffer
-            .content()
-            .iter()
-            .find(|c| c.symbol() == glyph)
-            .map(|c| c.fg)
-    }
-
-    fn set_state(app: &mut App, id: &str, state: ComponentState) {
-        let comp = app
-            .patch
-            .as_mut()
-            .unwrap()
-            .hw_components
-            .iter_mut()
-            .find(|c| c.id == id)
-            .unwrap();
-        comp.state = state;
-    }
-
-    // mono keeps switch (DarkGray) distinct from button (White), so the glyph
-    // color proves the switch token is used rather than the button token.
+    // mono keeps switch (DarkGray) distinct from button (White), so the
+    // reported fg color proves the switch token is used rather than the
+    // button token.
     #[test]
     fn value_state_switch_renders_percentage_in_switch_token() {
         theme::set_test_theme(Some(theme::Theme::mono()));
-        let mut app = switch_app("S1.1");
-        set_state(&mut app, "S1.1", ComponentState::Value(0.35));
-
-        let buffer = buffer_for(&mut app, 80, 24);
-        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
-        assert!(
-            text.contains("35%"),
-            "Value-state switch should render the percentage, got: {text}"
-        );
+        let comp = switch_component(ComponentState::Value(0.35));
+        let (glyph, state, fg) = physical_visuals(&comp, false);
+        assert_eq!(state, "35%", "Value-state switch renders the percentage");
+        assert_eq!(glyph, "◉");
         assert_eq!(
-            glyph_fg(&buffer, "◉"),
-            Some(theme::Theme::mono().switch),
+            fg,
+            theme::Theme::mono().switch,
             "filled glyph must use the switch token"
         );
         theme::set_test_theme(None);
@@ -4783,37 +4502,27 @@ mod switch_rendering_tests {
     fn on_off_switches_keep_glyph_and_label_rendering() {
         // Default (classic) palette: switch == button, so classic output is
         // byte-identical to the previous button-token rendering.
-        let mut app = switch_app("S1.1");
-        assert_eq!(
-            app.patch.as_ref().unwrap().hw_components[0].state,
-            ComponentState::Off
-        );
-
-        let buffer = buffer_for(&mut app, 80, 24);
-        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("□"), "Off switch keeps the hollow glyph");
-        assert!(text.contains("OFF"), "Off switch keeps the OFF label");
-        assert_eq!(glyph_fg(&buffer, "□"), Some(theme::Theme::classic().switch));
+        let off = switch_component(ComponentState::Off);
+        let (glyph, state, fg) = physical_visuals(&off, false);
+        assert_eq!(glyph, "□", "Off switch keeps the hollow glyph");
+        assert_eq!(state, "OFF", "Off switch keeps the OFF label");
+        assert_eq!(fg, theme::Theme::classic().switch);
         assert_eq!(
             theme::Theme::classic().switch,
             theme::Theme::classic().button
         );
 
-        set_state(&mut app, "S1.1", ComponentState::On);
-        let text = rendered_text(&mut app, 80, 24);
-        assert!(
-            text.contains("▣"),
-            "On switch keeps the filled-square glyph"
-        );
-        assert!(text.contains("ON"), "On switch keeps the ON label");
+        let on = switch_component(ComponentState::On);
+        let (glyph, state, _) = physical_visuals(&on, false);
+        assert_eq!(glyph, "▣", "On switch keeps the filled-square glyph");
+        assert_eq!(state, "ON", "On switch keeps the ON label");
     }
 
     #[test]
     fn off_switch_uses_switch_token_not_button_token() {
         theme::set_test_theme(Some(theme::Theme::mono()));
-        let mut app = switch_app("S1.1");
-        let buffer = buffer_for(&mut app, 80, 24);
-        let fg = glyph_fg(&buffer, "□").expect("Off switch glyph must render");
+        let comp = switch_component(ComponentState::Off);
+        let (_, _, fg) = physical_visuals(&comp, false);
         assert_eq!(
             fg,
             theme::Theme::mono().switch,
