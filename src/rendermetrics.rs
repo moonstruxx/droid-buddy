@@ -149,6 +149,211 @@ impl RenderFeatures {
     }
 }
 
+// ── learned decision table + scorer (task 2.2, design D1/D5) ─────────────
+
+/// Embedded distilled decision table (tools/render_artifact.txt, task 2.1).
+/// The schema-drift check (design D1) lives in `parse_artifact`: a mismatch
+/// between the fitter and this extractor breaks a test, not a user session.
+const RENDER_ARTIFACT_JSON: &str = include_str!("../tools/render_artifact.txt");
+const ARTIFACT_VERSION: u32 = 1;
+
+/// Feature names the artifact must declare, in exact order — the extractor's
+/// feature set (schema-drift check against `tools/build_rendermetrics.py`).
+pub(crate) const FEATURE_NAMES: [&str; 9] = [
+    "components",
+    "panels",
+    "modules",
+    "min_width",
+    "overflow_cols",
+    "fallback_rate",
+    "sidebar_hidden",
+    "minimap_hidden",
+    "min_contrast",
+];
+
+/// Sentinel for an unresolvable `min_contrast` (terminal theme, all tokens
+/// `Color::Reset`): above any real contrast value, so no learned band ever
+/// matches it — the terminal theme owns its colors and is never flagged.
+const CONTRAST_NA_SENTINEL: f64 = 99.0;
+
+/// Which degradation channel produced a render outlier.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DegradeChannel {
+    /// Native-fit clipping: `overflow_cols > 0` (matched the table's
+    /// `overflow_cols` band, or the D5 fallback). Structurally impossible at
+    /// or above the patch's native-fit width (overflow is 0 there).
+    Overflow,
+    /// Palette contrast failure: `min_contrast < 4.5` (the mono shift4=Black
+    /// failure the detector exists for). Width-independent.
+    Contrast,
+    /// Boxed→unboxed cell fallback (`fallback_rate > 0`), or any other
+    /// table match without a dedicated channel.
+    Fallback,
+}
+
+/// A predicted render degradation, advisory only (design D5): it never gates
+/// loading, never blocks rendering, never intercepts input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderOutlier {
+    /// The channel that fired.
+    pub channel: DegradeChannel,
+    /// Columns the patch wants at scale 1.0 (its native-fit `min_width`) —
+    /// the "use ≥ M cols" recommendation for the status hint.
+    pub recommended_width: u16,
+    /// The minimum co-occurring contrast that fired (contrast channel only;
+    /// `None` for themes whose tokens are unresolvable).
+    pub min_contrast: Option<f32>,
+}
+
+/// The distilled artifact: bounded per-feature bands (design D1).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct RenderArtifact {
+    version: u32,
+    feature_names: Vec<String>,
+    degraded_bands: Vec<RenderBand>,
+    baseline_min_width_factor: f64,
+    seed: u32,
+}
+
+/// One band over one feature: a row matches when its feature value lies in
+/// `[min, max]`. `degraded: true` flags, `degraded: false` passes; bands are
+/// evaluated top-down, first match wins. The fitter emits only flag bands
+/// (pass bands would weaken the baseline's guarantees, design D5).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct RenderBand {
+    feature: String,
+    min: f64,
+    max: f64,
+    degraded: bool,
+}
+
+/// Parse and schema-check the embedded artifact. Errors on drift: wrong
+/// version, feature names not matching the extractor's set, a band over an
+/// unknown feature, an inverted band, or a baseline factor ≠ 1.0 (the
+/// fallback rule implements `width < min_width × factor`, and only factor
+/// 1.0 — the committed artifact's value — is supported).
+pub(crate) fn parse_artifact(json: &str) -> Result<RenderArtifact, String> {
+    let artifact: RenderArtifact =
+        serde_json::from_str(json).map_err(|e| format!("render artifact parse: {e}"))?;
+    if artifact.version != ARTIFACT_VERSION {
+        return Err(format!(
+            "render artifact version {} != extractor version {ARTIFACT_VERSION}",
+            artifact.version
+        ));
+    }
+    if artifact.feature_names != FEATURE_NAMES {
+        return Err(format!(
+            "render artifact feature_names {:?} != extractor {:?}",
+            artifact.feature_names, FEATURE_NAMES
+        ));
+    }
+    for band in &artifact.degraded_bands {
+        if !artifact.feature_names.iter().any(|n| n == &band.feature) {
+            return Err(format!(
+                "render artifact band over unknown feature {:?}",
+                band.feature
+            ));
+        }
+        if band.min > band.max {
+            return Err(format!("render artifact band {:?} inverted", band.feature));
+        }
+    }
+    if artifact.baseline_min_width_factor != 1.0 {
+        return Err(format!(
+            "render artifact baseline_min_width_factor {} != 1.0 (fallback semantics)",
+            artifact.baseline_min_width_factor
+        ));
+    }
+    if artifact.seed != 42 {
+        return Err(format!(
+            "render artifact seed {} != 42 (corpus determinism seed)",
+            artifact.seed
+        ));
+    }
+    Ok(artifact)
+}
+
+/// One feature's value as `f64` for band matching. `min_contrast` uses the
+/// NA sentinel when the theme's tokens are unresolvable. An unknown feature
+/// is unreachable (parse_artifact validates band names) and yields NaN so
+/// no band can match it.
+fn feature_value(features: &RenderFeatures, name: &str) -> f64 {
+    match name {
+        "components" => features.components as f64,
+        "panels" => features.panels as f64,
+        "modules" => features.modules as f64,
+        "min_width" => features.min_width as f64,
+        "overflow_cols" => features.overflow_cols as f64,
+        "fallback_rate" => features.fallback_rate as f64,
+        "sidebar_hidden" => u8::from(features.sidebar_hidden) as f64,
+        "minimap_hidden" => u8::from(features.minimap_hidden) as f64,
+        "min_contrast" => features
+            .min_contrast
+            .map(f64::from)
+            .unwrap_or(CONTRAST_NA_SENTINEL),
+        _ => f64::NAN,
+    }
+}
+
+fn outlier_for(band: &RenderBand, features: &RenderFeatures) -> RenderOutlier {
+    let channel = match band.feature.as_str() {
+        "overflow_cols" => DegradeChannel::Overflow,
+        "min_contrast" => DegradeChannel::Contrast,
+        _ => DegradeChannel::Fallback,
+    };
+    RenderOutlier {
+        channel,
+        recommended_width: features.min_width,
+        min_contrast: features.min_contrast,
+    }
+}
+
+/// Score features against an explicit band set (testable core).
+///
+/// Invariant guards (design D5), enforced structurally:
+///   1. Native fit never flagged by the width channel — `overflow_cols == 0`
+///      exactly when `width >= min_width`, so neither the overflow band nor
+///      the fallback can fire at/above native fit. Contrast and fallback-rate
+///      channels are palette-dependent and orthogonal (the mono failure).
+///   2. Baseline clean never flagged — the fallback only flags when the
+///      baseline (native-fit rule) itself flags.
+///   3. Miss → heuristic fallback — a row matching no band falls back to the
+///      baseline rule below.
+pub(crate) fn score_with_bands(
+    features: &RenderFeatures,
+    bands: &[RenderBand],
+) -> Option<RenderOutlier> {
+    for band in bands {
+        let value = feature_value(features, &band.feature);
+        if band.min <= value && value <= band.max {
+            return if band.degraded {
+                Some(outlier_for(band, features))
+            } else {
+                None
+            };
+        }
+    }
+    // D5 miss → heuristic fallback: the native-fit rule (width < min_width
+    // × factor; factor validated == 1.0, so this is overflow_cols > 0).
+    if features.overflow_cols > 0 {
+        Some(RenderOutlier {
+            channel: DegradeChannel::Fallback,
+            recommended_width: features.min_width,
+            min_contrast: features.min_contrast,
+        })
+    } else {
+        None
+    }
+}
+
+/// Score a feature vector against the embedded learned table.
+/// `Err` means schema drift (design D1: breaks a test, not a user session);
+/// the caller decides how to surface it (task 3.1: no hint).
+pub fn score_render(features: &RenderFeatures) -> Result<Option<RenderOutlier>, String> {
+    let artifact = parse_artifact(RENDER_ARTIFACT_JSON)?;
+    Ok(score_with_bands(features, &artifact.degraded_bands))
+}
+
 /// One controller panel as the renderer groups it (`render_patch_grouped`):
 /// visible components (folded LEDs removed) split into module groups.
 struct PanelModel<'a> {
@@ -642,5 +847,227 @@ mod tests {
                 assert_eq!(a, b, "repeat extraction at {width} ({theme:?})");
             }
         }
+    }
+
+    // ── scorer: scored outliers (task 2.2) ──────────────────────────────────
+
+    #[test]
+    fn scored_outlier_overflow_channel() {
+        // arpeggio1 at 80 cols: min_width 228 → overflow 148 → overflow band.
+        let patch = load_fixture("arpeggio1");
+        let f = RenderFeatures::extract(&patch, 80, classic());
+        let out = score_render(&f)
+            .expect("artifact parses")
+            .expect("degraded at 80");
+        assert_eq!(out.channel, DegradeChannel::Overflow);
+        assert_eq!(out.recommended_width, 228);
+    }
+
+    #[test]
+    fn scored_outlier_contrast_channel() {
+        // mono at native fit (width == min_width): overflow 0, so the width
+        // band is silent — the contrast band fires on shift4=Black (1.0).
+        let patch = load_fixture("arpeggio1");
+        let f = RenderFeatures::extract(&patch, 228, mono());
+        let out = score_render(&f)
+            .expect("artifact parses")
+            .expect("mono contrast fails");
+        assert_eq!(out.channel, DegradeChannel::Contrast);
+        assert_eq!(out.min_contrast, Some(1.0));
+        assert_eq!(out.recommended_width, 228);
+        // Sanity: the same patch in classic at native fit is clean.
+        let f = RenderFeatures::extract(&patch, 228, classic());
+        assert_eq!(score_render(&f).expect("artifact parses"), None);
+    }
+
+    #[test]
+    fn clean_render_scores_none() {
+        // Native fit (width == min_width), classic: no channel fires.
+        let patch = load_fixture("influence_outlier");
+        let f = RenderFeatures::extract(&patch, 324, classic());
+        assert_eq!(score_render(&f).expect("artifact parses"), None);
+        // Native fit, terminal: contrast unresolvable, width clean.
+        let f = RenderFeatures::extract(&patch, 324, terminal());
+        assert_eq!(score_render(&f).expect("artifact parses"), None);
+    }
+
+    // ── scorer: fallback + invariant guards (design D5) ─────────────────────
+
+    fn clean_features() -> RenderFeatures {
+        RenderFeatures {
+            width: 120,
+            components: 14,
+            panels: 2,
+            modules: 2,
+            min_width: 100,
+            overflow_cols: 0,
+            fallback_rate: 0.0,
+            sidebar_hidden: false,
+            minimap_hidden: false,
+            min_contrast: Some(10.0),
+        }
+    }
+
+    #[test]
+    fn fallback_miss_clean_row_scores_none() {
+        // No band matches (empty set) and overflow == 0 → clean (baseline
+        // is clean, D5 guard 2).
+        assert_eq!(score_with_bands(&clean_features(), &[]), None);
+    }
+
+    #[test]
+    fn fallback_miss_flags_width_degradation() {
+        // No band matches but width < min_width → D5 miss → heuristic
+        // fallback flags via the Fallback channel (guard 3).
+        let mut f = clean_features();
+        f.min_width = 120;
+        f.overflow_cols = 20;
+        let out = score_with_bands(&f, &[]).expect("fallback flags width degradation");
+        assert_eq!(out.channel, DegradeChannel::Fallback);
+        assert_eq!(out.recommended_width, 120);
+    }
+
+    #[test]
+    fn native_fit_never_flagged_by_width_channel() {
+        // Guard 1: an aggressive overflow band cannot fire at/above native
+        // fit because overflow_cols == 0 exactly there (structural).
+        let band = RenderBand {
+            feature: "overflow_cols".into(),
+            min: 1.0,
+            max: 1e9,
+            degraded: true,
+        };
+        assert_eq!(score_with_bands(&clean_features(), &[band]), None);
+    }
+
+    #[test]
+    fn baseline_clean_never_flagged() {
+        // Guard 2: with the full embedded table, an overflow-clean row is
+        // never flagged — including terminal (contrast NA sentinel never
+        // matches the contrast band).
+        let patch = load_fixture("influence_outlier");
+        let f = RenderFeatures::extract(&patch, 324, terminal());
+        assert_eq!(score_render(&f).expect("artifact parses"), None);
+    }
+
+    // ── schema drift (design D1: breaks a test, not a user session) ────────
+
+    fn artifact_json(version: u32, features: &[&str], factor: f64) -> String {
+        format!(
+            r#"{{"version":{version}, "feature_names":{features:?}, "degraded_bands":[], "baseline_min_width_factor":{factor}, "seed":42}}"#
+        )
+    }
+
+    #[test]
+    fn schema_drift_detected_on_bad_json() {
+        assert!(parse_artifact("not json").is_err());
+    }
+
+    #[test]
+    fn schema_drift_detected_on_version_mismatch() {
+        assert!(parse_artifact(&artifact_json(2, &FEATURE_NAMES, 1.0)).is_err());
+    }
+
+    #[test]
+    fn schema_drift_detected_on_feature_names_mismatch() {
+        assert!(parse_artifact(&artifact_json(1, &["components"], 1.0)).is_err());
+    }
+
+    #[test]
+    fn schema_drift_detected_on_baseline_factor_change() {
+        assert!(parse_artifact(&artifact_json(1, &FEATURE_NAMES, 0.5)).is_err());
+    }
+
+    #[test]
+    fn valid_artifact_parses_and_feature_names_match_extractor() {
+        let artifact = parse_artifact(RENDER_ARTIFACT_JSON).expect("embedded artifact is valid");
+        assert_eq!(artifact.version, 1);
+        assert_eq!(artifact.feature_names, FEATURE_NAMES);
+        assert!(
+            artifact.degraded_bands.iter().all(|b| b.degraded),
+            "fitter emits only flag bands"
+        );
+    }
+
+    // ── Python ↔ Rust extractor agreement on the committed corpus ───────────
+
+    #[test]
+    fn python_rust_extractor_agreement_on_corpus() {
+        const CSV: &str = include_str!("../corpus/rendermetrics.csv");
+        let mut lines = CSV.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "patch,width,theme,components,panels,modules,min_width,overflow_cols,\
+fallback_rate,sidebar_hidden,minimap_hidden,min_contrast,degraded"
+        );
+        let mut checked = 0usize;
+        for line in lines {
+            let cols: Vec<&str> = line.split(',').collect();
+            assert_eq!(cols.len(), 13, "malformed corpus row: {line}");
+            let patch = load_fixture(cols[0]);
+            let width: u16 = cols[1].parse().unwrap();
+            let theme = theme::resolve(cols[2]);
+            let f = RenderFeatures::extract(&patch, width, theme);
+
+            let approx = |a: f64, b: &str| (a - b.parse::<f64>().unwrap()).abs() < 1e-3;
+            assert_eq!(
+                f.components,
+                cols[3].parse::<usize>().unwrap(),
+                "components {line}"
+            );
+            assert_eq!(f.panels, cols[4].parse::<usize>().unwrap(), "panels {line}");
+            assert_eq!(
+                f.modules,
+                cols[5].parse::<usize>().unwrap(),
+                "modules {line}"
+            );
+            assert_eq!(
+                f.min_width,
+                cols[6].parse::<u16>().unwrap(),
+                "min_width {line}"
+            );
+            assert_eq!(
+                f.overflow_cols,
+                cols[7].parse::<u16>().unwrap(),
+                "overflow {line}"
+            );
+            assert!(
+                approx(f.fallback_rate as f64, cols[8]),
+                "fallback_rate {line}"
+            );
+            assert_eq!(
+                u8::from(f.sidebar_hidden),
+                cols[9].parse::<u8>().unwrap(),
+                "sidebar_hidden {line}"
+            );
+            assert_eq!(
+                u8::from(f.minimap_hidden),
+                cols[10].parse::<u8>().unwrap(),
+                "minimap_hidden {line}"
+            );
+            match f.min_contrast {
+                None => assert!(
+                    cols[11].is_empty(),
+                    "rust None but csv {}: {line}",
+                    cols[11]
+                ),
+                Some(v) => assert!(approx(v as f64, cols[11]), "min_contrast {line}"),
+            }
+            // Label rule agreement (auditable D3 semantics): the Python label
+            // is the union of the three degradation channels.
+            let rust_label = (f.overflow_cols > 0
+                || f.fallback_rate > 0.0
+                || f.min_contrast.is_some_and(|c| c < 4.5)) as u8;
+            assert_eq!(
+                rust_label,
+                cols[12].parse::<u8>().unwrap(),
+                "degraded {line}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 300,
+            "agreement checked only {checked} corpus rows"
+        );
     }
 }
