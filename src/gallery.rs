@@ -17,6 +17,7 @@ use ratatui::Terminal;
 use crate::app::{App, ViewerFocus};
 use crate::handler::handle_event;
 use crate::patch::{ComponentState, ShiftGroup};
+use crate::rendermetrics::{score_render, RenderFeatures};
 use crate::theme;
 use crate::ui::render;
 
@@ -515,17 +516,40 @@ pub fn generate_gallery() -> std::io::Result<PathBuf> {
 
     let mut rows_html = String::new();
     for scenario in SCENARIOS {
-        rows_html.push_str(&format!(
-            "    <tr><td class=\"scenario\">{}</td>",
-            html_escape(scenario.label)
-        ));
+        // Render-outlier flags (task 3.2) are collected per theme first so the
+        // scenario cell can carry an aggregate marker as well.
+        let mut cells: Vec<(&str, &str, bool, String)> = Vec::with_capacity(theme::THEMES.len());
+        let mut any_degraded = false;
         for &theme_name in theme::THEMES {
             let _guard = ThemedGuard::pin(theme_name);
             let mut app = App::new();
             (scenario.setup)(&mut app);
             let buf = buffer_for(&mut app, scenario.width, scenario.height);
-            let ansi = buffer_to_ansi(&buf);
+            let mut ansi = buffer_to_ansi(&buf);
             let html = buffer_to_html(&buf);
+
+            // Score the scenario's patch at the rendered width under the pinned
+            // theme, exactly like ui.rs `render_outlier_hint`. `Err` (schema
+            // drift, design D1) is treated as "not flagged".
+            let degraded = match app.patch.as_ref().and_then(|patch| {
+                score_render(&RenderFeatures::extract(
+                    patch,
+                    scenario.width,
+                    theme::active(),
+                ))
+                .ok()
+                .flatten()
+            }) {
+                Some(outlier) => {
+                    any_degraded = true;
+                    ansi = format!(
+                        "⚠ degraded ({:?}) — use ≥ {} cols\n{ansi}",
+                        outlier.channel, outlier.recommended_width
+                    );
+                    true
+                }
+                None => false,
+            };
 
             // Write per-scenario ANSI for inspectability (ephemeral, gitignored)
             let ansi_path = out_dir.join(format!("{}_{}.ansi", scenario.id, theme_name));
@@ -535,9 +559,31 @@ pub fn generate_gallery() -> std::io::Result<PathBuf> {
             let html_cell_path = out_dir.join(format!("{}_{}.html", scenario.id, theme_name));
             fs::write(&html_cell_path, &html)?;
 
+            cells.push((theme_name, scenario.id, degraded, html));
+        }
+
+        rows_html.push_str(&format!(
+            "    <tr><td class=\"scenario\">{}{}</td>",
+            html_escape(scenario.label),
+            if any_degraded {
+                " <span class=\"degraded\">⚠ degraded</span>"
+            } else {
+                ""
+            }
+        ));
+        for (theme_name, scenario_id, degraded, html) in cells {
+            let marker = if degraded {
+                "<span class=\"degraded\">⚠ degraded</span>\n"
+            } else {
+                ""
+            };
+            let attr = if degraded {
+                " data-degraded=\"true\""
+            } else {
+                ""
+            };
             rows_html.push_str(&format!(
-                "<td data-theme=\"{theme_name}\" data-scenario=\"{}\"><pre class=\"cell\">{html}</pre></td>",
-                scenario.id
+                "<td data-theme=\"{theme_name}\" data-scenario=\"{scenario_id}\"{attr}>{marker}<pre class=\"cell\">{html}</pre></td>"
             ));
         }
         rows_html.push_str("</tr>\n");
@@ -559,11 +605,13 @@ td.scenario {{ background: #1a1a1a; font-size: 0.85rem; white-space: nowrap; max
 pre.cell {{ margin: 0; font-family: "Cascadia Mono", "Fira Code", monospace; font-size: 11px; line-height: 1.15; white-space: pre; background: #000; color: #ccc; padding: 6px; overflow-x: auto; }}
 pre.cell span {{ white-space: pre; }}
 .legend {{ margin: 12px 0; color: #aaa; font-size: 0.85rem; }}
+.degraded {{ color: #ffd500; font-weight: bold; font-size: 0.75rem; display: block; margin: 0 0 2px; }}
+td[data-degraded="true"] {{ border-left: 3px solid #ffd500; }}
 </style>
 </head>
 <body>
 <h1>droid_tui — visual gallery (TestBackend → ANSI → HTML)</h1>
-<p class="legend">One row per scenario, columns <code>classic</code> / <code>terminal</code> / <code>mono</code> (widths 80/120, viewer open/closed, shift active). Each cell is the same HTML from <code>buffer_to_html</code> used in insta snapshots. Generated via <code>cargo run --bin snapshot-gallery</code> or <code>cargo test -- --generate-gallery</code>.</p>
+<p class="legend">One row per scenario, columns <code>classic</code> / <code>terminal</code> / <code>mono</code> (widths 80/120, viewer open/closed, shift active). Each cell is the same HTML from <code>buffer_to_html</code> used in insta snapshots. Generated via <code>cargo run --bin snapshot-gallery</code> or <code>GENERATE_GALLERY=1 cargo test</code>. Cells marked <code>⚠ degraded</code> are scenarios the render-outlier scorer predicts degraded at that width/theme.</p>
 <table>
 <thead><tr><th>Scenario</th><th>classic</th><th>terminal</th><th>mono</th></tr></thead>
 <tbody>
