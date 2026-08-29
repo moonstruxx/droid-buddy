@@ -2,10 +2,10 @@
 
 ## 1. Merge & Extractor
 
-- [ ] 1.1 Merge learned Track-2 scoring onto main <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/geometry.rs, src/graph.rs, src/patch.rs, src/regression.rs, src/theme.rs, tools/build_features.py, tools/influence_stats.txt, corpus/features.csv] -->
+- [x] 1.1 Merge learned Track-2 scoring onto main <!-- merge landed as commit 22f135b (HEAD); verify via full gate 4.2 --> <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/geometry.rs, src/graph.rs, src/patch.rs, src/regression.rs, src/theme.rs, tools/build_features.py, tools/influence_stats.txt, corpus/features.csv] -->
       · merge `feature/2026-08-28-nn-ui-outlier-detection` onto main; resolve conflicts (geometry/graph/patch/regression/theme/tools) so the learned `WiringOutlierScorer` + `InfluenceStats` z-score second opinion and their proof tests exist on main
       · verify: `cargo test` (incl. `cargo insta test --check`) green; the merged tests from the branch pass; no duplicate or dead code left by the merge
-- [ ] 1.2 Pure render-metrics extractor <!-- agent: layout-designer-engineer.build, depends_on: [], touches: [src/rendermetrics.rs] -->
+- [x] 1.2 Pure render-metrics extractor <!-- agent: layout-designer-engineer.build, depends_on: [], touches: [src/rendermetrics.rs] -->
       · `src/rendermetrics.rs`: pure `(Patch, width, theme) → RenderFeatures` (components/panels/modules counts, min_width, overflow_cols, fallback_rate, sidebar_hidden, minimap_hidden, min_contrast) derived from the renderer's own layout constants — no rendered frame, deterministic
       · verify: `cargo test` new in-module unit tests cover known fixtures at known widths (80/100/120 × classic/mono/terminal) and determinism (identical output on repeat)
 

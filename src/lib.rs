@@ -10,6 +10,7 @@ pub mod latency;
 pub mod layout;
 pub mod optimize;
 pub mod patch;
+pub mod rendermetrics;
 pub mod schema;
 pub mod theme;
 pub mod ui;

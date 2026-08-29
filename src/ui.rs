@@ -375,14 +375,16 @@ fn render_empty(frame: &mut Frame, area: Rect) {
     frame.render_widget(msg, area);
 }
 
-const COMPONENT_WIDTH: u16 = 16;
-const COMPONENT_HEIGHT: u16 = 3;
+// pub(crate): the render-metrics extractor (src/rendermetrics.rs) mirrors these
+// exact layout constants so extractor and renderer cannot drift (design D2).
+pub(crate) const COMPONENT_WIDTH: u16 = 16;
+pub(crate) const COMPONENT_HEIGHT: u16 = 3;
 
 /// A boxed LED cell needs room for both border columns plus the interior
 /// state row; below this width the bordered cell degrades to the unboxed
 /// two-line rendering instead of emitting clipped border fragments
 /// (droid_tui-wsu).
-const BOX_MIN_WIDTH: u16 = 8;
+pub(crate) const BOX_MIN_WIDTH: u16 = 8;
 
 /// Truncate `s` to at most `max_chars` terminal columns, appending `…`
 /// (U+2026) when it overflows (droid_tui-lsd). Char-aware so multi-byte
@@ -2346,7 +2348,7 @@ fn render_panels_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-const MINIMAP_WIDTH: u16 = 3;
+pub(crate) const MINIMAP_WIDTH: u16 = 3;
 
 fn should_show_minimap(source_pane_area: Rect, total_area: Rect, app: &App) -> bool {
     if app.patch.is_none() {
