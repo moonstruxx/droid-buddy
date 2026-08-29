@@ -24,7 +24,7 @@
 - [x] 3.1 Runtime surfacing: status_hint + theme token <!-- agent: layout-designer-engineer.build, depends_on: [2.2], touches: [src/app.rs, src/handler.rs, src/ui.rs, src/theme.rs] -->
       · score on `load_patch` at the current size/theme; degraded → status hint `Renders degraded at N cols — use ≥ M cols or reduce scale` in a new `render_outlier_warning` token (classic/mono/terminal); never gates loading, never intercepts input; ui.rs publishes the recommendation per frame
       · verify: `cargo test` status/theme tests; token present in all three palettes; snapshot of the status-hint channel renders in classic/mono/terminal at widths 80/100/120
-- [ ] 3.2 Gallery-CI render-outlier flag <!-- agent: devops-engineer.build, depends_on: [3.1], touches: [src/bin/snapshot-gallery.rs, .github/workflows/ci.yml] -->
+- [x] 3.2 Gallery-CI render-outlier flag <!-- agent: devops-engineer.build, depends_on: [3.1], touches: [src/bin/snapshot-gallery.rs, .github/workflows/ci.yml] -->
       · the visual matrix marks scenarios the scorer predicts degraded; CI surfaces the flags as part of the existing gallery step
       · verify: gallery output marks predicted-bad scenarios; `cargo test -- --generate-gallery` + CI workflow lint pass
 
