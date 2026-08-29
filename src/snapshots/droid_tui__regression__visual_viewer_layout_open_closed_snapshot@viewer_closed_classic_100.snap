@@ -40,5 +40,5 @@ expression: ansi_closed
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Scale: 1.0 | Orientation: Portrait                          │
+│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 420 cols or reduce scal│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

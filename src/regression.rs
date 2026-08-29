@@ -1527,7 +1527,18 @@ fn regression_status_bar_segments_once() {
     // duplication used to render as "Scale: 1.0 | Orientation: Landscape |
     // Scale: 1.0 | Orientation: …".
     let mut app = melody2_app();
-    let buf = buffer_for(&mut app, 120, 24);
+    // Render at native fit: at degraded widths the render-outlier advisory
+    // hint (task 3.1) truncates the trailing Scale/Orientation segments, so
+    // a healthy frame keeps them fully visible — the no-duplication
+    // invariant holds at any width, hint or not.
+    let patch = app.patch.as_ref().unwrap();
+    let min_width = crate::rendermetrics::RenderFeatures::extract(
+        patch,
+        9999,
+        crate::theme::resolve("classic"),
+    )
+    .min_width;
+    let buf = buffer_for(&mut app, min_width + 40, 24);
     let text: String = buf.content().iter().map(|c| c.symbol()).collect();
     assert_eq!(
         text.matches("Scale: 1.0").count(),
@@ -2438,6 +2449,390 @@ fn gallery_generate_on_flag() {
     assert!(
         ansi_classic.contains("P2B8") || html.contains("P2B8"),
         "gallery contains P2B8 face"
+    );
+
+    // Render-outlier flag contract (task 4.1): the matrix cells the gallery
+    // materializes carry the same warning channel the status bar shows, so a
+    // degraded scenario's ANSI sidecar includes the hint and a healthy one
+    // never does. The `data-flag` matrix attribute itself is owned by 3.2
+    // (src/bin/snapshot-gallery.rs), so this asserts through the harness
+    // output — the same render path — without touching that tooling.
+    let degraded = std::fs::read_to_string("evidence/gallery/arpeggio_80_classic.ansi")
+        .expect("arpeggio 80 classic sidecar");
+    assert!(
+        degraded.contains("Renders degraded at 80 cols"),
+        "arpeggio_80_classic matrix cell must be flagged as degraded"
+    );
+    let degraded_120 = std::fs::read_to_string("evidence/gallery/arpeggio_120_mono.ansi")
+        .expect("arpeggio 120 mono sidecar");
+    assert!(
+        degraded_120.contains("Renders degraded at 120 cols"),
+        "arpeggio_120_mono matrix cell must be flagged as degraded"
+    );
+    for healthy in [
+        "switch_value_100_classic",
+        "disabled_circuit_graph_100_classic",
+    ] {
+        let sidecar = std::fs::read_to_string(format!("evidence/gallery/{healthy}.ansi"))
+            .unwrap_or_else(|e| panic!("{healthy} sidecar missing: {e}"));
+        assert!(
+            !sidecar.contains("Renders degraded"),
+            "{healthy} matrix cell must not be flagged (native fit)"
+        );
+    }
+}
+
+// ── render-outlier regression (task 4.1) ────────────────────────────────
+// Four proofs for the status-hint channel (task 3.1):
+//   1. holdout precision/recall: the learned scorer agrees with the offline
+//      corpus label on every committed row and is never worse than the
+//      heuristic baseline (the union rule) — tooling output asserted in-test
+//      instead of eyeballed;
+//   2. invariant matrix over fixtures × widths × themes: native-fit never
+//      flagged by the width channel, baseline-clean never flagged,
+//      miss → fallback, and the rendered hint channel matches the scorer
+//      verdict end-to-end;
+//   3. snapshot fixtures: the mixed-kind render_outlier_matrix fixture
+//      renders the warning channel at degraded widths and stays clean at
+//      native fit;
+//   4. gallery scenario verdicts: pins the exact matrix cells 3.2 flags.
+
+#[test]
+fn regression_scorer_holdout_agrees_with_corpus() {
+    const CSV: &str = include_str!("../corpus/rendermetrics.csv");
+    let mut lines = CSV.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "patch,width,theme,components,panels,modules,min_width,overflow_cols,\
+fallback_rate,sidebar_hidden,minimap_hidden,min_contrast,degraded"
+    );
+
+    // Confusion matrix of the learned scorer vs the corpus label; the
+    // heuristic baseline (union rule, the label semantics of
+    // tools/build_rendermetrics.py) is computed alongside so the test
+    // asserts precision/recall *relative to the baseline*.
+    let mut tp = 0usize;
+    let mut fp = 0usize;
+    let mut fn_ = 0usize;
+    let mut tn = 0usize;
+    let mut baseline_tp = 0usize;
+    let mut baseline_fp = 0usize;
+    let mut baseline_fn = 0usize;
+    let mut baseline_tn = 0usize;
+    let mut checked = 0usize;
+
+    for line in lines {
+        let cols: Vec<&str> = line.split(',').collect();
+        assert_eq!(cols.len(), 13, "malformed corpus row: {line}");
+        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{}.ini", cols[0])))
+            .unwrap_or_else(|e| panic!("fixture {}: {e}", cols[0]));
+        let width: u16 = cols[1].parse().unwrap();
+        let f =
+            crate::rendermetrics::RenderFeatures::extract(&patch, width, theme::resolve(cols[2]));
+
+        let predicted =
+            crate::rendermetrics::score_render(&f).unwrap_or_else(|e| panic!("scorer drift: {e}"));
+        let label = cols[12] == "1";
+
+        match (predicted.is_some(), label) {
+            (true, true) => tp += 1,
+            (true, false) => fp += 1,
+            (false, true) => fn_ += 1,
+            (false, false) => tn += 1,
+        }
+
+        // Channel honesty: a flagged row's channel must match the driving
+        // feature, and the recommendation is always the native-fit width.
+        if let Some(out) = &predicted {
+            assert_eq!(out.recommended_width, f.min_width, "{line}");
+            use crate::rendermetrics::DegradeChannel;
+            match out.channel {
+                DegradeChannel::Overflow => assert!(
+                    f.overflow_cols > 0,
+                    "Overflow channel but overflow 0: {line}"
+                ),
+                DegradeChannel::Contrast => assert!(
+                    f.min_contrast.is_some_and(|c| c < 4.5),
+                    "Contrast channel but min_contrast >= 4.5: {line}"
+                ),
+                DegradeChannel::Fallback => assert!(
+                    f.fallback_rate > 0.0,
+                    "Fallback channel but fallback_rate 0: {line}"
+                ),
+            }
+        }
+
+        // Heuristic baseline: the union of the three degradation channels.
+        let baseline =
+            f.overflow_cols > 0 || f.fallback_rate > 0.0 || f.min_contrast.is_some_and(|c| c < 4.5);
+        match (baseline, label) {
+            (true, true) => baseline_tp += 1,
+            (true, false) => baseline_fp += 1,
+            (false, true) => baseline_fn += 1,
+            (false, false) => baseline_tn += 1,
+        }
+        checked += 1;
+    }
+    assert!(checked >= 300, "holdout checked only {checked} corpus rows");
+
+    let precision = |tp: usize, fp: usize| tp as f64 / (tp + fp) as f64;
+    let recall = |tp: usize, fn_: usize| tp as f64 / (tp + fn_) as f64;
+    let scorer_p = precision(tp, fp);
+    let scorer_r = recall(tp, fn_);
+    let base_p = precision(baseline_tp, baseline_fp);
+    let base_r = recall(baseline_tp, baseline_fn);
+    assert!(
+        fp == 0 && fn_ == 0,
+        "scorer contradicts the corpus label: TP={tp} FP={fp} FN={fn_} TN={tn}"
+    );
+    assert!(
+        scorer_p >= base_p && scorer_r >= base_r,
+        "scorer ({scorer_p:.3}/{scorer_r:.3}) regressed vs baseline ({base_p:.3}/{base_r:.3})"
+    );
+    // Baseline confusion counts are read here so the comparison above is
+    // auditable in failure output (TN included).
+    let baseline_rows = baseline_tp + baseline_fp + baseline_fn + baseline_tn;
+    assert_eq!(
+        baseline_rows, checked,
+        "baseline confusion TP={baseline_tp} FP={baseline_fp} FN={baseline_fn} TN={baseline_tn}"
+    );
+}
+
+#[test]
+fn regression_outlier_invariant_matrix() {
+    // The design-D5 invariants as a matrix over real fixtures × widths ×
+    // themes (not hand-built feature vectors): native-fit never flagged by
+    // the width channel, baseline-clean never flagged, miss → fallback.
+    for name in [
+        "arpeggio1",
+        "render_outlier_matrix",
+        "source_navigation",
+        "droid_mpfs5melody2",
+    ] {
+        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{name}.ini")))
+            .unwrap_or_else(|e| panic!("fixture {name}: {e}"));
+        let min_width =
+            crate::rendermetrics::RenderFeatures::extract(&patch, 9999, theme::resolve("classic"))
+                .min_width;
+        for width in [80u16, 100, 120, min_width, min_width + 40] {
+            for theme_name in theme::THEMES {
+                let f = crate::rendermetrics::RenderFeatures::extract(
+                    &patch,
+                    width,
+                    theme::resolve(theme_name),
+                );
+                let verdict = crate::rendermetrics::score_render(&f).expect("no schema drift");
+
+                // Invariant: native fit is never flagged by the width channel
+                // (overflow is structurally 0 at/above min_width). Contrast
+                // and fallback channels are palette-dependent and orthogonal.
+                if width >= min_width {
+                    if let Some(out) = &verdict {
+                        assert_ne!(
+                            out.channel,
+                            crate::rendermetrics::DegradeChannel::Overflow,
+                            "{name} at {width} ({theme_name}): native fit must not flag Overflow"
+                        );
+                    }
+                }
+
+                // Invariant: a baseline-clean row is never flagged at all.
+                let baseline_clean = f.overflow_cols == 0
+                    && f.fallback_rate == 0.0
+                    && !f.min_contrast.is_some_and(|c| c < 4.5);
+                if baseline_clean {
+                    assert!(
+                        verdict.is_none(),
+                        "{name} at {width} ({theme_name}): clean baseline flagged"
+                    );
+                }
+
+                // Invariant: miss → fallback — an empty band set reproduces
+                // the D5 heuristic exactly (flags iff overflow, Fallback
+                // channel, recommending min_width).
+                let miss = crate::rendermetrics::score_with_bands(&f, &[]);
+                if f.overflow_cols > 0 {
+                    let out = miss.expect("miss must fall back to the native-fit rule");
+                    assert_eq!(
+                        out.channel,
+                        crate::rendermetrics::DegradeChannel::Fallback,
+                        "{name} at {width} ({theme_name})"
+                    );
+                    assert_eq!(out.recommended_width, f.min_width, "{name} at {width}");
+                } else {
+                    assert!(
+                        miss.is_none(),
+                        "{name} at {width} ({theme_name}): clean miss flagged"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn regression_hint_channel_matches_scorer_verdict() {
+    // End-to-end through render(): the status bar shows the advisory hint
+    // iff the in-process scorer flags the frame — the hint channel and the
+    // scorer can never disagree. Widths ≥ 80 keep the hint token unclipped
+    // behind the default status message. (source_navigation is excluded:
+    // its scope hints lengthen the status prefix and would clip the hint.)
+    for name in ["arpeggio1", "render_outlier_matrix"] {
+        let min_width = {
+            let app = app_from_fixture(name);
+            crate::rendermetrics::RenderFeatures::extract(
+                app.patch.as_ref().unwrap(),
+                9999,
+                theme::resolve("classic"),
+            )
+            .min_width
+        };
+        for theme_name in theme::THEMES {
+            for width in [80u16, 100, 120, min_width, min_width + 40] {
+                let _guard = ThemedGuard::pin(theme_name);
+                let mut app = app_from_fixture(name);
+                let buf = buffer_for(&mut app, width, 30);
+                let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+                let f = crate::rendermetrics::RenderFeatures::extract(
+                    app.patch.as_ref().unwrap(),
+                    width,
+                    theme::resolve(theme_name),
+                );
+                let expected_hint = crate::rendermetrics::score_render(&f)
+                    .expect("no schema drift")
+                    .is_some();
+                assert_eq!(
+                    text.contains("Renders degraded"),
+                    expected_hint,
+                    "{name} {theme_name} at {width} cols: hint channel disagrees with scorer"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn visual_render_outlier_hint_snapshot() {
+    // Snapshot fixtures for the new warning channel (task 4.1 item 3):
+    // render_outlier_matrix at degraded widths shows the hint; at native fit
+    // classic is clean; mono still flags via the contrast channel; terminal
+    // flags via overflow at 80 and stays clean at native fit.
+    let min_width = {
+        let app = app_from_fixture("render_outlier_matrix");
+        crate::rendermetrics::RenderFeatures::extract(
+            app.patch.as_ref().unwrap(),
+            9999,
+            theme::resolve("classic"),
+        )
+        .min_width
+    };
+
+    {
+        let _guard = ThemedGuard::pin("classic");
+        let mut app = app_from_fixture("render_outlier_matrix");
+        for width in [80u16, 100, 120] {
+            let buf = buffer_for(&mut app, width, 30);
+            insta::with_settings!(
+                {snapshot_suffix => format!("render_outlier_classic_{width}")},
+                { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
+            );
+        }
+        let buf = buffer_for(&mut app, min_width, 30);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            !text.contains("Renders degraded"),
+            "classic native fit must be clean"
+        );
+        insta::with_settings!(
+            {snapshot_suffix => "render_outlier_classic_native"},
+            { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
+        );
+    }
+
+    {
+        let _guard = ThemedGuard::pin("mono");
+        let mut app = app_from_fixture("render_outlier_matrix");
+        let buf = buffer_for(&mut app, min_width, 30);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("Renders degraded"),
+            "mono native fit must flag the contrast channel"
+        );
+        insta::with_settings!(
+            {snapshot_suffix => "render_outlier_mono_native"},
+            { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
+        );
+    }
+
+    {
+        let _guard = ThemedGuard::pin("terminal");
+        let mut app = app_from_fixture("render_outlier_matrix");
+        let buf = buffer_for(&mut app, 80, 30);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("Renders degraded"),
+            "terminal 80 must flag via overflow"
+        );
+        insta::with_settings!(
+            {snapshot_suffix => "render_outlier_terminal_80"},
+            { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
+        );
+    }
+}
+
+#[test]
+fn regression_gallery_scenario_verdicts() {
+    // The gallery matrix (src/gallery.rs SCENARIOS) is generated from real
+    // fixture loads; this pins the scorer verdict each matrix cell renders,
+    // so the cells 3.2 marks "degraded" are exactly these. Asserted
+    // in-process so the contract holds in every `cargo test`, not only under
+    // `--generate-gallery`.
+    let cases: &[(&str, &str, u16, bool)] = &[
+        ("arpeggio_80", "arpeggio1", 80, true),
+        ("arpeggio_120", "arpeggio1", 120, true),
+        ("led_pairs_100", "led_pairs", 100, true),
+        ("melody2_narrow_40", "droid_mpfs5melody2", 40, true),
+        ("melody2_p2b8_uniform_60", "droid_mpfs5melody2", 60, true),
+        ("viewer_closed_100", "source_navigation", 100, true),
+        ("viewer_open_100", "source_navigation", 100, true),
+        ("arpeggio_shift1_100", "arpeggio1", 100, true),
+        ("led_shift1_100", "led_pairs", 100, true),
+        ("viewer_shift1_100", "source_navigation", 100, true),
+        ("viewer_live_shift1_100", "source_navigation", 100, true),
+        ("viewer_live_toggle_100", "source_navigation", 100, true),
+        ("quad_none_120", "modifier_switch_passthrough", 120, true),
+        ("quad_b1_120", "modifier_switch_passthrough", 120, true),
+        ("quad_b1_100", "modifier_switch_passthrough", 100, true),
+        ("quad_b1_80", "modifier_switch_passthrough", 80, true),
+        ("switch_value_100", "switch_value", 100, false),
+        ("paused_dim_100", "arpeggio1", 100, true),
+        (
+            "disabled_circuit_graph_100",
+            "cable_banner_combos",
+            100,
+            false,
+        ),
+    ];
+    let mut flagged = 0usize;
+    for &(id, fixture, width, degraded) in cases {
+        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{fixture}.ini")))
+            .unwrap_or_else(|e| panic!("fixture {fixture}: {e}"));
+        let f =
+            crate::rendermetrics::RenderFeatures::extract(&patch, width, theme::resolve("classic"));
+        let verdict = crate::rendermetrics::score_render(&f).expect("no schema drift");
+        assert_eq!(
+            verdict.is_some(),
+            degraded,
+            "gallery scenario {id} ({fixture} @ {width}): verdict {} != expected {degraded}",
+            verdict.is_some()
+        );
+        if verdict.is_some() {
+            flagged += 1;
+        }
+    }
+    assert!(
+        flagged >= 12,
+        "expected most gallery scenarios to be flagged, got {flagged}"
     );
 }
 

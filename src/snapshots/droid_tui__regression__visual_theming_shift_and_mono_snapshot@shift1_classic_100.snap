@@ -30,5 +30,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | SHIFT 1 ACTIVE | Scale: 1.0 | Orientation: Portrait         │
+│No patch loaded. Press 'l' to load. | SHIFT 1 ACTIVE | Renders degraded at 100 cols — use ≥ 228 co│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
