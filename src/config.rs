@@ -1,7 +1,7 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
 //! + `[physical.rack]`) stored in `config.toml` under the XDG config home.
-//! Loaded once at startup, before the terminal UI initializes (design
-//! Decision 5).
+//!   Loaded once at startup, before the terminal UI initializes (design
+//!   Decision 5).
 //!
 //! This module stays decoupled from the theme catalog: canonical name
 //! resolution is injected as a function reference, so name-catalog
