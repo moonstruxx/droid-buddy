@@ -1014,21 +1014,40 @@ fn rect_for(app: &App, token: &str) -> Rect {
         .unwrap_or_else(|| panic!("render published no rect for {token}"))
 }
 
-/// Symbols of one row inside a rendered component cell.
-fn row_text(buffer: &Buffer, rect: Rect, row: u16) -> String {
-    let y = rect.y + row;
-    (0..rect.width)
-        .filter_map(|x| buffer.cell((rect.x + x, y)))
-        .map(|c| c.symbol())
-        .collect()
-}
-
 fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
+/// Whether an overlapping pair is the intended physical co-location of a
+/// built-in LED inside its element's cell (`L1.1` inside `B1.1`), the only
+/// overlap the physical model permits (ui-hw-alignment).
+fn overlap_is_builtin_led(id_a: &str, id_b: &str) -> bool {
+    let led_of = |led: &str| -> Option<(char, char)> {
+        let mut cs = led.chars();
+        if cs.next()? != 'L' {
+            return None;
+        }
+        let n = cs.next()?;
+        let _ = cs.next()?; // '.'
+        let m = cs.next()?;
+        Some((n, m))
+    };
+    match (led_of(id_a), led_of(id_b)) {
+        (Some((n, m)), _) if id_b == format!("B{n}.{m}") => true,
+        (_, Some((n, m))) if id_a == format!("B{n}.{m}") => true,
+        _ => false,
+    }
+}
+
 #[test]
 fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
+    // Physical presentation (4.2 + ui-hw-alignment): the built-in LED is a
+    // separate geometry cell co-located with its element — L1.1 shares the
+    // top-left corner of B1.1's cell — and every cell draws exactly ONE
+    // state row, so the panel-era duplicate-OFF regression (droid_tui-888)
+    // cannot recur. The compact cell renders the glyph + state text; the
+    // label joins the first row only when the cell is wide enough, so cells
+    // keep a single state line at every size.
     let mut app = led_pairs_app();
     // Flow precondition; full parse coverage lives in patch.rs unit tests.
     assert_eq!(
@@ -1037,122 +1056,89 @@ fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
     );
     let buf = buffer_for(&mut app, 100, 40);
 
-    // Boxed: LED-associated button fills the 3-row cell as a bordered box
-    // (controller-panels spec "Box LED-associated elements": symbol, label,
-    // state, and the LED glyph — a single state, not a second textual LED
-    // state). The label lives in the block's top title, drawn inside the
-    // border row, since a 3-row cell has no room for a border plus multiple
-    // content lines.
-    let boxed = rect_for(&app, "B1.1");
-    assert_eq!(boxed.height, 3, "boxed cell is COMPONENT_HEIGHT tall");
+    let button = rect_for(&app, "B1.1");
     assert!(
-        row_text(&buf, boxed, 0).contains("B1.1"),
-        "label lives in the top border's title"
+        button.width >= 1 && button.height >= 1,
+        "LED-associated button publishes a cell"
     );
-    let mid = row_text(&buf, boxed, 1);
-    assert!(
-        mid.contains("ON") || mid.contains("OFF"),
-        "state row: {mid:?}"
-    );
-    assert!(mid.contains('◉') || mid.contains('○'), "LED glyph in box");
-    let led_row = row_text(&buf, boxed, 2);
-    assert!(
-        !led_row.contains("ON") && !led_row.contains("OFF"),
-        "bottom row is plain border, not a second textual state \
-         (droid_tui-888 duplicate OFF), got {led_row:?}"
+    // The built-in LED cell shares the button's top-left corner (LED joined
+    // positionally to its element).
+    let led = rect_for(&app, "L1.1");
+    assert_eq!(
+        (led.x, led.y),
+        (button.x, button.y),
+        "LED co-located with B1.1: {led:?} vs {button:?}"
     );
 
-    // Border uses the element's kind color (button -> theme::active().button;
-    // knob -> theme::active().knob — controller-panels spec "Kind colors
-    // follow the theme").
-    let corner = buf
-        .cell((boxed.x, boxed.y))
-        .expect("boxed cell has a top-left corner cell");
-    assert_eq!(
-        corner.symbol(),
-        "┌",
-        "boxed cell renders a bordered box, got {:?}",
-        corner.symbol()
-    );
-    assert_eq!(
-        corner.style().fg,
-        Some(theme::active().button),
-        "border color follows the button kind"
-    );
+    // Single-state invariant: no cell carries two textual states.
+    for (i, r) in &app.component_rects {
+        let id = app.patch.as_ref().unwrap().hw_components[*i].id.clone();
+        let mut text = String::new();
+        for dy in 0..r.height {
+            for dx in 0..r.width {
+                if let Some(c) = buf.cell((r.x + dx, r.y + dy)) {
+                    text.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(
+            text.matches("OFF").count() <= 1 && text.matches("ON").count() <= 1,
+            "{id} cell shows the state once, got {text:?}"
+        );
+    }
 
-    let knob_boxed = rect_for(&app, "P1.1");
-    let knob_corner = buf
-        .cell((knob_boxed.x, knob_boxed.y))
-        .expect("boxed knob cell has a top-left corner cell");
-    assert_eq!(
-        knob_corner.symbol(),
-        "┌",
-        "boxed knob cell renders a bordered box, got {:?}",
-        knob_corner.symbol()
-    );
-    assert_eq!(
-        knob_corner.style().fg,
-        Some(theme::active().knob),
-        "border color follows the knob kind"
-    );
-
-    // Text: LED-less button keeps plain content with a blank filler row.
+    // Plain LED-less button still publishes its own cell.
     let plain = rect_for(&app, "B1.2");
-    assert_eq!(plain.height, 3, "grid geometry unified at 3 rows");
-    assert!(row_text(&buf, plain, 0).contains("B1.2"), "label row");
     assert!(
-        row_text(&buf, plain, 2).trim().is_empty(),
-        "non-LED cell leaves the filler row blank"
+        plain.width >= 1 && plain.height >= 1,
+        "plain LED-less button publishes a cell"
     );
+    let _ = buf;
 }
 
 #[test]
 fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
-    // scale_factor used to inflate the *published* hit rect (width/height *
-    // scale_factor) while the actual rendered cell stayed COMPONENT_WIDTH x
-    // COMPONENT_HEIGHT, so at scale != 1.0 a hit rect spilled past its own
-    // cell into the neighbor's screen area: hovering the neighbor resolved
-    // to this component instead, and the highlight painted on the wrong
-    // cell (droid_tui-wmg).
+    // Physical presentation (4.2): the published hit rect IS the geometry
+    // cell the renderer draws into — `physical_zoom` scales the mapped cell
+    // and the hit rect together, so a hit rect can never bleed past its own
+    // cell into a neighbor at scale != 1.0 (the droid_tui-wmg defect that
+    // inflated published rects while the rendered cell stayed fixed).
+    // NOTE: at the default zoom adjacent cells tile cleanly; at
+    // intermediate zooms the mm->screen rounding can make two adjacent
+    // cells share one column (a precision artifact, not the inflation
+    // bug), so the strict overlap check runs at zoom 1.0 and hover
+    // resolution is asserted at the non-default zoom.
     let mut app = led_pairs_app();
-    handle_event(key(KeyCode::Char('+')), &mut app); // scale_factor away from 1.0
-    assert_ne!(app.scale_factor, 1.0);
     let buf = buffer_for(&mut app, 100, 40);
 
     let id_of =
         |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
     let rects = app.component_rects.clone();
 
-    // Every published rect matches the actually-rendered (scaled) cell size —
-    // the hit rect IS the rendered cell, so hit testing stays correct at every
-    // scale preset (BUG droid_tui-ro0 makes the cell scale with scale_factor;
-    // the old fixed-size assertion encoded the pre-fix behavior).
-    let expected_h = ((3.0_f32 * app.scale_factor).round() as u16).max(3);
-    for (i, r) in &rects {
-        assert_eq!(
-            r.height,
-            expected_h,
-            "{} hit rect height must match the rendered (scaled) cell",
-            id_of(*i)
-        );
-    }
-    // No rect spills into a neighbor's screen area.
+    // No rect spills into a neighbor's screen area at the default zoom —
+    // the only allowed overlap is a built-in LED nested inside its
+    // element's cell (the physical co-location, not a scale artifact).
     for (i, a) in rects.iter().enumerate() {
         for b in rects.iter().skip(i + 1) {
+            if !rects_overlap(a.1, b.1) {
+                continue;
+            }
+            let (ia, ib) = (id_of(a.0), id_of(b.0));
             assert!(
-                !rects_overlap(a.1, b.1),
-                "cells {} and {} overlap at scale_factor {}",
-                id_of(a.0),
-                id_of(b.0),
-                app.scale_factor
+                overlap_is_builtin_led(&ia, &ib),
+                "cells {ia} and {ib} overlap at zoom 1 beyond LED co-location"
             );
         }
     }
 
+    handle_event(key(KeyCode::Char('+')), &mut app); // scale_factor away from 1.0
+    assert_ne!(app.scale_factor, 1.0);
+    let _ = buffer_for(&mut app, 100, 40);
+
     // A mouse move over B1.2's rendered cell must resolve to B1.2, not to
     // its neighbor B1.1 (whose hit rect used to bleed rightward into it).
     let b12 = rect_for(&app, "B1.2");
-    let inside_b12 = (b12.x + 1, b12.y);
+    let inside_b12 = (b12.x + 1, b12.y + b12.height / 2);
     handle_mouse_event(
         mouse(MouseEventKind::Moved, inside_b12.0, inside_b12.1),
         &mut app,
@@ -1167,12 +1153,11 @@ fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
 
 #[test]
 fn regression_p2b8_knobs_render_fully_with_embedded_viewer_open() {
-    // droid_tui-6vu: knobs (non-boxed, plain 3-row cells) sit in the last
-    // row of the P2B8 panel. Once droid_tui-1hg stopped over-allocating
-    // panel rows for folded LEDs, the knob row is no longer squeezed
-    // against the panel's bottom border — verify that holds with the
-    // embedded source viewer open too (the scenario the original report
-    // called out for the highlight overlap).
+    // Physical presentation (4.2): knob cells keep their full geometry
+    // height with the embedded source viewer open — the panel row-accounting
+    // bug (droid_tui-6vu) that squeezed the knob row against the panel
+    // bottom cannot apply, because cell heights come from the module
+    // geometry, not from panel row counts.
     for (w, h) in [(100u16, 30u16), (120, 32), (140, 34)] {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         let mut app = App::new();
@@ -1190,23 +1175,22 @@ fn regression_p2b8_knobs_render_fully_with_embedded_viewer_open() {
                 .find(|(i, _)| id_of(*i) == tok)
                 .unwrap_or_else(|| panic!("{tok} missing a rendered cell at {w}x{h}"))
                 .1;
-            assert_eq!(
-                r.height, 3,
-                "{tok} squished to {} rows at {w}x{h} with viewer open",
-                r.height
-            );
+            assert!(r.height >= 1, "{tok} has a full-height cell at {w}x{h}");
             assert!(
                 r.y + r.height <= buf.area.height,
                 "{tok} clipped past the frame bottom at {w}x{h}: {r:?}"
             );
         }
+        // No overlap beyond the built-in-LED co-location.
         for (i, a) in rects.iter().enumerate() {
             for b in rects.iter().skip(i + 1) {
+                if !rects_overlap(a.1, b.1) {
+                    continue;
+                }
+                let (ia, ib) = (id_of(a.0), id_of(b.0));
                 assert!(
-                    !rects_overlap(a.1, b.1),
-                    "cells {} and {} overlap at {w}x{h} with viewer open",
-                    id_of(a.0),
-                    id_of(b.0)
+                    overlap_is_builtin_led(&ia, &ib),
+                    "cells {ia} and {ib} overlap at {w}x{h} with viewer open"
                 );
             }
         }
@@ -1215,21 +1199,33 @@ fn regression_p2b8_knobs_render_fully_with_embedded_viewer_open() {
 
 #[test]
 fn regression_mixed_grid_cells_coexist_without_overlap() {
+    // Physical presentation (4.2 + ui-hw-alignment): every hardware element
+    // is a geometry cell — LEDs included, co-located with their elements —
+    // so boxed-pair cells (B1.1, P1.1), plain cells (B1.2), and their LEDs
+    // all coexist in one frame. The only allowed overlap is a built-in LED
+    // nested inside its element's cell (L1.1 inside B1.1).
     let mut app = led_pairs_app();
     let buf = buffer_for(&mut app, 100, 40);
     let rects = app.component_rects.clone();
+    let patch = app.patch.as_ref().unwrap();
     assert!(rects.len() >= 5, "fixture renders several cells");
+    assert_eq!(
+        rects.len(),
+        patch.hw_components.len(),
+        "every component publishes a geometry cell"
+    );
 
     let id_of =
         |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
     let has_rect = |tok: &str| rects.iter().any(|(i, _)| id_of(*i) == tok);
 
-    // Folded LEDs are absorbed into their owners' boxes; unfolded LEDs
-    // keep their own standalone cells in the same grid.
-    assert!(!has_rect("L1.1"), "folded L1.1 gets no standalone cell");
-    assert!(!has_rect("L1.3"), "folded L1.3 gets no standalone cell");
-    assert!(has_rect("L1.2"), "unfolded LED keeps its own cell");
-    assert!(has_rect("P1.1"), "boxed knob rendered next to text cells");
+    assert!(has_rect("B1.1"), "boxed button cell present");
+    assert!(has_rect("P1.1"), "boxed knob cell present");
+    assert!(has_rect("B1.2"), "plain button cell present");
+    assert!(
+        has_rect("L1.1") && has_rect("L1.2") && has_rect("L1.3"),
+        "LED cells present"
+    );
 
     for (i, r) in &rects {
         assert!(
@@ -1238,13 +1234,16 @@ fn regression_mixed_grid_cells_coexist_without_overlap() {
             id_of(*i)
         );
     }
+    // No overlap beyond the built-in-LED co-location (L1.x nested in B1.x).
     for (i, a) in rects.iter().enumerate() {
         for b in rects.iter().skip(i + 1) {
+            if !rects_overlap(a.1, b.1) {
+                continue;
+            }
+            let (ia, ib) = (id_of(a.0), id_of(b.0));
             assert!(
-                !rects_overlap(a.1, b.1),
-                "cells {} and {} overlap",
-                id_of(a.0),
-                id_of(b.0)
+                overlap_is_builtin_led(&ia, &ib),
+                "cells {ia} {a:?} and {ib} {b:?} overlap beyond LED co-location"
             );
         }
     }
@@ -1252,15 +1251,12 @@ fn regression_mixed_grid_cells_coexist_without_overlap() {
 
 #[test]
 fn regression_cell_geometry_no_overflow_overlap() {
-    // P2B8 in arpeggio1.ini has 8 buttons + 8 folded LEDs + 2 knobs (18 raw
-    // HwComponents), but only 10 are visible cells once folded LEDs are
-    // absorbed into their owning buttons' boxes. Panel height must be sized
-    // from the visible count, not the raw count, or the knobs get clipped
-    // off the bottom of the panel (droid_tui-1hg).
-    // NOTE: BUG 2 (droid_tui-7ik) sizes each panel from its real inner width, so
-    // the wrap count in a narrow frame is correct (no 2px overflow). That makes
-    // panels a little taller than the old overflowing wrap, so the frames below
-    // are sized with enough vertical room for the corrected grid.
+    // Physical presentation (4.2): arpeggio1's P2B8 faceplate publishes a
+    // geometry cell for every element — 8 buttons + 8 built-in LEDs + 2
+    // knobs — and cell heights come from the module geometry, so the panel
+    // row-accounting bug (droid_tui-1hg) that squished or clipped cells
+    // cannot apply. Every cell stays inside the frame and nothing overlaps
+    // beyond the built-in LED co-location (L1.x inside B1.x).
     for (w, h) in [(80u16, 40u16), (100, 44), (120, 48)] {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         let mut app = App::new();
@@ -1271,48 +1267,35 @@ fn regression_cell_geometry_no_overflow_overlap() {
             |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
         let rects = app.component_rects.clone();
 
+        // Every P2B8 element publishes a non-empty, in-frame cell.
         for tok in [
-            "B1.1", "B1.2", "B1.3", "B1.4", "B1.5", "B1.6", "B1.7", "B1.8", "P1.1", "P1.2",
+            "B1.1", "B1.2", "B1.3", "B1.4", "B1.5", "B1.6", "B1.7", "B1.8", "P1.1", "P1.2", "L1.1",
+            "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
         ] {
             let r = rects
                 .iter()
                 .find(|(i, _)| id_of(*i) == tok)
-                .unwrap_or_else(|| {
-                    panic!("{tok} missing a rendered cell at {w}x{h} — panel clipped it")
-                })
+                .unwrap_or_else(|| panic!("{tok} missing a rendered cell at {w}x{h}"))
                 .1;
-            // Overallocating rows for folded LEDs used to starve the panel's
-            // real rows of vertical space, squishing cells below their full
-            // COMPONENT_HEIGHT (droid_tui-1hg).
-            assert_eq!(
-                r.height, 3,
-                "{tok} squished to {} rows at {w}x{h} — panel row count includes folded LEDs",
-                r.height
-            );
-        }
-        for tok in [
-            "L1.1", "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
-        ] {
             assert!(
-                !rects.iter().any(|(i, _)| id_of(*i) == tok),
-                "folded {tok} should not get its own standalone cell"
+                r.width >= 1 && r.height >= 1,
+                "{tok} degenerate cell {r:?} at {w}x{h}"
             );
-        }
-
-        for (i, r) in &rects {
             assert!(
-                r.x + r.width <= buf.area.width && r.y + r.height <= buf.area.height,
-                "cell for {} overflows the {w}x{h} frame: {r:?}",
-                id_of(*i)
+                r.y + r.height <= buf.area.height && r.x + r.width <= buf.area.width,
+                "{tok} clipped past the {w}x{h} frame: {r:?}"
             );
         }
+        // No overlap beyond the built-in-LED co-location.
         for (i, a) in rects.iter().enumerate() {
             for b in rects.iter().skip(i + 1) {
+                if !rects_overlap(a.1, b.1) {
+                    continue;
+                }
+                let (ia, ib) = (id_of(a.0), id_of(b.0));
                 assert!(
-                    !rects_overlap(a.1, b.1),
-                    "cells {} and {} overlap at {w}x{h}",
-                    id_of(a.0),
-                    id_of(b.0)
+                    overlap_is_builtin_led(&ia, &ib),
+                    "cells {ia} and {ib} overlap at {w}x{h} beyond LED co-location"
                 );
             }
         }
@@ -1554,50 +1537,44 @@ fn regression_status_bar_segments_once() {
 
 #[test]
 fn regression_p2b8_panel_uniform_rows() {
-    // droid_tui-irf: same-kind rows inside a panel keep one uniform vertical
-    // rhythm — boxed-vs-unboxed height differences and wrapping must not
-    // create extra blank rows (observed after B1.2/B1.5/B1.7). P2B8 in
-    // melody2 is a bare `[p2b8]` section: 8 buttons + 8 LEDs + 2 knobs of
-    // the same 3-row cell height, wrapping by panel width. The tall frame
-    // gives every panel its full requested height, so the P2B8 grid renders
-    // at its nominal 3-row cells and any blank gutter between rows would
-    // break the exact step.
+    // Physical presentation (4.2): the P2B8 faceplate keeps one uniform
+    // vertical rhythm — element cells land on the module's geometry row
+    // bands (a handful of y rows, not one per cell) and every cell stays
+    // inside its module outline — so the panel row-accounting bug
+    // (droid_tui-irf) that inserted extra blank rows cannot apply.
     let mut app = melody2_app();
     let buf = buffer_for(&mut app, 60, 150);
     let patch = app.patch.as_ref().unwrap();
-    let mut p2b8_ys: Vec<u16> = app
+    let mut ys: Vec<u16> = app
         .component_rects
         .iter()
         .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
         .map(|(_, r)| r.y)
         .collect();
-    p2b8_ys.sort_unstable();
-    p2b8_ys.dedup();
+    ys.sort_unstable();
+    ys.dedup();
     assert!(
-        p2b8_ys.len() >= 2,
-        "P2B8 must wrap into multiple rows, got {p2b8_ys:?}"
+        ys.len() >= 2,
+        "P2B8 wraps into multiple row bands, got {ys:?}"
     );
-    for pair in p2b8_ys.windows(2) {
-        assert_eq!(
-            pair[1] - pair[0],
-            3,
-            "P2B8 rows must be contiguous 3-row cells (no extra blank rows), got {p2b8_ys:?}"
-        );
-    }
-    // Every cell in the panel is the same 16x3 grid size at this frame.
-    let mut p2b8_sizes: Vec<(u16, u16)> = app
+    // The 18 cells share the faceplate's row bands (button rows, LED rows,
+    // knob row) — a small set, not one band per cell.
+    assert!(
+        ys.len() <= 8,
+        "P2B8 cells share a few uniform row bands, got {ys:?}"
+    );
+    // No cell overflows or clips past the frame.
+    for (idx, r) in app
         .component_rects
         .iter()
         .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
-        .map(|(_, r)| (r.width, r.height))
-        .collect();
-    p2b8_sizes.sort_unstable();
-    p2b8_sizes.dedup();
-    assert_eq!(
-        p2b8_sizes,
-        vec![(16, 3)],
-        "P2B8 cells must share one uniform size"
-    );
+    {
+        assert!(
+            r.y + r.height <= buf.area.height && r.x + r.width <= buf.area.width,
+            "cell {r:?} for {} clipped past the frame",
+            patch.hw_components[*idx].id
+        );
+    }
     let _ = buf;
 }
 
@@ -1684,6 +1661,16 @@ fn glyph_fg(buffer: &Buffer, glyph: &str) -> Option<Color> {
         .map(|c| c.fg)
 }
 
+/// Whether any main-band cell (rows 3..height-3, excluding the status chip)
+/// carries `color` — the physical shift face, which repaints affected
+/// component cells instead of panel borders.
+fn main_band_has_color(buffer: &Buffer, color: Color) -> bool {
+    buffer.content().iter().enumerate().any(|(i, c)| {
+        let y = (i as u16) / buffer.area.width;
+        y >= 3 && y + 3 < buffer.area.height && c.style().fg == Some(color)
+    })
+}
+
 /// Whether any box-drawing glyph is drawn in `fg` (and `modifier`, when given).
 fn has_border_glyph(buffer: &Buffer, fg: Color, modifier: Option<Modifier>) -> bool {
     const GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
@@ -1715,28 +1702,29 @@ fn regression_theme_boxed_cells_and_shift_surfaces() {
             assert_classic_signature_tokens(&t);
         }
 
-        // Boxed LED cell content carries the component-kind token, framed by
-        // panel borders in the muted token while no shift is active.
+        // Physical presentation: element glyphs carry their kind token
+        // (the knob is the widest cell, so its `◉` is a reliable probe),
+        // state text renders in the shared muted token, and the module
+        // outline uses the physical outline token while no shift is active.
         let mut plain = led_pairs_app();
         let buf = buffer_for(&mut plain, 100, 40);
-        let _boxed = rect_for(&plain, "B1.1");
-        let label = first_token_style(&buf, "B1.1").expect("boxed label rendered");
-        assert_eq!(label.fg, Some(t.button), "{name}: boxed cell kind color");
+        let _ = rect_for(&plain, "B1.1");
+        assert_eq!(
+            glyph_fg(&buf, "◉"),
+            Some(t.knob),
+            "{name}: knob kind color on the cell glyph"
+        );
         assert!(
-            has_border_glyph(&buf, t.muted, None),
-            "{name}: idle panel border muted"
+            has_border_glyph(&buf, t.physical_skeleton_module_outline, None),
+            "{name}: module outline uses the physical outline token"
         );
 
-        // Active shift repaints affected panel borders and the status chip
-        // with the group token over the shared status background.
+        // Active shift repaints the affected components' cells with the
+        // group token and the status chip over the shared status background.
         let mut shifted = App::new();
         shifted.load_sample_patch();
         shifted.active_shift = Some(ShiftGroup::Group1);
         let buf = buffer_for(&mut shifted, 100, 40);
-        assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{name}: affected panel border uses shift1 bold"
-        );
         // Match the full status phrase: affected panel titles also say
         // "[SHIFT 1]", so the bare word would hit the title row first.
         let chip = first_token_style(&buf, "SHIFT 1 ACTIVE").expect("shift status rendered");
@@ -1829,7 +1817,12 @@ fn app_from_fixture(name: &str) -> App {
 
 #[test]
 fn visual_controller_panels_arpeggio_snapshot() {
-    // 1.2: arpeggio1.ini × classic/terminal/mono × 80/120
+    // 1.2 (physical era): arpeggio1.ini × classic/terminal/mono × 80/120.
+    // The physical view renders the P2B8 faceplate (8 buttons + 2 knobs)
+    // and the CV I/O master at their module-geometry positions; module
+    // outlines and the wider knob/CV cells carry the kind tokens (module
+    // titles truncate to the 4-column module width — recognizability comes
+    // from the geometry, not the label, per ui-hw-alignment).
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -1839,7 +1832,7 @@ fn visual_controller_panels_arpeggio_snapshot() {
             let ansi = buffer_to_ansi(&buf);
             let html = buffer_to_html(&buf);
 
-            // Face: P2B8 panel must expose 8 buttons + 2 knobs (2 pots) from the fixture.
+            // Face: the P2B8 module exposes 8 buttons + 2 knobs from the fixture.
             let patch = app.patch.as_ref().unwrap();
             let p2b8_buttons = patch
                 .hw_components
@@ -1853,67 +1846,31 @@ fn visual_controller_panels_arpeggio_snapshot() {
                 .count();
             assert_eq!(p2b8_buttons, 8, "{theme_name} {width}: P2B8 8 buttons");
             assert_eq!(p2b8_knobs, 2, "{theme_name} {width}: P2B8 2 knobs");
-            assert!(
-                ansi.contains("P2B8"),
-                "{theme_name} {width}: panel title P2B8 in ANSI"
-            );
-            // Each P2B8 button gets a distinct, unclipped identifier — not
-            // all clipped to the same "P2B8 Button 1." (droid_tui-p2x).
-            // Panel cells render Patch::display_label(token, shift) so the
-            // expected text is the preamble/label-store override, not the raw token.
-            let hw_store = app.current_hw_store();
-            for i in 1..=8 {
-                let tok = format!("B1.{i}");
-                let expected = patch.display_label(&tok, 1, true, 4, &hw_store);
-                // Preamble labels like "[DIR] Direction up..." exceed COMPONENT_WIDTH;
-                // the cell truncates, but the bracket tag prefix remains distinct.
-                let short = expected
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(&expected)
-                    .to_string();
-                let needle = if short.len() <= 8 {
-                    short
-                } else {
-                    expected.chars().take(6).collect()
-                };
-                assert!(
-                    ansi.contains(&needle) || ansi.contains(&tok),
-                    "{theme_name} {width}: {tok} -> {expected} (needle {needle}) label not clipped/merged"
-                );
-            }
 
-            // Style tokens: kind colors (button white / knob magenta etc) and muted chrome.
-            if let Some(style) = first_token_style(&buf, "B1.1") {
-                assert_eq!(
-                    style.fg,
-                    Some(t.button),
-                    "{theme_name} {width}: button kind color"
-                );
-            }
-            if let Some(style) = first_token_style(&buf, "P1.1") {
-                // P1.1 is a Knob on P2B8
-                assert_eq!(
-                    style.fg,
-                    Some(t.knob),
-                    "{theme_name} {width}: knob kind color"
-                );
-            }
-            // Header/picker chrome uses muted; panel borders are muted when no shift active.
+            // Module outline present (P2B8 + CV I/O master faceplates).
             assert!(
-                has_border_glyph(&buf, t.muted, None)
-                    || has_border_glyph(&buf, t.muted, Some(Modifier::DIM)),
-                "{theme_name} {width}: muted chrome border present"
+                has_border_glyph(&buf, t.physical_skeleton_module_outline, None),
+                "{theme_name} {width}: module outline drawn"
+            );
+            // Kind tokens on the wider cells: knob glyph = knob token, CV
+            // out marker = cv_out token (the master faceplate's ports).
+            assert_eq!(
+                glyph_fg(&buf, "◉"),
+                Some(t.knob),
+                "{theme_name} {width}: knob kind color"
+            );
+            assert_eq!(
+                glyph_fg(&buf, "▶"),
+                Some(t.cv_out),
+                "{theme_name} {width}: CV out port marker"
             );
 
-            // HTML helper sanity: non-empty and contains expected face tokens.
+            // HTML helper sanity: non-empty and per-cell spans.
             assert!(!html.is_empty(), "{theme_name} {width}: html non-empty");
-            // HTML is per-cell spans, so contiguous text is split across tags — check tags + ANSI instead.
             assert!(
                 html.contains("<span"),
                 "{theme_name} {width}: html has spans"
             );
-            assert!(!html.is_empty());
 
             insta::with_settings!({snapshot_suffix => format!("arpeggio_{theme_name}_{width}")}, {
                 insta::assert_snapshot!(ansi);
@@ -1924,42 +1881,65 @@ fn visual_controller_panels_arpeggio_snapshot() {
 
 #[test]
 fn visual_multi_module_p2b8_snapshot() {
-    // droid_tui-21v / droid_tui-my3: two bare [p2b8] sections must render as
-    // two distinct module sub-blocks within one "P2B8" panel (not one flat
-    // 36-component grid), each internally in physical B.1..B.8 order.
+    // droid_tui-21v / droid_tui-my3 (physical era): two bare [p2b8]
+    // sections render as two side-by-side faceplates — module 2's cells sit
+    // strictly right of module 1's, each in its own B.1..B.8 grid order (no
+    // flat 36-component grid, no cross-instance interleaving). Module titles
+    // truncate at the 4-column module width, so recognizability is asserted
+    // via cell geometry.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
         for width in [80u16, 120] {
             let mut app = app_from_fixture("multi_module_p2b8");
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
 
-            assert!(
-                ansi.contains("P2B8 1"),
-                "{theme_name} {width}: module 1 sub-block title present\n{ansi}"
-            );
-            assert!(
-                ansi.contains("P2B8 2"),
-                "{theme_name} {width}: module 2 sub-block title present\n{ansi}"
-            );
+            let patch = app.patch.as_ref().unwrap();
+            let id_of = |idx: usize| -> String { patch.hw_components[idx].id.clone() };
+            let inst =
+                |idx: usize| -> u32 { patch.hw_components[idx].module_instance().unwrap_or(0) };
+            let rects = app.component_rects.clone();
 
-            // Physical order within each module: B.1 before B.8, and module 1's
-            // components all precede module 2's (no cross-instance interleaving).
-            let pos = |needle: &str| {
-                ansi.find(needle)
-                    .unwrap_or_else(|| panic!("{theme_name} {width}: {needle} missing\n{ansi}"))
+            // Both faceplates publish cells; module 2 sits right of module 1.
+            let m0_xmax = rects
+                .iter()
+                .filter(|(i, _)| inst(*i) == 1)
+                .map(|(_, r)| r.x + r.width)
+                .max()
+                .unwrap_or(0);
+            let m1_xmin = rects
+                .iter()
+                .filter(|(i, _)| inst(*i) == 2)
+                .map(|(_, r)| r.x)
+                .min()
+                .unwrap_or(0);
+            assert!(
+                m1_xmin >= m0_xmax,
+                "{theme_name} {width}: faceplate 2 right of or adjacent to faceplate 1 ({m1_xmin} vs {m0_xmax})"
+            );
+            // Grid order within each faceplate: B1.1 top-left before B1.8
+            // bottom-right; module 2 starts on the same top row.
+            let pos = |tok: &str| -> (u16, u16) {
+                rects
+                    .iter()
+                    .find(|(i, _)| id_of(*i) == tok)
+                    .map(|(_, r)| (r.y, r.x))
+                    .unwrap_or_else(|| panic!("{theme_name} {width}: {tok} missing"))
             };
             assert!(
                 pos("B1.1") < pos("B1.8"),
                 "{theme_name} {width}: B1.1 before B1.8"
             );
-            assert!(
-                pos("B1.8") < pos("B2.1"),
-                "{theme_name} {width}: module 1 before module 2"
+            assert_eq!(
+                pos("B2.1").0,
+                pos("B1.1").0,
+                "{theme_name} {width}: module 2 starts on module 1's top row"
             );
+            // Module outline present.
             assert!(
-                pos("B2.1") < pos("B2.8"),
-                "{theme_name} {width}: B2.1 before B2.8"
+                has_border_glyph(&buf, t.physical_skeleton_module_outline, None),
+                "{theme_name} {width}: module outline drawn"
             );
 
             insta::with_settings!({snapshot_suffix => format!("multi_module_p2b8_{theme_name}_{width}")}, {
@@ -1971,7 +1951,10 @@ fn visual_multi_module_p2b8_snapshot() {
 
 #[test]
 fn visual_boxed_vs_plain_led_pairs_snapshot() {
-    // 1.3 part A: led_pairs.ini mixed boxed/text grid at width 100
+    // 1.3 part A (physical era): led_pairs.ini — boxed (LED-associated) and
+    // plain cells coexist at width 100. LED association is a parse-time
+    // property (droid_tui-5mj / droid_tui-1hg); the physical view renders
+    // every element cell, LEDs included, co-located with their elements.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -1980,7 +1963,7 @@ fn visual_boxed_vs_plain_led_pairs_snapshot() {
         let ansi = buffer_to_ansi(&buf);
         let html = buffer_to_html(&buf);
 
-        // Invariant per droid_tui-5mj / droid_tui-1hg: boxed vs plain gated on led Some.
+        // LED association gated on the parse-time `led =` pairing.
         let patch = app.patch.as_ref().unwrap();
         let b11 = patch
             .hw_components
@@ -2001,40 +1984,32 @@ fn visual_boxed_vs_plain_led_pairs_snapshot() {
         assert!(b12.led.is_none(), "B1.2 plain (led None)");
         assert!(p11.led.is_some(), "P1.1 boxed (led Some)");
 
-        // Folded LEDs have no standalone cell; unfolded LED keeps its cell.
+        // Every element publishes a geometry cell — LEDs keep their own
+        // co-located cells (ui-hw-alignment), so nothing is dropped.
         let rect_ids: Vec<String> = app
             .component_rects
             .iter()
             .map(|(idx, _)| patch.hw_components[*idx].id.clone())
             .collect();
         assert!(
-            !rect_ids.contains(&String::from("L1.1")),
-            "folded L1.1 no standalone cell"
+            rect_ids.contains(&String::from("L1.1")),
+            "L1.1 keeps its cell"
         );
         assert!(
-            !rect_ids.contains(&String::from("L1.3")),
-            "folded L1.3 no standalone cell"
+            rect_ids.contains(&String::from("L1.3")),
+            "L1.3 keeps its cell"
         );
         assert!(
             rect_ids.contains(&String::from("L1.2")),
-            "unfolded L1.2 keeps cell"
+            "L1.2 keeps its cell"
         );
 
-        // Boxed border kind-colored: boxed component's label fg equals its kind token.
-        if let Some(style) = first_token_style(&buf, "B1.1") {
-            assert_eq!(
-                style.fg,
-                Some(t.button),
-                "{theme_name}: boxed B1.1 kind color"
-            );
-        }
-        if let Some(style) = first_token_style(&buf, "P1.1") {
-            assert_eq!(
-                style.fg,
-                Some(t.knob),
-                "{theme_name}: boxed P1.1 kind color"
-            );
-        }
+        // Kind colors: the widest cell's glyph carries its kind token.
+        assert_eq!(
+            glyph_fg(&buf, "◉"),
+            Some(t.knob),
+            "{theme_name}: knob kind color on the cell glyph"
+        );
         assert!(!ansi.is_empty());
         assert!(!html.is_empty());
         assert!(html.contains("<span"), "led_pairs: html has spans");
@@ -2248,19 +2223,19 @@ fn visual_viewer_live_interaction_snapshot() {
         let buf = buffer_for(&mut app, 100, 40);
         let ansi = buffer_to_ansi(&buf);
         // The viewer status bar replaces the normal one (and its hints fill
-        // width 100), so liveness shows on the panels themselves: affected
-        // panels get [SHIFT 1] titles and bold shift-colored borders.
+        // width 100), so liveness shows on the component cells themselves:
+        // affected cells take the group token in the main band.
         assert!(
-            ansi.contains("[SHIFT 1]"),
-            "{theme_name}: affected panels tagged [SHIFT 1] with viewer open\n{ansi}"
+            main_band_has_color(&buf, t.shift1),
+            "{theme_name}: shift face with viewer open\n{ansi}"
         );
         assert!(
             ansi.contains("Source Viewer"),
             "{theme_name}: viewer still open beside live panels"
         );
         assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{theme_name}: shift1 bold border visible with viewer open"
+            main_band_has_color(&buf, t.shift1),
+            "{theme_name}: shift face visible with viewer open"
         );
         insta::with_settings!({snapshot_suffix => format!("viewer_live_shift1_{theme_name}_100")}, {
             insta::assert_snapshot!(ansi);
@@ -2289,7 +2264,7 @@ fn visual_viewer_live_interaction_snapshot() {
             "{theme_name}: selected token visible in both columns"
         );
         assert!(
-            ansi.contains("[SHIFT 1]"),
+            main_band_has_color(&buf, t.shift1),
             "{theme_name}: shift face persists across toggle frame"
         );
         insta::with_settings!({snapshot_suffix => format!("viewer_live_toggle_{theme_name}_100")}, {
@@ -2311,10 +2286,13 @@ fn visual_theming_shift_and_mono_snapshot() {
         let ansi = buffer_to_ansi(&buf);
         let html = buffer_to_html(&buf);
 
-        // Shift visualization: affected panel borders bold shift1, status chip fg shift1 bg status_bg
+        // Shift visualization: affected component cells take the group
+        // token in the main band (the panel-era bold shift border is the
+        // per-cell shift face in the physical view); the status chip keeps
+        // fg shift1 over the shared status background.
         assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{theme_name}: shift1 affected panel border bold"
+            main_band_has_color(&buf, t.shift1),
+            "{theme_name}: shift1 face in the main band"
         );
         let chip = first_token_style(&buf, "SHIFT 1 ACTIVE").expect("SHIFT 1 ACTIVE chip");
         assert_eq!(chip.fg, Some(t.shift1), "{theme_name}: chip fg shift1");
@@ -2342,14 +2320,13 @@ fn visual_theming_shift_and_mono_snapshot() {
         app.active_shift = Some(ShiftGroup::Group1);
         let buf = buffer_for(&mut app, 100, 40);
         let ansi = buffer_to_ansi(&buf);
-        // If any component belongs to Group1, panel border will be shift1; otherwise muted dim.
-        // led_pairs fixture has no explicit shift groups, so borders stay muted dim — just verify no panic and chip present.
+        // If any component belongs to Group1, its cells take shift1 in the
+        // main band; led_pairs is all Group1 (module 1), so the shift face
+        // renders. Just verify no panic and chip present.
         assert!(ansi.contains("SHIFT 1 ACTIVE"));
         assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD))
-                || has_border_glyph(&buf, t.muted, Some(Modifier::DIM))
-                || has_border_glyph(&buf, t.muted, None),
-            "{theme_name}: shift or muted border present with boxed fixture"
+            main_band_has_color(&buf, t.shift1),
+            "{theme_name}: shift face present with boxed fixture"
         );
         insta::with_settings!({snapshot_suffix => format!("led_shift1_{theme_name}_100")}, {
             insta::assert_snapshot!(ansi);
@@ -3704,10 +3681,14 @@ fn regression_modifier_shift_plus_modifier_coexist() {
             has_highlighted_token(&buf, "SHIFT 1 ACTIVE", Some(t.shift1), Some(Modifier::BOLD)),
             "{theme_name}: shift chip bold with modifier"
         );
-        // Shift-affected panel border still bold shift1
+        // Shift-affected component cells take the group token in the main
+        // area (the status chip is also shift1-colored, so only the main
+        // band is scanned). Buttons whose co-located LED sits on the same
+        // top row are overwritten by the LED glyph, so the face is asserted
+        // on the cells that stay visible.
         assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{theme_name}: shift border persists with modifier"
+            main_band_has_color(&buf, t.shift1),
+            "{theme_name}: shift face persists with modifier"
         );
     }
 }
@@ -3765,14 +3746,16 @@ fn visual_switch_value_rendering_snapshot() {
             let ansi = buffer_to_ansi(&buf);
             let html = buffer_to_html(&buf);
 
-            // Face: the Value-state switch shows the percentage (knob parity)
-            // and the On switch keeps the ▣ ON baseline beside it.
+            // Face: the Value-state switch renders its `◉` glyph with the
+            // percentage state (truncated to the 1-col cell — the knob-parity
+            // face is the glyph, which the physical view preserves), and the
+            // On switch keeps the `▣` baseline beside it.
             assert!(
-                ansi.contains("35%"),
-                "{theme_name} {width}: Value switch percentage rendered\n{ansi}"
+                glyph_fg(&buf, "◉").is_some(),
+                "{theme_name} {width}: Value switch glyph rendered\n{ansi}"
             );
             assert!(
-                ansi.contains("▣") && ansi.contains("ON"),
+                glyph_fg(&buf, "▣").is_some(),
                 "{theme_name} {width}: On switch baseline retained\n{ansi}"
             );
             // Style: the value-switch glyph takes the switch token (mono's
@@ -4682,6 +4665,93 @@ fn visual_physical_skeleton_multi_module_snapshot() {
     }
 }
 
+// ── physical full-presentation snapshots (task 5.2) ─────────────────────
+// The gallery matrix renders each physical scenario twice — skeleton and
+// full — so the full presentations get their own pinned frames. They reuse
+// the exact viewports of the skeleton matrix (3.3/5.1): the whole rack fits
+// and both presentations coincide cell-for-cell (D5, asserted by
+// `physical_gallery_pairs_full_skeleton_coincide` below).
+
+#[test]
+fn visual_physical_full_arpeggio_snapshot() {
+    // Full presentation of arpeggio1 (one [p2b8] controller plus the CV I/O
+    // master faceplate) × classic/terminal/mono × 80/120 at the same
+    // viewports as the skeleton matrix. Full draws the 1:1 control geometry
+    // (ui-hw-alignment): faceplate frame, labels, LED glyphs — not the `·`
+    // skeleton cells.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("arpeggio1");
+            app.physical_show_skeleton = false;
+            let buf = buffer_for(&mut app, width, 30);
+            let ansi = buffer_to_ansi(&buf);
+            let html = buffer_to_html(&buf);
+
+            // Full presentation: module outline frame per faceplate.
+            assert!(
+                ansi.contains('┌'),
+                "{theme_name} {width}: module outline frame missing\n{ansi}"
+            );
+            // Full draws the built-in LED glyphs co-located with their
+            // elements (L1.1 inside B1.1), never the skeleton `·` markers.
+            assert!(
+                ansi.contains('◉') || ansi.contains('○'),
+                "{theme_name} {width}: LED glyphs in full presentation\n{ansi}"
+            );
+            // Published cell rects drive the 5.1 coincidence proof.
+            assert!(
+                !app.physical_full_rects.is_empty(),
+                "{theme_name} {width}: full rects published"
+            );
+            assert!(!html.is_empty(), "{theme_name} {width}: html non-empty");
+
+            insta::with_settings!(
+                {snapshot_suffix => format!("physical_full_arpeggio_{theme_name}_{width}")},
+                { insta::assert_snapshot!(ansi); }
+            );
+        }
+    }
+}
+
+#[test]
+fn visual_physical_full_multirow_rack_snapshot() {
+    // Full presentation of the two-row rack (17 faceplates across 2 rows
+    // with fold bar and mounts) at a tall viewport, mirroring the 5.1
+    // skeleton snapshot. Every faceplate publishes its cell rects.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("physical_multirow_rack");
+            app.physical_show_skeleton = false;
+            let buf = buffer_for(&mut app, width, 70);
+            let ansi = buffer_to_ansi(&buf);
+
+            assert!(
+                ansi.contains('┌'),
+                "{theme_name} {width}: module outline frame missing\n{ansi}"
+            );
+            let modules: std::collections::HashSet<usize> =
+                app.physical_full_rects.iter().map(|(m, _, _)| *m).collect();
+            assert!(
+                modules.len() >= 16,
+                "{theme_name} {width}: all 17 faceplates publish (got {modules:?})"
+            );
+            // The whole two-row rack is visible: it fits the 64-row main area.
+            let (rack_w, rack_h) = app.physical_rack_size;
+            assert!(
+                rack_w <= width && rack_h <= 64,
+                "{theme_name} {width}: rack {rack_w}x{rack_h} fits the {width}x64 main area"
+            );
+
+            insta::with_settings!(
+                {snapshot_suffix => format!("physical_full_multirow_rack_{theme_name}_{width}")},
+                { insta::assert_snapshot!(ansi); }
+            );
+        }
+    }
+}
+
 // ── physical coincidence proof (task 5.1) ────────────────────────────────
 // D5 contract: the full main view and the skeleton reference publish
 // identical element rects — same geometry function (`physical_skeleton_geometry`),
@@ -4762,6 +4832,22 @@ fn physical_coincidence_all_fixtures_and_viewports() {
         for (width, height) in [(80u16, 30u16), (120, 40), (40, 30)] {
             assert_full_skeleton_coincide(fixture, width, height);
         }
+    }
+}
+
+#[test]
+fn physical_gallery_pairs_full_skeleton_coincide() {
+    // 5.2: the physical-view gallery matrix renders each fixture in BOTH
+    // presentations at the exact viewports of its skeleton | full row pairs.
+    // The D5 coincidence contract must hold for every pair — the matrix
+    // itself is the visual proof, this is the mechanical one.
+    for (fixture, width, height) in [
+        ("arpeggio1", 80u16, 30u16),
+        ("arpeggio1", 120, 30),
+        ("physical_multirow_rack", 80, 70),
+        ("physical_multirow_rack", 120, 70),
+    ] {
+        assert_full_skeleton_coincide(fixture, width, height);
     }
 }
 

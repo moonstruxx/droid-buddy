@@ -314,6 +314,26 @@ fn setup_disabled_circuit_graph(app: &mut App) {
     app.disabled_circuits.insert((String::from("clocktool"), 0));
 }
 
+fn setup_physical_arpeggio_skeleton(app: &mut App) {
+    *app = app_from_fixture("arpeggio1");
+    app.physical_show_skeleton = true;
+}
+
+fn setup_physical_arpeggio_full(app: &mut App) {
+    *app = app_from_fixture("arpeggio1");
+    app.physical_show_skeleton = false;
+}
+
+fn setup_physical_multirow_rack_skeleton(app: &mut App) {
+    *app = app_from_fixture("physical_multirow_rack");
+    app.physical_show_skeleton = true;
+}
+
+fn setup_physical_multirow_rack_full(app: &mut App) {
+    *app = app_from_fixture("physical_multirow_rack");
+    app.physical_show_skeleton = false;
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -504,6 +524,68 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 40,
         setup: setup_disabled_circuit_graph,
+    },
+    // ── physical-view matrix (task 5.2): the rack in skeleton | full ───────
+    // Each fixture renders both presentations at the same viewport so the
+    // matrix itself is the D5 coincidence proof (full rect == skeleton rect);
+    // `physical_gallery_pairs_full_skeleton_coincide` asserts that contract
+    // per pair. Skeleton shows module outlines + `·` cells; full shows the
+    // 1:1 control geometry (ui-hw-alignment).
+    Scenario {
+        id: "physical_arpeggio_skeleton_80",
+        label: "physical rack arpeggio1 · width 80 · skeleton",
+        width: 80,
+        height: 30,
+        setup: setup_physical_arpeggio_skeleton,
+    },
+    Scenario {
+        id: "physical_arpeggio_full_80",
+        label: "physical rack arpeggio1 · width 80 · full",
+        width: 80,
+        height: 30,
+        setup: setup_physical_arpeggio_full,
+    },
+    Scenario {
+        id: "physical_arpeggio_skeleton_120",
+        label: "physical rack arpeggio1 · width 120 · skeleton",
+        width: 120,
+        height: 30,
+        setup: setup_physical_arpeggio_skeleton,
+    },
+    Scenario {
+        id: "physical_arpeggio_full_120",
+        label: "physical rack arpeggio1 · width 120 · full",
+        width: 120,
+        height: 30,
+        setup: setup_physical_arpeggio_full,
+    },
+    Scenario {
+        id: "physical_multirow_rack_skeleton_80",
+        label: "physical rack multirow · width 80 · skeleton (2 rows + fold bar)",
+        width: 80,
+        height: 70,
+        setup: setup_physical_multirow_rack_skeleton,
+    },
+    Scenario {
+        id: "physical_multirow_rack_full_80",
+        label: "physical rack multirow · width 80 · full (2 rows + fold bar)",
+        width: 80,
+        height: 70,
+        setup: setup_physical_multirow_rack_full,
+    },
+    Scenario {
+        id: "physical_multirow_rack_skeleton_120",
+        label: "physical rack multirow · width 120 · skeleton (2 rows + fold bar)",
+        width: 120,
+        height: 70,
+        setup: setup_physical_multirow_rack_skeleton,
+    },
+    Scenario {
+        id: "physical_multirow_rack_full_120",
+        label: "physical rack multirow · width 120 · full (2 rows + fold bar)",
+        width: 120,
+        height: 70,
+        setup: setup_physical_multirow_rack_full,
     },
 ];
 

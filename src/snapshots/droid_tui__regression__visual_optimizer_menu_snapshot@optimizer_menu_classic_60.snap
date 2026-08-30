@@ -1,34 +1,35 @@
 ---
 source: src/regression.rs
+assertion_line: 4369
 expression: ansi
 ---
 ┌──────────────────────────────────────────────────────────┐
 │                 DROID: optimizer_latency                 │
 └─╭ Optimizer (3) ───────────────────────────────────────╮─┘
-┌ │▶ banner (default) avg 4.00→1.00 · max 4.00→1.00 · bac│─┐
-│ │   global min-sum avg 4.00→1.00 · max 4.00→1.00 · back│ │
-│ │   min-max avg 4.00→1.00 · max 4.00→1.00 · back-edges │ │
-│ │                                                      │ │
-└─│                                                      │─┘
-┌ │                                                      │─┐
-│ │                                                      │ │
-│ │                                                      │ │
-│ │                                                      │ │
-└─│                                                      │─┘
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
+┌─│▶ banner (default) avg 4.00→1.00 · max 4.00→1.00 · bac│
+│ │   global min-sum avg 4.00→1.00 · max 4.00→1.00 · back│
+│ │   min-max avg 4.00→1.00 · max 4.00→1.00 · back-edges │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+│ │                                                      │
+└─│                                                      │
 ┌─╰ j/k select · Enter preview · r restore · s export · E╯─┐
 │Optimizer: j/k select · Enter preview · r restore · s expo│
 └──────────────────────────────────────────────────────────┘
