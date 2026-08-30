@@ -4681,3 +4681,569 @@ fn visual_physical_skeleton_multi_module_snapshot() {
         }
     }
 }
+
+// ── physical coincidence proof (task 5.1) ────────────────────────────────
+// D5 contract: the full main view and the skeleton reference publish
+// identical element rects — same geometry function (`physical_skeleton_geometry`),
+// same mapping (`physical_zoom = scale_factor`, `physical_offset`), same
+// (module, cell, rect) construction. These tests render both presentations
+// per fixture × viewport and compare the published `physical_full_rects` /
+// `physical_skeleton_rects` 1:1, then prove pan/zoom invariance, the
+// two-[p2b8]-instance faceplate path, and multi-row rack offsets with fold
+// bars and mount regions.
+
+use crate::physical::{
+    PhysicalLayout, RackLayout, RackRow, RackRowPlacement, RackSpec, RectMm, ScreenMapping,
+    FOLD_BAR_HEIGHT_MM, PHYSICAL_COLS_PER_MM, PHYSICAL_ROWS_PER_MM,
+};
+use crate::ui::physical_skeleton_geometry;
+
+/// Round an f64 screen quad the same way the renderer does (`screen_rect_of`).
+fn round_rect((x, y, w, h): (f64, f64, f64, f64)) -> Rect {
+    Rect::new(
+        x.round() as u16,
+        y.round() as u16,
+        (w.round() as u16).max(1),
+        (h.round() as u16).max(1),
+    )
+}
+
+/// Render `fixture` in full and skeleton mode at the same viewport and
+/// compare the published element rects 1:1. Both presentations read the
+/// same `scale_factor` + `physical_offset`, so "same scale/offset" holds by
+/// construction; this asserts the published geometry actually coincides.
+fn assert_full_skeleton_coincide(fixture: &str, width: u16, height: u16) {
+    let mut app = app_from_fixture(fixture);
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, width, height);
+    let full = app.physical_full_rects.clone();
+    assert!(
+        !full.is_empty(),
+        "{fixture} {width}x{height}: full view publishes element rects"
+    );
+
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, width, height);
+    let skeleton = app.physical_skeleton_rects.clone();
+    assert!(
+        !skeleton.is_empty(),
+        "{fixture} {width}x{height}: skeleton publishes element rects"
+    );
+
+    assert_eq!(
+        full.len(),
+        skeleton.len(),
+        "{fixture} {width}x{height}: full ({}) and skeleton ({}) publish the same element count",
+        full.len(),
+        skeleton.len()
+    );
+    for (i, (f, s)) in full.iter().zip(&skeleton).enumerate() {
+        assert_eq!(
+            f, s,
+            "{fixture} {width}x{height}: element {i} rect coincides \
+             (full {f:?} vs skeleton {s:?})"
+        );
+    }
+}
+
+#[test]
+fn physical_coincidence_all_fixtures_and_viewports() {
+    // Every physical-layout fixture × fixed viewports: full rects equal
+    // skeleton rects element-for-element. Covers the small rack (arpeggio1),
+    // the repeated-faceplate rack (multi_module_p2b8), the wide real patch
+    // (droid_mpfs5melody2), and the overflow rack (physical_multirow_rack),
+    // at viewports where the rack fits (80/120) and where it overflows (40).
+    for fixture in [
+        "arpeggio1",
+        "multi_module_p2b8",
+        "droid_mpfs5melody2",
+        "physical_multirow_rack",
+    ] {
+        for (width, height) in [(80u16, 30u16), (120, 40), (40, 30)] {
+            assert_full_skeleton_coincide(fixture, width, height);
+        }
+    }
+}
+
+#[test]
+fn physical_coincidence_two_p2b8_instances_prove_faceplate_path() {
+    // Two bare [p2b8] sections must surface as two distinct faceplates with
+    // the same cell rects in both presentations (5.1 faceplate-path proof).
+    let mut app = app_from_fixture("multi_module_p2b8");
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, 80, 40);
+    let full = app.physical_full_rects.clone();
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, 80, 40);
+    let skeleton = app.physical_skeleton_rects.clone();
+
+    let modules = |rects: &[(usize, usize, Rect)]| -> std::collections::HashSet<usize> {
+        rects.iter().map(|&(m, _, _)| m).collect()
+    };
+    let full_modules = modules(&full);
+    let skeleton_modules = modules(&skeleton);
+    assert_eq!(
+        full_modules, skeleton_modules,
+        "both presentations publish the same faceplate set"
+    );
+    assert!(
+        full_modules.contains(&0) && full_modules.contains(&1),
+        "two P2B8 faceplates must publish, got {full_modules:?}"
+    );
+    assert_eq!(full, skeleton, "faceplate-path cells coincide 1:1");
+
+    // The two faceplates sit side by side in the single default row: module 1
+    // starts 25.4 mm + 0.5 mm gap right of module 0 (≈ 4 cols at 0.15).
+    let x_of = |m: usize, rects: &[(usize, usize, Rect)]| -> u16 {
+        rects
+            .iter()
+            .find(|&&(mm, _, _)| mm == m)
+            .map(|&(_, _, r)| r.x)
+            .expect("faceplate present")
+    };
+    assert!(
+        x_of(1, &full) > x_of(0, &full),
+        "P2B8 faceplates side by side (module 1 right of module 0)"
+    );
+}
+
+#[test]
+fn physical_coincidence_overflow_pan_consistency() {
+    // physical_multirow_rack (17 faceplates, ~68 cols) overflows a 40-col
+    // main viewport. Panning by integer screen cells must shift every
+    // published rect by exactly the same amount in both presentations
+    // (mm_to_screen subtracts the offset before rounding, so integer
+    // offsets shift integer-rounded rects exactly).
+    let mut app = app_from_fixture("physical_multirow_rack");
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, 40, 30);
+    assert!(
+        app.physical_rack_size.0 > 40,
+        "fixture must overflow a 40-col viewport (rack is {} cols wide)",
+        app.physical_rack_size.0
+    );
+    let zero_full = app.physical_full_rects.clone();
+
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, 40, 30);
+    let zero_skeleton = app.physical_skeleton_rects.clone();
+    assert_eq!(zero_full, zero_skeleton, "zero-offset coincidence");
+
+    app.physical_offset = (12.0, 4.0);
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, 40, 30);
+    let panned_full = app.physical_full_rects.clone();
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, 40, 30);
+    let panned_skeleton = app.physical_skeleton_rects.clone();
+    assert_eq!(panned_full, panned_skeleton, "panned coincidence");
+
+    // Every rect shifts by exactly (-12, -4); negative coordinates saturate
+    // to 0 in the u16 cast, which `saturating_sub` mirrors.
+    let assert_pan_shift = |zero: &[(usize, usize, Rect)], panned: &[(usize, usize, Rect)]| {
+        assert_eq!(zero.len(), panned.len(), "pan keeps the element count");
+        for ((_, _, zr), (_, _, pr)) in zero.iter().zip(panned) {
+            assert_eq!(
+                (pr.x, pr.y),
+                (zr.x.saturating_sub(12), zr.y.saturating_sub(4)),
+                "pan by (12, 4) shifts every rect by exactly (-12, -4): \
+                 zero {zr:?} -> panned {pr:?}"
+            );
+        }
+    };
+    assert_pan_shift(&zero_full, &panned_full);
+    assert_pan_shift(&zero_skeleton, &panned_skeleton);
+}
+
+#[test]
+fn physical_coincidence_zoom_and_pan_invariance() {
+    // The coincidence contract must hold at every scale preset and offset,
+    // not just the default: `physical_zoom = scale_factor` feeds the same
+    // mapping to both presentations, so full == skeleton at 150 % and 75 %
+    // as well as at 150 % + pan.
+    for zoom in [1.0f32, 1.5, 0.75] {
+        let mut app = app_from_fixture("arpeggio1");
+        app.scale_factor = zoom;
+        app.physical_show_skeleton = false;
+        let _ = buffer_for(&mut app, 100, 30);
+        let full = app.physical_full_rects.clone();
+        assert!(!full.is_empty(), "zoom {zoom}: full rects published");
+
+        app.physical_show_skeleton = true;
+        let _ = buffer_for(&mut app, 100, 30);
+        assert_eq!(
+            full, app.physical_skeleton_rects,
+            "zoom {zoom}: full == skeleton"
+        );
+    }
+
+    let mut app = app_from_fixture("arpeggio1");
+    app.scale_factor = 1.5;
+    app.physical_offset = (5.0, 2.0);
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, 100, 30);
+    let full = app.physical_full_rects.clone();
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, 100, 30);
+    assert_eq!(
+        full, app.physical_skeleton_rects,
+        "zoom + pan: full == skeleton"
+    );
+}
+
+#[test]
+fn physical_multi_row_geometry_offsets_folds_and_mounts() {
+    // Pack the 17-faceplate chain into a 2×80 HP rack with 4 TE top + side
+    // mounts. Auto-pack overflows the 16th P2B8 and the CV I/O master onto
+    // row 1; the fold bar and mount regions carry rack-absolute mm positions
+    // that `physical_skeleton_geometry` maps with the same formula as the
+    // cells, so row offsets coincide across rows.
+    let patch = Patch::from_ini_file(Path::new("fixtures/physical_multirow_rack.ini")).unwrap();
+    let mut app = App::new();
+    assert!(
+        app.load_patch(patch.clone()),
+        "multi-row fixture loads without Error-severity issues: {:?}",
+        app.validation_issues
+            .iter()
+            .filter(|i| i.severity == crate::validation::Severity::Error)
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let chain = PhysicalLayout::build(&patch);
+    let spec = RackSpec {
+        rows: vec![
+            RackRow {
+                he: 3,
+                hp: 80.0,
+                label: None,
+            },
+            RackRow {
+                he: 3,
+                hp: 80.0,
+                label: None,
+            },
+        ],
+        top_mount_te: 4.0,
+        side_mount_te: 4.0,
+        assign: std::collections::HashMap::new(),
+    };
+    let rack = RackLayout::pack(&chain, &spec);
+
+    let hp_mm = chain.hp_mm;
+    let rows_width = 80.0 * hp_mm;
+    let side_w = 4.0 * hp_mm;
+    let top_h = 4.0 * hp_mm;
+
+    // Auto-pack overflow: row 0 fills to 15 P2B8 faceplates, the 16th and
+    // the master land on row 1.
+    assert_eq!(rack.rows.len(), 2, "two-row rack");
+    assert_eq!(
+        rack.rows[0].modules.len(),
+        15,
+        "row 0 fills to 15 faceplates, got {}",
+        rack.rows[0].modules.len()
+    );
+    assert_eq!(
+        rack.rows[1].modules.len(),
+        2,
+        "row 1 takes the overflow P2B8 + master, got {}",
+        rack.rows[1].modules.len()
+    );
+    assert!(
+        rack.rows[1].modules.iter().any(|m| m.key == "CV I/O"),
+        "master faceplate lands on row 1"
+    );
+
+    // Mount regions (rack-absolute mm).
+    let top = rack.mounts.top.expect("top mount region");
+    assert_eq!((top.x_mm, top.y_mm), (0.0, 0.0));
+    assert_eq!((top.w_mm, top.h_mm), (rows_width, top_h));
+
+    let left = rack.mounts.side_left.expect("left mount region");
+    let right = rack.mounts.side_right.expect("right mount region");
+    assert_eq!(left.x_mm, 0.0);
+    assert_eq!(right.x_mm, rows_width);
+    assert_eq!((left.w_mm, right.w_mm), (side_w, side_w));
+    assert_eq!(left.y_mm, top_h);
+    assert_eq!(
+        left.h_mm,
+        rack.rows[0].height_mm + FOLD_BAR_HEIGHT_MM + rack.rows[1].height_mm,
+        "side mounts span the rows region"
+    );
+
+    // Fold bar sits at the row-0/row-1 boundary.
+    assert_eq!(rack.fold_bars.len(), 1, "one fold bar");
+    let fold = &rack.fold_bars[0];
+    assert_eq!(fold.after_row, 0);
+    assert_eq!(fold.rect_mm.h_mm, FOLD_BAR_HEIGHT_MM);
+    assert_eq!(
+        fold.rect_mm.y_mm,
+        rack.rows[0].y_mm + rack.rows[0].height_mm,
+        "fold bar directly below row 0"
+    );
+
+    // Row 1 sits below row 0 + the fold bar; totals include mounts + fold.
+    assert_eq!(
+        rack.rows[1].y_mm,
+        rack.rows[0].y_mm + rack.rows[0].height_mm + FOLD_BAR_HEIGHT_MM,
+        "row 1 offset accounts for the fold bar"
+    );
+    assert_eq!(rack.total_width_mm, rows_width + 2.0 * side_w);
+    assert_eq!(
+        rack.total_height_mm,
+        top_h + rack.rows[0].height_mm + FOLD_BAR_HEIGHT_MM + rack.rows[1].height_mm
+    );
+
+    // Screen geometry under the default mapping (the renderers' mapping).
+    let mapping = ScreenMapping::default();
+    assert_eq!(
+        (mapping.cols_per_mm, mapping.rows_per_mm),
+        (PHYSICAL_COLS_PER_MM, PHYSICAL_ROWS_PER_MM),
+        "default mapping is the documented D4 aspect-compensated factors"
+    );
+    let geom = physical_skeleton_geometry(&rack, &chain, &mapping);
+
+    // Fold bar + mounts surface in the geometry with the mapped rects.
+    assert_eq!(geom.fold_bars.len(), 1);
+    let (fold_screen, fold_label) = &geom.fold_bars[0];
+    assert_eq!(
+        *fold_screen,
+        round_rect(mapping.mm_to_screen(fold.rect_mm)),
+        "fold bar screen rect from the same formula"
+    );
+    assert_eq!(fold_label, " 2", "fold bar labels the row below (1-based)");
+    assert_eq!(geom.mounts.len(), 3, "top + left + right mount regions");
+    for mount in &geom.mounts {
+        assert!(
+            mount.width > 0 && mount.height > 0,
+            "mount region has visible extent"
+        );
+    }
+
+    // Coincidence across rows: every published cell rect equals the manual
+    // D5 formula applied to the rack-absolute position (placed x + row y).
+    let row_of = |module_index: usize| -> &RackRowPlacement {
+        rack.rows
+            .iter()
+            .find(|r| r.modules.iter().any(|m| m.module_index == module_index))
+            .expect("module placed in a row")
+    };
+    for &(mi, ci, rect, _) in &geom.cells {
+        let row = row_of(mi);
+        let placed = row
+            .modules
+            .iter()
+            .find(|m| m.module_index == mi)
+            .expect("placed module");
+        let cell = chain
+            .cell_for(mi, &chain.modules[mi].components[ci].id)
+            .expect("cell geometry");
+        let expected = round_rect(mapping.mm_to_screen(RectMm {
+            x_mm: placed.rect_mm.x_mm + cell.rect_mm.x_mm,
+            y_mm: row.y_mm + cell.rect_mm.y_mm,
+            w_mm: cell.rect_mm.w_mm,
+            h_mm: cell.rect_mm.h_mm,
+        }));
+        assert_eq!(
+            rect, expected,
+            "module {mi} cell {ci} matches the rack-absolute D5 formula"
+        );
+    }
+
+    // Cross-row separation in screen space: every row-1 cell sits strictly
+    // below every row-0 cell (row 0 bottom ≈ 45, row 1 top ≈ 46 at zoom 1).
+    let mut row0_bottom = 0u16;
+    let mut row1_top = u16::MAX;
+    let mut row0_cells = 0usize;
+    let mut row1_cells = 0usize;
+    for &(mi, _, rect, _) in &geom.cells {
+        if rack.rows[0].modules.iter().any(|m| m.module_index == mi) {
+            row0_bottom = row0_bottom.max(rect.bottom());
+            row0_cells += 1;
+        } else {
+            row1_top = row1_top.min(rect.y);
+            row1_cells += 1;
+        }
+    }
+    assert!(row0_cells > 0 && row1_cells > 0, "both rows publish cells");
+    assert!(
+        row1_top > row0_bottom,
+        "row 1 ({row1_top}) strictly below row 0 ({row0_bottom}) in screen space"
+    );
+}
+
+#[test]
+fn physical_coincidence_multi_row_fixture_renders_cleanly() {
+    // The multi-row fixture also renders through the default-case renderers
+    // (single row, wide enough for the whole chain) with full == skeleton.
+    assert_full_skeleton_coincide("physical_multirow_rack", 120, 40);
+    assert_full_skeleton_coincide("physical_multirow_rack", 80, 30);
+}
+
+#[test]
+fn physical_coincidence_rects_stay_within_the_main_render_area() {
+    // D5 containment: published hit-test rects lie inside the main render
+    // area (full buffer minus the 3-row header and 3-row status bar)
+    // whenever the rack fits the viewport; an overflowing rack publishes
+    // rects beyond it, which is exactly what panning addresses (4.3).
+    let main_of = |width: u16, height: u16| Rect::new(0, 3, width, height - 6);
+    for fixture in ["arpeggio1", "multi_module_p2b8", "droid_mpfs5melody2"] {
+        let mut fits_somewhere = false;
+        for (width, height) in [(80u16, 30u16), (120, 40), (120, 70)] {
+            let mut app = app_from_fixture(fixture);
+            let main = main_of(width, height);
+
+            app.physical_show_skeleton = false;
+            let _ = buffer_for(&mut app, width, height);
+            let (rack_w, rack_h) = app.physical_rack_size;
+            if rack_w > main.width || rack_h > main.height {
+                continue; // overflow viewport — pan territory (4.3)
+            }
+            fits_somewhere = true;
+            for &(m, c, r) in &app.physical_full_rects {
+                assert_eq!(
+                    r.intersection(main),
+                    r,
+                    "{fixture} {width}x{height}: full-view rect of module {m} cell {c} \
+                     {r:?} lies inside the main area {main:?} (rack {rack_w}x{rack_h})"
+                );
+            }
+
+            app.physical_show_skeleton = true;
+            let _ = buffer_for(&mut app, width, height);
+            for &(m, c, r) in &app.physical_skeleton_rects {
+                assert_eq!(
+                    r.intersection(main),
+                    r,
+                    "{fixture} {width}x{height}: skeleton rect of module {m} cell {c} \
+                     {r:?} lies inside the main area {main:?}"
+                );
+            }
+        }
+        assert!(
+            fits_somewhere,
+            "{fixture}: at least one viewport fits the rack"
+        );
+    }
+
+    // The two-row rack deliberately overflows a 40-row viewport vertically
+    // (row 1 + fold bar + top mount) — the reason vertical panning exists.
+    let mut app = app_from_fixture("physical_multirow_rack");
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, 120, 40);
+    assert!(
+        app.physical_rack_size.1 > 34,
+        "multi-row rack overflows the 40-row main area ({} rows tall)",
+        app.physical_rack_size.1
+    );
+}
+
+#[test]
+fn physical_coincidence_rects_stable_across_rerenders() {
+    // D5 determinism: re-rendering the same state publishes the same hit-test
+    // rects — the renderer must not mutate the published layout between draws.
+    let mut app = app_from_fixture("multi_module_p2b8");
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, 120, 40);
+    let full_first = app.physical_full_rects.clone();
+    let _ = buffer_for(&mut app, 120, 40);
+    assert_eq!(
+        full_first, app.physical_full_rects,
+        "full view publishes identical rects across re-renders"
+    );
+
+    app.physical_show_skeleton = true;
+    let _ = buffer_for(&mut app, 120, 40);
+    let skeleton_first = app.physical_skeleton_rects.clone();
+    let _ = buffer_for(&mut app, 120, 40);
+    assert_eq!(
+        skeleton_first, app.physical_skeleton_rects,
+        "skeleton publishes identical rects across re-renders"
+    );
+
+    // A panned state is just as stable: the offset applies once per render.
+    app.physical_offset = (7.0, 2.0);
+    let _ = buffer_for(&mut app, 120, 40);
+    let panned_first = app.physical_skeleton_rects.clone();
+    let _ = buffer_for(&mut app, 120, 40);
+    assert_eq!(
+        panned_first, app.physical_skeleton_rects,
+        "panned state publishes identical rects across re-renders"
+    );
+}
+
+#[test]
+fn physical_coincidence_faceplate_cells_do_not_overlap() {
+    // D5 separation: the two P2B8 faceplates sit side by side with a 0.5 mm
+    // gap, so no cell of one faceplate intersects any cell of the other —
+    // in both presentations.
+    let mut app = app_from_fixture("multi_module_p2b8");
+    app.physical_show_skeleton = false;
+    let _ = buffer_for(&mut app, 120, 40);
+    let cells_of = |m: usize| -> Vec<Rect> {
+        app.physical_full_rects
+            .iter()
+            .filter(|&&(mm, _, _)| mm == m)
+            .map(|&(_, _, r)| r)
+            .collect()
+    };
+    let (a, b) = (cells_of(0), cells_of(1));
+    assert!(
+        !a.is_empty() && !b.is_empty(),
+        "both faceplates publish cells"
+    );
+    for ra in &a {
+        for rb in &b {
+            assert!(
+                ra.intersection(*rb).is_empty(),
+                "module 0 cell {ra:?} overlaps module 1 cell {rb:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn visual_physical_skeleton_multirow_rack_snapshot() {
+    // 5.1: the two-row rack renders end to end through the skeleton — both
+    // rows, the fold bar and mount regions visible at a tall viewport, with
+    // every faceplate publishing its cell rects (17 modules across 2 rows).
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("physical_multirow_rack");
+            app.physical_show_skeleton = true;
+            let buf = buffer_for(&mut app, width, 70);
+            let ansi = buffer_to_ansi(&buf);
+
+            assert!(
+                ansi.contains('\u{00B7}'),
+                "{theme_name} {width}: element-cell markers in multi-row skeleton\n{ansi}"
+            );
+            assert!(
+                ansi.contains('┌'),
+                "{theme_name} {width}: module outline frame missing\n{ansi}"
+            );
+            let modules: std::collections::HashSet<usize> = app
+                .physical_skeleton_rects
+                .iter()
+                .map(|(m, _, _)| *m)
+                .collect();
+            assert!(
+                modules.len() >= 16,
+                "{theme_name} {width}: all 17 faceplates publish (got {modules:?})"
+            );
+            // The whole two-row rack is visible: it fits the 64-row main area.
+            let (rack_w, rack_h) = app.physical_rack_size;
+            assert!(
+                rack_w <= width && rack_h <= 64,
+                "{theme_name} {width}: rack {rack_w}x{rack_h} fits the {width}x64 main area"
+            );
+
+            insta::with_settings!(
+                {snapshot_suffix => format!("physical_skeleton_multirow_rack_{theme_name}_{width}")},
+                { insta::assert_snapshot!(ansi); }
+            );
+        }
+    }
+}
