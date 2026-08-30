@@ -503,6 +503,12 @@ pub struct App {
     /// reset on patch load like `physical_show_skeleton`.
     pub physical_offset: (f32, f32),
     pub physical_zoom: f32,
+    /// The case/rack definition the physical view packs into (design D12).
+    /// Seeded from `[physical.rack]` at startup (main.rs); empty rows mean
+    /// "no rack configured" and `RackLayout::pack` materializes the default
+    /// single-row case. Not reset on patch load — the rack is a property of
+    /// the environment, not the patch.
+    pub physical_rack_spec: crate::physical::RackSpec,
     /// Screen size (w, h) in cells of the whole rack under the current
     /// mapping, published by the renderers each frame
     /// (renderer-owns-geometry contract). `physical_overflow` compares it
@@ -614,6 +620,7 @@ impl App {
             physical_full_rects: Vec::new(),
             physical_offset: (0.0, 0.0),
             physical_zoom: 1.0,
+            physical_rack_spec: crate::physical::RackSpec::default(),
             physical_rack_size: (0, 0),
             physical_viewport: None,
             active_modifier_var: None,
