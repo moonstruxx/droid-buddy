@@ -29,11 +29,23 @@ The system SHALL render each controller group as a bordered panel with a title s
 - **THEN** those components are first grouped into module containers, then the modules are arranged within the panel
 
 ### Requirement: Position components in physical layout order
-The system SHALL arrange components within each module in the same order as they appear on the physical hardware (e.g., B1.1 through B1.8 left-to-right, top-to-bottom for P2B8). Modules are then arranged within panels based on their circuit order.
+
+The system SHALL position components by the physical grid model — real millimeter cells in chain order (modules sized from HP, elements at their faceplate positions) — rather than by wrapped panel rows. Repeated instances of the same controller render as separate side-by-side faceplates.
 
 #### Scenario: P2B8 button order
+
 - **WHEN** P2B8 buttons are rendered
 - **THEN** B1.1 appears first (left), B1.8 appears last (right), in physical order within their module
+
+#### Scenario: P2B8 components at physical cells
+
+- **WHEN** a patch contains tokens B1.1-B1.8, L1.1-L1.8, P1.1-P1.2
+- **THEN** the components are rendered at the P2B8 module's real faceplate cells (width in HP, element pitch from the geometry data), not in a uniform wrapped grid.
+
+#### Scenario: Two instances render as two faceplates
+
+- **WHEN** a patch declares two `[p2b8]` sections
+- **THEN** two P2B8 faceplates render side by side at their real widths, in declaration order.
 
 ### Requirement: Display component labels and state
 The system SHALL display each component's label (e.g., "TRIG A", "CUTOFF", "CV IN 1") and its current state (ON/OFF for buttons, percentage for knobs, value for CV I/O) within its panel. Labels longer than the available cell width SHALL truncate with a trailing ellipsis (…) while preserving cell geometry and hit-testing.
@@ -51,15 +63,23 @@ The system SHALL display each component's label (e.g., "TRIG A", "CUTOFF", "CV I
 - **THEN** the label truncates with a trailing ellipsis (…) and the cell geometry and hit rect are unchanged
 
 ### Requirement: Handle overflow with scrolling or wrapping
-The system SHALL handle panels that contain more modules than fit in the available terminal width by wrapping modules to multiple rows. Components within modules wrap based on module width.
+
+The system SHALL handle racks wider or taller than the terminal main area by panning/scrolling (the physical view), keeping the 1:1 mapping intact.
 
 #### Scenario: Panel overflow
-- **WHEN** a controller panel has more components than fit in one row
-- **THEN** components wrap to additional rows within the panel
+
+- **WHEN** a controller panel has more components than fit in the visible area
+- **THEN** the view pans/scrolls to reveal the rest, keeping module geometry intact.
 
 #### Scenario: Panel overflow with modules
-- **WHEN** a controller panel has more modules than fit in one row
-- **THEN** modules wrap to additional rows, maintaining their internal component layout
+
+- **WHEN** a controller chain has more modules than fit in the visible width
+- **THEN** the view pans horizontally, maintaining each module's internal component layout.
+
+#### Scenario: Rack wider than terminal pans
+
+- **WHEN** the rack's total width exceeds the terminal main area
+- **THEN** the view pans horizontally to reveal the rest, without compressing module geometry.
 
 ### Requirement: Support terminal resize
 The system SHALL reflow the layout when the terminal is resized, preserving component visibility and panel structure.
@@ -127,15 +147,23 @@ The boxed path SHALL support every control kind that can carry a resolvable LED 
 - **THEN** the cell renders with complete borders — content shrinks to fit or the cell falls back to unboxed two-line rendering, never partial border fragments
 
 ### Requirement: Box geometry and hit-testing
-Boxed cells use the updated component cell geometry (height 3). The published component geometry SHALL reflect the boxed cell for click hit-testing.
+
+The system SHALL publish `component_rects` matching the rendered physical cells under the current scale and pan offset, preserving the renderer-owns-geometry contract.
 
 #### Scenario: Click on boxed cell
+
 - **WHEN** the user clicks anywhere inside a bordered box
 - **THEN** the element toggles/selects
 
 #### Scenario: LED state changes
+
 - **WHEN** the LED state of a boxed element changes
 - **THEN** the glyph inside the box updates accordingly
+
+#### Scenario: Hit rects match rendered cells
+
+- **WHEN** a component renders at a physical cell
+- **THEN** its published `component_rects` entry covers exactly the rendered cell's screen area.
 
 ### Requirement: Panels render dim while processing paused
 
