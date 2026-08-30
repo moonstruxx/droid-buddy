@@ -1,44 +1,43 @@
 ---
 source: src/regression.rs
-assertion_line: 2462
 expression: ansi
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                DROID: modifier_switch_passthrough                                │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Panels ──────────────────────────────────────────────────┐┌ Circuits ────────┐┌ Source [raw] ────┐
-│┌ P2B8 ──────────────────────────────────────────────────┐││p2b8              ││    button = B1.1 │
-││  ○ Button B1.1    ○ LED L1.1     ○ Button B1.2         │││button            ││    output = _TRIG│
-││       OFF             OFF             OFF              │││copy              ││                  │
-││                                                        │││clocktool         ││[copy]            │
-││   ○ LED L1.2     ○ Button B1.3    ○ LED L1.3           │││copy (1)          ││    input = B1.1  │
-││       OFF             OFF             OFF              │││contour           ││    output = _EXTR│
-││                                                        │││copy (2)          ││                  │
-││  ○ Button B1.4    ○ LED L1.4     ○ Button B1.5         │││copy (3)          ││[clocktool]       │
-││       OFF             OFF             OFF              │││contour (1)       ││    output = _BASE│
-││                                                        │││switch            ││                  │
-││   ○ LED L1.5     ○ Button B1.6    ○ LED L1.6           │││quantizer         ││# direct consumpti│
-││       OFF             OFF             OFF              │││mixer             ││[copy]            │
-││                                                        │││contour (2)       ││    input = _BASE │
-││  ○ Button B1.7    ○ LED L1.7     ○ Button B1.8         │││logic             ││    output = O1   │
-││       OFF             OFF             OFF              │││copy (4)          ││                  │
-││                                                        │││led               ││[contour]         │
-││   ○ LED L1.8      ◉ Pot P1.1      ◉ Pot P1.2           │││contour (3)       ││    input = _BASE │
-││       OFF             0%              0%               │││copy (5)          ││                  │
-││                                                        │││copy (6)          ││# copy chain: _TRI│
-│└────────────────────────────────────────────────────────┘││copy (7)          ││[copy]            │
-│┌ CV I/O ────────────────────────────────────────────────┐││switch (1)        ││    input = _TRIG │
-││   ← Output O1     ← Output O2     ← Output O4          │││                  ││    output = _COPY│
-││     CV OUT          CV OUT          CV OUT             │││                  ││                  │
-││                                                        │││                  ││[copy]            │
-│└────────────────────────────────────────────────────────┘││                  ││    input = _COPY1│
-│                                                          ││                  ││    output = _COPY│
-│                                                          ││                  ││                  │
-│                                                          ││                  ││[contour]         │
-│                                                          ││                  ││    input = _COPY2│
-│                                                          ││                  ││                  │
-│                                                          ││                  ││# indirect via swi│
-│                                                          ││                  ││[switch]          │
+│◉◉┐┌────┐┐                                                ││p2b8              ││    button = B1.1 │
+│…0%  CV …                                                 ││button            ││    output = _TRIG│
+││ ││    ││                                                ││copy              ││                  │
+││ ││    ││                                                ││clocktool         ││[copy]            │
+││ ││    ││                                                ││copy (1)          ││    input = B1.1  │
+││ ││    ││                                                ││contour           ││    output = _EXTR│
+││ ││    ││                                                ││copy (2)          ││                  │
+││ ││    ││                                                ││copy (3)          ││[clocktool]       │
+││ ││    ││                                                ││contour (1)       ││    output = _BASE│
+││ ││    ││                                                ││switch            ││                  │
+│○○││    ││                                                ││quantizer         ││# direct consumpti│
+│……││    ││                                                ││mixer             ││[copy]            │
+││ ││    ││                                                ││contour (2)       ││    input = _BASE │
+││ ││    ││                                                ││logic             ││    output = O1   │
+│○○││  ▶ ││                                                ││copy (4)          ││                  │
+│○○││  … ││                                                ││led               ││[contour]         │
+││ ││    ││                                                ││contour (3)       ││    input = _BASE │
+││ ││    ││                                                ││copy (5)          ││                  │
+││ ││  ▶ ││                                                ││copy (6)          ││# copy chain: _TRI│
+│○○││  … ││                                                ││copy (7)          ││[copy]            │
+│……││    ││                                                ││switch (1)        ││    input = _TRIG │
+││ ││    ││                                                ││                  ││    output = _COPY│
+││ ││    ││                                                ││                  ││                  │
+│○○││    ││                                                ││                  ││[copy]            │
+│○○││    ││                                                ││                  ││    input = _COPY1│
+││ ││    ││                                                ││                  ││    output = _COPY│
+││ ││  ▶ ││                                                ││                  ││                  │
+││ ││  … ││                                                ││                  ││[contour]         │
+││ ││    ││                                                ││                  ││    input = _COPY2│
+││ ││    ││                                                ││                  ││                  │
+││ ││    ││                                                ││                  ││# indirect via swi│
+│└─┘└────┘┘                                                ││                  ││[switch]          │
 └──────────────────────────────────────────────────────────┘└──────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Quad fallback (<120 cols): showing panels+source | Esc close                                      │

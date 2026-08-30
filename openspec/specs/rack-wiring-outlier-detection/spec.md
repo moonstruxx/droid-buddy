@@ -9,7 +9,7 @@ Detect physically implausible HwComponent bindings in a DROID patch by comparing
 ### Requirement: Rack geometry table
 The system SHALL provide a machine-readable rack geometry that maps every HwComponent token to an element-precise position in B32-grid units. The table SHALL describe controller positions and per-controller element offsets, support vertical mounting, and cover multiple racks (distinct coordinate bands).
 
-- The B32 controller SHALL be modeled as a 4×8 grid numbered row-wise: row 0 is `B1.1..B1.8`, row 1 is `B1.9..B1.16`, row 2 is `B1.17..B1.24`, row 3 is `B1.25..B1.32`. LEDs (`L1.1..L1.32`) are co-located with their buttons (distance 0).
+- The B32 controller SHALL be modeled as a 4×8 grid (4 columns × 8 rows) numbered row-wise: row 0 is `B1.1..B1.4`, row 1 is `B1.5..B1.8`, row 2 is `B1.9..B1.12`, row 3 is `B1.13..B1.16`, row 4 is `B1.17..B1.20`, row 5 is `B1.21..B1.24`, row 6 is `B1.25..B1.28`, row 7 is `B1.29..B1.32`. LEDs (`L1.1..L1.32`) are co-located with their buttons (distance 0).
 - Uppercase/lowercase controller names that denote the same physical grid (e.g. `B32` and `b32`, `E4` and `e4`) SHALL share the same element grid.
 - Each binding to a co-located `L→B` pair SHALL be treated as distance 0 and never flagged as an outlier.
 

@@ -173,6 +173,69 @@ fn led_pairs_app() -> App {
     app
 }
 
+/// Load a fixture from `fixtures/ui_review/` (controller-front review rows).
+fn app_from_ui_review(name: &str) -> App {
+    let path = format!("fixtures/ui_review/{name}.ini");
+    let patch = crate::patch::Patch::from_ini_file(Path::new(&path)).unwrap();
+    let mut app = App::new();
+    app.load_patch(patch);
+    app
+}
+
+fn setup_ui_review_p4b2(app: &mut App) {
+    // P4B2 physical front (5 HP): four pots (P1.1..P1.4), two buttons with
+    // LEDs (B1.1/B1.2 + L1.1/L1.2). [p4b2] is registered in
+    // KNOWN_CONTROLLER_SECTIONS, so the patch resolves to the real p4b2
+    // geometry key (not the fallback panel).
+    *app = app_from_ui_review("p4b2");
+}
+
+fn setup_ui_review_p8s8(app: &mut App) {
+    // P8S8 faderbank front (8 HP): 8 sliders, 8 LEDs, 8 switches. Rendering
+    // caveat: the F-slider row renders only via M-family tokens — P tokens
+    // don't cross the family→F cell boundary (review-relevant known state).
+    *app = app_from_ui_review("p8s8");
+}
+
+fn setup_ui_review_db8e(app: &mut App) {
+    // DB8E physical front (6 HP): eight buttons (B1.1..B1.8), one encoder
+    // (E1.1), LEDs (L1.1..L1.8 shown; the panel carries 32). [db8e] is
+    // registered in KNOWN_CONTROLLER_SECTIONS, so the tokens resolve to the
+    // real db8e geometry (6 HP) instead of a fallback panel.
+    *app = app_from_ui_review("db8e");
+}
+
+fn setup_ui_review_g8(app: &mut App) {
+    // G8 physical front (4 HP): 8 gate jacks + 8 LEDs. g8.ini intentionally
+    // lacks a [g8] section, so the fixture renders as the fallback
+    // "Controller 1" panel — kept in the gallery to show the current
+    // fallback state (review-relevant).
+    *app = app_from_ui_review("g8");
+}
+
+fn setup_ui_review_x7(app: &mut App) {
+    // X7 physical front (4 HP): 4 gate outputs, 8 LEDs, 1 USB switch. x7.ini
+    // intentionally lacks an [x7] section, so the fixture renders as the
+    // fallback "Controller 1" panel — kept in the gallery to show the
+    // current fallback state (review-relevant).
+    *app = app_from_ui_review("x7");
+}
+
+fn setup_ui_review_master18(app: &mut App) {
+    // MASTER18 physical front (6 HP). The master faceplate resolves to
+    // master18 whenever the patch addresses a CV jack above 8 (I9..I12 force
+    // it here). Known caveat: master18.ini yields some invalid_jack Warnings
+    // (validator caps at I1-I8) — acceptable, non-gating.
+    *app = app_from_ui_review("master18");
+}
+
+fn setup_ui_review_all_uncovered(app: &mut App) {
+    // One instance of every controller whose physical front is not yet
+    // snapshot-covered (p4b2, p8s8, db8e, g8, x7, master18) in a single
+    // patch — the side-by-side comparison row.
+    *app = app_from_ui_review("all_uncovered");
+}
+
 // ── gallery definition ────────────────────────────────────────────────────
 
 struct Scenario {
@@ -504,6 +567,66 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 40,
         setup: setup_disabled_circuit_graph,
+    },
+    // ── controller-front review matrix: fixtures/ui_review/* (6.2) ────────
+    // Renders each newly-created controller-front fixture in the default
+    // physical full view (rack faceplates) so the fronts can be reviewed
+    // side-by-side with the DROID manual photos. Height 50 fits the full
+    // 128.5 mm faceplate (≈39 rows at zoom 1.0) plus header/status chrome.
+    // g8.ini/x7.ini intentionally lack their [g8]/[x7] sections and render
+    // the fallback "Controller 1" panel — kept on purpose (fallback state is
+    // review-relevant). p8s8's F-slider row renders only via M-family tokens
+    // (P tokens don't cross family→F cell boundary); master18.ini yields
+    // invalid_jack Warnings (validator caps at I1-I8) — both acceptable,
+    // non-gating.
+    Scenario {
+        id: "ui_review_p4b2",
+        label: "ui_review/p4b2 · width 100 · P4B2 front (5 HP, P1.1–P1.4 + B1.1/B1.2)",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_p4b2,
+    },
+    Scenario {
+        id: "ui_review_p8s8",
+        label: "ui_review/p8s8 · width 100 · P8S8 faderbank front (8 HP) — F-sliders via M tokens",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_p8s8,
+    },
+    Scenario {
+        id: "ui_review_db8e",
+        label: "ui_review/db8e · width 100 · DB8E front (6 HP, B1.1–B1.8 + E1.1)",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_db8e,
+    },
+    Scenario {
+        id: "ui_review_g8",
+        label: "ui_review/g8 · width 100 · G8 front (4 HP) — no [g8] → fallback 'Controller 1'",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_g8,
+    },
+    Scenario {
+        id: "ui_review_x7",
+        label: "ui_review/x7 · width 100 · X7 front (4 HP) — no [x7] → fallback 'Controller 1'",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_x7,
+    },
+    Scenario {
+        id: "ui_review_master18",
+        label: "ui_review/master18 · width 100 · MASTER18 front (6 HP, I9+ forces) — invalid_jack warnings expected",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_master18,
+    },
+    Scenario {
+        id: "ui_review_all_uncovered",
+        label: "ui_review/all_uncovered · width 100 · all six controller fronts side-by-side",
+        width: 100,
+        height: 50,
+        setup: setup_ui_review_all_uncovered,
     },
 ];
 

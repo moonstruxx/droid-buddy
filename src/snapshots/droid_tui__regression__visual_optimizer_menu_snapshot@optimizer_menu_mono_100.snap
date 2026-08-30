@@ -5,30 +5,30 @@ expression: ansi
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                     DROID: optimizer_latency                                     │
 └─╭ Optimizer (3) ───────────────────────────────────────────────────────────────────────────────╮─┘
-┌ │▶ banner (default) avg 4.00→1.00 · max 4.00→1.00 · back-edges 4→0                             │─┐
-│ │   global min-sum avg 4.00→1.00 · max 4.00→1.00 · back-edges 4→0                              │ │
-│ │   min-max avg 4.00→1.00 · max 4.00→1.00 · back-edges 4→0                                     │ │
-│ │                                                                                              │ │
-└─│                                                                                              │─┘
-┌ │                                                                                              │─┐
-│ │                                                                                              │ │
-│ │                                                                                              │ │
-│ │                                                                                              │ │
-└─│                                                                                              │─┘
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
+┌─│▶ banner (default) avg 4.00→1.00 · max 4.00→1.00 · back-edges 4→0                             │
+│ │   global min-sum avg 4.00→1.00 · max 4.00→1.00 · back-edges 4→0                              │
+│ │   min-max avg 4.00→1.00 · max 4.00→1.00 · back-edges 4→0                                     │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+│ │                                                                                              │
+└─│                                                                                              │
 ┌─╰ j/k select · Enter preview · r restore · s export · Esc close ───────────────────────────────╯─┐
 │Optimizer: j/k select · Enter preview · r restore · s export · Esc close | Renders degraded at 100│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

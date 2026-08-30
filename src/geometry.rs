@@ -115,7 +115,7 @@ impl RackGeometry {
     /// Behaviour mirrors `HwComponent::module_instance()` / `leading_number()` in
     /// `src/patch.rs`: strip the leading digit-run (module instance) and use the
     /// element number after the dot to index the grid. For a 4×8 row-wise matrix
-    /// element 17 → row 2 col 0.
+    /// element 17 → row 4 col 0.
     ///
     /// Co-located `L→B` pairs share the same cell (distance 0). Mirrored
     /// controller names (`B32`/`b32`, `E4`/`e4`) share the same element grid via
@@ -768,7 +768,7 @@ mod tests {
             {"id":"R2","y":12,"controllers":[{"name":"R2C","x":0,"grid":"r2c"},{"name":"e4","x":14,"grid":"e4"},{"name":"b32","x":30,"grid":"b32"}]}
           ],
           "grids":{
-            "b32":{"kind":"matrix","cols":8,"rows":4,"row_wise":true,"orientation":"vertical"},
+            "b32":{"kind":"matrix","cols":4,"rows":8,"row_wise":true,"orientation":"vertical"},
             "e4":{"kind":"stack","count":4,"pitch_y":2},
             "r2c":{"kind":"singleton"}
           },
@@ -808,20 +808,20 @@ mod tests {
     }
 
     #[test]
-    fn b1_17_resolves_to_row2_col0() {
+    fn b1_17_resolves_to_row4_col0() {
         let geo = test_geometry();
-        // Element 17 in a 4×8 row-wise matrix → col 0, row 2 (0-based)
+        // Element 17 in a 4×8 row-wise matrix → col 0, row 4 (0-based)
         let off = offset_of(&geo, "B1.17").expect("B1.17 resolves");
         assert_eq!(
             off,
-            (0, 2),
-            "B1.17 should be row 2 col 0 within its B32 slot"
+            (0, 4),
+            "B1.17 should be row 4 col 0 within its B32 slot"
         );
 
         // Also check absolute via resolve: strip instance, index grid correctly
         // b32 lower-case variant must give same offset
         let off_lower = offset_of(&geo, "b1.17").expect("b1.17 resolves");
-        assert_eq!(off_lower, (0, 2));
+        assert_eq!(off_lower, (0, 4));
     }
 
     #[test]
@@ -910,6 +910,50 @@ mod tests {
         let geo = loaded.unwrap();
         assert!(!geo.racks.is_empty());
         assert!(geo.grids.contains_key("b32"));
+    }
+
+    #[test]
+    fn b32_grid_agrees_between_geometry_files() {
+        // Regression (droid_tui-9xr): rack_geometry.json and
+        // controller_geometry.json must agree that the B32 button grid is
+        // 4 columns × 8 rows (manual orientation; physical.rs already asserts
+        // the controller_geometry side, this ties the rack side to it).
+        let rack = RackGeometry::load().expect("rack_geometry.json loads");
+        let b32_grid = rack
+            .grids
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("b32"))
+            .map(|(_, v)| v)
+            .expect("rack_geometry.json must carry a b32 grid");
+        match b32_grid {
+            Grid::Matrix { cols, rows, .. } => {
+                assert_eq!(*cols, 4, "rack_geometry.json b32 cols must be 4");
+                assert_eq!(*rows, 8, "rack_geometry.json b32 rows must be 8");
+            }
+            other => panic!("b32 must be a matrix grid, got {other:?}"),
+        }
+
+        let ctrl =
+            crate::physical::ControllerGeometry::load().expect("controller_geometry.json loads");
+        let b32 = ctrl
+            .controller("b32")
+            .expect("controller_geometry.json must carry a b32 entry");
+        let buttons = &b32.element_cells["B"];
+        let cols: std::collections::BTreeSet<u32> = buttons.iter().map(|c| c.col).collect();
+        let rows: std::collections::BTreeSet<u32> = buttons.iter().map(|c| c.row).collect();
+        assert_eq!(
+            buttons.len(),
+            32,
+            "controller_geometry.json b32 must carry 32 buttons"
+        );
+        assert_eq!(
+            cols.len(),
+            4,
+            "controller_geometry.json b32 must be 4 columns"
+        );
+        assert_eq!(rows.len(), 8, "controller_geometry.json b32 must be 8 rows");
+        // Element 17 lands on row 4 col 0 in both models (4-col row-wise).
+        assert!(rows.contains(&4), "b32 must span row 4 (B1.17..B1.20)");
     }
 
     // ---- BindingFeatures scenario tests (task 1.2) ----
@@ -1028,26 +1072,27 @@ mod tests {
     // ---- WiringOutlierScorer tests (task 2.1) ----
 
     #[test]
-    fn embedded_artifact_parses_to_28_rules() {
+    fn embedded_artifact_parses_to_32_rules() {
         // The committed artifact must stay parseable and complete; a parse
         // failure would degrade the scorer to the pure threshold fallback.
         let scorer = WiringOutlierScorer::embedded();
-        assert_eq!(scorer.rule_count(), 28, "artifact must keep 28 rules");
+        assert_eq!(scorer.rule_count(), 32, "artifact must keep 32 rules");
     }
 
     #[test]
     fn scorer_flags_learned_outlier() {
-        // E4.4 -> M4.2 is a learned flag row (`* 5 8 flag`): E=5, M=8 kind
-        // pair with full range, any controller.
+        // E4.4 -> M4.2 is a learned flag row (`15.1815..15.2815 * 5 8 flag`):
+        // the E=5/M=8 kind pair is flagged within the fitted euclidean window
+        // (the true E4.4->M4.2 distance sqrt(14^2 + 6^2) = 15.232).
         let scorer = WiringOutlierScorer::embedded();
         let f = BindingFeatures {
             src_kind: 5,
             sink_kind: 8,
             param_key: 0,
             src_xy: (0, 0),
-            sink_xy: (50, 50),
-            euclidean: 70.7,
-            manhattan: 100,
+            sink_xy: (14, 6),
+            euclidean: 15.232,
+            manhattan: 20,
             same_controller: false,
             same_rack: true,
             adjacent: false,

@@ -2086,8 +2086,10 @@ fn visual_numbered_led_pairs_snapshot() {
 fn visual_joined_boxes_kinds_snapshot() {
     // 2.2 (droid_tui-8kr): every control kind with a resolvable LED
     // association — pot/knob, encoder, switch, fader (M models as Knob) —
-    // must render as one boxed cell with the LED folded into the interior
-    // row; associated LEDs never render as standalone cells.
+    // is associated at parse time (both numbered and bare styles). In the
+    // physical view (droid_tui-26q) the Pot-panel LEDs stay folded into
+    // their control's interior row, while the Encoder ring LEDs render as
+    // standalone E4 cells.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let mut app = app_from_fixture("led_pairs_kinds");
@@ -2139,20 +2141,41 @@ fn visual_joined_boxes_kinds_snapshot() {
             "{theme_name}: fader bare"
         );
 
-        // All eight LEDs folded into their control's box: no standalone cell.
+        // Panel split (droid_tui-26q): the number-1 collision resolves pot
+        // and encoder onto separate faceplates — P10 ("Pot") and E4
+        // ("Encoder") — instead of one merged module. The Pot faceplate has no
+        // LED cells, so its six LEDs (L1.1, L1.3, L1.4, L1.5, L1.7, L1.8 for
+        // the pot/switch/fader pairs) stay folded; the E4 faceplate carries
+        // ring-LED cells, so the encoder LEDs (L1.2, L1.6) render standalone
+        // there.
         let rect_ids: Vec<String> = app
             .component_rects
             .iter()
             .map(|(idx, _)| patch.hw_components[*idx].id.clone())
             .collect();
-        for led in [
-            "L1.1", "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
-        ] {
+        for led in ["L1.1", "L1.3", "L1.4", "L1.5", "L1.7", "L1.8"] {
             assert!(
                 !rect_ids.contains(&String::from(led)),
-                "{theme_name}: LED {led} must be folded, not standalone"
+                "{theme_name}: Pot-panel LED {led} must be folded, not standalone"
             );
         }
+        for led in ["L1.2", "L1.6"] {
+            assert!(
+                rect_ids.contains(&String::from(led)),
+                "{theme_name}: encoder ring LED {led} renders standalone on the Encoder faceplate"
+            );
+        }
+        // The two controller faceplates stay distinct (shared-number
+        // coexistence): rendered cells span both Pot and Encoder.
+        let rect_controllers: Vec<&str> = app
+            .component_rects
+            .iter()
+            .map(|(idx, _)| patch.hw_components[*idx].controller.as_str())
+            .collect();
+        assert!(
+            rect_controllers.contains(&"Pot") && rect_controllers.contains(&"Encoder"),
+            "{theme_name}: rendered cells span the Pot and Encoder faceplates"
+        );
 
         insta::with_settings!({snapshot_suffix => format!("joined_boxes_kinds_{theme_name}_80")}, {
             insta::assert_snapshot!(ansi);
@@ -3732,12 +3755,14 @@ fn visual_modifier_shift_plus_modifier_snapshot() {
 }
 
 // ── switch detail regression harness (task 1.3) ──────────────────────────
-// switch_value.ini: an S-token Switch in `ComponentState::Value` renders
-// `◉ {:.0}%` in the `switch` token. classic keeps switch == button so its
-// face is byte-identical to the pre-token rendering; mono's DarkGray switch
-// provably differs from the White button/knob in the same grid. S1.2 pins
-// the retained `▣ ON` baseline beside the percentage. HTML row mirrors the
-// visual gallery row convention.
+// switch_value.ini: the number-1 collision (droid_tui-26q) pins every
+// section — S1.1, S1.2, B1.1, P1.1 — to the Pot faceplate (P10), which has
+// cells only for its pots, so the face is the single P1.1 knob at its 0%
+// state; the switch/button tokens carry no render cells. The switch token
+// styling story survives as theme properties: classic keeps switch ==
+// button, mono's DarkGray switch provably differs from the White
+// button/knob in the same theme. HTML row mirrors the visual gallery row
+// convention.
 
 fn switch_value_app() -> App {
     let mut app = app_from_fixture("switch_value");
@@ -3753,9 +3778,11 @@ fn switch_value_app() -> App {
 
 #[test]
 fn visual_switch_value_rendering_snapshot() {
-    // 1.3: switch_value.ini × classic/mono × 80/120 — the switch detail story
-    // lives in classic (byte-identical baseline) and mono (switch token
-    // distinct from button); terminal resets every token so it adds nothing.
+    // 1.3: switch_value.ini × classic/mono × 80/120 — the number-1
+    // collision (droid_tui-26q) pins every section to the Pot faceplate, so
+    // the switch token carries no render cells; its styling story lives as
+    // theme properties (classic keeps switch == button; mono's switch provably
+    // differs from the button).
     for theme_name in ["classic", "mono"] {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -3765,22 +3792,43 @@ fn visual_switch_value_rendering_snapshot() {
             let ansi = buffer_to_ansi(&buf);
             let html = buffer_to_html(&buf);
 
-            // Face: the Value-state switch shows the percentage (knob parity)
-            // and the On switch keeps the ▣ ON baseline beside it.
-            assert!(
-                ansi.contains("35%"),
-                "{theme_name} {width}: Value switch percentage rendered\n{ansi}"
+            // Panel resolution (droid_tui-26q): every section in this fixture
+            // shares controller number 1, and [pot] is its only KNOWN
+            // controller section — so S1.1, S1.2, B1.1 and P1.1 all pin to
+            // the Pot faceplate (P10). The P10 faceplate has element cells
+            // only for its pots, so the switch/button tokens carry no render
+            // cells: the face is the single P1.1 knob at its 0% state. The
+            // switch token styling story survives as theme properties
+            // (classic keeps switch == button; mono's switch provably differs
+            // from the button in the same theme).
+            let patch = app.patch.as_ref().unwrap();
+            for comp in &patch.hw_components {
+                assert_eq!(
+                    comp.controller, "Pot",
+                    "{theme_name} {width}: {} pinned to the Pot faceplate",
+                    comp.id
+                );
+            }
+            let rect_ids: Vec<String> = app
+                .component_rects
+                .iter()
+                .map(|(idx, _)| patch.hw_components[*idx].id.clone())
+                .collect();
+            assert_eq!(
+                rect_ids,
+                vec![String::from("P1.1")],
+                "{theme_name} {width}: only the pot renders a cell on the P10 faceplate"
             );
             assert!(
-                ansi.contains("▣") && ansi.contains("ON"),
-                "{theme_name} {width}: On switch baseline retained\n{ansi}"
+                ansi.contains("0%"),
+                "{theme_name} {width}: pot state rendered\n{ansi}"
             );
-            // Style: the value-switch glyph takes the switch token (mono's
-            // DarkGray, distinct from the White button/knob in this frame).
+            // Style: the value glyph takes the knob token (mono's White,
+            // distinct from the DarkGray switch in the same theme).
             assert_eq!(
                 glyph_fg(&buf, "◉"),
-                Some(t.switch),
-                "{theme_name} {width}: value glyph uses the switch token"
+                Some(t.knob),
+                "{theme_name} {width}: value glyph uses the knob token"
             );
             if theme_name == "classic" {
                 assert_eq!(
@@ -5244,6 +5292,66 @@ fn visual_physical_skeleton_multirow_rack_snapshot() {
                 {snapshot_suffix => format!("physical_skeleton_multirow_rack_{theme_name}_{width}")},
                 { insta::assert_snapshot!(ansi); }
             );
+        }
+    }
+}
+
+// ── controller-front review matrix: fixtures/ui_review/* (6.2) ───────────
+// Strict insta gate for the seven review fixtures added with the gallery
+// rows (droid_tui-egd): each renders the physical full view at 100×50
+// (≈ the whole 128.5 mm faceplate) under classic/terminal/mono, and both
+// the ANSI and HTML faces are snapshotted (led_pairs precedent). Known
+// states stay review-relevant, not gating: g8/x7 (and today p4b2/db8e)
+// render the fallback "Controller 1" panel, p8s8's F-row needs M-family
+// tokens, master18 yields invalid_jack Warnings.
+
+/// Load a fixture from `fixtures/ui_review/` (mirror of gallery.rs, kept
+/// private here so the gate needs no gallery coupling).
+fn app_from_ui_review(name: &str) -> App {
+    let path = format!("fixtures/ui_review/{name}.ini");
+    let patch = Patch::from_ini_file(Path::new(&path)).unwrap();
+    let mut app = App::new();
+    app.load_patch(patch);
+    app
+}
+
+#[test]
+fn visual_ui_review_fronts_snapshot() {
+    let names = [
+        "p4b2",
+        "p8s8",
+        "db8e",
+        "g8",
+        "x7",
+        "master18",
+        "all_uncovered",
+    ];
+    for &name in &names {
+        for &theme_name in theme::THEMES {
+            let _guard = ThemedGuard::pin(theme_name);
+            let mut app = app_from_ui_review(name);
+            let buf = buffer_for(&mut app, 100, 50);
+            let ansi = buffer_to_ansi(&buf);
+            let html = buffer_to_html(&buf);
+
+            let patch = app.patch.as_ref().unwrap();
+            assert!(
+                !patch.hw_components.is_empty(),
+                "{name} {theme_name}: fixture parsed components"
+            );
+            assert!(!ansi.is_empty(), "{name} {theme_name}: ansi non-empty");
+            assert!(!html.is_empty(), "{name} {theme_name}: html non-empty");
+            assert!(
+                html.contains("<span"),
+                "{name} {theme_name}: html has spans"
+            );
+
+            insta::with_settings!({snapshot_suffix => format!("ui_review_{name}_{theme_name}_100")}, {
+                insta::assert_snapshot!(ansi);
+            });
+            insta::with_settings!({snapshot_suffix => format!("ui_review_{name}_{theme_name}_100_html")}, {
+                insta::assert_snapshot!(html);
+            });
         }
     }
 }

@@ -126,7 +126,32 @@ def palette(name: str) -> dict:
 KNOWN_CONTROLLER_SECTIONS = {
     "notebuttons", "faderbank", "encoder", "pot",
     "unusedfaders", "motorfader", "fadermatrix",
+    "p4b2", "p10", "s10", "p8s8", "b32", "e4", "m4", "db8e", "g8", "x7",
 }
+
+# Bare controller sections whose section name alone declares the full
+# hardware token set (design.md Decision 2b, mirror of patch::BARE_SYNTHESIS):
+# (section name, panel name, [(family letter, element count)]). Families and
+# counts follow the manual: p8s8 = 8 sliders (P registers) + 8 slider LEDs +
+# 8 switches, b32 = 32 buttons + 32 LEDs, m4 = 4 motor faders (P registers) +
+# 4 touch buttons + 4 LEDs, e4 = 4 encoders + 4 encoder buttons + 4 ring LEDs.
+BARE_SYNTHESIS = [
+    ("p2b8", "P2B8", [("B", 8), ("L", 8), ("P", 2)]),
+    ("p8s8", "P8S8", [("P", 8), ("L", 8), ("S", 8)]),
+    ("b32", "B32", [("B", 32), ("L", 32)]),
+    ("m4", "M4", [("P", 4), ("B", 4), ("L", 4)]),
+    ("e4", "E4", [("E", 4), ("B", 4), ("L", 4)]),
+    ("s10", "S10", [("S", 10)]),
+    ("p10", "P10", [("P", 10)]),
+]
+
+# Component kind for a bare-synthesis family letter (mirror of
+# patch::family_kind).
+def family_kind(family: str) -> str:
+    return {
+        "B": "button", "L": "led", "P": "knob", "M": "knob",
+        "S": "switch", "E": "encoder",
+    }.get(family, "button")
 
 
 def strip_comment(line: str) -> str:
@@ -218,12 +243,13 @@ def parse_patch_components(content: str):
 
     components = []
     seen_ids = set()
-    p2b8_instances = 0
+    controller_chain_pos = 0
+    pinned_panels = {}
     controller_types = {}
 
     def add_component(token, kind):
         if token in seen_ids:
-            return
+            return False
         seen_ids.add(token)
         components.append({
             "id": token,
@@ -232,6 +258,7 @@ def parse_patch_components(content: str):
             "shift_group": None,
             "led": None,
         })
+        return True
 
     for section in sections:
         # LED association: `led = L.N` entry + first hardware token overall.
@@ -243,17 +270,21 @@ def parse_patch_components(content: str):
                 element_token = tok[0]
                 break
 
-        # A bare `[p2b8]` declaration implies 18 hardware tokens even with
-        # no key-value pairs (design.md Decision 2b).
-        if section["name"] == "p2b8":
-            p2b8_instances += 1
-            n = p2b8_instances
-            controller_types.setdefault(n, "P2B8")
-            for i in range(1, 9):
-                add_component("B%d.%d" % (n, i), "button")
-                add_component("L%d.%d" % (n, i), "led")
-            for i in range(1, 3):
-                add_component("P%d.%d" % (n, i), "knob")
+        # A bare controller declaration implies its full hardware token set
+        # even with no key-value pairs (design.md Decision 2b). The panel is
+        # the controller type numbered by chain position; synthesized tokens
+        # are pinned to that panel so they keep it even when another section
+        # claimed the same controller number first.
+        bare = next((p for p in BARE_SYNTHESIS if p[0] == section["name"]), None)
+        if bare is not None:
+            controller_chain_pos += 1
+            n = controller_chain_pos
+            controller_types.setdefault(n, bare[1])
+            for family, count in bare[2]:
+                for i in range(1, count + 1):
+                    token = "%s%d.%d" % (family, n, i)
+                    if add_component(token, family_kind(family)):
+                        pinned_panels[token] = bare[1]
         elif section["name"] in KNOWN_CONTROLLER_SECTIONS:
             first_number = None
             for _, v in section["entries"]:
@@ -265,7 +296,19 @@ def parse_patch_components(content: str):
                 if first_number is not None:
                     break
             if first_number is not None:
-                controller_types.setdefault(first_number, titlecase(section["name"]))
+                panel = titlecase(section["name"])
+                controller_types.setdefault(first_number, panel)
+                # Pin every token this section declares to its own faceplate
+                # (mirror of patch.rs): two explicit known types sharing a
+                # controller number coexist on separate panels instead of the
+                # later section's tokens falling through first-wins to the
+                # earlier section's panel (droid_tui-26q). Skip tokens already
+                # seen: a duplicate of a bare-synthesized token must not steal
+                # the panel its synthesizing section pinned.
+                for _key, value in section["entries"]:
+                    for token in scan_hw_tokens(value):
+                        if token_kind(token) is not None and token not in seen_ids:
+                            pinned_panels[token] = panel
 
         for _key, value in section["entries"]:
             for token in scan_hw_tokens(value):
@@ -309,10 +352,13 @@ def parse_patch_components(content: str):
             comp["shift_group"] = (n - 1) % 4
 
     # Controller panels (design.md Decision 3): CV I/O tokens are fixed
-    # jacks sharing one panel; others map via controller_types or "Controller N".
+    # jacks sharing one panel; bare-synthesized tokens keep the panel their
+    # own section declared; others map via controller_types or "Controller N".
     for comp in components:
         if comp["kind"] in ("cvin", "cvout"):
             comp["controller"] = "CV I/O"
+        elif comp["id"] in pinned_panels:
+            comp["controller"] = pinned_panels[comp["id"]]
         else:
             n = leading_number(comp["id"])
             if n is not None and n in controller_types:
