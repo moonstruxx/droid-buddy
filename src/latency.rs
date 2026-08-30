@@ -381,6 +381,7 @@ mod tests {
             latency: crate::config::Latency {
                 per_circuit: HashMap::from([("CLOCKTOOL".to_string(), 7.5)]),
             },
+            physical: crate::config::Physical::default(),
         };
         let model = CostModel::from_config(&settings);
         assert_eq!(

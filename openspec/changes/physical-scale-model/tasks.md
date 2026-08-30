@@ -29,24 +29,27 @@
 - [x] 3.2 Skeleton theme tokens <!-- agent: layout-designer-engineer.fast, depends_on: [3.1], touches: [src/theme.rs] -->
       · `physical_skeleton_*` tokens (module outline, element cell, port markers) in classic/mono/terminal, following the token-layer invariant (no `Color::` literals outside tests)
       · verify: tokens present in all three palettes; mono pairwise-distinct where they co-occur
-- [ ] 3.3 Skeleton snapshot coverage <!-- agent: horst-engineer.fast, depends_on: [3.1], touches: [src/regression.rs] -->
+- [x] 3.3 Skeleton snapshot coverage <!-- agent: horst-engineer.fast, depends_on: [3.1], touches: [src/regression.rs] -->
       · insta snapshots of skeleton frames for physical-layout fixtures (classic/mono/terminal)
       · verify: `cargo insta test --check` green after accepting new snapshots
 
 ## 4. 1:1 Main View
 
-- [ ] 4.1 mm→chars mapping + pan/zoom model <!-- agent: layout-designer-engineer.build, depends_on: [2.3, 3.1], touches: [src/physical.rs, src/ui.rs, src/app.rs] -->
+- [x] 4.1 mm→chars mapping + pan/zoom model <!-- agent: layout-designer-engineer.build, depends_on: [2.3, 3.1], touches: [src/physical.rs, src/ui.rs, src/app.rs] -->
       · aspect-compensated mapping (D4: rows/mm ≈ 2 × cols/mm) over the whole rack (row offsets + fold-bar heights from RackLayout); `physical_offset` + `physical_zoom` state on App; scale presets (`+`/`-`) map to zoom levels around a fixed anchor; wheel-pan when the rack overflows; component_rects published from the same formula (renderer-owns-geometry contract)
       · verify: `cargo test` mapping unit tests (round-trip mm→screen→mm, zoom anchor stability, pan offset math, multi-row offsets)
-- [ ] 4.2 Replace main panel view with physical render <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/ui.rs] -->
+- [x] 4.2 Replace main panel view with physical render <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/ui.rs] -->
       · the main view renders components onto the grid cells (labels/state/shift/dim/pause, LED-folding + boxed cells preserved); the case outline, fold bars at row boundaries, and top/side mount regions render in both skeleton and full; multi-circuit instances render as side-by-side faceplates; over-long labels ellipsize; component_rects hit rects exactly match rendered cells
       · verify: `cargo test` + snapshot review: physical-layout frames replace the wrapped-panel frames; hit rects match rendered cells (no neighbor spill)
-- [ ] 4.3 Physical-view keys + status hints <!-- agent: rusty-engineer.build, depends_on: [4.2], touches: [src/handler.rs, src/app.rs] -->
+- [x] 4.3 Physical-view keys + status hints <!-- agent: rusty-engineer.build, depends_on: [4.2], touches: [src/handler.rs, src/app.rs] -->
       · pan keys, skeleton-toggle key, zoom via existing `+`/`-`; status hints (pan/zoom/skeleton state); no interference with prefix/viewer/graph/diff priority
       · verify: `cargo test` handler tests for the new keys; status hint text asserted
-- [ ] 4.4 `[physical]` + `[physical.rack]` config defaults <!-- agent: rusty-engineer.fast, depends_on: [4.2, 2.3], touches: [src/config.rs] -->
+- [x] 4.4 `[physical]` + `[physical.rack]` config defaults <!-- agent: rusty-engineer.fast, depends_on: [4.2, 2.3], touches: [src/config.rs] -->
       · optional `[physical]` (default zoom, pan/scroll behavior) + `[physical.rack]` (rows: array of {he, hp, label?}, top_mount_te, side_mount_te, assign map) config parsed into a RackSpec via the existing injected-validation pattern; malformed rows → default case + warn-once
       · verify: `cargo test` config discovery/load/save/fallback tests pass
+- [x] 4.5 Wire `[physical]` defaults into physical-view initialization <!-- agent: rusty-engineer.fast, depends_on: [4.4], touches: [src/app.rs, src/main.rs, src/ui.rs] -->
+      · App gains `physical_rack_spec`; main.rs seeds scale_factor + physical_zoom from `zoom`, the pan origin from `offset_x`/`offset_y`, the presentation mode from `show_skeleton`, and the rack from `[physical.rack]` (mirroring the cost_model pattern); both physical renderers pack with `app.physical_rack_spec` (empty rows → default single-row case)
+      · verify: `cargo test` green; absent `[physical]` leaves out-of-box view untouched
 
 ## 5. Verification & Docs
 
