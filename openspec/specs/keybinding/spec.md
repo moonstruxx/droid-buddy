@@ -280,6 +280,20 @@ When the source viewer is open, the `[` and `]` keys SHALL adjust the panels | s
 - **WHEN** the graph surface is open and no node is hovered
 - **THEN** `x` changes nothing.
 
+### Requirement: Physical-view navigation keys
+
+The system SHALL provide keys to pan the physical view when the rack overflows the terminal, to change zoom, and to toggle the skeleton reference mode.
+
+#### Scenario: Pan keys move the viewport
+
+- **WHEN** the rack overflows the terminal and the user presses a pan key
+- **THEN** the viewport offset moves in the corresponding direction without changing zoom.
+
+#### Scenario: Skeleton toggle switches presentation
+
+- **WHEN** the user presses the skeleton-toggle key
+- **THEN** the main view switches between full and skeleton presentation of the same layout, and back.
+
 ## Design Decisions
 
 - Decision 1: Lazy timeout check (no background timer). Rationale: the app is event-driven; checking expiry on the next keypress avoids threading complexity and keeps the event loop simple. A stale prefix that nobody presses is harmless.
