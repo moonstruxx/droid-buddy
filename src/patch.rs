@@ -1441,7 +1441,10 @@ const KNOWN_CONTROLLER_SECTIONS: [&str; 17] = [
 /// absent: their fronts are spec-dependent (fixed inputs, uncovered rear
 /// connectors, ...), so a bare section of those names falls back to the
 /// generic "Controller N" panel like any other unknown section.
-const BARE_SYNTHESIS: &[(&str, &str, &[(char, u32)])] = &[
+/// (bare section name, panel label, [(token family letter, count)])
+type BareSynthesis = (&'static str, &'static str, &'static [(char, u32)]);
+
+const BARE_SYNTHESIS: &[BareSynthesis] = &[
     ("p2b8", "P2B8", &[('B', 8), ('L', 8), ('P', 2)]),
     ("p8s8", "P8S8", &[('P', 8), ('L', 8), ('S', 8)]),
     ("b32", "B32", &[('B', 32), ('L', 32)]),
@@ -2424,7 +2427,8 @@ mod tests {
     fn bare_controllers_synthesize_complete_token_sets() {
         // droid_tui-2b4: bare [p8s8]/[b32]/[m4]/[e4] declare their full front
         // panels (manual §6.8–6.10) on the correct panel, like bare [p2b8].
-        let cases: &[(&str, &str, &[(&str, u32)])] = &[
+        type BareSynthesisCase = (&'static str, &'static str, &'static [(&'static str, u32)]);
+        let cases: &[BareSynthesisCase] = &[
             ("p8s8", "P8S8", &[("P", 8), ("L", 8), ("S", 8)]),
             ("b32", "B32", &[("B", 32), ("L", 32)]),
             ("m4", "M4", &[("P", 4), ("B", 4), ("L", 4)]),
