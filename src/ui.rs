@@ -555,7 +555,8 @@ fn screen_rect_of((x, y, w, h): (f64, f64, f64, f64)) -> Rect {
 /// Rack-aware skeleton renderer (D9/D10/D11): case outline, fold bars, mount
 /// regions, modules into their rack rows, element cells (· for elements, ◀/▶
 /// for in/out CV ports). Geometry only — no labels/states. The rack config
-/// comes from `RackSpec::default_case` until task 4.4 lands `[physical.rack]`.
+/// comes from `app.physical_rack_spec` (seeded from `[physical.rack]`, D12);
+/// empty rows pack the default single-row case.
 /// Published `physical_skeleton_rects` come from the SAME mapping the drawing
 /// uses (renderer-owns-geometry contract, D5).
 fn render_physical_skeleton(
@@ -571,8 +572,7 @@ fn render_physical_skeleton(
     app.physical_zoom = app.scale_factor;
 
     let chain = crate::physical::PhysicalLayout::build(patch);
-    let rack =
-        crate::physical::RackLayout::pack(&chain, &crate::physical::RackSpec::default_case(&chain));
+    let rack = crate::physical::RackLayout::pack(&chain, &app.physical_rack_spec);
     let mapping = crate::physical::ScreenMapping::new(
         crate::physical::PHYSICAL_COLS_PER_MM,
         crate::physical::PHYSICAL_ROWS_PER_MM,
@@ -691,8 +691,7 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
     app.physical_zoom = app.scale_factor;
 
     let chain = crate::physical::PhysicalLayout::build(patch);
-    let rack =
-        crate::physical::RackLayout::pack(&chain, &crate::physical::RackSpec::default_case(&chain));
+    let rack = crate::physical::RackLayout::pack(&chain, &app.physical_rack_spec);
     let mapping = crate::physical::ScreenMapping::new(
         crate::physical::PHYSICAL_COLS_PER_MM,
         crate::physical::PHYSICAL_ROWS_PER_MM,
