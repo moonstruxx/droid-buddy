@@ -1,6 +1,7 @@
-//! Persistent user preferences (v1 schema: a single `theme` key) stored in
-//! `config.toml` under the XDG config home. Loaded once at startup, before
-//! the terminal UI initializes (design Decision 5).
+//! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
+//! + `[physical.rack]`) stored in `config.toml` under the XDG config home.
+//! Loaded once at startup, before the terminal UI initializes (design
+//! Decision 5).
 //!
 //! This module stays decoupled from the theme catalog: canonical name
 //! resolution is injected as a function reference, so name-catalog
@@ -21,6 +22,17 @@ pub const DEFAULT_MAX_SHIFT_LAYER: u8 = 4;
 pub const MIN_SHIFT_LAYER: u8 = 1;
 pub const MAX_SHIFT_LAYER: u8 = 8;
 
+/// Physical-view defaults, matching the `App::new` initial state so an
+/// absent `[physical]` section keeps the out-of-box presentation.
+pub const DEFAULT_PHYSICAL_SHOW_SKELETON: bool = false;
+pub const DEFAULT_PHYSICAL_ZOOM: f64 = 1.0;
+/// Pan-origin default (`physical_offset: (0.0, 0.0)` in `App`).
+pub const DEFAULT_PHYSICAL_OFFSET: f64 = 0.0;
+/// Zoom floor/ceiling — the `+`/`-` scale presets `[0.75, 1.0, 1.5, 2.0]`
+/// (handler.rs), so a configured zoom always sits on the preset ladder.
+pub const MIN_PHYSICAL_ZOOM: f64 = 0.75;
+pub const MAX_PHYSICAL_ZOOM: f64 = 2.0;
+
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -34,6 +46,18 @@ fn default_layers_enabled() -> bool {
 
 fn default_max_shift_layer() -> u8 {
     DEFAULT_MAX_SHIFT_LAYER
+}
+
+fn default_show_skeleton() -> bool {
+    DEFAULT_PHYSICAL_SHOW_SKELETON
+}
+
+fn default_physical_zoom() -> f64 {
+    DEFAULT_PHYSICAL_ZOOM
+}
+
+fn default_physical_offset() -> f64 {
+    DEFAULT_PHYSICAL_OFFSET
 }
 
 /// Per-label configuration under `[labels]`.
@@ -65,6 +89,40 @@ pub struct Latency {
     pub per_circuit: HashMap<String, f32>,
 }
 
+/// View defaults under `[physical]` plus the rack/case definition under
+/// `[physical.rack]` (design D12). Field defaults mirror the physical-view
+/// state `App::new` starts with (skeleton off, zoom 1.0, pan origin); an
+/// absent table leaves the out-of-box view untouched. The rack reuses
+/// `physical::RackSpec` directly (one source of truth for the schema); empty
+/// `rack.rows` means "no rack configured" and packs the default single-row
+/// case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Physical {
+    #[serde(default = "default_show_skeleton")]
+    pub show_skeleton: bool,
+    #[serde(default = "default_physical_zoom")]
+    pub zoom: f64,
+    /// Pan offset in screen cells; negative values reveal content above/left.
+    #[serde(default = "default_physical_offset")]
+    pub offset_x: f64,
+    #[serde(default = "default_physical_offset")]
+    pub offset_y: f64,
+    #[serde(default)]
+    pub rack: crate::physical::RackSpec,
+}
+
+impl Default for Physical {
+    fn default() -> Self {
+        Self {
+            show_skeleton: default_show_skeleton(),
+            zoom: default_physical_zoom(),
+            offset_x: default_physical_offset(),
+            offset_y: default_physical_offset(),
+            rack: crate::physical::RackSpec::default(),
+        }
+    }
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions). `Eq` is intentionally not
 /// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
@@ -76,6 +134,8 @@ pub struct Settings {
     pub labels: Labels,
     #[serde(default)]
     pub latency: Latency,
+    #[serde(default)]
+    pub physical: Physical,
 }
 
 impl Default for Settings {
@@ -84,6 +144,7 @@ impl Default for Settings {
             theme: default_theme(),
             labels: Labels::default(),
             latency: Latency::default(),
+            physical: Physical::default(),
         }
     }
 }
@@ -166,7 +227,22 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    sanitize_physical(&mut settings.physical);
     settings
+}
+
+/// Clamp view/rack values to the model's valid domain on the way in: zoom to
+/// the preset ladder, mount widths to non-negative, and row dimensions off
+/// their degenerate floors (`RackSpec::default_case` also floors `he` at 1).
+/// Row overrides are validated at pack time, so `assign` is left untouched.
+fn sanitize_physical(physical: &mut Physical) {
+    physical.zoom = physical.zoom.clamp(MIN_PHYSICAL_ZOOM, MAX_PHYSICAL_ZOOM);
+    physical.rack.top_mount_te = physical.rack.top_mount_te.max(0.0);
+    physical.rack.side_mount_te = physical.rack.side_mount_te.max(0.0);
+    for row in &mut physical.rack.rows {
+        row.he = row.he.max(1);
+        row.hp = row.hp.max(1.0);
+    }
 }
 
 /// Save settings to the discovered user config path.
@@ -194,6 +270,7 @@ pub fn save_to_dir(dir: &Path, settings: &Settings) -> io::Result<()> {
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    sanitize_physical(&mut normalized.physical);
     let body = toml::to_string(&normalized)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     let target = dir.join(CONFIG_FILE_NAME);
@@ -340,6 +417,7 @@ mod tests {
                 theme: "mono".to_string(),
                 labels: Labels::default(),
                 latency: Latency::default(),
+                physical: Physical::default(),
             },
         )
         .unwrap();
@@ -370,6 +448,7 @@ mod tests {
                 theme: "terminal".to_string(),
                 labels: Labels::default(),
                 latency: Latency::default(),
+                physical: Physical::default(),
             },
         )
         .unwrap();
@@ -441,6 +520,7 @@ mod tests {
                     max_shift_layer: 20,
                 },
                 latency: Latency::default(),
+                physical: Physical::default(),
             },
         )
         .unwrap();
@@ -466,6 +546,7 @@ mod tests {
                         max_shift_layer: raw,
                     },
                     latency: Latency::default(),
+                    physical: Physical::default(),
                 },
             )
             .unwrap();
@@ -490,6 +571,7 @@ mod tests {
             latency: Latency {
                 per_circuit: HashMap::from([("clocktool".to_string(), 2.0)]),
             },
+            physical: Physical::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -558,6 +640,7 @@ mod tests {
                 latency: Latency {
                     per_circuit: HashMap::from([("clocktool".to_string(), 2.5)]),
                 },
+                physical: Physical::default(),
             },
         )
         .unwrap();
@@ -569,5 +652,218 @@ mod tests {
             &TEST_CATALOG,
         );
         assert_eq!(loaded.latency.per_circuit.get("clocktool"), Some(&2.5));
+    }
+
+    // ── physical-scale-model 4.4: [physical] + [physical.rack] ──
+
+    #[test]
+    fn physical_defaults_when_tables_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.physical, Physical::default());
+        assert!(!loaded.physical.show_skeleton);
+        assert_eq!(loaded.physical.zoom, 1.0);
+        assert_eq!(loaded.physical.offset_x, 0.0);
+        assert_eq!(loaded.physical.offset_y, 0.0);
+        assert!(loaded.physical.rack.rows.is_empty());
+        assert_eq!(loaded.physical.rack.top_mount_te, 0.0);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn physical_table_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical]\nshow_skeleton = true\nzoom = 1.5\noffset_x = 2.0\noffset_y = -8.0\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert!(loaded.physical.show_skeleton);
+        assert_eq!(loaded.physical.zoom, 1.5);
+        assert_eq!(loaded.physical.offset_x, 2.0);
+        assert_eq!(loaded.physical.offset_y, -8.0);
+    }
+
+    #[test]
+    fn physical_rack_table_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical.rack]\ntop_mount_te = 4.0\nside_mount_te = 2.0\n\
+             [[physical.rack.rows]]\nhe = 3\nhp = 84.0\nlabel = \"Main\"\n\
+             [[physical.rack.rows]]\nhe = 1\nhp = 24.0\n\
+             [physical.rack.assign]\n\"P2B8 1\" = 0\n\"CV I/O\" = 1\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        let rack = &loaded.physical.rack;
+        assert_eq!(rack.rows.len(), 2);
+        assert_eq!(rack.rows[0].he, 3);
+        assert_eq!(rack.rows[0].hp, 84.0);
+        assert_eq!(rack.rows[0].label.as_deref(), Some("Main"));
+        assert_eq!(rack.rows[1].he, 1);
+        assert_eq!(rack.rows[1].hp, 24.0);
+        assert_eq!(rack.rows[1].label, None);
+        assert_eq!(rack.top_mount_te, 4.0);
+        assert_eq!(rack.side_mount_te, 2.0);
+        assert_eq!(rack.assign.get("P2B8 1"), Some(&0));
+        assert_eq!(rack.assign.get("CV I/O"), Some(&1));
+    }
+
+    #[test]
+    fn physical_zoom_clamped_on_load() {
+        for (raw, expected) in [
+            (0.1, 0.75),
+            (0.75, 0.75),
+            (1.5, 1.5),
+            (2.0, 2.0),
+            (5.0, 2.0),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[physical]\nzoom = {raw}\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.physical.zoom, expected,
+                "raw {raw} should clamp to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_rack_sanitized_on_load() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical.rack]\ntop_mount_te = -4.0\nside_mount_te = -1.0\n\
+             [[physical.rack.rows]]\nhe = 0\nhp = -5.0\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.physical.rack.top_mount_te, 0.0);
+        assert_eq!(loaded.physical.rack.side_mount_te, 0.0);
+        assert_eq!(loaded.physical.rack.rows[0].he, 1);
+        assert_eq!(loaded.physical.rack.rows[0].hp, 1.0);
+    }
+
+    #[test]
+    fn malformed_physical_rack_falls_back_to_defaults() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical.rack]\ntop_mount_te = \"wide\"\n",
+        )
+        .unwrap();
+        assert_eq!(load_at(&dir), Settings::default());
+    }
+
+    #[test]
+    fn existing_config_without_physical_section_loads_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"terminal\"\n[labels]\nlayers_enabled = false\nmax_shift_layer = 6\n[latency]\nper_circuit = { \"clocktool\" = 2.5 }\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.theme, "terminal");
+        assert!(!loaded.labels.layers_enabled);
+        assert_eq!(loaded.labels.max_shift_layer, 6);
+        assert_eq!(loaded.latency.per_circuit.get("clocktool"), Some(&2.5));
+        assert_eq!(loaded.physical, Physical::default());
+    }
+
+    #[test]
+    fn physical_save_round_trips_through_load() {
+        let dir = TempDir::new().unwrap();
+        let settings = Settings {
+            theme: "classic".to_string(),
+            labels: Labels::default(),
+            latency: Latency::default(),
+            physical: Physical {
+                show_skeleton: true,
+                zoom: 1.5,
+                offset_x: 2.0,
+                offset_y: -8.0,
+                rack: crate::physical::RackSpec {
+                    rows: vec![crate::physical::RackRow {
+                        he: 3,
+                        hp: 84.0,
+                        label: Some("Main".to_string()),
+                    }],
+                    top_mount_te: 4.0,
+                    side_mount_te: 2.0,
+                    assign: HashMap::from([("P2B8 1".to_string(), 0)]),
+                },
+            },
+        };
+        save_to_dir(dir.path(), &settings).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[physical]"), "body: {body}");
+        assert!(body.contains("[physical.rack]"), "body: {body}");
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.physical, settings.physical);
+    }
+
+    #[test]
+    fn save_sanitizes_physical_zoom_and_rack() {
+        let dir = TempDir::new().unwrap();
+        save_to_dir(
+            dir.path(),
+            &Settings {
+                theme: "classic".to_string(),
+                labels: Labels::default(),
+                latency: Latency::default(),
+                physical: Physical {
+                    show_skeleton: false,
+                    zoom: 5.0,
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    rack: crate::physical::RackSpec {
+                        rows: vec![crate::physical::RackRow {
+                            he: 0,
+                            hp: -3.0,
+                            label: None,
+                        }],
+                        top_mount_te: -1.0,
+                        side_mount_te: 0.0,
+                        assign: HashMap::new(),
+                    },
+                },
+            },
+        )
+        .unwrap();
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.physical.zoom, 2.0);
+        assert_eq!(loaded.physical.rack.top_mount_te, 0.0);
+        assert_eq!(loaded.physical.rack.rows[0].he, 1);
+        assert_eq!(loaded.physical.rack.rows[0].hp, 1.0);
     }
 }
