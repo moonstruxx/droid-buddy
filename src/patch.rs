@@ -677,10 +677,27 @@ impl Patch {
         // Flatten modules' components into hw_components for backward compatibility
         let mut components: Vec<HwComponent> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
-        let mut p2b8_instances: u32 = 0;
+        // Chain position of the next controller-declaring section (design.md
+        // Decision 2b): advances once per controller module declared in patch
+        // order — the chain order the manual requires — not a per-type counter,
+        // so a mixed chain ([m4][b32][e4]...) numbers each module by its
+        // position (B1.x, B3.x, E4.x, ...) regardless of type.
+        let mut controller_chain_pos: u32 = 0;
+        // Component id -> panel name for every token a controller-declaring
+        // section owns: tokens synthesized by a bare controller section
+        // (e.g. `[b32]` -> B1.1..B1.32) AND explicit token entries in
+        // `KNOWN_CONTROLLER_SECTIONS` sections (e.g. `[faderbank]`'s S1.1).
+        // Pinned tokens stay on their own faceplate even when another section
+        // claimed the same controller number for a different type first
+        // (first-wins on the number, but each section's own tokens are pinned
+        // to that section's panel, so two explicit types sharing number 1
+        // coexist on separate faceplates instead of merging).
+        let mut pinned_panels: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         // Controller number -> panel name, e.g. 1 -> "P2B8", 2 -> "Notebuttons".
-        // Populated from explicit controller-declaring sections; anything not
-        // covered here falls back to a generic "Controller N" panel below.
+        // Populated from controller-declaring sections; anything not covered
+        // here falls back to a generic "Controller N" panel below. Only used
+        // for components NOT pinned to their declaring section's panel.
         let mut controller_types: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
 
@@ -698,56 +715,55 @@ impl Patch {
                 .flat_map(|(_, v)| scan_hw_tokens(v).first().cloned())
                 .next();
 
-            // A bare `[p2b8]` declaration implies 18 hardware tokens even
-            // when it has no key-value pairs of its own (design.md Decision 2b).
-            if section.name == "p2b8" {
-                p2b8_instances += 1;
-                let n = p2b8_instances;
+            // A bare `[p2b8]`/`[b32]`/... declaration implies the full
+            // hardware token set of that controller even when it has no
+            // key-value pairs of its own (design.md Decision 2b). The panel
+            // name is the controller type, numbered by chain position; any
+            // explicit entries in the same section are deduplicated below.
+            // Synthesized tokens are pinned to this section's panel in
+            // `pinned_panels` so they keep it even when another section
+            // claimed the same controller number first; components from
+            // circuit sections keep the `controller_types` fallback in the
+            // assignment pass below.
+            if let Some(&(_, panel, plan)) =
+                BARE_SYNTHESIS.iter().find(|entry| entry.0 == section.name)
+            {
+                controller_chain_pos += 1;
+                let n = controller_chain_pos;
                 controller_types
                     .entry(n)
-                    .or_insert_with(|| String::from("P2B8"));
-                // Label is just the token id ("B1.1") — the panel title
-                // already reads "P2B8", so a "P2B8 Button 1.1" label was a
-                // redundant prefix that clipped to an indistinguishable
-                // "P2B8 Button 1." inside COMPONENT_WIDTH (droid_tui-p2x).
-                for i in 1..=8 {
-                    add_component(
-                        &mut components,
-                        &mut seen_ids,
-                        format!("B{}.{}", n, i),
-                        ComponentKind::Button,
-                        format!("B{}.{}", n, i),
-                    );
-                    add_component(
-                        &mut components,
-                        &mut seen_ids,
-                        format!("L{}.{}", n, i),
-                        ComponentKind::Led,
-                        format!("L{}.{}", n, i),
-                    );
-                }
-                for i in 1..=2 {
-                    add_component(
-                        &mut components,
-                        &mut seen_ids,
-                        format!("P{}.{}", n, i),
-                        ComponentKind::Knob,
-                        format!("P{}.{}", n, i),
-                    );
+                    .or_insert_with(|| panel.to_string());
+                for id in synthesize_controller_tokens(&mut components, &mut seen_ids, n, plan) {
+                    pinned_panels.insert(id, panel.to_string());
                 }
             } else if KNOWN_CONTROLLER_SECTIONS.contains(&section.name.as_str()) {
                 // Named controller sections (Notebuttons, Faderbank, ...) declare
                 // their tokens as key-value pairs; the controller number is the
-                // number embedded in the first hardware token we find.
-                let first_number = section.entries.iter().find_map(|(_, v)| {
+                // number embedded in the first hardware token we find. Bare
+                // known sections (no token entries) declare nothing.
+                if let Some(n) = section.entries.iter().find_map(|(_, v)| {
                     scan_hw_tokens(v)
                         .into_iter()
                         .find_map(|t| leading_number(&t))
-                });
-                if let Some(n) = first_number {
-                    controller_types
-                        .entry(n)
-                        .or_insert_with(|| titlecase(&section.name));
+                }) {
+                    let panel = titlecase(&section.name);
+                    controller_types.entry(n).or_insert_with(|| panel.clone());
+                    // Pin every token this section declares to its own
+                    // faceplate, so two explicit types sharing a controller
+                    // number coexist on separate panels instead of the later
+                    // section's tokens falling through first-wins to the
+                    // earlier section's panel (droid_tui-26q). Skip tokens
+                    // already seen: a duplicate of a bare-synthesized token
+                    // (e.g. a `[pot]` circuit driving the bare [p10]'s P3.2)
+                    // must not steal the panel its synthesizing section
+                    // pinned.
+                    for (_key, value) in &section.entries {
+                        for token in scan_hw_tokens(value) {
+                            if token_kind(&token).is_some() && !seen_ids.contains(&token) {
+                                pinned_panels.insert(token, panel.clone());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -826,16 +842,21 @@ impl Patch {
         for comp in components.iter_mut() {
             comp.controller = match comp.kind {
                 ComponentKind::CvIn | ComponentKind::CvOut => String::from("CV I/O"),
-                _ => {
-                    let num = leading_number(&comp.id);
-                    match num.and_then(|n| controller_types.get(&n).cloned()) {
-                        Some(name) => name,
-                        None => match num {
-                            Some(n) => format!("Controller {}", n),
-                            None => String::from("Other"),
-                        },
+                _ => match pinned_panels.get(&comp.id) {
+                    // Bare-synthesized tokens keep the panel their own section
+                    // declared, regardless of who claimed the number first.
+                    Some(panel) => panel.clone(),
+                    None => {
+                        let num = leading_number(&comp.id);
+                        match num.and_then(|n| controller_types.get(&n).cloned()) {
+                            Some(name) => name,
+                            None => match num {
+                                Some(n) => format!("Controller {}", n),
+                                None => String::from("Other"),
+                            },
+                        }
                     }
-                }
+                },
             };
         }
 
@@ -1377,7 +1398,17 @@ const HW_TOKEN_LETTERS: [char; 8] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M'];
 
 /// Section names that declare a physical, pluggable controller unit (as
 /// opposed to internal logic/CV circuits). See design.md Decision 3.
-const KNOWN_CONTROLLER_SECTIONS: [&str; 7] = [
+///
+/// The first seven are usage-based section names that `resolve_controller`
+/// maps onto a physical module (e.g. `[faderbank]` -> p8s8); the remaining
+/// entries are the module names themselves (schema `controllers` keys plus
+/// g8/x7), so a patch may also declare a controller directly by its
+/// hardware name. Controllers with a fixed implicit front panel (p2b8,
+/// p8s8, b32, m4, e4, p10, s10) are bare-synthesized by `BARE_SYNTHESIS`
+/// (checked before this list), so the module names here are kept for the
+/// with-entries path and as documentation; db8e/g8/x7 have spec-dependent
+/// fronts and always route through this list.
+const KNOWN_CONTROLLER_SECTIONS: [&str; 17] = [
     "notebuttons",
     "faderbank",
     "encoder",
@@ -1385,7 +1416,82 @@ const KNOWN_CONTROLLER_SECTIONS: [&str; 7] = [
     "unusedfaders",
     "motorfader",
     "fadermatrix",
+    "p4b2",
+    "p10",
+    "s10",
+    "p8s8",
+    "b32",
+    "e4",
+    "m4",
+    "db8e",
+    "g8",
+    "x7",
 ];
+
+/// Bare controller sections whose section name alone declares the full
+/// hardware token set (design.md Decision 2b). These controllers have a
+/// fixed, implicit front panel: `[p2b8]` with no entries still means a
+/// P2B8 with 8 buttons, 8 LEDs and 2 knobs. Each plan is
+/// `(section name, panel name, [(family letter, element count)])`, with the
+/// families/counts from the manual: p8s8 = 8 sliders (P registers) + 8
+/// slider LEDs + 8 switches, b32 = 32 buttons + 32 LEDs, m4 = 4 motor
+/// faders (P registers) + 4 touch buttons + 4 LEDs, e4 = 4 encoders + 4
+/// encoder buttons + 4 ring LEDs, s10 = 10 switches (manual §6.7), p10 =
+/// 10 pots. g8/x7 (and db8e) are intentionally
+/// absent: their fronts are spec-dependent (fixed inputs, uncovered rear
+/// connectors, ...), so a bare section of those names falls back to the
+/// generic "Controller N" panel like any other unknown section.
+const BARE_SYNTHESIS: &[(&str, &str, &[(char, u32)])] = &[
+    ("p2b8", "P2B8", &[('B', 8), ('L', 8), ('P', 2)]),
+    ("p8s8", "P8S8", &[('P', 8), ('L', 8), ('S', 8)]),
+    ("b32", "B32", &[('B', 32), ('L', 32)]),
+    ("m4", "M4", &[('P', 4), ('B', 4), ('L', 4)]),
+    ("e4", "E4", &[('E', 4), ('B', 4), ('L', 4)]),
+    ("s10", "S10", &[('S', 10)]),
+    ("p10", "P10", &[('P', 10)]),
+];
+
+/// Emit the hardware tokens implied by a bare controller section: the
+/// element families and counts for controller number `n`, deduplicated
+/// against ids already created by explicit entries. Returns the ids that
+/// were actually added (the caller pins those to this section's panel so
+/// they never fall through to another section's controller-number claim).
+fn synthesize_controller_tokens(
+    components: &mut Vec<HwComponent>,
+    seen_ids: &mut HashSet<String>,
+    n: u32,
+    plan: &[(char, u32)],
+) -> Vec<String> {
+    let mut added = Vec::new();
+    for &(family, count) in plan {
+        for i in 1..=count {
+            let id = format!("{family}{n}.{i}");
+            if add_component(
+                components,
+                seen_ids,
+                id.clone(),
+                family_kind(family),
+                id.clone(),
+            ) {
+                added.push(id);
+            }
+        }
+    }
+    added
+}
+
+/// Component kind for a bare-synthesis family letter (B button, L led,
+/// P/M knob, S switch, E encoder).
+fn family_kind(family: char) -> ComponentKind {
+    match family {
+        'B' => ComponentKind::Button,
+        'L' => ComponentKind::Led,
+        'P' | 'M' => ComponentKind::Knob,
+        'S' => ComponentKind::Switch,
+        'E' => ComponentKind::Encoder,
+        _ => ComponentKind::Button,
+    }
+}
 
 /// Scan a value expression for DROID hardware tokens (`B1.1`, `O4`, `I1`, `M4.2`, ...).
 ///
@@ -1916,9 +2022,9 @@ fn add_component(
     id: String,
     kind: ComponentKind,
     label: String,
-) {
+) -> bool {
     if seen_ids.contains(&id) {
-        return;
+        return false;
     }
     let state = match kind {
         ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => ComponentState::Off,
@@ -1938,6 +2044,7 @@ fn add_component(
         controller: String::new(),
         led: None,
     });
+    true
 }
 
 /// Partition `raw_lines` into per-section blocks by header line (D4).
@@ -2260,6 +2367,221 @@ mod tests {
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
         let b2_1 = patch.hw_components.iter().find(|c| c.id == "B2.1").unwrap();
         assert_eq!(b2_1.controller, "Notebuttons");
+    }
+
+    #[test]
+    fn bare_p2b8_at_chain_position_five_numbers_by_position() {
+        // droid_tui-2b4: the p2b8 in a mixed chain is numbered by its chain
+        // position, not per-type: with [m4][m4][b32][e4] before it, the bare
+        // `[p2b8]` gets controller number 5 (B5.x/L5.x/P5.x) on a P2B8 panel.
+        let content = "[m4]\n[m4]\n[b32]\n[e4]\n[p2b8]\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        for i in 1..=8u32 {
+            let b = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == format!("B5.{}", i))
+                .unwrap_or_else(|| panic!("B5.{} must exist", i));
+            assert_eq!(b.controller, "P2B8", "B5.{} on the P2B8 panel", i);
+            let l = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == format!("L5.{}", i))
+                .unwrap_or_else(|| panic!("L5.{} must exist", i));
+            assert_eq!(l.controller, "P2B8");
+        }
+        for i in 1..=2u32 {
+            let p = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == format!("P5.{}", i))
+                .unwrap_or_else(|| panic!("P5.{} must exist", i));
+            assert_eq!(p.controller, "P2B8");
+        }
+        assert!(
+            patch
+                .hw_components
+                .iter()
+                .all(|c| c.controller != "P2B8" || !c.id.starts_with("B1.")),
+            "the p2b8 must not claim controller number 1"
+        );
+        // The preceding controllers keep their own chain positions.
+        assert!(patch
+            .hw_components
+            .iter()
+            .any(|c| c.id == "P1.1" && c.controller == "M4"));
+        assert!(patch
+            .hw_components
+            .iter()
+            .any(|c| c.id == "B3.1" && c.controller == "B32"));
+        assert!(patch
+            .hw_components
+            .iter()
+            .any(|c| c.id == "E4.1" && c.controller == "E4"));
+    }
+
+    #[test]
+    fn bare_controllers_synthesize_complete_token_sets() {
+        // droid_tui-2b4: bare [p8s8]/[b32]/[m4]/[e4] declare their full front
+        // panels (manual §6.8–6.10) on the correct panel, like bare [p2b8].
+        let cases: &[(&str, &str, &[(&str, u32)])] = &[
+            ("p8s8", "P8S8", &[("P", 8), ("L", 8), ("S", 8)]),
+            ("b32", "B32", &[("B", 32), ("L", 32)]),
+            ("m4", "M4", &[("P", 4), ("B", 4), ("L", 4)]),
+            ("e4", "E4", &[("E", 4), ("B", 4), ("L", 4)]),
+            ("s10", "S10", &[("S", 10)]),
+            ("p10", "P10", &[("P", 10)]),
+        ];
+        for &(section, panel, families) in cases {
+            let content = format!("[{section}]\n");
+            let patch = Patch::from_ini_str(&content, String::from("t")).unwrap();
+            let total: u32 = families.iter().map(|(_, c)| c).sum();
+            assert_eq!(
+                patch.hw_components.len(),
+                total as usize,
+                "{section} synthesizes {total} tokens"
+            );
+            for &(family, count) in families {
+                for i in 1..=count {
+                    let id = format!("{family}1.{i}");
+                    let comp = patch
+                        .hw_components
+                        .iter()
+                        .find(|c| c.id == id)
+                        .unwrap_or_else(|| panic!("{section}: {id} must exist"));
+                    assert_eq!(comp.controller, panel, "{section}: {id} panel");
+                }
+            }
+            assert!(
+                patch
+                    .hw_components
+                    .iter()
+                    .all(|c| c.controller != "Controller 1"),
+                "{section}: no generic fallback panel"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_controllers_do_not_synthesize_g8_x7_or_db8e() {
+        // g8/x7/db8e fronts are spec-dependent (fixed inputs, display + 8
+        // encoders, ...), so a bare section of those names declares nothing
+        // and any tokens that reference number 1 fall back to "Controller 1".
+        let content = "[g8]\n[x7]\n[db8e]\n[copy]\n    input = I1\n    output = O1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert!(
+            patch.hw_components.iter().all(|c| c.id != "B1.1"),
+            "g8/x7/db8e bare sections must not synthesize buttons"
+        );
+        assert!(
+            patch.hw_components.iter().all(|c| c.id != "L1.1"),
+            "g8/x7/db8e bare sections must not synthesize LEDs"
+        );
+    }
+
+    #[test]
+    fn bare_synthesized_tokens_stay_on_their_own_panel() {
+        // droid_tui-2b4: a [faderbank] section whose first token is P1.1
+        // claims controller number 1 first, but a later bare [b32] must not
+        // merge into it — the b32's own synthesized tokens are pinned to the
+        // B32 panel (first-wins on the number, pinned panels for the bare
+        // section's own tokens).
+        let content = "[faderbank]\n    button1 = B1.1\n[b32]\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(
+            b1_1.controller, "Faderbank",
+            "explicit entry keeps its panel"
+        );
+        let b1_2 = patch.hw_components.iter().find(|c| c.id == "B1.2").unwrap();
+        assert_eq!(b1_2.controller, "B32", "synthesized b32 token stays on B32");
+        let l1_1 = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        assert_eq!(l1_1.controller, "B32");
+    }
+
+    #[test]
+    fn explicit_controllers_sharing_a_number_stay_on_separate_panels() {
+        // droid_tui-26q: two explicit KNOWN_CONTROLLER_SECTIONS types both
+        // using controller number 1 (faderbank's switches S1.x + pot's P1.x)
+        // must not merge first-wins into whichever section appeared first —
+        // each section's own tokens are pinned to its own faceplate.
+        let content =
+            "[faderbank]\n    button1 = B1.1\n    switch1 = S1.1\n[pot]\n    pot1 = P1.1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(b1_1.controller, "Faderbank");
+        let s1_1 = patch.hw_components.iter().find(|c| c.id == "S1.1").unwrap();
+        assert_eq!(s1_1.controller, "Faderbank");
+        let p1_1 = patch.hw_components.iter().find(|c| c.id == "P1.1").unwrap();
+        assert_eq!(
+            p1_1.controller, "Pot",
+            "pot's own token stays on the Pot panel"
+        );
+        assert_eq!(
+            patch
+                .hw_components
+                .iter()
+                .filter(|c| c.controller == "Faderbank")
+                .count(),
+            2,
+            "faderbank keeps only its own tokens"
+        );
+        assert_eq!(
+            patch
+                .hw_components
+                .iter()
+                .filter(|c| c.controller == "Pot")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn bare_s10_at_chain_position_six_pins_its_tokens_to_s10() {
+        // droid_tui-26q: bare `[s10]` after [m4][m4][b32][e4][p2b8] is chain
+        // position 6, so it synthesizes S6.1..S6.10 on an S10 panel instead of
+        // falling back to "Controller 6" (the melody2 fixture layout).
+        let content = "[m4]\n[m4]\n[b32]\n[e4]\n[p2b8]\n[s10]\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        for i in 1..=10u32 {
+            let s = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == format!("S6.{}", i))
+                .unwrap_or_else(|| panic!("S6.{} must exist", i));
+            assert_eq!(s.controller, "S10", "S6.{} on the S10 panel", i);
+        }
+        assert!(
+            patch
+                .hw_components
+                .iter()
+                .all(|c| c.controller != "Controller 6"),
+            "no generic fallback panel for the bare s10"
+        );
+    }
+
+    #[test]
+    fn bare_p10_at_chain_position_three_pins_its_tokens_to_p10() {
+        // droid_tui-26q: alg27_2.ini has two bare [p2b8] sections followed by
+        // a bare [p10] at chain position 3, so it synthesizes P3.1..P3.10 on a
+        // P10 panel instead of falling back to "Controller 3".
+        let content = std::fs::read_to_string("fixtures/alg27_2.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("alg27_2")).unwrap();
+        for i in 1..=10 {
+            let p = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == format!("P3.{i}"))
+                .unwrap_or_else(|| panic!("P3.{i} must exist"));
+            assert_eq!(p.controller, "P10", "P3.{} on the P10 panel", i);
+        }
+        assert!(
+            patch
+                .hw_components
+                .iter()
+                .all(|c| c.controller != "Controller 3"),
+            "no generic fallback panel for the bare p10"
+        );
     }
 
     #[test]

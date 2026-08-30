@@ -21,7 +21,7 @@
     }
   ],
   "grids": {
-    "b32": { "kind": "matrix", "cols": 8, "rows": 4, "row_wise": true, "orientation": "vertical" },
+    "b32": { "kind": "matrix", "cols": 4, "rows": 8, "row_wise": true, "orientation": "vertical" },
     "e4": { "kind": "stack", "count": 4, "pitch_y": 2 },
     "r2c": { "kind": "singleton" }
   },

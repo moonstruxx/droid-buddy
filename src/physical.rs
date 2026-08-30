@@ -584,7 +584,14 @@ impl PhysicalLayout {
     pub fn cell_for(&self, module_index: usize, token: &str) -> Option<&ElementCell> {
         let module = self.modules.get(module_index)?;
         let (kind_letter, element) = token_element(token)?;
-        let family = family_for(kind_letter)?;
+        let mut family = family_for(kind_letter)?;
+        if family == "P" && !module.cells.contains_key(family) {
+            // Sliders/faders (p8s8, m4) live in the "F" family in the
+            // geometry but are addressed with P registers in patches
+            // (manual §6.8: "adressed with P1.1 through P1.8"; geometry
+            // notes "sliders addressed via P registers").
+            family = "F";
+        }
         let cells = module.cells.get(family)?;
         cells
             .iter()
@@ -1196,6 +1203,49 @@ mod tests {
         let again = PhysicalLayout::build(&p);
         let rects = |l: &PhysicalLayout| l.modules.iter().map(|m| m.rect_mm).collect::<Vec<_>>();
         assert_eq!(rects(&layout), rects(&again));
+    }
+
+    #[test]
+    fn p_registered_sliders_resolve_to_f_family_cells() {
+        // droid_tui-2b4: p8s8 sliders and m4 motor faders live in the "F"
+        // geometry family but are addressed with P registers in patches
+        // (manual §6.8: "adressed with P1.1 through P1.8"; geometry notes
+        // "sliders addressed via P registers"). cell_for must fall back from
+        // the absent "P" family to "F" so P tokens render on their cells.
+        let p = patch("[p8s8]\n");
+        let layout = PhysicalLayout::build(&p);
+        let s1 = layout.cell_for(0, "P1.1").expect("P1.1 slider cell");
+        assert_eq!(s1.label, "P1.1");
+        assert_eq!(s1.element, Some(1));
+        assert_eq!(s1.family, "F", "slider cell lives in the F family");
+        let s8 = layout.cell_for(0, "P1.8").expect("P1.8 slider cell");
+        assert_eq!(s8.label, "P1.8");
+        assert!(layout.cell_for(0, "P1.9").is_none(), "8 sliders only");
+
+        let p = patch("[m4]\n");
+        let layout = PhysicalLayout::build(&p);
+        let f1 = layout.cell_for(0, "P1.2").expect("M4 fader cell");
+        assert_eq!(f1.family, "F");
+        assert_eq!(f1.element, Some(2));
+    }
+
+    #[test]
+    fn bare_p8s8_synthesizes_switches_and_leds() {
+        // droid_tui-2b4: a bare [p8s8] declares 8 sliders (P), 8 slider LEDs
+        // (L) and 8 switches (S) — all resolvable against the p8s8 geometry.
+        let p = patch("[p8s8]\n");
+        let layout = PhysicalLayout::build(&p);
+        assert_eq!(layout.modules.len(), 1);
+        assert_eq!(layout.modules[0].controller, "P8S8");
+        assert_eq!(layout.modules[0].module_instance, Some(1));
+        for i in 1..=8u32 {
+            assert!(
+                layout.cell_for(0, &format!("P1.{i}")).is_some(),
+                "P1.{i} slider"
+            );
+            assert!(layout.cell_for(0, &format!("L1.{i}")).is_some(), "L1.{i}");
+            assert!(layout.cell_for(0, &format!("S1.{i}")).is_some(), "S1.{i}");
+        }
     }
 
     #[test]
