@@ -1,0 +1,13 @@
+# Malformed plugin fixture: the only circuit is missing the REQUIRED
+# `ramsize` field. The TOML parses fine; the error is at the semantic
+# layer. The loader must skip this file and warn, never abort startup.
+
+[[circuit]]
+name = "noramsize"
+category = "util"
+title = "Circuit without a RAM size"
+
+[[circuit.inputs]]
+name = "input"
+short = "i"
+type = "jack"
