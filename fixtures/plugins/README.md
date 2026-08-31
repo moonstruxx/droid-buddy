@@ -82,3 +82,7 @@ family name (`bit1 ... bit8`), matching the embedded `adc` circuit's output layo
   `ramsize`, `cable_kind`, `color`).
 - `missing_ramsize.toml`: a circuit without the required `ramsize`; the loader must
   skip the file and warn.
+- `newckt_override.toml`: a second `newckt` definition (ramsize 512, category `util`)
+  proving ordered overlay — loaded after `valid.toml` it wins for the same circuit
+  name. Plugin-plugin collisions are a plain later-wins overlay, no shadow warning,
+  because `newckt` is not an embedded circuit.

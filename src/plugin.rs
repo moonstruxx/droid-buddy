@@ -141,7 +141,8 @@ pub fn discover_plugins(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -
 
 /// Load one plugin file. Returns `None` (with a warn-once stderr notice)
 /// when the file is unreadable, malformed TOML, or semantically invalid.
-fn load_file(path: &Path) -> Option<PluginFile> {
+/// `pub(crate)` so schema.rs tests can load the real fixtures.
+pub(crate) fn load_file(path: &Path) -> Option<PluginFile> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) => {

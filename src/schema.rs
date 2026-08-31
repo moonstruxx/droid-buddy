@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::plugin::{PluginCircuit, PluginFile, PluginParam};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -441,6 +442,88 @@ pub fn load_schema() -> Schema {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin overlay (embedded base + plugin files)
+// ---------------------------------------------------------------------------
+
+/// Merge plugin circuits over the embedded base schema, returning the schema
+/// the app should use.
+///
+/// `files` are applied in slice order (callers pass discovery's sorted
+/// filename order), later files overriding earlier ones on a name collision.
+/// A plugin circuit whose lowercased name already exists in the embedded
+/// base shadows it: the plugin definition wins and a single stderr warning
+/// naming the file and the shadowed circuit(s) is printed. The warning is
+/// once per file (design decision D3), and the config.rs warn-once contract
+/// applies: the merge runs once per process at startup via `schema::init`,
+/// so each notice is emitted at most once. Collisions between plugin files
+/// themselves are a plain later-wins overlay, not a shadow.
+///
+/// The merge lives here rather than `plugin.rs` because it is a pure
+/// `Schema -> Schema` transformation over the types it produces, and task
+/// 2.2's `schema::init` calls it without `plugin.rs` importing `schema.rs`
+/// (which would invert the layering).
+pub fn merge_plugins(mut base: Schema, files: &[PluginFile]) -> Schema {
+    let embedded: HashSet<String> = base.circuits.keys().cloned().collect();
+    for file in files {
+        let mut shadowed: Vec<&str> = Vec::new();
+        for circuit in &file.circuits {
+            if embedded.contains(&circuit.name) {
+                shadowed.push(&circuit.name);
+            }
+            base.circuits
+                .insert(circuit.name.clone(), circuit_def(circuit));
+        }
+        if !shadowed.is_empty() {
+            eprintln!(
+                "warning: plugin file {} shadows embedded circuit{}: {}",
+                file.path.display(),
+                if shadowed.len() == 1 { "" } else { "s" },
+                shadowed.join(", ")
+            );
+        }
+    }
+    base
+}
+
+/// Map one validated plugin circuit onto the schema's `CircuitDef` shape,
+/// applying the neutral defaults plugins do not carry (`presets`, `manual`,
+/// and per-param `essential`, `ramhint`, `autotitle`). `prefix`/`count`/
+/// `start_at` are preserved so numbered plugin params expand through the
+/// same `expand_names` path as embedded ones.
+fn circuit_def(c: &PluginCircuit) -> CircuitDef {
+    // task 3.1 consumes these: it extends `CircuitDef` with `cable_kind` and
+    // `color` and copies them from `PluginCircuit` here. Until then they are
+    // dropped at this merge boundary.
+    CircuitDef {
+        category: c.category.clone(),
+        title: c.title.clone(),
+        description: c.description.clone(),
+        ramsize: c.ramsize,
+        inputs: c.inputs.iter().map(circuit_param).collect(),
+        outputs: c.outputs.iter().map(circuit_param).collect(),
+        presets: 0,
+        manual: 0,
+    }
+}
+
+/// Map one plugin param onto `CircuitParam`, applying neutral defaults.
+fn circuit_param(p: &PluginParam) -> CircuitParam {
+    CircuitParam {
+        name: p.name.clone(),
+        short: p.short.clone(),
+        param_type: p.param_type.clone(),
+        default: p.default.clone().map(serde_json::Value::String),
+        description: String::new(),
+        essential: 0,
+        ramhint: String::new(),
+        autotitle: false,
+        prefix: p.prefix.clone(),
+        count: p.count,
+        start_at: p.start_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Levenshtein + suggestions
 // ---------------------------------------------------------------------------
 
@@ -509,6 +592,7 @@ pub fn suggest_circuit_with_schema(name: &str, schema: &Schema) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn schema_has_76_circuits() {
@@ -626,5 +710,92 @@ mod tests {
         let schema = load_schema();
         assert!(schema.available_memory.contains_key("master16"));
         assert!(schema.available_memory.contains_key("master18"));
+    }
+
+    // --- Plugin overlay (task 1.3) ----------------------------------------
+
+    const PLUGIN_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/plugins");
+
+    fn load_plugin_fixture(name: &str) -> PluginFile {
+        crate::plugin::load_file(&Path::new(PLUGIN_FIXTURES).join(name))
+            .unwrap_or_else(|| panic!("fixture {name} must parse"))
+    }
+
+    fn fixture_files(names: &[&str]) -> Vec<PluginFile> {
+        names.iter().map(|n| load_plugin_fixture(n)).collect()
+    }
+
+    #[test]
+    fn non_colliding_plugin_circuit_is_additive() {
+        let base = load_schema();
+        let merged = merge_plugins(base.clone(), &fixture_files(&["valid.toml"]));
+
+        // NEWCKT is new; `copy` overrides in place, so the count grows by one.
+        assert_eq!(merged.circuits.len(), base.circuits.len() + 1);
+        let newckt = merged.circuits.get("newckt").expect("newckt merged");
+        assert_eq!(newckt.ramsize, 256);
+        assert_eq!(newckt.category, "logic");
+        // An existing embedded circuit is untouched.
+        let base_moto = serde_json::to_value(&base.circuits["motoquencer"]).expect("serialize");
+        let merged_moto = serde_json::to_value(&merged.circuits["motoquencer"]).expect("serialize");
+        assert_eq!(merged_moto, base_moto);
+    }
+
+    #[test]
+    fn colliding_plugin_circuit_overrides_embedded() {
+        let base = load_schema();
+        let merged = merge_plugins(base.clone(), &fixture_files(&["valid.toml"]));
+
+        // Embedded copy is ramsize 24; the plugin override declares 32.
+        assert_eq!(base.circuits["copy"].ramsize, 24);
+        let plugin_copy = &merged.circuits["copy"];
+        assert_eq!(plugin_copy.ramsize, 32);
+        assert_ne!(plugin_copy.ramsize, base.circuits["copy"].ramsize);
+    }
+
+    #[test]
+    fn plugin_param_expansion_uses_embedded_path() {
+        let merged = merge_plugins(load_schema(), &fixture_files(&["valid.toml"]));
+
+        // NEWCKT's `prefix`/`count`/`start_at` trio expands exactly like an
+        // embedded circuit's through `get_param_names`.
+        let mut expected = vec!["input".to_string(), "level".to_string()];
+        expected.extend((1..=8).map(|n| format!("bit{n}")));
+        expected.push("output".to_string());
+        assert_eq!(
+            merged.get_param_names("newckt").expect("newckt exists"),
+            expected
+        );
+
+        let outputs = merged
+            .get_output_param_names("newckt")
+            .expect("newckt exists");
+        assert_eq!(outputs, expected[2..]);
+    }
+
+    #[test]
+    fn empty_plugin_slice_leaves_schema_byte_identical() {
+        let base = load_schema();
+        let merged = merge_plugins(base.clone(), &[]);
+        assert_eq!(
+            serde_json::to_vec(&merged).expect("serialize merged"),
+            serde_json::to_vec(&base).expect("serialize base")
+        );
+    }
+
+    #[test]
+    fn later_plugin_file_wins_over_earlier() {
+        let base = load_schema();
+        let forward = merge_plugins(
+            base.clone(),
+            &fixture_files(&["valid.toml", "newckt_override.toml"]),
+        );
+        assert_eq!(forward.circuits["newckt"].ramsize, 512);
+
+        let backward = merge_plugins(
+            base,
+            &fixture_files(&["newckt_override.toml", "valid.toml"]),
+        );
+        assert_eq!(backward.circuits["newckt"].ramsize, 256);
     }
 }

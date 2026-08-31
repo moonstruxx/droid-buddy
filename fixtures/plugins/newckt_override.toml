@@ -1,0 +1,21 @@
+# Second NEWCKT definition for the ordered-overlay test (task 1.3).
+# When this file loads after valid.toml it wins for the same circuit name
+# (later files override earlier ones). ramsize 512 differs from valid.toml's
+# 256 so the winning definition is observable. No shadow warning applies:
+# `newckt` is not an embedded circuit, and plugin-plugin collisions are a
+# plain later-wins overlay, not a shadow of the embedded base.
+
+[[circuit]]
+name = "newckt"
+category = "util"
+ramsize = 512
+
+[[circuit.inputs]]
+name = "input"
+short = "i"
+type = "jack"
+
+[[circuit.outputs]]
+name = "output"
+short = "o"
+type = "cv"
