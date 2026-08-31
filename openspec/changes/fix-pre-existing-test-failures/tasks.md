@@ -13,13 +13,13 @@
 
 ## 3. Corpus/tooling reconciliation (api-engineer, depends_on 1)
 
-- [ ] 3.1 Diff the failing assertion in `regression_scorer_holdout_agrees_with_corpus` against `tools/outlier_artifact.txt` and `corpus/features.csv`; re-sync corpus or table only when drift is real (holdout gate catches genuine model drift); verify: the test passes and the diff/reason is recorded in the commit message <!-- agent: api-engineer.build, depends_on: [1.4], touches: [src/regression.rs, tools/outlier_artifact.txt, corpus/] -->
+- [x] 3.1 Diff the failing assertion in `regression_scorer_holdout_agrees_with_corpus` against `tools/outlier_artifact.txt` and `corpus/features.csv`; re-sync corpus or table only when drift is real (holdout gate catches genuine model drift); verify: the test passes and the diff/reason is recorded in the commit message <!-- agent: api-engineer.build, depends_on: [1.4], touches: [src/regression.rs, tools/outlier_artifact.txt, corpus/] -->
 - [ ] 3.2 Diff the failing assertion in `rendermetrics::tests::python_rust_extractor_agreement_on_corpus` between the Rust extractor and `tools/build_rendermetrics.py`; re-sync the extractor or corpus; verify: the test passes <!-- agent: api-engineer.build, depends_on: [3.1], touches: [src/rendermetrics.rs, tools/, corpus/] -->
 
 ## 4. Renderer edge cases (rusty-engineer)
 
-- [ ] 4.1 Fix mm→screen border overlap: change `ScreenMapping`/module rect computation to derive column spans from absolute mm positions (`round(mm0×f)..round(mm1×f)`) so adjacent module borders abut at every zoom preset; add a regression test in `physical.rs` (alongside the coincidence tests) asserting no two adjacent module rects overlap across 75/100/150/200%; verify: `cargo test --lib physical` (55 tests) plus the new test pass <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/physical.rs] -->
-- [ ] 4.2 Fix switch value rendering on the physical view: place switch cells from controller geometry (same mechanism as knobs/encoders/buttons) and render switch state glyph; when geometry lacks a switch cell for the controller, omit the switch rather than mis-rendering on a knob cell; verify: `switch_value.ini` fixture renders switch cells with state and hit-tests <!-- agent: rusty-engineer.build, depends_on: [4.1], touches: [src/ui.rs, src/physical.rs, fixtures/] -->
+- [x] 4.1 Fix mm→screen border overlap: change `ScreenMapping`/module rect computation to derive column spans from absolute mm positions (`round(mm0×f)..round(mm1×f)`) so adjacent module borders abut at every zoom preset; add a regression test in `physical.rs` (alongside the coincidence tests) asserting no two adjacent module rects overlap across 75/100/150/200%; verify: `cargo test --lib physical` (55 tests) plus the new test pass <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/physical.rs] -->
+- [x] 4.2 Fix switch value rendering on the physical view: place switch cells from controller geometry (same mechanism as knobs/encoders/buttons) and render switch state glyph; when geometry lacks a switch cell for the controller, omit the switch rather than mis-rendering on a knob cell; verify: `switch_value.ini` fixture renders switch cells with state and hit-tests <!-- agent: rusty-engineer.build, depends_on: [4.1], touches: [src/ui.rs, src/physical.rs, fixtures/] -->
 
 ## 5. Clippy lints (rusty-engineer)
 
