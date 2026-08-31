@@ -1027,210 +1027,224 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
+/// Whether a point lies inside a rect (the handler's hit-test predicate).
+fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
 #[test]
 fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
-    let mut app = led_pairs_app();
-    // Flow precondition; full parse coverage lives in patch.rs unit tests.
-    assert_eq!(
-        app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].led,
-        Some(String::from("L1.1"))
-    );
-    let buf = buffer_for(&mut app, 100, 40);
+    // Physical-era rewrite (droid_tui-skb 1.1): LED-folding semantics on the
+    // physical faceplate. In arpeggio1 every P2B8 button carries `led = L1.x`
+    // AND the LED keeps its own faceplate cell, nested inside the button
+    // frame exactly like the real panel (the 3 mm LED sits inside the 8 mm
+    // button). The LED cell renders the LED state glyph on top; a plain cell
+    // (no LED) renders compactly — glyph + state text — without a bordered
+    // frame, because at the preset zooms (0.75–2.0) no faceplate cell reaches
+    // the boxed-cell width threshold.
+    for zoom in [1.0f32, 2.0] {
+        let mut app = app_from_fixture("arpeggio1");
+        app.scale_factor = zoom;
+        app.physical_show_skeleton = false;
+        let buf = buffer_for(&mut app, 100, 40);
 
-    // Boxed: LED-associated button fills the 3-row cell as a bordered box
-    // (controller-panels spec "Box LED-associated elements": symbol, label,
-    // state, and the LED glyph — a single state, not a second textual LED
-    // state). The label lives in the block's top title, drawn inside the
-    // border row, since a 3-row cell has no room for a border plus multiple
-    // content lines.
-    let boxed = rect_for(&app, "B1.1");
-    assert_eq!(boxed.height, 3, "boxed cell is COMPONENT_HEIGHT tall");
-    assert!(
-        row_text(&buf, boxed, 0).contains("B1.1"),
-        "label lives in the top border's title"
-    );
-    let mid = row_text(&buf, boxed, 1);
-    assert!(
-        mid.contains("ON") || mid.contains("OFF"),
-        "state row: {mid:?}"
-    );
-    assert!(mid.contains('◉') || mid.contains('○'), "LED glyph in box");
-    let led_row = row_text(&buf, boxed, 2);
-    assert!(
-        !led_row.contains("ON") && !led_row.contains("OFF"),
-        "bottom row is plain border, not a second textual state \
-         (droid_tui-888 duplicate OFF), got {led_row:?}"
-    );
+        // Flow precondition: B1.1 folds L1.1 (full parse coverage lives in
+        // patch.rs unit tests).
+        assert_eq!(
+            app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")].led,
+            Some(String::from("L1.1"))
+        );
 
-    // Border uses the element's kind color (button -> theme::active().button;
-    // knob -> theme::active().knob — controller-panels spec "Kind colors
-    // follow the theme").
-    let corner = buf
-        .cell((boxed.x, boxed.y))
-        .expect("boxed cell has a top-left corner cell");
-    assert_eq!(
-        corner.symbol(),
-        "┌",
-        "boxed cell renders a bordered box, got {:?}",
-        corner.symbol()
-    );
-    assert_eq!(
-        corner.style().fg,
-        Some(theme::active().button),
-        "border color follows the button kind"
-    );
+        let b11 = rect_for(&app, "B1.1");
+        let l11 = rect_for(&app, "L1.1");
+        let p11 = rect_for(&app, "P1.1");
 
-    let knob_boxed = rect_for(&app, "P1.1");
-    let knob_corner = buf
-        .cell((knob_boxed.x, knob_boxed.y))
-        .expect("boxed knob cell has a top-left corner cell");
-    assert_eq!(
-        knob_corner.symbol(),
-        "┌",
-        "boxed knob cell renders a bordered box, got {:?}",
-        knob_corner.symbol()
-    );
-    assert_eq!(
-        knob_corner.style().fg,
-        Some(theme::active().knob),
-        "border color follows the knob kind"
-    );
+        // The LED cell nests inside its owner's cell (physical geometry: the
+        // LED sits inside the button frame — this is the physical-era
+        // replacement for the panel grid's "absorbed into the box").
+        assert!(
+            l11.x >= b11.x
+                && l11.y >= b11.y
+                && l11.x + l11.width <= b11.x + b11.width
+                && l11.y + l11.height <= b11.y + b11.height,
+            "zoom {zoom}: L1.1's cell {l11:?} lies inside B1.1's cell {b11:?}"
+        );
 
-    // Text: LED-less button keeps plain content with a blank filler row.
-    let plain = rect_for(&app, "B1.2");
-    assert_eq!(plain.height, 3, "grid geometry unified at 3 rows");
-    assert!(row_text(&buf, plain, 0).contains("B1.2"), "label row");
-    assert!(
-        row_text(&buf, plain, 2).trim().is_empty(),
-        "non-LED cell leaves the filler row blank"
-    );
+        // Owner cell renders the button state; the LED glyph on top carries
+        // the led token (distinct from the button kind color).
+        let b11_row0 = row_text(&buf, b11, 0);
+        assert!(
+            b11_row0.contains('○') || b11_row0.contains('●'),
+            "zoom {zoom}: button glyph in owner cell, got {b11_row0:?}"
+        );
+        assert_eq!(
+            buf.cell((l11.x, l11.y)).unwrap().style().fg,
+            Some(theme::active().led),
+            "zoom {zoom}: LED glyph uses the led token"
+        );
+
+        // Plain knob cell (no LED): compact rendering — knob glyph + state
+        // text — and it stays unboxed at every preset zoom (the compact path
+        // is the physical norm, not a bordered frame).
+        let p11_row1 = row_text(&buf, p11, 1);
+        assert!(
+            p11_row1.contains("0%"),
+            "zoom {zoom}: knob state text in the plain cell, got {p11_row1:?}"
+        );
+        assert_ne!(
+            buf.cell((p11.x, p11.y)).unwrap().symbol(),
+            "┌",
+            "zoom {zoom}: plain cell renders compactly, no bordered frame"
+        );
+    }
 }
 
 #[test]
 fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
-    // scale_factor used to inflate the *published* hit rect (width/height *
-    // scale_factor) while the actual rendered cell stayed COMPONENT_WIDTH x
-    // COMPONENT_HEIGHT, so at scale != 1.0 a hit rect spilled past its own
-    // cell into the neighbor's screen area: hovering the neighbor resolved
-    // to this component instead, and the highlight painted on the wrong
-    // cell (droid_tui-wmg).
-    let mut app = led_pairs_app();
-    handle_event(key(KeyCode::Char('+')), &mut app); // scale_factor away from 1.0
-    assert_ne!(app.scale_factor, 1.0);
-    let buf = buffer_for(&mut app, 100, 40);
+    // Physical-era rewrite (droid_tui-skb 1.2): the physical renderer
+    // publishes hit rects from the SAME mapped geometry it draws — every
+    // component_rects entry equals the cell rect in physical_full_rects for
+    // that component — so a hit rect can never inflate past its own cell
+    // (BUG droid_tui-wmg). At every scale preset the published rect IS the
+    // rendered cell; hovering B1.2's cell resolves to B1.2, not to a
+    // neighbor whose rect bled into it.
+    for zoom in [0.75f32, 1.0, 1.5, 2.0] {
+        let mut app = app_from_fixture("arpeggio1");
+        app.scale_factor = zoom;
+        let _ = buffer_for(&mut app, 100, 40);
 
-    let id_of =
-        |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
-    let rects = app.component_rects.clone();
+        let patch = app.patch.as_ref().unwrap();
+        let chain = crate::physical::PhysicalLayout::build(patch);
+        let id_of = |idx: usize| -> String { patch.hw_components[idx].id.clone() };
 
-    // Every published rect matches the actually-rendered (scaled) cell size —
-    // the hit rect IS the rendered cell, so hit testing stays correct at every
-    // scale preset (BUG droid_tui-ro0 makes the cell scale with scale_factor;
-    // the old fixed-size assertion encoded the pre-fix behavior).
-    let expected_h = ((3.0_f32 * app.scale_factor).round() as u16).max(3);
-    for (i, r) in &rects {
-        assert_eq!(
-            r.height,
-            expected_h,
-            "{} hit rect height must match the rendered (scaled) cell",
-            id_of(*i)
+        // Every hit rect matches a published full-view cell rect for the same
+        // component — the hit rect IS the rendered cell, with no scaling
+        // inflation (the old fixed-size assertion encoded the pre-fix bug).
+        assert!(
+            !app.component_rects.is_empty(),
+            "zoom {zoom}: faceplate cells published"
         );
-    }
-    // No rect spills into a neighbor's screen area.
-    for (i, a) in rects.iter().enumerate() {
-        for b in rects.iter().skip(i + 1) {
+        for &(gi, r) in &app.component_rects {
+            let id = id_of(gi);
+            let matches = app
+                .physical_full_rects
+                .iter()
+                .any(|&(m, c, fr)| chain.modules[m].components[c].id == id && fr == r);
             assert!(
-                !rects_overlap(a.1, b.1),
-                "cells {} and {} overlap at scale_factor {}",
-                id_of(a.0),
-                id_of(b.0),
-                app.scale_factor
+                matches,
+                "zoom {zoom}: {id} hit rect {r:?} is not a rendered cell"
             );
         }
+        // The full-view list is the superset: cells clipped by the viewport
+        // may publish without being drawable, never the reverse.
+        assert!(
+            app.component_rects.len() <= app.physical_full_rects.len(),
+            "zoom {zoom}: hit rects are a subset of the rendered cells"
+        );
     }
 
-    // A mouse move over B1.2's rendered cell must resolve to B1.2, not to
-    // its neighbor B1.1 (whose hit rect used to bleed rightward into it).
+    // Hover at scale != 1.0: B1.2's rendered cell resolves to B1.2, not B1.1
+    // (whose hit rect used to bleed rightward into its neighbor).
+    let mut app = app_from_fixture("arpeggio1");
+    handle_event(key(KeyCode::Char('+')), &mut app); // scale_factor 1.0 -> 1.5
+    assert_eq!(app.scale_factor, 1.5);
+    let _ = buffer_for(&mut app, 100, 40);
+
+    let b11 = rect_for(&app, "B1.1");
     let b12 = rect_for(&app, "B1.2");
-    let inside_b12 = (b12.x + 1, b12.y);
-    handle_mouse_event(
-        mouse(MouseEventKind::Moved, inside_b12.0, inside_b12.1),
-        &mut app,
+    let probe = (b12.x, b12.y + 1);
+    assert!(
+        !rect_contains(&b11, probe.0, probe.1),
+        "probe point must lie outside B1.1's cell ({b11:?})"
     );
+    assert!(
+        rect_contains(&b12, probe.0, probe.1),
+        "probe point must lie inside B1.2's cell ({b12:?})"
+    );
+    handle_mouse_event(mouse(MouseEventKind::Moved, probe.0, probe.1), &mut app);
     assert_eq!(
         app.hovered_component,
         Some(idx_for(&app, "B1.2")),
-        "hover resolves to the cell under the cursor, not an inflated neighbor rect"
+        "hover resolves to the cell under the cursor at 150%"
     );
-    let _ = buf;
 }
 
 #[test]
 fn regression_p2b8_knobs_render_fully_with_embedded_viewer_open() {
-    // droid_tui-6vu: knobs (non-boxed, plain 3-row cells) sit in the last
-    // row of the P2B8 panel. Once droid_tui-1hg stopped over-allocating
-    // panel rows for folded LEDs, the knob row is no longer squeezed
-    // against the panel's bottom border — verify that holds with the
-    // embedded source viewer open too (the scenario the original report
-    // called out for the highlight overlap).
+    // Physical-era rewrite (droid_tui-skb 1.2): with the embedded source
+    // viewer open the P2B8 knobs keep publishing their faceplate cells (the
+    // hit-test contract) and stay fully inside the panels pane — the viewer
+    // split must not squeeze or clip them (droid_tui-6vu, reported with the
+    // highlight overlap while the viewer was open).
     for (w, h) in [(100u16, 30u16), (120, 32), (140, 34)] {
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        let mut app = App::new();
-        app.load_patch(patch);
+        let mut app = app_from_fixture("arpeggio1");
         open_viewer(&mut app);
         let buf = buffer_for(&mut app, w, h);
 
-        let id_of =
-            |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
-        let rects = app.component_rects.clone();
+        // Panels pane inner area mirrors render_embedded_main: 60 % width
+        // (default viewer_split_ratio 0.6), minus the pane border, below the
+        // 3-row header/status bars.
+        let main = Rect::new(0, 3, w, h - 6);
+        let panels_w = main.width * 60 / 100;
+        let inner = Rect::new(main.x + 1, main.y + 1, panels_w - 2, main.height - 2);
 
         for tok in ["P1.1", "P1.2"] {
-            let r = rects
+            let idx = idx_for(&app, tok);
+            let r = app
+                .component_rects
                 .iter()
-                .find(|(i, _)| id_of(*i) == tok)
-                .unwrap_or_else(|| panic!("{tok} missing a rendered cell at {w}x{h}"))
-                .1;
-            assert_eq!(
-                r.height, 3,
-                "{tok} squished to {} rows at {w}x{h} with viewer open",
-                r.height
-            );
+                .find(|(i, _)| *i == idx)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| {
+                    panic!("{tok} missing a published cell at {w}x{h} with viewer open")
+                });
             assert!(
-                r.y + r.height <= buf.area.height,
-                "{tok} clipped past the frame bottom at {w}x{h}: {r:?}"
+                r.x + r.width <= inner.width && r.y + r.height <= inner.height,
+                "{tok} clipped by the viewer split at {w}x{h}: {r:?} vs panels inner {inner:?}"
             );
-        }
-        for (i, a) in rects.iter().enumerate() {
-            for b in rects.iter().skip(i + 1) {
-                assert!(
-                    !rects_overlap(a.1, b.1),
-                    "cells {} and {} overlap at {w}x{h} with viewer open",
-                    id_of(a.0),
-                    id_of(b.0)
-                );
-            }
+            // The knob glyph renders at the clipped draw position.
+            let clipped = r.intersection(inner);
+            assert_eq!(
+                buf.cell((clipped.x, clipped.y)).unwrap().symbol(),
+                "◉",
+                "{tok} knob glyph renders fully at {w}x{h} with viewer open"
+            );
         }
     }
 }
 
 #[test]
 fn regression_mixed_grid_cells_coexist_without_overlap() {
+    // Physical-era rewrite (droid_tui-skb 1.1): mixed-kind faceplate cells
+    // coexist on the rack. led_pairs pins its [button]/[pot] sections to the
+    // Pot faceplate (P10, whose geometry has no B/L cells), so B1.1/B1.2/
+    // L1.1/L1.3 have no faceplate cell and publish nothing; the P2B8
+    // faceplate carries the remaining buttons/LEDs/knobs. What publishes are
+    // the real physical cells — knob, buttons and LEDs side by side,
+    // in-frame, and strictly separated across the two faceplates.
     let mut app = led_pairs_app();
     let buf = buffer_for(&mut app, 100, 40);
     let rects = app.component_rects.clone();
-    assert!(rects.len() >= 5, "fixture renders several cells");
+    assert_eq!(rects.len(), 14, "1 Pot knob + 13 P2B8 cells publish");
 
     let id_of =
         |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
     let has_rect = |tok: &str| rects.iter().any(|(i, _)| id_of(*i) == tok);
 
-    // Folded LEDs are absorbed into their owners' boxes; unfolded LEDs
-    // keep their own standalone cells in the same grid.
-    assert!(!has_rect("L1.1"), "folded L1.1 gets no standalone cell");
-    assert!(!has_rect("L1.3"), "folded L1.3 gets no standalone cell");
-    assert!(has_rect("L1.2"), "unfolded LED keeps its own cell");
-    assert!(has_rect("P1.1"), "boxed knob rendered next to text cells");
+    // Collision-era mapping: components without a faceplate cell publish
+    // nothing (the physical-era equivalent of "absorbed into the owner box").
+    for tok in ["B1.1", "B1.2", "L1.1", "L1.3"] {
+        assert!(
+            !has_rect(tok),
+            "{tok} has no Pot faceplate cell, must not publish"
+        );
+    }
+    // The real faceplate cells all publish: knob + buttons + LEDs coexist.
+    for tok in ["P1.1", "B1.3", "B1.4", "L1.2", "P1.2"] {
+        assert!(has_rect(tok), "{tok} missing a published cell");
+    }
 
+    // Every published cell stays inside the frame.
     for (i, r) in &rects {
         assert!(
             r.x + r.width <= buf.area.width && r.y + r.height <= buf.area.height,
@@ -1238,13 +1252,25 @@ fn regression_mixed_grid_cells_coexist_without_overlap() {
             id_of(*i)
         );
     }
-    for (i, a) in rects.iter().enumerate() {
-        for b in rects.iter().skip(i + 1) {
+
+    // Cross-faceplate separation: the Pot knob never overlaps a P2B8 cell
+    // (within-faceplate LED nesting is physical reality, so separation is
+    // asserted at the faceplate boundary).
+    let pot: Vec<Rect> = rects
+        .iter()
+        .filter(|(i, _)| id_of(*i) == "P1.1")
+        .map(|(_, r)| *r)
+        .collect();
+    let p2b8: Vec<Rect> = rects
+        .iter()
+        .filter(|(i, _)| id_of(*i) != "P1.1")
+        .map(|(_, r)| *r)
+        .collect();
+    for a in &pot {
+        for b in &p2b8 {
             assert!(
-                !rects_overlap(a.1, b.1),
-                "cells {} and {} overlap",
-                id_of(a.0),
-                id_of(b.0)
+                !rects_overlap(*a, *b),
+                "Pot cell {a:?} overlaps P2B8 cell {b:?}"
             );
         }
     }
@@ -1252,50 +1278,37 @@ fn regression_mixed_grid_cells_coexist_without_overlap() {
 
 #[test]
 fn regression_cell_geometry_no_overflow_overlap() {
-    // P2B8 in arpeggio1.ini has 8 buttons + 8 folded LEDs + 2 knobs (18 raw
-    // HwComponents), but only 10 are visible cells once folded LEDs are
-    // absorbed into their owning buttons' boxes. Panel height must be sized
-    // from the visible count, not the raw count, or the knobs get clipped
-    // off the bottom of the panel (droid_tui-1hg).
-    // NOTE: BUG 2 (droid_tui-7ik) sizes each panel from its real inner width, so
-    // the wrap count in a narrow frame is correct (no 2px overflow). That makes
-    // panels a little taller than the old overflowing wrap, so the frames below
-    // are sized with enough vertical room for the corrected grid.
+    // Physical-era rewrite (droid_tui-skb 1.2): every P2B8 faceplate element —
+    // buttons, LEDs AND knobs — publishes its own cell (the physical view
+    // does not absorb LEDs into owner boxes; each element has real geometry),
+    // and the CV I/O master publishes its jacks. Across widths all published
+    // cells stay inside the frame and the two faceplates never bleed into
+    // each other (the old panel-grid row-squish defect, droid_tui-1hg, has no
+    // panel grid anymore — the invariant is now faceplate separation).
     for (w, h) in [(80u16, 40u16), (100, 44), (120, 48)] {
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        let mut app = App::new();
-        app.load_patch(patch);
+        let mut app = app_from_fixture("arpeggio1");
         let buf = buffer_for(&mut app, w, h);
 
         let id_of =
             |idx: usize| -> String { app.patch.as_ref().unwrap().hw_components[idx].id.clone() };
         let rects = app.component_rects.clone();
 
+        // All 18 P2B8 elements publish — including the LEDs, which keep their
+        // own faceplate cells in the physical view.
         for tok in [
-            "B1.1", "B1.2", "B1.3", "B1.4", "B1.5", "B1.6", "B1.7", "B1.8", "P1.1", "P1.2",
-        ] {
-            let r = rects
-                .iter()
-                .find(|(i, _)| id_of(*i) == tok)
-                .unwrap_or_else(|| {
-                    panic!("{tok} missing a rendered cell at {w}x{h} — panel clipped it")
-                })
-                .1;
-            // Overallocating rows for folded LEDs used to starve the panel's
-            // real rows of vertical space, squishing cells below their full
-            // COMPONENT_HEIGHT (droid_tui-1hg).
-            assert_eq!(
-                r.height, 3,
-                "{tok} squished to {} rows at {w}x{h} — panel row count includes folded LEDs",
-                r.height
-            );
-        }
-        for tok in [
-            "L1.1", "L1.2", "L1.3", "L1.4", "L1.5", "L1.6", "L1.7", "L1.8",
+            "B1.1", "B1.2", "B1.3", "B1.4", "B1.5", "B1.6", "B1.7", "B1.8", "L1.1", "L1.2", "L1.3",
+            "L1.4", "L1.5", "L1.6", "L1.7", "L1.8", "P1.1", "P1.2",
         ] {
             assert!(
-                !rects.iter().any(|(i, _)| id_of(*i) == tok),
-                "folded {tok} should not get its own standalone cell"
+                rects.iter().any(|(i, _)| id_of(*i) == tok),
+                "{tok} missing a rendered cell at {w}x{h}"
+            );
+        }
+        // The CV I/O master faceplate publishes its jacks too.
+        for tok in ["I1", "O1", "O3", "O4"] {
+            assert!(
+                rects.iter().any(|(i, _)| id_of(*i) == tok),
+                "{tok} missing a rendered cell at {w}x{h}"
             );
         }
 
@@ -1306,13 +1319,34 @@ fn regression_cell_geometry_no_overflow_overlap() {
                 id_of(*i)
             );
         }
-        for (i, a) in rects.iter().enumerate() {
-            for b in rects.iter().skip(i + 1) {
+
+        // Cross-faceplate separation: no P2B8 cell overlaps a CV I/O cell.
+        let chain = crate::physical::PhysicalLayout::build(app.patch.as_ref().unwrap());
+        let module_of = |tok: &str| -> usize {
+            chain
+                .modules
+                .iter()
+                .position(|m| m.components.iter().any(|c| c.id == tok))
+                .expect("component lives on a faceplate")
+        };
+        let p2b8 = module_of("B1.1");
+        let cv = module_of("O1");
+        assert_ne!(p2b8, cv, "P2B8 and CV I/O are distinct faceplates");
+        let a: Vec<Rect> = rects
+            .iter()
+            .filter(|(i, _)| module_of(&id_of(*i)) == p2b8)
+            .map(|(_, r)| *r)
+            .collect();
+        let b: Vec<Rect> = rects
+            .iter()
+            .filter(|(i, _)| module_of(&id_of(*i)) == cv)
+            .map(|(_, r)| *r)
+            .collect();
+        for ra in &a {
+            for rb in &b {
                 assert!(
-                    !rects_overlap(a.1, b.1),
-                    "cells {} and {} overlap at {w}x{h}",
-                    id_of(a.0),
-                    id_of(b.0)
+                    !rects_overlap(*ra, *rb),
+                    "faceplate {p2b8} cell {ra:?} overlaps faceplate {cv} cell {rb:?}"
                 );
             }
         }
@@ -1321,55 +1355,86 @@ fn regression_cell_geometry_no_overflow_overlap() {
 
 #[test]
 fn regression_click_on_boxed_cell_toggles_and_selects() {
+    // Physical-era rewrite (droid_tui-skb 1.1): the renderer-published
+    // faceplate cells drive hit-testing — clicking a rendered cell toggles
+    // the component and selects it, and the LED cell is a first-class hit
+    // target (physical LEDs keep their own cells).
     let mut app = led_pairs_app();
     // Real renderer geometry drives hit-testing — no hand-built rects.
     let _ = buffer_for(&mut app, 100, 40);
 
-    let boxed = rect_for(&app, "B1.1");
-    let idx = idx_for(&app, "B1.1");
-    let start = app.patch.as_ref().unwrap().hw_components[idx].state.clone();
-    let cx = boxed.x + boxed.width / 2;
-    let cy = boxed.y + boxed.height / 2;
-
-    handle_mouse_event(
-        mouse(MouseEventKind::Down(MouseButton::Left), cx, cy),
-        &mut app,
-    );
-    let mid = app.patch.as_ref().unwrap().hw_components[idx].state.clone();
-    assert_ne!(mid, start, "click inside boxed cell toggles");
-    assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
-    assert_eq!(app.hovered_component, Some(idx));
-
+    // LED-folding knob: a click toggles its value (0.1 per click) and selects.
+    let knob = rect_for(&app, "P1.1");
+    let idx = idx_for(&app, "P1.1");
+    let (cx, cy) = (knob.x + knob.width / 2, knob.y + knob.height / 2);
     handle_mouse_event(
         mouse(MouseEventKind::Down(MouseButton::Left), cx, cy),
         &mut app,
     );
     assert_eq!(
         app.patch.as_ref().unwrap().hw_components[idx].state,
-        start,
+        ComponentState::Value(0.1),
+        "click on the LED-folding knob cell toggles its value"
+    );
+    assert_eq!(app.selected_component.as_deref(), Some("P1.1"));
+    assert_eq!(app.hovered_component, Some(idx));
+
+    // A second click keeps stepping the knob.
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), cx, cy),
+        &mut app,
+    );
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[idx].state,
+        ComponentState::Value(0.2),
+        "second click keeps stepping the knob"
+    );
+
+    // Plain button on the P2B8 faceplate: click toggles Off -> On -> Off.
+    let btn = rect_for(&app, "B1.3");
+    let bidx = idx_for(&app, "B1.3");
+    let (bx, by) = (btn.x + btn.width / 2, btn.y + btn.height / 2);
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), bx, by),
+        &mut app,
+    );
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[bidx].state,
+        ComponentState::On,
+        "click on the plain button cell toggles on"
+    );
+    assert_eq!(app.selected_component.as_deref(), Some("B1.3"));
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), bx, by),
+        &mut app,
+    );
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[bidx].state,
+        ComponentState::Off,
         "second click toggles back"
     );
 
-    // Text cell hit-testing still works alongside boxes.
-    let plain = rect_for(&app, "B1.2");
-    let idx2 = idx_for(&app, "B1.2");
-    let before = app.patch.as_ref().unwrap().hw_components[idx2]
-        .state
-        .clone();
+    // A standalone LED cell is a first-class hit target: it toggles the LED.
+    let led = rect_for(&app, "L1.2");
+    let lidx = idx_for(&app, "L1.2");
+    let (lx, ly) = (led.x + led.width / 2, led.y + led.height / 2);
     handle_mouse_event(
-        mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            plain.x + plain.width / 2,
-            plain.y + plain.height / 2,
-        ),
+        mouse(MouseEventKind::Down(MouseButton::Left), lx, ly),
         &mut app,
     );
-    assert_ne!(
-        app.patch.as_ref().unwrap().hw_components[idx2].state,
-        before,
-        "click on text cell toggles"
+    assert_eq!(
+        app.patch.as_ref().unwrap().hw_components[lidx].state,
+        ComponentState::On,
+        "click on the LED cell toggles the LED"
     );
-    assert_eq!(app.selected_component.as_deref(), Some("B1.2"));
+    assert_eq!(app.selected_component.as_deref(), Some("L1.2"));
+
+    // Empty faceplate space clears the selection without moving the cursor.
+    handle_mouse_event(
+        mouse(MouseEventKind::Down(MouseButton::Left), 40, 5),
+        &mut app,
+    );
+    assert_eq!(app.selected_component, None, "empty-space click deselects");
 }
 
 #[test]
@@ -1554,51 +1619,99 @@ fn regression_status_bar_segments_once() {
 
 #[test]
 fn regression_p2b8_panel_uniform_rows() {
-    // droid_tui-irf: same-kind rows inside a panel keep one uniform vertical
-    // rhythm — boxed-vs-unboxed height differences and wrapping must not
-    // create extra blank rows (observed after B1.2/B1.5/B1.7). P2B8 in
-    // melody2 is a bare `[p2b8]` section: 8 buttons + 8 LEDs + 2 knobs of
-    // the same 3-row cell height, wrapping by panel width. The tall frame
-    // gives every panel its full requested height, so the P2B8 grid renders
-    // at its nominal 3-row cells and any blank gutter between rows would
-    // break the exact step.
-    let mut app = melody2_app();
-    let buf = buffer_for(&mut app, 60, 150);
-    let patch = app.patch.as_ref().unwrap();
-    let mut p2b8_ys: Vec<u16> = app
-        .component_rects
-        .iter()
-        .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
-        .map(|(_, r)| r.y)
-        .collect();
-    p2b8_ys.sort_unstable();
-    p2b8_ys.dedup();
-    assert!(
-        p2b8_ys.len() >= 2,
-        "P2B8 must wrap into multiple rows, got {p2b8_ys:?}"
-    );
-    for pair in p2b8_ys.windows(2) {
+    // Physical-era rewrite (droid_tui-skb 1.3): row uniformity inside the
+    // P2B8 faceplate sub-block. The 8 buttons form four 2-button rows at
+    // identical y (one physical 15 mm row pitch each); every button cell
+    // shares one uniform size, every knob cell another, every LED cell
+    // another — no stray sizes or interleaved rows (droid_tui-irf, originally
+    // observed as boxed-vs-unboxed height differences creating blank rows in
+    // the panel grid).
+    for zoom in [1.0f32, 2.0] {
+        let mut app = app_from_fixture("arpeggio1");
+        app.scale_factor = zoom;
+        // Taller frame at zoom 2 so the bottom button row still fits the main
+        // area (the rack is 39 rows at zoom 1, 78 at zoom 2).
+        let h = if zoom == 2.0 { 70 } else { 40 };
+        let _ = buffer_for(&mut app, 100, h);
+
+        let patch = app.patch.as_ref().unwrap();
+        let rects = &app.component_rects;
+        let id_of = |idx: usize| -> String { patch.hw_components[idx].id.clone() };
+        let by_prefix = |prefix: &str| -> Vec<(String, Rect)> {
+            rects
+                .iter()
+                .filter(|(i, _)| id_of(*i).starts_with(prefix))
+                .map(|(i, r)| (id_of(*i), *r))
+                .collect()
+        };
+
+        // Uniform sizes per kind within the faceplate.
+        let buttons = by_prefix("B1.");
+        let leds = by_prefix("L1.");
+        let knobs = by_prefix("P1.");
+        assert_eq!(buttons.len(), 8, "zoom {zoom}: 8 P2B8 buttons");
+        assert_eq!(leds.len(), 8, "zoom {zoom}: 8 P2B8 LEDs");
+        assert_eq!(knobs.len(), 2, "zoom {zoom}: 2 P2B8 knobs");
+        let distinct_sizes = |cells: &[(String, Rect)]| -> Vec<(u16, u16)> {
+            let mut v: Vec<(u16, u16)> = cells.iter().map(|(_, r)| (r.width, r.height)).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
         assert_eq!(
-            pair[1] - pair[0],
-            3,
-            "P2B8 rows must be contiguous 3-row cells (no extra blank rows), got {p2b8_ys:?}"
+            distinct_sizes(&buttons).len(),
+            1,
+            "zoom {zoom}: buttons share one cell size"
         );
+        assert_eq!(
+            distinct_sizes(&leds).len(),
+            1,
+            "zoom {zoom}: LEDs share one cell size"
+        );
+        assert_eq!(
+            distinct_sizes(&knobs).len(),
+            1,
+            "zoom {zoom}: knobs share one cell size"
+        );
+
+        // Buttons group into four 2-member rows at identical y, strictly
+        // ordered top to bottom — the uniform row rhythm of the faceplate.
+        let mut rows: Vec<(u16, Vec<String>)> = Vec::new();
+        for (id, r) in &buttons {
+            match rows.iter_mut().find(|(y, _)| *y == r.y) {
+                Some((_, v)) => v.push(id.clone()),
+                None => rows.push((r.y, vec![id.clone()])),
+            }
+        }
+        rows.sort_by_key(|(y, _)| *y);
+        let expected_bands: [&[&str]; 4] = [
+            &["B1.1", "B1.2"],
+            &["B1.3", "B1.4"],
+            &["B1.5", "B1.6"],
+            &["B1.7", "B1.8"],
+        ];
+        assert_eq!(rows.len(), 4, "zoom {zoom}: four button rows");
+        for (band, (y, ids)) in expected_bands.iter().zip(&rows) {
+            let mut got = ids.clone();
+            got.sort_unstable();
+            assert_eq!(
+                &got, band,
+                "zoom {zoom}: row at y={y} holds the expected pair"
+            );
+        }
+        for w in rows.windows(2) {
+            assert!(w[0].0 < w[1].0, "zoom {zoom}: button rows strictly ordered");
+        }
+
+        // At zoom 2 the row pitch is the uniform mapped step (15 mm pitch).
+        if zoom == 2.0 {
+            let ys: Vec<u16> = rows.iter().map(|(y, _)| *y).collect();
+            let step = ys[1] - ys[0];
+            for w in ys.windows(2) {
+                assert_eq!(w[1] - w[0], step, "zoom 2: uniform row pitch {step}");
+            }
+        }
     }
-    // Every cell in the panel is the same 16x3 grid size at this frame.
-    let mut p2b8_sizes: Vec<(u16, u16)> = app
-        .component_rects
-        .iter()
-        .filter(|(idx, _)| patch.hw_components[*idx].controller == "P2B8")
-        .map(|(_, r)| (r.width, r.height))
-        .collect();
-    p2b8_sizes.sort_unstable();
-    p2b8_sizes.dedup();
-    assert_eq!(
-        p2b8_sizes,
-        vec![(16, 3)],
-        "P2B8 cells must share one uniform size"
-    );
-    let _ = buf;
 }
 
 #[test]
@@ -1708,6 +1821,11 @@ fn assert_classic_signature_tokens(t: &crate::theme::Theme) {
 
 #[test]
 fn regression_theme_boxed_cells_and_shift_surfaces() {
+    // Physical-era rewrite (droid_tui-skb 1.3): theme tokens on the physical
+    // faceplate — LED-carrying cell content carries the component-kind token,
+    // idle faceplate chrome uses the physical module-outline token, the
+    // shift-affected cell repaints in shift1, and the shift status chip keeps
+    // its shared status background.
     for &name in theme::THEMES {
         let _guard = ThemedGuard::pin(name);
         let t = *theme::resolve(name);
@@ -1715,30 +1833,37 @@ fn regression_theme_boxed_cells_and_shift_surfaces() {
             assert_classic_signature_tokens(&t);
         }
 
-        // Boxed LED cell content carries the component-kind token, framed by
-        // panel borders in the muted token while no shift is active.
+        // LED-carrying knob content carries the knob token on the faceplate
+        // (the physical-era "boxed cell kind color").
         let mut plain = led_pairs_app();
         let buf = buffer_for(&mut plain, 100, 40);
-        let _boxed = rect_for(&plain, "B1.1");
-        let label = first_token_style(&buf, "B1.1").expect("boxed label rendered");
-        assert_eq!(label.fg, Some(t.button), "{name}: boxed cell kind color");
+        let knob = rect_for(&plain, "P1.1");
+        let glyph = buf.cell((knob.x, knob.y)).expect("knob cell rendered");
+        assert_eq!(glyph.symbol(), "◉", "{name}: knob glyph on the faceplate");
+        assert_eq!(
+            glyph.style().fg,
+            Some(t.knob),
+            "{name}: faceplate kind color"
+        );
+        // Idle module chrome: faceplate borders use the physical outline token.
         assert!(
-            has_border_glyph(&buf, t.muted, None),
-            "{name}: idle panel border muted"
+            has_border_glyph(&buf, t.physical_skeleton_module_outline, None),
+            "{name}: idle faceplate outline"
         );
 
-        // Active shift repaints affected panel borders and the status chip
-        // with the group token over the shared status background.
-        let mut shifted = App::new();
-        shifted.load_sample_patch();
+        // Active shift repaints the shift-affected cell in shift1 while the
+        // status chip keeps its shared background.
+        let mut shifted = modifier_app("modifier_switch_passthrough", "B1.1");
         shifted.active_shift = Some(ShiftGroup::Group1);
+        shifted.scale_factor = 2.0;
         let buf = buffer_for(&mut shifted, 100, 40);
-        assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{name}: affected panel border uses shift1 bold"
+        let b11 = rect_for(&shifted, "B1.1");
+        let glyph = buf.cell((b11.x, b11.y)).expect("shift cell rendered");
+        assert_eq!(
+            glyph.style().fg,
+            Some(t.shift1),
+            "{name}: shift-affected cell repaints in shift1"
         );
-        // Match the full status phrase: affected panel titles also say
-        // "[SHIFT 1]", so the bare word would hit the title row first.
         let chip = first_token_style(&buf, "SHIFT 1 ACTIVE").expect("shift status rendered");
         assert_eq!(chip.fg, Some(t.shift1), "{name}: shift status fg");
         assert_eq!(chip.bg, Some(t.status_bg), "{name}: status bar background");
@@ -3699,16 +3824,21 @@ fn regression_modifier_additive_replaces_single_var() {
 
 #[test]
 fn regression_modifier_shift_plus_modifier_coexist() {
-    // Shift panel border (bold shift hue) and modifier background wash + status
-    // MOD hint are orthogonal — both must coexist without either clobbering the other.
+    // Physical-era rewrite (droid_tui-skb 1.3): the shift surface (the
+    // shift-affected component's faceplate glyph repainted in the shift hue)
+    // and the modifier status hint are orthogonal — both coexist without
+    // either clobbering the other.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
         let mut app = modifier_app("modifier_switch_passthrough", "B1.1");
         app.active_shift = Some(ShiftGroup::Group1);
+        // Cells are wide enough at zoom 2 to read B1.1's glyph clear of the
+        // nested LED cell.
+        app.scale_factor = 2.0;
         let buf = buffer_for(&mut app, 100, 40);
         let ansi = buffer_to_ansi(&buf);
-        // Both hints in status: SHIFT 1 ACTIVE and MOD B1.1
+        // Both hints in status: SHIFT 1 ACTIVE and MOD B1.1.
         assert!(
             ansi.contains("SHIFT 1 ACTIVE"),
             "{theme_name}: shift hint missing with modifier"
@@ -3717,7 +3847,8 @@ fn regression_modifier_shift_plus_modifier_coexist() {
             ansi.contains("MOD B1.1"),
             "{theme_name}: MOD hint missing with shift"
         );
-        // Shift chip bold shift1, MOD hint bold modifier_hue — distinct hues coexist
+        // Distinct hues coexist: MOD hint bold in the modifier hue, shift
+        // chip bold in shift1.
         let hue = theme::modifier_hue("B1.1");
         assert!(
             has_highlighted_token(&buf, "MOD B1.1", Some(hue), Some(Modifier::BOLD)),
@@ -3727,10 +3858,15 @@ fn regression_modifier_shift_plus_modifier_coexist() {
             has_highlighted_token(&buf, "SHIFT 1 ACTIVE", Some(t.shift1), Some(Modifier::BOLD)),
             "{theme_name}: shift chip bold with modifier"
         );
-        // Shift-affected panel border still bold shift1
-        assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{theme_name}: shift border persists with modifier"
+        // The shift surface on the faceplate: B1.1's glyph carries shift1
+        // (the physical-era equivalent of the repainted panel border).
+        let b11 = rect_for(&app, "B1.1");
+        let glyph = buf.cell((b11.x, b11.y)).unwrap();
+        assert_eq!(glyph.symbol(), "○", "{theme_name}: B1.1 off glyph");
+        assert_eq!(
+            glyph.style().fg,
+            Some(t.shift1),
+            "{theme_name}: shift-affected cell glyph"
         );
     }
 }
@@ -3755,14 +3891,14 @@ fn visual_modifier_shift_plus_modifier_snapshot() {
 }
 
 // ── switch detail regression harness (task 1.3) ──────────────────────────
-// switch_value.ini: the number-1 collision (droid_tui-26q) pins every
-// section — S1.1, S1.2, B1.1, P1.1 — to the Pot faceplate (P10), which has
-// cells only for its pots, so the face is the single P1.1 knob at its 0%
-// state; the switch/button tokens carry no render cells. The switch token
-// styling story survives as theme properties: classic keeps switch ==
-// button, mono's DarkGray switch provably differs from the White
-// button/knob in the same theme. HTML row mirrors the visual gallery row
-// convention.
+// switch_value.ini: the switch tokens (S1.1, S1.2) live on the Faderbank
+// faceplate (p8s8 geometry carries an S family), so the physical view places
+// them from controller geometry — exactly like knobs/encoders/buttons — and
+// renders each switch's state glyph: S1.1 as `◉ 35%` (Value), S1.2 as
+// `▣ ON`. P1.1 pins to the same Faderbank faceplate via the P→F slider
+// fallback, giving the mono contrast: switch token (DarkGray) provably
+// differs from the slider/knob (White) in the same theme. HTML row mirrors
+// the visual gallery row convention.
 
 fn switch_value_app() -> App {
     let mut app = app_from_fixture("switch_value");
@@ -3778,11 +3914,13 @@ fn switch_value_app() -> App {
 
 #[test]
 fn visual_switch_value_rendering_snapshot() {
-    // 1.3: switch_value.ini × classic/mono × 80/120 — the number-1
-    // collision (droid_tui-26q) pins every section to the Pot faceplate, so
-    // the switch token carries no render cells; its styling story lives as
-    // theme properties (classic keeps switch == button; mono's switch provably
-    // differs from the button).
+    // 4.2: switch_value.ini × classic/mono × 80/120 — the switch tokens
+    // render on the Faderbank faceplate's switch cells (p8s8 geometry carries
+    // an S family): S1.1 as the filled `◉` glyph (Value), S1.2 as `▣` (On),
+    // P1.1 as the slider percentage; mono's switch provably differs from the
+    // slider/knob. State text beyond the glyph is cell-width dependent — the
+    // percentage/ON strings themselves are unit-pinned in ui.rs
+    // (`physical_visuals`).
     for theme_name in ["classic", "mono"] {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -3792,20 +3930,16 @@ fn visual_switch_value_rendering_snapshot() {
             let ansi = buffer_to_ansi(&buf);
             let html = buffer_to_html(&buf);
 
-            // Panel resolution (droid_tui-26q): every section in this fixture
-            // shares controller number 1, and [pot] is its only KNOWN
-            // controller section — so S1.1, S1.2, B1.1 and P1.1 all pin to
-            // the Pot faceplate (P10). The P10 faceplate has element cells
-            // only for its pots, so the switch/button tokens carry no render
-            // cells: the face is the single P1.1 knob at its 0% state. The
-            // switch token styling story survives as theme properties
-            // (classic keeps switch == button; mono's switch provably differs
-            // from the button in the same theme).
+            // Panel resolution: [faderbank] is the only KNOWN controller
+            // section and claims controller number 1 (via `pot = P1.1`), so
+            // S1.1, S1.2 and P1.1 all pin to the Faderbank faceplate (p8s8),
+            // whose S and F families carry switch and slider cells — every
+            // token renders a cell with its state.
             let patch = app.patch.as_ref().unwrap();
             for comp in &patch.hw_components {
                 assert_eq!(
-                    comp.controller, "Pot",
-                    "{theme_name} {width}: {} pinned to the Pot faceplate",
+                    comp.controller, "Faderbank",
+                    "{theme_name} {width}: {} pinned to the Faderbank faceplate",
                     comp.id
                 );
             }
@@ -3816,19 +3950,34 @@ fn visual_switch_value_rendering_snapshot() {
                 .collect();
             assert_eq!(
                 rect_ids,
-                vec![String::from("P1.1")],
-                "{theme_name} {width}: only the pot renders a cell on the P10 faceplate"
+                vec![
+                    String::from("S1.1"),
+                    String::from("S1.2"),
+                    String::from("P1.1")
+                ],
+                "{theme_name} {width}: switch + slider cells render and hit-test on the Faderbank faceplate"
             );
             assert!(
-                ansi.contains("0%"),
-                "{theme_name} {width}: pot state rendered\n{ansi}"
+                ansi.contains("◉"),
+                "{theme_name} {width}: S1.1 Value glyph rendered\n{ansi}"
             );
-            // Style: the value glyph takes the knob token (mono's White,
-            // distinct from the DarkGray switch in the same theme).
+            assert!(
+                ansi.contains("▣"),
+                "{theme_name} {width}: S1.2 On glyph rendered\n{ansi}"
+            );
+            // Style: S1.2's `▣` takes the switch token (mono's DarkGray,
+            // distinct from the White slider/knob in the same theme), and the
+            // first `◉` is P1.1's slider glyph (knob token, rendered above
+            // the switch rows).
+            assert_eq!(
+                glyph_fg(&buf, "▣"),
+                Some(t.switch),
+                "{theme_name} {width}: switch On glyph uses the switch token"
+            );
             assert_eq!(
                 glyph_fg(&buf, "◉"),
                 Some(t.knob),
-                "{theme_name} {width}: value glyph uses the knob token"
+                "{theme_name} {width}: slider value glyph uses the knob token"
             );
             if theme_name == "classic" {
                 assert_eq!(
