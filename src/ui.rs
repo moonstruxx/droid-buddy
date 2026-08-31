@@ -10,6 +10,7 @@ use crate::app::{is_picker_parent_entry, App, QuadFocus, SourceViewMode, ViewerF
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
+use crate::schema;
 use crate::theme;
 
 const QUAD_WIDTH_THRESHOLD: u16 = 120;
@@ -1477,6 +1478,21 @@ impl CableKind {
     /// anything else is treated as audio/CV.
     fn from_circuit(circuit: &str) -> CableKind {
         let name = circuit.to_ascii_lowercase();
+        // Declared-first: a plugin circuit can pin its cable kind, overriding
+        // the substring guess. Unrecognized declarations fall through unchanged.
+        let declared = schema::load_schema()
+            .circuits
+            .get(&name)
+            .and_then(|c| c.cable_kind.as_deref());
+        if let Some(kind) = declared {
+            match kind.to_ascii_lowercase().as_str() {
+                "control" => return CableKind::Control,
+                "midi" => return CableKind::Midi,
+                "audio" => return CableKind::Audio,
+                "unknown" => return CableKind::Unknown,
+                _ => {}
+            }
+        }
         if ["clock", "gate", "trigger", "pulsar", "div"]
             .iter()
             .any(|k| name.contains(k))
@@ -3095,9 +3111,13 @@ fn render_viewer_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(status, area);
 }
 
-fn circuit_color(name: &str) -> Color {
+/// The semantic color for a component-kind token (button/knob/cv-in/led).
+/// Shared between `circuit_color`'s declared-token path and its name fallback
+/// so a plugin's declared `color` maps through the exact same table as the
+/// embedded name conventions.
+fn kind_token_color(token: &str) -> Color {
     let t = theme::active();
-    match name {
+    match token {
         "button" | "switch" | "notebuttons" | "notobuttons" => t.button,
         "pot" | "encoder" | "faderbank" => t.knob,
         "cvin" | "cv_in" => t.cv_in,
@@ -3105,6 +3125,19 @@ fn circuit_color(name: &str) -> Color {
         "led" => t.led,
         _ => t.accent,
     }
+}
+
+fn circuit_color(name: &str) -> Color {
+    // Declared-first: a plugin's declared `color` token wins over the
+    // name-convention match; embedded circuits carry `color = None`.
+    if let Some(token) = schema::load_schema()
+        .circuits
+        .get(&name.to_ascii_lowercase())
+        .and_then(|c| c.color.as_deref())
+    {
+        return kind_token_color(token);
+    }
+    kind_token_color(name)
 }
 
 fn disambiguate_names(names: &[String]) -> Vec<String> {
@@ -3629,6 +3662,30 @@ mod tests {
         assert_eq!(circuit_color("led"), t.led);
         assert_eq!(circuit_color("p2b8"), t.accent);
         assert_eq!(circuit_color("copy"), t.accent);
+    }
+
+    #[test]
+    fn circuit_color_prefers_declared_token_over_name() {
+        // Pin a thread-local schema where `mixer` declares `color = "led"`;
+        // the (leaked) static survives the local `schema` binding and the pin
+        // is cleared on the way out, mirroring `theme::set_test_theme`.
+        let mut schema = (*schema::load_schema()).clone();
+        schema
+            .circuits
+            .get_mut("mixer")
+            .expect("mixer embedded")
+            .color = Some("led".into());
+        let pinned: &'static crate::schema::Schema = Box::leak(Box::new(schema));
+        schema::set_test_schema(Some(pinned));
+
+        let t = theme::active();
+        // "mixer" name-matches to `t.accent`, so a non-accent result proves
+        // the declared `"led"` token won.
+        assert_eq!(circuit_color("mixer"), t.led);
+
+        schema::set_test_schema(None);
+        // With the pin removed, the name fallback governs again.
+        assert_eq!(circuit_color("button"), t.button);
     }
 
     // ── 4.1 embedded layout tests ───────────────────────────────────────
@@ -4976,6 +5033,27 @@ mod graph_view_tests {
         assert_eq!(CableKind::from_circuit("notesequencer"), CableKind::Midi);
         assert_eq!(CableKind::from_circuit("osc"), CableKind::Audio);
         assert_eq!(CableKind::from_circuit("vca"), CableKind::Audio);
+    }
+
+    #[test]
+    fn cable_kind_prefers_declared_kind_over_substring() {
+        // `mixer` has none of the control/midi keywords, so substring
+        // inference alone would call it Audio. A declared `cable_kind =
+        // "control"` must win.
+        let mut schema = (*schema::load_schema()).clone();
+        schema
+            .circuits
+            .get_mut("mixer")
+            .expect("mixer embedded")
+            .cable_kind = Some("control".into());
+        let pinned: &'static crate::schema::Schema = Box::leak(Box::new(schema));
+        schema::set_test_schema(Some(pinned));
+
+        assert_eq!(CableKind::from_circuit("mixer"), CableKind::Control);
+
+        schema::set_test_schema(None);
+        // With the pin removed, the substring fallback governs.
+        assert_eq!(CableKind::from_circuit("mixer"), CableKind::Audio);
     }
 
     #[test]
