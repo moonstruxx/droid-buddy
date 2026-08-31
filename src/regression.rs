@@ -4010,6 +4010,10 @@ fn switch_value_app() -> App {
         match comp.id.as_str() {
             "S1.1" => comp.state = ComponentState::Value(0.35),
             "S1.2" => comp.state = ComponentState::On,
+            // P1.1 drives the fader track mid-way so the lit `▮` rows and the
+            // amber fill boundary are visible in the snapshots (0% would
+            // render an all-dim track, task 1.2 design D1).
+            "P1.1" => comp.state = ComponentState::Value(0.5),
             _ => {}
         }
     }

@@ -790,9 +790,13 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         };
         // Fader modules (p8s8 Faderbank, m4 motorfader) address their faders
         // with P registers, which parse as `Knob` — the module's geometry key
-        // is what marks them as faders so `physical_visuals` can tell them
-        // from knobs/encoders (design D1).
-        let is_fader = module_is_fader(&chain.modules[module_idx].geometry_key);
+        // marks the slider cells as faders so `physical_visuals` can tell
+        // them from knobs/encoders (design D1). The kind guard keeps the
+        // S/L-family cells on the same faceplate (switches, LEDs) out of the
+        // fader-arm/track rendering: `physical_visuals` ignores the flag for
+        // non-slider kinds anyway, so this only narrows the cell renderer.
+        let is_fader = module_is_fader(&chain.modules[module_idx].geometry_key)
+            && matches!(comp.kind, ComponentKind::Knob | ComponentKind::Encoder);
         let (symbol, state_text, fg_color) = physical_visuals(comp, is_shift_active, is_fader);
         let display_style = dim_style(
             if is_hovered {
@@ -815,6 +819,7 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             display_style,
             app.processing_paused,
             patch,
+            is_fader,
         );
         // Hit rect is the mapped cell the component rendered into (the same
         // rect as `physical_full_rects`), so handler hit-testing stays in
@@ -913,6 +918,7 @@ fn render_physical_cell(
     display_style: Style,
     paused: bool,
     patch: &crate::patch::Patch,
+    fader: bool,
 ) {
     if let Some(led_id) = &comp.led {
         if area.width >= 5 && area.height >= 3 {
@@ -959,6 +965,18 @@ fn render_physical_cell(
         }
     }
 
+    // Fader face (design D1): a bottom-up vertical track replaces the flat
+    // glyph + percentage in the compact path. The boxed-LED branch above
+    // stays authoritative for LED-folding faders (task 4.1).
+    if fader {
+        let value = match &comp.state {
+            ComponentState::Value(v) => *v,
+            _ => 0.0,
+        };
+        render_fader_track(frame, area, value, label, state_text, display_style, paused);
+        return;
+    }
+
     // Compact cell: glyph always; the label joins the first row when the
     // cell is wide enough, ellipsized so it never spills past the cell.
     let first = if area.width >= 3 {
@@ -982,6 +1000,60 @@ fn render_physical_cell(
             area.y + 1,
             &state,
             area.width as usize,
+            dim_style(Style::default().fg(theme::active().muted), paused),
+        );
+    }
+}
+
+/// The DROID fader's faceplate LED strip (design D1): a bottom-up vertical
+/// track filling `value × height` rows. Filled rows are the lit `▮` glyph in
+/// the amber `fader_led_bar` token — the top of the fill marks the fader
+/// position — and the rows above stay the hollow `▯` in the muted shade, so
+/// 0% renders an empty track and 100% a full one. The label and percentage
+/// share the columns right of the track when the cell is wide enough.
+fn render_fader_track(
+    frame: &mut Frame,
+    area: Rect,
+    value: f32,
+    label: &str,
+    state_text: &str,
+    base: Style,
+    paused: bool,
+) {
+    let height = area.height as usize;
+    if height == 0 {
+        return;
+    }
+    let fill = ((value.clamp(0.0, 1.0) * height as f32).round() as usize).min(height);
+    let lit = base.fg(theme::active().fader_led_bar);
+    let dim = base.fg(theme::active().muted);
+    for row in 0..height {
+        let filled = row >= height - fill;
+        frame.buffer_mut().set_stringn(
+            area.x,
+            area.y + row as u16,
+            if filled { "▮" } else { "▯" },
+            1,
+            if filled { lit } else { dim },
+        );
+    }
+    let text_w = (area.width as usize).saturating_sub(1);
+    if text_w == 0 {
+        return;
+    }
+    let label_part = truncate_with_ellipsis(label, text_w);
+    if !label_part.is_empty() {
+        frame
+            .buffer_mut()
+            .set_stringn(area.x + 1, area.y, &label_part, text_w, base);
+    }
+    if height >= 2 {
+        let state = truncate_with_ellipsis(state_text, text_w);
+        frame.buffer_mut().set_stringn(
+            area.x + 1,
+            area.y + 1,
+            &state,
+            text_w,
             dim_style(Style::default().fg(theme::active().muted), paused),
         );
     }
@@ -4613,6 +4685,8 @@ mod switch_rendering_tests {
 #[cfg(test)]
 mod fader_marker_tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     /// A knob component as `physical_visuals` consumes it — faders parse from
     /// P registers as `Knob`, so the fader arm is selected by the caller's
@@ -4675,6 +4749,75 @@ mod fader_marker_tests {
             "the two arms must stay tellable apart in mono"
         );
         theme::set_test_theme(None);
+    }
+
+    #[test]
+    fn fader_track_fills_bottom_up_with_lit_and_dim_rows() {
+        theme::set_test_theme(Some(theme::Theme::mono()));
+        let backend = TestBackend::new(5, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_fader_track(
+                    frame,
+                    Rect::new(0, 0, 5, 3),
+                    0.5,
+                    "P1.1",
+                    "50%",
+                    Style::default(),
+                    false,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // 50% of a 3-row cell rounds to 2 filled rows, bottom-up.
+        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "▮", "bottom row lit");
+        assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "▮", "middle row lit");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "▯", "top row stays dim");
+        assert_eq!(
+            buf.cell((0, 2)).unwrap().style().fg,
+            Some(theme::Theme::mono().fader_led_bar),
+            "lit rows take the amber fader_led_bar token"
+        );
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().style().fg,
+            Some(theme::Theme::mono().muted),
+            "dim rows take the muted shade"
+        );
+        // Text columns right of the track: label on row 1, percentage on row 2.
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "P", "label column");
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "5", "percentage column");
+        theme::set_test_theme(None);
+    }
+
+    #[test]
+    fn fader_track_extremes_empty_and_full() {
+        let backend = TestBackend::new(1, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut render = |value: f32| {
+            terminal
+                .draw(|frame| {
+                    render_fader_track(
+                        frame,
+                        Rect::new(0, 0, 1, 3),
+                        value,
+                        "",
+                        "",
+                        Style::default(),
+                        false,
+                    )
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let empty = render(0.0);
+        for y in 0..3 {
+            assert_eq!(empty.cell((0, y)).unwrap().symbol(), "▯", "0%: empty track");
+        }
+        let full = render(1.0);
+        for y in 0..3 {
+            assert_eq!(full.cell((0, y)).unwrap().symbol(), "▮", "100%: full track");
+        }
     }
 }
 
