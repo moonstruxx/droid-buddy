@@ -9,7 +9,11 @@ Replica contract (design D4):
   - The INI parsing replicates Patch::from_ini_str (src/patch.rs):
     module-default expansion (a bare `[p2b8]` section declares B/L/P
     defaults), hardware-token scanning (scan_hw_tokens), LED association
-    (`led = L.N` + `ledN` suffix pairing with same-suffix element entries),
+    (`led = L.N` + `ledN` suffix pairing with same-suffix element entries,
+    plus per-controller device defaults applied only when no explicit
+    pairing exists: M4 touch plate `B{inst}.{n}` -> `L{inst}.{n}`,
+    master CV I/O `I{n}` -> `R{n}` / `O{n}` -> `R{8+n}`; B32 and every
+    other controller stay white-only),
     shift-group auto-assignment from the controller number
     `(leading_number(id) - 1) % 4`, and controller-panel assignment
     (CV I/O always "CV I/O"; known controller sections by name; else
@@ -367,6 +371,32 @@ def parse_patch_components(content: str):
                 comp["controller"] = "Controller %d" % n
             else:
                 comp["controller"] = "Other"
+
+    # Device-default LED wiring (task 3.1): applied only when no explicit
+    # `led`/`ledN` association was captured. M4 touch plate B{inst}.{n} gets
+    # its RGB LED twin L{inst}.{n}; master CV jacks default-link to R
+    # registers (I{n} -> R{n}, O{n} -> R{8+n} in the 4x4 matrix); B32 and
+    # every other controller stay white-only (None).
+    def device_default_led(controller, comp_id):
+        ctl = controller.lower()
+        if ctl in ("m4", "motorfader"):
+            if comp_id.startswith("B") and "." in comp_id:
+                inst, n = comp_id[1:].split(".", 1)
+                return "L%s.%s" % (inst, n)
+        elif ctl in ("cv i/o", "master"):
+            if comp_id.startswith("I"):
+                n = leading_number(comp_id)
+                if n is not None and 1 <= n <= 8:
+                    return "R%d" % n
+            if comp_id.startswith("O"):
+                n = leading_number(comp_id)
+                if n is not None and 1 <= n <= 8:
+                    return "R%d" % (8 + n)
+        return None
+
+    for comp in components:
+        if comp["led"] is None:
+            comp["led"] = device_default_led(comp["controller"], comp["id"])
 
     return components
 

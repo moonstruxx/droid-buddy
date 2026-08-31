@@ -858,6 +858,11 @@ impl Patch {
                     }
                 },
             };
+            // Per-controller device-default LED wiring (task 3.1): only when
+            // the section yielded no explicit `led`/`ledN` association.
+            if comp.led.is_none() {
+                comp.led = device_default_led(&comp.controller, &comp.id);
+            }
         }
 
         // Assign shift groups from modules (if modules have shift group info)
@@ -1493,6 +1498,40 @@ fn family_kind(family: char) -> ComponentKind {
         'S' => ComponentKind::Switch,
         'E' => ComponentKind::Encoder,
         _ => ComponentKind::Button,
+    }
+}
+
+/// Per-controller device-default LED wiring, applied only when a section
+/// yielded no explicit `led`/`ledN` association (`comp.led` is `None`). These
+/// are the hardware's implicit links: an M4 (Motorfader) touch plate
+/// `B{inst}.{n}` has an RGB LED twin at `L{inst}.{n}` (L state + R color), and
+/// each master CV jack is default-linked to an R register in the master 4×4
+/// matrix — `I{n}` → `R{n}`, `O{n}` → `R{8+n}`. B32 (white-only buttons) and
+/// every other controller map to `None`. Keyed by the resolved controller
+/// name, case-insensitive.
+fn device_default_led(controller: &str, id: &str) -> Option<String> {
+    match controller.to_ascii_lowercase().as_str() {
+        // M4 (Motorfader) touch plate: the B token's L-register twin.
+        "m4" | "motorfader" => {
+            let (inst, n) = id.strip_prefix('B')?.split_once('.')?;
+            Some(format!("L{inst}.{n}"))
+        }
+        // Master CV I/O: the R-register default link (CD channel).
+        "cv i/o" | "master" => {
+            if let Some(n) = id.strip_prefix('I').and_then(|s| s.parse::<u32>().ok()) {
+                if (1..=8).contains(&n) {
+                    return Some(format!("R{n}"));
+                }
+            }
+            if let Some(n) = id.strip_prefix('O').and_then(|s| s.parse::<u32>().ok()) {
+                if (1..=8).contains(&n) {
+                    return Some(format!("R{}", 8 + n));
+                }
+            }
+            None
+        }
+        // B32 and every other controller: white-only, no RGB default.
+        _ => None,
     }
 }
 
@@ -2301,6 +2340,101 @@ mod tests {
         let patch = Patch::from_ini_str(content, String::from("fadermatrix_leds")).unwrap();
         let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
         assert_eq!(b1_1.led.as_deref(), Some("L1.1"));
+    }
+
+    #[test]
+    fn m4_touch_plate_gets_rgb_led_twin_default() {
+        // An M4 (Motorfader) touch plate B{inst}.{n} is default-linked to its
+        // RGB LED twin L{inst}.{n} (L state + R color) when the section gives
+        // no explicit `led`/`ledN` (task 3.1).
+        let content = "[m4]\n[m4]\n";
+        let patch = Patch::from_ini_str(content, String::from("m4_defaults")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(find("B1.1").led.as_deref(), Some("L1.1"));
+        assert_eq!(find("B1.4").led.as_deref(), Some("L1.4"));
+        assert_eq!(find("B2.2").led.as_deref(), Some("L2.2"));
+        // The M4's own P faders and L LEDs have no LED default of their own.
+        assert_eq!(find("P1.1").led, None);
+        assert_eq!(find("L1.1").led, None);
+    }
+
+    #[test]
+    fn b32_buttons_stay_white_only_without_led_default() {
+        // B32 buttons are white-only: no RGB default may be invented (task 3.1).
+        let content = "[b32]\n";
+        let patch = Patch::from_ini_str(content, String::from("b32_defaults")).unwrap();
+        assert!(
+            patch
+                .hw_components
+                .iter()
+                .filter(|c| c.kind == ComponentKind::Button)
+                .all(|c| c.led.is_none()),
+            "b32 buttons must stay LED-less"
+        );
+    }
+
+    #[test]
+    fn master_cv_jacks_default_link_to_r_registers() {
+        // Master CV I/O jacks default-link to R registers (CD channel):
+        // I{n} -> R{n} and O{n} -> R{8+n} in the master 4x4 matrix (task 3.1).
+        let content =
+            "[copy]\n    input = I1\n    output = O1\n[copy]\n    input = I8\n    output = O8\n";
+        let patch = Patch::from_ini_str(content, String::from("master_defaults")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(find("I1").controller, "CV I/O");
+        assert_eq!(find("I1").led.as_deref(), Some("R1"));
+        assert_eq!(find("O1").led.as_deref(), Some("R9"));
+        assert_eq!(find("I8").led.as_deref(), Some("R8"));
+        assert_eq!(find("O8").led.as_deref(), Some("R16"));
+        // Beyond the 4x4 matrix there is no default link (master18, droid_tui-9np).
+        let content2 = "[copy]\n    input = I9\n    output = O9\n";
+        let patch2 = Patch::from_ini_str(content2, String::from("master18_defaults")).unwrap();
+        assert_eq!(
+            patch2
+                .hw_components
+                .iter()
+                .find(|c| c.id == "I9")
+                .unwrap()
+                .led,
+            None
+        );
+        assert_eq!(
+            patch2
+                .hw_components
+                .iter()
+                .find(|c| c.id == "O9")
+                .unwrap()
+                .led,
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_led_pairing_wins_over_device_default() {
+        // An explicit `led`/`ledN` in the section always beats the
+        // per-controller device default (task 3.1).
+        let m4_bare = "[m4]\n[button]\n    button = B1.1\n    led = L5.5\n";
+        let patch = Patch::from_ini_str(m4_bare, String::from("m4_explicit_led")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(
+            b1_1.led.as_deref(),
+            Some("L5.5"),
+            "bare `led` beats the M4 default L1.1"
+        );
+
+        let m4_numbered = "[m4]\n[button]\n    button1 = B1.2\n    led1 = L6.6\n";
+        let patch = Patch::from_ini_str(m4_numbered, String::from("m4_explicit_ledn")).unwrap();
+        let b1_2 = patch.hw_components.iter().find(|c| c.id == "B1.2").unwrap();
+        assert_eq!(
+            b1_2.led.as_deref(),
+            Some("L6.6"),
+            "numbered `ledN` beats the M4 default L1.2"
+        );
+
+        let b32_explicit = "[b32]\n[button]\n    button = B1.1\n    led = L7.7\n";
+        let patch = Patch::from_ini_str(b32_explicit, String::from("b32_explicit_led")).unwrap();
+        let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(b1_1.led.as_deref(), Some("L7.7"));
     }
 
     #[test]
