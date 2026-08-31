@@ -1,5 +1,9 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::sync::Mutex;
 
+use crate::config::Settings;
 use crate::plugin::{PluginCircuit, PluginFile, PluginParam};
 use serde::{Deserialize, Serialize};
 
@@ -361,8 +365,60 @@ pub fn get_param_names(circuit: &str) -> Option<Vec<String>> {
 // Schema loading
 // ---------------------------------------------------------------------------
 
+/// The process-wide cached schema, filled on first `load_schema()` call (or
+/// by task 2.2's `schema::init`). `Mutex`, not `OnceLock`, so tests can reset
+/// it and no test ordering can poison later tests — same rationale as
+/// `theme::ACTIVE`.
+static SCHEMA_CACHE: Mutex<Option<&'static Schema>> = Mutex::new(None);
+
+thread_local! {
+    // Per-thread schema override so parallel tests can pin or reset their
+    // view of the cache without observing each other's state (theme.rs's
+    // `TEST_OVERRIDE` idiom).
+    static TEST_OVERRIDE: RefCell<Option<&'static Schema>> = const { RefCell::new(None) };
+}
+
+/// Test-only: serializes tests that install a plugin-merged schema into the
+/// global cache against tests that assert on the raw embedded schema (exact
+/// circuit counts or ramsizes). `init` fills the cache before returning, so a
+/// merged schema stays observable to concurrent readers for the whole `init`
+/// call — shrinking that window is not enough, readers must be excluded from
+/// it entirely (`tests::cache_guard`).
+#[cfg(test)]
+pub(crate) static TEST_CACHE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Load the authoritative schema from the embedded `circuits.json`.
-pub fn load_schema() -> Schema {
+///
+/// Returns a cached `&'static Schema`. The first call parses the embedded
+/// JSON once and leaks it into the process-wide cache; later calls return
+/// the same instance. Callers keep taking `&Schema` unchanged — a
+/// `&'static Schema` coerces to `&Schema` at use sites — and tests pin/reset
+/// the cache via `set_test_schema` / `reset_test_schema`.
+pub fn load_schema() -> &'static Schema {
+    if let Some(schema) = TEST_OVERRIDE.with(|slot| *slot.borrow()) {
+        return schema;
+    }
+    if let Some(schema) = SCHEMA_CACHE.lock().map(|guard| *guard).ok().flatten() {
+        return schema;
+    }
+    // Uninitialized fallback: parse the embedded JSON once and cache it.
+    // task 2.2 sets the merged schema here via `schema::init`; until then
+    // the cache holds the pure embedded schema.
+    let installed: &'static Schema = Box::leak(Box::new(parse_embedded()));
+    if let Ok(mut guard) = SCHEMA_CACHE.lock() {
+        if let Some(existing) = *guard {
+            // A concurrent thread cached first — reuse the canonical
+            // instance instead of replacing it.
+            return existing;
+        }
+        *guard = Some(installed);
+    }
+    installed
+}
+
+/// Parse the embedded `circuits.json` into the schema shape. Pure; the
+/// fallback path of `load_schema` calls this at most once per process.
+fn parse_embedded() -> Schema {
     let raw: RawSchema =
         serde_json::from_str(CIRCUITS_JSON).expect("embedded circuits.json must be valid JSON");
 
@@ -438,6 +494,53 @@ pub fn load_schema() -> Schema {
         circuits,
         controllers,
         manual_references,
+    }
+}
+
+/// Test-only: pins the schema `load_schema()` hands out on the calling
+/// thread (`None` restores the global cache). Mirrors `theme::set_test_theme`
+/// so parallel tests never observe each other's injected schema.
+pub fn set_test_schema(schema: Option<&'static Schema>) {
+    TEST_OVERRIDE.with(|slot| *slot.borrow_mut() = schema);
+}
+
+/// Test-only: clears the cached schema — this thread's override and the
+/// global — so the next `load_schema()` re-runs the uninitialized fallback
+/// parse. This is exactly why the cache is a `Mutex` rather than a
+/// `OnceLock`: tests must be able to reset it.
+pub fn reset_test_schema() {
+    TEST_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    if let Ok(mut guard) = SCHEMA_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// Install the process-wide schema, merging plugin circuits per the
+/// `[plugins]` settings. Called once from `main()` before `ratatui::init()`
+/// so plugin shadow/skip warnings land on a clean terminal (ADR 14).
+///
+/// `plugins.enabled == false` installs the pure embedded schema and returns
+/// without touching any plugin directory. Otherwise the configured
+/// `plugins.dir` override wins; absent that, discovery resolves the standard
+/// XDG plugins dir from the injected environment values (`None` in tests —
+/// the process env is never read here, mirroring `plugin::discover_plugins`
+/// and `config::config_dir`).
+///
+/// Content-idempotent: a second call with the same settings yields a schema
+/// with identical circuit keys and counts — the extra `Box::leak` of a fresh
+/// merge is acceptable for a process-lifetime static.
+pub fn init(settings: &Settings, xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) {
+    let installed: &'static Schema = if settings.plugins.enabled {
+        let files = match settings.plugins.plugins_dir() {
+            Some(dir) => crate::plugin::discover_plugins_from_dir(dir),
+            None => crate::plugin::discover_plugins(xdg_config_home, home),
+        };
+        Box::leak(Box::new(merge_plugins(parse_embedded(), &files)))
+    } else {
+        Box::leak(Box::new(parse_embedded()))
+    };
+    if let Ok(mut guard) = SCHEMA_CACHE.lock() {
+        *guard = Some(installed);
     }
 }
 
@@ -566,7 +669,7 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
 /// Returns `None` if no candidate within distance ≤ 3.
 pub fn suggest_circuit(name: &str) -> Option<String> {
     let schema = load_schema();
-    suggest_circuit_with_schema(name, &schema)
+    suggest_circuit_with_schema(name, schema)
 }
 
 /// Same as `suggest_circuit` but with an explicit schema (pure, no re-parse).
@@ -592,10 +695,25 @@ pub fn suggest_circuit_with_schema(name: &str, schema: &Schema) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use crate::config::{Plugins, Settings};
+    use std::path::{Path, PathBuf};
+
+    /// Serializes cache-sensitive tests: anything that writes a
+    /// plugin-merged schema into the global cache (`schema::init`) or
+    /// asserts on the raw embedded schema (exact circuit counts or
+    /// ramsizes) must hold this guard for its whole body, so parallel runs
+    /// never observe a half-installed cache. Recovers from poisoning via
+    /// `into_inner` — a failing test drops its guard while still holding
+    /// the lock.
+    fn cache_guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn schema_has_76_circuits() {
+        let _guard = cache_guard();
         let schema = load_schema();
         assert_eq!(
             schema.circuits.len(),
@@ -668,13 +786,13 @@ mod tests {
     fn suggest_circuit_finds_close_match() {
         let schema = load_schema();
         // "motoquncer" -> "motoquencer"
-        let s = suggest_circuit_with_schema("motoquncer", &schema);
+        let s = suggest_circuit_with_schema("motoquncer", schema);
         assert_eq!(s.as_deref(), Some("motoquencer"));
         // exact match must not suggest itself (dist 0 filtered)
-        let s = suggest_circuit_with_schema("copy", &schema);
+        let s = suggest_circuit_with_schema("copy", schema);
         assert_ne!(s.as_deref(), Some("copy"));
         // very distant -> None
-        let s = suggest_circuit_with_schema("zzzzzz", &schema);
+        let s = suggest_circuit_with_schema("zzzzzz", schema);
         assert!(s.is_none());
     }
 
@@ -727,7 +845,8 @@ mod tests {
 
     #[test]
     fn non_colliding_plugin_circuit_is_additive() {
-        let base = load_schema();
+        let _guard = cache_guard();
+        let base = (*load_schema()).clone();
         let merged = merge_plugins(base.clone(), &fixture_files(&["valid.toml"]));
 
         // NEWCKT is new; `copy` overrides in place, so the count grows by one.
@@ -743,7 +862,8 @@ mod tests {
 
     #[test]
     fn colliding_plugin_circuit_overrides_embedded() {
-        let base = load_schema();
+        let _guard = cache_guard();
+        let base = (*load_schema()).clone();
         let merged = merge_plugins(base.clone(), &fixture_files(&["valid.toml"]));
 
         // Embedded copy is ramsize 24; the plugin override declares 32.
@@ -755,7 +875,7 @@ mod tests {
 
     #[test]
     fn plugin_param_expansion_uses_embedded_path() {
-        let merged = merge_plugins(load_schema(), &fixture_files(&["valid.toml"]));
+        let merged = merge_plugins((*load_schema()).clone(), &fixture_files(&["valid.toml"]));
 
         // NEWCKT's `prefix`/`count`/`start_at` trio expands exactly like an
         // embedded circuit's through `get_param_names`.
@@ -775,7 +895,7 @@ mod tests {
 
     #[test]
     fn empty_plugin_slice_leaves_schema_byte_identical() {
-        let base = load_schema();
+        let base = (*load_schema()).clone();
         let merged = merge_plugins(base.clone(), &[]);
         assert_eq!(
             serde_json::to_vec(&merged).expect("serialize merged"),
@@ -785,7 +905,7 @@ mod tests {
 
     #[test]
     fn later_plugin_file_wins_over_earlier() {
-        let base = load_schema();
+        let base = (*load_schema()).clone();
         let forward = merge_plugins(
             base.clone(),
             &fixture_files(&["valid.toml", "newckt_override.toml"]),
@@ -797,5 +917,116 @@ mod tests {
             &fixture_files(&["newckt_override.toml", "valid.toml"]),
         );
         assert_eq!(backward.circuits["newckt"].ramsize, 256);
+    }
+
+    // --- Cached schema (task 2.1) ----------------------------------------
+
+    #[test]
+    fn load_schema_returns_same_static_schema() {
+        let first = load_schema();
+        // Pin this thread's view so a parallel cache-reset test cannot race
+        // the identity assertion mid-test; restore before returning.
+        set_test_schema(Some(first));
+        let second = load_schema();
+        let third = load_schema();
+        set_test_schema(None);
+        assert!(
+            std::ptr::eq(first, second),
+            "repeated calls must return the same cached instance"
+        );
+        assert!(std::ptr::eq(first, third));
+    }
+
+    #[test]
+    fn uninitialized_fallback_returns_valid_embedded_schema() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        let schema = load_schema();
+        // An empty cache must still hand out the pure embedded schema, never
+        // a plugin circuit, and never panic on the fallback parse.
+        assert_eq!(schema.circuits.len(), 76);
+        assert!(schema.circuits.contains_key("motoquencer"));
+        assert!(!schema.circuits.contains_key("newckt"));
+        assert!(schema.available_memory.contains_key("master18"));
+    }
+
+    #[test]
+    fn no_cross_test_poisoning_a() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        let schema = load_schema();
+        assert_eq!(schema.circuits.len(), 76);
+        assert!(schema.circuits.contains_key("copy"));
+        assert!(!schema.circuits.contains_key("newckt"));
+    }
+
+    #[test]
+    fn no_cross_test_poisoning_b() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        let schema = load_schema();
+        assert_eq!(schema.circuits.len(), 76);
+        assert!(schema.circuits.contains_key("copy"));
+        assert!(!schema.circuits.contains_key("newckt"));
+    }
+
+    // --- schema::init (task 2.2) ----------------------------------------
+
+    fn settings_with_plugins(enabled: bool, dir: Option<PathBuf>) -> Settings {
+        Settings {
+            plugins: Plugins { enabled, dir },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn init_disabled_installs_embedded_only() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        init(&settings_with_plugins(false, None), None, None);
+        let schema = load_schema();
+        // Disabled plugins: pure embedded schema, no discovery, no merge.
+        assert_eq!(schema.circuits.len(), 76);
+        assert!(schema.circuits.contains_key("motoquencer"));
+        assert!(!schema.circuits.contains_key("newckt"));
+        reset_test_schema();
+    }
+
+    #[test]
+    fn init_with_dir_override() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        init(
+            &settings_with_plugins(true, Some(PathBuf::from(PLUGIN_FIXTURES))),
+            None,
+            None,
+        );
+        let schema = load_schema();
+        // The fixtures dir adds `newckt` and overrides embedded `copy`.
+        assert!(schema.circuits.contains_key("newckt"));
+        assert_eq!(schema.circuits["copy"].ramsize, 32);
+        reset_test_schema();
+    }
+
+    #[test]
+    fn init_is_idempotent() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        let settings = settings_with_plugins(true, Some(PathBuf::from(PLUGIN_FIXTURES)));
+        init(&settings, None, None);
+        let first = load_schema();
+        init(&settings, None, None);
+        let second = load_schema();
+        // Identical circuit key sets and plugin definitions — a second init
+        // must not double-merge or nest plugin circuits.
+        let first_keys: HashSet<&String> = first.circuits.keys().collect();
+        let second_keys: HashSet<&String> = second.circuits.keys().collect();
+        assert_eq!(first_keys, second_keys);
+        assert_eq!(first.circuits.len(), second.circuits.len());
+        assert_eq!(
+            first.circuits["newckt"].ramsize,
+            second.circuits["newckt"].ramsize
+        );
+        reset_test_schema();
     }
 }

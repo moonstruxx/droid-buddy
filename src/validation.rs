@@ -442,7 +442,7 @@ mod tests {
     fn validate(ini: &str) -> Vec<ValidationIssue> {
         let patch = Patch::from_ini_str(ini, String::from("test")).unwrap();
         let schema = load_schema();
-        validate_patch(&patch, &schema)
+        validate_patch(&patch, schema)
     }
 
     fn has_code(issues: &[ValidationIssue], code: &str) -> bool {
@@ -455,6 +455,12 @@ mod tests {
 
     #[test]
     fn schema_still_has_76_circuits() {
+        // Exclude the schema::init tests' merged-schema window (see
+        // schema::TEST_CACHE_LOCK): exact counts must observe the embedded
+        // schema only.
+        let _guard = crate::schema::TEST_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let schema = load_schema();
         assert_eq!(schema.circuits.len(), 76);
     }
@@ -713,7 +719,7 @@ mod tests {
         let schema = load_schema();
         let unknown = "[unknowncircuit]\nfoo = 1\n[p2b8]\n";
         let patch = Patch::from_ini_str(unknown, String::from("t")).unwrap();
-        let issues = validate_patch(&patch, &schema);
+        let issues = validate_patch(&patch, schema);
         // Should have unknown_circuit but no ram_overflow because unknown=true
         assert!(has_code(&issues, "unknown_circuit"));
         assert!(!has_code(&issues, "ram_overflow"));
@@ -745,8 +751,8 @@ mod tests {
         let ini = "[p2b8]\n[copy]\ninput = B33.1\noutput = _A\n[copy]\ninput = _A\noutput = O1\n";
         let patch = Patch::from_ini_str(ini, String::from("t")).unwrap();
         let schema = load_schema();
-        let a = validate_patch(&patch, &schema);
-        let b = validate_patch(&patch, &schema);
+        let a = validate_patch(&patch, schema);
+        let b = validate_patch(&patch, schema);
         assert_eq!(a, b);
     }
 

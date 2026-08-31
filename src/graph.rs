@@ -244,7 +244,7 @@ fn compute_latency(
     let schema = load_schema();
     // The provider merges config `[latency]` overrides over the
     // ramsize-proportional heuristic; identical input stays deterministic.
-    let circuit_avg = |id: &NodeId| cost.circuit_avg(id, &schema);
+    let circuit_avg = |id: &NodeId| cost.circuit_avg(id, schema);
     let (lat_edges, summary) = forward_latency(edges, &node_positions, circuit_avg);
     Some(LatencyData {
         edges: lat_edges,

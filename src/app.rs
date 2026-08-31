@@ -976,7 +976,7 @@ impl App {
     /// minimap/source-pane geometry yet (renderer will publish on next frame).
     /// Clears inline edit overlay and current patch path (sample/demo loads).
     ///
-    /// Validates via `validate_patch(&patch, &load_schema())`. When at least one
+    /// Validates via `validate_patch(&patch, load_schema())`. When at least one
     /// `Severity::Error` is present the load is gated: the current patch is
     /// kept (or stays `None`), `validation_issues` + `showing_validation` are
     /// set, `ValidationCompleted` is dispatched, and the method returns `false`.
@@ -1065,7 +1065,7 @@ impl App {
     }
 
     pub fn load_patch(&mut self, patch: Patch) -> bool {
-        let issues = validate_patch(&patch, &load_schema());
+        let issues = validate_patch(&patch, load_schema());
         // Gate only on hard errors (unknown_circuit, ram_overflow). Legacy
         // fixtures like source_navigation.ini contain unknown_param for
         // switch/button/math that pre-date circuits.json 76; treat those as
@@ -1171,7 +1171,7 @@ impl App {
     /// return `false`; otherwise the new patch is installed and `true` is
     /// returned.
     pub fn load_patch_at(&mut self, path: &Path, patch: Patch) -> bool {
-        let issues = validate_patch(&patch, &load_schema());
+        let issues = validate_patch(&patch, load_schema());
         let has_hard_error = issues
             .iter()
             .any(|i| i.severity == Severity::Error && i.code != "unknown_param");
