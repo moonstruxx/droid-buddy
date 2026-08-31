@@ -2,10 +2,10 @@
 
 ## 1. Test rewrites — physical-era contracts (horst-engineer)
 
-- [ ] 1.1 Rewrite `regression_boxed_cell_renders_led_frame_text_cell_stays_plain`, `regression_click_on_boxed_cell_toggles_and_selects`, `regression_mixed_grid_cells_coexist_without_overlap` to assert physical-view cell rendering (boxed LED cells, click toggle/select, coexistence without overlap) via the shared `physical_coincidence_*` fixture style; verify: these 3 tests pass and the renderer code paths they exercise are the physical view's <!-- agent: horst-engineer.build, depends_on: [], touches: [src/regression.rs] -->
-- [ ] 1.2 Rewrite `regression_cell_geometry_no_overflow_overlap`, `regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale`, `regression_p2b8_knobs_render_fully_with_embedded_viewer_open` to assert geometry/hit-rect invariants under the physical renderer (hit rects match rendered cells at 75–200% zoom, embedded viewer open); verify: 3 tests pass <!-- agent: horst-engineer.build, depends_on: [1.1], touches: [src/regression.rs] -->
-- [ ] 1.3 Rewrite `regression_p2b8_panel_uniform_rows`, `regression_modifier_shift_plus_modifier_coexist`, `regression_theme_boxed_cells_and_shift_surfaces` to physical-era equivalents (row uniformity via module sub-blocks, modifier+shift coexistence, theme boxed cells + shift surfaces); delete assertions whose intent is superseded by an existing physical-era test; verify: 3 tests pass and no deleted assertion lacks a superseding test <!-- agent: horst-engineer.build, depends_on: [1.2], touches: [src/regression.rs] -->
-- [ ] 1.4 Run `cargo test --lib regression` and confirm all rewritten `regression_*` tests pass (expect 0 failures in the lane) <!-- agent: horst-engineer.build, depends_on: [1.3], touches: [src/regression.rs] -->
+- [x] 1.1 Rewrite `regression_boxed_cell_renders_led_frame_text_cell_stays_plain`, `regression_click_on_boxed_cell_toggles_and_selects`, `regression_mixed_grid_cells_coexist_without_overlap` to assert physical-view cell rendering (boxed LED cells, click toggle/select, coexistence without overlap) via the shared `physical_coincidence_*` fixture style; verify: these 3 tests pass and the renderer code paths they exercise are the physical view's <!-- agent: horst-engineer.build, depends_on: [], touches: [src/regression.rs] -->
+- [x] 1.2 Rewrite `regression_cell_geometry_no_overflow_overlap`, `regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale`, `regression_p2b8_knobs_render_fully_with_embedded_viewer_open` to assert geometry/hit-rect invariants under the physical renderer (hit rects match rendered cells at 75–200% zoom, embedded viewer open); verify: 3 tests pass <!-- agent: horst-engineer.build, depends_on: [1.1], touches: [src/regression.rs] -->
+- [x] 1.3 Rewrite `regression_p2b8_panel_uniform_rows`, `regression_modifier_shift_plus_modifier_coexist`, `regression_theme_boxed_cells_and_shift_surfaces` to physical-era equivalents (row uniformity via module sub-blocks, modifier+shift coexistence, theme boxed cells + shift surfaces); delete assertions whose intent is superseded by an existing physical-era test; verify: 3 tests pass and no deleted assertion lacks a superseding test <!-- agent: horst-engineer.build, depends_on: [1.2], touches: [src/regression.rs] -->
+- [x] 1.4 Run `cargo test --lib regression` and confirm all rewritten `regression_*` tests pass (expect 0 failures in the lane) <!-- agent: horst-engineer.build, depends_on: [1.3], touches: [src/regression.rs] -->
 
 ## 2. Snapshot re-acceptance (horst-engineer, depends_on 1)
 
@@ -23,7 +23,7 @@
 
 ## 5. Clippy lints (rusty-engineer)
 
-- [ ] 5.1 Fix the 2 pre-existing clippy lints in `config.rs` and 2 in `patch.rs` with minimal behavior-preserving edits (no `#[allow]`); verify: `cargo clippy --all-targets --all-features --locked -- -D warnings` exits 0 <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/config.rs, src/patch.rs] -->
+- [x] 5.1 Fix the 2 pre-existing clippy lints in `config.rs` and 2 in `patch.rs` with minimal behavior-preserving edits (no `#[allow]`); verify: `cargo clippy --all-targets --all-features --locked -- -D warnings` exits 0 <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/config.rs, src/patch.rs] -->
 
 ## 6. Full gate (horst-engineer, depends_on 2,3,4,5)
 
