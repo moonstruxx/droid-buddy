@@ -788,7 +788,12 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         } else {
             patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store)
         };
-        let (symbol, state_text, fg_color) = physical_visuals(comp, is_shift_active);
+        // Fader modules (p8s8 Faderbank, m4 motorfader) address their faders
+        // with P registers, which parse as `Knob` — the module's geometry key
+        // is what marks them as faders so `physical_visuals` can tell them
+        // from knobs/encoders (design D1).
+        let is_fader = module_is_fader(&chain.modules[module_idx].geometry_key);
+        let (symbol, state_text, fg_color) = physical_visuals(comp, is_shift_active, is_fader);
         let display_style = dim_style(
             if is_hovered {
                 Style::default()
@@ -823,9 +828,14 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
 /// draws so both presentations of a cell coincide (D11); buttons/switches
 /// keep their On/Off glyphs and knobs/encoders/faders their percentage, so
 /// toggle semantics survive the physical presentation.
+fn module_is_fader(geometry_key: &str) -> bool {
+    matches!(geometry_key, "p8s8" | "m4")
+}
+
 fn physical_visuals(
     comp: &crate::patch::HwComponent,
     is_shift_active: bool,
+    fader: bool,
 ) -> (String, String, Color) {
     match comp.kind {
         ComponentKind::Button => {
@@ -850,6 +860,15 @@ fn physical_visuals(
             String::from("CV OUT"),
             theme::active().cv_out,
         ),
+        ComponentKind::Knob | ComponentKind::Encoder if fader => {
+            // The DROID fader's amber LED strip: a vertical bar in its own
+            // token, distinct from the knob/encoder disc and the plain LED.
+            let val = match &comp.state {
+                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
+                _ => String::from("---"),
+            };
+            (String::from("▮"), val, theme::active().fader_led_bar)
+        }
         ComponentKind::Knob | ComponentKind::Encoder => {
             let val = match &comp.state {
                 ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
@@ -4545,7 +4564,7 @@ mod switch_rendering_tests {
     fn value_state_switch_renders_percentage_in_switch_token() {
         theme::set_test_theme(Some(theme::Theme::mono()));
         let comp = switch_component(ComponentState::Value(0.35));
-        let (glyph, state, fg) = physical_visuals(&comp, false);
+        let (glyph, state, fg) = physical_visuals(&comp, false, false);
         assert_eq!(state, "35%", "Value-state switch renders the percentage");
         assert_eq!(glyph, "◉");
         assert_eq!(
@@ -4561,7 +4580,7 @@ mod switch_rendering_tests {
         // Default (classic) palette: switch == button, so classic output is
         // byte-identical to the previous button-token rendering.
         let off = switch_component(ComponentState::Off);
-        let (glyph, state, fg) = physical_visuals(&off, false);
+        let (glyph, state, fg) = physical_visuals(&off, false, false);
         assert_eq!(glyph, "□", "Off switch keeps the hollow glyph");
         assert_eq!(state, "OFF", "Off switch keeps the OFF label");
         assert_eq!(fg, theme::Theme::classic().switch);
@@ -4571,7 +4590,7 @@ mod switch_rendering_tests {
         );
 
         let on = switch_component(ComponentState::On);
-        let (glyph, state, _) = physical_visuals(&on, false);
+        let (glyph, state, _) = physical_visuals(&on, false, false);
         assert_eq!(glyph, "▣", "On switch keeps the filled-square glyph");
         assert_eq!(state, "ON", "On switch keeps the ON label");
     }
@@ -4580,13 +4599,81 @@ mod switch_rendering_tests {
     fn off_switch_uses_switch_token_not_button_token() {
         theme::set_test_theme(Some(theme::Theme::mono()));
         let comp = switch_component(ComponentState::Off);
-        let (_, _, fg) = physical_visuals(&comp, false);
+        let (_, _, fg) = physical_visuals(&comp, false, false);
         assert_eq!(
             fg,
             theme::Theme::mono().switch,
             "Off switch must take the switch token"
         );
         assert_ne!(fg, theme::Theme::mono().button);
+        theme::set_test_theme(None);
+    }
+}
+
+#[cfg(test)]
+mod fader_marker_tests {
+    use super::*;
+
+    /// A knob component as `physical_visuals` consumes it — faders parse from
+    /// P registers as `Knob`, so the fader arm is selected by the caller's
+    /// `fader` marker, not by the component kind (task 1.1, design D1).
+    fn knob_component(state: ComponentState) -> crate::patch::HwComponent {
+        crate::patch::HwComponent {
+            id: String::from("P1.1"),
+            label: String::from("SLIDER"),
+            kind: ComponentKind::Knob,
+            shift_group: None,
+            state,
+            controller: String::from("Faderbank"),
+            led: None,
+        }
+    }
+
+    #[test]
+    fn module_is_fader_matches_fader_controller_geometry() {
+        assert!(
+            module_is_fader("p8s8"),
+            "Faderbank geometry is a fader module"
+        );
+        assert!(
+            module_is_fader("m4"),
+            "Motorfader geometry is a fader module"
+        );
+        assert!(
+            !module_is_fader("p2b8"),
+            "button panel is not a fader module"
+        );
+        assert!(
+            !module_is_fader("b32"),
+            "Notebuttons grid is not a fader module"
+        );
+        assert!(!module_is_fader(""), "empty geometry key is not a fader");
+    }
+
+    #[test]
+    fn fader_marker_selects_led_bar_arm_over_knob_disc() {
+        theme::set_test_theme(Some(theme::Theme::mono()));
+        let comp = knob_component(ComponentState::Value(0.5));
+        let (glyph, state, fg) = physical_visuals(&comp, false, true);
+        assert_eq!(glyph, "▮", "fader marker must use the LED-bar glyph");
+        assert_eq!(state, "50%", "fader keeps the percentage state text");
+        assert_eq!(
+            fg,
+            theme::Theme::mono().fader_led_bar,
+            "fader arm must take the fader_led_bar token"
+        );
+        let (glyph, _, fg) = physical_visuals(&comp, false, false);
+        assert_eq!(glyph, "◉", "non-fader knob keeps the disc glyph");
+        assert_eq!(
+            fg,
+            theme::Theme::mono().knob,
+            "knob arm must take the knob token"
+        );
+        assert_ne!(
+            theme::Theme::mono().fader_led_bar,
+            theme::Theme::mono().knob,
+            "the two arms must stay tellable apart in mono"
+        );
         theme::set_test_theme(None);
     }
 }
