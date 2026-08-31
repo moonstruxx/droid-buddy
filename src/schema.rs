@@ -94,6 +94,11 @@ pub struct CircuitDef {
     pub outputs: Vec<CircuitParam>,
     pub presets: u32,
     pub manual: u32,
+    /// Declared rendering metadata carried by plugin circuits. `None` on the
+    /// 76 embedded circuits, which fall through to substring inference in
+    /// `ui.rs` instead.
+    pub cable_kind: Option<String>,
+    pub color: Option<String>,
 }
 
 /// Controller definition (only ramsize today).
@@ -468,6 +473,8 @@ fn parse_embedded() -> Schema {
                     .collect(),
                 presets: def.presets,
                 manual: def.manual,
+                cable_kind: None,
+                color: None,
             },
         );
     }
@@ -594,9 +601,6 @@ pub fn merge_plugins(mut base: Schema, files: &[PluginFile]) -> Schema {
 /// `start_at` are preserved so numbered plugin params expand through the
 /// same `expand_names` path as embedded ones.
 fn circuit_def(c: &PluginCircuit) -> CircuitDef {
-    // task 3.1 consumes these: it extends `CircuitDef` with `cable_kind` and
-    // `color` and copies them from `PluginCircuit` here. Until then they are
-    // dropped at this merge boundary.
     CircuitDef {
         category: c.category.clone(),
         title: c.title.clone(),
@@ -606,6 +610,8 @@ fn circuit_def(c: &PluginCircuit) -> CircuitDef {
         outputs: c.outputs.iter().map(circuit_param).collect(),
         presets: 0,
         manual: 0,
+        cable_kind: c.cable_kind.clone(),
+        color: c.color.clone(),
     }
 }
 
@@ -901,6 +907,35 @@ mod tests {
             serde_json::to_vec(&merged).expect("serialize merged"),
             serde_json::to_vec(&base).expect("serialize base")
         );
+    }
+
+    #[test]
+    fn merge_carries_declared_rendering_metadata() {
+        let _guard = cache_guard();
+        let base = (*load_schema()).clone();
+        let merged = merge_plugins(base, &fixture_files(&["valid.toml"]));
+
+        // The plugin `copy` override declares both rendering fields; they
+        // survive the merge as `CircuitDef` fields instead of being dropped.
+        let copy = &merged.circuits["copy"];
+        assert_eq!(copy.cable_kind.as_deref(), Some("audio"));
+        assert_eq!(copy.color.as_deref(), Some("knob"));
+        // NEWCKT declares neither, so both stay `None`.
+        let newckt = &merged.circuits["newckt"];
+        assert!(newckt.cable_kind.is_none());
+        assert!(newckt.color.is_none());
+    }
+
+    #[test]
+    fn embedded_circuits_have_no_declared_metadata() {
+        let _guard = cache_guard();
+        reset_test_schema();
+        let schema = load_schema();
+        // `circuits.json` has no cable_kind/color; `parse_embedded` leaves
+        // both `None` so `ui.rs` reduces to substring inference for them.
+        let button = &schema.circuits["button"];
+        assert!(button.cable_kind.is_none());
+        assert!(button.color.is_none());
     }
 
     #[test]
