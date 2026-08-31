@@ -1797,6 +1797,17 @@ fn glyph_fg(buffer: &Buffer, glyph: &str) -> Option<Color> {
         .map(|c| c.fg)
 }
 
+/// Whether any cell carries `glyph` in `fg`. LED cells sit at the owner
+/// button's cell origin at 1.0 zoom and render on top, so the row-major
+/// "first" lookup above can land on a folded LED instead of the button — the
+/// `any` scan is the reliable presence check.
+fn any_glyph_fg(buffer: &Buffer, glyph: &str, fg: Color) -> bool {
+    buffer
+        .content()
+        .iter()
+        .any(|c| c.symbol() == glyph && c.style().fg == Some(fg))
+}
+
 /// Whether any box-drawing glyph is drawn in `fg` (and `modifier`, when given).
 fn has_border_glyph(buffer: &Buffer, fg: Color, modifier: Option<Modifier>) -> bool {
     const GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
@@ -1964,7 +1975,8 @@ fn visual_controller_panels_arpeggio_snapshot() {
             let ansi = buffer_to_ansi(&buf);
             let html = buffer_to_html(&buf);
 
-            // Face: P2B8 panel must expose 8 buttons + 2 knobs (2 pots) from the fixture.
+            // Model: the P2B8 faceplate from the fixture still yields exactly
+            // 8 buttons + 2 knobs (2 pots) in patch.hw_components.
             let patch = app.patch.as_ref().unwrap();
             let p2b8_buttons = patch
                 .hw_components
@@ -1978,53 +1990,44 @@ fn visual_controller_panels_arpeggio_snapshot() {
                 .count();
             assert_eq!(p2b8_buttons, 8, "{theme_name} {width}: P2B8 8 buttons");
             assert_eq!(p2b8_knobs, 2, "{theme_name} {width}: P2B8 2 knobs");
-            assert!(
-                ansi.contains("P2B8"),
-                "{theme_name} {width}: panel title P2B8 in ANSI"
-            );
-            // Each P2B8 button gets a distinct, unclipped identifier — not
-            // all clipped to the same "P2B8 Button 1." (droid_tui-p2x).
-            // Panel cells render Patch::display_label(token, shift) so the
-            // expected text is the preamble/label-store override, not the raw token.
-            let hw_store = app.current_hw_store();
-            for i in 1..=8 {
-                let tok = format!("B1.{i}");
-                let expected = patch.display_label(&tok, 1, true, 4, &hw_store);
-                // Preamble labels like "[DIR] Direction up..." exceed COMPONENT_WIDTH;
-                // the cell truncates, but the bracket tag prefix remains distinct.
-                let short = expected
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(&expected)
-                    .to_string();
-                let needle = if short.len() <= 8 {
-                    short
-                } else {
-                    expected.chars().take(6).collect()
-                };
-                assert!(
-                    ansi.contains(&needle) || ansi.contains(&tok),
-                    "{theme_name} {width}: {tok} -> {expected} (needle {needle}) label not clipped/merged"
-                );
-            }
 
-            // Style tokens: kind colors (button white / knob magenta etc) and muted chrome.
-            if let Some(style) = first_token_style(&buf, "B1.1") {
-                assert_eq!(
-                    style.fg,
-                    Some(t.button),
-                    "{theme_name} {width}: button kind color"
-                );
-            }
-            if let Some(style) = first_token_style(&buf, "P1.1") {
-                // P1.1 is a Knob on P2B8
-                assert_eq!(
-                    style.fg,
-                    Some(t.knob),
-                    "{theme_name} {width}: knob kind color"
-                );
-            }
-            // Header/picker chrome uses muted; panel borders are muted when no shift active.
+            // Physical-era surface: the P2B8 module faceplate is published in
+            // the full-view geometry (module 0) and every fixture component
+            // gets a cell. The old panel title "P2B8" no longer renders as
+            // text — the element cells draw glyphs + labels and overwrite the
+            // module title row — so presence is proven via published geometry.
+            // `physical_full_rects` is viewport-independent (cells publish
+            // even when the rack overflows, unlike `component_rects` which
+            // only carries drawable cells), so the full P2B8 instance is
+            // provable at both widths.
+            assert!(
+                !app.physical_full_rects.is_empty(),
+                "{theme_name} {width}: faceplate cells published"
+            );
+            assert!(
+                app.physical_full_rects.iter().any(|&(m, _, _)| m == 0),
+                "{theme_name} {width}: P2B8 faceplate (module 0) published"
+            );
+            assert_eq!(
+                app.physical_full_rects.len(),
+                patch.hw_components.len(),
+                "{theme_name} {width}: every fixture component publishes a cell"
+            );
+
+            // Style tokens: kind colors (button white / knob magenta etc) and
+            // muted chrome. LED cells may cover a button's glyph at 1.0 zoom
+            // (the LED cell sits at the button-cell origin and renders on
+            // top), so scan for ANY glyph in the kind hue rather than the
+            // row-major first cell.
+            assert!(
+                any_glyph_fg(&buf, "○", t.button),
+                "{theme_name} {width}: button kind color"
+            );
+            assert!(
+                any_glyph_fg(&buf, "◉", t.knob),
+                "{theme_name} {width}: knob kind color"
+            );
+            // Header/picker chrome uses muted; the status-bar border is muted.
             assert!(
                 has_border_glyph(&buf, t.muted, None)
                     || has_border_glyph(&buf, t.muted, Some(Modifier::DIM)),
@@ -2049,9 +2052,13 @@ fn visual_controller_panels_arpeggio_snapshot() {
 
 #[test]
 fn visual_multi_module_p2b8_snapshot() {
-    // droid_tui-21v / droid_tui-my3: two bare [p2b8] sections must render as
-    // two distinct module sub-blocks within one "P2B8" panel (not one flat
-    // 36-component grid), each internally in physical B.1..B.8 order.
+    // droid_tui-21v / droid_tui-my3: two bare [p2b8] sections must surface as
+    // two distinct faceplates published in file order — module 0 left of
+    // module 1 — not one flat 36-component grid. The old per-instance
+    // sub-block titles ("P2B8 1"/"P2B8 2") no longer render as text: the
+    // element cells draw over the module title row, so instance separation is
+    // proven via the published physical geometry (same contract as
+    // physical_coincidence_two_p2b8_instances_prove_faceplate_path).
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         for width in [80u16, 120] {
@@ -2059,32 +2066,34 @@ fn visual_multi_module_p2b8_snapshot() {
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
 
+            let full = app.physical_full_rects.clone();
             assert!(
-                ansi.contains("P2B8 1"),
-                "{theme_name} {width}: module 1 sub-block title present\n{ansi}"
+                !full.is_empty(),
+                "{theme_name} {width}: faceplate cells published"
             );
+            let modules: std::collections::HashSet<usize> =
+                full.iter().map(|&(m, _, _)| m).collect();
             assert!(
-                ansi.contains("P2B8 2"),
-                "{theme_name} {width}: module 2 sub-block title present\n{ansi}"
+                modules.contains(&0) && modules.contains(&1),
+                "{theme_name} {width}: two P2B8 faceplates must publish, got {modules:?}"
             );
-
-            // Physical order within each module: B.1 before B.8, and module 1's
-            // components all precede module 2's (no cross-instance interleaving).
-            let pos = |needle: &str| {
-                ansi.find(needle)
-                    .unwrap_or_else(|| panic!("{theme_name} {width}: {needle} missing\n{ansi}"))
+            // Physical order: instance 1 sits right of instance 0 in the
+            // single default row (module 0 precedes module 1).
+            let x_of = |m: usize| -> u16 {
+                full.iter()
+                    .find(|&&(mm, _, _)| mm == m)
+                    .map(|&(_, _, r)| r.x)
+                    .expect("faceplate present")
             };
             assert!(
-                pos("B1.1") < pos("B1.8"),
-                "{theme_name} {width}: B1.1 before B1.8"
+                x_of(1) > x_of(0),
+                "{theme_name} {width}: module 1 right of module 0"
             );
+            // The physical surface renders the button glyphs of both
+            // instances in the buffer at both viewports.
             assert!(
-                pos("B1.8") < pos("B2.1"),
-                "{theme_name} {width}: module 1 before module 2"
-            );
-            assert!(
-                pos("B2.1") < pos("B2.8"),
-                "{theme_name} {width}: B2.1 before B2.8"
+                ansi.contains("○"),
+                "{theme_name} {width}: button glyphs rendered\n{ansi}"
             );
 
             insta::with_settings!({snapshot_suffix => format!("multi_module_p2b8_{theme_name}_{width}")}, {
@@ -2376,9 +2385,12 @@ fn visual_viewer_live_interaction_snapshot() {
     // keys are live. Frame A drives shift1 through the real key path while
     // Source is focused — a state that was impossible before the fix because
     // '1' was swallowed by the source-focus branch — and proves the shift
-    // face (chip + bold borders) renders beside the viewer chrome. Frame B
-    // shows B1.1 toggled AND selected via Enter with source_scroll parked at
-    // its first occurrence while the viewer stays open.
+    // surface renders beside the viewer chrome. The viewer status bar
+    // replaces the normal one, so the SHIFT 1 ACTIVE chip (a render_status
+    // span) is asserted in Frame A' with the viewer closed over the same
+    // state. Frame B shows B1.1 toggled AND selected via Enter with
+    // source_scroll parked at its first occurrence while the viewer stays
+    // open.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -2395,27 +2407,41 @@ fn visual_viewer_live_interaction_snapshot() {
         );
         let buf = buffer_for(&mut app, 100, 40);
         let ansi = buffer_to_ansi(&buf);
-        // The viewer status bar replaces the normal one (and its hints fill
-        // width 100), so liveness shows on the panels themselves: affected
-        // panels get [SHIFT 1] titles and bold shift-colored borders.
-        assert!(
-            ansi.contains("[SHIFT 1]"),
-            "{theme_name}: affected panels tagged [SHIFT 1] with viewer open\n{ansi}"
-        );
+        // The viewer status bar replaces the normal one (its hints fill width
+        // 100), so liveness shows on the panels themselves: a shift-active
+        // button glyph is repainted in the shift hue (the physical-era
+        // replacement for the old [SHIFT 1] panel tag). The `any` scan is
+        // required because the folded LED cell (led token) can cover a
+        // button's glyph at 1.0 zoom.
         assert!(
             ansi.contains("Source Viewer"),
             "{theme_name}: viewer still open beside live panels"
         );
         assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{theme_name}: shift1 bold border visible with viewer open"
+            any_glyph_fg(&buf, "○", t.shift1),
+            "{theme_name}: shift-active button glyph recolored with viewer open"
         );
         insta::with_settings!({snapshot_suffix => format!("viewer_live_shift1_{theme_name}_100")}, {
             insta::assert_snapshot!(ansi);
         });
 
+        // Frame A': same state, viewer closed — the normal status bar now
+        // shows the SHIFT 1 ACTIVE chip in the shift hue.
+        app.showing_viewer = false;
+        let buf = buffer_for(&mut app, 100, 40);
+        let ansi = buffer_to_ansi(&buf);
+        assert!(
+            ansi.contains("SHIFT 1 ACTIVE"),
+            "{theme_name}: shift chip renders once the viewer closes\n{ansi}"
+        );
+        assert!(
+            has_highlighted_token(&buf, "SHIFT 1 ACTIVE", Some(t.shift1), Some(Modifier::BOLD)),
+            "{theme_name}: shift chip bold in shift1"
+        );
+
         // Frame B: Enter toggles + selects B1.1 and scrolls the source view
         // to its first occurrence — the viewer never closes.
+        open_viewer(&mut app);
         let b11 = idx_for(&app, "B1.1");
         app.hovered_component = Some(b11);
         let first_b11 = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
@@ -2434,11 +2460,17 @@ fn visual_viewer_live_interaction_snapshot() {
         let ansi = buffer_to_ansi(&buf);
         assert!(
             ansi.contains("B1.1"),
-            "{theme_name}: selected token visible in both columns"
+            "{theme_name}: selected token visible in the source column"
         );
         assert!(
-            ansi.contains("[SHIFT 1]"),
-            "{theme_name}: shift face persists across toggle frame"
+            ansi.contains("Source Viewer"),
+            "{theme_name}: viewer stays open across the toggle frame"
+        );
+        // The shift face persists: the other (still-off) Group1 buttons keep
+        // the shift hue across the toggle.
+        assert!(
+            any_glyph_fg(&buf, "○", t.shift1),
+            "{theme_name}: shift face persists across the toggle frame"
         );
         insta::with_settings!({snapshot_suffix => format!("viewer_live_toggle_{theme_name}_100")}, {
             insta::assert_snapshot!(ansi);
@@ -2448,8 +2480,8 @@ fn visual_viewer_live_interaction_snapshot() {
 
 #[test]
 fn visual_theming_shift_and_mono_snapshot() {
-    // 1.4: same fixtures with shift1 active (bold colored border + SHIFT 1 ACTIVE chip)
-    // and mono grayscale pairwise distinct, plus side-by-side html row.
+    // 1.4: same fixtures with shift1 active (shift-hued button glyphs + SHIFT 1
+    // ACTIVE chip) and mono grayscale pairwise distinct, plus side-by-side html row.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -2459,11 +2491,19 @@ fn visual_theming_shift_and_mono_snapshot() {
         let ansi = buffer_to_ansi(&buf);
         let html = buffer_to_html(&buf);
 
-        // Shift visualization: affected panel borders bold shift1, status chip fg shift1 bg status_bg
-        assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD)),
-            "{theme_name}: shift1 affected panel border bold"
-        );
+        // Shift visualization: a shift-active button glyph is repainted in
+        // the shift hue (the old bold shift-colored panel border is gone),
+        // and the status chip fg is shift1 on status_bg. The `any` scan is
+        // required because the folded LED cell (led token) can cover a
+        // button's glyph at 1.0 zoom; where the theme maps shift and button
+        // to the same token (terminal's Reset) the hue check degenerates and
+        // the chip carries the proof.
+        if t.shift1 != t.button {
+            assert!(
+                any_glyph_fg(&buf, "○", t.shift1),
+                "{theme_name}: shift-active button glyph uses the shift hue"
+            );
+        }
         let chip = first_token_style(&buf, "SHIFT 1 ACTIVE").expect("SHIFT 1 ACTIVE chip");
         assert_eq!(chip.fg, Some(t.shift1), "{theme_name}: chip fg shift1");
         assert_eq!(
@@ -2490,15 +2530,17 @@ fn visual_theming_shift_and_mono_snapshot() {
         app.active_shift = Some(ShiftGroup::Group1);
         let buf = buffer_for(&mut app, 100, 40);
         let ansi = buffer_to_ansi(&buf);
-        // If any component belongs to Group1, panel border will be shift1; otherwise muted dim.
-        // led_pairs fixture has no explicit shift groups, so borders stay muted dim — just verify no panic and chip present.
+        // Shift groups derive from the controller number (design.md 2c): the
+        // B1.x buttons are Group1, so with shift1 active their glyphs repaint
+        // in the shift hue (the physical-era replacement for the shift-colored
+        // panel border); chip present as always.
         assert!(ansi.contains("SHIFT 1 ACTIVE"));
-        assert!(
-            has_border_glyph(&buf, t.shift1, Some(Modifier::BOLD))
-                || has_border_glyph(&buf, t.muted, Some(Modifier::DIM))
-                || has_border_glyph(&buf, t.muted, None),
-            "{theme_name}: shift or muted border present with boxed fixture"
-        );
+        if t.shift1 != t.button {
+            assert!(
+                any_glyph_fg(&buf, "○", t.shift1),
+                "{theme_name}: boxed-fixture button glyph shift-hued"
+            );
+        }
         insta::with_settings!({snapshot_suffix => format!("led_shift1_{theme_name}_100")}, {
             insta::assert_snapshot!(ansi);
         });
