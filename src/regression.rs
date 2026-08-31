@@ -1761,6 +1761,24 @@ impl Drop for ThemedGuard {
     }
 }
 
+/// Pins a plugin-merged schema for the calling thread and restores the
+/// default resolution on drop, mirroring `ThemedGuard` so sibling tests never
+/// observe a leaked plugin schema (thread-local, so no cross-test leakage).
+struct SchemaGuard;
+
+impl SchemaGuard {
+    fn pin(schema: &'static crate::schema::Schema) -> Self {
+        crate::schema::set_test_schema(Some(schema));
+        Self
+    }
+}
+
+impl Drop for SchemaGuard {
+    fn drop(&mut self) {
+        crate::schema::set_test_schema(None);
+    }
+}
+
 /// Style of the first character of the first occurrence of `token`, or None
 /// when the token is not rendered anywhere in the buffer.
 fn first_token_style(buffer: &Buffer, token: &str) -> Option<Style> {
@@ -3136,6 +3154,50 @@ fn visual_graph_edge_kinds_colors_snapshot() {
     insta::with_settings!({snapshot_suffix => "graph_edge_kinds_classic_100"}, {
         insta::assert_snapshot!(ansi);
     });
+}
+
+#[test]
+fn visual_graph_plugin_declared_kind_snapshot() {
+    // A plugin circuit (`plugkind`) whose name carries no control/midi keyword
+    // would be substring-inferred as Audio (green). Declaring `cable_kind =
+    // "control"` must instead render its cable with graph_edge_control (cyan in
+    // classic), proving the declared metadata beats the substring fallback.
+    // (The declared `color` is a panel-view concern, already unit-covered by
+    // `circuit_color_prefers_declared_token_over_name`; the graph surface
+    // proves cable_kind.) The merged schema is pinned so validation recognizes
+    // `plugkind` and `CableKind::from_circuit` sees its declared kind.
+    let base = (*crate::schema::load_schema()).clone();
+    let file = crate::plugin::load_file(Path::new("fixtures/plugins/declared_kind.toml"))
+        .expect("declared_kind.toml must load");
+    let merged: &'static crate::schema::Schema =
+        Box::leak(Box::new(crate::schema::merge_plugins(base, &[file])));
+    let _schema_guard = SchemaGuard::pin(merged);
+
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+        for width in [100u16, 40] {
+            let mut app = graph_app_from_fixture("graph_plugin_cable_kind");
+            // Latency ramp coloring (on by default) would re-color the single
+            // forward edge; pin the kind-color mapping like the sibling test.
+            app.latency_coloring = false;
+            let buf = buffer_for(&mut app, width, 40);
+
+            assert!(
+                has_box_glyph_of_color(&buf, t.graph_edge_control),
+                "{theme_name} {width}: declared control cable must render, not the audio fallback"
+            );
+            assert!(
+                !has_box_glyph_of_color(&buf, t.graph_edge_audio),
+                "{theme_name} {width}: substring fallback audio must not render"
+            );
+
+            let ansi = buffer_to_ansi(&buf);
+            insta::with_settings!({snapshot_suffix => format!("graph_plugin_declared_kind_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
 }
 
 #[test]
