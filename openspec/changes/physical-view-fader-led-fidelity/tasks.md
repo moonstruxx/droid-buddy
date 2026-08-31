@@ -30,5 +30,5 @@
 
 ## 5. Verification gate
 
-- [ ] 5.1 Run full verification gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`) and fix any failures
-  <!-- agent: horst-engineer.fast, depends_on: [1.3, 2.2, 3.2, 4.1], touches: [] -->
+- [x] 5.1 Run full verification gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`) and fix any failures
+  <!-- agent: horst-engineer.fast, depends_on: [1.3, 2.2, 3.2, 4.1], touches: [], status: done, note: gate green on 2026-09-01: fmt clean, clippy -D warnings clean, cargo test 715 passed / 0 failed (all targets), release build OK. -->
