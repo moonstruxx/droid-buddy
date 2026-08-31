@@ -1,0 +1,58 @@
+# Valid plugin fixture. Two circuits:
+#   - NEWCKT: a new circuit. Jack input, a cv input with a default, a
+#     prefix/count output expansion, and NO declared cable_kind/color
+#     (exercises the substring-inference fallback path).
+#   - copy:   overrides the embedded `copy` circuit (name collision), with
+#     declared ramsize + cable_kind + color so the override is observable.
+# Circuit names are case-insensitive, like the embedded schema lookup.
+
+[[circuit]]
+name = "NEWCKT"
+category = "logic"
+title = "A new circuit"
+description = "Fixture circuit: converts an analog input into bit gates."
+ramsize = 256
+
+[[circuit.inputs]]
+name = "input"
+short = "i"
+type = "jack"
+
+[[circuit.inputs]]
+name = "level"
+short = "l"
+type = "cv"
+default = "0"
+
+[[circuit.outputs]]
+name = "bit1 ... bit8"
+short = "b"
+type = "gate"
+prefix = "bit"
+count = 8
+start_at = 1
+
+[[circuit.outputs]]
+name = "output"
+short = "o"
+type = "cv"
+
+[[circuit]]
+name = "copy"
+category = "logic"
+title = "Copy a signal, while applying attenuation and offset"
+description = "Override of the embedded copy circuit: re-declared ramsize plus declared rendering metadata."
+ramsize = 32
+cable_kind = "audio"
+color = "knob"
+
+[[circuit.inputs]]
+name = "input"
+short = "i"
+type = "cv"
+default = "0"
+
+[[circuit.outputs]]
+name = "output"
+short = "o"
+type = "cv"
