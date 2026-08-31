@@ -1101,13 +1101,16 @@ fn regression_boxed_cell_renders_led_frame_text_cell_stays_plain() {
 
 #[test]
 fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
-    // Physical-era rewrite (droid_tui-skb 1.2): the physical renderer
-    // publishes hit rects from the SAME mapped geometry it draws — every
-    // component_rects entry equals the cell rect in physical_full_rects for
-    // that component — so a hit rect can never inflate past its own cell
-    // (BUG droid_tui-wmg). At every scale preset the published rect IS the
-    // rendered cell; hovering B1.2's cell resolves to B1.2, not to a
-    // neighbor whose rect bled into it.
+    // Physical-era rewrite (droid_tui-skb 1.2) + D4 clamp
+    // (physical-view-fader-led-fidelity): the physical renderer publishes hit
+    // rects from the SAME mapped geometry it draws — at default scale every
+    // component_rects entry equals the geometric cell in physical_full_rects.
+    // At non-default zooms mm→screen rounding makes adjacent cells share a
+    // column, so D4 clamps the published hit rect: the earlier cell owns the
+    // shared column, the later cell's hit rect starts at the previous
+    // same-row right edge, and no hit rect ever inflates past its geometric
+    // cell's right edge (BUG droid_tui-wmg). Hovering a cell resolves to that
+    // cell, not to a neighbor whose rect bled into it.
     for zoom in [0.75f32, 1.0, 1.5, 2.0] {
         let mut app = app_from_fixture("arpeggio1");
         app.scale_factor = zoom;
@@ -1117,23 +1120,45 @@ fn regression_hover_hit_rect_matches_rendered_cell_at_nondefault_scale() {
         let chain = crate::physical::PhysicalLayout::build(patch);
         let id_of = |idx: usize| -> String { patch.hw_components[idx].id.clone() };
 
-        // Every hit rect matches a published full-view cell rect for the same
-        // component — the hit rect IS the rendered cell, with no scaling
-        // inflation (the old fixed-size assertion encoded the pre-fix bug).
         assert!(
             !app.component_rects.is_empty(),
             "zoom {zoom}: faceplate cells published"
         );
         for &(gi, r) in &app.component_rects {
             let id = id_of(gi);
-            let matches = app
+            // (c) the hit rect never widens past its geometric cell's right
+            // edge (nor before its left edge): D4 moves the later cell's
+            // LEFT edge right to hand the shared column to the earlier cell,
+            // so the rect stays a sub-span of the drawn cell.
+            let geo = app
                 .physical_full_rects
                 .iter()
-                .any(|&(m, c, fr)| chain.modules[m].components[c].id == id && fr == r);
+                .find(|&&(m, c, _)| chain.modules[m].components[c].id == id)
+                .map(|&(_, _, fr)| fr)
+                .unwrap_or_else(|| panic!("zoom {zoom}: no geometric cell for {id}"));
             assert!(
-                matches,
-                "zoom {zoom}: {id} hit rect {r:?} is not a rendered cell"
+                r.x >= geo.x && r.x + r.width <= geo.x + geo.width,
+                "zoom {zoom}: {id} hit rect {r:?} inflated past its geometric cell {geo:?}"
             );
+            // (a) the hit rect keeps the cell's row and vertical extent —
+            // the clamp only re-slices the horizontal span.
+            assert_eq!(
+                (r.y, r.height),
+                (geo.y, geo.height),
+                "zoom {zoom}: {id} hit rect {r:?} left its row/height in {geo:?}"
+            );
+        }
+        // (b) in publish order, consecutive same-row hit rects never overlap:
+        // the shared column belongs to the earlier cell.
+        for w in app.component_rects.windows(2) {
+            let (_, a) = &w[0];
+            let (_, b) = &w[1];
+            if a.y == b.y {
+                assert!(
+                    b.x >= a.x + a.width,
+                    "zoom {zoom}: same-row hit rects overlap {a:?} vs {b:?}"
+                );
+            }
         }
         // The full-view list is the superset: cells clipped by the viewport
         // may publish without being drawable, never the reverse.
@@ -1622,10 +1647,14 @@ fn regression_p2b8_panel_uniform_rows() {
     // Physical-era rewrite (droid_tui-skb 1.3): row uniformity inside the
     // P2B8 faceplate sub-block. The 8 buttons form four 2-button rows at
     // identical y (one physical 15 mm row pitch each); every button cell
-    // shares one uniform size, every knob cell another, every LED cell
-    // another — no stray sizes or interleaved rows (droid_tui-irf, originally
-    // observed as boxed-vs-unboxed height differences creating blank rows in
-    // the panel grid).
+    // shares one uniform HEIGHT, every knob cell another, every LED cell
+    // another — no stray heights or interleaved rows (droid_tui-irf,
+    // originally observed as boxed-vs-unboxed height differences creating
+    // blank rows in the panel grid). D4 (physical-view-fader-led-fidelity)
+    // re-slices hit-rect WIDTHS where rounding makes adjacent cells share a
+    // column, so widths are no longer uniform by design; the invariants that
+    // stay are the per-kind height, the hit rect never inflating past its
+    // geometric cell, and consecutive same-row hit rects never overlapping.
     for zoom in [1.0f32, 2.0] {
         let mut app = app_from_fixture("arpeggio1");
         app.scale_factor = zoom;
@@ -1652,27 +1681,59 @@ fn regression_p2b8_panel_uniform_rows() {
         assert_eq!(buttons.len(), 8, "zoom {zoom}: 8 P2B8 buttons");
         assert_eq!(leds.len(), 8, "zoom {zoom}: 8 P2B8 LEDs");
         assert_eq!(knobs.len(), 2, "zoom {zoom}: 2 P2B8 knobs");
-        let distinct_sizes = |cells: &[(String, Rect)]| -> Vec<(u16, u16)> {
-            let mut v: Vec<(u16, u16)> = cells.iter().map(|(_, r)| (r.width, r.height)).collect();
+        let distinct_heights = |cells: &[(String, Rect)]| -> Vec<u16> {
+            let mut v: Vec<u16> = cells.iter().map(|(_, r)| r.height).collect();
             v.sort_unstable();
             v.dedup();
             v
         };
         assert_eq!(
-            distinct_sizes(&buttons).len(),
+            distinct_heights(&buttons).len(),
             1,
-            "zoom {zoom}: buttons share one cell size"
+            "zoom {zoom}: buttons share one cell height"
         );
         assert_eq!(
-            distinct_sizes(&leds).len(),
+            distinct_heights(&leds).len(),
             1,
-            "zoom {zoom}: LEDs share one cell size"
+            "zoom {zoom}: LEDs share one cell height"
         );
         assert_eq!(
-            distinct_sizes(&knobs).len(),
+            distinct_heights(&knobs).len(),
             1,
-            "zoom {zoom}: knobs share one cell size"
+            "zoom {zoom}: knobs share one cell height"
         );
+        // No hit rect inflates past its geometric cell's right edge — D4
+        // hands a shared column to the earlier cell by moving the later
+        // cell's left edge right, never by widening past the drawn cell.
+        let chain = crate::physical::PhysicalLayout::build(patch);
+        let geo_of = |id: &str| -> Rect {
+            app.physical_full_rects
+                .iter()
+                .find(|&&(m, c, _)| chain.modules[m].components[c].id == id)
+                .map(|&(_, _, r)| r)
+                .unwrap_or_else(|| panic!("zoom {zoom}: no geometric cell for {id}"))
+        };
+        for cells in [&buttons, &leds, &knobs] {
+            for (id, r) in cells {
+                let g = geo_of(id);
+                assert!(
+                    r.x >= g.x && r.x + r.width <= g.x + g.width,
+                    "zoom {zoom}: {id} hit rect {r:?} inflated past its cell {g:?}"
+                );
+            }
+        }
+        // Consecutive same-row hit rects never overlap (shared-column
+        // resolution gives the column to the earlier cell).
+        for w in app.component_rects.windows(2) {
+            let (_, a) = &w[0];
+            let (_, b) = &w[1];
+            if a.y == b.y {
+                assert!(
+                    b.x >= a.x + a.width,
+                    "zoom {zoom}: same-row hit rects overlap {a:?} vs {b:?}"
+                );
+            }
+        }
 
         // Buttons group into four 2-member rows at identical y, strictly
         // ordered top to bottom — the uniform row rhythm of the faceplate.
@@ -4129,6 +4190,207 @@ fn visual_switch_value_rendering_snapshot() {
     assert!(row.contains("<td"), "switch html row has cells");
     assert!(row.len() > 200, "switch html row substantial");
     insta::assert_snapshot!("switch_value_html_row", row);
+}
+
+// ── fader-column face: value-mirroring track across zoom presets (1.3) ────
+// fader_column.ini = bare [p8s8] + [m4]: P8S8 Faderbank (8 sliders
+// P1.1..P1.8, 8 slider LEDs, 8 switches) + M4 Motorfader (4 motor faders
+// P2.1..P2.4, 4 touch buttons, 4 LEDs). Tests drive the first fader of each
+// panel and assert the bottom-up `▮`/`▯` track face mirrors value.
+
+fn fader_column_app(value: f32) -> App {
+    let mut app = app_from_fixture("fader_column");
+    for comp in &mut app.patch.as_mut().unwrap().hw_components {
+        if matches!(comp.id.as_str(), "P1.1" | "P2.1") {
+            comp.state = ComponentState::Value(value);
+        }
+    }
+    app
+}
+
+/// Rect (in buffer cells) the renderer drew for `id` in the last frame.
+fn cell_rect_of(app: &App, id: &str) -> Rect {
+    let idx = app
+        .patch
+        .as_ref()
+        .unwrap()
+        .hw_components
+        .iter()
+        .position(|c| c.id == id)
+        .unwrap_or_else(|| panic!("no component {id}"));
+    app.component_rects
+        .iter()
+        .find(|(i, _)| *i == idx)
+        .unwrap_or_else(|| panic!("no rect published for {id}"))
+        .1
+}
+
+/// How many cells of `rect` carry `glyph`.
+fn count_glyph_in(buffer: &Buffer, glyph: &str, rect: Rect) -> usize {
+    let mut n = 0;
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..rect.x + rect.width {
+            if buffer.cell((x, y)).is_some_and(|c| c.symbol() == glyph) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn fader_column_track_mirrors_value_across_zoom_presets() {
+    // 1.3: the P8S8 Faderbank and M4 Motorfader fader columns at 0/50/100 %
+    // across zoom presets 0.75/1.0/1.5/2.0 (× classic/mono × 80/120): the
+    // lit `▮` rows are exactly round(value × cell height) — 0% is an
+    // all-dim `▯` track, 50% boundary mid-cell, 100% full lit — and every
+    // lit row takes the amber fader_led_bar token. The p8s8's in-slider LED
+    // (L1.1, "LED inside slider cap") renders over the slider's track column
+    // at zooms where its cell maps onto it; the test calibrates that overlay
+    // row from a 100% render (all rows lit except the LED) so the fill
+    // assertion stays exact. P2.1 (M4, 62 mm action) has no overlay and pins
+    // the pure track formula at a second, taller cell height.
+    let zooms = [0.75, 1.0, 1.5, 2.0];
+    let values = [0.0f32, 0.5, 1.0];
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        let t = *theme::resolve(theme_name);
+        for &zoom in &zooms {
+            for width in [80u16, 120] {
+                // Calibrate the LED-overlay rows from the 100% render.
+                let mut cal = fader_column_app(1.0);
+                cal.scale_factor = zoom;
+                let cal_buf = buffer_for(&mut cal, width, 90);
+                for value in values {
+                    let mut app = fader_column_app(value);
+                    app.scale_factor = zoom;
+                    let buf = buffer_for(&mut app, width, 90);
+                    for id in ["P1.1", "P2.1"] {
+                        let rect = cell_rect_of(&app, id);
+                        // Precondition: the measured cell is fully visible so
+                        // the glyph count equals what the renderer drew.
+                        assert!(
+                            rect.y + rect.height <= buf.area.height,
+                            "{theme_name} {width} zoom{zoom} {id}: cell {rect:?} clipped by {} rows",
+                            buf.area.height
+                        );
+                        let lit = count_glyph_in(&buf, "▮", rect);
+                        let dim = count_glyph_in(&buf, "▯", rect);
+                        // Rows the in-slider LED draws over the track column
+                        // (its own cell overlaps the slider's geometric
+                        // column; the D4 hit-rect clamp keeps the drawn glyph
+                        // at the geometric cell). Count them in the value
+                        // render: they show the LED glyph, not the track.
+                        let led_rows = (rect.y..rect.y + rect.height)
+                            .filter(|&y| {
+                                matches!(buf.cell((rect.x, y)).unwrap().symbol(), "○" | "◉")
+                            })
+                            .count();
+                        let fill = (value * rect.height as f32).round() as usize;
+                        // Of those overlay rows, the ones inside the lit half
+                        // of the track steal a `▮` from the count (the row is
+                        // dim at 0/50% on the small Faderbank cell, lit at
+                        // 100% and at zoom 2.0's 50%). The calibration render
+                        // tells us the LED rows; the fill tells us the split.
+                        let led_in_lit = (rect.y..rect.y + rect.height)
+                            .filter(|&y| {
+                                let s = cal_buf.cell((rect.x, y)).unwrap().symbol();
+                                (s == "○" || s == "◉")
+                                    && (y - rect.y) as usize >= rect.height as usize - fill
+                            })
+                            .count();
+                        assert_eq!(
+                            lit,
+                            fill - led_in_lit,
+                            "{theme_name} {width} zoom{zoom} {id}: value {value} → {lit} lit rows in {rect:?} (expect {fill} − {led_in_lit} LED-overlaid)"
+                        );
+                        assert_eq!(
+                            lit + dim + led_rows,
+                            rect.height as usize,
+                            "{theme_name} {width} zoom{zoom} {id}: track + LED fill the whole column"
+                        );
+                        // Every lit row carries the amber fader_led_bar token.
+                        for y in rect.y..rect.y + rect.height {
+                            let cell = buf.cell((rect.x, y)).unwrap();
+                            if cell.symbol() == "▮" {
+                                assert_eq!(
+                                    cell.style().fg,
+                                    Some(t.fader_led_bar),
+                                    "{theme_name} {width} zoom{zoom} {id}: lit row {y} not amber"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn visual_fader_column_snapshot() {
+    // 1.3: fader_column.ini (P8S8 Faderbank + M4 Motorfader) × classic/mono
+    // × 80/120 × 0/50/100 % (tall viewport so both faceplates fit), plus a
+    // 50% zoom ladder 0.75/1.5/2.0 at width 120 — the value-mirroring track
+    // face is pinned per level and per zoom preset.
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            for (value, tag) in [(0.0f32, "0"), (0.5, "50"), (1.0, "100")] {
+                let mut app = fader_column_app(value);
+                let buf = buffer_for(&mut app, width, 90);
+                let ansi = buffer_to_ansi(&buf);
+                if tag == "0" {
+                    assert!(
+                        !ansi.contains('▮'),
+                        "{theme_name} {width} {tag}%: track must be all-dim\n{ansi}"
+                    );
+                    assert!(
+                        ansi.contains('▯'),
+                        "{theme_name} {width} {tag}%: dim track rendered\n{ansi}"
+                    );
+                } else {
+                    assert!(
+                        ansi.contains('▮'),
+                        "{theme_name} {width} {tag}%: track lit rows rendered\n{ansi}"
+                    );
+                }
+                insta::with_settings!({snapshot_suffix => format!("fader_column_{theme_name}_{width}_{tag}")}, {
+                    insta::assert_snapshot!(ansi);
+                });
+            }
+        }
+    }
+    // Zoom ladder at 50% (1.0 is covered above at both widths).
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        for zoom in [0.75, 1.5, 2.0] {
+            let mut app = fader_column_app(0.5);
+            app.scale_factor = zoom;
+            let buf = buffer_for(&mut app, 120, 90);
+            let ansi = buffer_to_ansi(&buf);
+            assert!(
+                ansi.contains('▮'),
+                "{theme_name} zoom{zoom}: 50% track lit rows rendered\n{ansi}"
+            );
+            insta::with_settings!({snapshot_suffix => format!("fader_column_{theme_name}_zoom{zoom}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+    // Side-by-side HTML gallery row (classic/mono columns) for gallery parity.
+    let mut cells: Vec<String> = Vec::new();
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = fader_column_app(0.5);
+        let buf = buffer_for(&mut app, 100, 30);
+        let html = buffer_to_html(&buf);
+        cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
+    }
+    let row = format!("<tr>{}</tr>", cells.join(""));
+    assert!(row.contains("<td"), "fader html row has cells");
+    assert!(row.len() > 200, "fader html row substantial");
+    insta::assert_snapshot!("fader_column_html_row", row);
 }
 
 // ── paused-dim + disabled-circuit visual validation (task 4.1) ─────────────
