@@ -762,6 +762,16 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
     let layers_enabled = settings.labels.layers_enabled;
     let max_shift_layer = settings.labels.max_shift_layer;
 
+    // D4 clamp (physical-view-fader-led-fidelity): mm→screen rounding makes
+    // adjacent cells share a column at non-default zooms, so the published
+    // hit rect is clamped at draw time — cells emit in stable module/row
+    // order, and clamping each cell's left edge to the previous same-row
+    // cell's right edge gives the shared column to the earlier cell. Only
+    // the hit rect is clamped; the drawn cell stays the geometric cell, so
+    // the skeleton coincidence (physical_full_rects) stays exact.
+    let mut prev_right: i64 = 0;
+    let mut prev_y: u16 = u16::MAX; // sentinel: no previous same-row cell
+
     // Element cells carry their component: state glyph + label where the
     // cell has room; boxed when the component folds an LED in and the cell
     // fits a box.
@@ -822,9 +832,30 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             is_fader,
         );
         // Hit rect is the mapped cell the component rendered into (the same
-        // rect as `physical_full_rects`), so handler hit-testing stays in
-        // lockstep with what is drawn.
-        app.component_rects.push((global_idx, rect));
+        // rect as `physical_full_rects`), clamped per D4 so no two cells of a
+        // row share a column; handler hit-testing stays in lockstep with the
+        // drawn cell while the clamp resolves rounding overlaps in favor of
+        // the earlier cell.
+        let hit_rect = {
+            let x0 = rect.x as i64;
+            let x1 = x0 + rect.width as i64;
+            let mut hit_x0 = if rect.y == prev_y {
+                x0.max(prev_right)
+            } else {
+                x0
+            };
+            // Never inflate past the geometric right edge: a fully overlapped
+            // cell (hit_x0 >= x1) keeps a 1-column sliver pulled inside the
+            // cell instead of extending beyond it.
+            if hit_x0 >= x1 {
+                hit_x0 = hit_x0.min(x1.saturating_sub(1));
+            }
+            let hit_x1 = x1;
+            prev_right = hit_x1;
+            prev_y = rect.y;
+            Rect::new(hit_x0 as u16, rect.y, (hit_x1 - hit_x0) as u16, rect.height)
+        };
+        app.component_rects.push((global_idx, hit_rect));
     }
 }
 
