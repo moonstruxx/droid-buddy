@@ -13,6 +13,11 @@ pub struct Theme {
     pub cv_in: Color,
     pub cv_out: Color,
     pub led: Color,
+    /// The amber LED strip next to each fader on a fader module's faceplate
+    /// (p8s8 Faderbank, m4 motorfader). Its own token so the physical-view
+    /// fader marker stays distinguishable from knobs/encoders and from the
+    /// plain `led` token (design D1).
+    pub fader_led_bar: Color,
     pub shift1: Color,
     pub shift2: Color,
     pub shift3: Color,
@@ -96,6 +101,8 @@ impl Theme {
             cv_in: Color::Cyan,
             cv_out: Color::Green,
             led: Color::Red,
+            // ANSI-16 yellow reads as the fader strip's amber on most terminals.
+            fader_led_bar: Color::Yellow,
             shift1: Color::Yellow,
             shift2: Color::Cyan,
             shift3: Color::Magenta,
@@ -166,6 +173,7 @@ impl Theme {
             cv_in: Color::Reset,
             cv_out: Color::Reset,
             led: Color::Reset,
+            fader_led_bar: Color::Reset,
             shift1: Color::Reset,
             shift2: Color::Reset,
             shift3: Color::Reset,
@@ -233,6 +241,9 @@ impl Theme {
             cv_in: Color::Gray,
             cv_out: Color::Gray,
             led: Color::White,
+            // Mid-gray so the fader bar stays tellable from the White led and
+            // knob tokens in the grayscale palette.
+            fader_led_bar: Color::Gray,
             shift1: Color::Gray,
             shift2: Color::White,
             shift3: Color::DarkGray,
@@ -478,6 +489,7 @@ mod tests {
             t.cv_in,
             t.cv_out,
             t.led,
+            t.fader_led_bar,
             t.shift1,
             t.shift2,
             t.shift3,
@@ -586,6 +598,18 @@ mod tests {
         // Mono gives switches their own shade, distinct from button's gray.
         assert_eq!(mono.switch, Color::DarkGray);
         assert_ne!(mono.switch, mono.button);
+    }
+
+    #[test]
+    fn fader_led_bar_resolves_per_palette() {
+        // Physical-view fader LED bar (design D1): classic amber (ANSI
+        // yellow), terminal defers to the terminal, mono a mid-gray so the bar
+        // stays tellable from the White led/knob tokens.
+        assert_eq!(Theme::classic().fader_led_bar, Color::Yellow);
+        assert_eq!(Theme::terminal().fader_led_bar, Color::Reset);
+        assert_eq!(Theme::mono().fader_led_bar, Color::Gray);
+        assert_ne!(Theme::mono().fader_led_bar, Theme::mono().led);
+        assert_ne!(Theme::mono().fader_led_bar, Theme::mono().knob);
     }
 
     #[test]

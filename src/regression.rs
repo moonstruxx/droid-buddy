@@ -4066,22 +4066,32 @@ fn visual_switch_value_rendering_snapshot() {
                 "{theme_name} {width}: S1.1 Value glyph rendered\n{ansi}"
             );
             assert!(
+                ansi.contains("▮"),
+                "{theme_name} {width}: P1.1 fader-bar glyph rendered\n{ansi}"
+            );
+            assert!(
                 ansi.contains("▣"),
                 "{theme_name} {width}: S1.2 On glyph rendered\n{ansi}"
             );
             // Style: S1.2's `▣` takes the switch token (mono's DarkGray,
-            // distinct from the White slider/knob in the same theme), and the
-            // first `◉` is P1.1's slider glyph (knob token, rendered above
-            // the switch rows).
+            // distinct from the White slider/knob in the same theme), the
+            // fader's `▮` takes the amber fader_led_bar token, and the first
+            // `◉` is S1.1's Value switch glyph (switch token, rendered above
+            // the slider row).
             assert_eq!(
                 glyph_fg(&buf, "▣"),
                 Some(t.switch),
                 "{theme_name} {width}: switch On glyph uses the switch token"
             );
             assert_eq!(
+                glyph_fg(&buf, "▮"),
+                Some(t.fader_led_bar),
+                "{theme_name} {width}: fader-bar glyph uses the fader_led_bar token"
+            );
+            assert_eq!(
                 glyph_fg(&buf, "◉"),
-                Some(t.knob),
-                "{theme_name} {width}: slider value glyph uses the knob token"
+                Some(t.switch),
+                "{theme_name} {width}: Value switch glyph uses the switch token"
             );
             if theme_name == "classic" {
                 assert_eq!(
