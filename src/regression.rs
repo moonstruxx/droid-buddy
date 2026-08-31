@@ -1655,12 +1655,13 @@ fn regression_p2b8_panel_uniform_rows() {
     // column, so widths are no longer uniform by design; the invariants that
     // stay are the per-kind height, the hit rect never inflating past its
     // geometric cell, and consecutive same-row hit rects never overlapping.
-    for zoom in [1.0f32, 2.0] {
+    for zoom in [0.75f32, 1.0, 1.5, 2.0] {
         let mut app = app_from_fixture("arpeggio1");
         app.scale_factor = zoom;
-        // Taller frame at zoom 2 so the bottom button row still fits the main
-        // area (the rack is 39 rows at zoom 1, 78 at zoom 2).
-        let h = if zoom == 2.0 { 70 } else { 40 };
+        // Taller frame at non-default zooms so the bottom button row still
+        // fits the main area (the rack is ~39 rows at zoom 1, scaling with
+        // zoom: 78 at 200 %).
+        let h = (39.0 * zoom) as u16 + 12;
         let _ = buffer_for(&mut app, 100, h);
 
         let patch = app.patch.as_ref().unwrap();
@@ -4393,6 +4394,165 @@ fn visual_fader_column_snapshot() {
     insta::assert_snapshot!("fader_column_html_row", row);
 }
 
+#[test]
+fn regression_component_rects_never_overlap_at_every_zoom_preset() {
+    // 2.2: the strict no-overlap contract (D4) must hold over ALL published
+    // component_rects at every zoom preset, not only 100 %. arpeggio1 is a
+    // single faceplate; fader_column stacks the P8S8 and M4 faceplates on one
+    // rack row, so cross-module adjacency is exercised at each preset. The
+    // drawn cells must stay the un-clamped geometric cells (skeleton
+    // coincidence D5): only the hit rect is re-sliced, never the cell drawn.
+    for zoom in [0.75f32, 1.0, 1.5, 2.0] {
+        let mut app = fader_column_app(0.5);
+        app.scale_factor = zoom;
+        let _ = buffer_for(&mut app, 120, 90);
+
+        let patch = app.patch.as_ref().unwrap();
+        let chain = crate::physical::PhysicalLayout::build(patch);
+        let id_of = |idx: usize| -> String { patch.hw_components[idx].id.clone() };
+
+        assert!(
+            !app.component_rects.is_empty(),
+            "zoom {zoom}: faceplate cells published"
+        );
+        let mut rows: std::collections::BTreeMap<u16, Vec<Rect>> = Default::default();
+        for &(gi, r) in &app.component_rects {
+            let id = id_of(gi);
+            let geo = app
+                .physical_full_rects
+                .iter()
+                .find(|&&(m, c, _)| chain.modules[m].components[c].id == id)
+                .map(|&(_, _, fr)| fr)
+                .unwrap_or_else(|| panic!("zoom {zoom}: no geometric cell for {id}"));
+            // (a) the hit rect keeps the cell's row and vertical extent —
+            // the clamp only re-slices the horizontal span.
+            assert_eq!(
+                (r.y, r.height),
+                (geo.y, geo.height),
+                "zoom {zoom}: {id} hit rect {r:?} left its row/height in {geo:?}"
+            );
+            // (c) the hit rect never inflates past its geometric cell's right
+            // edge: D4 hands a shared column to the earlier cell by moving the
+            // later cell's left edge right, never by widening past the drawn
+            // cell.
+            assert!(
+                r.x >= geo.x && r.x + r.width <= geo.x + geo.width,
+                "zoom {zoom}: {id} hit rect {r:?} inflated past its cell {geo:?}"
+            );
+            rows.entry(r.y).or_default().push(r);
+        }
+        // (b) strict no-overlap over ALL published rects, with the one
+        // sanctioned exception: within each row the x-sorted intervals are
+        // disjoint unless the later cell is a fully-overlapped D4 sliver — a
+        // cell whose entire width rounded behind its same-row predecessor's
+        // right edge keeps a 1-column sliver pulled inside its OWN geometric
+        // cell (so it stays published and hit-testable, never inflating past
+        // its right edge). Sorted by x, that sliver compares against its
+        // geometric left neighbor, which contains it; hit-testing resolves
+        // the shared column first-wins.
+        for (y, mut cells) in rows {
+            cells.sort_by_key(|r| r.x);
+            for w in cells.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                if b.x >= a.x + a.width {
+                    continue; // disjoint — the normal D4 resolution
+                }
+                assert!(
+                    b.width == 1 && b.x >= a.x && b.x + b.width <= a.x + a.width,
+                    "zoom {zoom}: unsanctioned same-row overlap at y={y}: {a:?} vs {b:?}"
+                );
+            }
+        }
+        // The full-view list is the superset: viewport clipping can only drop
+        // cells, never invent them.
+        assert!(
+            app.component_rects.len() <= app.physical_full_rects.len(),
+            "zoom {zoom}: hit rects are a subset of the rendered cells"
+        );
+        // D5: the drawn cells (physical_full_rects) are unchanged from the
+        // un-clamped geometry — the skeleton renders the same (module, cell,
+        // rect) construction 1:1, so the D4 clamp never leaks into the face.
+        let full = app.physical_full_rects.clone();
+        app.physical_show_skeleton = true;
+        let _ = buffer_for(&mut app, 120, 90);
+        assert_eq!(
+            full, app.physical_skeleton_rects,
+            "zoom {zoom}: drawn cells unchanged from the un-clamped baseline (D5)"
+        );
+    }
+}
+
+#[test]
+fn visual_device_led_defaults_snapshot() {
+    // 3.2: the device-default face. The M4 touch plates render their button
+    // glyph with the RGB twin's LED cell below the plate (m4 geometry), the
+    // B32 faceplate nests each white LED inside its button with no fold
+    // association, and the master renders the CV jacks. The snapshot pins the
+    // full face; the glyph assertions pin the device-specific rendering.
+    for theme_name in ["classic", "mono"] {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("device_led_defaults");
+            let buf = buffer_for(&mut app, width, 60);
+            let ansi = buffer_to_ansi(&buf);
+
+            // M4 touch plate renders its button glyph; the L twin's cell
+            // (below the plate in the 1:1 m4 geometry) uses the led token.
+            let b11 = rect_for(&app, "B1.1");
+            assert!(
+                matches!(buf.cell((b11.x, b11.y)).unwrap().symbol(), "○" | "●"),
+                "{theme_name} {width}: M4 touch plate renders a button glyph"
+            );
+            let l11 = rect_for(&app, "L1.1");
+            assert_eq!(
+                buf.cell((l11.x, l11.y)).unwrap().style().fg,
+                Some(theme::active().led),
+                "{theme_name} {width}: L1.1 cell uses the led token"
+            );
+
+            // B32: the white LED's cell renders over its button (b32
+            // geometry nests each L cell inside its B cell; at narrow widths
+            // the D4 hit-rect clamp gives the shared column to the button, so
+            // the LED reads as the cell right beside it). The button carries
+            // no fold association — the data-level assertion lives in the
+            // association test.
+            let b21 = rect_for(&app, "B2.1");
+            let l21 = rect_for(&app, "L2.1");
+            assert!(
+                matches!(buf.cell((b21.x, b21.y)).unwrap().symbol(), "○" | "●"),
+                "{theme_name} {width}: B32 button renders a button glyph"
+            );
+            assert!(
+                l21.y >= b21.y && l21.y < b21.y + b21.height,
+                "{theme_name} {width}: L2.1 cell {l21:?} shares B2.1's row {b21:?}"
+            );
+            assert_eq!(
+                buf.cell((l21.x, l21.y)).unwrap().style().fg,
+                Some(theme::active().led),
+                "{theme_name} {width}: L2.1 cell uses the led token"
+            );
+
+            // Master CV jacks render their direction glyphs.
+            let i1 = rect_for(&app, "I1");
+            let o1 = rect_for(&app, "O1");
+            assert_eq!(
+                buf.cell((i1.x, i1.y)).unwrap().symbol(),
+                "◀",
+                "{theme_name} {width}: CV IN jack renders"
+            );
+            assert_eq!(
+                buf.cell((o1.x, o1.y)).unwrap().symbol(),
+                "▶",
+                "{theme_name} {width}: CV OUT jack renders"
+            );
+
+            insta::with_settings!({snapshot_suffix => format!("device_led_defaults_{theme_name}_{width}")}, {
+                insta::assert_snapshot!(ansi);
+            });
+        }
+    }
+}
+
 // ── paused-dim + disabled-circuit visual validation (task 4.1) ─────────────
 
 #[test]
@@ -5883,4 +6043,99 @@ fn visual_ui_review_fronts_snapshot() {
             });
         }
     }
+}
+
+// 3.2: per-controller device-default LED wiring (task 3.1).
+// `device_led_defaults.ini` = bare [m4] (M4 Motorfader panel 1: P1.x faders,
+// B1.1..B1.4 touch buttons, L1.1..L1.4) + bare [b32] (B32 Notebuttons panel 2:
+// B2.1..B2.32, L2.1..L2.32) + a [copy] circuit mapping master CV I/O I1/O1.
+// The device defaults (patch.rs `device_default_led`, applied only when a
+// section yields no explicit `led`/`ledN`) must resolve: M4 touch plate
+// B1.x -> L1.x (RGB twin), B32 button -> None (white-only), master I1 -> R1 /
+// O1 -> R9 (CD-channel register).
+#[test]
+fn device_default_lights_resolve_for_m4_b32_master() {
+    let content = std::fs::read_to_string("fixtures/device_led_defaults.ini").unwrap();
+    let patch =
+        crate::patch::Patch::from_ini_str(&content, String::from("device_led_defaults")).unwrap();
+    let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+
+    // M4 touch plate B{tok}.{n} -> its RGB LED twin L{tok}.{n}.
+    let b = find("B1.1");
+    assert_eq!(
+        b.controller, "M4",
+        "B1.1 belongs to the M4 Motorfader panel"
+    );
+    assert_eq!(
+        b.led.as_deref(),
+        Some("L1.1"),
+        "M4 touch plate default-links to its LED twin"
+    );
+    assert_eq!(
+        find("B1.4").led.as_deref(),
+        Some("L1.4"),
+        "every M4 touch plate links to L{{inst}}.{{n}}"
+    );
+    // The M4 faders stay non-LED-synthetic (P family has no default).
+    assert_eq!(
+        find("P1.1").led,
+        None,
+        "M4 motor-fader register P1.1 carries no default LED"
+    );
+
+    // B32 button -> white-only, no default.
+    let b2 = find("B2.1");
+    assert_eq!(
+        b2.controller, "B32",
+        "B2.1 belongs to the B32 Notebuttons panel"
+    );
+    assert_eq!(b2.led, None, "B32 button stays white-only (no default LED)");
+    assert_eq!(
+        find("B2.32").led,
+        None,
+        "B32 buttons are uniformly white-only"
+    );
+
+    // Master CV I/O -> CD-channel register (I{n}->R{n}, O{n}->R{8+n}).
+    let i1 = find("I1");
+    assert_eq!(i1.controller, "CV I/O", "I1 is a master CV input jack");
+    assert_eq!(
+        i1.led.as_deref(),
+        Some("R1"),
+        "master I1 default-links to R1"
+    );
+    assert_eq!(
+        find("O1").led.as_deref(),
+        Some("R9"),
+        "master O1 default-links to R9"
+    );
+}
+
+#[test]
+fn explicit_led_pairing_wins_over_device_default() {
+    // An explicit `ledN = L.M` paired with a same-suffix element entry must
+    // win over the controller's device default (task 3.1 authoritative rule).
+    for content in [
+        "[m4]\n    button1 = B1.1\n    led1 = L9.1\n",
+        "[motorfader]\n    button1 = B1.1\n    led1 = L9.1\n",
+    ] {
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("probe")).unwrap();
+        let b = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(
+            b.led.as_deref(),
+            Some("L9.1"),
+            "explicit led1 wins over the M4 device default (input {:?})",
+            content
+        );
+    }
+
+    // Bare led = also wins.
+    let content = "[m4]\n    button1 = B1.1\n    led = L9.1\n";
+    let patch = crate::patch::Patch::from_ini_str(content, String::from("probe")).unwrap();
+    let b = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+    assert_eq!(
+        b.led.as_deref(),
+        Some("L9.1"),
+        "bare led wins over the M4 device default"
+    );
 }
