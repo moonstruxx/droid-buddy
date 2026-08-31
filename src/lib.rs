@@ -11,6 +11,7 @@ pub mod layout;
 pub mod optimize;
 pub mod patch;
 pub mod physical;
+pub mod plugin;
 pub mod rendermetrics;
 pub mod schema;
 pub mod theme;
