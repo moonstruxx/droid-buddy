@@ -8,7 +8,7 @@ use ratatui::DefaultTerminal;
 use droid_tui::app::App;
 use droid_tui::latency::CostModel;
 use droid_tui::ui::render;
-use droid_tui::{config, handler, theme};
+use droid_tui::{config, handler, schema, theme};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -16,6 +16,14 @@ fn main() -> Result<()> {
     // and rendering never starts with a half-selected theme.
     let settings = config::load(&theme::canonical_theme_name, theme::THEMES);
     theme::init(*theme::resolve(&settings.theme));
+    // Install the merged schema (embedded + plugin overlay) before the
+    // terminal switches to the alternate screen so plugin shadow/skip
+    // warnings print on a clean terminal (ADR 14).
+    schema::init(
+        &settings,
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    );
     let terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;
 

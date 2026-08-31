@@ -4370,7 +4370,7 @@ fn validation_issues_for(fixture: &str) -> Vec<crate::validation::ValidationIssu
     let patch =
         Patch::from_ini_file(Path::new(&path)).unwrap_or_else(|e| panic!("{path} must parse: {e}"));
     let schema = crate::schema::load_schema();
-    crate::validation::validate_patch(&patch, &schema)
+    crate::validation::validate_patch(&patch, schema)
 }
 
 fn assert_has_code(fixture: &str, expected_code: &str) {

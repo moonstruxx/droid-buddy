@@ -529,7 +529,7 @@ pub fn generate_candidates(
     let eval = EvalCtx {
         derived: &derived,
         cost,
-        schema: &schema,
+        schema,
     };
     if derived.edges.is_empty() {
         // Nothing to optimize: no cables, so every ordering ties. Return the
@@ -658,7 +658,7 @@ mod tests {
         let eval = EvalCtx {
             derived: &derived,
             cost: &cost,
-            schema: &schema,
+            schema,
         };
 
         // Independent brute force: enumerate all 4! permutations of the four
@@ -813,7 +813,7 @@ mod tests {
             .iter()
             .map(|(id, section_index)| (id.clone(), position[*section_index]))
             .collect();
-        let circuit_avg = |id: &NodeId| cost.circuit_avg(id, &schema);
+        let circuit_avg = |id: &NodeId| cost.circuit_avg(id, schema);
         let (edge_latencies, _) = forward_latency(&derived.edges, &node_positions, circuit_avg);
         for edge in &edge_latencies {
             assert!(

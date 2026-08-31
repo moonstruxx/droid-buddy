@@ -127,7 +127,15 @@ pub fn discover_plugins(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -
     let Some(dir) = plugin_dir(xdg_config_home, home) else {
         return Vec::new();
     };
-    let Ok(entries) = fs::read_dir(&dir) else {
+    discover_plugins_from_dir(&dir)
+}
+
+/// Discover and parse every `*.toml` plugin file under an explicit directory,
+/// in sorted-filename order, with the same skip/warn semantics as
+/// `discover_plugins`. This is the `[plugins].dir` override entry point
+/// (`schema::init` loads from here when the config pins a directory).
+pub fn discover_plugins_from_dir(dir: &Path) -> Vec<PluginFile> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut paths: Vec<PathBuf> = entries
