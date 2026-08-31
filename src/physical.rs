@@ -957,6 +957,35 @@ impl ScreenMapping {
         )
     }
 
+    /// Integer screen rect for an absolute mm rect: the left/right (and
+    /// top/bottom) edges round independently from the absolute mm span
+    /// (`round(mm0×f×zoom − offset) .. round(mm1×f×zoom − offset)`), so
+    /// adjacent rects sharing a boundary abut exactly at every zoom instead
+    /// of accumulating rounded widths. Sub-cell spans clamp to 1 cell so
+    /// slivers still draw; edges off the top/left clamp to 0.
+    pub fn mm_rect_to_screen(&self, mm: RectMm) -> (u16, u16, u16, u16) {
+        let x0 = (mm.x_mm * self.cols_per_mm * self.zoom - self.offset_x).round() as i64;
+        let x1 =
+            ((mm.x_mm + mm.w_mm) * self.cols_per_mm * self.zoom - self.offset_x).round() as i64;
+        let y0 = (mm.y_mm * self.rows_per_mm * self.zoom - self.offset_y).round() as i64;
+        let y1 =
+            ((mm.y_mm + mm.h_mm) * self.rows_per_mm * self.zoom - self.offset_y).round() as i64;
+        // Both edges clamp before the span is derived: a rect partially
+        // off-screen left must not keep width from its unclamped origin
+        // (that would extend it past its true right edge and overlap the
+        // next module).
+        let x0c = x0.max(0);
+        let x1c = x1.max(0);
+        let y0c = y0.max(0);
+        let y1c = y1.max(0);
+        (
+            x0c as u16,
+            y0c as u16,
+            (x1c - x0c).max(1) as u16,
+            (y1c - y0c).max(1) as u16,
+        )
+    }
+
     /// Inverse of `mm_to_screen` for a screen point (the round-trip test and
     /// the zoom-anchor math both use it).
     pub fn screen_to_mm(&self, x: f64, y: f64) -> (f64, f64) {
@@ -1082,6 +1111,53 @@ mod tests {
         let (mx1, my1) = p.screen_to_mm(x0, y0);
         assert_close(mx1, mm.x_mm + 7.0 / (0.15 * 1.0));
         assert_close(my1, mm.y_mm + 11.0 / (0.3 * 1.0));
+    }
+
+    #[test]
+    fn adjacent_module_rects_never_overlap_across_zoom_presets() {
+        // droid_tui-4.1: module borders must abut — not overlap by a column —
+        // at every zoom preset and pan offset. Deriving each module's span
+        // from its own rounded width (`round(x)` + `round(w)`) lets the
+        // rounding disagree with the next module's rounded left edge when a
+        // pan offset shifts the first module's edge rounding differently
+        // (e.g. offset 0.4: module 0 = [0,4) while module 1 starts at 3).
+        // Edge-rounded spans (`round(mm0×f)..round(mm1×f)`) share the
+        // boundary value, so adjacent rects abut exactly.
+        let chain = two_module_chain(); // p2b8 + CV I/O: x 0..25.4, 25.9..66.54
+        let rack = RackLayout::pack(&chain, &spec(&[(3, 20.0)], &[]));
+        let zooms = [0.75, 1.0, 1.5, 2.0];
+        let offsets = [(0.0, 0.0), (0.4, 0.0), (-1.3, 0.7), (2.1, -0.9)];
+        for zoom in zooms {
+            for &(ox, oy) in &offsets {
+                let m = ScreenMapping::new(0.15, 0.3, zoom, ox, oy);
+                // Renderer-equivalent module rects: absolute mm spans mapped
+                // with edge rounding, clamped to non-negative origin.
+                let rects: Vec<(u16, u16, u16, u16)> = rack.rows[0]
+                    .modules
+                    .iter()
+                    .map(|placed| {
+                        m.mm_rect_to_screen(RectMm {
+                            x_mm: placed.rect_mm.x_mm,
+                            y_mm: placed.rect_mm.y_mm,
+                            w_mm: placed.rect_mm.w_mm,
+                            h_mm: placed.rect_mm.h_mm,
+                        })
+                    })
+                    .collect();
+                // Adjacent rects (same row, chain order) must abut or gap,
+                // never overlap: right edge <= next left edge.
+                for pair in rects.windows(2) {
+                    let (x0, _, w0, _) = pair[0];
+                    let (x1, _, _, _) = pair[1];
+                    assert!(
+                        x0.saturating_add(w0) <= x1,
+                        "zoom {zoom} offset ({ox},{oy}): module rects overlap \
+                         (m0 spans {x0}..{}, m1 starts at {x1})",
+                        x0.saturating_add(w0)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1227,6 +1303,50 @@ mod tests {
         let f1 = layout.cell_for(0, "P1.2").expect("M4 fader cell");
         assert_eq!(f1.family, "F");
         assert_eq!(f1.element, Some(2));
+    }
+
+    #[test]
+    fn switch_tokens_resolve_to_switch_cells_or_are_omitted() {
+        // droid_tui-4.2: switch tokens place on the controller geometry's S
+        // family — the same mechanism as knobs (P)/encoders (E)/buttons (B) —
+        // and when the controller physically lacks switch cells the switch is
+        // omitted rather than mis-rendered on a same-numbered knob cell.
+
+        // Faderbank (p8s8) carries an S family: S tokens land on their switch
+        // cells, the slider P1.1 on the F family (P->F fallback).
+        let p = patch(
+            "[switch]\n    switch = S1.1\n    output = _OUT\n[switch]\n    switch = S1.2\n[faderbank]\n    pot = P1.1\n",
+        );
+        let layout = PhysicalLayout::build(&p);
+        assert_eq!(layout.modules.len(), 1);
+        assert_eq!(layout.modules[0].controller, "Faderbank");
+        let s1 = layout.cell_for(0, "S1.1").expect("S1.1 switch cell");
+        assert_eq!(s1.family, "S");
+        assert_eq!(s1.element, Some(1));
+        let s2 = layout.cell_for(0, "S1.2").expect("S1.2 switch cell");
+        assert_eq!(s2.family, "S");
+        assert_eq!(s2.element, Some(2));
+        let p1 = layout.cell_for(0, "P1.1").expect("P1.1 slider cell");
+        assert_eq!(
+            p1.family, "F",
+            "slider lives in the F family (P->F fallback)"
+        );
+
+        // Pot (p10) has no S family: the switch token is omitted — cell_for
+        // returns None instead of falling back to the same-numbered knob cell.
+        let p = patch("[pot]\n    pot = P1.1\n[switch]\n    switch = S1.1\n");
+        let layout = PhysicalLayout::build(&p);
+        assert_eq!(layout.modules.len(), 1);
+        assert_eq!(layout.modules[0].controller, "Pot");
+        assert!(
+            layout.cell_for(0, "S1.1").is_none(),
+            "no switch cell on Pot -> the switch is omitted"
+        );
+        let knob = layout.cell_for(0, "P1.1").expect("P1.1 knob cell");
+        assert_eq!(
+            knob.label, "P1.1",
+            "the knob cell stays a knob, not claimed by the omitted switch"
+        );
     }
 
     #[test]

@@ -496,15 +496,17 @@ pub(crate) fn physical_skeleton_geometry(
             // `y_mm` carries the rack-absolute offset (below the previous
             // rows and their fold bars).
             let abs_y_mm = row.y_mm + placed.rect_mm.y_mm;
-            module_rects.push((
-                placed.module_index,
-                screen_rect_of(mapping.mm_to_screen(crate::physical::RectMm {
-                    x_mm: placed.rect_mm.x_mm,
-                    y_mm: abs_y_mm,
-                    w_mm: placed.rect_mm.w_mm,
-                    h_mm: placed.rect_mm.h_mm,
-                })),
-            ));
+            // Module borders span the absolute mm edges (`mm_rect_to_screen`
+            // rounds both edges), so adjacent faceplates abut exactly at
+            // every zoom instead of accumulating rounded widths; cells below
+            // are interior elements and keep the plain mapping.
+            let (mx, my, mw, mh) = mapping.mm_rect_to_screen(crate::physical::RectMm {
+                x_mm: placed.rect_mm.x_mm,
+                y_mm: abs_y_mm,
+                w_mm: placed.rect_mm.w_mm,
+                h_mm: placed.rect_mm.h_mm,
+            });
+            module_rects.push((placed.module_index, Rect::new(mx, my, mw, mh)));
             let module = &chain.modules[placed.module_index];
             for (cell_index, component) in module.components.iter().enumerate() {
                 let Some(cell) = chain.cell_for(placed.module_index, &component.id) else {
