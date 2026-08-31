@@ -828,7 +828,6 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             &state_text,
             display_style,
             app.processing_paused,
-            patch,
             is_fader,
         );
         // Hit rect is the mapped cell the component rendered into (the same
@@ -931,11 +930,10 @@ fn physical_visuals(
     }
 }
 
-/// Render one component into its physical element cell. LED-folding is
-/// preserved from the panel renderer: a component that folds an LED in draws
-/// a boxed cell (border + "symbol label" title + "state led-glyph" interior)
-/// when the cell is wide/tall enough, falling back to the compact cell
-/// otherwise. The compact cell always draws the state glyph; the label
+/// Render one component into its physical element cell. The compact cell is
+/// the sole physical contract: no element cell reaches the boxed-cell gate
+/// (5 cols × 3 rows) at any zoom preset, so LED-folding boxed cells live only
+/// in the panel renderer. The cell always draws the state glyph; the label
 /// shares the first row when there is room (ellipsized), and the state text
 /// takes the second row.
 #[allow(clippy::too_many_arguments)]
@@ -948,57 +946,10 @@ fn render_physical_cell(
     state_text: &str,
     display_style: Style,
     paused: bool,
-    patch: &crate::patch::Patch,
     fader: bool,
 ) {
-    if let Some(led_id) = &comp.led {
-        if area.width >= 5 && area.height >= 3 {
-            let led_glyph = patch
-                .hw_components
-                .iter()
-                .find(|c| c.id == led_id.as_str())
-                .map(|led| {
-                    if matches!(led.state, ComponentState::On | ComponentState::Active) {
-                        "◉"
-                    } else {
-                        "○"
-                    }
-                })
-                .unwrap_or("○");
-            // Border + title row + one interior row: label lives in the title
-            // (ellipsized to the border row's inner width), the interior
-            // holds state + LED glyph — the panel renderer's boxed-cell
-            // approach (droid_tui-888) ported into the physical cell.
-            let title = truncate_with_ellipsis(
-                &format!(" {symbol} {label} "),
-                (area.width as usize).saturating_sub(1),
-            );
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(display_style)
-                .title_top(Line::styled(title, display_style));
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            if inner.width > 0 && inner.height > 0 {
-                let inner_line = truncate_with_ellipsis(
-                    &format!("{state_text} {led_glyph}"),
-                    inner.width as usize,
-                );
-                frame.buffer_mut().set_stringn(
-                    inner.x,
-                    inner.y,
-                    &inner_line,
-                    inner.width as usize,
-                    display_style,
-                );
-            }
-            return;
-        }
-    }
-
     // Fader face (design D1): a bottom-up vertical track replaces the flat
-    // glyph + percentage in the compact path. The boxed-LED branch above
-    // stays authoritative for LED-folding faders (task 4.1).
+    // glyph + percentage in the compact path.
     if fader {
         let value = match &comp.state {
             ComponentState::Value(v) => *v,

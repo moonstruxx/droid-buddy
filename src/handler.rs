@@ -922,7 +922,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
         crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
             // Cycle through the scaling presets defined by the module-scaling spec.
-            // The floor is 0.75 so cells never shrink below the boxable width.
             const PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
             let idx = PRESETS
                 .iter()
