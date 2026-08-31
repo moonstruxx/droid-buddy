@@ -361,6 +361,9 @@ fn setup_switch_value(app: &mut App) {
         match comp.id.as_str() {
             "S1.1" => comp.state = ComponentState::Value(0.35),
             "S1.2" => comp.state = ComponentState::On,
+            // P1.1 mid-way so the gallery row shows the fader track with its
+            // lit amber rows (mirrors switch_value_app, task 1.2 design D1).
+            "P1.1" => comp.state = ComponentState::Value(0.5),
             _ => {}
         }
     }
