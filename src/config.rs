@@ -1,5 +1,5 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
-//! + `[physical.rack]`) stored in `config.toml` under the XDG config home.
+//! + `[physical.rack]`, `[plugins]`) stored in `config.toml` under the XDG config home.
 //!   Loaded once at startup, before the terminal UI initializes (design
 //!   Decision 5).
 //!
@@ -33,6 +33,10 @@ pub const DEFAULT_PHYSICAL_OFFSET: f64 = 0.0;
 pub const MIN_PHYSICAL_ZOOM: f64 = 0.75;
 pub const MAX_PHYSICAL_ZOOM: f64 = 2.0;
 
+/// Plugin-loading default under `[plugins]`: enabled by default, no directory
+/// override (the standard XDG plugins dir applies).
+pub const DEFAULT_PLUGINS_ENABLED: bool = true;
+
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -58,6 +62,10 @@ fn default_physical_zoom() -> f64 {
 
 fn default_physical_offset() -> f64 {
     DEFAULT_PHYSICAL_OFFSET
+}
+
+fn default_plugins_enabled() -> bool {
+    DEFAULT_PLUGINS_ENABLED
 }
 
 /// Per-label configuration under `[labels]`.
@@ -123,6 +131,42 @@ impl Default for Physical {
     }
 }
 
+/// Plugin-loading configuration under `[plugins]`.
+///
+/// `dir` overrides the plugin directory; `None` selects the standard XDG
+/// plugins dir resolved by `plugin::discover_plugins`
+/// (`$XDG_CONFIG_HOME/droid-tui/plugins`). `enabled = false` disables plugin
+/// loading entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plugins {
+    /// Directory override, kept as written. Read via [`Plugins::plugins_dir`],
+    /// which applies the XDG rule (non-absolute values treated as unset).
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    #[serde(default = "default_plugins_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for Plugins {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            enabled: default_plugins_enabled(),
+        }
+    }
+}
+
+impl Plugins {
+    /// Resolved directory override: the configured absolute `dir`, or `None`
+    /// when absent (caller falls back to the standard XDG plugins dir). A
+    /// non-absolute configured value is treated as unset, mirroring the
+    /// `$XDG_CONFIG_HOME` rule in `config_dir`/`plugin::plugin_dir` (silent,
+    /// no warning).
+    pub fn plugins_dir(&self) -> Option<&Path> {
+        self.dir.as_deref().filter(|path| path.is_absolute())
+    }
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions). `Eq` is intentionally not
 /// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
@@ -136,6 +180,8 @@ pub struct Settings {
     pub latency: Latency,
     #[serde(default)]
     pub physical: Physical,
+    #[serde(default)]
+    pub plugins: Plugins,
 }
 
 impl Default for Settings {
@@ -145,6 +191,7 @@ impl Default for Settings {
             labels: Labels::default(),
             latency: Latency::default(),
             physical: Physical::default(),
+            plugins: Plugins::default(),
         }
     }
 }
@@ -418,6 +465,7 @@ mod tests {
                 labels: Labels::default(),
                 latency: Latency::default(),
                 physical: Physical::default(),
+                plugins: Plugins::default(),
             },
         )
         .unwrap();
@@ -449,6 +497,7 @@ mod tests {
                 labels: Labels::default(),
                 latency: Latency::default(),
                 physical: Physical::default(),
+                plugins: Plugins::default(),
             },
         )
         .unwrap();
@@ -521,6 +570,7 @@ mod tests {
                 },
                 latency: Latency::default(),
                 physical: Physical::default(),
+                plugins: Plugins::default(),
             },
         )
         .unwrap();
@@ -547,6 +597,7 @@ mod tests {
                     },
                     latency: Latency::default(),
                     physical: Physical::default(),
+                    plugins: Plugins::default(),
                 },
             )
             .unwrap();
@@ -572,6 +623,7 @@ mod tests {
                 per_circuit: HashMap::from([("clocktool".to_string(), 2.0)]),
             },
             physical: Physical::default(),
+            plugins: Plugins::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -641,6 +693,7 @@ mod tests {
                     per_circuit: HashMap::from([("clocktool".to_string(), 2.5)]),
                 },
                 physical: Physical::default(),
+                plugins: Plugins::default(),
             },
         )
         .unwrap();
@@ -815,6 +868,7 @@ mod tests {
                     assign: HashMap::from([("P2B8 1".to_string(), 0)]),
                 },
             },
+            plugins: Plugins::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -853,6 +907,7 @@ mod tests {
                         assign: HashMap::new(),
                     },
                 },
+                plugins: Plugins::default(),
             },
         )
         .unwrap();
@@ -865,5 +920,117 @@ mod tests {
         assert_eq!(loaded.physical.rack.top_mount_te, 0.0);
         assert_eq!(loaded.physical.rack.rows[0].he, 1);
         assert_eq!(loaded.physical.rack.rows[0].hp, 1.0);
+    }
+
+    // ── circuit-plugin-system 4.2: [plugins] dir / enabled ──
+
+    #[test]
+    fn plugins_defaults_when_table_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.plugins, Plugins::default());
+        assert!(loaded.plugins.enabled);
+        assert_eq!(loaded.plugins.plugins_dir(), None);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn plugins_defaults_when_file_empty() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.plugins, Plugins::default());
+    }
+
+    #[test]
+    fn plugins_enabled_false_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[plugins]\nenabled = false\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert!(!loaded.plugins.enabled);
+        assert_eq!(loaded.plugins.plugins_dir(), None);
+    }
+
+    #[test]
+    fn plugins_dir_override_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[plugins]\ndir = \"/some/dir\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.plugins.plugins_dir(), Some(Path::new("/some/dir")));
+        assert!(loaded.plugins.enabled);
+    }
+
+    #[test]
+    fn plugins_relative_dir_treated_as_unset() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[plugins]\ndir = \"rel/path\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        // The raw value is preserved on the field; the getter applies the XDG
+        // rule (non-absolute treated as unset, silently, like `config_dir`).
+        assert_eq!(loaded.plugins.dir, Some(PathBuf::from("rel/path")));
+        assert_eq!(loaded.plugins.plugins_dir(), None);
+        assert!(loaded.plugins.enabled);
+    }
+
+    #[test]
+    fn plugins_malformed_enabled_falls_back_to_defaults() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[plugins]\nenabled = \"yes\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded, Settings::default());
+        assert_eq!(loaded.plugins, Plugins::default());
+    }
+
+    #[test]
+    fn plugins_save_round_trips_through_load() {
+        let dir = TempDir::new().unwrap();
+        let settings = Settings {
+            theme: "classic".to_string(),
+            labels: Labels::default(),
+            latency: Latency::default(),
+            physical: Physical::default(),
+            plugins: Plugins {
+                dir: Some(PathBuf::from("/custom/plugins")),
+                enabled: false,
+            },
+        };
+        save_to_dir(dir.path(), &settings).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[plugins]"), "body: {body}");
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.plugins, settings.plugins);
     }
 }
