@@ -40,5 +40,5 @@
 
 - [x] 5.1 Update ARCHITECTURE.md (plugin.rs module, merged-schema cache, declared metadata) and DESIGN.md (plugin format + merge semantics); sync the four delta specs and new `circuit-plugins` spec
   <!-- agent: devops-engineer.fast, depends_on: [3.3, 4.1, 4.2], touches: [ARCHITECTURE.md, DESIGN.md, openspec/specs/**] -->
-- [ ] 5.2 Full verification gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` — all four exit 0
+- [x] 5.2 Full verification gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` — all four exit 0
   <!-- agent: horst-engineer.fast, depends_on: [5.1], touches: [] -->
