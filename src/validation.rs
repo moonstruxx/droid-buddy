@@ -437,7 +437,9 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
 mod tests {
     use super::*;
     use crate::patch::Patch;
-    use crate::schema::load_schema;
+    use crate::plugin::{PluginCircuit, PluginFile, PluginParam};
+    use crate::schema::{load_schema, merge_plugins};
+    use std::path::PathBuf;
 
     fn validate(ini: &str) -> Vec<ValidationIssue> {
         let patch = Patch::from_ini_str(ini, String::from("test")).unwrap();
@@ -723,6 +725,94 @@ mod tests {
         // Should have unknown_circuit but no ram_overflow because unknown=true
         assert!(has_code(&issues, "unknown_circuit"));
         assert!(!has_code(&issues, "ram_overflow"));
+    }
+
+    /// Build an owned schema whose embedded circuits are augmented with one
+    /// plugin-defined circuit (ramsize 16) via the same `merge_plugins` entry
+    /// point `schema::init` uses at startup. This mirrors task 4.1: plugin
+    /// circuits land in `Schema.circuits` and must therefore participate in
+    /// every validation check, especially the RAM budget.
+    fn schema_with_plugin_circuit() -> crate::schema::Schema {
+        let base = (*load_schema()).clone();
+        let circuit = PluginCircuit {
+            name: "ramtestplugin".to_string(),
+            category: "logic".to_string(),
+            ramsize: 16,
+            title: "RAM Test Plugin".to_string(),
+            description: String::new(),
+            cable_kind: None,
+            color: None,
+            inputs: vec![PluginParam {
+                name: "input".to_string(),
+                short: "i".to_string(),
+                param_type: "cv".to_string(),
+                default: Some("0".to_string()),
+                prefix: None,
+                count: None,
+                start_at: None,
+            }],
+            outputs: vec![PluginParam {
+                name: "output".to_string(),
+                short: "o".to_string(),
+                param_type: "cv".to_string(),
+                default: None,
+                prefix: None,
+                count: None,
+                start_at: None,
+            }],
+        };
+        let file = PluginFile {
+            path: PathBuf::from("ram_test.toml"),
+            circuits: vec![circuit],
+        };
+        merge_plugins(base, &[file])
+    }
+
+    #[test]
+    fn plugin_circuit_participates_in_ram_overflow_check() {
+        let schema = schema_with_plugin_circuit();
+        // Sum enough instances of the 16-byte plugin circuit to exceed every
+        // master's available memory; the plugin circuit is known, so the RAM
+        // check must NOT be skipped the way `ram_not_checked_when_unknown_circuit`
+        // documents it is for a genuinely unknown circuit.
+        let avail_min = *schema.available_memory.values().min().unwrap();
+        let copies = (avail_min / 16 + 2) as usize;
+        let mut ini = String::from("[p2b8]\n");
+        for _ in 0..copies {
+            ini.push_str("[ramtestplugin]\ninput = 0\n");
+        }
+        let patch = Patch::from_ini_str(&ini, String::from("t")).unwrap();
+        let issues = validate_patch(&patch, &schema);
+        assert!(
+            has_code(&issues, "ram_overflow"),
+            "expected ram_overflow, got: {:?}",
+            codes(&issues)
+        );
+        // The plugin circuit itself is recognized, not unknown.
+        assert!(!has_code(&issues, "unknown_circuit"));
+    }
+
+    #[test]
+    fn plugin_circuit_is_recognized_within_budget() {
+        let schema = schema_with_plugin_circuit();
+        let ini = "[p2b8]\n[ramtestplugin]\ninput = 0\n";
+        let patch = Patch::from_ini_str(ini, String::from("t")).unwrap();
+        let issues = validate_patch(&patch, &schema);
+        assert!(
+            !has_code(&issues, "ram_overflow"),
+            "unexpected ram_overflow: {:?}",
+            codes(&issues)
+        );
+        assert!(
+            !has_code(&issues, "unknown_circuit"),
+            "plugin circuit should be known: {:?}",
+            codes(&issues)
+        );
+        assert!(
+            !has_code(&issues, "unknown_param"),
+            "plugin circuit's own params should validate: {:?}",
+            codes(&issues)
+        );
     }
 
     #[test]
