@@ -9,12 +9,12 @@
 
 ## 2. Snapshot re-acceptance (horst-engineer, depends_on 1)
 
-- [ ] 2.1 Re-accept the 5 stale visual snapshots (`visual_boxed_vs_plain_led_pairs_snapshot`, `visual_controller_panels_arpeggio_snapshot`, `visual_multi_module_p2b8_snapshot`, `visual_theming_shift_and_mono_snapshot`, `visual_viewer_live_interaction_snapshot`) to physical-era faces via `cargo insta accept --include-ignored`; review each `.snap` diff is a physical-era face (not a rendering regression); verify: `cargo insta test --check` passes with no pending snapshots <!-- agent: horst-engineer.build, depends_on: [1.4, 4.2], touches: [src/snapshots/] -->
+- [x] 2.1 Re-accept the 5 stale visual snapshots (`visual_boxed_vs_plain_led_pairs_snapshot`, `visual_controller_panels_arpeggio_snapshot`, `visual_multi_module_p2b8_snapshot`, `visual_theming_shift_and_mono_snapshot`, `visual_viewer_live_interaction_snapshot`) to physical-era faces via `cargo insta accept --include-ignored`; review each `.snap` diff is a physical-era face (not a rendering regression); verify: `cargo insta test --check` passes with no pending snapshots <!-- agent: horst-engineer.build, depends_on: [1.4, 4.2], touches: [src/snapshots/] -->
 
 ## 3. Corpus/tooling reconciliation (api-engineer, depends_on 1)
 
 - [x] 3.1 Diff the failing assertion in `regression_scorer_holdout_agrees_with_corpus` against `tools/outlier_artifact.txt` and `corpus/features.csv`; re-sync corpus or table only when drift is real (holdout gate catches genuine model drift); verify: the test passes and the diff/reason is recorded in the commit message <!-- agent: api-engineer.build, depends_on: [1.4], touches: [src/regression.rs, tools/outlier_artifact.txt, corpus/] -->
-- [ ] 3.2 Diff the failing assertion in `rendermetrics::tests::python_rust_extractor_agreement_on_corpus` between the Rust extractor and `tools/build_rendermetrics.py`; re-sync the extractor or corpus; verify: the test passes <!-- agent: api-engineer.build, depends_on: [3.1], touches: [src/rendermetrics.rs, tools/, corpus/] -->
+- [x] 3.2 Diff the failing assertion in `rendermetrics::tests::python_rust_extractor_agreement_on_corpus` between the Rust extractor and `tools/build_rendermetrics.py`; re-sync the extractor or corpus; verify: the test passes <!-- agent: api-engineer.build, depends_on: [3.1], touches: [src/rendermetrics.rs, tools/, corpus/] -->
 
 ## 4. Renderer edge cases (rusty-engineer)
 
@@ -27,4 +27,4 @@
 
 ## 6. Full gate (horst-engineer, depends_on 2,3,4,5)
 
-- [ ] 6.1 Run the complete verification gate and confirm all four exit 0: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test` (full suite, incl. insta `--check`), `cargo build --release --locked`; verify: `cargo insta test --check` reports no pending snapshots and the suite shows 0 failures <!-- agent: horst-engineer.build, depends_on: [2.1, 3.2, 4.2, 5.1], touches: [] -->
+- [x] 6.1 Run the complete verification gate and confirm all four exit 0: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test` (full suite, incl. insta `--check`), `cargo build --release --locked`; verify: `cargo insta test --check` reports no pending snapshots and the suite shows 0 failures <!-- agent: horst-engineer.build, depends_on: [2.1, 3.2, 4.2, 5.1], touches: [] -->
