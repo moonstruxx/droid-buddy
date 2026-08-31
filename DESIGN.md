@@ -187,6 +187,8 @@ Glyphs by kind:
 - **Zoom**: `+`/`-` cycle the presets 75 %, 100 %, 150 %, 200 % with wrap-around (floor 75 % keeps cells boxable); the status bar reports `Scaling: X%` (or the rack-aware physical hint). Zoom actually rescales the physical cells, unlike the legacy fixed 16×3 wrapped-panel cells.
 - **Pan**: arrow keys pan the rack toward the pressed direction when it overflows the main area, and Up/Down fall back to panel navigation when it fits; `j`/`k` always navigate. The mouse wheel pans on overflow — a wheel over a knob/fader cell still adjusts its value when no overflow forces panning.
 - **Rack definition**: `config.toml` gains `[physical]` view defaults (`show_skeleton`, `zoom`, `offset_x`/`offset_y`) and `[physical.rack]` (`rows = [{he, hp, label?}]`, `top_mount_te`, `side_mount_te`, `assign = { "P2B8 1" = 1 }`); absent sections keep the out-of-box single-row case wide enough for the whole chain.
+- **Element state rendering**: each element renders its live state on its physical-view cell — buttons/switches show their toggle glyph, knobs/encoders/faders their percentage, CV I/O their direction — mirroring the panel view's state rendering.
+- **Border abutment + switch placement**: adjacent module borders abut exactly at every zoom preset (edge-rounded mm→screen spans share boundary values); switch cells place per the controller's geometry data and never collapse onto a neighboring control's cell (e.g. a knob's) when geometry lacks a matching switch cell.
 
 ## Status Bar
 
