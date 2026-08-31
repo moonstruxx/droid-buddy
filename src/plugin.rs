@@ -360,4 +360,114 @@ mod tests {
         let files = discover_plugins(Some(OsStr::new("/nonexistent")), None);
         assert!(files.is_empty());
     }
+
+    #[test]
+    fn load_file_valid_fixture_returns_two_circuits() {
+        // End-to-end through the loader's public entry: read + parse + validate.
+        let file = load_file(&fixture_path("valid.toml")).expect("valid fixture loads");
+        assert_eq!(file.path, fixture_path("valid.toml"));
+        assert_eq!(file.circuits.len(), 2);
+
+        // NEWCKT lowercases to the schema key convention; no declared metadata.
+        assert_eq!(file.circuits[0].name, "newckt");
+        assert_eq!(file.circuits[0].ramsize, 256);
+        assert!(file.circuits[0].cable_kind.is_none());
+        assert!(file.circuits[0].color.is_none());
+
+        // The embedded `copy` override carries declared rendering metadata.
+        assert_eq!(file.circuits[1].name, "copy");
+        assert_eq!(file.circuits[1].ramsize, 32);
+        assert_eq!(file.circuits[1].cable_kind.as_deref(), Some("audio"));
+        assert_eq!(file.circuits[1].color.as_deref(), Some("knob"));
+    }
+
+    #[test]
+    fn load_file_missing_ramsize_returns_none() {
+        // One circuit without the required `ramsize` rejects the whole file.
+        assert!(load_file(&fixture_path("missing_ramsize.toml")).is_none());
+    }
+
+    #[test]
+    fn load_file_unreadable_or_malformed_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("missing.toml");
+        assert!(load_file(&missing).is_none(), "unreadable file is skipped");
+
+        let malformed = tmp.path().join("malformed.toml");
+        fs::write(&malformed, "[[circuit]]\nname = ").expect("write malformed TOML");
+        assert!(load_file(&malformed).is_none(), "malformed TOML is skipped");
+    }
+
+    #[test]
+    fn discover_plugins_ignores_non_toml_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugins = tmp.path().join("droid-tui/plugins");
+        fs::create_dir_all(&plugins).expect("create plugin dir");
+        fs::copy(fixture_path("valid.toml"), plugins.join("valid.toml")).expect("copy fixture");
+        fs::write(plugins.join("README.md"), "not a plugin").expect("write non-toml file");
+        fs::write(plugins.join("schema.json"), "{}").expect("write non-toml file");
+
+        let files = discover_plugins(Some(tmp.path().as_os_str()), None);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].path.file_name().and_then(|n| n.to_str()),
+            Some("valid.toml")
+        );
+    }
+
+    #[test]
+    fn discover_plugins_preserves_sorted_order_for_overlay() {
+        // `newckt` is defined in both valid.toml (ramsize 256) and the
+        // alphabetically-later newckt_override.toml (ramsize 512). The loader
+        // must hand the merge a stable sorted order so the later-file-wins
+        // overlay in schema.rs is deterministic; the override itself lives on
+        // the schema side. The ramsize delta keeps the winning definition
+        // observable after the merge.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugins = tmp.path().join("droid-tui/plugins");
+        fs::create_dir_all(&plugins).expect("create plugin dir");
+        fs::copy(fixture_path("valid.toml"), plugins.join("valid.toml")).expect("copy fixture");
+        fs::copy(
+            fixture_path("newckt_override.toml"),
+            plugins.join("newckt_override.toml"),
+        )
+        .expect("copy fixture");
+
+        let files = discover_plugins(Some(tmp.path().as_os_str()), None);
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[0].path.file_name().and_then(|n| n.to_str()),
+            Some("newckt_override.toml"),
+            "alphabetically earlier file loads first"
+        );
+        assert_eq!(
+            files[1].path.file_name().and_then(|n| n.to_str()),
+            Some("valid.toml")
+        );
+        let override_def = &files[0].circuits[0];
+        assert_eq!(override_def.name, "newckt");
+        assert_eq!(override_def.ramsize, 512);
+        let base_def = &files[1].circuits[0];
+        assert_eq!(base_def.name, "newckt");
+        assert_eq!(base_def.ramsize, 256);
+    }
+
+    #[test]
+    fn mixed_case_circuit_name_is_lowercased() {
+        // Names are case-insensitive like the embedded schema lookup: any
+        // casing normalizes to the lowercased schema key.
+        let doc: PluginDocument = toml::from_str(
+            "[[circuit]]\n\
+             name = \"NeWcKt\"\n\
+             category = \"logic\"\n\
+             ramsize = 64\n",
+        )
+        .expect("valid TOML");
+        let circuits = parse_circuits(&doc).expect("valid semantics");
+        assert_eq!(circuits.len(), 1);
+        assert_eq!(circuits[0].name, "newckt");
+        assert_eq!(circuits[0].category, "logic");
+    }
 }
