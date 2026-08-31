@@ -22,16 +22,16 @@
 
 ## 3. Declared metadata replaces name inference
 
-- [ ] 3.1 Extend the circuit definition with optional `cable_kind` + `color` fields; update `CableKind::from_circuit` to consult the declared kind first, substring tables as fallback; verify embedded circuits classify byte-for-byte (existing kind tests unchanged and green)
+- [x] 3.1 Extend the circuit definition with optional `cable_kind` + `color` fields; update `CableKind::from_circuit` to consult the declared kind first, substring tables as fallback; verify embedded circuits classify byte-for-byte (existing kind tests unchanged and green)
   <!-- agent: layout-designer-engineer.build, depends_on: [1.3, 2.1], touches: [src/ui.rs, src/schema.rs] -->
-- [ ] 3.2 Update `circuit_color` the same way (declared color token first, substring inference fallback); verify existing color tests unchanged and green
+- [x] 3.2 Update `circuit_color` the same way (declared color token first, substring inference fallback); verify existing color tests unchanged and green (folded into 3.1 commit `cbe59f5`: `kind_token_color` helper + `circuit_color_prefers_declared_token_over_name` test)
   <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/ui.rs] -->
-- [ ] 3.3 Add visual proof: plugin-circuit fixture (patch whose producing circuit declares cable_kind + color) into the gallery/snapshot matrix across themes/widths; verify `cargo test` snapshot gate passes with the new row rendering the declared kind/color
+- [x] 3.3 Add visual proof: plugin-circuit fixture (patch whose producing circuit declares cable_kind + color) into the gallery/snapshot matrix across themes/widths; verify `cargo test` snapshot gate passes with the new row rendering the declared kind/color
   <!-- agent: horst-engineer.build, depends_on: [3.2], touches: [src/regression.rs, fixtures/plugins/**, src/bin/snapshot-gallery.rs] -->
 
 ## 4. Validation integration
 
-- [ ] 4.1 Verify plugin circuits participate in all 9 checks incl. `ram_overflow` (patch using a plugin circuit must no longer skip RAM checks); add regression test that a plugin circuit over budget reports `ram_overflow` Error and one within budget validates clean; verify `cargo test validation` passes
+- [x] 4.1 Verify plugin circuits participate in all 9 checks incl. `ram_overflow` (patch using a plugin circuit must no longer skip RAM checks); add regression test that a plugin circuit over budget reports `ram_overflow` Error and one within budget validates clean; verify `cargo test validation` passes
   <!-- agent: horst-engineer.build, depends_on: [2.2], touches: [src/validation.rs, fixtures/plugins/**] -->
 - [x] 4.2 Add optional `[plugins]` config section (`dir` override, `enabled` bool default true, malformed → warn-once + defaults) to `config.rs`; verify config tests cover absent/disabled/custom-dir
   <!-- agent: rusty-engineer.fast, depends_on: [1.2], touches: [src/config.rs] -->
