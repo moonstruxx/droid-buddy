@@ -1,0 +1,27 @@
+# Plugin fixture driving the declared-kind visual proof (task 3.3).
+# One circuit `plugkind`: the name carries no control/midi keyword, so
+# substring inference would classify its cable as Audio. Declaring
+# `cable_kind = "control"` + `color = "knob"` must instead win, so the
+# producing cable renders with graph_edge_control (cyan in classic) and the
+# circuit's components take the knob color in the panel view.
+# Circuit names are case-insensitive, like the embedded schema lookup.
+
+[[circuit]]
+name = "plugkind"
+category = "logic"
+title = "Plugin kind"
+description = "Fixture circuit: declares control cable_kind + knob color."
+ramsize = 8
+cable_kind = "control"
+color = "knob"
+
+[[circuit.inputs]]
+name = "input"
+short = "i"
+type = "cv"
+default = "0"
+
+[[circuit.outputs]]
+name = "output"
+short = "o"
+type = "cv"
