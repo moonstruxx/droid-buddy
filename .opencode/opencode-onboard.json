@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "generatedAt": "2026-08-20T01:54:24.411Z",
+  "generatedAt": "2026-09-01T17:23:45.342Z",
   "onboardVersion": "1.6.7",
-  "opencodeVersion": "1.18.17",
+  "opencodeVersion": "1.18.25",
   "platform": {
     "backlog": "browser",
     "repo": "none"
@@ -25,7 +25,8 @@
     "quota": true,
     "caveman": false,
     "codegraph": false,
-    "memory": false
+    "memory": false,
+    "rtk": false
   },
   "preexisting": {
     "design": false,

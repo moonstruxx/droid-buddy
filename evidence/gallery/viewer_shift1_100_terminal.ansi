@@ -3,38 +3,38 @@
 │                                     DROID: source_navigation                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Panels ──────────────────────────────────────────────────┐┌ Circuits ────────┐┌ Source [raw] ────┐
-│◉◉┐┌───┐                                                  ││p2b8              ││    button = B1.1 │
-│…0%  CV…                                                  ││button            ││    led = L1.1    │
-││ ││   │                                                  ││button (1)        ││                  │
-││ ││   │                                                  ││button (2)        ││[button]  # second│
-││ ││   │                                                  ││copy              ││    button = B1.2 │
-││ │▶▶  │                                                  ││copy (1)          ││    led = L1.2    │
-││ │……  │                                                  ││copy (2)          ││    output = _ENV1│
-││ ││   │                                                  ││switch            ││                  │
-││ ││   │                                                  ││switch (1)        ││[button]          │
-││ │▶▶  │                                                  ││compare           ││    button = B1.3 │
-│○○│……  │                                                  ││switch (2)        ││    led = L1.3    │
-│……││   │                                                  ││math              ││    # internal var│
-││ ││   │                                                  ││copy (3)          ││    input = _ENV1_│
-││ │▶▶  │                                                  ││copy (4)          ││                  │
-│○○│……  │                                                  ││copy (5)          ││[copy]            │
-│○○││   │                                                  ││copy (6)          ││    input = B1.1  │
-││ ││   │                                                  ││copy (7)          ││    output = O1 # │
-││ │▶▶  │                                                  ││switch (3)        ││                  │
-││ │……  │                                                  ││switch (4)        ││[copy] # repeated │
-│○○││   │                                                  ││copy (8)          ││    input = B1.2  │
-│……││   │                                                  ││copy (9)          ││    output = O2   │
-││ ││   │                                                  ││switch (5)        ││                  │
-││ ││   │                                                  ││                  ││[copy]            │
-│○○││   │                                                  ││                  ││    input = _MYVAR│
-│○○││   │                                                  ││                  ││    output = O3   │
-││ ││   │                                                  ││                  ││                  │
-││ ││   │                                                  ││                  ││# select forms for│
-││ ││   │                                                  ││                  ││[switch]          │
-││ ││   │                                                  ││                  ││    select = B1.1 │
-││ ││   │                                                  ││                  ││    output = O4   │
-││ ││   │                                                  ││                  ││                  │
-│└─┘└───┘                                                  ││                  ││[switch]          │
+│◉◉┐┌──┐┐                                                  ││p2b8              ││    button = B1.1 │
+│…0%  C…                                                   ││button            ││    led = L1.1    │
+││ ││  ││                                                  ││button (1)        ││                  │
+││ ││  ││                                                  ││button (2)        ││[button]  # second│
+││ ││  ││                                                  ││copy              ││    button = B1.2 │
+││ │▶▶ ││                                                  ││copy (1)          ││    led = L1.2    │
+││ │…… ││                                                  ││copy (2)          ││    output = _ENV1│
+││ ││  ││                                                  ││switch            ││                  │
+││ ││  ││                                                  ││switch (1)        ││[button]          │
+││ │▶▶ ││                                                  ││compare           ││    button = B1.3 │
+│○○│…… ││                                                  ││switch (2)        ││    led = L1.3    │
+│……││  ││                                                  ││math              ││    # internal var│
+││ ││  ││                                                  ││copy (3)          ││    input = _ENV1_│
+││ │▶▶ ││                                                  ││copy (4)          ││                  │
+│○○│…… ││                                                  ││copy (5)          ││[copy]            │
+│○○││  ││                                                  ││copy (6)          ││    input = B1.1  │
+││ ││  ││                                                  ││copy (7)          ││    output = O1 # │
+││ │▶▶ ││                                                  ││switch (3)        ││                  │
+││ │…… ││                                                  ││switch (4)        ││[copy] # repeated │
+│○○││  ││                                                  ││copy (8)          ││    input = B1.2  │
+│……││  ││                                                  ││copy (9)          ││    output = O2   │
+││ ││  ││                                                  ││switch (5)        ││                  │
+││ ││  ││                                                  ││                  ││[copy]            │
+│○○││  ││                                                  ││                  ││    input = _MYVAR│
+│○○││  ││                                                  ││                  ││    output = O3   │
+││ ││  ││                                                  ││                  ││                  │
+││ ││  ││                                                  ││                  ││# select forms for│
+││ ││  ││                                                  ││                  ││[switch]          │
+││ ││  ││                                                  ││                  ││    select = B1.1 │
+││ ││  ││                                                  ││                  ││    output = O4   │
+││ ││  ││                                                  ││                  ││                  │
+│└─┘└──┘┘                                                  ││                  ││[switch]          │
 └──────────────────────────────────────────────────────────┘└──────────────────┘└──────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Source Viewer | ESC close | j/k scroll | Up/Down occur | Home/End jump | t toggle | Tab focus | [ │

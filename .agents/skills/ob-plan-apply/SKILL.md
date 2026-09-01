@@ -44,7 +44,7 @@ Before hydrating the Todo board, resolve every task's annotated worker. If any t
 **4. Worker context.** Before each wave, derive file-disjointness from `touches:` globs and `git diff`.
 
 <!-- OB-OPTIMIZATION-CODEGRAPH-START -->
-Use `codegraph_explore` to refine relevant symbols and file-disjointness for the current wave.
+
 <!-- OB-OPTIMIZATION-CODEGRAPH-END -->
 
 <!-- OB-OPTIMIZATION-MEMORY-START -->
