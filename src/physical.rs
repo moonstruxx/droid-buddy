@@ -1816,7 +1816,10 @@ mod tests {
         let q = patch("[p2b8]\n# mismatch in comment\n[copy]\n    input = I1\n    output = O1\n");
         // The comment is in raw_lines and would trigger the stub if db8e were present,
         // but without db8e the result must stay "not used".
-        assert!(q.raw_lines.iter().any(|l| l.to_ascii_lowercase().contains("mismatch")));
+        assert!(q
+            .raw_lines
+            .iter()
+            .any(|l| l.to_ascii_lowercase().contains("mismatch")));
         assert_eq!(db8e_display_state(&q), "not used");
     }
 
