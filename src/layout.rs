@@ -135,7 +135,7 @@ pub fn local_resettle(
 /// `y = within-layer file order · VERTICAL_SPACING`, plus a hash-of-id jitter
 /// to break ties. Replaces the old vertically-banded cluster stripes so the
 /// convergence target is a horizontal chain.
-fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
+pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
     let n = graph.nodes.len();
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);

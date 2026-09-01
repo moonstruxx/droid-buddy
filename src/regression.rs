@@ -18,8 +18,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 
 use crate::app::{App, SourceViewMode, ViewerFocus};
-use crate::graph::TopologySeverity;
+use crate::graph::{Cluster, Graph, TopologySeverity};
 use crate::handler::{handle_event, handle_mouse_event};
+use crate::layout::{local_resettle, seed_positions, solve, LOCAL_ITERATIONS, LOCAL_RADIUS};
 use crate::patch::{ComponentState, Patch, ShiftGroup};
 use crate::ui::render;
 
@@ -83,6 +84,11 @@ fn idx_for(app: &App, token: &str) -> usize {
 }
 
 fn buffer_for(app: &mut App, width: u16, height: u16) -> Buffer {
+    // TestBackend never emits kitty graphics: force the box-drawing path so
+    // graph assertions are deterministic regardless of the host terminal's
+    // kitty capability (design D6 dispatch).
+    #[cfg(feature = "kitty-gfx")]
+    crate::kitty_protocol::set_supported_for_tests(false);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, app)).unwrap();
@@ -5307,6 +5313,23 @@ fn outlier_graph_renders_both_warning_channels_with_error_token() {
     let _guard = ThemedGuard::pin("classic");
     let t = *theme::resolve("classic");
     let mut app = outlier_graph_app();
+    // The solver's fan-out is a ~1400-unit-tall column — no fit shows it with
+    // readable nodes (design D5: the legibility clamp overflows). Compact the
+    // positions so the error edges' endpoints are on-screen and the red token
+    // is provable from the rendered frame.
+    let n = app.graph.as_ref().unwrap().nodes.len();
+    app.graph_positions = (0..n)
+        .map(|i| {
+            if i == 0 {
+                (0.0, 120.0) // p2b8 source, middle-left
+            } else {
+                (
+                    40.0 + ((i - 1) % 5) as f32 * 60.0,
+                    ((i - 1) / 5) as f32 * 40.0,
+                )
+            }
+        })
+        .collect();
     let buf = buffer_for(&mut app, 100, 50);
     assert!(
         has_box_glyph_of_color(&buf, t.graph_edge_error),
@@ -6137,5 +6160,220 @@ fn explicit_led_pairing_wins_over_device_default() {
         b.led.as_deref(),
         Some("L9.1"),
         "bare led wins over the M4 device default"
+    );
+}
+
+// ── task 4.1: solver layout guarantees over real fixtures ────────────────
+// Integration-level regressions for the task 1.1 solver rework. The
+// layout::tests module covers the same guarantees on synthetic graphs; these
+// lock them in through the real wiring (fixture patch → banner clusters →
+// graph → solve) so a regression in either the solver or the wiring is
+// caught on representative real patches.
+
+fn solver_fixture(name: &str) -> (Patch, Graph) {
+    let patch = Patch::from_ini_file(Path::new(name)).unwrap();
+    let clusters: Vec<Cluster> = patch
+        .banner_groups
+        .iter()
+        .map(|g| Cluster {
+            title: g.banner.clone().unwrap_or_default(),
+            section_range: g.section_range.clone(),
+        })
+        .collect();
+    let graph = Graph::build_from_patch(&patch, &clusters, &crate::latency::CostModel::default());
+    (patch, graph)
+}
+
+fn solver_bbox(positions: &[(f32, f32)]) -> (f32, f32) {
+    let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (x, y) in positions {
+        min_x = min_x.min(*x);
+        max_x = max_x.max(*x);
+        min_y = min_y.min(*y);
+        max_y = max_y.max(*y);
+    }
+    (max_x - min_x, max_y - min_y)
+}
+
+fn solver_dist(a: (f32, f32), b: (f32, f32)) -> f32 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+#[test]
+fn regression_solver_single_axis_on_real_multi_banner_patch() {
+    // Spec-scale real fixture (164 sections, 46 banners, 97 cable outputs).
+    // The solver must converge along the x-axis — a wide horizontal pipeline
+    // (width-first) — not a vertical stack of banner bands.
+    let (_patch, graph) = solver_fixture("fixtures/alg27_2.ini");
+    assert!(
+        graph.nodes.len() >= 60,
+        "fixture should be spec-scale, got {} nodes",
+        graph.nodes.len()
+    );
+    let positions = solve(&graph, &[]);
+    for (x, y) in &positions {
+        assert!(x.is_finite() && y.is_finite(), "non-finite position");
+    }
+    let (w, h) = solver_bbox(&positions);
+    assert!(w > 0.0, "degenerate zero-width layout");
+    assert!(
+        w >= h,
+        "single-axis regression: x-span {w} must be >= y-span {h} (width-first horizontal chain)"
+    );
+}
+
+#[test]
+fn regression_solver_spring_dominance_on_real_cable_chain() {
+    // Real cable chain (clocktool → osc → notesequencer → vca) plus an
+    // isolated controller node. Spring attraction must keep cable-connected
+    // circuits nearer each other than unconnected pairs settle.
+    let (_patch, graph) = solver_fixture("fixtures/graph_edge_kinds.ini");
+    let positions = solve(&graph, &[]);
+    let n = graph.nodes.len();
+    let edge_pairs: Vec<(usize, usize)> = graph
+        .edges
+        .iter()
+        .map(|e| {
+            let s = graph.nodes.iter().position(|x| x.id == e.source).unwrap();
+            let t = graph.nodes.iter().position(|x| x.id == e.sink).unwrap();
+            (s, t)
+        })
+        .collect();
+    let mut connected = Vec::new();
+    let mut unconnected = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = solver_dist(positions[i], positions[j]);
+            if edge_pairs.contains(&(i, j)) || edge_pairs.contains(&(j, i)) {
+                connected.push(d);
+            } else {
+                unconnected.push(d);
+            }
+        }
+    }
+    assert!(!connected.is_empty() && !unconnected.is_empty());
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    let mc = mean(&connected);
+    let mu = mean(&unconnected);
+    assert!(
+        mc < mu,
+        "spring dominance failed on real chain: mean connected {mc} !< mean unconnected {mu}"
+    );
+}
+
+#[test]
+fn regression_solver_cluster_cohesion_on_real_banner_groups() {
+    // Real banner groups (implicit unnamed {button}, "Mixer" {clocktool,
+    // mixer, contour}) with real cables. cluster_index_of must map every node
+    // into its group; the Mixer members must cohere into a bounded,
+    // width-first cluster — not a tall/narrow vertical stripe.
+    let (_patch, graph) = solver_fixture("fixtures/cable_banner_combos.ini");
+    for node in &graph.nodes {
+        assert!(
+            graph.cluster_index_of(node.section_index).is_some(),
+            "node {:?} must map into a banner cluster",
+            node.id
+        );
+    }
+    let cluster_idx = graph
+        .clusters
+        .iter()
+        .position(|c| c.title == "Mixer")
+        .expect("fixture has a Mixer banner group");
+    let members: Vec<usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| graph.cluster_index_of(n.section_index) == Some(cluster_idx))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        members.len() >= 2,
+        "Mixer cluster should have multiple members"
+    );
+    let positions = solve(&graph, &[]);
+    let xs: Vec<f32> = members.iter().map(|&i| positions[i].0).collect();
+    let ys: Vec<f32> = members.iter().map(|&i| positions[i].1).collect();
+    let min_x = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_y = ys.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_y = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let (cw, ch) = (max_x - min_x, max_y - min_y);
+    assert!(cw.is_finite() && ch.is_finite());
+    assert!(cw > 0.0);
+    assert!(
+        cw >= ch,
+        "cohesion regression: Mixer member rect {cw} x {ch} is pathologically tall/narrow"
+    );
+    // Members stay bounded around their centroid (no explosion, no stripe).
+    let cx = xs.iter().sum::<f32>() / xs.len() as f32;
+    let cy = ys.iter().sum::<f32>() / ys.len() as f32;
+    for &i in &members {
+        let d = solver_dist(positions[i], (cx, cy));
+        assert!(d < 2000.0, "member drifted from cluster centroid: {d}");
+    }
+}
+
+#[test]
+fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
+    // Tip anchor + drag-to-place over a real fixture: a pinned node holds its
+    // exact seed position through a full solve, a dragged node pinned at its
+    // drop stays put through a local re-settle, and unpinning lets the tip
+    // re-flow.
+    let (_patch, graph) = solver_fixture("fixtures/cable_banner_combos.ini");
+    assert!(!graph.nodes.is_empty());
+    let tip = 0; // first section in .ini order = the graph's tip
+
+    // Pinned through a full solve: the tip never leaves its seed (the fixed
+    // anchor) while the other nodes settle.
+    let seed = seed_positions(&graph);
+    let positions = solve(&graph, &[tip]);
+    assert_eq!(
+        positions[tip], seed[tip],
+        "pinned tip moved during full solve"
+    );
+
+    // Unpinned, the tip re-flows under the forces.
+    let free = solve(&graph, &[]);
+    assert_ne!(
+        free[tip], seed[tip],
+        "unpinned tip should re-flow off its seed"
+    );
+
+    // Local re-settle: drop the tip elsewhere and pin it — it stays exactly
+    // at the drop position while its neighbours pull.
+    let mut moved = positions.clone();
+    let drop = (positions[tip].0 + 40.0, positions[tip].1 - 20.0);
+    moved[tip] = drop;
+    let found = local_resettle(
+        &graph,
+        &mut moved,
+        &graph.nodes[tip].id,
+        LOCAL_RADIUS,
+        LOCAL_ITERATIONS,
+        &[tip],
+    );
+    assert!(found);
+    assert_eq!(
+        moved[tip], drop,
+        "pinned dragged node must stay at its drop"
+    );
+
+    // Same drop, unpinned: the dragged node re-flows away from the drop.
+    let mut free_moved = positions.clone();
+    free_moved[tip] = drop;
+    let found = local_resettle(
+        &graph,
+        &mut free_moved,
+        &graph.nodes[tip].id,
+        LOCAL_RADIUS,
+        LOCAL_ITERATIONS,
+        &[],
+    );
+    assert!(found);
+    assert_ne!(
+        free_moved[tip], drop,
+        "unpinned dragged node should re-flow off its drop"
     );
 }

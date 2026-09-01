@@ -235,10 +235,20 @@ mod emit {
         PROBED.store(false, Ordering::Relaxed);
         SUPPORTED.store(false, Ordering::Relaxed);
     }
+
+    /// Test-only override so render-dispatch tests can force either branch of
+    /// the `supported()` gate without a terminal handshake.
+    #[cfg(test)]
+    pub fn set_supported_for_tests(value: bool) {
+        PROBED.store(true, Ordering::Relaxed);
+        SUPPORTED.store(value, Ordering::Relaxed);
+    }
 }
 
 #[cfg(feature = "kitty-gfx")]
 pub use emit::{cursor, delete, frame, place, supported, transmit};
+#[cfg(all(test, feature = "kitty-gfx"))]
+pub use emit::{reset_for_tests, set_supported_for_tests};
 
 #[cfg(test)]
 mod tests {

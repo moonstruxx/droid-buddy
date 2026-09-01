@@ -542,7 +542,26 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             crossterm::event::KeyCode::Char('p') => {
-                app.toggle_processing_pause();
+                // Task 3.1 (design D7): `p` toggles pin/unpin on the hovered
+                // graph node, mirroring the `x` processing toggle. Silent
+                // no-op without hover; the rebuild + re-solve re-anchors the
+                // layout. Processing pause stays on `p` on every other
+                // surface.
+                let Some(idx) = app.hovered_graph_node else {
+                    return false;
+                };
+                let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
+                    return false;
+                };
+                let now_pinned = app.toggle_pin(&node.id);
+                app.rebuild_graph();
+                if now_pinned {
+                    app.status_message =
+                        format!("Pinned: {} {}", node.circuit, node.instance_index);
+                } else {
+                    app.status_message =
+                        format!("Unpinned: {} {}", node.circuit, node.instance_index);
+                }
                 return false;
             }
             crossterm::event::KeyCode::Char('c') => {
@@ -1270,18 +1289,30 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                     clamp_drag(mouse.row as f32 + drag.offset_y),
                 );
             }
+            let pins = app.pinned_indices(graph);
             layout::local_resettle(
                 graph,
                 &mut app.graph_positions,
                 &node_id,
                 layout::LOCAL_RADIUS,
                 layout::LOCAL_ITERATIONS,
-                &[],
+                &pins,
             );
             app.notify_node_moved(&node_id);
         }
         MouseEventKind::Up(_) => {
-            app.graph_drag = None;
+            // Task 3.1 (design D7): the drag result becomes a fixed anchor —
+            // the dropped node is auto-pinned so it stays where placed
+            // instead of snapping back to spring equilibrium on a rebuild.
+            if let Some(drag) = app.graph_drag.take() {
+                if let Some(node) = app
+                    .graph
+                    .as_ref()
+                    .and_then(|g| g.nodes.get(drag.node_index))
+                {
+                    app.pinned.insert(node.id.clone());
+                }
+            }
         }
         MouseEventKind::ScrollUp => {
             // Task 2.3: wheel pans the graph camera on the graph surface
@@ -1356,13 +1387,14 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
                         clamp_drag(mouse.row as f32 + offset_y),
                     );
                 }
+                let pins = app.pinned_indices(&graph);
                 layout::local_resettle(
                     &graph,
                     &mut app.filtered_positions,
                     &node_id,
                     layout::LOCAL_RADIUS,
                     layout::LOCAL_ITERATIONS,
-                    &[],
+                    &pins,
                 );
                 app.notify_node_moved(&node_id);
                 return true;
@@ -1384,13 +1416,14 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
                         clamp_drag(mouse.row as f32 + offset_y),
                     );
                 }
+                let pins = app.pinned_indices(&graph);
                 layout::local_resettle(
                     &graph,
                     &mut app.graph_positions,
                     &node_id,
                     layout::LOCAL_RADIUS,
                     layout::LOCAL_ITERATIONS,
-                    &[],
+                    &pins,
                 );
                 app.notify_node_moved(&node_id);
                 return true;
@@ -1399,8 +1432,26 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
         }
         MouseEventKind::Up(_) => {
             let was_dragging = app.filtered_drag.is_some() || app.graph_drag.is_some();
-            app.filtered_drag = None;
-            app.graph_drag = None;
+            // Task 3.1 (design D7): drag auto-pins in the quad panes too — a
+            // dropped node becomes a fixed anchor in the full graph.
+            if let Some(drag) = app.filtered_drag.take() {
+                if let Some(node) = app
+                    .filtered_graph
+                    .as_ref()
+                    .and_then(|g| g.nodes.get(drag.node_index))
+                {
+                    app.pinned.insert(node.id.clone());
+                }
+            }
+            if let Some(drag) = app.graph_drag.take() {
+                if let Some(node) = app
+                    .graph
+                    .as_ref()
+                    .and_then(|g| g.nodes.get(drag.node_index))
+                {
+                    app.pinned.insert(node.id.clone());
+                }
+            }
             was_dragging
         }
         MouseEventKind::Moved => {
@@ -3121,13 +3172,35 @@ mod tests {
     }
 
     #[test]
-    fn p_toggles_pause_while_graph_open() {
+    fn p_toggles_pin_on_graph_surface() {
         let mut app = app_with_fixture();
         app.open_graph();
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        assert!(node_count >= 2, "fixture needs a non-tip node to toggle");
+        let idx = 1; // non-tip node: the tip is pinned by default
+        app.hovered_graph_node = Some(idx);
+        let node = app.graph.as_ref().unwrap().nodes[idx].clone();
+        assert!(
+            !app.pinned.contains(&node.id),
+            "non-tip node starts unpinned"
+        );
         handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
-        assert!(app.processing_paused, "p live on the graph surface");
-        assert!(app.showing_graph);
-        assert_eq!(app.status_message, "Processing paused (p to resume)");
+        assert!(app.pinned.contains(&node.id), "p pins the hovered node");
+        assert!(app.showing_graph, "p must not close the graph");
+        assert!(
+            !app.processing_paused,
+            "p no longer toggles pause on the graph surface"
+        );
+        assert_eq!(
+            app.status_message,
+            format!("Pinned: {} {}", node.circuit, node.instance_index)
+        );
+        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        assert!(!app.pinned.contains(&node.id), "second p unpins");
+        assert_eq!(
+            app.status_message,
+            format!("Unpinned: {} {}", node.circuit, node.instance_index)
+        );
     }
 
     #[test]
@@ -3317,19 +3390,108 @@ mod tests {
     }
 
     #[test]
-    fn graph_p_still_toggles_pause_while_graph_open() {
+    fn graph_p_toggles_pin_not_pause() {
         let mut app = app_with_graph();
         assert!(!app.processing_paused);
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        assert!(node_count >= 2, "fixture needs a non-tip node to toggle");
+        let idx = node_count - 1; // non-tip node
+        app.hovered_graph_node = Some(idx);
+        let node = app.graph.as_ref().unwrap().nodes[idx].clone();
         handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
-        assert!(
-            app.processing_paused,
-            "p must toggle pause on graph surface"
+        assert!(app.pinned.contains(&node.id), "p pins the hovered node");
+        assert_eq!(
+            app.status_message,
+            format!("Pinned: {} {}", node.circuit, node.instance_index)
         );
-        assert_eq!(app.status_message, "Processing paused (p to resume)");
         assert!(app.showing_graph, "p must not close the graph");
+        assert!(
+            !app.processing_paused,
+            "p no longer toggles pause on the graph surface"
+        );
         handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
-        assert!(!app.processing_paused);
-        assert_eq!(app.status_message, "Processing enabled (p to pause)");
+        assert!(!app.pinned.contains(&node.id), "second p unpins");
+        assert!(!app.processing_paused, "pause untouched throughout");
+    }
+
+    #[test]
+    fn drag_auto_pins_the_dropped_node() {
+        let mut app = app_with_graph();
+        let idx = 1;
+        let (_, rect) = app
+            .graph_node_rects
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(i, r)| (*i, *r))
+            .unwrap();
+        // Down on the node, drag by (+7, +1), then release.
+        handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x + 1,
+                rect.y + 1,
+            ),
+            &mut app,
+        );
+        handle_mouse_event(
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                rect.x + 8,
+                rect.y + 2,
+            ),
+            &mut app,
+        );
+        handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                rect.x + 8,
+                rect.y + 2,
+            ),
+            &mut app,
+        );
+        let node = app.graph.as_ref().unwrap().nodes[idx].clone();
+        assert!(
+            app.pinned.contains(&node.id),
+            "drag auto-pins the dropped node"
+        );
+        // The anchor stays put: a subsequent drag of another node must not
+        // move the pinned node.
+        let other_idx = 2;
+        let (_, other_rect) = app
+            .graph_node_rects
+            .iter()
+            .find(|(i, _)| *i == other_idx)
+            .map(|(i, r)| (*i, *r))
+            .unwrap();
+        let pinned_pos = app.graph_positions[idx];
+        handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                other_rect.x + 1,
+                other_rect.y + 1,
+            ),
+            &mut app,
+        );
+        handle_mouse_event(
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                other_rect.x + 4,
+                other_rect.y + 2,
+            ),
+            &mut app,
+        );
+        handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                other_rect.x + 4,
+                other_rect.y + 2,
+            ),
+            &mut app,
+        );
+        assert_eq!(
+            app.graph_positions[idx], pinned_pos,
+            "pinned anchor stays put"
+        );
     }
 
     #[test]
