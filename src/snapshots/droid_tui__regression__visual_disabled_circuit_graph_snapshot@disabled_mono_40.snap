@@ -1,6 +1,5 @@
 ---
 source: src/regression.rs
-assertion_line: 4694
 expression: ansi
 ---
 ┌──────────────────────────────────────┐
@@ -41,5 +40,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | │
+│Loaded cable_banner_combos | Renders d│
 └──────────────────────────────────────┘

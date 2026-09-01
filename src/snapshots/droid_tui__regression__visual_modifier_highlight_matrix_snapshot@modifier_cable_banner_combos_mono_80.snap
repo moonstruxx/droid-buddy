@@ -40,5 +40,5 @@ expression: ansi
 │  ││    ││
 └──┘└────┘┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | MOD B1.1 → 2 cells / 2 cables | Renders │
+│Loaded cable_banner_combos | MOD B1.1 → 2 cells / 2 cables | Renders degraded │
 └──────────────────────────────────────────────────────────────────────────────┘

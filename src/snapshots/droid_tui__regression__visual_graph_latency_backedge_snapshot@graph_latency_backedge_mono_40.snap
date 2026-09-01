@@ -1,6 +1,5 @@
 ---
 source: src/regression.rs
-assertion_line: 3363
 expression: ansi
 ---
 ┌──────────────────────────────────────┐
@@ -41,5 +40,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | │
+│Loaded graph_latency_backedge | Render│
 └──────────────────────────────────────┘

@@ -30,5 +30,5 @@ expression: buffer_to_ansi(&buf)
 │  ││  │ │    │
 └──┘└──┘─└────┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 358 cols or reduce scal│
+│Loaded render_outlier_matrix | Renders degraded at 100 cols — use ≥ 358 cols or reduce scale | Sca│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

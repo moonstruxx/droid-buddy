@@ -90,5 +90,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 120 cols — use ≥ 516 cols or reduce scale | Scale: 0.8 | Ori│
+│Loaded fader_column | Renders degraded at 120 cols — use ≥ 516 cols or reduce scale | Scale: 0.8 | Orientation: Portra│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

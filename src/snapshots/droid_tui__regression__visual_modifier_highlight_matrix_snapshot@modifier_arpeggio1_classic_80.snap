@@ -40,5 +40,5 @@ expression: ansi
 │  ││    ││
 └──┘└────┘┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | MOD B1.1 → 1 cells / 1 cables | Renders │
+│Loaded arpeggio1 | MOD B1.1 → 1 cells / 1 cables | Renders degraded at 80 cols│
 └──────────────────────────────────────────────────────────────────────────────┘
