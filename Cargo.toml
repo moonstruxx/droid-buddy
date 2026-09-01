@@ -11,6 +11,12 @@ color-eyre = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
+# Kitty-graphics rasterizer stack — unconditional so the rasterizer/camera
+# compile and unit-test in the default suite (design.md decisions 4/10).
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+fontdue = "0.9"
+base64 = "0.22"
+flate2 = "1"
 
 [features]
 kitty-gfx = []
