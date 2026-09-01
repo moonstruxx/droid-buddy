@@ -37,7 +37,7 @@
     "prune": false,
     "reserved": 10000
   },
-  "model": "opencode/nemotron-3.5-lightning-free",
+  "model": "opencode/Muse-Sparl-1.2 free",
   "plugin": [
     "@slkiser/opencode-quota@4.2.0"
   ],
