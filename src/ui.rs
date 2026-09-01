@@ -722,17 +722,23 @@ fn render_rack_structure(
         } else {
             0.295
         };
-        let placeholder_h = ((rect.height as f64 * ratio).round() as u16).max(3);
-        if rect.width < 3 || placeholder_h < 3 || rect.height < 3 {
+        // Base the placeholder on the *clipped* module rect so the inset
+        // tracks the actually visible faceplate when the rack is offset
+        // inside `area` (regression gallery centers the rack; `rect` may be
+        // at (0,0) before the area offset is applied). Using `clipped`
+        // keeps the inner band at `clipped.y+1` instead of overlapping the
+        // outer border — the bug that produced "┌┌─┐┐" in the 100-col
+        // db8e snapshot (ph at y=1 clipped to y=3 == module top).
+        let placeholder_h = ((clipped.height as f64 * ratio).round() as u16).max(3);
+        if clipped.width < 3 || placeholder_h < 3 || clipped.height < 3 {
             continue;
         }
         // Inset 1 char inside the module border, height is the band minus the
-        // outer module border's 2 rows (top+bottom). Clamp so a fully-overlapped
-        // or tiny module still draws at least a sliver rather than panicking.
+        // outer module border's 2 rows (top+bottom).
         let ph_rect = Rect::new(
-            rect.x.saturating_add(1),
-            rect.y.saturating_add(1),
-            rect.width.saturating_sub(2),
+            clipped.x.saturating_add(1),
+            clipped.y.saturating_add(1),
+            clipped.width.saturating_sub(2),
             placeholder_h.saturating_sub(2),
         );
         let clipped_ph = ph_rect.intersection(area);
