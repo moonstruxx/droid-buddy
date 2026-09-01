@@ -1,7 +1,7 @@
 ---
 description: DevOps/API integration engineer for Rust ratatui 0.29 + crossterm 0.28 TUI, GitHub Actions CI, Beads issue tracking, OpenSpec change workflow, and git safety
 mode: subagent
-color: #C7D831
+color: "#C7D831"
 permission:
   edit: allow
   bash: allow

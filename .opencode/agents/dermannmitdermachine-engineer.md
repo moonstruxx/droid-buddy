@@ -1,7 +1,7 @@
 ---
 description: Rust engineer for ratatui 0.29 + crossterm 0.28 TUI, DROID framework development, monolith/layered architecture, and Rust design patterns
 mode: subagent
-color: #4231D8
+color: "#4231D8"
 permission:
   edit: allow
   bash: allow

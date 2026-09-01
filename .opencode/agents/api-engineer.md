@@ -1,7 +1,7 @@
 ---
 description: API/Integration engineer for Rust ratatui 0.29 + crossterm 0.28 TUI, ComfyUI-style node graph, force-directed physics simulation, and observer-pattern event-driven design
 mode: subagent
-color: #D83182
+color: "#D83182"
 permission:
   edit: allow
   bash: allow
