@@ -12,12 +12,14 @@ The app is a **patch viewer/interactor, not a hardware bridge**: it parses `.ini
 
 ```
 droid_tui/
-├── Cargo.toml              # crate manifest; deps: ratatui, crossterm, color-eyre, serde, toml
+├── Cargo.toml              # crate manifest; deps: ratatui, crossterm, color-eyre, serde, toml,
+│   #                       #   tiny-skia, fontdue, base64, flate2 (kitty rasterizer stack, unconditional);
+│   #                       #   feature kitty-gfx gates only the terminal emit (src/kitty_protocol.rs)
 ├── Cargo.lock
 ├── src/
 │   ├── lib.rs              # module wiring: app, config, diff, events, gallery, geometry,
-│   │                       #   graph, handler, layout, patch, physical, plugin, schema, theme,
-│   │                       #   ui, validation (+ regression in cfg(test))
+│   │                       #   graph, graph_render, handler, kitty_protocol, layout, patch, physical,
+│   │                       #   plugin, schema, theme, ui, validation (+ regression in cfg(test))
 │   ├── main.rs             # entry point, config/theme init, event loop
 │   ├── app.rs              # App state struct + picker/graph/validation/diff helpers + event bus
 │   │                       #   + LabelStore (XDG labels.toml per-patch hw/circuits) + overlay EditState
@@ -39,6 +41,10 @@ droid_tui/
 │   ├── plugin.rs           # plugin-circuit TOML loader (XDG discovery + serde parse); see §3.14
 │   ├── graph.rs            # signal-flow graph model (nodes/edges/clusters) + topology validation
 │   │                       #   + wiring-outlier detection (learned decision table)
+│   ├── graph_render.rs     # kitty offscreen rasterizer + pure GraphCamera (world→pixel, pixel→world)
+│   │                       #   for the graph surface's image path (tiny-skia + fontdue)
+│   ├── kitty_protocol.rs   # raw \x1b_G kitty-graphics protocol emitter + capability detection;
+│   │                       #   terminal emit gated behind #[cfg(feature = "kitty-gfx")]
 │   ├── latency.rs          # forward-loop latency metric + CostModel (shared per-circuit AVG provider, design D2)
 │   ├── layout.rs           # force-directed layout solver (one-shot, deterministic)
 │   ├── events.rs           # synchronous observer event bus (GraphRebuilt/NodeMoved/TopologyError/
@@ -329,6 +335,10 @@ DROID reference material (`droid_living_examlpes/` and the `ext/droid-lsp` submo
 | serde | 1 | Serialization derives for the in-memory patch domain model, the schema JSON mirror, and the v1 `Settings` schema |
 | serde_json | 1 | Deserializing the embedded `circuits.json` schema into typed `RawSchema` structures |
 | toml | 0.9 | `config.toml` + `labels.toml` parse/serialize (`theme` + `[labels]` layers + `[latency]` per_circuit), and the plugin-file loader (`src/plugin.rs`) parses `[[circuit]]` TOML via serde |
+| tiny-skia | 0.12 | Kitty offscreen rasterizer (AA rounded-rect + cubic/quadratic Bézier strokes on a bounded `Pixmap`); unconditional so it unit-tests in the default suite |
+| fontdue | 0.9 | Kitty text-rasterizer for circuit labels (bundled OFL `Hack-Regular.ttf`), composited over the opaque canvas |
+| base64 | 0.22 | Kitty protocol payload encoding (`encode_payload`, chunked ≤ 4096 bytes) |
+| flate2 | 1 | zlib (`o=z`) compression of the kitty image payload (`transmit_escapes`) |
 | insta | 1 (dev) | Golden-file snapshot testing across UI frames |
 | OpenSpec | — | Change proposals + capability specs under `openspec/` |
 
@@ -412,6 +422,7 @@ DROID reference material (`droid_living_examlpes/` and the `ext/droid-lsp` submo
 25. **In-process patch diff viewer** — `src/diff.rs` is a pure model (`DiffReport` of added/removed/changed cables + nodes) with no terminal dependency; `g d` opens the picker to choose the B patch, `load_diff_patch` computes the report once and emits `Event::DiffComputed`, `d` toggles the overlay, `Esc` clears the diff scope, and the graph colors cables/nodes by classification via `graph_edge_diff_added`/`graph_edge_diff_removed`. The diff is read-only and never mutates either patch.
 26. **Learned wiring-outlier detection with preserved fallback** — `src/geometry.rs` hosts `WiringOutlierScorer`, a pure scorer over an embedded decision table (`tools/outlier_artifact.txt` via `include_str!`, schema.rs precedent) fitted offline by `tools/fit_outlier_model.py` on `corpus/features.csv` (28 rules, first-match-wins; gate precision ≥ 0.60 at recall ≥ 0.86 on holdout — fitted 0.824/1.000 vs baseline 8.0 rule 0.124/0.714). A table miss falls back to the preserved threshold rule (`euclidean > 8.0 && cable_hops == 0`, design D1); invariant guards (adjacent / co-located / via-cable) stay at the call site in `graph::validate_wiring_outliers` and never reach the scorer (design D5). The per-token influence second opinion (`patch::InfluenceStats`, embedded `tools/influence_stats.txt`) z-scores each token's `influence_subtree` size against per-kind corpus mean/std; tokens beyond the 3.0 band produce a `Warning` on the token's first root-var cable (design D4). Both channels reuse the existing `TopologyIssue`/`graph_edge_error` surfacing (ADR 21).
 27. **Physical 1:1 layout as the main view (millimeter grid model + skeleton reference presentation)** — the wrapped-panel main view is replaced by a rack model in millimeters (`src/physical.rs`): one grid unit (mm), aspect-compensated mm→chars mapping (columns/mm ≠ rows/mm so physical proportions survive ~2:1 terminal cells, D4), a viewport of pan offset + zoom (screen = mm × factor × zoom − offset, D5), and a data-driven per-controller geometry file with load-time validation and fallback (D6). The skeleton is a render *presentation* of the same layout, not a new surface (`s` toggles, D7); the rack is an ordered list of rows plus optional TE mount sections with auto-pack + per-module override (`[physical.rack]` config, D9/D10/D12); fold-bar dividers render at row boundaries in both presentations (D11). Zoom reuses the `+`/`-` scale presets `[0.75, 1.0, 1.5, 2.0]` with wrap-around (floor 0.75 keeps cells boxable); arrows/wheel pan only when the rack overflows, preserving their legacy navigation meaning otherwise. Module borders abut exactly at every supported zoom preset (edge-rounded mm→screen spans share boundary values — regression `adjacent_module_rects_never_overlap_across_zoom_presets`); each element renders its live state on its physical-view cell (buttons/switches glyph, knobs/encoders percentage, faders a vertical track proportional to value with an amber LED bar mirroring position, CV I/O direction); switch cells place per controller geometry and never collapse onto a neighboring control's cell when geometry lacks a matching switch cell; adjoined element-cell `component_rects` are clamped at draw time so distinct cells never overlap at any zoom preset (75 %–200 %).
+28. **Kitty-graphics graph rendering with a box-drawing fallback (raw `\x1b_G` escapes, no `ratatui-image`)** — the graph surface renders as an anti-aliased kitty image when the terminal supports the kitty graphics protocol and the `kitty-gfx` feature is on, falling back to the existing box-drawing renderer otherwise (design D1/D8). Raw `\x1b_G` escapes are used rather than `ratatui-image` (which requires ratatui ^0.30 and drags in `image`+`chafa`/`sixel`+`tokio`); `src/kitty_protocol.rs` is the emitter (base64 + zlib chunking ≤ 4096 bytes, `f=32` RGBA, capability detection via `KITTY_WINDOW_ID` env + DA1/`\x1b_Gi=31` handshake, gated behind `#[cfg(feature = "kitty-gfx")]`) and `src/graph_render.rs` is the offscreen rasterizer (tiny-skia AA rounded-rect + Bézier stroke, fontdue labels) plus the pure `GraphCamera` (world→pixel `pixel = world × zoom − pan`, `pixel_to_world` inverse feeding `graph_node_rects` so the existing drag/hover apparatus works unchanged). The image is placed `z=-1` beneath the header/status/picker text, re-transmitted with the same `i=` id on pan/zoom/re-filter; on resize or fallback it clears with `\x1b_Ga=d`. Rasterizer deps (tiny-skia/fontdue/base64/flate2) are unconditional so they compile and unit-test in the default suite; only the terminal emit is gated, keeping the `TestBackend`/insta snapshot path byte-identical. Every node/edge/label color derives from the active theme's semantic tokens via the new `Theme::rgb(Color) -> (u8,u8,u8)` hop (never hardcoded RGB) with the existing precedence (topology-error red > diff > latency ramp > cable kind) preserved in the pixel path.
 
 ## 15. Constraints, Risks, and Technical Debt
 
@@ -477,6 +488,7 @@ DROID reference material (`droid_living_examlpes/` and the `ext/droid-lsp` submo
 - **OpenSpec**: spec-driven change workflow (`openspec/changes/`, `openspec/specs/`).
 - **beads (bd)**: Dolt-backed issue tracker used for task tracking.
 
+<!-- Last updated: 2026-09-01 · graph-kitty-rendering: src/kitty_protocol.rs (raw \x1b_G kitty emitter + capability detection, emit gated behind #[cfg(feature = "kitty-gfx")]) + src/graph_render.rs (tiny-skia/fontdue offscreen rasterizer + GraphCamera world↔pixel) + ui.rs (render_graph kitty image path with box-drawing fallback, z=-1 placement under header/status) + theme.rs (Theme::rgb(Color)→RGB hop) + Cargo.toml (unconditional tiny-skia/fontdue/base64/flate2, kitty-gfx feature) -->
 <!-- Last updated: 2026-08-31 · circuit-plugin-system: src/plugin.rs (XDG discovery + TOML parse, PluginFile/PluginCircuit/PluginParam, sorted-filename order, skip-on-malformed/missing-ramsize) + schema.rs (merge_plugins insert-or-override + warn-once shadow, schema::init honoring [plugins] before ratatui::init, CircuitDef cable_kind/color) + ui.rs (CableKind::from_circuit / circuit_color declared-first with substring fallback) + config.rs [plugins] dir/enabled -->
 <!-- Last updated: 2026-08-30 · physical-scale-model: physical 1:1 mm-accurate main view (src/physical.rs grid model + RackSpec/RackLayout rack packing + ScreenMapping pan/zoom, `s` skeleton reference presentation, [physical]/[physical.rack] config, physical_skeleton_* theme tokens, 5.1 coincidence proof) -->
 <!-- Last updated: 2026-08-29 · patch-validation + patch-diff-viewer + rack-wiring-outlier-detection (8.0 rule) + nn-ui-outlier-detection + nn-ui-render-outlier-detection: schema.rs (embedded circuits.json) + validation.rs (9 checks, Error gating via EntrySpan), patch-diff-viewer (diff.rs, g d/d/Esc, graph diff coloring), rack-wiring-outlier-detection (geometry.rs BindingFeatures), nn-ui-outlier-detection (geometry.rs WiringOutlierScorer learned table, patch.rs InfluenceStats z-score second opinion, tools/fit_outlier_model.py + influence_stats.txt artifacts), nn-ui-render-outlier-detection (ui.rs render_outlier_hint status hint + theme.rs render_outlier_warning token, tools/build_rendermetrics.py + fit_render_model.py + render_artifact.txt, gallery-CI render-outlier flag) -->
