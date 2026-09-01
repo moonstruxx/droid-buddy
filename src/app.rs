@@ -1641,7 +1641,7 @@ impl App {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
                 let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
-                let positions = layout::solve(&graph);
+                let positions = layout::solve(&graph, &[]);
                 (Some(graph), positions)
             }
             None => (Some(Graph::default()), Vec::new()),
@@ -1693,7 +1693,7 @@ impl App {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
                 let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
-                let positions = layout::solve(&graph);
+                let positions = layout::solve(&graph, &[]);
                 (Some(graph), positions)
             }
             None => (Some(Graph::default()), Vec::new()),
@@ -1716,7 +1716,7 @@ impl App {
                 }
                 if let Some(graph) = self.graph.as_ref() {
                     let filtered = graph.filtered_influence(&sub);
-                    let positions = layout::solve_filtered(&filtered);
+                    let positions = layout::solve_filtered(&filtered, &[]);
                     self.filtered_graph = Some(filtered);
                     self.filtered_positions = positions;
                     self.filtered_node_rects.clear();
@@ -1775,7 +1775,7 @@ impl App {
                 Some(patch) => {
                     let clusters = clusters_from_patch(patch);
                     let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
-                    let positions = layout::solve(&graph);
+                    let positions = layout::solve(&graph, &[]);
                     (Some(graph), positions)
                 }
                 None => (Some(Graph::default()), Vec::new()),
@@ -1860,7 +1860,7 @@ impl App {
         if needs_graph && self.graph.is_none() {
             let clusters = clusters_from_patch(&patch);
             let graph = Graph::build_from_patch(&patch, &clusters, &self.cost_model);
-            let positions = layout::solve(&graph);
+            let positions = layout::solve(&graph, &[]);
             self.graph = Some(graph);
             self.graph_positions = positions;
             self.graph_cluster_rects.clear();
@@ -1874,7 +1874,7 @@ impl App {
         }
         if let Some(graph) = self.graph.as_ref() {
             let filtered = graph.filtered_influence(&subtree);
-            let positions = layout::solve_filtered(&filtered);
+            let positions = layout::solve_filtered(&filtered, &[]);
             self.filtered_graph = Some(filtered);
             self.filtered_positions = positions;
             self.filtered_node_rects.clear();

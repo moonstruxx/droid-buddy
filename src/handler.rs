@@ -1276,6 +1276,7 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 &node_id,
                 layout::LOCAL_RADIUS,
                 layout::LOCAL_ITERATIONS,
+                &[],
             );
             app.notify_node_moved(&node_id);
         }
@@ -1361,6 +1362,7 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
                     &node_id,
                     layout::LOCAL_RADIUS,
                     layout::LOCAL_ITERATIONS,
+                    &[],
                 );
                 app.notify_node_moved(&node_id);
                 return true;
@@ -1388,6 +1390,7 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
                     &node_id,
                     layout::LOCAL_RADIUS,
                     layout::LOCAL_ITERATIONS,
+                    &[],
                 );
                 app.notify_node_moved(&node_id);
                 return true;
