@@ -604,7 +604,15 @@ fn render_physical_skeleton(
 
     // Case outline, mount regions, fold bars, and module faceplate borders —
     // shared with the full presentation (D11), only the cell interior differs.
-    render_rack_structure(frame, area, &geom, case_style, fold_style, module_outline);
+    render_rack_structure(
+        frame,
+        area,
+        &geom,
+        &chain,
+        case_style,
+        fold_style,
+        module_outline,
+    );
 
     // Element cells: · for elements, ◀/▶ for in/out CV ports (4.1 token swap).
     for &(_, _, cell_rect, mark) in &geom.cells {
@@ -627,10 +635,19 @@ fn render_physical_skeleton(
 /// the case outline, attached mount regions, labeled fold bars at row
 /// boundaries, and each module's faceplate border. Only the cell interior
 /// differs between skeleton (`·`/port glyphs) and full (components).
+///
+/// DB8E OLED placeholder (db8e-oled-display-placeholder task 3.1): when a
+/// module's `geometry_key == "db8e"`, an upper-band bordered rect above the
+/// B-grid is drawn inside the faceplate with centered state text. The band
+/// height is derived at runtime from `element_cells["B"].min(y_mm)`
+/// (fallback 38.0) so geometry drift does not require a code change; the
+/// placeholder is decorative (no `component_rects` entry) and renders through
+/// this shared path so skeleton and full coincide per D5.
 fn render_rack_structure(
     frame: &mut Frame,
     area: Rect,
     geom: &SkeletonGeometry,
+    chain: &crate::physical::PhysicalLayout,
     case_style: Style,
     fold_style: Style,
     module_outline: Style,
@@ -663,7 +680,7 @@ fn render_rack_structure(
     }
 
     // Modules into their rack rows.
-    for &(_, rect) in &geom.module_rects {
+    for &(module_idx, rect) in &geom.module_rects {
         let clipped = rect.intersection(area);
         if clipped.width == 0 || clipped.height == 0 {
             continue;
@@ -674,6 +691,65 @@ fn render_rack_structure(
                 .border_style(module_outline),
             clipped,
         );
+        // DB8E OLED placeholder — decorative upper-band rect above the B-grid
+        // (shared path so skeleton and full coincide per D5).
+        let Some(module) = chain.modules.get(module_idx) else {
+            continue;
+        };
+        if module.geometry_key != "db8e" {
+            continue;
+        }
+        // Derive B-grid top at runtime; fallback literal keeps the band
+        // visible when geometry has no B family (spec mitigation for drift).
+        let b_min_y = module
+            .cells
+            .get("B")
+            .and_then(|cells| {
+                cells
+                    .iter()
+                    .map(|c| c.rect_mm.y_mm)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            })
+            .unwrap_or(38.0);
+        // Upper-band height = B-grid top - faceplate top (y=0), inset for border.
+        // Use the rendered module height as the mm→screen scale proxy so the
+        // placeholder stays in lockstep with `physical_skeleton_geometry`'s
+        // mapping without threading `ScreenMapping` separately; both call sites
+        // share the same `rect.height`, so skeleton/full coincidence is exact.
+        let module_h_mm = module.rect_mm.h_mm;
+        let ratio = if module_h_mm > 0.0 {
+            (b_min_y / module_h_mm).clamp(0.0, 1.0)
+        } else {
+            0.295
+        };
+        let placeholder_h = ((rect.height as f64 * ratio).round() as u16).max(3);
+        if rect.width < 3 || placeholder_h < 3 || rect.height < 3 {
+            continue;
+        }
+        // Inset 1 char inside the module border, height is the band minus the
+        // outer module border's 2 rows (top+bottom). Clamp so a fully-overlapped
+        // or tiny module still draws at least a sliver rather than panicking.
+        let ph_rect = Rect::new(
+            rect.x.saturating_add(1),
+            rect.y.saturating_add(1),
+            rect.width.saturating_sub(2),
+            placeholder_h.saturating_sub(2),
+        );
+        let clipped_ph = ph_rect.intersection(area);
+        if clipped_ph.width < 3 || clipped_ph.height < 2 {
+            continue;
+        }
+        let state = crate::physical::db8e_display_state_for_layout(chain);
+        let inner_width = clipped_ph.width.saturating_sub(2) as usize;
+        let text = truncate_with_ellipsis(state, inner_width);
+        let placeholder_style = Style::default().fg(theme::active().display_placeholder);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(placeholder_style);
+        let para = Paragraph::new(Line::from(Span::styled(text, placeholder_style)))
+            .block(block)
+            .alignment(Alignment::Center);
+        frame.render_widget(para, clipped_ph);
     }
 }
 
@@ -728,7 +804,15 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
     let case_style = Style::default().fg(t.graph_cluster_border);
     let fold_style = Style::default().fg(t.muted);
 
-    render_rack_structure(frame, area, &geom, case_style, fold_style, module_outline);
+    render_rack_structure(
+        frame,
+        area,
+        &geom,
+        &chain,
+        case_style,
+        fold_style,
+        module_outline,
+    );
 
     // Per-module faceplate title (controller [+ instance]) inside the module
     // border, in the faceplate's top screw zone.
