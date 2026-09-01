@@ -31,8 +31,9 @@
 //! nodes and edges are derived once and every candidate is scored by
 //! re-mapping positions through [`forward_latency`].
 //!
-//! **Deterministic and bounded**: the search is seeded from node-id hashes
-//! (FNV-1a, no RNG), capped at ~2000 local-search steps, and small search
+//! **Deterministic and bounded**: local search is seeded from a deterministic
+//! FAS-indegree rank (node-id-hash ties, no RNG), capped at ~2000
+//! local-search steps, and small search
 //! spaces (≤ [`ENUM_LIMIT`] valid permutations) are solved exactly by
 //! enumeration — which is what the brute-force equivalence tests (N ≤ 8)
 //! rely on.
@@ -40,8 +41,8 @@
 //! Pure module: no terminal, no I/O, no RNG. The patch, cost model and schema
 //! arrive as arguments, so identical input yields byte-identical candidates.
 
-use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 
 use crate::graph::{GraphEdge, NodeId};
@@ -295,6 +296,10 @@ fn valid_permutation_count(domain: &[usize], sections: &[IniSection]) -> u128 {
 /// Deterministic seed: within each domain, sort sections by `(hash(name),
 /// instance)` — same-named sections keep their instance order (valid
 /// permutation), different names are ordered by hash.
+///
+/// Retained for tasks 1.2/1.3 (VNS and SA reuse it as the fallback seed);
+/// the local-search variants now seed from [`fas_indegree_seed`].
+#[expect(dead_code, reason = "reused as the fallback seed by tasks 1.2/1.3")]
 fn seed_order(domains: &[Range<usize>], sections: &[IniSection]) -> Vec<usize> {
     let mut order = Vec::with_capacity(sections.len());
     for range in domains {
@@ -313,6 +318,106 @@ fn seed_order(domains: &[Range<usize>], sections: &[IniSection]) -> Vec<usize> {
         }
         items.sort_unstable();
         order.extend(items.into_iter().map(|(_, _, i)| i));
+    }
+    order
+}
+
+/// FAS-indegree first-phase seed (design D1): a Kahn-style rank over the
+/// cable-index edge set that places producers before their consumers, cutting
+/// back edges before the bounded local search refines. Only edges whose
+/// endpoints both lie in one domain influence that domain's rank (cross-domain
+/// edges are position-invariant within it, matching [`seed_order`]'s scope).
+/// Deterministic — no RNG: the Kahn queue breaks ties by node-id hash
+/// ([`fnv1a`]), so two runs produce identical orderings. The edge set
+/// addresses each circuit name once, so same-name sections rank as one block
+/// in file order — the result is always a valid permutation — and the sections
+/// a cycle stalls on are appended in the same hash order, so the function
+/// never returns a partial permutation.
+fn fas_indegree_seed(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    edges: &[GraphEdge],
+    nodes: &[(NodeId, usize)],
+) -> Vec<usize> {
+    // NodeId → section index, in file order (each node appears exactly once).
+    let mut node_section: HashMap<&NodeId, usize> = HashMap::with_capacity(nodes.len());
+    for (id, section_index) in nodes {
+        node_section.insert(id, *section_index);
+    }
+
+    let mut order = Vec::with_capacity(sections.len());
+    for range in domains {
+        // Same-name sections form one block, in file order. Only a block's
+        // first section can be an edge endpoint (the edge set references each
+        // circuit name once), so ranking whole blocks preserves the same-name
+        // relative order by construction.
+        let mut blocks: Vec<Vec<usize>> = Vec::new();
+        let mut block_of: HashMap<&str, usize> = HashMap::new();
+        for i in range.start..range.end {
+            let name = sections[i].name.as_str();
+            let block = match block_of.get(name) {
+                Some(&b) => b,
+                None => {
+                    block_of.insert(name, blocks.len());
+                    blocks.push(Vec::new());
+                    blocks.len() - 1
+                }
+            };
+            blocks[block].push(i);
+        }
+        let m = blocks.len();
+        let mut indegree = vec![0usize; m];
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for edge in edges {
+            let (Some(&source), Some(&sink)) =
+                (node_section.get(&edge.source), node_section.get(&edge.sink))
+            else {
+                continue; // endpoint outside the node set — impossible via `derive`
+            };
+            if !range.contains(&source) || !range.contains(&sink) {
+                continue; // cross-domain edge: position-invariant within this domain
+            }
+            let source_block = block_of[sections[source].name.as_str()];
+            let sink_block = block_of[sections[sink].name.as_str()];
+            adj[source_block].push(sink_block);
+            indegree[sink_block] += 1;
+        }
+        // Ready blocks in node-id-hash order (same tie-break as `seed_order`).
+        let key = |b: usize| {
+            (
+                fnv1a(sections[blocks[b][0]].name.as_bytes()),
+                blocks[b][0],
+                b,
+            )
+        };
+        let mut ready: BinaryHeap<Reverse<(u64, usize, usize)>> = BinaryHeap::new();
+        for b in 0..m {
+            if indegree[b] == 0 {
+                ready.push(Reverse(key(b)));
+            }
+        }
+        let mut ranked = Vec::with_capacity(range.len());
+        let mut placed = vec![false; m];
+        while let Some(Reverse((_, _, b))) = ready.pop() {
+            placed[b] = true;
+            ranked.extend_from_slice(&blocks[b]);
+            for &nb in &adj[b] {
+                indegree[nb] -= 1;
+                if indegree[nb] == 0 {
+                    ready.push(Reverse(key(nb)));
+                }
+            }
+        }
+        if ranked.len() < range.len() {
+            // A dependency cycle stalls the Kahn queue; append the remainder in
+            // the same hash order so the seed is always a full permutation.
+            let mut leftover: Vec<usize> = (0..m).filter(|&b| !placed[b]).collect();
+            leftover.sort_unstable_by_key(|&b| key(b));
+            for b in leftover {
+                ranked.extend_from_slice(&blocks[b]);
+            }
+        }
+        order.extend(ranked);
     }
     order
 }
@@ -439,17 +544,18 @@ fn search_exact(
     })
 }
 
-/// Heuristic search: seeded from node-id hashes, then first-improvement
-/// hill-climbing over safe swaps within each domain, bounded by `SEARCH_STEPS`.
-/// Tracks the best order seen; the identity order is always a candidate, so
-/// the result is never worse than the original under `objective`.
+/// Heuristic search: seeded from the FAS-indegree rank (producers before
+/// consumers, design D1), then first-improvement hill-climbing over safe swaps
+/// within each domain, bounded by `SEARCH_STEPS`. Tracks the best order seen;
+/// the identity order is always a candidate, so the result is never worse than
+/// the original under `objective`.
 fn search_local(
     domains: &[Range<usize>],
     sections: &[IniSection],
     eval: &EvalCtx<'_>,
     objective: Objective,
 ) -> (Vec<usize>, LatencySummary) {
-    let mut order = seed_order(domains, sections);
+    let mut order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
     let mut best_order = order.clone();
     let mut best_summary = evaluate_order(&best_order, eval);
     let identity: Vec<usize> = (0..sections.len()).collect();
@@ -844,5 +950,127 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].order, vec![0]);
         assert_eq!(candidates[0].before, candidates[0].after);
+    }
+
+    // --- task 1.1: FAS-indegree first-phase seed ---
+
+    /// Latency summary of `order` under the patch's derived graph.
+    fn order_summary(order: &[usize], derived: &Derived, cost: &CostModel) -> LatencySummary {
+        let schema = load_schema();
+        let eval = EvalCtx {
+            derived,
+            cost,
+            schema: &schema,
+        };
+        evaluate_order(order, &eval)
+    }
+
+    /// Full-domain FAS rank of `patch` (the `GlobalMinSum` strategy's domain;
+    /// the fixtures here carry no banners).
+    fn fas_rank(patch: &Patch) -> (Derived, Vec<usize>) {
+        let derived = derive(patch);
+        let domains = vec![0..patch.sections.len()];
+        let order = fas_indegree_seed(&domains, &patch.sections, &derived.edges, &derived.nodes);
+        (derived, order)
+    }
+
+    /// A 4-cycle a→b→c→d→a with a pure producer p feeding a (p→a). Any linear
+    /// order keeps exactly one back edge inside the cycle; p has only an
+    /// out-edge, so the FAS rank places it first and its edge stays forward.
+    fn circular_patch() -> Patch {
+        patch(
+            "[p]\n\
+             button = B1.1\n\
+             output = _PA\n\
+             [b]\n\
+             in = _AB\n\
+             output = _BC\n\
+             [c]\n\
+             in = _BC\n\
+             output = _CD\n\
+             [d]\n\
+             in = _CD\n\
+             output = _DA\n\
+             [a]\n\
+             in = _PA\n\
+             in2 = _DA\n\
+             output = _AB\n",
+        )
+    }
+
+    fn assert_full_permutation(order: &[usize], section_count: usize) {
+        let mut sorted = order.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..section_count).collect::<Vec<usize>>(),
+            "seed must rank every section exactly once: {order:?}"
+        );
+    }
+
+    #[test]
+    fn fas_seed_orders_acyclic_chain_producers_first() {
+        let patch = chain_patch(); // a→c→b→d, file order d, b, a, c
+        let cost = CostModel::default();
+        let (derived, order) = fas_rank(&patch);
+        assert_eq!(order, vec![2, 3, 1, 0], "a, c, b, d — the chain order");
+        assert_eq!(
+            order_summary(&order, &derived, &cost).back_edge_count,
+            0,
+            "acyclic dependencies rank without back edges"
+        );
+    }
+
+    #[test]
+    fn fas_seed_back_edges_no_worse_than_seed_order_on_cycle() {
+        let patch = circular_patch();
+        let cost = CostModel::default();
+        let (derived, fas) = fas_rank(&patch);
+        let domains = vec![0..patch.sections.len()];
+        let seed = seed_order(&domains, &patch.sections);
+        let fas_back = order_summary(&fas, &derived, &cost).back_edge_count;
+        let seed_back = order_summary(&seed, &derived, &cost).back_edge_count;
+        assert_full_permutation(&fas, patch.sections.len());
+        assert!(
+            fas_back >= 1,
+            "the a→b→c→d→a cycle must keep at least one back edge in any order"
+        );
+        assert!(
+            fas_back <= seed_back,
+            "FAS rank ({fas_back} back edges) must not exceed seed_order ({seed_back})"
+        );
+        let pos_p = fas.iter().position(|&s| s == 0).expect("p in order");
+        let pos_a = fas.iter().position(|&s| s == 4).expect("a in order");
+        assert!(pos_p < pos_a, "producer p must rank before its consumer a");
+    }
+
+    #[test]
+    fn fas_seed_completes_on_large_patch() {
+        // 12-section chain in scrambled file order — too big to enumerate, the
+        // local-search path's seed. The pass is linear in sections + edges by
+        // construction (one pass over each); the behavioral contract is that it
+        // always returns a full permutation.
+        let patch = big_patch();
+        let cost = CostModel::default();
+        let (derived, order) = fas_rank(&patch);
+        assert_full_permutation(&order, patch.sections.len());
+        assert_eq!(
+            order_summary(&order, &derived, &cost).back_edge_count,
+            0,
+            "s0→s1→…→s11 ranks as the chain with no back edges"
+        );
+    }
+
+    #[test]
+    fn fas_seed_is_deterministic() {
+        for patch in [chain_patch(), circular_patch(), big_patch()] {
+            let derived = derive(&patch);
+            let domains = vec![0..patch.sections.len()];
+            let first =
+                fas_indegree_seed(&domains, &patch.sections, &derived.edges, &derived.nodes);
+            let second =
+                fas_indegree_seed(&domains, &patch.sections, &derived.edges, &derived.nodes);
+            assert_eq!(first, second, "two runs must produce identical rankings");
+        }
     }
 }
