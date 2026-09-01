@@ -5,6 +5,7 @@ pub mod events;
 pub mod gallery;
 pub mod geometry;
 pub mod graph;
+pub mod graph_render;
 pub mod handler;
 pub mod latency;
 pub mod layout;
