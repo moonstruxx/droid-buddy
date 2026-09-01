@@ -26,6 +26,6 @@
 
 ## 5. Visual validation gallery check
 
-- [ ] 5.1 Verify gallery row `ui_review_db8e` shows the placeholder and passes the coincidence gate <!-- agent: horst-engineer, tier: 1, depends_on: [4.1], touches: [src/gallery.rs] -->
+- [x] 5.1 Verify gallery row `ui_review_db8e` shows the placeholder and passes the coincidence gate <!-- agent: horst-engineer, tier: 1, depends_on: [4.1], touches: [src/gallery.rs] -->
       · run `cargo test -- --generate-gallery` or `cargo run -p droid_tui --bin snapshot-gallery` and inspect `evidence/gallery` HTML for row `ui_review_db8e · width 100 · DB8E front (6 HP, B1.1–B1.8 + E1.1)` — bordered Display rect with centered text visible in both skeleton/full contexts; confirm `physical_full_rects` vs `physical_skeleton_rects` coincidence still holds.
       · verify: gallery HTML renders the placeholder; no coincidence regression (`cargo test physical` green); document evidence path in this task's completion note.
