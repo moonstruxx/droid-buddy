@@ -299,7 +299,7 @@ fn valid_permutation_count(domain: &[usize], sections: &[IniSection]) -> u128 {
 ///
 /// Retained for tasks 1.2/1.3 (VNS and SA reuse it as the fallback seed);
 /// the local-search variants now seed from [`fas_indegree_seed`].
-#[expect(dead_code, reason = "reused as the fallback seed by tasks 1.2/1.3")]
+#[allow(dead_code)]
 fn seed_order(domains: &[Range<usize>], sections: &[IniSection]) -> Vec<usize> {
     let mut order = Vec::with_capacity(sections.len());
     for range in domains {
@@ -353,6 +353,7 @@ fn fas_indegree_seed(
         // relative order by construction.
         let mut blocks: Vec<Vec<usize>> = Vec::new();
         let mut block_of: HashMap<&str, usize> = HashMap::new();
+        #[allow(clippy::needless_range_loop)]
         for i in range.start..range.end {
             let name = sections[i].name.as_str();
             let block = match block_of.get(name) {
@@ -391,6 +392,7 @@ fn fas_indegree_seed(
             )
         };
         let mut ready: BinaryHeap<Reverse<(u64, usize, usize)>> = BinaryHeap::new();
+        #[allow(clippy::needless_range_loop)]
         for b in 0..m {
             if indegree[b] == 0 {
                 ready.push(Reverse(key(b)));
@@ -960,7 +962,7 @@ mod tests {
         let eval = EvalCtx {
             derived,
             cost,
-            schema: &schema,
+            schema,
         };
         evaluate_order(order, &eval)
     }
@@ -969,6 +971,7 @@ mod tests {
     /// the fixtures here carry no banners).
     fn fas_rank(patch: &Patch) -> (Derived, Vec<usize>) {
         let derived = derive(patch);
+        #[allow(clippy::single_range_in_vec_init)]
         let domains = vec![0..patch.sections.len()];
         let order = fas_indegree_seed(&domains, &patch.sections, &derived.edges, &derived.nodes);
         (derived, order)
@@ -1026,6 +1029,7 @@ mod tests {
         let patch = circular_patch();
         let cost = CostModel::default();
         let (derived, fas) = fas_rank(&patch);
+        #[allow(clippy::single_range_in_vec_init)]
         let domains = vec![0..patch.sections.len()];
         let seed = seed_order(&domains, &patch.sections);
         let fas_back = order_summary(&fas, &derived, &cost).back_edge_count;
@@ -1065,6 +1069,7 @@ mod tests {
     fn fas_seed_is_deterministic() {
         for patch in [chain_patch(), circular_patch(), big_patch()] {
             let derived = derive(&patch);
+            #[allow(clippy::single_range_in_vec_init)]
             let domains = vec![0..patch.sections.len()];
             let first =
                 fas_indegree_seed(&domains, &patch.sections, &derived.edges, &derived.nodes);
