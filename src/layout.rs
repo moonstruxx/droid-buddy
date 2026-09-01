@@ -6,11 +6,11 @@
 //! (damped `local_resettle`).
 //!
 //! Deterministic (design D9): initial positions are seeded from topological
-//! depth (sources left, sinks right, banner clusters banded vertically) plus
-//! a hash of the node id — no RNG, so the same patch converges to the same
-//! arrangement on the same machine. Repulsion uses uniform-grid cell hashing
-//! (rebuilt per iteration) so a node only repels against nodes in neighboring
-//! cells, keeping the 600-node case near-linear instead of O(n²).
+//! depth (x) plus within-layer file order (y) plus a hash of the node id — no
+//! RNG, so the same patch converges to the same arrangement on the same
+//! machine. Repulsion uses uniform-grid cell hashing (rebuilt per iteration)
+//! so a node only repels against nodes in neighboring cells, keeping the
+//! 600-node case near-linear instead of O(n²).
 //!
 //! Pure module: no terminal dependency. Positions are a `Vec<(f32, f32)>`
 //! parallel to `graph.nodes` — index `i` is the position of `graph.nodes[i]`.
@@ -36,18 +36,27 @@ const ENERGY_THRESHOLD: f32 = 0.5;
 const FRICTION: f32 = 0.5;
 /// Spring rest length between connected nodes.
 const SPRING_REST: f32 = 80.0;
-/// Spring stiffness along an edge (force = k · (distance − rest)).
-const SPRING_K: f32 = 0.05;
-/// Repulsion magnitude coefficient (force ~ strength / distance²).
-const REPULSION_STRENGTH: f32 = 4000.0;
+/// Spring stiffness along an edge (force = k · (distance − rest)). Tuned so
+/// attraction dominates repulsion at patch scale (design D2): connected
+/// circuits settle near the rest length while unconnected ones are pushed
+/// toward the repulsion radius.
+const SPRING_K: f32 = 0.15;
+/// Repulsion magnitude coefficient (force ~ strength / distance²). Softened
+/// below spring influence so edges read as the primary structure (design D2).
+const REPULSION_STRENGTH: f32 = 1500.0;
 /// Repulsion cutoff radius; also the uniform-grid cell size.
 const REPULSION_RADIUS: f32 = 120.0;
 /// Per-axis cap on a single velocity update, keeps the solver from exploding.
 const MAX_DISPLACEMENT: f32 = 20.0;
 
+/// Weak per-cluster cohesion pulling each member toward its banner group's
+/// centroid (design D3). Deliberately far below `SPRING_K` so clusters
+/// cohere without collapsing or overriding the single-axis spring bias.
+const COHESION_K: f32 = 0.01;
+
 /// Horizontal gap between topological-depth levels in the seed layout.
 const HORIZONTAL_SPACING: f32 = 80.0;
-/// Vertical gap between cluster bands in the seed layout.
+/// Vertical gap between nodes within one topological layer in the seed layout.
 const VERTICAL_SPACING: f32 = 120.0;
 
 /// Default iteration cap for a damped local re-settle (fewer than a solve).
@@ -60,15 +69,20 @@ pub const LOCAL_RADIUS: f32 = 200.0;
 /// The returned `Vec<(f32, f32)>` is parallel to `graph.nodes`: index `i`
 /// holds the position of `graph.nodes[i]`.
 ///
+/// `pinned` holds node indices that act as unmoved fixed anchors: they stay
+/// exactly where the seed placed them while every other node still pulls
+/// toward and depends on them. Out-of-range indices are ignored defensively;
+/// pass `&[]` for an unpinned solve (today's behavior until task 3.1 supplies
+/// real pin indices).
+///
 /// Used for both the FULL graph (`solve(&full_graph)`) and the FILTERED
 /// induced subgraph (`solve(&filtered_graph)` / `solve_filtered`) — each call
-/// seeds deterministically from its own graph (topological depth + cluster
-/// bands + node-id hash, no RNG) and converges independently under the same
-/// bounded, grid-hashed solver (`MAX_ITERATIONS`, `ENERGY_THRESHOLD`). No API
-/// break to `local_resettle`.
-pub fn solve(graph: &Graph) -> Vec<(f32, f32)> {
+/// seeds deterministically from its own graph (topological depth + within-
+/// layer order + node-id hash, no RNG) and converges independently under the
+/// same bounded, grid-hashed solver (`MAX_ITERATIONS`, `ENERGY_THRESHOLD`).
+pub fn solve(graph: &Graph, pinned: &[usize]) -> Vec<(f32, f32)> {
     let mut positions = seed_positions(graph);
-    run_iterations(graph, &mut positions, MAX_ITERATIONS, None);
+    run_iterations(graph, &mut positions, MAX_ITERATIONS, None, pinned);
     positions
 }
 
@@ -82,9 +96,10 @@ pub fn solve(graph: &Graph) -> Vec<(f32, f32)> {
 /// target this path without coupling to FULL-graph fixtures. A small filtered
 /// graph converges compactly and quickly; when the filtered set is a strict
 /// subset of FULL, its positions differ from the corresponding FULL subset.
-/// Pure, no terminal dependency. No API break to `solve`/`local_resettle`.
-pub fn solve_filtered(graph: &Graph) -> Vec<(f32, f32)> {
-    solve(graph)
+/// `pinned` behaves exactly as in [`solve`]; pass `&[]` for an unpinned
+/// filtered solve. Pure, no terminal dependency.
+pub fn solve_filtered(graph: &Graph, pinned: &[usize]) -> Vec<(f32, f32)> {
+    solve(graph, pinned)
 }
 
 /// Damped local re-settle after a node move (design D1).
@@ -92,14 +107,17 @@ pub fn solve_filtered(graph: &Graph) -> Vec<(f32, f32)> {
 /// Only nodes within `radius` of the moved node are active and move; distant
 /// nodes act as anchors and stay essentially unmoved. `iterations` should be
 /// well below `MAX_ITERATIONS` (default `LOCAL_ITERATIONS`). `moved` must be a
-/// node in `graph`; positions are otherwise left untouched. Returns whether
-/// the moved node was found.
+/// node in `graph`; positions are otherwise left untouched. `pinned` marks
+/// node indices that never move — they stay exactly where they currently sit
+/// (e.g. a drag-dropped anchor) while still exerting forces on the active
+/// neighbourhood. Returns whether the moved node was found.
 pub fn local_resettle(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     moved: &NodeId,
     radius: f32,
     iterations: usize,
+    pinned: &[usize],
 ) -> bool {
     let Some(center) = graph.nodes.iter().position(|n| &n.id == moved) else {
         return false;
@@ -108,20 +126,24 @@ pub fn local_resettle(
     let active: Vec<bool> = (0..graph.nodes.len())
         .map(|i| dist(positions[i], c) <= radius)
         .collect();
-    run_iterations(graph, positions, iterations, Some(&active));
+    run_iterations(graph, positions, iterations, Some(&active), pinned);
     true
 }
 
-/// Deterministic initial placement: sources on the left, sinks right, each
-/// cluster banded into its own horizontal stripe, plus a hash-of-id jitter.
+/// Deterministic initial placement along a single dominant left→right axis
+/// (design D1): sources on the left, sinks right — `x = depth · HORIZONTAL_SPACING`,
+/// `y = within-layer file order · VERTICAL_SPACING`, plus a hash-of-id jitter
+/// to break ties. Replaces the old vertically-banded cluster stripes so the
+/// convergence target is a horizontal chain.
 fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
     let n = graph.nodes.len();
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
 
     // Longest-path topological depth via bounded Bellman-Ford relaxation. The
-    // bound (n passes) keeps cyclic graphs finite: a simple path has ≤ n−1
-    // edges, so no depth can grow past that regardless of cycles.
+    // n-pass bound keeps cyclic graphs finite: each pass relaxes every edge
+    // once, so on a cycle depth grows by at most the cycle length per pass and
+    // can exceed n — the per-depth map below must not assume depth < n.
     let mut depth = vec![0usize; n];
     for _ in 0..n {
         let mut changed = false;
@@ -136,18 +158,16 @@ fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
         }
     }
 
-    let fallback_band = graph.clusters.len();
-    let bands: Vec<usize> = graph
-        .nodes
-        .iter()
-        .map(|node| {
-            graph
-                .clusters
-                .iter()
-                .position(|c| c.section_range.contains(&node.section_index))
-                .unwrap_or(fallback_band)
-        })
-        .collect();
+    // Deterministic within-layer order: file (node-index) order per depth.
+    // Depth can exceed `n` on cyclic graphs (each relaxation pass re-propagates
+    // a cycle), so per-depth counters live in a map, not a fixed-size vec.
+    let mut layer_order = vec![0usize; n];
+    let mut per_layer: HashMap<usize, usize> = HashMap::new();
+    for i in 0..n {
+        let order = per_layer.entry(depth[i]).or_insert(0);
+        layer_order[i] = *order;
+        *order += 1;
+    }
 
     graph
         .nodes
@@ -156,7 +176,7 @@ fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
         .map(|(i, node)| {
             let h = hash_unit(&node.id);
             let x = depth[i] as f32 * HORIZONTAL_SPACING + h * HORIZONTAL_SPACING * 0.2;
-            let y = bands[i] as f32 * VERTICAL_SPACING + h * VERTICAL_SPACING * 0.4;
+            let y = layer_order[i] as f32 * VERTICAL_SPACING + h * VERTICAL_SPACING * 0.4;
             (x, y)
         })
         .collect()
@@ -165,13 +185,16 @@ fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
 /// Advance `positions` up to `max_iter` iterations, returning how many were
 /// actually run so callers can detect early energy-threshold convergence.
 /// `active` (when `Some`) marks which nodes may move; inactive nodes stay put
-/// but still exert forces (they anchor the active set). Freezes early when
-/// kinetic energy converges.
+/// but still exert forces (they anchor the active set). `pinned` marks node
+/// indices that never move, exactly like inactive nodes but for the whole
+/// solve (fixed anchors; out-of-range indices are ignored). Freezes early
+/// when kinetic energy converges.
 fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     max_iter: usize,
     active: Option<&[bool]>,
+    pinned: &[usize],
 ) -> usize {
     let n = graph.nodes.len();
     if n == 0 {
@@ -179,6 +202,12 @@ fn run_iterations(
     }
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
+    let pinned_mask: Vec<bool> = (0..n).map(|i| pinned.contains(&i)).collect();
+    // Cluster membership for cohesion (design D3); `None` = node in no banner
+    // group, so the cohesion force is skipped defensively for it.
+    let member_of: Vec<Option<usize>> = (0..n)
+        .map(|i| graph.cluster_index_of(graph.nodes[i].section_index))
+        .collect();
     let mut velocity = vec![(0.0f32, 0.0f32); n];
 
     let mut iterations = 0;
@@ -221,9 +250,36 @@ fn run_iterations(
             }
         }
 
+        // Per-cluster cohesion: pull members toward their centroid (D3). The
+        // centroid is recomputed from live positions each iteration, so the
+        // force is deterministic and follows the cluster as it moves.
+        if !graph.clusters.is_empty() {
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
+            for (i, cluster) in member_of.iter().enumerate() {
+                if let Some(c) = cluster {
+                    members[*c].push(i);
+                }
+            }
+            for list in &members {
+                if list.is_empty() {
+                    continue;
+                }
+                let (mut sx, mut sy) = (0.0f32, 0.0f32);
+                for &i in list {
+                    sx += positions[i].0;
+                    sy += positions[i].1;
+                }
+                let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
+                for &i in list {
+                    accel[i].0 += (cx - positions[i].0) * COHESION_K;
+                    accel[i].1 += (cy - positions[i].1) * COHESION_K;
+                }
+            }
+        }
+
         let mut kinetic = 0.0f32;
         for i in 0..n {
-            if active.is_some_and(|act| !act[i]) {
+            if pinned_mask[i] || active.is_some_and(|act| !act[i]) {
                 continue;
             }
             let a = clamp(accel[i], MAX_DISPLACEMENT);
@@ -365,7 +421,7 @@ mod tests {
     #[test]
     fn single_node_solves_to_finite_position() {
         let graph = make_graph(1, &[]);
-        let positions = solve(&graph);
+        let positions = solve(&graph, &[]);
         assert_eq!(positions.len(), 1);
         assert_finite_and_bounded(&positions);
     }
@@ -374,7 +430,7 @@ mod tests {
     fn disconnected_graph_produces_finite_positions() {
         // Three independent components with no connecting edges.
         let graph = make_graph(6, &[(0, 1), (2, 3), (4, 5)]);
-        let positions = solve(&graph);
+        let positions = solve(&graph, &[]);
         assert_eq!(positions.len(), 6);
         assert_finite_and_bounded(&positions);
     }
@@ -383,7 +439,7 @@ mod tests {
     fn cyclic_graph_produces_finite_positions() {
         // A closed loop; topological depth is bounded by the solver.
         let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3), (3, 0)]);
-        let positions = solve(&graph);
+        let positions = solve(&graph, &[]);
         assert_eq!(positions.len(), 4);
         assert_finite_and_bounded(&positions);
     }
@@ -396,7 +452,7 @@ mod tests {
             edges.push((i, i + 1));
         }
         let graph = make_graph(600, &edges);
-        let positions = solve(&graph);
+        let positions = solve(&graph, &[]);
         assert_eq!(positions.len(), 600);
         assert_finite_and_bounded(&positions);
     }
@@ -409,8 +465,8 @@ mod tests {
             edges.push((i, i + 1));
         }
         let graph = make_graph(50, &edges);
-        let a = solve(&graph);
-        let b = solve(&graph);
+        let a = solve(&graph, &[]);
+        let b = solve(&graph, &[]);
         assert_eq!(a, b);
     }
 
@@ -419,8 +475,8 @@ mod tests {
         // After a solve, re-solving the unchanged graph yields identical
         // frozen positions (no drift across queries).
         let graph = make_graph(40, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)]);
-        let first = solve(&graph);
-        let second = solve(&graph);
+        let first = solve(&graph, &[]);
+        let second = solve(&graph, &[]);
         assert_eq!(first, second);
     }
 
@@ -430,7 +486,7 @@ mod tests {
             12,
             &[(0, 1), (1, 2), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)],
         );
-        let mut positions = solve(&graph);
+        let mut positions = solve(&graph, &[]);
 
         // Teleport node 0 far away; distant nodes must stay put.
         let before = positions.clone();
@@ -441,6 +497,7 @@ mod tests {
             &(String::from("n0"), 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
+            &[],
         );
         assert!(found);
         assert_finite_and_bounded(&positions);
@@ -454,7 +511,7 @@ mod tests {
     #[test]
     fn local_resettle_unknown_node_is_noop() {
         let graph = make_graph(3, &[(0, 1), (1, 2)]);
-        let mut positions = solve(&graph);
+        let mut positions = solve(&graph, &[]);
         let before = positions.clone();
         let found = local_resettle(
             &graph,
@@ -462,15 +519,17 @@ mod tests {
             &(String::from("nope"), 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
+            &[],
         );
         assert!(!found);
         assert_eq!(positions, before);
     }
 
     #[test]
-    fn cluster_seed_bands_nodes_vertically() {
-        // Two clusters band their members into distinct y-stripes.
-        let nodes = vec![node("a", 0), node("b", 1), node("c", 2)];
+    fn single_axis_seed_spreads_layers_horizontally() {
+        // D1: the seed places nodes by topological depth on x (not by cluster
+        // band on y), so a layered graph starts as a horizontal chain.
+        let nodes = vec![node("n0", 0), node("n1", 1), node("n2", 2)];
         let clusters = vec![
             Cluster {
                 title: "left".to_string(),
@@ -483,16 +542,27 @@ mod tests {
         ];
         let graph = Graph {
             nodes,
-            edges: vec![],
+            edges: vec![
+                GraphEdge {
+                    cable: "_C".to_string(),
+                    source: (String::from("n0"), 0),
+                    sink: (String::from("n1"), 0),
+                },
+                GraphEdge {
+                    cable: "_C".to_string(),
+                    source: (String::from("n1"), 0),
+                    sink: (String::from("n2"), 0),
+                },
+            ],
             clusters,
             validation: vec![],
             ..Default::default()
         };
-        let positions = solve(&graph);
-        // Cluster 0 stripe (a, b) is above cluster 1 stripe (c): min band gap
-        // is one full vertical spacing, so c's y exceeds both a's and b's.
-        assert!(positions[2].1 > positions[0].1 + VERTICAL_SPACING * 0.5);
-        assert!(positions[2].1 > positions[1].1 + VERTICAL_SPACING * 0.5);
+        let positions = solve(&graph, &[]);
+        // Sinks sit right of sources: x grows with topological depth.
+        assert!(positions[2].0 > positions[0].0 + HORIZONTAL_SPACING * 0.5);
+        assert!(positions[2].0 > positions[1].0 + HORIZONTAL_SPACING * 0.5);
+        assert_finite_and_bounded(&positions);
     }
 
     /// Number of iterations a full `solve` would run before freezing (energy
@@ -500,7 +570,7 @@ mod tests {
     /// deterministically instead of timing the solver.
     fn solve_iteration_count(graph: &Graph) -> usize {
         let mut positions = seed_positions(graph);
-        run_iterations(graph, &mut positions, MAX_ITERATIONS, None)
+        run_iterations(graph, &mut positions, MAX_ITERATIONS, None, &[])
     }
 
     /// Number of iterations a local re-settle around `moved` would run before
@@ -519,7 +589,7 @@ mod tests {
         let active: Vec<bool> = (0..graph.nodes.len())
             .map(|i| dist(positions[i], c) <= radius)
             .collect();
-        run_iterations(graph, positions, iterations, Some(&active))
+        run_iterations(graph, positions, iterations, Some(&active), &[])
     }
 
     #[test]
@@ -535,7 +605,7 @@ mod tests {
         let count = solve_iteration_count(&graph);
         assert!(count <= MAX_ITERATIONS, "solve exceeded cap: {count}");
         assert!(count > 0);
-        assert_finite_and_bounded(&solve(&graph));
+        assert_finite_and_bounded(&solve(&graph, &[]));
     }
 
     #[test]
@@ -554,7 +624,7 @@ mod tests {
             "expected energy convergence below cap, took {count} (cap {MAX_ITERATIONS})"
         );
         assert!(count > 0);
-        assert_finite_and_bounded(&solve(&graph));
+        assert_finite_and_bounded(&solve(&graph, &[]));
     }
 
     #[test]
@@ -578,11 +648,11 @@ mod tests {
                 (11, 12),
             ],
         );
-        let baseline = solve(&graph);
+        let baseline = solve(&graph, &[]);
         assert_finite_and_bounded(&baseline);
         for _ in 0..3 {
             assert_eq!(
-                solve(&graph),
+                solve(&graph, &[]),
                 baseline,
                 "positions drifted across a repeated query"
             );
@@ -614,8 +684,8 @@ mod tests {
                 (13, 14),
             ],
         );
-        let a = solve(&graph);
-        let b = solve(&graph);
+        let a = solve(&graph, &[]);
+        let b = solve(&graph, &[]);
         assert_eq!(a, b);
         assert_finite_and_bounded(&a);
     }
@@ -625,7 +695,7 @@ mod tests {
         // Determinism extends to the damped re-settle: the same move from the
         // same frozen layout must yield the same result (D9).
         let graph = make_graph(20, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]);
-        let baseline = solve(&graph);
+        let baseline = solve(&graph, &[]);
 
         let mut a = baseline.clone();
         a[0] = (5000.0, 5000.0);
@@ -635,6 +705,7 @@ mod tests {
             &(String::from("n0"), 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
+            &[],
         );
 
         let mut b = baseline.clone();
@@ -645,6 +716,7 @@ mod tests {
             &(String::from("n0"), 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
+            &[],
         );
 
         assert_eq!(a, b);
@@ -663,14 +735,18 @@ mod tests {
 
     #[test]
     fn local_resettle_terminates_faster_than_full_solve() {
-        // A long chain needs many iterations to converge fully; a local
-        // re-settle around one node is capped at LOCAL_ITERATIONS, so it
-        // provably does less work than the full solve on the same graph (D1).
+        // The local re-settle is contractually cheaper than a full solve (D1):
+        // a graph whose full solve needs many iterations vs a resettle capped
+        // at LOCAL_ITERATIONS around one node. A chain seeds at spring rest
+        // length and converges in ~20 iters under the spring-dominant
+        // constants (D2), so it would not exercise the budget gap; a star of
+        // 40 same-layer nodes fanned 4680 units apart in y, collapsing into
+        // one sink, still takes the full solve far past LOCAL_ITERATIONS.
         let mut edges = Vec::new();
-        for i in 0..199 {
-            edges.push((i, i + 1));
+        for i in 0..40 {
+            edges.push((i, 40));
         }
-        let graph = make_graph(200, &edges);
+        let graph = make_graph(41, &edges);
 
         let full_count = solve_iteration_count(&graph);
         assert!(
@@ -678,7 +754,7 @@ mod tests {
             "expected full solve to need more than {LOCAL_ITERATIONS} iters, got {full_count}"
         );
 
-        let mut positions = solve(&graph);
+        let mut positions = solve(&graph, &[]);
         let resettle_count = resettle_iteration_count(
             &graph,
             &mut positions,
@@ -712,7 +788,7 @@ mod tests {
                 (12, 13),
             ],
         );
-        let baseline = solve(&graph);
+        let baseline = solve(&graph, &[]);
         let mut positions = baseline.clone();
         positions[0] = (10000.0, 10000.0);
         let found = local_resettle(
@@ -721,6 +797,7 @@ mod tests {
             &(String::from("n0"), 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
+            &[],
         );
         assert!(found);
         assert_finite_and_bounded(&positions);
@@ -759,13 +836,13 @@ mod tests {
         let filtered = full.filtered_influence(&sub);
         assert!(!filtered.nodes.is_empty());
         assert!(filtered.nodes.len() < full.nodes.len());
-        let full_pos = solve(&full);
-        let filt_pos = solve_filtered(&filtered);
+        let full_pos = solve(&full, &[]);
+        let filt_pos = solve_filtered(&filtered, &[]);
         assert_eq!(filt_pos.len(), filtered.nodes.len());
         assert_finite_and_bounded(&filt_pos);
         assert_finite_and_bounded(&full_pos);
         // deterministic: second filtered solve identical
-        assert_eq!(filt_pos, solve_filtered(&filtered));
+        assert_eq!(filt_pos, solve_filtered(&filtered, &[]));
         // distinct from FULL subset: at least one node moved vs its FULL position
         let full_index: HashMap<&NodeId, usize> = full
             .nodes
@@ -819,9 +896,228 @@ mod tests {
     #[test]
     fn filtered_solve_on_empty_is_empty_and_deterministic() {
         let empty = Graph::default();
-        let a = solve_filtered(&empty);
-        let b = solve_filtered(&empty);
+        let a = solve_filtered(&empty, &[]);
+        let b = solve_filtered(&empty, &[]);
         assert!(a.is_empty());
         assert_eq!(a, b);
+    }
+
+    // ── task 1.1 rework: single-axis, spring dominance, cohesion, pins ──────
+
+    fn bbox_span(positions: &[(f32, f32)]) -> (f32, f32) {
+        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+        for (x, y) in positions {
+            min_x = min_x.min(*x);
+            max_x = max_x.max(*x);
+            min_y = min_y.min(*y);
+            max_y = max_y.max(*y);
+        }
+        (max_x - min_x, max_y - min_y)
+    }
+
+    #[test]
+    fn solve_converges_along_single_axis_not_vertical_stack() {
+        // Spec scenario scale: 60 circuits as three parallel chains of 20 — a
+        // layered DAG with several nodes per layer. The solver must converge
+        // along the x-axis (a wide horizontal pipeline), not a vertical stack.
+        let mut edges = Vec::new();
+        for chain in 0..3 {
+            for k in 0..19 {
+                edges.push((chain * 20 + k, chain * 20 + k + 1));
+            }
+        }
+        let graph = make_graph(60, &edges);
+        let positions = solve(&graph, &[]);
+        assert_finite_and_bounded(&positions);
+        let (w, h) = bbox_span(&positions);
+        assert!(w > 1000.0, "layout underuses the canvas width: {w}");
+        assert!(
+            w > 3.0 * h,
+            "layout is not single-axis: x-span {w} vs y-span {h}"
+        );
+    }
+
+    #[test]
+    fn cable_springs_keep_connected_circuits_nearer_than_unconnected() {
+        // D2: one connected pair (0-1) plus two isolated nodes (2,3). Spring
+        // attraction must dominate repulsion so the connected pair settles
+        // nearer each other than any unconnected pairing.
+        let graph = make_graph(4, &[(0, 1)]);
+        let positions = solve(&graph, &[]);
+        assert_finite_and_bounded(&positions);
+        let connected = dist(positions[0], positions[1]);
+        let unconnected = [
+            dist(positions[0], positions[2]),
+            dist(positions[0], positions[3]),
+            dist(positions[1], positions[2]),
+            dist(positions[1], positions[3]),
+            dist(positions[2], positions[3]),
+        ];
+        let min_unconnected = unconnected.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            connected < min_unconnected,
+            "spring dominance failed: connected {connected} !< unconnected {min_unconnected}"
+        );
+    }
+
+    #[test]
+    fn cluster_members_cohere_around_their_centroid() {
+        // D3: banner-group members attract toward their cluster centroid. Two
+        // 3-member clusters with no edges: intra-cluster spread must stay well
+        // below the inter-cluster gap — members cohere, clusters don't merge
+        // into a stripe or collapse together.
+        let nodes: Vec<GraphNode> = (0..6).map(|i| node(&format!("n{i}"), i)).collect();
+        let clusters = vec![
+            Cluster {
+                title: "A".to_string(),
+                section_range: 0..3,
+            },
+            Cluster {
+                title: "B".to_string(),
+                section_range: 3..6,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+        let positions = solve(&graph, &[]);
+        assert_finite_and_bounded(&positions);
+        let intra = [
+            dist(positions[0], positions[1]),
+            dist(positions[0], positions[2]),
+            dist(positions[1], positions[2]),
+            dist(positions[3], positions[4]),
+            dist(positions[3], positions[5]),
+            dist(positions[4], positions[5]),
+        ];
+        let max_intra = intra.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let inter = [
+            dist(positions[0], positions[3]),
+            dist(positions[0], positions[4]),
+            dist(positions[0], positions[5]),
+            dist(positions[1], positions[3]),
+            dist(positions[1], positions[4]),
+            dist(positions[1], positions[5]),
+            dist(positions[2], positions[3]),
+            dist(positions[2], positions[4]),
+            dist(positions[2], positions[5]),
+        ];
+        let min_inter = inter.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            max_intra < min_inter,
+            "cohesion failed: intra spread {max_intra} !< inter gap {min_inter}"
+        );
+    }
+
+    #[test]
+    fn pinned_nodes_never_move_during_solve() {
+        // Pinned indices are fixed anchors: they stay exactly at their seed
+        // position while every other node still settles under the forces.
+        let graph = make_graph(10, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]);
+        let seed = seed_positions(&graph);
+        let positions = solve(&graph, &[0, 3]);
+        assert_finite_and_bounded(&positions);
+        assert_eq!(positions[0], seed[0], "pinned node 0 moved");
+        assert_eq!(positions[3], seed[3], "pinned node 3 moved");
+        // Unpinned nodes still settle away from their seed (forces act on them).
+        let mut any_unpinned_moved = false;
+        for i in 0..10 {
+            if i == 0 || i == 3 {
+                continue;
+            }
+            if positions[i] != seed[i] {
+                any_unpinned_moved = true;
+                break;
+            }
+        }
+        assert!(any_unpinned_moved, "unpinned nodes did not settle");
+    }
+
+    #[test]
+    fn pinned_node_never_moves_during_local_resettle() {
+        // Drag-to-place semantics: the caller drops a node, then re-settles
+        // locally. A pinned node (here the moved one, and separately a pinned
+        // neighbor) must stay exactly where it sits while neighbors pull.
+        let graph = make_graph(
+            12,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 8),
+                (8, 9),
+                (9, 10),
+                (10, 11),
+            ],
+        );
+        let baseline = solve(&graph, &[]);
+
+        // Case A: the moved node itself is pinned at its drop position.
+        let mut a = baseline.clone();
+        let drop = (baseline[0].0 + 30.0, baseline[0].1 + 10.0);
+        a[0] = drop;
+        let found = local_resettle(
+            &graph,
+            &mut a,
+            &(String::from("n0"), 0),
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+            &[0],
+        );
+        assert!(found);
+        assert_eq!(a[0], drop, "pinned moved node must stay at its drop");
+        // Its unpinned neighbour settles toward the new position.
+        assert_ne!(a[1], baseline[1], "neighbour should re-settle");
+
+        // Case B: a pinned neighbour never moves even as the moved node pulls.
+        let mut b = baseline.clone();
+        b[0] = drop;
+        let found = local_resettle(
+            &graph,
+            &mut b,
+            &(String::from("n0"), 0),
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+            &[1],
+        );
+        assert!(found);
+        assert_eq!(b[1], baseline[1], "pinned neighbour must not move");
+        assert_ne!(b[0], baseline[0], "unpinned moved node settles elsewhere");
+    }
+
+    #[test]
+    fn empty_pin_slice_and_out_of_range_pins_behave_as_before() {
+        // `&[]` is the pre-rework unpinned behavior (deterministic, all nodes
+        // free); out-of-range pin indices are ignored defensively, never panic.
+        let graph = make_graph(
+            30,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (8, 9),
+            ],
+        );
+        let free = solve(&graph, &[]);
+        assert_finite_and_bounded(&free);
+        assert_eq!(solve(&graph, &[]), free, "&[] must be deterministic");
+        assert_eq!(
+            solve(&graph, &[999, 1000, usize::MAX]),
+            free,
+            "out-of-range pins must be ignored"
+        );
     }
 }

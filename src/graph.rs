@@ -213,6 +213,18 @@ impl Graph {
             highlighted_edges: HashSet::new(),
         }
     }
+
+    /// Index of the banner-group cluster whose `section_range` contains
+    /// `section_index`, if any. This is the cluster-membership mapping the
+    /// layout solver consumes for per-cluster cohesion (design D3): a node
+    /// belongs to the cluster owning its `Patch.sections` position. Returns
+    /// `None` for a section in no banner group (or an unknown index), so the
+    /// solver can skip the cohesion force defensively instead of panicking.
+    pub fn cluster_index_of(&self, section_index: usize) -> Option<usize> {
+        self.clusters
+            .iter()
+            .position(|c| c.section_range.contains(&section_index))
+    }
 }
 
 /// Compute forward-loop latency as a graph-build step (design D2), mirroring
