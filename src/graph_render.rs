@@ -1,9 +1,11 @@
-//! Pixel-space camera and (later) offscreen rasterizer for the graph surface.
+//! Pixel-space camera and offscreen rasterizer for the graph surface.
 //!
 //! This module is intentionally pure: no terminal, no ratatui, no `App` — only
-//! `f32` math over the layout solver's world plane and the kitty image's pixel
-//! plane. Task 2.1 wires it into `render_graph` by replacing the bounding-box
-//! fit with the camera and deriving `graph_node_rects` through the inverse.
+//! `f32` math over the layout solver's world plane, the kitty image's pixel
+//! plane, and `tiny-skia`/`fontdue` rasterization. Task 2.1 wires it into
+//! `render_graph` by replacing the bounding-box fit with the camera and
+//! deriving `graph_node_rects` through the inverse; task 2.2 supplies the
+//! `Color → RGB` hop that feeds `render_scene`.
 
 /// Degenerate-world guard: a zero-span axis (single node, coincident nodes)
 /// behaves as if it spanned `MIN_SPAN` so the fit zoom stays finite.
@@ -314,5 +316,439 @@ mod tests {
                 max_y: 0.0
             }
         );
+    }
+}
+// ---------------------------------------------------------------------------
+// Offscreen rasterizer (design.md D2 rounded rects, D3 fontdue labels, D5 f=32)
+// ---------------------------------------------------------------------------
+
+use fontdue::{Font, FontSettings};
+use std::sync::OnceLock;
+use tiny_skia::{
+    Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PremultipliedColorU8,
+    Stroke, Transform,
+};
+
+/// RGB color triple in the rasterizer's own space. The `Color → RGB` hop (task
+/// 2.2) lives outside this module — the pixel path never hardcodes or converts
+/// theme colors.
+pub type Rgb = (u8, u8, u8);
+
+/// Canvas cap for runaway pan/zoom: larger sizes are clamped before
+/// `Pixmap::new`, so a stretched camera can never exhaust memory (design.md D2
+/// "bounded `Pixmap::new`").
+const MAX_DIM: u32 = 8192;
+
+/// Bundled OFL font, parsed once (design.md D3/D10: deterministic and
+/// headless-safe, no filesystem lookup). A corrupt asset yields `None` for the
+/// whole scene so the caller falls back to box drawing.
+static FONT: OnceLock<Option<Font>> = OnceLock::new();
+
+fn bundled_font() -> Option<&'static Font> {
+    FONT.get_or_init(|| {
+        Font::from_bytes(
+            include_bytes!("../assets/JetBrainsMono-Regular.ttf").as_slice(),
+            FontSettings::default(),
+        )
+        .ok()
+    })
+    .as_ref()
+}
+
+/// Pixel-space appearance of one graph node: an anti-aliased rounded rect with
+/// an optional centered title.
+#[derive(Clone)]
+pub struct NodeSpec {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+    pub fill: Rgb,
+    pub border: Rgb,
+    pub border_width: f32,
+    pub label: String,
+    pub label_color: Rgb,
+}
+
+/// Pixel-space appearance of one cable: a quadratic Bézier stroke with a filled
+/// direction arrow at `end`.
+#[derive(Clone)]
+pub struct EdgeSpec {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub ctrl: (f32, f32),
+    pub color: Rgb,
+    pub width: f32,
+}
+
+/// A finished raster pass: opaque RGBA8 (`alpha == 255`, so premultiplied ==
+/// straight — design.md D5) ready for the `f=32` kitty transport.
+pub struct Scene {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Rasterize one graph frame: opaque background, cable curves behind
+/// rounded-rect nodes, labels on top. Pure over RGB tuples; `None` on
+/// degenerate sizes or a broken bundled font.
+pub fn render_scene(
+    width: u32,
+    height: u32,
+    background: Rgb,
+    nodes: &[NodeSpec],
+    edges: &[EdgeSpec],
+) -> Option<Scene> {
+    let font = bundled_font()?;
+    let width = width.min(MAX_DIM);
+    let height = height.min(MAX_DIM);
+    let mut pixmap = Pixmap::new(width, height)?;
+    pixmap.fill(Color::from_rgba8(
+        background.0,
+        background.1,
+        background.2,
+        255,
+    ));
+
+    for edge in edges {
+        draw_edge(&mut pixmap, edge);
+    }
+    for node in nodes {
+        draw_node(&mut pixmap, node, font);
+    }
+
+    Some(Scene {
+        width,
+        height,
+        rgba: pixmap.data().to_vec(),
+    })
+}
+
+/// Point on the circle of radius `r` around `c` at `angle_deg`. Screen y grows
+/// downward, so the angles run clockwise on screen — only the resulting point
+/// set matters, never the winding.
+fn arc_point(c: (f32, f32), r: f32, angle_deg: f32) -> (f32, f32) {
+    let a = angle_deg.to_radians();
+    (c.0 + r * a.cos(), c.1 + r * a.sin())
+}
+
+/// Append one rounded corner as two quadratic Béziers whose control points make
+/// each segment pass through its 45° arc midpoint (`C = 2M − (P0+P2)/2`), so
+/// the corner tracks the quarter circle. tiny-skia has no `RRect` (design.md
+/// D2): a rounded rect is eight `quad_to` calls, two per corner.
+fn append_corner(pb: &mut PathBuilder, center: (f32, f32), r: f32, start_deg: f32) {
+    for seg in 0..2 {
+        let a0 = start_deg + seg as f32 * 45.0;
+        let a1 = a0 + 45.0;
+        let (p0x, p0y) = arc_point(center, r, a0);
+        let (p2x, p2y) = arc_point(center, r, a1);
+        let (mx, my) = arc_point(center, r, (a0 + a1) / 2.0);
+        pb.quad_to(
+            2.0 * mx - (p0x + p2x) / 2.0,
+            2.0 * my - (p0y + p2y) / 2.0,
+            p2x,
+            p2y,
+        );
+    }
+}
+
+/// Anti-aliased rounded-rect outline: `line_to` between corners, two `quad_to`
+/// per corner (design.md D2). `None` for degenerate geometry; the radius is
+/// clamped to half the smaller side.
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let r = radius.clamp(0.0, w.min(h) / 2.0);
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    append_corner(&mut pb, (x + w - r, y + r), r, 270.0);
+    pb.line_to(x + w, y + h - r);
+    append_corner(&mut pb, (x + w - r, y + h - r), r, 0.0);
+    pb.line_to(x + r, y + h);
+    append_corner(&mut pb, (x + r, y + h - r), r, 90.0);
+    pb.line_to(x, y + r);
+    append_corner(&mut pb, (x + r, y + r), r, 180.0);
+    pb.close();
+    pb.finish()
+}
+
+/// Straight-alpha source-over of `src` at coverage `cov`/255 over an opaque
+/// `dst`. Alpha stays 255, so premultiplied == straight (design.md D5).
+fn blend_over_opaque(dst: PremultipliedColorU8, src: Rgb, cov: u8) -> (u8, u8, u8) {
+    let c = cov as u32;
+    let inv = 255 - c;
+    let bl = |d: u8, s: u8| ((s as u32 * c + d as u32 * inv + 127) / 255) as u8;
+    (
+        bl(dst.red(), src.0),
+        bl(dst.green(), src.1),
+        bl(dst.blue(), src.2),
+    )
+}
+
+/// Rasterize `label` centered inside `node` at a size that scales with the node
+/// height. Glyph coverage composites straight-alpha over the opaque canvas;
+/// alpha stays 255.
+fn draw_label(pixmap: &mut Pixmap, node: &NodeSpec, font: &Font) {
+    let px = (node.h * 0.42).clamp(8.0, 40.0);
+    let Some(line) = font.horizontal_line_metrics(px) else {
+        return;
+    };
+    let glyphs: Vec<_> = node.label.chars().map(|c| font.rasterize(c, px)).collect();
+    let total_w: f32 = glyphs.iter().map(|(m, _)| m.advance_width).sum();
+    let mut cursor = node.x + (node.w - total_w) / 2.0;
+    // Baseline centered vertically: text spans [baseline + descent, baseline + ascent].
+    let baseline = node.y + node.h / 2.0 + (line.ascent + line.descent) / 2.0;
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let pixels = pixmap.pixels_mut();
+    for (metrics, coverage) in &glyphs {
+        let gx = (cursor + metrics.xmin as f32).round() as i32;
+        let gy = (baseline + metrics.ymin as f32).round() as i32;
+        for row in 0..metrics.height {
+            for col in 0..metrics.width {
+                let x = gx + col as i32;
+                let y = gy + row as i32;
+                if x < 0 || y < 0 || x >= width || y >= height {
+                    continue;
+                }
+                let cov = coverage[row * metrics.width + col];
+                if cov == 0 {
+                    continue;
+                }
+                let idx = (y as u32 * width as u32 + x as u32) as usize;
+                let (r, g, b) = blend_over_opaque(pixels[idx], node.label_color, cov);
+                // Alpha stays 255 (opaque canvas), so the premultiplied form is
+                // always valid; an impossible failure just skips one pixel.
+                if let Some(c) = PremultipliedColorU8::from_rgba(r, g, b, 255) {
+                    pixels[idx] = c;
+                }
+            }
+        }
+        cursor += metrics.advance_width;
+    }
+}
+
+/// Fill + border a rounded-rect node, then its label on top.
+fn draw_node(pixmap: &mut Pixmap, node: &NodeSpec, font: &Font) {
+    let Some(path) = rounded_rect_path(node.x, node.y, node.w, node.h, node.radius) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(node.fill.0, node.fill.1, node.fill.2, 255);
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    if node.border_width > 0.0 {
+        paint.set_color_rgba8(node.border.0, node.border.1, node.border.2, 255);
+        let stroke = Stroke {
+            width: node.border_width,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
+        };
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    if !node.label.is_empty() {
+        draw_label(pixmap, node, font);
+    }
+}
+
+/// Stroke a quadratic Bézier cable, then fill a direction arrow at `end` along
+/// the curve tangent (`B'(1) = 2·(P2 − C)`).
+fn draw_edge(pixmap: &mut Pixmap, edge: &EdgeSpec) {
+    let mut pb = PathBuilder::new();
+    pb.move_to(edge.start.0, edge.start.1);
+    pb.quad_to(edge.ctrl.0, edge.ctrl.1, edge.end.0, edge.end.1);
+    let Some(path) = pb.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(edge.color.0, edge.color.1, edge.color.2, 255);
+    let stroke = Stroke {
+        width: edge.width,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+
+    let (tx, ty) = (
+        2.0 * (edge.end.0 - edge.ctrl.0),
+        2.0 * (edge.end.1 - edge.ctrl.1),
+    );
+    let len = (tx * tx + ty * ty).sqrt();
+    if len < 1e-6 {
+        return;
+    }
+    let (ux, uy) = (tx / len, ty / len);
+    let (nx, ny) = (-uy, ux);
+    let arrow_len = (8.0 + edge.width * 2.0).min(16.0);
+    let half = (4.0 + edge.width).min(8.0);
+    let base = (edge.end.0 - ux * arrow_len, edge.end.1 - uy * arrow_len);
+    let mut pb = PathBuilder::new();
+    pb.move_to(edge.end.0, edge.end.1);
+    pb.line_to(base.0 + nx * half, base.1 + ny * half);
+    pb.line_to(base.0 - nx * half, base.1 - ny * half);
+    pb.close();
+    if let Some(arrow) = pb.finish() {
+        pixmap.fill_path(
+            &arrow,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+#[cfg(test)]
+mod rasterizer_tests {
+    use super::*;
+
+    const BG: Rgb = (20, 20, 20);
+
+    fn pixel(scene: &Scene, x: u32, y: u32) -> (u8, u8, u8) {
+        let i = ((y * scene.width + x) * 4) as usize;
+        (scene.rgba[i], scene.rgba[i + 1], scene.rgba[i + 2])
+    }
+
+    fn all_opaque(scene: &Scene) -> bool {
+        scene.rgba.chunks_exact(4).all(|p| p[3] == 255)
+    }
+
+    fn non_background_count(scene: &Scene) -> usize {
+        scene
+            .rgba
+            .chunks_exact(4)
+            .filter(|p| p[0] != BG.0 || p[1] != BG.1 || p[2] != BG.2)
+            .count()
+    }
+
+    fn sample_node() -> NodeSpec {
+        NodeSpec {
+            x: 30.0,
+            y: 30.0,
+            w: 80.0,
+            h: 40.0,
+            radius: 8.0,
+            fill: (60, 60, 80),
+            border: (200, 200, 200),
+            border_width: 2.0,
+            label: "OUT".to_string(),
+            label_color: (240, 240, 200),
+        }
+    }
+
+    /// Curve stays below the node (node ends at y=70; the quad's minimum is
+    /// y=80 at its midpoint) and inside the 200×160 canvas.
+    fn sample_edge() -> EdgeSpec {
+        EdgeSpec {
+            start: (30.0, 140.0),
+            ctrl: (100.0, 20.0),
+            end: (170.0, 140.0),
+            color: (100, 220, 140),
+            width: 3.0,
+        }
+    }
+
+    #[test]
+    fn render_small_node_and_edge_produces_non_blank_pixels() {
+        let scene = render_scene(200, 160, BG, &[sample_node()], &[sample_edge()])
+            .expect("bounded scene renders");
+        assert!(
+            all_opaque(&scene),
+            "opaque canvas: f=32 premultiplied == straight"
+        );
+        // Node interior is fully covered by the fill.
+        assert_eq!(pixel(&scene, 50, 50), sample_node().fill);
+        // The edge midpoint lies on the quadratic curve (B(0.5) = (100, 80)).
+        assert_ne!(pixel(&scene, 100, 80), BG);
+        // The direction-arrow tip at the edge end is painted.
+        assert_ne!(pixel(&scene, 170, 140), BG);
+        // Node body + label + cable + arrow together produce a large
+        // non-background region.
+        assert!(non_background_count(&scene) > 1000);
+    }
+
+    #[test]
+    fn rounded_corner_has_anti_aliased_coverage() {
+        let node = NodeSpec {
+            x: 10.0,
+            y: 10.0,
+            w: 60.0,
+            h: 30.0,
+            radius: 8.0,
+            label: String::new(),
+            border_width: 0.0,
+            ..sample_node()
+        };
+        let scene = render_scene(120, 80, BG, std::slice::from_ref(&node), &[]).expect("renders");
+        assert!(all_opaque(&scene));
+        // Scan the top-left corner square (arc center (18,18), r=8): the AA
+        // edge must contain a pixel strictly between background and fill
+        // (coverage in (0,1)) alongside fully-off and fully-on pixels. On an
+        // opaque canvas coverage shows up in RGB, not alpha.
+        let mut blends = 0;
+        let mut on = 0;
+        let mut off = 0;
+        for y in 10..18 {
+            for x in 10..18 {
+                let p = pixel(&scene, x, y);
+                if p.0 > BG.0
+                    && p.0 < node.fill.0
+                    && p.1 > BG.1
+                    && p.1 < node.fill.1
+                    && p.2 > BG.2
+                    && p.2 < node.fill.2
+                {
+                    blends += 1;
+                } else if p == node.fill {
+                    on += 1;
+                } else if p == BG {
+                    off += 1;
+                }
+            }
+        }
+        assert!(blends > 0, "no anti-aliased corner pixel found");
+        assert!(on > 0, "corner square must contain fully-covered fill");
+        assert!(off > 0, "corner square must contain uncovered background");
+    }
+
+    #[test]
+    fn label_glyphs_render_over_opaque_background() {
+        // Taller node → px 23.5, so glyph coverage is unambiguous.
+        let node = NodeSpec {
+            h: 56.0,
+            ..sample_node()
+        };
+        let scene = render_scene(200, 120, BG, std::slice::from_ref(&node), &[]).expect("renders");
+        assert!(all_opaque(&scene));
+        // Glyph interiors at full coverage composite to exactly the label color;
+        // nothing else in the scene uses it, so this proves legible text.
+        let label_pixels = scene
+            .rgba
+            .chunks_exact(4)
+            .filter(|p| (p[0], p[1], p[2]) == node.label_color)
+            .count();
+        assert!(
+            label_pixels >= 30,
+            "legible label: only {label_pixels} glyph pixels"
+        );
+        // Every label pixel stays inside the node's rect.
+        for y in 0..scene.height {
+            for x in 0..scene.width {
+                if pixel(&scene, x, y) == node.label_color {
+                    assert!(x >= node.x as u32 && x < (node.x + node.w) as u32);
+                    assert!(y >= node.y as u32 && y < (node.y + node.h) as u32);
+                }
+            }
+        }
     }
 }
