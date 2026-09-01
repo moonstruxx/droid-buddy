@@ -70,5 +70,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 80 cols — use ≥ 310 │
+│Loaded physical_multirow_rack | Renders degraded at 80 cols — use ≥ 310 cols o│
 └──────────────────────────────────────────────────────────────────────────────┘

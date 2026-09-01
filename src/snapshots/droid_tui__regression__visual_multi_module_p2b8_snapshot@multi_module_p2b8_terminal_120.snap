@@ -40,5 +40,5 @@ expression: ansi
 │  ││  │
 └──┘└──┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 120 cols — use ≥ 292 cols or reduce scale | Scale: 1.0 | Ori│
+│Loaded multi_module_p2b8 | Renders degraded at 120 cols — use ≥ 292 cols or reduce scale | Scale: 1.0 | Orientation: P│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

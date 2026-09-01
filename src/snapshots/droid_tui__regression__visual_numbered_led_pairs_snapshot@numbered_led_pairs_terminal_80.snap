@@ -40,5 +40,5 @@ expression: ansi
 │  │
 └──┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Scale: 1.0 | Orientation: Portrait      │
+│Loaded numbered_led_pairs | Scale: 1.0 | Orientation: Portrait                │
 └──────────────────────────────────────────────────────────────────────────────┘

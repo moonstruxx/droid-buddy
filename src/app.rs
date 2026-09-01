@@ -1233,6 +1233,18 @@ impl App {
             self.validation_cursor = 0;
             self.events
                 .dispatch(&Event::ValidationCompleted { count, error_count });
+            self.status_message = {
+                let name = self
+                    .patch
+                    .as_ref()
+                    .map(|p| p.name.trim().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    "Ready".to_string()
+                } else {
+                    format!("Loaded {name}")
+                }
+            };
             return true;
         }
         // No Error: install patch and keep warnings/hints.
@@ -1263,6 +1275,18 @@ impl App {
         self.validation_cursor = 0;
         self.events
             .dispatch(&Event::ValidationCompleted { count, error_count });
+        self.status_message = {
+            let name = self
+                .patch
+                .as_ref()
+                .map(|p| p.name.trim().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                "Ready".to_string()
+            } else {
+                format!("Loaded {name}")
+            }
+        };
         true
     }
 
@@ -1326,6 +1350,18 @@ impl App {
             self.validation_cursor = 0;
             self.events
                 .dispatch(&Event::ValidationCompleted { count, error_count });
+            self.status_message = {
+                let name = self
+                    .patch
+                    .as_ref()
+                    .map(|p| p.name.trim().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    "Ready".to_string()
+                } else {
+                    format!("Loaded {name}")
+                }
+            };
             return true;
         }
         self.reset_graph_state();
@@ -1355,6 +1391,18 @@ impl App {
         self.validation_cursor = 0;
         self.events
             .dispatch(&Event::ValidationCompleted { count, error_count });
+        self.status_message = {
+            let name = self
+                .patch
+                .as_ref()
+                .map(|p| p.name.trim().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                "Ready".to_string()
+            } else {
+                format!("Loaded {name}")
+            }
+        };
         true
     }
 

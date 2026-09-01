@@ -90,5 +90,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 80 cols — use ≥ 516 │
+│Loaded fader_column | Renders degraded at 80 cols — use ≥ 516 cols or reduce s│
 └──────────────────────────────────────────────────────────────────────────────┘

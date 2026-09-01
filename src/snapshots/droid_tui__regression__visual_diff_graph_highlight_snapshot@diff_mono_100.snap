@@ -1,6 +1,5 @@
 ---
 source: src/regression.rs
-assertion_line: 4803
 expression: ansi_on
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -41,5 +40,5 @@ expression: ansi_on
                         │ │                    │                                │
                         │ ╰────────────────────╯                                │
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 36 cols or reduce scale│
+│Loaded cable_banner_combos | Renders degraded at 100 cols — use ≥ 36 cols or reduce scale | latenc│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

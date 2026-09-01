@@ -50,5 +50,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 98 cols or reduce scale│
+│Loaded p4b2 | Renders degraded at 100 cols — use ≥ 98 cols or reduce scale | Scale: 1.0 | Orientat│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

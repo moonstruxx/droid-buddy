@@ -30,5 +30,5 @@ expression: ansi
 │    │
 └────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Scale: 1.0 | Orientation: Portrait      │
+│Loaded switch_value | Scale: 1.0 | Orientation: Portrait                      │
 └──────────────────────────────────────────────────────────────────────────────┘

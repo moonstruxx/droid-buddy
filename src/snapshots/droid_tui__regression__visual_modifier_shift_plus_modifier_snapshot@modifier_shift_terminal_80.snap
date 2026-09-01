@@ -40,5 +40,5 @@ expression: ansi
 │  ││    ││
 └──┘└────┘┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | SHIFT 1 ACTIVE | MOD B1.1 → 15 cells / 9│
+│Loaded modifier_switch_passthrough | SHIFT 1 ACTIVE | MOD B1.1 → 15 cells / 9 │
 └──────────────────────────────────────────────────────────────────────────────┘

@@ -30,5 +30,5 @@ expression: ansi
 │  ││    ││
 └──┘└──▶─┘┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | PROCESSING PAUSED | Renders degraded at │
+│Loaded arpeggio1 | PROCESSING PAUSED | Renders degraded at 80 cols — use ≥ 228│
 └──────────────────────────────────────────────────────────────────────────────┘

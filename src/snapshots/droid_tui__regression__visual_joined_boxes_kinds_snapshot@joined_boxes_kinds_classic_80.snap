@@ -40,5 +40,5 @@ expression: ansi
 │  ││  ││
 └──┘└──┘┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 80 cols — use ≥ 132 │
+│Loaded led_pairs_kinds | Renders degraded at 80 cols — use ≥ 132 cols or reduc│
 └──────────────────────────────────────────────────────────────────────────────┘

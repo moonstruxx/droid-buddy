@@ -40,5 +40,5 @@ expression: ansi
 │  ││  │
 └──┘└──┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 80 cols — use ≥ 292 │
+│Loaded multi_module_p2b8 | Renders degraded at 80 cols — use ≥ 292 cols or red│
 └──────────────────────────────────────────────────────────────────────────────┘

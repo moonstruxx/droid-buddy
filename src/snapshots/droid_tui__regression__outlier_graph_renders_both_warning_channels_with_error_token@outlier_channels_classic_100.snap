@@ -1,6 +1,5 @@
 ---
 source: src/regression.rs
-assertion_line: 5360
 expression: ansi
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -51,5 +50,5 @@ expression: ansi
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 324 cols or reduce scal│
+│Loaded influence_outlier | Renders degraded at 100 cols — use ≥ 324 cols or reduce scale | latency│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

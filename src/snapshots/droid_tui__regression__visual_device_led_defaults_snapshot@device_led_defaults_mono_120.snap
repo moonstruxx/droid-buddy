@@ -60,5 +60,5 @@ O… O…O… O…│○ ○ ○○││     │
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 120 cols — use ≥ 1190 cols or reduce scale | Scale: 1.0 | Or│
+│Loaded device_led_defaults | Renders degraded at 120 cols — use ≥ 1190 cols or reduce scale | Scale: 1.0 | Orientation│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

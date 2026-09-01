@@ -3,9 +3,3 @@ thoughts
 #\.*
 .beads
 .gitignore
-snapshots/
-src/snapshots/
-**/*.snap.new
-*.snap.new
-/evidence/
-/evidence/gallery/
