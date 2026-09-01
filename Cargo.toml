@@ -19,6 +19,10 @@ base64 = "0.22"
 flate2 = "1"
 
 [features]
+# Kitty-graphics is the default graph renderer (design D6); the box-drawing
+# renderer remains the runtime fallback for terminals without kitty support or
+# when the feature is compiled out via --no-default-features.
+default = ["kitty-gfx"]
 kitty-gfx = []
 
 [dev-dependencies]

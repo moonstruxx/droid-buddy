@@ -90,12 +90,16 @@ impl GraphCamera {
         }
     }
 
-    /// Initial fit: zoom/pan so `world_bounds` centers in `pixel_size` while a
-    /// node spanning one world unit stays at least `min_node_px` pixels wide.
-    /// The fit zoom (`min(pw/span_w, ph/span_h)`) is clamped up to
-    /// `min_node_px` pixels per world unit, so a spread-out world overflows the
-    /// viewport instead of collapsing nodes below the legible minimum — the
-    /// user pans/zooms from there. `min_node_px = 0` degrades to a pure fit.
+    /// Initial fit (design D5, width-first): zoom/pan so `world_bounds`
+    /// preserves aspect ratio while *preferring to fill the canvas width* — the
+    /// fit zoom is `min(pw/span_w, ph/span_h)`, so a wide graph (a horizontal
+    /// chain) scales to fill the width exactly, and a tall graph scales to fit
+    /// the height with the whole graph framed. The zoom is additionally clamped
+    /// up to `min_node_px` pixels per world unit so a spread-out world overflows
+    /// rather than collapsing the smallest node below the legible minimum;
+    /// `min_node_px = 0` degrades to a pure fit. The spec's "Legible initial
+    /// fit" scenario requires the camera to frame the graph — the min fit keeps
+    /// every node in view, and the clamp is the only source of overflow.
     pub fn fit_to_world(bounds: WorldBounds, pixel_size: (f32, f32), min_node_px: f32) -> Self {
         let span_w = (bounds.max_x - bounds.min_x).max(MIN_SPAN);
         let span_h = (bounds.max_y - bounds.min_y).max(MIN_SPAN);
@@ -323,6 +327,53 @@ mod tests {
         let (ax, ay) = cam.world_to_pixel(anchor.0, anchor.1);
         assert_close(ax, bx, 0.5);
         assert_close(ay, by, 0.5);
+    }
+
+    #[test]
+    fn fit_prefers_filling_canvas_width() {
+        // A wide world — the horizontal-chain case (design D5) — fills the
+        // canvas width exactly instead of being centered small: the fit zoom is
+        // `pw/span_w` when the graph is proportionally wider than the canvas.
+        let bounds = WorldBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 400.0,
+            max_y: 100.0,
+        };
+        let pixel = (1600.0, 640.0); // canvas aspect 2.5 < world aspect 4.0
+        let cam = GraphCamera::fit_to_world(bounds, pixel, 0.0);
+
+        assert_close(cam.zoom, 4.0, 1e-3); // pw/span_w fills the width
+        let (left, _) = cam.world_to_pixel(0.0, 0.0);
+        let (right, _) = cam.world_to_pixel(400.0, 0.0);
+        assert_close(left, 0.0, 1e-2);
+        assert_close(right, pixel.0, 1e-2);
+        // The height fits: the whole chain is framed.
+        let (_, bottom) = cam.world_to_pixel(0.0, 100.0);
+        assert!(bottom <= pixel.1, "width-first fit keeps the chain framed");
+    }
+
+    #[test]
+    fn fit_frames_a_taller_than_canvas_world() {
+        // A world taller (per width) than the canvas scales to fit the height
+        // (the smaller of the two fills), so the whole graph stays in view —
+        // the spec's "Legible initial fit" frames the graph.
+        let bounds = WorldBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 100.0,
+            max_y: 400.0,
+        };
+        let pixel = (1600.0, 640.0); // canvas aspect 2.5 > world aspect 0.25
+        let cam = GraphCamera::fit_to_world(bounds, pixel, 0.0);
+
+        assert_close(cam.zoom, 1.6, 1e-3); // ph/span_h fits the height
+        let (_, top) = cam.world_to_pixel(0.0, 0.0);
+        let (_, bottom) = cam.world_to_pixel(0.0, 400.0);
+        assert_close(top, 0.0, 1e-2);
+        assert_close(bottom, pixel.1, 1e-2);
+        let (right, _) = cam.world_to_pixel(100.0, 0.0);
+        assert!(right <= pixel.0, "the whole graph stays framed");
     }
 
     #[test]

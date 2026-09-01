@@ -16,9 +16,11 @@ use crate::theme;
 /// Kitty-graphics image-path imports: the pure scene builder and camera are
 /// unconditional dependencies (design D10); only the transport stays gated.
 #[cfg(feature = "kitty-gfx")]
-use crate::graph_render::{
-    build_scene, EdgeTokenSpec, GraphCamera, NodeTokenSpec, Scene, WorldBounds,
-};
+use crate::graph_render::{build_scene, EdgeTokenSpec, NodeTokenSpec, Scene};
+/// The camera fit shared by both graph render paths (design D5): the
+/// box-drawing fit maps world positions through it, and the kitty path
+/// rasterizes through it, so both publish identical hit rects.
+use crate::graph_render::{GraphCamera, WorldBounds};
 #[cfg(feature = "kitty-gfx")]
 use crate::kitty_protocol;
 
@@ -1349,16 +1351,14 @@ const GRAPH_CLUSTER_PADDING: u16 = 2;
 /// Pixel size of one terminal cell assumed by the camera fit (kitty's default
 /// 8×16). The exact value only scales the offscreen image: kitty rescales it
 /// into the area's cell rect, so the world→pixel→cell mapping stays internally
-/// consistent on any terminal.
-#[cfg(feature = "kitty-gfx")]
+/// consistent on any terminal. Shared by the kitty image path and the
+/// box-drawing fit (design D5) so both publish identical hit rects.
 const GRAPH_CELL_W_PX: f32 = 8.0;
-#[cfg(feature = "kitty-gfx")]
 const GRAPH_CELL_H_PX: f32 = 16.0;
 /// Initial-fit zoom floor, pixels per world unit: the tightest typical node
 /// spacing (`layout::SPRING_REST` ≈ 80 world units) must render a node at its
 /// legible width of `GRAPH_NODE_WIDTH` cells — `22×8px / 80 ≈ 2.2px` per unit
 /// (design Open Questions allow tuning).
-#[cfg(feature = "kitty-gfx")]
 const GRAPH_MIN_NODE_PX: f32 = GRAPH_NODE_WIDTH as f32 * GRAPH_CELL_W_PX / 80.0;
 /// Fixed kitty image id: re-transmitting the same `i=` replaces the prior
 /// placement, so pan/zoom never exhausts ids (design D8).
@@ -1521,23 +1521,17 @@ fn graph_kitty_frame(
             label_color: title_color,
         });
 
-        // Hit rect through the camera inverse: world → pixel → cell. Nodes
-        // fully outside the area get no rect (the box path never overflows).
+        // Hit rect through the camera inverse: world → pixel → cell, clamped
+        // into the area by the same `node_rect_at` the box path uses, so both
+        // paths publish identical in-bounds rects. A node fully outside the
+        // area gets no rect (zero rect) — its pixels are clipped by the canvas
+        // edge anyway.
         let (col, row) = cam.world_to_cell(wx, wy, GRAPH_CELL_W_PX, GRAPH_CELL_H_PX);
-        let rx = area.x as i32 + col;
-        let ry = area.y as i32 + row;
-        if rx >= area.x as i32 + area.width as i32 || ry >= area.y as i32 + area.height as i32 {
+        let rect = node_rect_at(area, col, row);
+        if rect.width == 0 || rect.height == 0 {
             continue;
         }
-        rects.push((
-            i,
-            Rect::new(
-                rx.clamp(area.x as i32, area.x as i32 + area.width as i32 - 1) as u16,
-                ry.clamp(area.y as i32, area.y as i32 + area.height as i32 - 1) as u16,
-                GRAPH_NODE_WIDTH.min(area.width),
-                GRAPH_NODE_HEIGHT.min(area.height),
-            ),
-        ));
+        rects.push((i, rect));
     }
 
     // Cables: quadratic from the source node's right-center to the sink node's
@@ -1605,11 +1599,7 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
             .as_ref()
             .is_some_and(|g| app.graph_positions.len() == g.nodes.len())
     {
-        app.graph_camera = Some(GraphCamera::fit_to_world(
-            WorldBounds::from_positions(&app.graph_positions),
-            (pw as f32, ph as f32),
-            GRAPH_MIN_NODE_PX,
-        ));
+        app.graph_camera = Some(graph_fit_camera(&app.graph_positions, area));
     }
     app.graph_canvas_px = Some((pw as f32, ph as f32));
     let Some(cam) = app.graph_camera else {
@@ -1774,6 +1764,9 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     for (i, node) in graph.nodes.iter().enumerate() {
         let node_rect = node_rects[i];
+        if node_rect.width == 0 || node_rect.height == 0 {
+            continue; // off-viewport node: nothing to draw or hit-test
+        }
         node_rect_field.push((i, node_rect));
         render_graph_node_with_highlight(
             frame,
@@ -1800,41 +1793,71 @@ fn render_graph_empty(frame: &mut Frame, area: Rect) {
     frame.render_widget(msg, area);
 }
 
-/// Map each frozen solver position onto a screen rect for its node frame.
-/// A simple deterministic fit: the min/max of all positions defines the box
-/// that stretches into the area, leaving room for the node's own frame so no
-/// node overflows the right/bottom edges. Coincident positions coincide.
+/// Map each frozen solver position onto a screen rect for its node frame,
+/// through the same width-first camera fit as the kitty image path (design
+/// D5): the fit preserves aspect ratio, prefers filling the canvas width, and
+/// the `GRAPH_MIN_NODE_PX` clamp keeps tight node chains at least
+/// `GRAPH_NODE_WIDTH` cells apart so frames never mush into 1–2 chars.
+/// Deterministic: the same positions + area always map to the same rects. A
+/// node whose frame lies fully outside the area maps to a zero rect — callers
+/// skip zero rects (drawing, edges, cluster union) so an overflowing world
+/// never draws off-screen ghosts.
 fn graph_node_rects(positions: &[(f32, f32)], area: Rect, nodes: &[GraphNode]) -> Vec<Rect> {
     if positions.len() != nodes.len() {
         return Vec::new();
     }
-    let node_w = GRAPH_NODE_WIDTH.min(area.width);
-    let node_h = GRAPH_NODE_HEIGHT.min(area.height);
-    // Available travel for the top-left corner: the frame keeps its full size.
-    let avail_w = area.width.saturating_sub(node_w).max(1) as f32;
-    let avail_h = area.height.saturating_sub(node_h).max(1) as f32;
-    let min_x = positions.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-    let max_x = positions
-        .iter()
-        .map(|p| p.0)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_y = positions.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-    let max_y = positions
-        .iter()
-        .map(|p| p.1)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let span_x = (max_x - min_x).max(1.0);
-    let span_y = (max_y - min_y).max(1.0);
+    let cam = graph_fit_camera(positions, area);
     positions
         .iter()
         .map(|&(x, y)| {
-            let sx = (x - min_x) / span_x;
-            let sy = (y - min_y) / span_y;
-            let col = area.x + (sx * avail_w).round() as u16;
-            let row = area.y + (sy * avail_h).round() as u16;
-            Rect::new(col, row, node_w, node_h)
+            let (col, row) = cam.world_to_cell(x, y, GRAPH_CELL_W_PX, GRAPH_CELL_H_PX);
+            node_rect_at(area, col, row)
         })
         .collect()
+}
+
+/// The width-first camera fit for the graph surface (design D5): like
+/// `GraphCamera::fit_to_world`, but the canvas reserves one node frame on the
+/// width and height — the fit spans the world's top-left corners, so without a
+/// margin the extreme nodes' frames would poke past the viewport edge. With it,
+/// the whole graph (frames included) is framed. Shared by the box and kitty
+/// paths so both publish identical hit rects.
+fn graph_fit_camera(positions: &[(f32, f32)], area: Rect) -> GraphCamera {
+    let pw = area.width as f32 * GRAPH_CELL_W_PX;
+    let ph = area.height as f32 * GRAPH_CELL_H_PX;
+    let node_w = GRAPH_NODE_WIDTH.min(area.width) as f32 * GRAPH_CELL_W_PX;
+    let node_h = GRAPH_NODE_HEIGHT.min(area.height) as f32 * GRAPH_CELL_H_PX;
+    GraphCamera::fit_to_world(
+        WorldBounds::from_positions(positions),
+        (pw - node_w, ph - node_h),
+        GRAPH_MIN_NODE_PX,
+    )
+}
+
+/// One node's on-screen frame for a camera cell: a `GRAPH_NODE_WIDTH ×
+/// GRAPH_NODE_HEIGHT` rect clamped into `area` (so buffer writes and published
+/// hit rects stay in-bounds); a frame fully outside the area becomes a zero
+/// rect — nothing to draw, nothing to hit-test.
+fn node_rect_at(area: Rect, col: i32, row: i32) -> Rect {
+    let ax = area.x as i32;
+    let ay = area.y as i32;
+    let right = ax + area.width as i32;
+    let bottom = ay + area.height as i32;
+    let x = ax + col;
+    let y = ay + row;
+    let w = GRAPH_NODE_WIDTH.min(area.width) as i32;
+    let h = GRAPH_NODE_HEIGHT.min(area.height) as i32;
+    if x >= right || y >= bottom || x + w <= ax || y + h <= ay {
+        return Rect::new(0, 0, 0, 0); // fully outside the viewport
+    }
+    let x = x.max(ax);
+    let y = y.max(ay);
+    Rect::new(
+        x as u16,
+        y as u16,
+        w.min(right - x) as u16,
+        h.min(bottom - y) as u16,
+    )
 }
 
 /// Title text for a node's frame: the circuit name, with the zero-based
@@ -2079,6 +2102,13 @@ fn render_graph_edges_with_highlight(
         };
         let src_rect = node_rects[src];
         let sink_rect = node_rects[sink];
+        if src_rect.width == 0
+            || src_rect.height == 0
+            || sink_rect.width == 0
+            || sink_rect.height == 0
+        {
+            continue; // an endpoint node is off the viewport
+        }
         let x_s = src_rect.x as i16 + src_rect.width as i16 - 1;
         let y_s = src_rect.y as i16 + src_rect.height as i16 / 2;
         let x_t = sink_rect.x as i16;
@@ -2341,6 +2371,9 @@ fn graph_cluster_rect(
         .zip(node_rects)
         .filter(|(node, _)| cluster.section_range.contains(&node.section_index))
         .map(|(_, rect)| *rect)
+        // Off-viewport members publish a zero rect; they must not drag the
+        // envelope to the origin (design D5 — the envelope hugs visible nodes).
+        .filter(|rect| rect.width > 0 && rect.height > 0)
         .collect();
     let mut union = member_rects.first().copied()?;
     for rect in &member_rects[1..] {
@@ -2598,6 +2631,9 @@ fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) 
     );
     for (i, node) in graph.nodes.iter().enumerate() {
         let nr = node_rects[i];
+        if nr.width == 0 || nr.height == 0 {
+            continue; // off-viewport node: nothing to draw or hit-test
+        }
         app.graph_node_rects.push((i, nr));
         render_graph_node_with_highlight(
             frame,
@@ -2650,6 +2686,9 @@ fn render_quad_graph_filtered_content(frame: &mut Frame, area: Rect, app: &mut A
     render_graph_edges(frame, inner, &graph, &node_rects);
     for (i, node) in graph.nodes.iter().enumerate() {
         let nr = node_rects[i];
+        if nr.width == 0 || nr.height == 0 {
+            continue; // off-viewport node: nothing to draw or hit-test
+        }
         app.filtered_node_rects.push((i, nr));
         render_graph_node_with_highlight(
             frame,
@@ -4323,6 +4362,11 @@ mod tests {
     // ── 4.2 highlight + minimap tests ───────────────────────────────────
 
     fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        // TestBackend never emits kitty graphics: force the box-drawing path so
+        // graph assertions are deterministic regardless of the host terminal's
+        // kitty capability (design D6 dispatch).
+        #[cfg(feature = "kitty-gfx")]
+        kitty_protocol::set_supported_for_tests(false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
@@ -5146,6 +5190,11 @@ mod paused_rendering_tests {
     use ratatui::Terminal;
 
     fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        // TestBackend never emits kitty graphics: force the box-drawing path so
+        // graph assertions are deterministic regardless of the host terminal's
+        // kitty capability (design D6 dispatch).
+        #[cfg(feature = "kitty-gfx")]
+        kitty_protocol::set_supported_for_tests(false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
@@ -5318,6 +5367,11 @@ mod graph_view_tests {
     }
 
     fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        // TestBackend never emits kitty graphics: force the box-drawing path so
+        // graph assertions are deterministic regardless of the host terminal's
+        // kitty capability (design D6 dispatch).
+        #[cfg(feature = "kitty-gfx")]
+        kitty_protocol::set_supported_for_tests(false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
@@ -5343,20 +5397,66 @@ mod graph_view_tests {
 
     #[test]
     fn graph_view_renders_input_and_output_ports() {
-        let mut app = graph_app();
+        // Hand-built world keeps a source and a sink visible under the
+        // width-first fit (the real solver cloud overflows the viewport).
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (6.0, 5.0)]));
         let text = rendered_text(&mut app, 120, 40);
-        // clocktool sources _CLK (right output port ●); copy and osc sink it
-        // (left input port ◉).
+        // clocktool sources _CLK (right output port ●); osc sinks it (left
+        // input port ◉).
         assert!(text.contains("◉"), "sink nodes need a left input port");
         assert!(text.contains("●"), "source nodes need a right output port");
     }
 
     #[test]
     fn graph_cluster_containers_render_titled_borders() {
-        let mut app = graph_app();
+        // Hand-built world keeps both clusters' members visible (design D5: the
+        // real solver cloud overflows the viewport, so off-screen clusters get
+        // no container). Cluster containers use a plain (┌┐) border vs the
+        // nodes' rounded one, and are titled with the banner name.
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("copy", 0, "copy", 1),
+                node("osc", 0, "osc", 2),
+                node("vca", 0, "vca", 3),
+            ],
+            edges: vec![],
+            clusters: vec![
+                Cluster {
+                    title: "Pulsar".into(),
+                    section_range: 0..2,
+                },
+                Cluster {
+                    title: "Steady".into(),
+                    section_range: 2..4,
+                },
+            ],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(
+            graph,
+            padded_positions(&[(3.0, 5.0), (5.0, 5.0), (6.0, 5.0), (8.0, 5.0)]),
+        );
         let text = rendered_text(&mut app, 120, 40);
-        // Cluster containers use a plain (┌┐) border vs the nodes' rounded one,
-        // and are titled with the banner name.
         assert!(
             text.contains("Pulsar"),
             "first cluster titled from its banner"
@@ -5370,7 +5470,33 @@ mod graph_view_tests {
 
     #[test]
     fn graph_cluster_rects_published_per_cluster_within_surface() {
-        let mut app = graph_app();
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("copy", 0, "copy", 1),
+                node("osc", 0, "osc", 2),
+                node("vca", 0, "vca", 3),
+            ],
+            edges: vec![],
+            clusters: vec![
+                Cluster {
+                    title: "Pulsar".into(),
+                    section_range: 0..2,
+                },
+                Cluster {
+                    title: "Steady".into(),
+                    section_range: 2..4,
+                },
+            ],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(
+            graph,
+            padded_positions(&[(3.0, 5.0), (5.0, 5.0), (6.0, 5.0), (8.0, 5.0)]),
+        );
         let buf = buffer_for(&mut app, 120, 40);
         let clusters = app.graph.as_ref().unwrap().clusters.len();
         assert_eq!(app.graph_cluster_rects.len(), clusters);
@@ -5383,29 +5509,56 @@ mod graph_view_tests {
 
     #[test]
     fn graph_node_rects_rebuilt_per_frame_not_accumulated() {
-        let mut app = graph_app();
+        // Hand-built world so all four nodes publish rects at 120×40.
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("copy", 0, "copy", 1),
+                node("osc", 0, "osc", 2),
+                node("vca", 0, "vca", 3),
+            ],
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(
+            graph,
+            padded_positions(&[(3.0, 5.0), (5.0, 5.0), (6.0, 5.0), (8.0, 5.0)]),
+        );
         let node_count = app.graph.as_ref().unwrap().nodes.len();
         buffer_for(&mut app, 120, 40);
-        assert_eq!(app.graph_node_rects.len(), node_count);
-        // Move a node the way a drag would, then render another frame: the
-        // published rects must be rebuilt from the current positions, never
-        // appended to the previous frame's stale entries.
-        app.graph_positions[0].0 += 500.0;
+        // Every node publishes a rect — the width-first margin fit frames the
+        // whole world, pads included — and rects are rebuilt per frame, never
+        // appended to stale entries.
+        assert_eq!(
+            app.graph_node_rects.len(),
+            node_count,
+            "every node (pads included) publishes a rect"
+        );
+        let before = node_rect_of(&app, 2); // clock: first real node after pads
+                                            // Move a node the way a drag would, then render another frame: the
+                                            // published rects must be rebuilt from the current positions, never
+                                            // appended to the previous frame's stale entries.
+        app.graph_positions[2].0 += 0.5;
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
         buffer_for(&mut app, 120, 40);
         assert_eq!(
             app.graph_node_rects.len(),
             node_count,
             "node rects must be rebuilt per frame, not accumulated"
         );
-        let (idx, rect) = app.graph_node_rects[0];
-        assert_eq!(idx, 0);
+        let after = node_rect_of(&app, 2);
+        assert_ne!(after, before, "published rects reflect the moved position");
         let expected = graph_node_rects(
             &app.graph_positions,
             graph_main_area(120, 40),
             &app.graph.as_ref().unwrap().nodes,
         );
         assert_eq!(
-            rect, expected[0],
+            after, expected[2],
             "published rects reflect the moved position"
         );
     }
@@ -5429,6 +5582,106 @@ mod graph_view_tests {
         app.open_graph();
         let text = rendered_text(&mut app, 80, 24);
         assert!(text.contains("No patch loaded"));
+    }
+
+    #[test]
+    fn graph_node_rects_box_fit_frames_the_graph_and_fills_width() {
+        // Design D5: the box fit preserves aspect ratio, prefers filling the
+        // canvas width (a horizontal chain starts at the left edge and spans
+        // the width — not centered small), and frames the whole graph — every
+        // node publishes a full-width in-area rect and tight spacing stays
+        // readable (never 1–2 chars).
+        let nodes: Vec<GraphNode> = (0..5)
+            .map(|i| node(&format!("n{i}"), 0, "copy", i))
+            .collect();
+        let area = Rect::new(0, 0, 200, 34);
+        // Wide chain (aspect 20 > canvas): fills the width.
+        let wide: Vec<(f32, f32)> = (0..5).map(|i| (i as f32 * 40.0, i as f32 * 2.0)).collect();
+        let rects = graph_node_rects(&wide, area, &nodes);
+        assert_eq!(rects.len(), 5);
+        assert!(rects[0].x <= 1, "chain starts at the left edge");
+        for r in &rects {
+            assert_eq!(r.width, GRAPH_NODE_WIDTH, "node frame stays full width");
+            assert!(r.x + r.width <= area.width && r.y + r.height <= area.height);
+        }
+        // The chain spans the width instead of hugging the left margin.
+        assert!(
+            (rects[4].x + rects[4].width) as usize >= area.width as usize * 3 / 4,
+            "width-first chain spans most of the canvas"
+        );
+        for pair in rects.windows(2) {
+            assert!(
+                (pair[1].x as i32 - pair[0].x as i32) >= GRAPH_NODE_WIDTH as i32,
+                "readable chain spacing preserved"
+            );
+        }
+        // Tall world (aspect < canvas): fills the height and frames the whole
+        // graph — every node still gets an in-area rect.
+        let tall: Vec<(f32, f32)> = (0..5).map(|i| (i as f32 * 40.0, i as f32 * 20.0)).collect();
+        let rects = graph_node_rects(&tall, area, &nodes);
+        assert_eq!(rects.len(), 5);
+        for r in &rects {
+            assert!(r.width >= 1 && r.height >= 1, "tall world stays framed");
+            assert!(r.x + r.width <= area.width && r.y + r.height <= area.height);
+        }
+    }
+
+    #[test]
+    fn graph_cluster_rect_is_enclosing_union_not_full_band() {
+        // Design D5: a banner group renders as an enclosing rectangle — the
+        // padded union of its member node frames — not a full-width band. An
+        // off-viewport member (zero rect) must not drag the envelope to the
+        // origin; the publish stays deterministic.
+        let nodes = vec![
+            node("a", 0, "copy", 0),
+            node("b", 0, "osc", 1),
+            node("c", 0, "vca", 2),
+            node("off", 0, "p2b8", 3),
+        ];
+        let cluster = Cluster {
+            title: "Mix".into(),
+            section_range: 0..4,
+        };
+        let rects = vec![
+            Rect::new(10, 10, 22, 5),
+            Rect::new(60, 10, 22, 5),
+            Rect::new(110, 10, 22, 5),
+            Rect::new(0, 0, 0, 0), // off-viewport member
+        ];
+        let area = Rect::new(0, 0, 200, 40);
+        let envelope = graph_cluster_rect(&cluster, &nodes, &rects, area).expect("members visible");
+        // Envelope = padded union of the visible member frames.
+        assert_eq!(envelope.x, 10 - GRAPH_CLUSTER_PADDING);
+        assert_eq!(envelope.y, 10 - GRAPH_CLUSTER_PADDING);
+        assert_eq!(
+            envelope.x + envelope.width,
+            110 + 22 + GRAPH_CLUSTER_PADDING
+        );
+        assert_eq!(envelope.y + envelope.height, 10 + 5 + GRAPH_CLUSTER_PADDING);
+        // A content container, never a full-width band across the surface.
+        assert!(envelope.width < area.width);
+    }
+
+    #[cfg(feature = "kitty-gfx")]
+    #[test]
+    fn graph_renders_box_drawing_fallback_when_terminal_unsupported() {
+        // Design D6: kitty-gfx is the default feature, but dispatch is gated on
+        // the terminal actually supporting the protocol. Forcing an unsupported
+        // terminal must render the box-drawing fallback without error (spec
+        // scenario "Fallback without kitty support"); the supported branch is
+        // covered by the `kitty_frame_*` tests (the image path renders when
+        // invoked).
+        kitty_protocol::set_supported_for_tests(false);
+        let mut app = graph_app();
+        let text = rendered_text(&mut app, 120, 40);
+        assert!(
+            text.contains("╭"),
+            "unsupported terminal falls back to box frames"
+        );
+        assert!(
+            text.contains("clocktool"),
+            "fallback still shows circuit titles"
+        );
     }
 
     // ---- task 5.2 edge rendering ----
@@ -5796,11 +6049,34 @@ mod graph_view_tests {
         );
     }
 
+    /// A padding node far outside the visible band (design D5): it extends the
+    /// world bbox so the real nodes stay interior and on-screen under the
+    /// width-first fit. It carries no edges and renders off-viewport.
+    fn pad_node(i: usize) -> GraphNode {
+        node(&format!("pad{i}"), 0, "pad", 99)
+    }
+
+    /// Padded positions: two far-corner pads widen the world bbox so the fit
+    /// frames the whole world (design D5 width-first margin) and the real nodes
+    /// land interior, clear of the edges; the pads themselves are visible but
+    /// edge-only and carry no edges or cluster membership.
+    fn padded_positions(interior: &[(f32, f32)]) -> Vec<(f32, f32)> {
+        let mut all = vec![(0.0, 0.0), (10.0, 10.0)];
+        all.extend_from_slice(interior);
+        all
+    }
+
     #[test]
     fn straight_edge_renders_box_characters_between_ports() {
-        // Two nodes on the same row: the edge is a single horizontal run.
+        // Two nodes on the same row, kept interior to the fit's visible band
+        // by far-corner pads: the edge is a single horizontal run.
         let graph = Graph {
-            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+            ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
                 source: ("clock".into(), 0),
@@ -5810,7 +6086,7 @@ mod graph_view_tests {
             validation: vec![],
             ..Default::default()
         };
-        let mut app = graph_app_from(graph, vec![(0.0, 0.5), (1.0, 0.5)]);
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (6.0, 5.0)]));
         let buf = buffer_for(&mut app, 120, 40);
         assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
         // The source is clocktool (control -> cyan); spot-check an interior cell.
@@ -5824,9 +6100,12 @@ mod graph_view_tests {
     #[test]
     fn crossing_edges_render_without_panic_and_later_wins() {
         // Square layout: A--C and B--D are diagonals whose vertical connectors
-        // share the midpoint column, so the two polylines cross there.
+        // share the midpoint column, so the two polylines cross there. Pads
+        // keep the square interior to the visible band.
         let graph = Graph {
             nodes: vec![
+                pad_node(0),
+                pad_node(1),
                 node("a", 0, "clocktool", 0),
                 node("b", 0, "osc", 1),
                 node("c", 0, "osc", 2),
@@ -5848,18 +6127,42 @@ mod graph_view_tests {
             validation: vec![],
             ..Default::default()
         };
-        let mut app = graph_app_from(graph, vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
+        let mut app = graph_app_from(
+            graph,
+            padded_positions(&[(3.0, 4.0), (3.0, 6.0), (6.0, 6.0), (6.0, 4.0)]),
+        );
         let buf = buffer_for(&mut app, 120, 40);
         // Both edges render fully with their own colors (no panic on the cross).
         assert_edge_drawn(&buf, &app, "_CLK", Color::Cyan);
         assert_edge_drawn(&buf, &app, "_AUD", Color::Green);
         // The shared vertical column: the later edge (_AUD) overwrites it, so
-        // the crossing cell carries _AUD's glyph and color.
-        let shared_x = 59u16; // midpoint of the two diagonal polylines
-        let cells_a = edge_cells(&buf, &app, "_CLK");
-        let crossing = cells_a
+        // the crossing cell carries _AUD's glyph and color. The two polylines
+        // both run from col x_s to x_t with mid-x connectors, so the shared
+        // column is their midpoint.
+        let graph = app.graph.as_ref().unwrap();
+        let area = graph_main_area(buf.area.width, buf.area.height);
+        let rects = graph_node_rects(&app.graph_positions, area, &graph.nodes);
+        let a_idx = graph
+            .nodes
             .iter()
-            .find(|&&(x, y)| x == shared_x && y > 5 && y < 30);
+            .position(|n| n.id == ("a".into(), 0))
+            .unwrap();
+        let c_idx = graph
+            .nodes
+            .iter()
+            .position(|n| n.id == ("c".into(), 0))
+            .unwrap();
+        let x_s = rects[a_idx].x as i32 + rects[a_idx].width as i32 - 1;
+        let x_t = rects[c_idx].x as i32;
+        let shared_x = (x_s + x_t) / 2;
+        let y_a = rects[a_idx].y as i32 + rects[a_idx].height as i32 / 2;
+        let y_c = rects[c_idx].y as i32 + rects[c_idx].height as i32 / 2;
+        let cells_a = edge_cells(&buf, &app, "_CLK");
+        // Interior of the shared vertical connector: strictly between the two
+        // port rows, so the cell carries the later edge's plain vertical glyph.
+        let crossing = cells_a.iter().find(|&&(x, y)| {
+            x as i32 == shared_x && (y as i32) > y_a.min(y_c) && (y as i32) < y_a.max(y_c)
+        });
         let &(cx, cy) = crossing.unwrap();
         assert_eq!(buf.cell((cx, cy)).unwrap().symbol(), "│");
         assert_eq!(buf.cell((cx, cy)).unwrap().fg, Color::Green);
@@ -5867,9 +6170,35 @@ mod graph_view_tests {
 
     #[test]
     fn cluster_spanning_edge_renders_through_both_cluster_containers() {
-        // graph_app puts clocktool in "Pulsar" and osc in "Steady", so _CLK is
-        // a cluster-spanning cable and must still draw its polyline.
-        let mut app = graph_app();
+        // A clock in "Pulsar" feeding an osc in "Steady" (design D5): _CLK is
+        // a cluster-spanning cable and must still draw its polyline, with both
+        // endpoint nodes kept visible by pads.
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![
+                Cluster {
+                    title: "Pulsar".into(),
+                    section_range: 0..1,
+                },
+                Cluster {
+                    title: "Steady".into(),
+                    section_range: 1..2,
+                },
+            ],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (6.0, 5.0)]));
         // The cluster-spanning test targets the kind-color polyline, not the
         // latency ramp; disable ramp coloring so `_CLK` renders its control token.
         app.latency_coloring = false;
@@ -5884,7 +6213,12 @@ mod graph_view_tests {
     #[test]
     fn topology_error_cable_renders_with_error_color() {
         let graph = Graph {
-            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+            ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
                 source: ("clock".into(), 0),
@@ -5898,18 +6232,23 @@ mod graph_view_tests {
             }],
             ..Default::default()
         };
-        let mut app = graph_app_from(graph, vec![(0.0, 0.5), (1.0, 0.5)]);
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (6.0, 5.0)]));
         let buf = buffer_for(&mut app, 120, 40);
         assert_edge_drawn(&buf, &app, "_CLK", Color::Red);
     }
 
     #[test]
     fn edge_polyline_clips_cleanly_at_surface() {
-        // Push the sink far right/bottom so the polyline's horizontal and
-        // vertical runs would overrun the surface; every drawn cell must stay
-        // inside `area` and the render must not panic.
+        // Push the sink to the far right of the visible band so the polyline's
+        // run hugs the surface edge; every drawn cell must stay inside `area`
+        // and the render must not panic.
         let graph = Graph {
-            nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+            ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
                 source: ("clock".into(), 0),
@@ -5919,7 +6258,7 @@ mod graph_view_tests {
             validation: vec![],
             ..Default::default()
         };
-        let mut app = graph_app_from(graph, vec![(0.0, 0.0), (1.0, 1.0)]);
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (9.9, 5.0)]));
         let buf = buffer_for(&mut app, 60, 20);
         for (cx, cy) in edge_cells(&buf, &app, "_CLK") {
             assert!(cx < buf.area.width && cy < buf.area.height);
@@ -6041,7 +6380,21 @@ mod graph_view_tests {
 
     #[test]
     fn disabled_node_frame_and_title_render_dim_enabled_nodes_normal() {
-        let mut app = graph_app();
+        // Hand-built world keeps both the disabled and the enabled node
+        // visible under the width-first fit (design D5).
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("copy", 0, "copy", 0),
+                node("clocktool", 0, "clocktool", 1),
+            ],
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (7.0, 5.0)]));
         app.disabled_circuits.insert((String::from("copy"), 0));
         let buf = buffer_for(&mut app, 120, 40);
         let graph = app.graph.as_ref().unwrap();
@@ -6098,7 +6451,15 @@ mod graph_view_tests {
 
     #[test]
     fn disabled_node_dims_incident_edges_but_error_red_wins() {
-        let mut app = graph_app_from(three_node_graph(), vec![(0.0, 0.5), (1.0, 0.0), (1.0, 1.0)]);
+        // three_node_graph padded with far-corner pads so all three real nodes
+        // stay visible under the width-first fit.
+        let mut graph = three_node_graph();
+        graph.nodes.insert(0, pad_node(0));
+        graph.nodes.insert(1, pad_node(1));
+        let mut app = graph_app_from(
+            graph,
+            padded_positions(&[(2.0, 5.0), (7.0, 3.0), (7.0, 7.0)]),
+        );
         app.disabled_circuits.insert((String::from("clocktool"), 0));
         let buf = buffer_for(&mut app, 120, 40);
         let theme = theme::active();
@@ -6154,7 +6515,21 @@ mod graph_view_tests {
 
     #[test]
     fn disabled_node_under_hover_keeps_hover_styling() {
-        let mut app = graph_app();
+        // Hand-built world keeps the disabled (hovered) and the enabled node
+        // visible under the width-first fit (design D5).
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("copy", 0, "copy", 0),
+                node("clocktool", 0, "clocktool", 1),
+            ],
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (7.0, 5.0)]));
         app.disabled_circuits.insert((String::from("copy"), 0));
         let copy_idx = app
             .graph
@@ -6213,7 +6588,24 @@ mod graph_view_tests {
 
     #[test]
     fn graph_without_disabled_circuits_renders_without_dim_drift() {
-        let mut app = graph_app();
+        // Hand-built world with a _CLK edge and both endpoints visible.
+        let graph = Graph {
+            nodes: vec![
+                pad_node(0),
+                pad_node(1),
+                node("clock", 0, "clocktool", 0),
+                node("osc", 0, "osc", 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: ("clock".into(), 0),
+                sink: ("osc".into(), 0),
+            }],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (6.0, 5.0)]));
         assert!(app.disabled_circuits.is_empty());
         // The kind token is the baseline this test pins; ramp coloring would
         // re-color `_CLK`, so turn it off to keep the assertion about dims.

@@ -552,6 +552,13 @@ pub struct App {
     /// end in the influence walk: nothing downstream of them is reached.
     /// Cleared on every `load_patch`.
     pub disabled_circuits: HashSet<(String, usize)>,
+    /// Circuits pinned as fixed layout anchors, keyed by `NodeId` (circuit
+    /// name, instance index). Pinned nodes are fixed anchors the solver never
+    /// moves (design D3). The graph's tip — the first circuit in `.ini` order
+    /// — is seeded by default on open; `p` toggles membership on the hovered
+    /// node; dragging a node auto-pins it at the dropped position (design
+    /// D7). Cleared on every `load_patch`.
+    pub pinned: HashSet<(String, usize)>,
     /// Per-patch XDG label store (`~/.config/droid-tui/labels.toml`), keyed by
     /// canonicalized absolute patch path. Loaded once at `App::new` via
     /// `LabelStore::load()` (warn-once, empty fallback) and persisted atomically
@@ -647,6 +654,7 @@ impl App {
             filtered_node_rects: Vec::new(),
             filtered_drag: None,
             disabled_circuits: HashSet::new(),
+            pinned: HashSet::new(),
             label_store: LabelStore::load(),
             editing: None,
             current_patch_path: None,
@@ -1637,14 +1645,22 @@ impl App {
     /// loaded the graph is empty but the view still opens so the renderer can
     /// show the empty-patch message (design D7: `g g` works either way).
     pub fn open_graph(&mut self) {
-        let (graph, positions) = match &self.patch {
+        let graph = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
-                let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
-                let positions = layout::solve(&graph, &[]);
-                (Some(graph), positions)
+                Some(Graph::build_from_patch(patch, &clusters, &self.cost_model))
             }
-            None => (Some(Graph::default()), Vec::new()),
+            None => Some(Graph::default()),
+        };
+        let positions = match graph.as_ref() {
+            Some(g) => {
+                // The tip is the layout's left anchor (design D3): seed it
+                // before the first solve so it never drifts.
+                self.seed_tip_pin(g);
+                let pins = self.pinned_indices(g);
+                layout::solve(g, &pins)
+            }
+            None => Vec::new(),
         };
         self.graph = graph;
         self.graph_positions = positions;
@@ -1689,14 +1705,22 @@ impl App {
     /// `showing_graph`. Used after a per-circuit toggle so the renderer
     /// reflects the new disabled state while staying on the surface.
     pub fn rebuild_graph(&mut self) {
-        let (graph, positions) = match &self.patch {
+        let graph = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
-                let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
-                let positions = layout::solve(&graph, &[]);
-                (Some(graph), positions)
+                Some(Graph::build_from_patch(patch, &clusters, &self.cost_model))
             }
-            None => (Some(Graph::default()), Vec::new()),
+            None => Some(Graph::default()),
+        };
+        let positions = match graph.as_ref() {
+            Some(g) => {
+                // Re-solve honors the current pin set. The tip is NOT re-seeded
+                // here so an explicit unpin (`p` on the tip) survives this
+                // rebuild and re-flows until the graph reopens (design D7).
+                let pins = self.pinned_indices(g);
+                layout::solve(g, &pins)
+            }
+            None => Vec::new(),
         };
         self.graph = graph;
         self.graph_positions = positions;
@@ -1716,7 +1740,8 @@ impl App {
                 }
                 if let Some(graph) = self.graph.as_ref() {
                     let filtered = graph.filtered_influence(&sub);
-                    let positions = layout::solve_filtered(&filtered, &[]);
+                    let pins = self.pinned_indices(&filtered);
+                    let positions = layout::solve_filtered(&filtered, &pins);
                     self.filtered_graph = Some(filtered);
                     self.filtered_positions = positions;
                     self.filtered_node_rects.clear();
@@ -1752,6 +1777,9 @@ impl App {
         self.graph_camera = None;
         self.graph_zoom_preset = 1;
         self.graph_canvas_px = None;
+        // Manual pins are per-patch graph state: cleared on every load so a
+        // new patch re-seeds its own tip on the next open (design D3/D7).
+        self.pinned.clear();
     }
 
     /// Reset quad-view state on patch load, mirroring `reset_graph_state`.
@@ -1771,14 +1799,20 @@ impl App {
     /// synchronizes influence from the current selection.
     pub fn open_quad(&mut self) {
         if self.graph.is_none() {
-            let (graph, positions) = match &self.patch {
+            let graph = match &self.patch {
                 Some(patch) => {
                     let clusters = clusters_from_patch(patch);
-                    let graph = Graph::build_from_patch(patch, &clusters, &self.cost_model);
-                    let positions = layout::solve(&graph, &[]);
-                    (Some(graph), positions)
+                    Some(Graph::build_from_patch(patch, &clusters, &self.cost_model))
                 }
-                None => (Some(Graph::default()), Vec::new()),
+                None => Some(Graph::default()),
+            };
+            let positions = match graph.as_ref() {
+                Some(g) => {
+                    self.seed_tip_pin(g);
+                    let pins = self.pinned_indices(g);
+                    layout::solve(g, &pins)
+                }
+                None => Vec::new(),
             };
             self.graph = graph;
             self.graph_positions = positions;
@@ -1860,7 +1894,9 @@ impl App {
         if needs_graph && self.graph.is_none() {
             let clusters = clusters_from_patch(&patch);
             let graph = Graph::build_from_patch(&patch, &clusters, &self.cost_model);
-            let positions = layout::solve(&graph, &[]);
+            self.seed_tip_pin(&graph);
+            let pins = self.pinned_indices(&graph);
+            let positions = layout::solve(&graph, &pins);
             self.graph = Some(graph);
             self.graph_positions = positions;
             self.graph_cluster_rects.clear();
@@ -1874,7 +1910,8 @@ impl App {
         }
         if let Some(graph) = self.graph.as_ref() {
             let filtered = graph.filtered_influence(&subtree);
-            let positions = layout::solve_filtered(&filtered, &[]);
+            let pins = self.pinned_indices(&filtered);
+            let positions = layout::solve_filtered(&filtered, &pins);
             self.filtered_graph = Some(filtered);
             self.filtered_positions = positions;
             self.filtered_node_rects.clear();
@@ -1933,6 +1970,45 @@ impl App {
         };
         self.recompute_influence();
         now_disabled
+    }
+
+    /// Map pinned `NodeId`s to solver indices parallel to `graph.nodes`
+    /// (design D3). The solver operates on node indices; a pinned id whose
+    /// node is absent from the current graph (e.g. after a rebuild) is a
+    /// no-op, never a panic. Sorted for determinism — `HashSet` iteration
+    /// order is random.
+    pub fn pinned_indices(&self, graph: &Graph) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .pinned
+            .iter()
+            .filter_map(|id| graph.nodes.iter().position(|n| &n.id == id))
+            .collect();
+        indices.sort_unstable();
+        indices
+    }
+
+    /// Toggle pin state for `node` (design D7). Returns `true` when the node
+    /// is now pinned. Mirrors `toggle_circuit_processing`: the caller emits
+    /// the rebuild + re-solve (`rebuild_graph`).
+    pub fn toggle_pin(&mut self, node: &NodeId) -> bool {
+        if self.pinned.contains(node) {
+            self.pinned.remove(node);
+            false
+        } else {
+            self.pinned.insert(node.clone());
+            true
+        }
+    }
+
+    /// Pin the graph's tip — `graph.nodes[0]`, the first circuit in `.ini`
+    /// section order — by default (design D3). Called when a graph is built
+    /// from the patch (`open_graph`/`open_quad`), NOT on every
+    /// `rebuild_graph`: an explicit user unpin (`p` on the tip) must survive
+    /// re-solves and re-flow until the graph reopens or the patch reloads.
+    fn seed_tip_pin(&mut self, graph: &Graph) {
+        if let Some(tip) = graph.nodes.first() {
+            self.pinned.insert(tip.id.clone());
+        }
     }
 
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
@@ -2525,6 +2601,81 @@ mod tests {
         assert!(
             app.disabled_circuits.is_empty(),
             "disabled set reset on load"
+        );
+    }
+
+    #[test]
+    fn tip_is_pinned_by_default_on_open() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let graph = app.graph.as_ref().unwrap();
+        assert!(
+            app.pinned.contains(&graph.nodes[0].id),
+            "the first circuit in .ini order is the pinned tip"
+        );
+        // The tip is a fixed anchor: it stays exactly at its seed position.
+        let seed = crate::layout::seed_positions(graph);
+        assert_eq!(app.graph_positions[0], seed[0], "tip never drifts");
+    }
+
+    #[test]
+    fn load_patch_clears_pinned() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(!app.pinned.is_empty(), "tip seeded by default");
+
+        let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(second);
+        assert!(app.pinned.is_empty(), "pinned set reset on load");
+    }
+
+    #[test]
+    fn toggle_pin_toggles_membership() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let (id, tip_id) = {
+            let graph = app.graph.as_ref().unwrap();
+            let node = graph
+                .nodes
+                .iter()
+                .find(|n| n.id != graph.nodes[0].id)
+                .expect("graph has a non-tip node");
+            (node.id.clone(), graph.nodes[0].id.clone())
+        };
+        assert!(!app.pinned.contains(&id), "non-tip node starts unpinned");
+        assert!(app.toggle_pin(&id), "first toggle pins");
+        assert!(app.pinned.contains(&id));
+        assert!(!app.toggle_pin(&id), "second toggle unpins");
+        assert!(!app.pinned.contains(&id));
+        // Unpinning the tip empties the pin set; the next open re-seeds it.
+        app.toggle_pin(&tip_id);
+        assert!(app.pinned.is_empty(), "tip unpin empties the pin set");
+    }
+
+    #[test]
+    fn pinned_indices_skip_ids_not_in_graph() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let ghost = (String::from("ghost"), 99);
+        app.pinned.insert(ghost.clone());
+        let graph = app.graph.as_ref().unwrap();
+        let pins = app.pinned_indices(graph);
+        assert!(
+            pins.iter().all(|&i| graph.nodes[i].id != ghost),
+            "ghost id is skipped, never a panic"
+        );
+        assert!(
+            pins.iter()
+                .all(|&i| app.pinned.contains(&graph.nodes[i].id)),
+            "pins map to real pinned nodes"
         );
     }
 
