@@ -891,6 +891,95 @@ impl RackLayout {
 }
 
 // ---------------------------------------------------------------------------
+// DB8E OLED display placeholder — patch-derived state text (task 2.1)
+// ---------------------------------------------------------------------------
+
+/// DB8E OLED display placeholder state heuristic (proposal
+/// `db8e-oled-display-placeholder`, task 2.1).
+///
+/// Location choice: `physical.rs` rather than `patch.rs` because the heuristic
+/// must inspect both `[db8e]` presence (patch sections) and the derived
+/// `PhysicalLayout` (geometry_key == "db8e"). `physical` already depends on
+/// `patch` (ARCHITECTURE dependency direction), while `patch` must not import
+/// `physical`/`geometry` — keeping the helper here preserves the direction and
+/// keeps both modules pure (no terminal/UI import, no `App` dependency).
+///
+/// Heuristic (YAGNI, no live circuit):
+/// - no `[db8e]` / no `PhysicalLayout` module with `geometry_key == "db8e"`
+///   → `"not used"` (manual ch. 6.5.5 *not used by patch*);
+/// - else if declared chain mismatches wired chain (stub: deterministic mismatch
+///   check, fallback to `"connected"` when ambiguous) → `"configuration error"`;
+/// - else → `"connected"` baseline.
+///
+/// Stub mismatch is deliberately conservative: it only returns
+/// `"configuration error"` when the patch/layout explicitly carries a `mismatch`
+/// marker (case-insensitive key/value or raw line containing "mismatch"). All
+/// ambiguous cases fall through to `"connected"` so valid multi-controller
+/// patches never false-positive.
+///
+/// Pure function — no I/O, no terminal dependency, deterministic.
+pub fn db8e_display_state(patch: &Patch) -> &'static str {
+    if !has_db8e_patch(patch) {
+        return "not used";
+    }
+    if is_mismatch_stub_patch(patch) {
+        return "configuration error";
+    }
+    "connected"
+}
+
+/// Layout-based counterpart of [`db8e_display_state`]: inspects the derived
+/// `PhysicalLayout` instead of the raw patch. Same three-state contract, same
+/// stub fallback. Preferred when a `PhysicalLayout` is already built for
+/// rendering (`render_rack_structure` can call this directly from the layout
+/// without re-inspecting the patch).
+pub fn db8e_display_state_for_layout(layout: &PhysicalLayout) -> &'static str {
+    if !has_db8e_layout(layout) {
+        return "not used";
+    }
+    if is_mismatch_stub_layout(layout) {
+        return "configuration error";
+    }
+    "connected"
+}
+
+fn has_db8e_patch(patch: &Patch) -> bool {
+    patch.sections.iter().any(|s| s.name == "db8e")
+}
+
+fn has_db8e_layout(layout: &PhysicalLayout) -> bool {
+    layout.modules.iter().any(|m| m.geometry_key == "db8e")
+}
+
+fn is_mismatch_stub_patch(patch: &Patch) -> bool {
+    // Raw lines cover comments/bare markers; entries cover structured params.
+    if patch
+        .raw_lines
+        .iter()
+        .any(|l| l.to_ascii_lowercase().contains("mismatch"))
+    {
+        return true;
+    }
+    patch.sections.iter().any(|s| {
+        s.entries.iter().any(|(k, v)| {
+            k.to_ascii_lowercase().contains("mismatch")
+                || v.to_ascii_lowercase().contains("mismatch")
+        })
+    })
+}
+
+fn is_mismatch_stub_layout(layout: &PhysicalLayout) -> bool {
+    layout.modules.iter().any(|m| {
+        m.geometry_key.to_ascii_lowercase().contains("mismatch")
+            || m.controller.to_ascii_lowercase().contains("mismatch")
+            || m.components.iter().any(|c| {
+                c.id.to_ascii_lowercase().contains("mismatch")
+                    || c.label.to_ascii_lowercase().contains("mismatch")
+            })
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1709,5 +1798,75 @@ mod tests {
         let a = RackLayout::pack(&chain, &s);
         let b = RackLayout::pack(&chain, &s);
         assert_eq!(a, b);
+    }
+
+    // ---- DB8E OLED placeholder state (task 2.1) ----
+
+    #[test]
+    fn db8e_display_state_not_used_when_no_db8e() {
+        // No [db8e] section → "not used" (manual ch. 6.5.5), nor any db8e module.
+        let p = patch("[p2b8]\n");
+        assert_eq!(db8e_display_state(&p), "not used");
+        assert_eq!(
+            db8e_display_state_for_layout(&PhysicalLayout::build(&p)),
+            "not used"
+        );
+        // Hardware mismatch marker alone must not false-positive when db8e absent.
+        // Use a valid patch with no db8e but a mismatch-tinted comment.
+        let q = patch("[p2b8]\n# mismatch in comment\n[copy]\n    input = I1\n    output = O1\n");
+        // The comment is in raw_lines and would trigger the stub if db8e were present,
+        // but without db8e the result must stay "not used".
+        assert!(q.raw_lines.iter().any(|l| l.to_ascii_lowercase().contains("mismatch")));
+        assert_eq!(db8e_display_state(&q), "not used");
+    }
+
+    #[test]
+    fn db8e_display_state_connected_when_db8e_present() {
+        // [db8e] with at least one hardware token creates the db8e faceplate
+        // (bare [db8e] alone synthesizes no tokens by design). Stub fallback
+        // yields "connected".
+        let p = patch("[db8e]\n    button1 = B1.1\n");
+        assert_eq!(db8e_display_state(&p), "connected");
+        let layout = PhysicalLayout::build(&p);
+        assert!(layout.modules.iter().any(|m| m.geometry_key == "db8e"));
+        assert_eq!(db8e_display_state_for_layout(&layout), "connected");
+        // With additional hardware the baseline stays "connected".
+        let q = patch("[db8e]\n    button1 = B1.1\n[p2b8]\n");
+        assert_eq!(db8e_display_state(&q), "connected");
+        assert_eq!(
+            db8e_display_state_for_layout(&PhysicalLayout::build(&q)),
+            "connected"
+        );
+    }
+
+    #[test]
+    fn db8e_display_state_configuration_error_on_stub_mismatch() {
+        // Deterministic stub: any key/value or raw line containing "mismatch"
+        // triggers "configuration error" when [db8e] is present. All fixtures
+        // include a real db8e token (B1.1) so Patch::from_ini_str succeeds
+        // (bare [db8e] synthesizes no hw_components by design).
+        let p = patch("[db8e]\n    button1 = B1.1\n    mismatch = 1\n");
+        assert_eq!(db8e_display_state(&p), "configuration error");
+        let p2 = patch("[db8e]\n    button1 = B1.1\n# mismatch in comment\n");
+        assert_eq!(db8e_display_state(&p2), "configuration error");
+        let p3 = patch("[db8e]\n    button1 = B1.1\n[copy]\n    input = _MISMATCH_CABLE\n");
+        assert_eq!(db8e_display_state(&p3), "configuration error");
+        // Layout-level stub: controller/component id containing "mismatch".
+        let layout = PhysicalLayout::build(&patch("[db8e]\n    button1 = B1.1\n"));
+        // No layout-level mismatch by default → still "connected".
+        assert_eq!(db8e_display_state_for_layout(&layout), "connected");
+        // Inject a layout-level mismatch marker and verify the branch.
+        let mut mismatched = layout.clone();
+        if let Some(m) = mismatched
+            .modules
+            .iter_mut()
+            .find(|m| m.geometry_key == "db8e")
+        {
+            m.controller = "mismatch".into();
+        }
+        assert_eq!(
+            db8e_display_state_for_layout(&mismatched),
+            "configuration error"
+        );
     }
 }
