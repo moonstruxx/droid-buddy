@@ -82,6 +82,10 @@ pub struct Theme {
     pub physical_skeleton_cell: Color,
     pub physical_skeleton_port_in: Color,
     pub physical_skeleton_port_out: Color,
+    /// DB8E OLED display placeholder (design DB8E): border + centered state
+    /// text for the 128×64 upper-band display. Muted neutral so the frame
+    /// reads as a display surface, not an accent or error.
+    pub display_placeholder: Color,
     pub validation_error: Color,
     pub validation_warning: Color,
     pub validation_hint: Color,
@@ -162,6 +166,7 @@ impl Theme {
             physical_skeleton_cell: Color::Cyan,
             physical_skeleton_port_in: Color::Cyan,
             physical_skeleton_port_out: Color::Green,
+            display_placeholder: Color::DarkGray,
             validation_error: Color::Red,
             validation_warning: Color::Yellow,
             validation_hint: Color::Cyan,
@@ -234,6 +239,7 @@ impl Theme {
             physical_skeleton_cell: Color::Reset,
             physical_skeleton_port_in: Color::Reset,
             physical_skeleton_port_out: Color::Reset,
+            display_placeholder: Color::Reset,
             validation_error: Color::Reset,
             validation_warning: Color::Reset,
             validation_hint: Color::Reset,
@@ -321,6 +327,7 @@ impl Theme {
             physical_skeleton_cell: Color::DarkGray,
             physical_skeleton_port_in: Color::Gray,
             physical_skeleton_port_out: Color::Black,
+            display_placeholder: Color::Gray,
             validation_error: Color::White,
             validation_warning: Color::Gray,
             validation_hint: Color::DarkGray,
@@ -635,6 +642,7 @@ mod tests {
             t.physical_skeleton_cell,
             t.physical_skeleton_port_in,
             t.physical_skeleton_port_out,
+            t.display_placeholder,
         ] {
             assert_eq!(color, Color::Reset);
         }
@@ -834,6 +842,31 @@ mod tests {
     }
 
     #[test]
+    fn all_palettes_define_display_placeholder() {
+        // Task 1.1 (db8e-oled-display-placeholder): display_placeholder exists in
+        // every palette — classic muted neutral, terminal Reset, mono mid-gray
+        // distinct from muted/text so the OLED frame stays tellable in grayscale.
+        assert_eq!(Theme::classic().display_placeholder, Color::DarkGray);
+        assert_eq!(Theme::terminal().display_placeholder, Color::Reset);
+        assert_eq!(Theme::mono().display_placeholder, Color::Gray);
+        assert_ne!(
+            Theme::mono().display_placeholder,
+            Theme::mono().muted,
+            "mono placeholder must be distinct from muted"
+        );
+        assert_ne!(
+            Theme::mono().display_placeholder,
+            Theme::mono().text,
+            "mono placeholder must be distinct from text"
+        );
+        assert_ne!(
+            Theme::mono().display_placeholder,
+            Theme::mono().physical_skeleton_cell,
+            "mono placeholder must be distinct from skeleton cell"
+        );
+    }
+
+    #[test]
     fn every_token_in_every_palette_maps_to_a_deterministic_rgb_triple() {
         // Task 2.2 + 3.2 verification: every semantic token the UI/graph
         // surface and the rasterizer consume (component kinds, shift groups,
@@ -896,6 +929,7 @@ mod tests {
                 theme.physical_skeleton_cell,
                 theme.physical_skeleton_port_in,
                 theme.physical_skeleton_port_out,
+                theme.display_placeholder,
                 theme.validation_error,
                 theme.validation_warning,
                 theme.validation_hint,
