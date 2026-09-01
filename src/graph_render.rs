@@ -5,7 +5,9 @@
 //! plane, and `tiny-skia`/`fontdue` rasterization. Task 2.1 wires it into
 //! `render_graph` by replacing the bounding-box fit with the camera and
 //! deriving `graph_node_rects` through the inverse; task 2.2 supplies the
-//! `Color → RGB` hop that feeds `render_scene`.
+//! `Color → RGB` hop that feeds `render_scene` via [`build_scene`], the
+//! theme-aware leaf converting the classified tokens from `ui.rs`'s pipeline —
+//! below that hop everything is RGB-pure.
 
 /// Degenerate-world guard: a zero-span axis (single node, coincident nodes)
 /// behaves as if it spanned `MIN_SPAN` so the fit zoom stays finite.
@@ -274,6 +276,56 @@ mod tests {
     }
 
     #[test]
+    fn cell_center_round_trips_back_to_the_same_cell() {
+        // Task 3.2: a world→cell round trip must be stable — the center of a
+        // cell, converted back to world and re-projected, lands in the same
+        // cell. This is what keeps drag hit-testing on `graph_node_rects`
+        // aligned with the pixels `build_scene` rasterizes.
+        let cam = GraphCamera::fit_to_world(
+            WorldBounds {
+                min_x: -50.0,
+                min_y: -25.0,
+                max_x: 150.0,
+                max_y: 75.0,
+            },
+            (800.0, 400.0),
+            2.0,
+        );
+        let cell = (22.0, 18.0);
+        for (wx, wy) in [(37.5, -3.25), (-12.0, 60.0), (0.0, 0.0)] {
+            let (col, row) = cam.world_to_cell(wx, wy, cell.0, cell.1);
+            // Cell center in pixel space → world → back to a cell.
+            let (cx_px, cy_px) = ((col as f32 + 0.5) * cell.0, (row as f32 + 0.5) * cell.1);
+            let (wx2, wy2) = cam.pixel_to_world(cx_px, cy_px);
+            assert_eq!(
+                cam.world_to_cell(wx2, wy2, cell.0, cell.1),
+                (col, row),
+                "cell center must round-trip to its own cell"
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_by_clamps_at_extremes_and_keeps_anchor_fixed() {
+        // Task 3.2: the zoom floor/ceiling keep the transform well-defined, and
+        // the anchor math uses the clamped zoom, so the anchor invariant holds
+        // even when a huge factor pins the camera at an extreme.
+        let mut cam = GraphCamera::new();
+        let anchor = (12.0, -8.0);
+        let (bx, by) = cam.world_to_pixel(anchor.0, anchor.1);
+        cam.zoom_by(1e9, anchor); // pins at MAX_ZOOM
+        assert_close(cam.zoom, MAX_ZOOM, 1e-3);
+        let (ax, ay) = cam.world_to_pixel(anchor.0, anchor.1);
+        assert_close(ax, bx, 0.5);
+        assert_close(ay, by, 0.5);
+        cam.zoom_by(1e-9, anchor); // pins at MIN_ZOOM
+        assert_close(cam.zoom, MIN_ZOOM, 1e-3);
+        let (ax, ay) = cam.world_to_pixel(anchor.0, anchor.1);
+        assert_close(ax, bx, 0.5);
+        assert_close(ay, by, 0.5);
+    }
+
+    #[test]
     fn fit_handles_degenerate_zero_span_world() {
         // Coincident positions: zero span must not produce NaN/inf.
         let cam = GraphCamera::fit_to_world(
@@ -330,8 +382,8 @@ use tiny_skia::{
 };
 
 /// RGB color triple in the rasterizer's own space. The `Color → RGB` hop (task
-/// 2.2) lives outside this module — the pixel path never hardcodes or converts
-/// theme colors.
+/// 2.2, design D9) happens in [`build_scene`] — the pixel path never hardcodes
+/// or converts theme colors.
 pub type Rgb = (u8, u8, u8);
 
 /// Canvas cap for runaway pan/zoom: larger sizes are clamped before
@@ -608,6 +660,83 @@ fn draw_edge(pixmap: &mut Pixmap, edge: &EdgeSpec) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Theme-aware Scene builder (design D9: the `Color → RGB` hop)
+// ---------------------------------------------------------------------------
+
+use crate::theme::Theme;
+use ratatui::style::Color as ThemeColor;
+
+/// Theme tokens for one rasterized node (design D9): mirror of [`NodeSpec`]
+/// whose color fields carry the classified semantic `Color`s from the existing
+/// pipeline (error red > diff > latency ramp > cable kind) instead of triples.
+#[derive(Clone)]
+pub struct NodeTokenSpec {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+    pub fill: ThemeColor,
+    pub border: ThemeColor,
+    pub border_width: f32,
+    pub label: String,
+    pub label_color: ThemeColor,
+}
+
+/// Theme tokens for one cable (design D9): mirror of [`EdgeSpec`] carrying the
+/// classified edge `Color` (error red > diff > latency ramp > cable kind).
+#[derive(Clone)]
+pub struct EdgeTokenSpec {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub ctrl: (f32, f32),
+    pub color: ThemeColor,
+    pub width: f32,
+}
+
+/// Build a raster scene from classified theme tokens (design D9): the single
+/// `Color → RGB` hop applied before anything touches the pixel path. Geometry
+/// (`x/y/w/h`, curve control points, widths) comes from the caller; only the
+/// tokens are resolved here, so `ui.rs` reuses its classification pipeline
+/// verbatim and the rasterizer stays RGB-pure. Returns `None` on degenerate
+/// sizes or a broken bundled font (same contract as [`render_scene`]).
+pub fn build_scene(
+    theme: &Theme,
+    width: u32,
+    height: u32,
+    background: ThemeColor,
+    nodes: &[NodeTokenSpec],
+    edges: &[EdgeTokenSpec],
+) -> Option<Scene> {
+    let nodes: Vec<NodeSpec> = nodes
+        .iter()
+        .map(|n| NodeSpec {
+            x: n.x,
+            y: n.y,
+            w: n.w,
+            h: n.h,
+            radius: n.radius,
+            fill: theme.rgb(n.fill),
+            border: theme.rgb(n.border),
+            border_width: n.border_width,
+            label: n.label.clone(),
+            label_color: theme.rgb(n.label_color),
+        })
+        .collect();
+    let edges: Vec<EdgeSpec> = edges
+        .iter()
+        .map(|e| EdgeSpec {
+            start: e.start,
+            end: e.end,
+            ctrl: e.ctrl,
+            color: theme.rgb(e.color),
+            width: e.width,
+        })
+        .collect();
+    render_scene(width, height, theme.rgb(background), &nodes, &edges)
+}
+
 #[cfg(test)]
 mod rasterizer_tests {
     use super::*;
@@ -750,5 +879,90 @@ mod rasterizer_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn build_scene_converts_theme_tokens_via_rgb_hop() {
+        // Task 2.2 verification: the Scene builder is the `Color → RGB` hop —
+        // tokens in, RGB pixels out — and `render_scene` never sees a token.
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let nodes = [NodeTokenSpec {
+            x: 30.0,
+            y: 30.0,
+            w: 80.0,
+            h: 40.0,
+            radius: 8.0,
+            fill: theme.graph_node_dim,      // Gray
+            border: theme.graph_node_border, // White
+            border_width: 2.0,
+            label: "OUT".to_string(),
+            label_color: theme.graph_node_title, // Yellow
+        }];
+        let edges = [EdgeTokenSpec {
+            start: (30.0, 140.0),
+            ctrl: (100.0, 20.0),
+            end: (170.0, 140.0),
+            color: theme.graph_edge_error, // Red
+            width: 3.0,
+        }];
+        let scene =
+            build_scene(&theme, 200, 160, theme.status_bg, &nodes, &edges).expect("renders");
+        assert!(all_opaque(&scene));
+        // The node fill hit the theme-resolved triple — proof the hop ran.
+        assert_eq!(pixel(&scene, 50, 50), theme.rgb(theme.graph_node_dim));
+        // The error-red curve is painted over the background.
+        assert_ne!(pixel(&scene, 100, 80), theme.rgb(theme.status_bg));
+    }
+
+    #[test]
+    fn scene_length_and_opacity_match_declared_dimensions() {
+        // Task 3.2: the RGBA buffer is exactly w×h×4 bytes and fully opaque
+        // (f=32 premultiplied == straight), and pixels away from any content
+        // stay at the painted background.
+        let (w, h) = (200u32, 160u32);
+        let scene =
+            render_scene(w, h, BG, &[sample_node()], &[sample_edge()]).expect("bounded scene");
+        assert_eq!(scene.rgba.len(), (w * h * 4) as usize);
+        assert!(all_opaque(&scene));
+        // Top-left corner (5,5) is clear of the node (x 30..110, y 30..70) and
+        // the curve (which stays below y≈80): the background must show through.
+        assert_eq!(pixel(&scene, 5, 5), BG);
+    }
+
+    #[test]
+    fn degenerate_dimensions_return_none() {
+        // Task 3.2: a zero-width or zero-height canvas has no Pixmap; the
+        // caller falls back to box drawing instead of receiving garbage.
+        assert!(render_scene(0, 160, BG, &[], &[]).is_none());
+        assert!(render_scene(200, 0, BG, &[], &[]).is_none());
+        assert!(render_scene(0, 0, BG, &[], &[]).is_none());
+    }
+
+    #[test]
+    fn huge_dimensions_clamp_to_max_dim() {
+        // Task 3.2: runaway pan/zoom must never reach `Pixmap::new` unchecked;
+        // larger requests clamp to MAX_DIM on each axis (design D2).
+        let wide = render_scene(2 * MAX_DIM, 10, BG, &[], &[]).expect("clamped wide canvas");
+        assert_eq!(wide.width, MAX_DIM);
+        assert_eq!(wide.height, 10);
+        assert_eq!(wide.rgba.len(), (MAX_DIM * 10 * 4) as usize);
+        let tall = render_scene(10, 2 * MAX_DIM, BG, &[], &[]).expect("clamped tall canvas");
+        assert_eq!(tall.width, 10);
+        assert_eq!(tall.height, MAX_DIM);
+        assert_eq!(tall.rgba.len(), (10 * MAX_DIM * 4) as usize);
+    }
+
+    #[test]
+    fn identical_inputs_render_byte_identical_scenes() {
+        // Task 3.2: the rasterizer is deterministic — two runs with identical
+        // inputs produce byte-identical buffers (same frames do not flicker).
+        let nodes = [sample_node()];
+        let edges = [sample_edge()];
+        let a = render_scene(200, 160, BG, &nodes, &edges).expect("first run");
+        let b = render_scene(200, 160, BG, &nodes, &edges).expect("second run");
+        assert_eq!(a.width, b.width);
+        assert_eq!(a.height, b.height);
+        assert_eq!(a.rgba, b.rgba);
     }
 }

@@ -574,6 +574,38 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
+            crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
+                // Task 2.3: `+`/`-` cycle the graph camera zoom presets on the
+                // graph surface, mirroring the physical view's scale presets.
+                // The camera re-seeds a fit on open; pan/zoom both re-emit the
+                // image on the next draw (drag/hover/x/e are unchanged).
+                let step = if matches!(key.code, crossterm::event::KeyCode::Char('+')) {
+                    1
+                } else {
+                    -1
+                };
+                app.graph_zoom_preset_step(step);
+                return false;
+            }
+            crossterm::event::KeyCode::Left
+            | crossterm::event::KeyCode::Right
+            | crossterm::event::KeyCode::Up
+            | crossterm::event::KeyCode::Down => {
+                // Task 2.3: arrows pan the graph camera on the graph surface
+                // (mirrors the physical pan-on-overflow model, but gated to the
+                // graph's own camera). When the camera has not been seeded yet
+                // (the box-drawing path), this is a no-op so navigation is
+                // unchanged.
+                let (dx, dy) = match key.code {
+                    crossterm::event::KeyCode::Left => (-1, 0),
+                    crossterm::event::KeyCode::Right => (1, 0),
+                    crossterm::event::KeyCode::Up => (0, -1),
+                    crossterm::event::KeyCode::Down => (0, 1),
+                    _ => (0, 0),
+                };
+                app.graph_pan_if_overflow(dx, dy);
+                return false;
+            }
             _ => {}
         }
     }
@@ -1250,6 +1282,15 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
         MouseEventKind::Up(_) => {
             app.graph_drag = None;
         }
+        MouseEventKind::ScrollUp => {
+            // Task 2.3: wheel pans the graph camera on the graph surface
+            // when it overflows; otherwise it is a no-op (the box-drawing
+            // path has no camera, so `graph_pan_if_overflow` returns false).
+            app.graph_pan_if_overflow(0, -1);
+        }
+        MouseEventKind::ScrollDown => {
+            app.graph_pan_if_overflow(0, 1);
+        }
         _ => {}
     }
 }
@@ -1726,6 +1767,93 @@ mod tests {
         // At the top preset, '+' wraps around to the bottom.
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 0.75);
+    }
+
+    // Task 2.3: graph camera persistent state + wheel/arrow zoom-pan.
+    //
+    // A camera must be seeded (like the renderer does on the first kitty frame)
+    // before zoom/pan apply; on the box-drawing path the camera is `None` so
+    // both are no-ops and preserve the old navigation behavior.
+
+    fn seed_graph_camera(app: &mut App) {
+        use crate::graph_render::{GraphCamera, WorldBounds};
+        app.graph_camera = Some(GraphCamera::fit_to_world(
+            WorldBounds::from_positions(&app.graph_positions),
+            (960.0, 480.0),
+            2.2, // GRAPH_MIN_NODE_PX is kitty-gfx-gated; a literal suffices for camera math
+        ));
+        app.graph_canvas_px = Some((960.0, 480.0));
+    }
+
+    #[test]
+    fn graph_plus_cycles_zoom_presets_and_wraps() {
+        let mut app = app_with_fixture();
+        app.open_graph();
+        seed_graph_camera(&mut app);
+
+        let z0 = app.graph_camera.unwrap().zoom;
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        let z1 = app.graph_camera.unwrap().zoom;
+        assert!(
+            (z1 - z0 * 1.5).abs() < 1e-2,
+            "'+' zooms in one preset: {z0} -> {z1}"
+        );
+        assert_eq!(app.graph_zoom_preset, 2);
+        assert!(app.status_message.contains("Graph zoom"));
+
+        // Wrap at the top preset (200%) back to the bottom (75%).
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        let z2 = app.graph_camera.unwrap().zoom;
+        assert!((z2 - z1 * (2.0 / 1.5)).abs() < 1e-2);
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        let z3 = app.graph_camera.unwrap().zoom;
+        assert!(
+            (z3 - z2 * (0.75 / 2.0)).abs() < 1e-2,
+            "wrap from 200% to 75%: {z2} -> {z3}"
+        );
+        assert_eq!(app.graph_zoom_preset, 0);
+    }
+
+    #[test]
+    fn graph_arrows_pan_and_zoom_reemits_next_frame() {
+        let mut app = app_with_fixture();
+        app.open_graph();
+        seed_graph_camera(&mut app);
+        // Camera fit centers the content; force an overflow so pan is allowed.
+        let before = app.graph_camera.unwrap().pan;
+        app.graph_canvas_px = Some((100.0, 100.0));
+        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        let after = app.graph_camera.unwrap().pan;
+        assert!(
+            (after.0 - before.0).abs() > 1.0,
+            "arrow pans the camera when it overflows: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn graph_zoom_pan_are_noop_until_camera_seeded() {
+        // Without a seeded camera (box-drawing path), '+' and arrows must not
+        // panic and must leave the camera None (old navigation preserved).
+        let mut app = app_with_fixture();
+        app.open_graph();
+        assert!(app.graph_camera.is_none());
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        assert!(app.graph_camera.is_none());
+        assert!(app.showing_graph);
+    }
+
+    #[test]
+    fn open_graph_resets_the_camera_to_unfitted() {
+        let mut app = app_with_fixture();
+        // A stale camera from a prior graph must not survive a re-open.
+        app.graph_camera = Some(crate::graph_render::GraphCamera::default());
+        app.graph_zoom_preset = 3;
+        app.graph_canvas_px = Some((1280.0, 720.0));
+        app.open_graph();
+        assert!(app.graph_camera.is_none());
+        assert_eq!(app.graph_zoom_preset, 1);
+        assert!(app.graph_canvas_px.is_none());
     }
 
     #[test]

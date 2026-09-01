@@ -270,6 +270,7 @@ use ratatui::layout::Rect;
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::graph::{Cluster, Graph, NodeId};
+use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
 use crate::layout;
 use crate::optimize::{CandidateOrdering, OptimizeScope};
@@ -435,6 +436,18 @@ pub struct App {
     /// mouse Moved via `graph_node_rects` hit-testing. `None` when the pointer
     /// is not over a node or the graph is closed.
     pub hovered_graph_node: Option<usize>,
+    /// Persistent world→pixel camera of the graph surface (task 2.3). Seeded by
+    /// the kitty renderer to a legible `fit_to_world` on the first frame after
+    /// open, then mutated by `+`/`-` (zoom presets) and arrow/wheel (pan).
+    /// `None` when the graph has not been rendered (the box-drawing path never
+    /// reads it); reset on open and on patch load so a new graph re-fits.
+    pub graph_camera: Option<GraphCamera>,
+    /// Index into `GRAPH_ZOOM_PRESETS` (mirrors the physical view's scale
+    /// presets); `+`/`-` cycle it with wrap-around. Default `1` (100%).
+    pub graph_zoom_preset: u8,
+    /// The kitty image's pixel size `(pw, ph)` at the last graph render, so the
+    /// handler can anchor zoom and gate pan on overflow. `None` until rendered.
+    pub graph_canvas_px: Option<(f32, f32)>,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -599,6 +612,9 @@ impl App {
             graph_node_rects: Vec::new(),
             graph_drag: None,
             hovered_graph_node: None,
+            graph_camera: None,
+            graph_zoom_preset: 1,
+            graph_canvas_px: None,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -1043,6 +1059,86 @@ impl App {
         if let Some(hint) = self.physical_status_hint() {
             self.status_message = hint;
         }
+        true
+    }
+
+    /// Zoom presets for the graph camera, mirroring the physical view's scale
+    /// presets (`0.75 → 1.0 → 1.5 → 2.0` with wrap-around). The camera's zoom is
+    /// absolute pixels-per-world-unit after the initial fit; `+`/`-` step the
+    /// preset multiplier, keeping the viewport centre anchored (task 2.3).
+    pub const GRAPH_ZOOM_PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
+    /// One wheel/arrow pan step of the graph camera in pixels, mirroring
+    /// `PHYSICAL_PAN_STEP`; the handler gating on overflow reuses this step.
+    pub const GRAPH_PAN_STEP_PX: f32 = 24.0;
+
+    /// The graph canvas centre in world coordinates, for anchoring zoom. Falls
+    /// back to the world origin when the canvas size has not been published.
+    fn graph_canvas_center_world(&self) -> (f32, f32) {
+        let Some((pw, ph)) = self.graph_canvas_px else {
+            return (0.0, 0.0);
+        };
+        self.graph_camera
+            .map(|cam| cam.pixel_to_world(pw / 2.0, ph / 2.0))
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// Step the graph camera's zoom preset by `dir` (±1), wrapping at both ends
+    /// like the physical view's scale presets. The new zoom is applied about the
+    /// canvas centre so the visible content stays put. No-op (returns false)
+    /// when the camera has not been seeded yet; the caller keeps the box path.
+    pub fn graph_zoom_preset_step(&mut self, dir: i32) -> bool {
+        if self.graph_camera.is_none() {
+            return false;
+        }
+        let n = Self::GRAPH_ZOOM_PRESETS.len() as i32;
+        let cur = self.graph_zoom_preset as i32;
+        let next = (cur + dir).rem_euclid(n) as usize;
+        let factor = Self::GRAPH_ZOOM_PRESETS[next]
+            / Self::GRAPH_ZOOM_PRESETS[self.graph_zoom_preset as usize];
+        let anchor = self.graph_canvas_center_world();
+        if let Some(cam) = self.graph_camera.as_mut() {
+            cam.zoom_by(factor, anchor);
+        }
+        self.graph_zoom_preset = next as u8;
+        self.status_message = format!("Graph zoom {:.0}%", Self::GRAPH_ZOOM_PRESETS[next] * 100.0);
+        true
+    }
+
+    /// Pan the graph camera by `(dx_px, dy_px)` pixels (design D5 analogue for
+    /// the graph surface): a pure camera-offset mutation. Callers decide when
+    /// overflow makes panning appropriate.
+    pub fn graph_pan_by(&mut self, dx_px: f32, dy_px: f32) {
+        if let Some(cam) = self.graph_camera.as_mut() {
+            cam.pan_by(dx_px, dy_px);
+        }
+    }
+
+    /// Pan the graph camera one step along the pressed axis only when the
+    /// rendered world overflows that axis, mirroring `physical_pan_if_overflow`.
+    /// Returns whether it panned so the handler can skip the navigate fallback.
+    pub fn graph_pan_if_overflow(&mut self, dir_x: i32, dir_y: i32) -> bool {
+        let Some(cam) = self.graph_camera else {
+            return false;
+        };
+        let Some((pw, ph)) = self.graph_canvas_px else {
+            return false;
+        };
+        let bounds = WorldBounds::from_positions(&self.graph_positions);
+        let world_w = (bounds.max_x - bounds.min_x) * cam.zoom;
+        let world_h = (bounds.max_y - bounds.min_y) * cam.zoom;
+        let ox = world_w > pw;
+        let oy = world_h > ph;
+        let dx = dir_x as f32 * Self::GRAPH_PAN_STEP_PX;
+        let dy = dir_y as f32 * Self::GRAPH_PAN_STEP_PX;
+        if (dx != 0.0 && !ox) || (dy != 0.0 && !oy) {
+            return false;
+        }
+        self.graph_pan_by(dx, dy);
+        self.status_message = format!(
+            "Graph pan {:.0}/{:.0}",
+            self.graph_camera.map(|c| c.pan.0).unwrap_or(0.0),
+            self.graph_camera.map(|c| c.pan.1).unwrap_or(0.0)
+        );
         true
     }
 
@@ -1556,6 +1652,12 @@ impl App {
         self.graph_node_rects.clear();
         self.graph_drag = None;
         self.hovered_graph_node = None;
+        // Task 2.3: a newly opened (or re-solved) graph re-fits its camera. The
+        // renderer seeds a legible `fit_to_world` on the next kitty frame; a
+        // previously-zoomed/panned camera must not linger across a new solve.
+        self.graph_camera = None;
+        self.graph_zoom_preset = 1;
+        self.graph_canvas_px = None;
         self.showing_graph = true;
         self.emit_graph_built();
     }
@@ -1647,6 +1749,9 @@ impl App {
         self.graph_node_rects.clear();
         self.graph_drag = None;
         self.hovered_graph_node = None;
+        self.graph_camera = None;
+        self.graph_zoom_preset = 1;
+        self.graph_canvas_px = None;
     }
 
     /// Reset quad-view state on patch load, mirroring `reset_graph_state`.
