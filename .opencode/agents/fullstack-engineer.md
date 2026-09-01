@@ -1,7 +1,7 @@
 ---
 description: Default engineer that accumulates skills from all created persona engineers. Use as fallback when no specialist matches: but prefer spawning a specific engineer for deterministic results.
 mode: subagent
-color: #D2D831
+color: "#D2D831"
 permission:
   edit: allow
   bash: allow

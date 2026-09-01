@@ -1,7 +1,7 @@
 ---
 description: Layout designer engineer for Rust TUI with ratatui 0.29 + crossterm 0.28, design systems, and terminal UI patterns
 mode: subagent
-color: #D83198
+color: "#D83198"
 permission:
   edit: allow
   bash: allow
