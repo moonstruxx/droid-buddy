@@ -41,6 +41,16 @@ pub struct Theme {
     pub graph_port_output: Color,
     pub graph_cluster_border: Color,
     pub graph_cluster_title: Color,
+    /// Background of the kitty-gfx graph canvas (design D9): the image is
+    /// opaque (`f=32`, design D5), so this token paints the whole graph surface
+    /// under the nodes and cables. `Black` blends with the terminal-default
+    /// dark background the box-drawing path inherits, so the image reads as
+    /// the same surface, not a band.
+    pub graph_canvas_bg: Color,
+    /// Body fill of a graph node in the kitty-gfx image path. The box-drawing
+    /// path leaves node interiors transparent, so this token only affects the
+    /// image path — a muted panel under the border and title.
+    pub graph_node_fill: Color,
     /// Cable edge color by inferred kind (design D8): control, audio, midi,
     /// and the unknown fallback, plus the topology-error highlight.
     pub graph_edge_control: Color,
@@ -126,6 +136,8 @@ impl Theme {
             graph_port_output: Color::Green,
             graph_cluster_border: Color::Blue,
             graph_cluster_title: Color::Blue,
+            graph_canvas_bg: Color::Black,
+            graph_node_fill: Color::DarkGray,
             graph_edge_control: Color::Cyan,
             graph_edge_audio: Color::Green,
             graph_edge_midi: Color::Magenta,
@@ -197,6 +209,10 @@ impl Theme {
             graph_port_output: Color::Reset,
             graph_cluster_border: Color::Reset,
             graph_cluster_title: Color::Reset,
+            // `Reset` would map to white via the rgb hop, wrong for a dark
+            // canvas; Black keeps the opaque image dark on any terminal.
+            graph_canvas_bg: Color::Black,
+            graph_node_fill: Color::DarkGray,
             graph_edge_control: Color::Reset,
             graph_edge_audio: Color::Reset,
             graph_edge_midi: Color::Reset,
@@ -270,6 +286,10 @@ impl Theme {
             graph_port_output: Color::White,
             graph_cluster_border: Color::White,
             graph_cluster_title: Color::Gray,
+            // Grayscale contrast ladder for the image path: canvas Black <
+            // node fill DarkGray < border White.
+            graph_canvas_bg: Color::Black,
+            graph_node_fill: Color::DarkGray,
             // The four edge kinds plus error must stay pairwise distinct in mono:
             // type/severity is carried by color alone. Only four gray shades exist,
             // so `unknown` falls back to the terminal default (Reset) as neutral.
@@ -326,6 +346,90 @@ impl Theme {
             self.graph_edge_latency_4,
         ]
     }
+
+    /// The `Color → RGB` hop (design D9): the single source of pixel colors
+    /// for the kitty rasterizer. ANSI-16 tokens map to fixed triples (pure
+    /// primaries, half-intensity pastels for the `Light*` variants), `Rgb`
+    /// passes through, `Indexed` resolves through the standard xterm-256
+    /// table, and `Reset` (the "defer to terminal" token) resolves to an
+    /// opaque bright white — the kitty canvas is opaque (`f=32` premultiplied
+    /// == straight), so a Reset token must still yield an opaque, readable fg
+    /// (the `terminal` palette is all Reset, and mono's neutral/hot tokens are
+    /// Reset by design). Pure and deterministic: the same token always maps to
+    /// the same triple, and every `Color` variant is covered so the pixel path
+    /// never panics.
+    pub fn rgb(&self, color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Reset => (0xff, 0xff, 0xff),
+            Color::Black => ansi16_rgb(0),
+            Color::Red => ansi16_rgb(1),
+            Color::Green => ansi16_rgb(2),
+            Color::Yellow => ansi16_rgb(3),
+            Color::Blue => ansi16_rgb(4),
+            Color::Magenta => ansi16_rgb(5),
+            Color::Cyan => ansi16_rgb(6),
+            Color::Gray => ansi16_rgb(7),
+            Color::DarkGray => ansi16_rgb(8),
+            Color::LightRed => ansi16_rgb(9),
+            Color::LightGreen => ansi16_rgb(10),
+            Color::LightYellow => ansi16_rgb(11),
+            Color::LightBlue => ansi16_rgb(12),
+            Color::LightMagenta => ansi16_rgb(13),
+            Color::LightCyan => ansi16_rgb(14),
+            Color::White => ansi16_rgb(15),
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Indexed(v) => xterm256_rgb(v),
+        }
+    }
+}
+
+/// The single ANSI-16 → RGB table, shared by the named variants in
+/// [`Theme::rgb`] and the 0..=15 head of the xterm-256 map so `Color::Red`
+/// and `Color::Indexed(1)` agree. Out-of-range indices degrade to the bright
+/// neutral (same as `Reset`) so the hop stays total without panicking.
+fn ansi16_rgb(v: u8) -> (u8, u8, u8) {
+    match v {
+        0 => (0x00, 0x00, 0x00),
+        1 => (0xff, 0x00, 0x00),
+        2 => (0x00, 0xff, 0x00),
+        3 => (0xff, 0xff, 0x00),
+        4 => (0x00, 0x00, 0xff),
+        5 => (0xff, 0x00, 0xff),
+        6 => (0x00, 0xff, 0xff),
+        7 => (0x80, 0x80, 0x80),
+        8 => (0x40, 0x40, 0x40),
+        9 => (0xff, 0x80, 0x80),
+        10 => (0x80, 0xff, 0x80),
+        11 => (0xff, 0xff, 0x80),
+        12 => (0x80, 0x80, 0xff),
+        13 => (0xff, 0x80, 0xff),
+        14 => (0x80, 0xff, 0xff),
+        _ => (0xff, 0xff, 0xff),
+    }
+}
+
+/// Standard xterm-256 → RGB (deterministic): 16-color head mirroring
+/// [`ansi16_rgb`], a 6×6×6 cube for 16..=231, and the 24-step gray ramp for
+/// 232..=255. `Theme::rgb` never emits a 256-color token today, but the hop
+/// must be total so the pixel path cannot panic on any `Color`.
+fn xterm256_rgb(v: u8) -> (u8, u8, u8) {
+    match v {
+        0..=15 => ansi16_rgb(v),
+        16..=231 => {
+            let n = v - 16;
+            let (r, g, b) = (n / 36, (n % 36) / 6, n % 6);
+            (cube_step(r), cube_step(g), cube_step(b))
+        }
+        _ => {
+            let g = 8 + 10 * (v - 232);
+            (g, g, g)
+        }
+    }
+}
+
+/// One 6×6×6 cube step: `0, 95, 135, 175, 215, 255`.
+fn cube_step(c: u8) -> u8 {
+    [0, 95, 135, 175, 215, 255][c as usize]
 }
 
 /// User-facing theme names, in presentation order.
@@ -725,6 +829,349 @@ mod tests {
         for (i, a) in skeleton.iter().enumerate() {
             for b in &skeleton[i + 1..] {
                 assert_ne!(a, b, "skeleton tokens must be pairwise distinct in mono");
+            }
+        }
+    }
+
+    #[test]
+    fn every_token_in_every_palette_maps_to_a_deterministic_rgb_triple() {
+        // Task 2.2 + 3.2 verification: every semantic token the UI/graph
+        // surface and the rasterizer consume (component kinds, shift groups,
+        // graph chrome + canvas + edges, skeleton, validation, optimizer) must
+        // resolve through the `Color → RGB` hop without panicking and
+        // deterministically (same token → same triple every call), in every
+        // palette.
+        for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
+            let tokens = [
+                theme.button,
+                theme.switch,
+                theme.knob,
+                theme.cv_in,
+                theme.cv_out,
+                theme.led,
+                theme.fader_led_bar,
+                theme.shift1,
+                theme.shift2,
+                theme.shift3,
+                theme.shift4,
+                theme.accent,
+                theme.muted,
+                theme.text,
+                theme.viewer_key,
+                theme.status_bg,
+                theme.focus_border,
+                theme.occurrence_highlight,
+                theme.modifier_boolean,
+                theme.modifier_exact,
+                theme.minimap_occurrence,
+                theme.minimap_modifier_boolean,
+                theme.minimap_modifier_exact,
+                theme.minimap_combined,
+                theme.graph_node_border,
+                theme.graph_node_title,
+                theme.graph_port_input,
+                theme.graph_port_output,
+                theme.graph_cluster_border,
+                theme.graph_cluster_title,
+                theme.graph_canvas_bg,
+                theme.graph_node_fill,
+                theme.graph_edge_control,
+                theme.graph_edge_audio,
+                theme.graph_edge_midi,
+                theme.graph_edge_unknown,
+                theme.graph_edge_error,
+                theme.graph_node_highlight,
+                theme.graph_node_dim,
+                theme.graph_edge_highlight,
+                theme.graph_edge_dim,
+                theme.graph_edge_diff_added,
+                theme.graph_edge_diff_removed,
+                theme.graph_edge_latency_0,
+                theme.graph_edge_latency_1,
+                theme.graph_edge_latency_2,
+                theme.graph_edge_latency_3,
+                theme.graph_edge_latency_4,
+                theme.graph_edge_latency_legend,
+                theme.physical_skeleton_module_outline,
+                theme.physical_skeleton_cell,
+                theme.physical_skeleton_port_in,
+                theme.physical_skeleton_port_out,
+                theme.validation_error,
+                theme.validation_warning,
+                theme.validation_hint,
+                theme.validation_modal_border,
+                theme.validation_selected_bg,
+                theme.render_outlier_warning,
+                theme.optimizer_modal_border,
+                theme.optimizer_selected_bg,
+            ];
+            for token in tokens {
+                let rgb = theme.rgb(token);
+                assert_eq!(
+                    theme.rgb(token),
+                    rgb,
+                    "hop must be deterministic for {token:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classic_graph_tokens_resolve_to_expected_rgb() {
+        // Task 2.2 verification: a token → expected-RGB table for the classic
+        // palette, anchoring the hop's mapping (error red, cable kinds,
+        // latency ramp cold→hot, node/cluster chrome).
+        let t = Theme::classic();
+        assert_eq!(t.rgb(t.graph_edge_error), (0xff, 0x00, 0x00), "error red");
+        assert_eq!(t.rgb(t.graph_edge_audio), (0x00, 0xff, 0x00), "audio green");
+        assert_eq!(
+            t.rgb(t.graph_edge_control),
+            (0x00, 0xff, 0xff),
+            "control cyan"
+        );
+        assert_eq!(t.rgb(t.graph_edge_midi), (0xff, 0x00, 0xff), "midi magenta");
+        assert_eq!(
+            t.rgb(t.graph_edge_unknown),
+            (0x40, 0x40, 0x40),
+            "unknown dark-gray"
+        );
+        assert_eq!(t.rgb(t.graph_edge_diff_added), (0x00, 0xff, 0x00));
+        assert_eq!(t.rgb(t.graph_edge_diff_removed), (0xff, 0x00, 0xff));
+        assert_eq!(t.rgb(t.graph_node_border), (0xff, 0xff, 0xff));
+        assert_eq!(t.rgb(t.graph_node_title), (0xff, 0xff, 0x00));
+        assert_eq!(t.rgb(t.graph_port_input), (0x00, 0xff, 0xff));
+        assert_eq!(t.rgb(t.graph_port_output), (0x00, 0xff, 0x00));
+        assert_eq!(t.rgb(t.graph_cluster_border), (0x00, 0x00, 0xff));
+        assert_eq!(t.rgb(t.graph_cluster_title), (0x00, 0x00, 0xff));
+        assert_eq!(t.rgb(t.graph_node_dim), (0x80, 0x80, 0x80));
+        assert_eq!(t.rgb(t.graph_edge_dim), (0x40, 0x40, 0x40));
+        assert_eq!(t.rgb(t.graph_edge_highlight), (0xff, 0xff, 0xff));
+        assert_eq!(t.rgb(t.graph_node_highlight), (0xff, 0xff, 0x00));
+        // Latency ramp cold → hot: blue → cyan → green → yellow → red.
+        assert_eq!(t.rgb(t.graph_edge_latency_0), (0x00, 0x00, 0xff));
+        assert_eq!(t.rgb(t.graph_edge_latency_1), (0x00, 0xff, 0xff));
+        assert_eq!(t.rgb(t.graph_edge_latency_2), (0x00, 0xff, 0x00));
+        assert_eq!(t.rgb(t.graph_edge_latency_3), (0xff, 0xff, 0x00));
+        assert_eq!(t.rgb(t.graph_edge_latency_4), (0xff, 0x00, 0x00));
+        assert_eq!(t.rgb(t.graph_edge_latency_legend), (0x00, 0x00, 0xff));
+    }
+
+    #[test]
+    fn every_color_variant_maps_without_panic() {
+        // Task 2.2 verification: every `Color` variant ratatui 0.29 can emit
+        // for these tokens is handled — the 17 ANSI-16 named variants, the
+        // `Rgb` passthrough, `Indexed` (0.29's 256-color variant), and `Reset`.
+        let t = Theme::classic();
+        for variant in [
+            Color::Reset,
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::White,
+            Color::Rgb(12, 34, 56),
+            Color::Indexed(0),
+            Color::Indexed(1),
+            Color::Indexed(7),
+            Color::Indexed(15),
+            Color::Indexed(16),
+            Color::Indexed(21),
+            Color::Indexed(196),
+            Color::Indexed(231),
+            Color::Indexed(232),
+            Color::Indexed(255),
+        ] {
+            t.rgb(variant); // exhaustive match: no `Color` variant can panic
+        }
+        // Rgb passes through unchanged; Reset resolves to the opaque neutral.
+        assert_eq!(t.rgb(Color::Rgb(12, 34, 56)), (12, 34, 56));
+        assert_eq!(t.rgb(Color::Reset), (0xff, 0xff, 0xff));
+        // Indexed head mirrors the ANSI-16 table; cube corners and the gray
+        // ramp resolve deterministically.
+        assert_eq!(t.rgb(Color::Indexed(1)), t.rgb(Color::Red));
+        assert_eq!(t.rgb(Color::Indexed(7)), t.rgb(Color::Gray));
+        assert_eq!(t.rgb(Color::Indexed(15)), t.rgb(Color::White));
+        assert_eq!(t.rgb(Color::Indexed(0)), (0x00, 0x00, 0x00));
+        assert_eq!(
+            t.rgb(Color::Indexed(21)),
+            (0x00, 0x00, 0xff),
+            "cube blue corner"
+        );
+        assert_eq!(
+            t.rgb(Color::Indexed(196)),
+            (0xff, 0x00, 0x00),
+            "cube red corner"
+        );
+        assert_eq!(
+            t.rgb(Color::Indexed(231)),
+            (0xff, 0xff, 0xff),
+            "cube white corner"
+        );
+        assert_eq!(
+            t.rgb(Color::Indexed(232)),
+            (0x08, 0x08, 0x08),
+            "gray ramp bottom"
+        );
+        assert_eq!(
+            t.rgb(Color::Indexed(255)),
+            (0xee, 0xee, 0xee),
+            "gray ramp top"
+        );
+    }
+
+    #[test]
+    fn ansi16_primaries_map_to_expected_rgb() {
+        // Task 3.2: the ANSI-16 named variants resolve to their standard RGB
+        // triples — pure primaries, half-intensity pastels for the Light*
+        // variants, and Reset to the opaque bright neutral the kitty canvas
+        // needs (there is no terminal-default fg in an opaque image).
+        let t = Theme::classic();
+        assert_eq!(t.rgb(Color::Black), (0x00, 0x00, 0x00));
+        assert_eq!(t.rgb(Color::Red), (0xff, 0x00, 0x00));
+        assert_eq!(t.rgb(Color::Green), (0x00, 0xff, 0x00));
+        assert_eq!(t.rgb(Color::Yellow), (0xff, 0xff, 0x00));
+        assert_eq!(t.rgb(Color::Blue), (0x00, 0x00, 0xff));
+        assert_eq!(t.rgb(Color::Magenta), (0xff, 0x00, 0xff));
+        assert_eq!(t.rgb(Color::Cyan), (0x00, 0xff, 0xff));
+        assert_eq!(t.rgb(Color::Gray), (0x80, 0x80, 0x80));
+        assert_eq!(t.rgb(Color::DarkGray), (0x40, 0x40, 0x40));
+        assert_eq!(t.rgb(Color::LightRed), (0xff, 0x80, 0x80));
+        assert_eq!(t.rgb(Color::LightGreen), (0x80, 0xff, 0x80));
+        assert_eq!(t.rgb(Color::LightYellow), (0xff, 0xff, 0x80));
+        assert_eq!(t.rgb(Color::LightBlue), (0x80, 0x80, 0xff));
+        assert_eq!(t.rgb(Color::LightMagenta), (0xff, 0x80, 0xff));
+        assert_eq!(t.rgb(Color::LightCyan), (0x80, 0xff, 0xff));
+        assert_eq!(t.rgb(Color::White), (0xff, 0xff, 0xff));
+        assert_eq!(t.rgb(Color::Reset), (0xff, 0xff, 0xff));
+    }
+
+    #[test]
+    fn indexed_head_agrees_with_named_ansi16_variants() {
+        // Task 3.2: xterm indices 0..=15 resolve exactly like the named
+        // ANSI-16 variants (index 0 == Black, …, index 15 == White), because
+        // the xterm-256 map shares the 0..=15 head with the named variants.
+        let t = Theme::classic();
+        let named = [
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::White,
+        ];
+        for (v, color) in named.iter().enumerate() {
+            assert_eq!(
+                t.rgb(Color::Indexed(v as u8)),
+                t.rgb(*color),
+                "Indexed({v}) must agree with the named ANSI-16 variant"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_gray_ramp_is_monotonic() {
+        // Task 3.2: the 232..=255 gray ramp steps 8 → 238 strictly upwards, so
+        // brighter indices always resolve to brighter pixels.
+        let t = Theme::classic();
+        assert_eq!(
+            t.rgb(Color::Indexed(232)),
+            (0x08, 0x08, 0x08),
+            "ramp bottom"
+        );
+        let mut prev = t.rgb(Color::Indexed(232)).0;
+        for v in 233..=255u8 {
+            let g = t.rgb(Color::Indexed(v)).0;
+            assert!(g > prev, "gray ramp must increase strictly at {v}");
+            prev = g;
+        }
+        assert_eq!(t.rgb(Color::Indexed(255)), (0xee, 0xee, 0xee), "ramp top");
+    }
+
+    #[test]
+    fn indexed_full_range_is_total_and_deterministic() {
+        // Task 3.2: every xterm-256 index resolves to a triple (never panics)
+        // and the same index always resolves to the same triple. The cube
+        // (16..=231) and gray (232..=255) regions anchor the structure.
+        let t = Theme::classic();
+        for v in 0..=255u8 {
+            let rgb = t.rgb(Color::Indexed(v));
+            assert_eq!(
+                t.rgb(Color::Indexed(v)),
+                rgb,
+                "Indexed({v}) must be deterministic"
+            );
+        }
+        assert_eq!(
+            t.rgb(Color::Indexed(16)),
+            (0x00, 0x00, 0x00),
+            "cube corner black"
+        );
+        assert_eq!(
+            t.rgb(Color::Indexed(17)),
+            (0x00, 0x00, 0x5f),
+            "cube step 95"
+        );
+        assert_eq!(
+            t.rgb(Color::Indexed(231)),
+            (0xff, 0xff, 0xff),
+            "cube corner white"
+        );
+    }
+
+    #[test]
+    fn terminal_and_mono_reset_tokens_round_trip_to_opaque_neutral() {
+        // The `terminal` palette defers every token to the terminal (`Reset`);
+        // the opaque kitty canvas has no "default fg", so Reset must still
+        // resolve to an opaque, readable fg.
+        let terminal = Theme::terminal();
+        for token in [
+            terminal.graph_edge_control,
+            terminal.graph_edge_audio,
+            terminal.graph_edge_error,
+            terminal.graph_node_border,
+            terminal.graph_node_title,
+            terminal.graph_edge_latency_4,
+        ] {
+            assert_eq!(terminal.rgb(token), (0xff, 0xff, 0xff));
+        }
+        // mono's neutral `unknown` and hottest latency stop are Reset too —
+        // they resolve bright so they stay visible against the dark canvas.
+        let mono = Theme::mono();
+        assert_eq!(mono.rgb(mono.graph_edge_unknown), (0xff, 0xff, 0xff));
+        assert_eq!(mono.rgb(mono.graph_edge_latency_4), (0xff, 0xff, 0xff));
+        // The four ANSI grays mono uses for edge kinds stay distinct in pixel
+        // space (Reset doubles as the fifth shade, colliding with White — the
+        // canvas has no terminal-default fg to defer to).
+        let grays = [
+            mono.rgb(mono.graph_edge_control), // White
+            mono.rgb(mono.graph_edge_audio),   // Gray
+            mono.rgb(mono.graph_edge_midi),    // DarkGray
+            mono.rgb(mono.graph_edge_error),   // Black
+        ];
+        for (i, a) in grays.iter().enumerate() {
+            for b in &grays[i + 1..] {
+                assert_ne!(a, b, "mono edge tokens must stay distinct in RGB");
             }
         }
     }

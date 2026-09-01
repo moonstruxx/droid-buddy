@@ -13,17 +13,16 @@ use crate::rendermetrics::{score_render, RenderFeatures};
 use crate::schema;
 use crate::theme;
 
-const QUAD_WIDTH_THRESHOLD: u16 = 120;
+/// Kitty-graphics image-path imports: the pure scene builder and camera are
+/// unconditional dependencies (design D10); only the transport stays gated.
+#[cfg(feature = "kitty-gfx")]
+use crate::graph_render::{
+    build_scene, EdgeTokenSpec, GraphCamera, NodeTokenSpec, Scene, WorldBounds,
+};
+#[cfg(feature = "kitty-gfx")]
+use crate::kitty_protocol;
 
-#[allow(dead_code)]
-fn is_kitty_terminal() -> bool {
-    // Runtime detection for kitty-gfx fallback: only attempt image rendering
-    // when the terminal advertises kitty graphics support.
-    std::env::var("KITTY_WINDOW_ID").is_ok()
-        || std::env::var("TERM")
-            .map(|v| v == "xterm-kitty")
-            .unwrap_or(false)
-}
+const QUAD_WIDTH_THRESHOLD: u16 = 120;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     // Picker takes absolute precedence – overlay on top of anything.
@@ -1345,6 +1344,334 @@ const GRAPH_NODE_HEIGHT: u16 = 5;
 /// Gap between a cluster's member nodes and its container frame.
 const GRAPH_CLUSTER_PADDING: u16 = 2;
 
+// ── Kitty-gfx image path (design D1/D8) ────────────────────────────────────
+
+/// Pixel size of one terminal cell assumed by the camera fit (kitty's default
+/// 8×16). The exact value only scales the offscreen image: kitty rescales it
+/// into the area's cell rect, so the world→pixel→cell mapping stays internally
+/// consistent on any terminal.
+#[cfg(feature = "kitty-gfx")]
+const GRAPH_CELL_W_PX: f32 = 8.0;
+#[cfg(feature = "kitty-gfx")]
+const GRAPH_CELL_H_PX: f32 = 16.0;
+/// Initial-fit zoom floor, pixels per world unit: the tightest typical node
+/// spacing (`layout::SPRING_REST` ≈ 80 world units) must render a node at its
+/// legible width of `GRAPH_NODE_WIDTH` cells — `22×8px / 80 ≈ 2.2px` per unit
+/// (design Open Questions allow tuning).
+#[cfg(feature = "kitty-gfx")]
+const GRAPH_MIN_NODE_PX: f32 = GRAPH_NODE_WIDTH as f32 * GRAPH_CELL_W_PX / 80.0;
+/// Fixed kitty image id: re-transmitting the same `i=` replaces the prior
+/// placement, so pan/zoom never exhausts ids (design D8).
+#[cfg(feature = "kitty-gfx")]
+const KITTY_GRAPH_IMAGE_ID: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// Kitty-gfx image path (design D1/D8/D9) — see the dispatch in `render_graph`.
+// ---------------------------------------------------------------------------
+
+/// Classification + hover state for the kitty image path, grouped like
+/// `GraphEdgeOpts` so the pixel helpers stay under clippy's 7-argument limit.
+#[cfg(feature = "kitty-gfx")]
+#[derive(Clone, Copy)]
+struct GraphKittyOpts<'a> {
+    disabled: &'a HashSet<(String, usize)>,
+    diff_report: Option<&'a crate::diff::DiffReport>,
+    diff_showing: bool,
+    latency_coloring: bool,
+    hovered: Option<usize>,
+    patch: Option<&'a crate::patch::Patch>,
+    circuit_store: &'a HashMap<(String, usize), String>,
+}
+
+/// Color for one cable on the kitty image path — a mirror of the box-drawing
+/// precedence in `render_graph_edges_with_highlight` (error red over disabled
+/// dim over diff over latency ramp over cable kind), reusing the same
+/// classification helpers. Modifiers (BOLD/DIM) are not representable in
+/// pixels, so only the token color is resolved — the dim tokens already carry
+/// the dim look.
+#[cfg(feature = "kitty-gfx")]
+fn graph_edge_pixel_color(
+    graph: &Graph,
+    edge: &crate::graph::GraphEdge,
+    src_node: &GraphNode,
+    sink_node: &GraphNode,
+    edge_index: usize,
+    opts: GraphKittyOpts<'_>,
+) -> Color {
+    let theme = theme::active();
+    let incident_disabled =
+        circuit_disabled(opts.disabled, &src_node.circuit, src_node.instance_index)
+            || circuit_disabled(opts.disabled, &sink_node.circuit, sink_node.instance_index);
+    let has_error = graph
+        .validation
+        .iter()
+        .any(|issue| issue.cable == edge.cable);
+    if incident_disabled {
+        // Error red outranks the dim (error > dim > influence > kind).
+        if has_error {
+            return theme.graph_edge_error;
+        }
+        return theme.graph_edge_dim;
+    }
+    if has_error {
+        return theme.graph_edge_error;
+    }
+    if opts.diff_showing {
+        if let Some(report) = opts.diff_report {
+            if report.added_cables.contains(&edge.cable) {
+                return theme.graph_edge_diff_added;
+            }
+            if report.removed_cables.contains(&edge.cable) {
+                return theme.graph_edge_diff_removed;
+            }
+            if report.changed_cables.iter().any(|c| c.cable == edge.cable) {
+                return theme.graph_edge_diff_added;
+            }
+        }
+    }
+    // Latency ramp replaces the kind color when coloring is on (error > diff
+    // > ramp > kind); a back-edge always lands on the hottest stop.
+    if opts.latency_coloring {
+        if let Some(data) = graph.latency.as_ref() {
+            if let Some(entry) = data.edges.get(edge_index) {
+                let ramp = theme.graph_edge_latency_ramp();
+                let stop = if entry.is_back_edge {
+                    ramp.len() - 1
+                } else {
+                    latency_ramp_index(
+                        entry.latency,
+                        data.edges.len(),
+                        data.summary.avg,
+                        ramp.len(),
+                    )
+                };
+                return ramp[stop];
+            }
+        }
+    }
+    cable_color_with_diff(graph, &edge.cable, opts.diff_report, opts.diff_showing)
+}
+
+/// Build one kitty-gfx frame for the graph surface: fit the camera to the
+/// world bounds, rasterize nodes/edges/labels into an opaque RGBA scene (the
+/// design D9 token→RGB hop runs inside `build_scene`), and derive the
+/// published `graph_node_rects` through the camera inverse (`world_to_cell`)
+/// so the existing mouse hit-testing behaves identically. Pure: no terminal,
+/// no `App`, no IO — `None` on degenerate inputs or a broken bundled font,
+/// and the caller falls back to box drawing.
+#[cfg(feature = "kitty-gfx")]
+fn graph_kitty_frame(
+    graph: &Graph,
+    positions: &[(f32, f32)],
+    area: Rect,
+    opts: GraphKittyOpts<'_>,
+    cam: GraphCamera,
+) -> Option<(Scene, Vec<(usize, Rect)>)> {
+    if positions.len() != graph.nodes.len() {
+        return None; // mismatched model/view: caller falls back to box drawing
+    }
+    let theme = theme::active();
+    let pw = (area.width as f32 * GRAPH_CELL_W_PX).max(2.0) as u32;
+    let ph = (area.height as f32 * GRAPH_CELL_H_PX).max(2.0) as u32;
+
+    // Node image rect: one box-drawing node (`22×5` cells) at the assumed
+    // cell size, so the image node and the published hit rect agree exactly.
+    let node_w = GRAPH_NODE_WIDTH as f32 * GRAPH_CELL_W_PX;
+    let node_h = GRAPH_NODE_HEIGHT as f32 * GRAPH_CELL_H_PX;
+
+    let mut node_specs = Vec::with_capacity(graph.nodes.len());
+    let mut node_topleft = Vec::with_capacity(graph.nodes.len());
+    let mut rects = Vec::with_capacity(graph.nodes.len());
+    for (i, node) in graph.nodes.iter().enumerate() {
+        let (wx, wy) = positions[i];
+        // World position is the node's top-left corner, matching the box path.
+        let (px, py) = cam.world_to_pixel(wx, wy);
+        node_topleft.push((px, py));
+
+        let is_disabled = circuit_disabled(opts.disabled, &node.circuit, node.instance_index);
+        // Hover emphasis uses the highlight token (the box path's REVERSED
+        // background has no pixel equivalent); disabled dim outranks hover.
+        let (border, title_color) = if is_disabled {
+            (theme.graph_node_dim, theme.graph_node_dim)
+        } else if opts.hovered == Some(i) {
+            (theme.graph_node_highlight, theme.graph_node_highlight)
+        } else {
+            (theme.graph_node_border, theme.graph_node_title)
+        };
+        let mut label = graph_node_display_title(node, opts.patch, Some(opts.circuit_store));
+        if opts.diff_showing
+            && opts.diff_report.is_some_and(|r| {
+                r.changed_nodes.iter().any(|n| n.id == node.id)
+                    || r.added_nodes.contains(&node.id)
+                    || r.removed_nodes.contains(&node.id)
+            })
+        {
+            label.push('*');
+        }
+        node_specs.push(NodeTokenSpec {
+            x: px,
+            y: py,
+            w: node_w,
+            h: node_h,
+            radius: 8.0,
+            fill: theme.graph_node_fill,
+            border,
+            border_width: 3.0,
+            label,
+            label_color: title_color,
+        });
+
+        // Hit rect through the camera inverse: world → pixel → cell. Nodes
+        // fully outside the area get no rect (the box path never overflows).
+        let (col, row) = cam.world_to_cell(wx, wy, GRAPH_CELL_W_PX, GRAPH_CELL_H_PX);
+        let rx = area.x as i32 + col;
+        let ry = area.y as i32 + row;
+        if rx >= area.x as i32 + area.width as i32 || ry >= area.y as i32 + area.height as i32 {
+            continue;
+        }
+        rects.push((
+            i,
+            Rect::new(
+                rx.clamp(area.x as i32, area.x as i32 + area.width as i32 - 1) as u16,
+                ry.clamp(area.y as i32, area.y as i32 + area.height as i32 - 1) as u16,
+                GRAPH_NODE_WIDTH.min(area.width),
+                GRAPH_NODE_HEIGHT.min(area.height),
+            ),
+        ));
+    }
+
+    // Cables: quadratic from the source node's right-center to the sink node's
+    // left-center with the control point at the midpoint — the pixel analogue
+    // of the box path's mid-x vertical connector. Edges draw before nodes, so
+    // node bodies cover the port cells for a clean join.
+    let mut edge_specs = Vec::with_capacity(graph.edges.len());
+    for (edge_index, edge) in graph.edges.iter().enumerate() {
+        let Some(src) = graph.nodes.iter().position(|n| n.id == edge.source) else {
+            continue;
+        };
+        let Some(sink) = graph.nodes.iter().position(|n| n.id == edge.sink) else {
+            continue;
+        };
+        let (sx, sy) = node_topleft[src];
+        let (tx, ty) = node_topleft[sink];
+        let start = (sx + node_w, sy + node_h / 2.0);
+        let end = (tx, ty + node_h / 2.0);
+        if start == end {
+            continue; // coincident nodes: zero-length edge
+        }
+        let ctrl = ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0);
+        edge_specs.push(EdgeTokenSpec {
+            start,
+            end,
+            ctrl,
+            color: graph_edge_pixel_color(
+                graph,
+                edge,
+                &graph.nodes[src],
+                &graph.nodes[sink],
+                edge_index,
+                opts,
+            ),
+            width: 3.0,
+        });
+    }
+
+    let scene = build_scene(
+        theme,
+        pw,
+        ph,
+        theme.graph_canvas_bg,
+        &node_specs,
+        &edge_specs,
+    )?;
+    Some((scene, rects))
+}
+
+/// Rasterize + emit one graph frame via the kitty graphics protocol, and
+/// publish the derived hit rects. Returns `true` only when the image path
+/// fully handled the frame (scene built AND emitted); any failure falls back
+/// to the box-drawing renderer.
+#[cfg(feature = "kitty-gfx")]
+fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
+    // Task 2.3: seed the persistent camera on the first frame after open — a
+    // legible `fit_to_world` — and publish the canvas pixel size for the
+    // handler's zoom anchor / overflow gating. Subsequent frames reuse the
+    // stored (user pan/zoomed) camera, so the image reflects it.
+    let pw = (area.width as f32 * GRAPH_CELL_W_PX).max(2.0) as u32;
+    let ph = (area.height as f32 * GRAPH_CELL_H_PX).max(2.0) as u32;
+    if app.graph_camera.is_none()
+        && app
+            .graph
+            .as_ref()
+            .is_some_and(|g| app.graph_positions.len() == g.nodes.len())
+    {
+        app.graph_camera = Some(GraphCamera::fit_to_world(
+            WorldBounds::from_positions(&app.graph_positions),
+            (pw as f32, ph as f32),
+            GRAPH_MIN_NODE_PX,
+        ));
+    }
+    app.graph_canvas_px = Some((pw as f32, ph as f32));
+    let Some(cam) = app.graph_camera else {
+        return false;
+    };
+
+    // Copyable state + owned report captured before the field destructure.
+    let circuit_store = app.current_circuit_store();
+    let patch_for_title = app.patch.clone();
+    let diff_showing = app.diff_showing;
+    let diff_report_owned = app.filtered_report();
+    let hovered = app.hovered_graph_node;
+    let latency_coloring = app.latency_coloring;
+
+    let App {
+        graph,
+        graph_positions,
+        graph_node_rects: node_rect_field,
+        disabled_circuits,
+        ..
+    } = app;
+    let Some(graph) = graph.as_ref() else {
+        return false;
+    };
+    if graph_positions.len() != graph.nodes.len() {
+        return false;
+    }
+
+    let opts = GraphKittyOpts {
+        disabled: disabled_circuits,
+        diff_report: diff_report_owned.as_ref(),
+        diff_showing,
+        latency_coloring,
+        hovered,
+        patch: patch_for_title.as_ref(),
+        circuit_store: &circuit_store,
+    };
+    let Some((scene, rects)) = graph_kitty_frame(graph, graph_positions, area, opts, cam) else {
+        return false;
+    };
+
+    // Emit beneath the surface at the area's top-left cell (1-based for the
+    // kitty protocol). Any IO failure falls back to box drawing rather than
+    // leaving a stale/partial image.
+    if kitty_protocol::frame(
+        KITTY_GRAPH_IMAGE_ID,
+        scene.width,
+        scene.height,
+        &scene.rgba,
+        area.x + 1,
+        area.y + 1,
+    )
+    .is_err()
+    {
+        return false;
+    }
+
+    node_rect_field.clear();
+    node_rect_field.extend(rects);
+    true
+}
+
 /// Render the full-screen signal-flow graph surface (design D8): cluster
 /// containers from banner groups, then cable edge polylines, then rounded node
 /// frames with title bars and left/right edge ports on top. Edges draw before
@@ -1363,6 +1690,19 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     if empty {
         render_graph_empty(frame, area);
+        return;
+    }
+
+    // Kitty-graphics image path (design D1/D8): when the terminal supports
+    // kitty graphics and the feature is on, rasterize the graph offscreen,
+    // emit it beneath the surface (`z=-1`), and publish `graph_node_rects`
+    // through the camera inverse so the mouse apparatus works unchanged. The
+    // graph-area cells stay background-free so the image shows through; on any
+    // failure (degenerate scene, emit error, unsupported terminal) we fall
+    // through to the box-drawing path below, which is also the TestBackend
+    // path.
+    #[cfg(feature = "kitty-gfx")]
+    if kitty_protocol::supported() && render_graph_kitty(area, app) {
         return;
     }
 
@@ -1722,13 +2062,6 @@ fn render_graph_edges_with_highlight(
     node_rects: &[Rect],
     opts: GraphEdgeOpts<'_>,
 ) {
-    // kitty-gfx optional: when feature enabled and terminal is kitty, we would
-    // emit inline image escapes instead of box-drawing. Fallback is box-drawing.
-    #[cfg(feature = "kitty-gfx")]
-    if is_kitty_terminal() {
-        // Stub: kitty image rendering would replace this path; for now fallback
-        // to box-drawing so feature flag never breaks non-kitty terminals.
-    }
     let GraphEdgeOpts {
         highlight,
         disabled,
@@ -5115,6 +5448,94 @@ mod graph_view_tests {
 
     /// An `App` in the graph view with a hand-built graph and frozen positions,
     /// giving tests full control over node geometry.
+    #[cfg(all(test, feature = "kitty-gfx"))]
+    mod kitty_graph_tests {
+        use super::*;
+
+        /// The kitty image path rasterizes an opaque scene from the theme
+        /// tokens (design D9) and derives hit rects through the camera
+        /// inverse. Pure `graph_kitty_frame` — no terminal, no IO.
+        #[test]
+        fn kitty_frame_builds_opaque_scene_and_in_area_rects() {
+            let app = graph_app();
+            let graph = app.graph.as_ref().unwrap();
+            // Main content area of the 120×40 test surface (3-row header +
+            // 3-row status bar bracket it).
+            let area = Rect::new(0, 3, 120, 34);
+            let disabled = HashSet::new();
+            let store = HashMap::new();
+            let opts = GraphKittyOpts {
+                disabled: &disabled,
+                diff_report: None,
+                diff_showing: false,
+                latency_coloring: false,
+                hovered: None,
+                patch: None,
+                circuit_store: &store,
+            };
+            let cam = GraphCamera::fit_to_world(
+                WorldBounds::from_positions(&app.graph_positions),
+                (
+                    area.width as f32 * GRAPH_CELL_W_PX,
+                    area.height as f32 * GRAPH_CELL_H_PX,
+                ),
+                GRAPH_MIN_NODE_PX,
+            );
+            let (scene, rects) = graph_kitty_frame(graph, &app.graph_positions, area, opts, cam)
+                .expect("kitty frame renders on a real graph");
+            assert!(!rects.is_empty(), "at least one node gets a hit rect");
+            assert_eq!(scene.width, (area.width as f32 * GRAPH_CELL_W_PX) as u32);
+            assert_eq!(scene.height, (area.height as f32 * GRAPH_CELL_H_PX) as u32);
+            assert!(
+                scene.rgba.chunks_exact(4).all(|p| p[3] == 255),
+                "opaque f=32 canvas (premultiplied == straight)"
+            );
+            // Published rects stay within the area like the box path's do.
+            for (i, rect) in &rects {
+                assert!(*i < graph.nodes.len());
+                assert!(rect.width >= 1 && rect.height >= 1);
+                assert!(rect.x >= area.x && rect.y >= area.y);
+                assert!(rect.x + rect.width <= area.x + area.width);
+                assert!(rect.y + rect.height <= area.y + area.height);
+            }
+        }
+
+        /// Rects derive deterministically from the camera fit: the same frame
+        /// data yields the same rects, so mouse hit-testing is stable across
+        /// frames.
+        #[test]
+        fn kitty_frame_rects_are_deterministic() {
+            let app = graph_app();
+            let graph = app.graph.as_ref().unwrap();
+            let area = Rect::new(0, 3, 120, 34);
+            let disabled = HashSet::new();
+            let store = HashMap::new();
+            let opts = GraphKittyOpts {
+                disabled: &disabled,
+                diff_report: None,
+                diff_showing: false,
+                latency_coloring: false,
+                hovered: None,
+                patch: None,
+                circuit_store: &store,
+            };
+            let cam = GraphCamera::fit_to_world(
+                WorldBounds::from_positions(&app.graph_positions),
+                (
+                    area.width as f32 * GRAPH_CELL_W_PX,
+                    area.height as f32 * GRAPH_CELL_H_PX,
+                ),
+                GRAPH_MIN_NODE_PX,
+            );
+            let frame = |g: &Graph| {
+                graph_kitty_frame(g, &app.graph_positions, area, opts, cam)
+                    .expect("renders")
+                    .1
+            };
+            assert_eq!(frame(graph), frame(graph));
+        }
+    }
+
     fn graph_app_from(graph: Graph, positions: Vec<(f32, f32)>) -> App {
         let mut app = App::new();
         app.graph = Some(graph);

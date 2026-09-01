@@ -74,6 +74,12 @@ pub fn transmit_cont_chunk(chunk: &str, more: bool) -> String {
 
 /// Every transmit escape for an RGBA payload, in wire order.
 pub fn transmit_escapes(id: u32, width: u32, height: u32, rgba: &[u8]) -> io::Result<Vec<String>> {
+    if rgba.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot transmit an empty RGBA payload",
+        ));
+    }
     let encoded = encode_payload(rgba)?;
     let chunks = chunk_encoded(&encoded, MAX_CHUNK_SIZE);
     let last = chunks.len() - 1;
@@ -369,6 +375,15 @@ mod tests {
         assert_eq!(chunk_encoded("", MAX_CHUNK_SIZE), vec![""]);
         assert_eq!(chunk_encoded("ab", 0), vec!["a", "b"]);
     }
+
+    #[test]
+    fn empty_payload_is_rejected() {
+        // Task 3.2: an empty buffer has no image to transmit; the wire would
+        // otherwise receive a zero-data escape stream, so the caller must get
+        // an error to fall back from.
+        assert!(transmit_escapes(1, 0, 0, &[]).is_err());
+        assert!(transmit_escapes(1, 10, 10, &[]).is_err());
+    }
 }
 
 #[cfg(all(test, feature = "kitty-gfx"))]
@@ -376,14 +391,23 @@ mod feature_tests {
     use super::*;
 
     #[test]
-    fn supported_is_a_stable_cached_bool() {
+    fn feature_gated_emit_keeps_pure_builder_escape_shapes() {
+        // Task 3.2: with the kitty-gfx feature on, the terminal-write `emit`
+        // facade compiles; its string builders must stay byte-identical to the
+        // always-compiled path so a feature build ships the same wire bytes.
+        // Only string assembly is exercised — the handshake probe
+        // (`emit::supported`) needs a real TTY and is never run from tests.
         emit::reset_for_tests();
-        let first = emit::supported();
-        let second = emit::supported();
         assert_eq!(
-            first, second,
-            "capability flag must be cached, not re-probed"
+            place_escape(7, 12, 34),
+            "\x1b_Ga=p,i=7,c=12,r=34,z=-1,C=1,q=2\x1b\\"
         );
-        assert!(matches!(first, true | false));
+        assert_eq!(delete_escape(), "\x1b_Ga=d,q=2\x1b\\");
+        assert_eq!(cursor_escape(3, 5), "\x1b[3;5H");
+        let escapes = transmit_escapes(1, 2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        assert_eq!(
+            escapes[0],
+            "\u{1b}_Ga=t,i=1,f=32,s=2,v=1,o=z,m=1,q=2;eJz7z8DwHwQBEPcD/Q==\u{1b}\\"
+        );
     }
 }
