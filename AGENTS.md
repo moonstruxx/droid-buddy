@@ -1,6 +1,6 @@
 # AGENTS.md
 
-<!-- OB-NOT-INITIALIZED -->
+<!-- PC-NOT-INITIALIZED -->
 
 # Agent operating guide
 
@@ -22,22 +22,22 @@ Before a non-trivial change, read these documents in order:
 
 Read each document once per session unless it changes or the task moves into a different area.
 
-Command aliases: OpenSpec skills may reference `/opsx-propose`, `/opsx-apply`, `/opsx-archive`, or `/opsx-explore`. Always substitute them with the `ob-plan-propose`, `ob-plan-apply`, `ob-plan-archive`, and `ob-plan-explore` skills respectively. User-facing command names are `/plan-propose`, `/plan-apply`, `/plan-archive`, and `/plan-explore`. Never mention the `opsx-` names to the user.
+Command aliases: OpenSpec skills may reference `/opsx-propose`, `/opsx-apply`, `/opsx-archive`, or `/opsx-explore`. Always substitute them with the `pc-plan-propose`, `pc-plan-apply`, `pc-plan-archive`, and `pc-plan-explore` skills respectively. User-facing command names are `/plan-propose`, `/plan-apply`, `/plan-archive`, and `/plan-explore`. Never mention the `opsx-` names to the user.
 
 ## Workflow ownership
 
-<!-- OB-PLATFORM-WORKFLOW-START -->
-This project uses a mixed-platform setup: the backlog (work items) and the repo (PRs) live on different platforms. Check `.opencode/opencode-onboard.json` → `platform.backlog` and `platform.repo`.
+<!-- PC-PLATFORM-WORKFLOW-START -->
+This project uses a mixed-platform setup: the backlog (work items) and the repo (PRs) live on different platforms. Check `.opencode/harness.json` → `platform.backlog` and `platform.repo`.
 
-When the user provides a work item URL or says "implement the plan" or "I've added comments to the PR", **I own the full lifecycle**: parse the work item with `@ob-userstory` (backlog platform CLI), plan via the `ob-plan-propose` skill, confirm with the user, implement via the `ob-plan-apply` skill, ship via the `ob-ops-ship` skill (repo platform CLI).
+When the user provides a work item URL or says "implement the plan" or "I've added comments to the PR", **I own the full lifecycle**: parse the work item with `@pc-userstory` (backlog platform CLI), plan via the `pc-plan-propose` skill, confirm with the user, implement via the `pc-plan-apply` skill, ship via the `pc-ops-ship` skill (repo platform CLI).
 
 Trigger patterns, I recognize ALL of these, exact wording does not matter:
-- A backlog work-item URL or issue key → load `ob-userstory` → parse → load the `ob-plan-propose` skill → confirm with user → load the `ob-plan-apply` skill → ship
-- `implement the plan` / `implement` / `start` / `go` → load the `ob-plan-apply` skill → ship
+- A backlog work-item URL or issue key → load `pc-userstory` → parse → load the `pc-plan-propose` skill → confirm with user → load the `pc-plan-apply` skill → ship
+- `implement the plan` / `implement` / `start` / `go` → load the `pc-plan-apply` skill → ship
 - A PR/MR URL or "I've added comments to the PR" → read the PR comments via the repo platform CLI → run the PR Feedback Loop
 
 Never mix the CLIs: work items always go through the backlog platform CLI, PRs/MRs always through the repo platform CLI.
-<!-- OB-PLATFORM-WORKFLOW-END -->
+<!-- PC-PLATFORM-WORKFLOW-END -->
 
 ## Planning and execution
 
@@ -57,7 +57,7 @@ Available engineers:
 | `dermannmitdermachine-engineer` | `.opencode/agents/dermannmitdermachine-engineer.md` | Rust application logic, DROID framework, monolith/layered architecture, and design patterns for the ratatui TUI |
 | `api-engineer` | `.opencode/agents/api-engineer.md` | API/Integration, ComfyUI-style node graphs, force-directed physics layout, and third-party integration for the ratatui TUI |
 
-The `ob-plan-apply` skill is authoritative for subagent waves, dependency ordering, retries, and concurrency. Read `agents.maxConcurrent` from `.opencode/opencode-onboard.json` before spawning workers.
+The `pc-plan-apply` skill is authoritative for subagent waves, dependency ordering, retries, and concurrency. Read `agents.maxConcurrent` from `.opencode/harness.json` before spawning workers.
 
 ## Tool and repository safety
 
@@ -82,13 +82,13 @@ The `ob-plan-apply` skill is authoritative for subagent waves, dependency orderi
 
 ## Skills
 
-Skills live in `.agents/skills/`. Always installed: `@ob-guardrails-generic`, `@ob-guardrails-project`, and `@browser-automation`. Agents load them via `@skill-name` in their `## Abilities` section.
+Skills live in `.agents/skills/`. Always installed: `@pc-guardrails-generic`, `@pc-guardrails-project`, and `@browser-automation`. Agents load them via `@skill-name` in their `## Abilities` section.
 
-<!-- OB-PLATFORM-SKILLS-GUIDE-START -->
+<!-- PC-PLATFORM-SKILLS-GUIDE-START -->
 Mixed platform setup: the two platform skills target different hosts:
-- `@ob-userstory` → fetches work items from the backlog platform. Load when a work-item URL or issue key is provided.
-- `ob-ops-ship` → creates PRs/MRs and triages review feedback on the repo platform. Load in ship mode or PR-feedback mode.
-<!-- OB-PLATFORM-SKILLS-GUIDE-END -->
+- `@pc-userstory` → fetches work items from the backlog platform. Load when a work-item URL or issue key is provided.
+- `pc-ops-ship` → creates PRs/MRs and triages review feedback on the repo platform. Load in ship mode or PR-feedback mode.
+<!-- PC-PLATFORM-SKILLS-GUIDE-END -->
 
 <!-- CODEGRAPH_START -->
 ## CodeGraph

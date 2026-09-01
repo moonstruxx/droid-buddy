@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "generatedAt": "2026-09-01T17:43:14.492Z",
+  "onboardVersion": "1.6.7",
+  "opencodeVersion": "1.18.25",
+  "platform": {
+    "backlog": "browser",
+    "repo": "none"
+  },
+  "models": {
+    "plan": "opencode/deepseek-v4-flash",
+    "build": "opencode/deepseek-v4-flash",
+    "fast": "opencode/deepseek-v4-flash"
+  },
+  "agents": {
+    "maxConcurrent": 3
+  },
+  "source": {
+    "mode": "current",
+    "roots": [
+      "/home/bjoern/projects/droid_tui"
+    ]
+  },
+  "tools": {
+    "quota": true,
+    "codegraph": true,
+    "memory": false,
+    "rtk": false,
+    "simpleEnglish": false,
+    "humanizer": true
+  },
+  "preexisting": {
+    "design": false,
+    "architecture": false,
+    "openspec": false
+  },
+  "harnessVersion": "2.3.0"
+}
