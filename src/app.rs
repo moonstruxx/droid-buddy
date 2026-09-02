@@ -269,6 +269,7 @@ use ratatui::layout::Rect;
 
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
+use crate::favorites::FavoritesStore;
 use crate::graph::{Cluster, Graph, NodeId};
 use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
@@ -566,6 +567,10 @@ pub struct App {
     /// `LabelStore::load()` (warn-once, empty fallback) and persisted atomically
     /// on edit save.
     pub label_store: LabelStore,
+    /// XDG favourites store (`~/.config/droid-tui/favourites.toml`), loaded once
+    /// at `App::new` via `FavoritesStore::load()` (warn-once, empty fallback)
+    /// and persisted via `favorites.save()` on toggle (mirrors `LabelStore`).
+    pub favorites: FavoritesStore,
     /// Inline single-field label-edit overlay state. `None` when not editing.
     pub editing: Option<EditState>,
     /// Canonical absolute path of the currently loaded patch, if any. Drives
@@ -658,6 +663,7 @@ impl App {
             disabled_circuits: HashSet::new(),
             pinned: HashSet::new(),
             label_store: LabelStore::load(),
+            favorites: FavoritesStore::load(),
             editing: None,
             current_patch_path: None,
             diff_patch: None,
