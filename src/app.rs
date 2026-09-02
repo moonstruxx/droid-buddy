@@ -680,8 +680,62 @@ impl App {
         }
     }
 
+    /// Favourited `.ini` files as sorted absolute `PathBuf`s (pinned section).
+    /// Filters `favorites.favourites` to `.ini` extension and sorts for stable
+    /// picker ordering. Uses stored absolute strings directly — canonicalization
+    /// is handled at toggle time via `FavoritesStore::canonical_key`.
+    pub fn picker_entries_with_favourites(&self) -> Vec<PathBuf> {
+        let mut favs: Vec<PathBuf> = self
+            .favorites
+            .favourites
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.extension().is_some_and(|e| e == "ini"))
+            .collect();
+        favs.sort();
+        favs
+    }
+
+    /// Whether `path` is in the favourites store (canonicalized comparison).
+    pub fn is_favourite_entry(&self, path: &Path) -> bool {
+        self.favorites.is_favourite(path)
+    }
+
+    /// Display label for a picker entry, prefixing favourited files with `★ `.
+    /// The parent sentinel `..` is never considered favourited.
+    pub fn picker_entry_label(&self, path: &Path) -> String {
+        let base = if is_picker_parent_entry(path) {
+            "..".to_string()
+        } else {
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+        if !is_picker_parent_entry(path) && self.is_favourite_entry(path) {
+            format!("★ {base}")
+        } else {
+            base
+        }
+    }
+
     pub fn refresh_picker_entries(&mut self) {
         self.picker_entries.clear();
+        // Pinned favourites section at the top. Favourited `.ini` files are
+        // prepended even when not in `picker_dir`, sorted for stable order.
+        // They use absolute paths from the store, so `file_name()` still
+        // renders the leaf name and `is_favourite_entry` marks them with ★.
+        let favs = self.picker_entries_with_favourites();
+        // Deduplicate directory listing against favourites (compare canonical keys)
+        // so a favourited file in the current directory appears only in the
+        // pinned section, not duplicated below.
+        let fav_keys: HashSet<String> = favs
+            .iter()
+            .map(|p| crate::favorites::FavoritesStore::canonical_key(p))
+            // also insert raw stored string for absolute-path direct match
+            .collect();
+        // Also include raw strings to handle canonical mismatch for missing files
+        let raw_fav_set: HashSet<String> = self.favorites.favourites.iter().cloned().collect();
+        self.picker_entries.extend(favs);
         // Parent-directory entry rendered as "..", only when there is a real
         // parent to navigate up into (the filesystem root has none). The
         // sentinel is a bare ".." path, which `file_name()` reports as `None`,
@@ -695,13 +749,19 @@ impl App {
         }
         // Read directory entries. `read_dir` order is arbitrary, so collect
         // into groups and sort directories first, then `.ini` files, then any
-        // remaining files.
+        // remaining files. Entries already present as favourites are skipped
+        // to avoid duplication across sections.
         if let Ok(entries) = std::fs::read_dir(&self.picker_dir) {
             let mut dirs = Vec::new();
             let mut inis = Vec::new();
             let mut others = Vec::new();
             for entry in entries.flatten() {
                 let path = entry.path();
+                // Skip entries that are already in the favourites pinned section.
+                let key = crate::favorites::FavoritesStore::canonical_key(&path);
+                if fav_keys.contains(&key) || raw_fav_set.contains(&key) {
+                    continue;
+                }
                 if path.metadata().is_ok_and(|m| m.is_dir()) {
                     dirs.push(path);
                 } else if path.extension().is_some_and(|e| e == "ini") {
@@ -717,6 +777,10 @@ impl App {
             self.picker_entries.extend(inis);
             self.picker_entries.extend(others);
         }
+        // Clamp picker_index after prepending favourites / rebuilding list.
+        if self.picker_index >= self.picker_entries.len() {
+            self.picker_index = self.picker_entries.len().saturating_sub(1);
+        }
         // Scale factor affects entry density: with higher scale, show fewer entries
         // to prevent overcrowding the picker UI
         if self.scale_factor > 2.0 {
@@ -724,6 +788,10 @@ impl App {
             let max_entries =
                 (self.picker_entries.len() as f32 / self.scale_factor).ceil() as usize;
             self.picker_entries.truncate(max_entries.max(1));
+            // Re-clamp after truncation.
+            if self.picker_index >= self.picker_entries.len() {
+                self.picker_index = self.picker_entries.len().saturating_sub(1);
+            }
         }
     }
 

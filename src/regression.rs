@@ -883,6 +883,27 @@ fn visual_picker_parent_entry_snapshot() {
     });
 }
 
+#[test]
+fn visual_picker_favourites_snapshot() {
+    // file-picker-favourites 4.2: picker with favourites section pinned at
+    // the top — ★-prefixed favourites, muted separator, then directory listing.
+    // Use mocked absolute favourites (directly set `favorites.favourites`) so
+    // the snapshot is deterministic and filesystem-independent.
+    let _guard = ThemedGuard::pin("classic");
+    let mut app = App::new();
+    app.favorites.favourites = vec![
+        "/tmp/fav_alpha.ini".to_string(),
+        "/tmp/fav_beta.ini".to_string(),
+    ];
+    app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
+    app.showing_picker = true;
+    app.refresh_picker_entries();
+    let buf = buffer_for(&mut app, 80, 24);
+    insta::with_settings!({snapshot_suffix => "picker_favourites"}, {
+        insta::assert_snapshot!(buffer_to_ansi(&buf));
+    });
+}
+
 // ── viewer live interaction (main window unblocked, droid_tui-0lw) ─────
 
 #[test]
