@@ -106,14 +106,22 @@ impl GraphCamera {
         let span_h = (bounds.max_y - bounds.min_y).max(MIN_SPAN);
         let fit_zoom = (pixel_size.0 / span_w).min(pixel_size.1 / span_h);
         let zoom = fit_zoom.max(min_node_px).max(MIN_ZOOM);
-        let (cx, cy) = (
-            (bounds.min_x + bounds.max_x) / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
-        );
-        let pan = (
-            cx * zoom - pixel_size.0 / 2.0,
-            cy * zoom - pixel_size.1 / 2.0,
-        );
+        // When the min-node clamp overrides the fit, the world overflows the
+        // canvas; anchor the pan on the world's top-left corner so the initial
+        // view shows the graph's start instead of empty space around its
+        // center (a vertical chain's center is a gap between nodes).
+        let pan = if zoom > fit_zoom {
+            (bounds.min_x * zoom, bounds.min_y * zoom)
+        } else {
+            let (cx, cy) = (
+                (bounds.min_x + bounds.max_x) / 2.0,
+                (bounds.min_y + bounds.max_y) / 2.0,
+            );
+            (
+                cx * zoom - pixel_size.0 / 2.0,
+                cy * zoom - pixel_size.1 / 2.0,
+            )
+        };
         Self { zoom, pan }
     }
 
@@ -200,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_to_world_keeps_smallest_node_legible_and_centers_content() {
+    fn fit_to_world_keeps_smallest_node_legible_and_anchors_top_left_when_clamped() {
         // Spread-out world: 1000 nodes one world unit apart. The raw fit zoom
         // (span 999 → 640px) would shrink a one-unit node to <1px; the minimum
         // clamp must hold the tightest spacing readable instead.
@@ -218,7 +226,31 @@ mod tests {
         );
         // Smallest node (the tightest 1.0-unit gap) renders ≥ min_node_px px.
         assert!(1.0 * cam.zoom >= min_node_px, "tightest gap sub-minimum");
-        // Content is centered: the world-bounds center lands on the viewport center.
+        // The clamp overrode the fit, so the pan anchors on the world's
+        // top-left corner: the initial view shows the graph's start, not
+        // empty space around the world center (regression: the graph surface
+        // rendered blank for real patches whose solver output is a vertical
+        // chain).
+        let (px, py) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        assert_close(px, 0.0, 1e-2);
+        assert_close(py, 0.0, 1e-2);
+    }
+
+    #[test]
+    fn fit_centers_content_when_fit_zoom_is_not_clamped() {
+        // A world that fits at the fit zoom (no min-node clamp override) keeps
+        // the center anchor: the world-bounds center lands on the viewport
+        // center.
+        let bounds = WorldBounds {
+            min_x: -10.0,
+            min_y: -5.0,
+            max_x: 30.0,
+            max_y: 15.0,
+        };
+        let pixel = (640.0, 400.0);
+        let cam = GraphCamera::fit_to_world(bounds, pixel, 4.0);
+        // fit_zoom = min(640/40, 400/20) = 16 ≥ 4 → not clamped.
+        assert_close(cam.zoom, 16.0, 1e-3);
         let (cx, cy) = (
             (bounds.min_x + bounds.max_x) / 2.0,
             (bounds.min_y + bounds.max_y) / 2.0,
@@ -226,6 +258,34 @@ mod tests {
         let (px, py) = cam.world_to_pixel(cx, cy);
         assert_close(px, pixel.0 / 2.0, 1e-2);
         assert_close(py, pixel.1 / 2.0, 1e-2);
+    }
+
+    #[test]
+    fn fit_clamped_zoom_anchors_tall_world_top_left_into_canvas() {
+        // Regression: a real patch's solver output is a vertical chain (tall,
+        // narrow world). The fit zoom is height-limited below the min-node
+        // clamp; the clamp overrides the fit, and the pan must anchor on the
+        // world's top-left corner so the graph's start is on-screen instead of
+        // the empty space around the world center (the graph surface rendered
+        // blank).
+        let bounds = WorldBounds {
+            min_x: -77.0,
+            min_y: 3.0,
+            max_x: 97.0,
+            max_y: 709.0,
+        };
+        let pixel = (624.0, 304.0); // 100x24 main area minus one node frame
+        let min_node_px = 2.2;
+        let cam = GraphCamera::fit_to_world(bounds, pixel, min_node_px);
+        // The clamp overrode the fit (fit would be ~0.43).
+        assert!(cam.zoom > 1.0);
+        // The world's top-left corner maps into the canvas.
+        let (px, py) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        assert!(px >= 0.0 && py >= 0.0, "top-left corner visible");
+        assert!(px < pixel.0 && py < pixel.1);
+        // A node near the top-left of the chain is on-screen.
+        let (nx, ny) = cam.world_to_pixel(1.0, 3.0);
+        assert!(nx >= 0.0 && ny >= 0.0 && nx < pixel.0 && ny < pixel.1);
     }
 
     #[test]

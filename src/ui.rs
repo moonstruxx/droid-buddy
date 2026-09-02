@@ -5483,6 +5483,7 @@ mod graph_view_tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
+    use std::path::Path;
 
     /// A synthetic patch with two named banner groups (clusters) and one cable
     /// fanning out: `clocktool` sources `_CLK`, `copy` and `osc` sink it.
@@ -5713,6 +5714,47 @@ mod graph_view_tests {
                 "{w}×{h}: node title bar missing"
             );
         }
+    }
+
+    #[test]
+    fn graph_view_renders_real_patch_solver_output() {
+        // Regression: the graph surface rendered blank for real patches. The
+        // solver's vertical-chain output overflows the viewport under the
+        // min-node zoom clamp, and the old center-anchored pan showed only
+        // empty space. The camera now anchors the world's top-left corner, so
+        // the graph's start must be visible at realistic terminal sizes.
+        for (w, h) in [(100, 30), (120, 40)] {
+            let mut app = App::new();
+            let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+            app.load_patch(patch);
+            app.open_graph();
+            let text = rendered_text(&mut app, w, h);
+            assert!(text.contains("╭"), "{w}×{h}: rounded node frame missing");
+            assert!(
+                text.contains("p2b8"),
+                "{w}×{h}: first circuit title missing"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_node_rects_real_patch_solver_output_has_visible_nodes() {
+        // Regression: with the old center-anchored pan, the real solver output
+        // (vertical chain) published zero in-area node rects at realistic
+        // terminal sizes — the surface rendered blank. The top-left anchor
+        // must publish at least one non-zero in-area rect.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        buffer_for(&mut app, 100, 30);
+        let area = graph_main_area(100, 30);
+        assert!(
+            app.graph_node_rects.iter().any(|(_, rect)| {
+                rect.width > 0 && rect.height > 0 && rect.x < area.width && rect.y < area.height
+            }),
+            "at least one node rect must be visible in the main area"
+        );
     }
 
     #[test]
