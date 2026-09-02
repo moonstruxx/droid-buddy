@@ -60,6 +60,12 @@ const ENUM_LIMIT: u128 = 50_000;
 /// candidate permutation).
 const SEARCH_STEPS: usize = 2_000;
 
+/// Capped budget for interactive use (`g o` open and live weight slider).
+/// `MinMax` runs 3 strategies ⇒ ≤ 750 scored candidates, each now hash-free
+/// via the cached `EvalCtx`, comfortably <100ms even on large patches.
+/// Full-budget tests still use `SEARCH_STEPS` via the original entry points.
+const INTERACTIVE_SEARCH_STEPS: usize = 250;
+
 /// One candidate reordering of the patch's sections.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateOrdering {
@@ -196,10 +202,46 @@ struct Derived {
 
 /// Everything a candidate evaluation needs: the derived graph plus the cost
 /// provider and schema (bundled to keep the search helpers' signatures small).
+/// Cached indices make per-candidate scoring hash-free (no HashMap rebuild).
 struct EvalCtx<'a> {
     derived: &'a Derived,
     cost: &'a CostModel,
     schema: &'a Schema,
+    /// Per-node `AVG` (source cost) in `derived.nodes` order.
+    node_avgs: Vec<f32>,
+    /// Per-edge source/sink node indices (parallel to `derived.edges`).
+    edge_src: Vec<usize>,
+    edge_sink: Vec<usize>,
+}
+
+fn new_eval_ctx<'a>(derived: &'a Derived, cost: &'a CostModel, schema: &'a Schema) -> EvalCtx<'a> {
+    let mut node_index = HashMap::with_capacity(derived.nodes.len());
+    for (idx, (id, _)) in derived.nodes.iter().enumerate() {
+        node_index.insert(id.clone(), idx);
+    }
+    let node_avgs = derived
+        .nodes
+        .iter()
+        .map(|(id, _)| cost.circuit_avg(id, schema))
+        .collect::<Vec<_>>();
+    let edge_src = derived
+        .edges
+        .iter()
+        .map(|e| node_index.get(&e.source).copied().unwrap_or(0))
+        .collect::<Vec<_>>();
+    let edge_sink = derived
+        .edges
+        .iter()
+        .map(|e| node_index.get(&e.sink).copied().unwrap_or(0))
+        .collect::<Vec<_>>();
+    EvalCtx {
+        derived,
+        cost,
+        schema,
+        node_avgs,
+        edge_src,
+        edge_sink,
+    }
 }
 
 fn derive(patch: &Patch) -> Derived {
@@ -244,11 +286,67 @@ fn derive(patch: &Patch) -> Derived {
 
 /// Score a candidate `order` with the exact `forward_latency` metric: nodes
 /// keep their identities, only the per-node processing position changes.
+/// Uses the cached `EvalCtx` indices so no per-candidate HashMap is built;
+/// result is byte-identical to `forward_latency` called with the same positions.
 fn evaluate_order(order: &[usize], eval: &EvalCtx<'_>) -> LatencySummary {
+    let n = eval.derived.nodes.len();
+    if eval.derived.edges.is_empty() {
+        return LatencySummary {
+            avg: 0.0,
+            max: 0.0,
+            back_edge_count: 0,
+        };
+    }
     let mut position = vec![0usize; order.len()];
     for (pos, &section) in order.iter().enumerate() {
         position[section] = pos;
     }
+    // Fast path: cached node/edge indices avoid the HashMap rebuild inside
+    // `forward_latency`. The per-edge formula is identical: distance = (t-s) mod N.
+    if !eval.edge_src.is_empty() && eval.edge_src.len() == eval.derived.edges.len() {
+        let mut sum = 0.0f32;
+        let mut max = 0.0f32;
+        let mut back = 0usize;
+        for (ei, &src_idx) in eval.edge_src.iter().enumerate() {
+            let sink_idx = eval.edge_sink[ei];
+            let s_section = eval
+                .derived
+                .nodes
+                .get(src_idx)
+                .map(|(_, s)| *s)
+                .unwrap_or(0);
+            let t_section = eval
+                .derived
+                .nodes
+                .get(sink_idx)
+                .map(|(_, s)| *s)
+                .unwrap_or(0);
+            let s = position.get(s_section).copied().unwrap_or(0);
+            let t = position.get(t_section).copied().unwrap_or(0);
+            let is_back = s > t;
+            let distance = if n == 0 {
+                0
+            } else {
+                ((t as isize - s as isize).rem_euclid(n as isize)) as usize
+            };
+            let latency = distance as f32 * eval.node_avgs.get(src_idx).copied().unwrap_or(1.0);
+            if is_back {
+                back += 1;
+            }
+            if latency > max {
+                max = latency;
+            }
+            sum += latency;
+        }
+        let avg = sum / eval.derived.edges.len() as f32;
+        return LatencySummary {
+            avg,
+            max,
+            back_edge_count: back,
+        };
+    }
+    // Fallback: identical to the original forward_latency path (should not happen
+    // in normal use but keeps the function total if caches are empty).
     let node_positions: Vec<(NodeId, usize)> = eval
         .derived
         .nodes
@@ -608,11 +706,22 @@ fn search_exact(
 /// within each domain, bounded by `SEARCH_STEPS`. Tracks the best order seen;
 /// the identity order is always a candidate, so the result is never worse than
 /// the original under `objective`.
+#[allow(dead_code)]
 fn search_local(
     domains: &[Range<usize>],
     sections: &[IniSection],
     eval: &EvalCtx<'_>,
     objective: Objective,
+) -> (Vec<usize>, LatencySummary) {
+    search_local_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
+}
+
+fn search_local_with_budget(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    eval: &EvalCtx<'_>,
+    objective: Objective,
+    budget_limit: usize,
 ) -> (Vec<usize>, LatencySummary) {
     let mut order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
     let mut best_order = order.clone();
@@ -623,7 +732,7 @@ fn search_local(
         best_order = identity;
         best_summary = identity_summary;
     }
-    let mut budget = SEARCH_STEPS;
+    let mut budget = budget_limit;
     loop {
         let mut improved = false;
         // Phase 1: adjacent swaps within each domain (cheap refinement).
@@ -751,11 +860,22 @@ fn coarsen_by_banner(
 /// refines with successive radii, halving the radius after each no-improvement
 /// round. Deterministic, banner-scope preserving (only swaps inside `domains`),
 /// and same-name order preserving via `safe_swap`.
+#[allow(dead_code)]
 fn search_vns(
     domains: &[Range<usize>],
     sections: &[IniSection],
     eval: &EvalCtx<'_>,
     objective: Objective,
+) -> (Vec<usize>, LatencySummary) {
+    search_vns_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
+}
+
+fn search_vns_with_budget(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    eval: &EvalCtx<'_>,
+    objective: Objective,
+    budget_limit: usize,
 ) -> (Vec<usize>, LatencySummary) {
     // --- coarsening (pure, deterministic) ---
     let coarse_derived = coarsen_by_banner(domains, sections, eval.derived);
@@ -777,7 +897,7 @@ fn search_vns(
         best_summary = identity_summary;
     }
     let mut current = best_order.clone();
-    let mut budget = SEARCH_STEPS;
+    let mut budget = budget_limit;
     let mut radius = domains.iter().map(|r| r.len()).max().unwrap_or(0);
     if radius > 8 {
         radius = 8;
@@ -937,14 +1057,25 @@ fn is_large_for_sa(domains: &[Range<usize>], sections: &[IniSection]) -> bool {
 /// acceptance on the (possibly weighted) objective delta, every move a
 /// `safe_swap`. Deterministic and bounded. Falls back to `search_local` when
 /// `is_large_for_sa`.
+#[allow(dead_code)]
 fn search_sa(
     domains: &[Range<usize>],
     sections: &[IniSection],
     eval: &EvalCtx<'_>,
     objective: Objective,
 ) -> (Vec<usize>, LatencySummary) {
+    search_sa_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
+}
+
+fn search_sa_with_budget(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    eval: &EvalCtx<'_>,
+    objective: Objective,
+    budget_limit: usize,
+) -> (Vec<usize>, LatencySummary) {
     if is_large_for_sa(domains, sections) {
-        return search_local(domains, sections, eval, objective);
+        return search_local_with_budget(domains, sections, eval, objective, budget_limit);
     }
     let mut rng = annealing_seed(domains, sections);
     let seed_order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
@@ -960,14 +1091,15 @@ fn search_sa(
     let mut current_summary = best_global;
     let mut current_value = objective_value(&current_summary, objective);
     let mut best_value = current_value;
-    // Geometric cooling: T0=1.0 → T_min=0.01 over SEARCH_STEPS
+    // Geometric cooling: T0=1.0 → T_min=0.01 over budget_limit steps
     let t0: f64 = 1.0;
     let t_min: f64 = 0.01;
-    let alpha = (t_min / t0).powf(1.0 / SEARCH_STEPS as f64);
+    let steps = budget_limit.max(1) as f64;
+    let alpha = (t_min / t0).powf(1.0 / steps);
     if domains.is_empty() {
         return (best_global_order, best_global);
     }
-    for step in 0..SEARCH_STEPS {
+    for step in 0..budget_limit {
         let t = t0 * alpha.powi(step as i32);
         let r = splitmix64(&mut rng);
         let domain_idx = (r as usize) % domains.len();
@@ -1034,22 +1166,48 @@ pub fn generate_candidates_weighted(
     generate_candidates_inner(patch, cost, scope, Some(Objective::weighted(weight)))
 }
 
+/// Fast interactive variant for `g o` and the `w` slider: same strategies and
+/// constraints as `generate_candidates_weighted`, but capped to
+/// `INTERACTIVE_SEARCH_STEPS` per heuristic strategy. Determinism and
+/// banner/same-name guarantees are preserved; only the hill-climbing depth is
+/// reduced. `forward_latency` metric and `CostModel` are unchanged.
+pub fn generate_candidates_weighted_fast(
+    patch: &Patch,
+    cost: &CostModel,
+    scope: OptimizeScope,
+    weight: f32,
+) -> Vec<CandidateOrdering> {
+    generate_candidates_inner_with_budget(
+        patch,
+        cost,
+        scope,
+        Some(Objective::weighted(weight)),
+        INTERACTIVE_SEARCH_STEPS,
+    )
+}
+
 fn generate_candidates_inner(
     patch: &Patch,
     cost: &CostModel,
     scope: OptimizeScope,
     objective_override: Option<Objective>,
 ) -> Vec<CandidateOrdering> {
+    generate_candidates_inner_with_budget(patch, cost, scope, objective_override, SEARCH_STEPS)
+}
+
+fn generate_candidates_inner_with_budget(
+    patch: &Patch,
+    cost: &CostModel,
+    scope: OptimizeScope,
+    objective_override: Option<Objective>,
+    budget: usize,
+) -> Vec<CandidateOrdering> {
     if patch.sections.is_empty() {
         return Vec::new();
     }
     let derived = derive(patch);
     let schema = load_schema();
-    let eval = EvalCtx {
-        derived: &derived,
-        cost,
-        schema,
-    };
+    let eval = new_eval_ctx(&derived, cost, schema);
     if derived.edges.is_empty() {
         // Nothing to optimize: no cables, so every ordering ties. Return the
         // single identity candidate so the caller still gets a valid result.
@@ -1077,20 +1235,24 @@ fn generate_candidates_inner(
             .fold(1u128, |acc, c| acc.saturating_mul(c.min(ENUM_LIMIT + 1)));
         let (order, after, label) = if matches!(strategy, Strategy::Annealing) {
             if is_large_for_sa(&domains, &patch.sections) {
-                let (o, a) = search_local(&domains, &patch.sections, &eval, objective);
+                let (o, a) =
+                    search_local_with_budget(&domains, &patch.sections, &eval, objective, budget);
                 (o, a, String::from("annealing (local)"))
             } else {
-                let (o, a) = search_sa(&domains, &patch.sections, &eval, objective);
+                let (o, a) =
+                    search_sa_with_budget(&domains, &patch.sections, &eval, objective, budget);
                 (o, a, String::from(strategy.label()))
             }
         } else if total_valid <= ENUM_LIMIT {
             let (o, a) = search_exact(&domains, &patch.sections, &eval, objective);
             (o, a, String::from(strategy.label()))
         } else if matches!(strategy, Strategy::BannerMinSum) {
-            let (o, a) = search_vns(&domains, &patch.sections, &eval, objective);
+            let (o, a) =
+                search_vns_with_budget(&domains, &patch.sections, &eval, objective, budget);
             (o, a, String::from(strategy.label()))
         } else {
-            let (o, a) = search_local(&domains, &patch.sections, &eval, objective);
+            let (o, a) =
+                search_local_with_budget(&domains, &patch.sections, &eval, objective, budget);
             (o, a, String::from(strategy.label()))
         };
         candidates.push(CandidateOrdering {
@@ -1188,11 +1350,7 @@ mod tests {
         let candidates = generate_candidates(&patch, &cost, OptimizeScope::Global);
         let derived = derive(&patch);
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived: &derived,
-            cost: &cost,
-            schema,
-        };
+        let eval = new_eval_ctx(&derived, &cost, schema);
 
         // Independent brute force: enumerate all 4! permutations of the four
         // sections (names distinct → all valid), score, keep the best.
@@ -1389,11 +1547,7 @@ mod tests {
     /// Latency summary of `order` under the patch's derived graph.
     fn order_summary(order: &[usize], derived: &Derived, cost: &CostModel) -> LatencySummary {
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived,
-            cost,
-            schema,
-        };
+        let eval = new_eval_ctx(derived, cost, schema);
         evaluate_order(order, &eval)
     }
 
@@ -1577,11 +1731,7 @@ mod tests {
         let cost = CostModel::default();
         let derived = derive(&patch);
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived: &derived,
-            cost: &cost,
-            schema,
-        };
+        let eval = new_eval_ctx(&derived, &cost, schema);
         let domains = Strategy::BannerMinSum.domains(&patch);
         // Verify the fixture indeed exceeds ENUM_LIMIT so VNS is exercised.
         let total_valid: u128 = domains
@@ -1644,11 +1794,7 @@ mod tests {
         // single whole-file domain) for bounded convergence even without groups.
         let big = big_patch();
         let big_derived = derive(&big);
-        let big_eval = EvalCtx {
-            derived: &big_derived,
-            cost: &cost,
-            schema,
-        };
+        let big_eval = new_eval_ctx(&big_derived, &cost, schema);
         let big_domains = Strategy::BannerMinSum.domains(&big);
         let (big_order, _) = search_vns(&big_domains, &big.sections, &big_eval, Objective::MinSum);
         assert_full_permutation(&big_order, big.sections.len());
@@ -1676,11 +1822,7 @@ mod tests {
         // Direct search_sa determinism as well.
         let derived = derive(&patch);
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived: &derived,
-            cost: &cost,
-            schema,
-        };
+        let eval = new_eval_ctx(&derived, &cost, schema);
         let domains = Strategy::Annealing.domains(&patch);
         let (o1, s1) = search_sa(&domains, &patch.sections, &eval, Objective::MinMax);
         let (o2, s2) = search_sa(&domains, &patch.sections, &eval, Objective::MinMax);
@@ -1697,11 +1839,7 @@ mod tests {
         for patch in [chain_patch(), big_patch(), large_banner_patch()] {
             let derived = derive(&patch);
             let schema = load_schema();
-            let eval = EvalCtx {
-                derived: &derived,
-                cost: &cost,
-                schema,
-            };
+            let eval = new_eval_ctx(&derived, &cost, schema);
             let domains = Strategy::Annealing.domains(&patch);
             let (order, _) = search_sa(&domains, &patch.sections, &eval, Objective::MinMax);
             assert_full_permutation(&order, patch.sections.len());
@@ -1759,11 +1897,7 @@ mod tests {
         for patch in [&small, &large] {
             let derived = derive(patch);
             let schema = load_schema();
-            let eval = EvalCtx {
-                derived: &derived,
-                cost: &cost,
-                schema,
-            };
+            let eval = new_eval_ctx(&derived, &cost, schema);
             let domains = Strategy::Annealing.domains(patch);
             let total_valid: u128 = domains
                 .iter()
@@ -1837,11 +1971,7 @@ mod tests {
         let cost = CostModel::default();
         let derived = derive(&patch);
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived: &derived,
-            cost: &cost,
-            schema,
-        };
+        let eval = new_eval_ctx(&derived, &cost, schema);
         // Two distinct orders: identity (d,b,a,c) vs chain (a,c,b,d).
         let identity: Vec<usize> = (0..patch.sections.len()).collect();
         let chain = vec![2, 3, 1, 0];
@@ -1912,11 +2042,7 @@ mod tests {
         let cost = CostModel::default();
         let derived = derive(&patch);
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived: &derived,
-            cost: &cost,
-            schema,
-        };
+        let eval = new_eval_ctx(&derived, &cost, schema);
         let domains = vec![0..patch.sections.len()];
         let (exact_sum_order, _) =
             search_exact(&domains, &patch.sections, &eval, Objective::MinSum);
@@ -1992,11 +2118,7 @@ mod tests {
         let cost = CostModel::default();
         let derived = derive(&patch);
         let schema = load_schema();
-        let eval = EvalCtx {
-            derived: &derived,
-            cost: &cost,
-            schema,
-        };
+        let eval = new_eval_ctx(&derived, &cost, schema);
         let domains = vec![0..patch.sections.len()];
         // Distinct circuit names → all 8! permutations valid and under the
         // enumeration limit, so both the engine and the brute force search the

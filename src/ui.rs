@@ -1771,6 +1771,9 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
     let Some((scene, rects)) = graph_kitty_frame(graph, graph_positions, area, opts, cam) else {
         return false;
     };
+    if !rects.iter().any(|r| r.1.width > 0 && r.1.height > 0) {
+        return false;
+    }
 
     // Emit beneath the surface at the area's top-left cell (1-based for the
     // kitty protocol). Any IO failure falls back to box drawing rather than
@@ -1958,9 +1961,11 @@ fn graph_fit_camera(positions: &[(f32, f32)], area: Rect) -> GraphCamera {
     let ph = area.height as f32 * GRAPH_CELL_H_PX;
     let node_w = GRAPH_NODE_WIDTH.min(area.width) as f32 * GRAPH_CELL_W_PX;
     let node_h = GRAPH_NODE_HEIGHT.min(area.height) as f32 * GRAPH_CELL_H_PX;
+    let avail_w = (pw - node_w).max(1.0);
+    let avail_h = (ph - node_h).max(1.0);
     GraphCamera::fit_to_world(
         WorldBounds::from_positions(positions),
-        (pw - node_w, ph - node_h),
+        (avail_w, avail_h),
         GRAPH_MIN_NODE_PX,
     )
 }
