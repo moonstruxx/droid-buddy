@@ -5109,17 +5109,80 @@ fn visual_optimizer_menu_snapshot() {
                 "{theme_name} {width}: menu title"
             );
             assert!(
-                ansi.contains("back-edges"),
-                "{theme_name} {width}: candidate summary line"
+                ansi.contains("obj"),
+                "{theme_name} {width}: weighted objective label"
             );
-            assert!(
-                ansi.contains("avg"),
-                "{theme_name} {width}: avg before→after"
-            );
+            // At width 60 the modal is 56 wide and the candidate line clips
+            // before `back-edges`; the full line only fits at width 100.
+            if width == 100 {
+                assert!(
+                    ansi.contains("back-edges"),
+                    "{theme_name} {width}: candidate summary line"
+                );
+                assert!(
+                    ansi.contains("avg"),
+                    "{theme_name} {width}: avg before→after"
+                );
+            }
             insta::with_settings!({snapshot_suffix => format!("optimizer_menu_{theme_name}_{width}")}, {
                 insta::assert_snapshot!(ansi);
             });
         }
+    }
+}
+
+#[test]
+fn visual_optimizer_menu_weight_snapshot() {
+    // Design D5 weight readout: mid-range `w = 0.4` renders in the header and
+    // each candidate row carries its weighted-objective `obj` label. Drive `]`
+    // × 4 through the handler so the candidates are re-generated under
+    // Weighted(0.4), not just the display field set.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = optimizer_app_from_fixture("optimizer_latency");
+        for _ in 0..4 {
+            handle_event(key(KeyCode::Char(']')), &mut app);
+        }
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.4);
+        let buf = buffer_for(&mut app, 100, 30);
+        let ansi = buffer_to_ansi(&buf);
+        assert!(
+            ansi.contains("w = 0.4"),
+            "{theme_name}: mid-range weight readout"
+        );
+        assert!(
+            ansi.contains("obj"),
+            "{theme_name}: weighted objective label"
+        );
+        insta::with_settings!({snapshot_suffix => format!("optimizer_menu_weight_{theme_name}")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+}
+
+#[test]
+fn visual_optimizer_menu_weight_endpoint_snapshot() {
+    // Design D5 endpoint snap (handler task 2.1): `1` snaps the weight to the
+    // pure min-max endpoint. The header shows the endpoint label and each
+    // candidate row carries its weighted-objective `obj` label.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        let mut app = optimizer_app_from_fixture("optimizer_latency");
+        handle_event(key(KeyCode::Char('1')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
+        let buf = buffer_for(&mut app, 100, 30);
+        let ansi = buffer_to_ansi(&buf);
+        assert!(
+            ansi.contains("w = 1.0 (min-max)"),
+            "{theme_name}: pure-endpoint weight readout"
+        );
+        assert!(
+            ansi.contains("obj"),
+            "{theme_name}: weighted objective label"
+        );
+        insta::with_settings!({snapshot_suffix => format!("optimizer_menu_weight_endpoint_{theme_name}")}, {
+            insta::assert_snapshot!(ansi);
+        });
     }
 }
 

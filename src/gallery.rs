@@ -380,6 +380,18 @@ fn setup_disabled_circuit_graph(app: &mut App) {
     app.disabled_circuits.insert((String::from("clocktool"), 0));
 }
 
+fn setup_optimizer_weighted(app: &mut App) {
+    // Optimizer menu with the weight slider mid-range: `g o` opens the menu
+    // (w = 0.0), four `]` presses step it to 0.4 through the real handler,
+    // re-generating candidates under Weighted(0.4).
+    *app = app_from_fixture("optimizer_latency");
+    press(app, KeyCode::Char('g'));
+    press(app, KeyCode::Char('o'));
+    for _ in 0..4 {
+        press(app, KeyCode::Char(']'));
+    }
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -570,6 +582,13 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 40,
         setup: setup_disabled_circuit_graph,
+    },
+    Scenario {
+        id: "optimizer_weight_100",
+        label: "optimizer_latency · width 100 · g o menu · w = 0.4 (weighted obj per row)",
+        width: 100,
+        height: 30,
+        setup: setup_optimizer_weighted,
     },
     // ── controller-front review matrix: fixtures/ui_review/* (6.2) ────────
     // Renders each newly-created controller-front fixture in the default

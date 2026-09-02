@@ -100,6 +100,11 @@ pub struct Theme {
     /// preview/export tool), not an error surface.
     pub optimizer_modal_border: Color,
     pub optimizer_selected_bg: Color,
+    /// Optimizer weight readout (design D5): the `w = x.x` header span plus the
+    /// per-candidate weighted-objective `obj` label. An accent value so the
+    /// weight the menu is scored on stays distinct from the muted candidate
+    /// values.
+    pub optimizer_weight: Color,
 }
 
 impl Theme {
@@ -177,6 +182,9 @@ impl Theme {
             render_outlier_warning: Color::Yellow,
             optimizer_modal_border: Color::Blue,
             optimizer_selected_bg: Color::DarkGray,
+            // Same accent family as graph_node_title: the weight readout is an
+            // accent value, not a muted statistic.
+            optimizer_weight: Color::Yellow,
         }
     }
 
@@ -248,6 +256,7 @@ impl Theme {
             render_outlier_warning: Color::Reset,
             optimizer_modal_border: Color::Reset,
             optimizer_selected_bg: Color::Reset,
+            optimizer_weight: Color::Reset,
         }
     }
 
@@ -338,6 +347,9 @@ impl Theme {
             render_outlier_warning: Color::White,
             optimizer_modal_border: Color::White,
             optimizer_selected_bg: Color::Black,
+            // Brightest gray so the weight span stays tellable against the
+            // Black selected-row background in the grayscale palette.
+            optimizer_weight: Color::White,
         }
     }
 
@@ -938,6 +950,7 @@ mod tests {
                 theme.render_outlier_warning,
                 theme.optimizer_modal_border,
                 theme.optimizer_selected_bg,
+                theme.optimizer_weight,
             ];
             for token in tokens {
                 let rgb = theme.rgb(token);

@@ -37,5 +37,5 @@
 │  ││  │
 └──┘└──┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 260 cols or reduce scal│
+│Loaded led_pairs | Renders degraded at 100 cols — use ≥ 260 cols or reduce scale | Scale: 1.0 | Or│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

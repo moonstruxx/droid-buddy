@@ -344,6 +344,8 @@ pub struct OptimizerState {
     /// Identity permutation `0..n` captured when the menu opened; applying it
     /// to `Patch.sections` restores the file order.
     pub original_order: Vec<usize>,
+    /// Current weight `w` in `[0,1]` for the weighted objective `(1−w)·Sum + w·max` (D2/D5).
+    pub weight: f32,
 }
 
 /// Grabbed-node state for a graph drag (design D1/D7). Holds the index of the
@@ -833,19 +835,72 @@ impl App {
             self.status_message = String::from("Nothing to optimize — no sections.");
             return false;
         }
-        let candidates =
-            crate::optimize::generate_candidates(patch, &self.cost_model, OptimizeScope::MinMax);
+        let weight: f32 = 0.0;
+        let candidates = crate::optimize::generate_candidates_weighted(
+            patch,
+            &self.cost_model,
+            OptimizeScope::MinMax,
+            weight,
+        );
         let original_order: Vec<usize> = (0..patch.sections.len()).collect();
         self.optimizer = Some(OptimizerState {
             candidates,
             cursor: 0,
             previewing: None,
             original_order,
+            weight,
         });
-        self.status_message = String::from(
-            "Optimizer: j/k select · Enter preview · r restore · s export · Esc close",
+        self.status_message = format!(
+            "Optimizer w = {:.1}: j/k select · Enter preview · r restore · s export · Esc close",
+            weight
         );
         true
+    }
+
+    /// Adjust optimizer weight `w` in `[0,1]` (clamped, snapped to 0.1),
+    /// re-running `generate_candidates` with `Weighted(w)`. Preserves the
+    /// cursor, clears any preview (restoring file order + rebuilding the graph
+    /// if needed), and updates the status line with `w = x.x`.
+    pub fn optimizer_set_weight(&mut self, weight: f32) {
+        let Some(state) = self.optimizer.as_ref() else {
+            return;
+        };
+        let w = if weight.is_finite() {
+            weight.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // Snap to 0.1 like the viewer split convention.
+        let w = (w * 10.0).round() / 10.0;
+        let w = w.clamp(0.0, 1.0);
+        if (w - state.weight).abs() < f32::EPSILON {
+            return;
+        }
+        let was_previewing = state.previewing.is_some();
+        self.restore_optimizer_order();
+        if was_previewing {
+            self.rebuild_graph();
+        }
+        let Some(patch) = self.patch.clone() else {
+            return;
+        };
+        let candidates = crate::optimize::generate_candidates_weighted(
+            &patch,
+            &self.cost_model,
+            OptimizeScope::MinMax,
+            w,
+        );
+        if let Some(state) = self.optimizer.as_mut() {
+            let cursor = state.cursor;
+            state.weight = w;
+            state.candidates = candidates;
+            state.cursor = cursor.min(state.candidates.len().saturating_sub(1));
+            state.previewing = None;
+        }
+        self.status_message = format!(
+            "Optimizer w = {:.1}: j/k select · Enter preview · r restore · s export · Esc close",
+            w
+        );
     }
 
     /// Reorder `patch.sections` by `order` (`order[i]` = original section

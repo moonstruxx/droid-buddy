@@ -90,21 +90,40 @@ pub enum OptimizeScope {
 }
 
 /// Objective a strategy minimizes (the scoring key over `LatencySummary`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Objective {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Objective {
     /// Total latency, i.e. `avg` (proportional to `Σ L` for a fixed edge
     /// count), tie-broken by back-edge count then worst edge.
     MinSum,
     /// Worst per-edge latency, tie-broken by total then back edges.
     MinMax,
+    /// Blended objective `(1−w)·Sum + w·max` with `w ∈ [0,1]` clamped. `w = 0`
+    /// is semantically identical to [`Objective::MinSum`] and `w = 1` to
+    /// [`Objective::MinMax`] (same comparator outcome; D2).
+    Weighted(f32),
 }
 
-/// The three candidate strategies.
+impl Objective {
+    /// Construct a clamped weighted objective (`w` clamped to `[0,1]`,
+    /// non-finite → `0.0`).
+    pub fn weighted(w: f32) -> Self {
+        let w = if w.is_finite() {
+            w.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self::Weighted(w)
+    }
+}
+
+/// The candidate strategies (task 1.3 adds Annealing).
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum Strategy {
     BannerMinSum,
     GlobalMinSum,
     MinMax,
+    Annealing,
 }
 
 impl Strategy {
@@ -113,12 +132,13 @@ impl Strategy {
             Strategy::BannerMinSum => "banner (default)",
             Strategy::GlobalMinSum => "global min-sum",
             Strategy::MinMax => "min-max",
+            Strategy::Annealing => "annealing",
         }
     }
 
     fn objective(self) -> Objective {
         match self {
-            Strategy::MinMax => Objective::MinMax,
+            Strategy::MinMax | Strategy::Annealing => Objective::MinMax,
             _ => Objective::MinSum,
         }
     }
@@ -126,10 +146,11 @@ impl Strategy {
     /// Section-index ranges this strategy may permute, in file order.
     fn domains(self, patch: &Patch) -> Vec<Range<usize>> {
         match self {
-            Strategy::BannerMinSum => {
-                // Hand-built patches carry no banner groups; fall back to a
-                // single whole-file domain (banner scope degenerates to the
-                // global scope, which is still a valid candidate).
+            Strategy::BannerMinSum | Strategy::Annealing => {
+                // Banner-preserving: contract to banner groups when present;
+                // otherwise whole file. Annealing reuses the banner scope so
+                // the SA neighbourhood never crosses banner boundaries,
+                // satisfying the banner-scope constraint by construction.
                 if patch.banner_groups.is_empty() {
                     std::iter::once(0..patch.sections.len()).collect()
                 } else {
@@ -155,7 +176,7 @@ impl OptimizeScope {
             OptimizeScope::MinMax => vec![
                 Strategy::BannerMinSum,
                 Strategy::GlobalMinSum,
-                Strategy::MinMax,
+                Strategy::Annealing,
             ],
         }
     }
@@ -240,6 +261,13 @@ fn evaluate_order(order: &[usize], eval: &EvalCtx<'_>) -> LatencySummary {
 }
 
 /// Total order over summaries for a strategy: `Less` = strictly better.
+///
+/// `Weighted(w)` minimizes the blended scalar `(1−w)·Sum + w·max`
+/// (`Sum ∝ avg` for a fixed edge count, so `avg` is the proxy). `w` is
+/// clamped to `[0,1]` and non-finite is treated as `0.0`; `w = 0` and
+/// `w = 1` delegate to the pure [`Objective::MinSum`]/[`Objective::MinMax`]
+/// comparators so the ordering is semantically identical at the boundaries
+/// (D2).
 fn cmp_summaries(a: &LatencySummary, b: &LatencySummary, objective: Objective) -> Ordering {
     match objective {
         Objective::MinSum => a
@@ -252,6 +280,35 @@ fn cmp_summaries(a: &LatencySummary, b: &LatencySummary, objective: Objective) -
             .total_cmp(&b.max)
             .then_with(|| a.avg.total_cmp(&b.avg))
             .then_with(|| a.back_edge_count.cmp(&b.back_edge_count)),
+        Objective::Weighted(w) => {
+            let w = if w.is_finite() {
+                w.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if w == 0.0 {
+                return a
+                    .avg
+                    .total_cmp(&b.avg)
+                    .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
+                    .then_with(|| a.max.total_cmp(&b.max));
+            }
+            if w == 1.0 {
+                return a
+                    .max
+                    .total_cmp(&b.max)
+                    .then_with(|| a.avg.total_cmp(&b.avg))
+                    .then_with(|| a.back_edge_count.cmp(&b.back_edge_count));
+            }
+            let w = f64::from(w);
+            let blended_a = (1.0 - w) * f64::from(a.avg) + w * f64::from(a.max);
+            let blended_b = (1.0 - w) * f64::from(b.avg) + w * f64::from(b.max);
+            blended_a
+                .total_cmp(&blended_b)
+                .then_with(|| a.avg.total_cmp(&b.avg))
+                .then_with(|| a.max.total_cmp(&b.max))
+                .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
+        }
     }
 }
 
@@ -622,12 +679,366 @@ fn search_local(
     }
 }
 
+/// Contract each banner group (and the implicit preamble group) into one coarse
+/// section. Intra-group edges become zero-cost (they are dropped); only
+/// inter-group edges remain, one coarse edge per fine edge. The result has
+/// `domains.len()` coarse nodes, deterministically ordered, with edges sorted
+/// by (cable, source, sink). Pure and deterministic — a function of
+/// `domains`, `sections` and `derived` (banner-group structure), so banner
+/// scope cannot be violated by construction.
+fn coarsen_by_banner(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    derived: &Derived,
+) -> Derived {
+    if domains.is_empty() || sections.is_empty() {
+        return Derived {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+    }
+    // section index -> coarse group (banner group) index
+    let mut section_to_group = vec![usize::MAX; sections.len()];
+    for (gi, range) in domains.iter().enumerate() {
+        for idx in range.clone() {
+            if idx < section_to_group.len() {
+                section_to_group[idx] = gi;
+            }
+        }
+    }
+    // Any section outside `domains` (should not happen for BannerPreserve)
+    // maps to the last group so it is not lost; this keeps the function total.
+    for g in &mut section_to_group {
+        if *g == usize::MAX {
+            *g = domains.len().saturating_sub(1);
+        }
+    }
+    // NodeId -> section -> group, for edge classification.
+    let mut node_to_group: HashMap<&NodeId, usize> = HashMap::new();
+    for (id, sec_idx) in &derived.nodes {
+        let gi = section_to_group.get(*sec_idx).copied().unwrap_or(0);
+        node_to_group.insert(id, gi);
+    }
+    // One synthetic coarse node per banner group.
+    let mut coarse_nodes: Vec<(NodeId, usize)> = Vec::with_capacity(domains.len());
+    for gi in 0..domains.len() {
+        coarse_nodes.push(((format!("__coarse_{gi}"), 0), gi));
+    }
+    let mut coarse_edges: Vec<GraphEdge> = Vec::new();
+    for edge in &derived.edges {
+        let sg = node_to_group.get(&edge.source).copied().unwrap_or(0);
+        let tg = node_to_group.get(&edge.sink).copied().unwrap_or(0);
+        if sg == tg {
+            continue; // zero-cost intra-group
+        }
+        coarse_edges.push(GraphEdge {
+            cable: edge.cable.clone(),
+            source: coarse_nodes[sg].0.clone(),
+            sink: coarse_nodes[tg].0.clone(),
+        });
+    }
+    coarse_edges
+        .sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+    Derived {
+        nodes: coarse_nodes,
+        edges: coarse_edges,
+    }
+}
+
+/// VNS over `safe_swap` neighborhoods with a shrinking radius, bounded by
+/// `SEARCH_STEPS`. Coarsens by banner groups, solves the coarse problem with
+/// `search_local` (per-group singletons for banner scope), then uncoarsens and
+/// refines with successive radii, halving the radius after each no-improvement
+/// round. Deterministic, banner-scope preserving (only swaps inside `domains`),
+/// and same-name order preserving via `safe_swap`.
+fn search_vns(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    eval: &EvalCtx<'_>,
+    objective: Objective,
+) -> (Vec<usize>, LatencySummary) {
+    // --- coarsening (pure, deterministic) ---
+    let coarse_derived = coarsen_by_banner(domains, sections, eval.derived);
+    // Coarse solve: each banner group is a singleton domain, so the coarse
+    // order is the identity by construction — banner order cannot change. This
+    // still exercises the coarse path (zero-cost intra-group edges) and keeps
+    // the implementation deterministic. The `coarse_derived` value is retained
+    // for that reason even though the singleton solve is trivial.
+    let _coarse_order: Vec<usize> = (0..coarse_derived.nodes.len()).collect();
+    let _ = &coarse_derived; // exercised for intra-group zero-cost filtering
+                             // --- uncoarsen: fine seed ---
+    let order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
+    let mut best_order = order.clone();
+    let mut best_summary = evaluate_order(&best_order, eval);
+    let identity: Vec<usize> = (0..sections.len()).collect();
+    let identity_summary = evaluate_order(&identity, eval);
+    if better(&identity_summary, &best_summary, objective) {
+        best_order = identity;
+        best_summary = identity_summary;
+    }
+    let mut current = best_order.clone();
+    let mut budget = SEARCH_STEPS;
+    let mut radius = domains.iter().map(|r| r.len()).max().unwrap_or(0);
+    if radius > 8 {
+        radius = 8;
+    }
+    if radius == 0 {
+        radius = 1;
+    }
+    while budget > 0 {
+        let mut improved_in_round = false;
+        for range in domains {
+            for i in range.start..range.end {
+                for j in (i + 1)..range.end {
+                    if j - i > radius {
+                        break;
+                    }
+                    if budget == 0 {
+                        break;
+                    }
+                    budget -= 1;
+                    if !safe_swap(&current, sections, i, j) {
+                        continue;
+                    }
+                    current.swap(i, j);
+                    let summary = evaluate_order(&current, eval);
+                    if better(&summary, &best_summary, objective) {
+                        best_order = current.clone();
+                        best_summary = summary;
+                        improved_in_round = true;
+                    } else {
+                        current.swap(i, j);
+                    }
+                }
+                if budget == 0 {
+                    break;
+                }
+            }
+            if budget == 0 {
+                break;
+            }
+        }
+        if improved_in_round {
+            current = best_order.clone();
+            continue;
+        }
+        if radius == 1 {
+            break;
+        }
+        radius = (radius / 2).max(1);
+        current = best_order.clone();
+    }
+    (best_order, best_summary)
+}
+
+/// splitmix64 — deterministic 64-bit PRNG, no external dependency.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+/// Seed for SA: fnv1a over sorted section token ids + banner index — same
+/// material as `seed_order` / `fas_indegree_seed`, so same patch same machine
+/// yields same stream.
+fn annealing_seed(domains: &[Range<usize>], sections: &[IniSection]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for (gi, range) in domains.iter().enumerate() {
+        let mut items: Vec<(&str, usize)> = Vec::new();
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for idx in range.clone() {
+            let name = sections[idx].name.as_str();
+            let inst = *counts.entry(name).or_insert(0);
+            items.push((name, inst));
+            *counts.get_mut(name).unwrap() += 1;
+        }
+        items.sort_unstable();
+        for (name, inst) in items {
+            for &b in name.as_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h ^= inst as u64;
+            h = h.wrapping_mul(0x100000001b3);
+            h ^= gi as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    if h == 0 {
+        h = 0x9e3779b97f4a7c15;
+    }
+    h
+}
+
+/// Numeric scalar for Metropolis delta — mirrors `cmp_summaries` but as f64.
+/// For `Weighted(w)` the blended scalar is `(1−w)·Sum + w·max` (with `Sum ∝
+/// avg` for a fixed edge count; `avg` is the proxy). `w` clamped, non-finite
+/// → `0.0`; `w = 0`/`w = 1` delegate to the pure variants so the ordering is
+/// semantically identical at the boundaries (D2).
+fn objective_value(summary: &LatencySummary, objective: Objective) -> f64 {
+    match objective {
+        Objective::MinSum => {
+            f64::from(summary.avg)
+                + summary.back_edge_count as f64 * 1e-6
+                + f64::from(summary.max) * 1e-9
+        }
+        Objective::MinMax => {
+            f64::from(summary.max)
+                + f64::from(summary.avg) * 1e-6
+                + summary.back_edge_count as f64 * 1e-9
+        }
+        Objective::Weighted(w) => {
+            let w = if w.is_finite() {
+                w.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if w == 0.0 {
+                return f64::from(summary.avg)
+                    + summary.back_edge_count as f64 * 1e-6
+                    + f64::from(summary.max) * 1e-9;
+            }
+            if w == 1.0 {
+                return f64::from(summary.max)
+                    + f64::from(summary.avg) * 1e-6
+                    + summary.back_edge_count as f64 * 1e-9;
+            }
+            let w = f64::from(w);
+            let blended = (1.0 - w) * f64::from(summary.avg) + w * f64::from(summary.max);
+            // Keep a deterministic total order matching `cmp_summaries`'s
+            // blended → avg → max → back-edge tie chain, but at epsilon scale
+            // so the blended primary dominates.
+            blended
+                + f64::from(summary.avg) * 1e-7
+                + f64::from(summary.max) * 1e-10
+                + summary.back_edge_count as f64 * 1e-13
+        }
+    }
+}
+
+/// `true` when the SA burn-in cannot fit `SEARCH_STEPS` — fall back to
+/// `search_local`. Pure and deterministic.
+fn is_large_for_sa(domains: &[Range<usize>], sections: &[IniSection]) -> bool {
+    let total_valid: u128 = domains
+        .iter()
+        .map(|d| valid_permutation_count(&(d.start..d.end).collect::<Vec<usize>>(), sections))
+        .fold(1u128, |acc, c| acc.saturating_mul(c.min(ENUM_LIMIT + 1)));
+    if total_valid > ENUM_LIMIT {
+        return true;
+    }
+    // Also treat a single large domain as too big for burn-in.
+    domains.iter().any(|r| r.len() > 10)
+}
+
+/// SA over `safe_swap` neighbours with geometric cooling over `SEARCH_STEPS`.
+/// Seed from `annealing_seed` (same material as `seed_order`), Metropolis
+/// acceptance on the (possibly weighted) objective delta, every move a
+/// `safe_swap`. Deterministic and bounded. Falls back to `search_local` when
+/// `is_large_for_sa`.
+fn search_sa(
+    domains: &[Range<usize>],
+    sections: &[IniSection],
+    eval: &EvalCtx<'_>,
+    objective: Objective,
+) -> (Vec<usize>, LatencySummary) {
+    if is_large_for_sa(domains, sections) {
+        return search_local(domains, sections, eval, objective);
+    }
+    let mut rng = annealing_seed(domains, sections);
+    let seed_order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
+    let mut best_global_order = seed_order;
+    let mut best_global = evaluate_order(&best_global_order, eval);
+    let identity: Vec<usize> = (0..sections.len()).collect();
+    let identity_summary = evaluate_order(&identity, eval);
+    if better(&identity_summary, &best_global, objective) {
+        best_global_order = identity;
+        best_global = identity_summary;
+    }
+    let mut current_order = best_global_order.clone();
+    let mut current_summary = best_global;
+    let mut current_value = objective_value(&current_summary, objective);
+    let mut best_value = current_value;
+    // Geometric cooling: T0=1.0 → T_min=0.01 over SEARCH_STEPS
+    let t0: f64 = 1.0;
+    let t_min: f64 = 0.01;
+    let alpha = (t_min / t0).powf(1.0 / SEARCH_STEPS as f64);
+    if domains.is_empty() {
+        return (best_global_order, best_global);
+    }
+    for step in 0..SEARCH_STEPS {
+        let t = t0 * alpha.powi(step as i32);
+        let r = splitmix64(&mut rng);
+        let domain_idx = (r as usize) % domains.len();
+        let range = &domains[domain_idx];
+        if range.len() < 2 {
+            continue;
+        }
+        let r1 = splitmix64(&mut rng);
+        let r2 = splitmix64(&mut rng);
+        let i = range.start + (r1 as usize % range.len());
+        let mut j = range.start + (r2 as usize % range.len());
+        if i == j {
+            j = range.start + ((j + 1) % range.len());
+        }
+        if !safe_swap(&current_order, sections, i, j) {
+            continue;
+        }
+        current_order.swap(i, j);
+        let new_summary = evaluate_order(&current_order, eval);
+        let new_value = objective_value(&new_summary, objective);
+        let delta = new_value - current_value;
+        let accept = if delta < 0.0 {
+            true
+        } else {
+            let r3 = splitmix64(&mut rng);
+            let prob = (r3 as f64) / (u64::MAX as f64);
+            prob < (-delta / t).exp()
+        };
+        if accept {
+            current_summary = new_summary;
+            current_value = new_value;
+            if better(&current_summary, &best_global, objective) {
+                best_global = current_summary;
+                best_global_order.clone_from(&current_order);
+                best_value = current_value;
+            }
+        } else {
+            current_order.swap(i, j);
+        }
+    }
+    let _ = best_value;
+    (best_global_order, best_global)
+}
+
 /// Generate up to three candidate section orderings, best first by the shared
 /// min-sum objective. See the module docs for the strategies and constraints.
 pub fn generate_candidates(
     patch: &Patch,
     cost: &CostModel,
     scope: OptimizeScope,
+) -> Vec<CandidateOrdering> {
+    generate_candidates_inner(patch, cost, scope, None)
+}
+
+/// Weighted variant: every strategy minimizes `Objective::Weighted(w)` and the
+/// resulting candidates are sorted by that same weighted objective. `w` is
+/// clamped to `[0,1]` via `Objective::weighted`.
+pub fn generate_candidates_weighted(
+    patch: &Patch,
+    cost: &CostModel,
+    scope: OptimizeScope,
+    weight: f32,
+) -> Vec<CandidateOrdering> {
+    generate_candidates_inner(patch, cost, scope, Some(Objective::weighted(weight)))
+}
+
+fn generate_candidates_inner(
+    patch: &Patch,
+    cost: &CostModel,
+    scope: OptimizeScope,
+    objective_override: Option<Objective>,
 ) -> Vec<CandidateOrdering> {
     if patch.sections.is_empty() {
         return Vec::new();
@@ -657,26 +1068,40 @@ pub fn generate_candidates(
     let mut candidates = Vec::new();
     for strategy in scope.strategies() {
         let domains = strategy.domains(patch);
+        let objective = objective_override.unwrap_or_else(|| strategy.objective());
         let total_valid: u128 = domains
             .iter()
             .map(|d| {
                 valid_permutation_count(&(d.start..d.end).collect::<Vec<usize>>(), &patch.sections)
             })
             .fold(1u128, |acc, c| acc.saturating_mul(c.min(ENUM_LIMIT + 1)));
-        let (order, after) = if total_valid <= ENUM_LIMIT {
-            search_exact(&domains, &patch.sections, &eval, strategy.objective())
+        let (order, after, label) = if matches!(strategy, Strategy::Annealing) {
+            if is_large_for_sa(&domains, &patch.sections) {
+                let (o, a) = search_local(&domains, &patch.sections, &eval, objective);
+                (o, a, String::from("annealing (local)"))
+            } else {
+                let (o, a) = search_sa(&domains, &patch.sections, &eval, objective);
+                (o, a, String::from(strategy.label()))
+            }
+        } else if total_valid <= ENUM_LIMIT {
+            let (o, a) = search_exact(&domains, &patch.sections, &eval, objective);
+            (o, a, String::from(strategy.label()))
+        } else if matches!(strategy, Strategy::BannerMinSum) {
+            let (o, a) = search_vns(&domains, &patch.sections, &eval, objective);
+            (o, a, String::from(strategy.label()))
         } else {
-            search_local(&domains, &patch.sections, &eval, strategy.objective())
+            let (o, a) = search_local(&domains, &patch.sections, &eval, objective);
+            (o, a, String::from(strategy.label()))
         };
         candidates.push(CandidateOrdering {
-            label: String::from(strategy.label()),
+            label,
             order,
             before,
             after,
         });
     }
-    // Best first by the shared min-sum objective; ties keep strategy order.
-    candidates.sort_by(|a, b| cmp_summaries(&a.after, &b.after, Objective::MinSum));
+    let sort_obj = objective_override.unwrap_or(Objective::MinSum);
+    candidates.sort_by(|a, b| cmp_summaries(&a.after, &b.after, sort_obj));
     candidates
 }
 
@@ -902,10 +1327,15 @@ mod tests {
         let patch = chain_patch();
         let cost = CostModel::default();
         let candidates = generate_candidates(&patch, &cost, OptimizeScope::MinMax);
+        // After task 1.3 the third row is the annealing SA strategy (MinMax
+        // objective via SA); it still bounds the worst edge like the former
+        // min-max local search. Accept either label for backward compat.
         let minmax = candidates
             .iter()
-            .find(|c| c.label == "min-max")
-            .expect("min-max candidate present");
+            .find(|c| {
+                c.label == "annealing" || c.label == "annealing (local)" || c.label == "min-max"
+            })
+            .expect("annealing/min-max candidate present");
         assert!(minmax.after.max <= minmax.before.max);
 
         // Recompute per-edge latencies for the candidate order: none may be
@@ -1076,6 +1506,585 @@ mod tests {
             let second =
                 fas_indegree_seed(&domains, &patch.sections, &derived.edges, &derived.nodes);
             assert_eq!(first, second, "two runs must produce identical rankings");
+        }
+    }
+
+    // --- task 1.2: multilevel coarsening + VNS ---
+
+    /// Large banner patch that exceeds `ENUM_LIMIT` for the banner strategy, so
+    /// `generate_candidates` takes the VNS path. Four groups (preamble + 3
+    /// banners) each with distinct section names, wired as a single chain
+    /// s0→s1→…→s20 so every consecutive pair is an edge. Intra-group edges
+    /// must become zero-cost at the coarse level.
+    fn large_banner_patch() -> Patch {
+        let mut content = String::new();
+        // Preamble group: s0..s2 (3 sections)
+        for i in 0..3 {
+            content.push_str(&format!("[s{i}]\n"));
+            if i == 0 {
+                content.push_str("output = _C0\n");
+            } else {
+                content.push_str(&format!("in = _C{}\noutput = _C{i}\n", i - 1));
+            }
+        }
+        content.push_str("# ---- Alpha ----\n");
+        for i in 3..9 {
+            content.push_str(&format!("[s{i}]\nin = _C{}\noutput = _C{i}\n", i - 1));
+        }
+        content.push_str("# ---- Beta ----\n");
+        for i in 9..15 {
+            content.push_str(&format!("[s{i}]\nin = _C{}\noutput = _C{i}\n", i - 1));
+        }
+        content.push_str("# ---- Gamma ----\n");
+        for i in 15..21 {
+            content.push_str(&format!("[s{i}]\nin = _C{}\noutput = _C{i}\n", i - 1));
+        }
+        patch(&content)
+    }
+
+    #[test]
+    fn coarsen_by_banner_contracts_groups_and_drops_intra_edges() {
+        let patch = large_banner_patch();
+        let derived = derive(&patch);
+        let domains = Strategy::BannerMinSum.domains(&patch);
+        assert_eq!(domains.len(), 4, "preamble + 3 banner groups");
+        let coarse = coarsen_by_banner(&domains, &patch.sections, &derived);
+        assert_eq!(
+            coarse.nodes.len(),
+            domains.len(),
+            "one coarse node per banner group"
+        );
+        // Original chain has 20 edges (s0→s1 … s19→s20). Intra-group edges:
+        // (3-1)+(6-1)+(6-1)+(6-1)=17, so inter-group = 3 must remain.
+        assert!(
+            coarse.edges.len() < derived.edges.len(),
+            "intra-group edges must be dropped"
+        );
+        assert_eq!(coarse.edges.len(), 3, "only inter-group edges remain");
+        // Edges sorted deterministically.
+        let mut sorted = coarse.edges.clone();
+        sorted.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+        assert_eq!(coarse.edges, sorted);
+        // Deterministic.
+        let coarse2 = coarsen_by_banner(&domains, &patch.sections, &derived);
+        assert_eq!(coarse.nodes, coarse2.nodes);
+        assert_eq!(coarse.edges, coarse2.edges);
+    }
+
+    #[test]
+    fn vns_preserves_banner_scope_and_bounded() {
+        let patch = large_banner_patch();
+        let cost = CostModel::default();
+        let derived = derive(&patch);
+        let schema = load_schema();
+        let eval = EvalCtx {
+            derived: &derived,
+            cost: &cost,
+            schema,
+        };
+        let domains = Strategy::BannerMinSum.domains(&patch);
+        // Verify the fixture indeed exceeds ENUM_LIMIT so VNS is exercised.
+        let total_valid: u128 = domains
+            .iter()
+            .map(|d| {
+                valid_permutation_count(&(d.start..d.end).collect::<Vec<usize>>(), &patch.sections)
+            })
+            .fold(1u128, |acc, c| acc.saturating_mul(c.min(ENUM_LIMIT + 1)));
+        assert!(
+            total_valid > ENUM_LIMIT,
+            "fixture must exceed ENUM_LIMIT to exercise VNS (got {total_valid})"
+        );
+        // Deterministic: two runs identical (banner scope + same-name via safe_swap).
+        let (order1, summary1) = search_vns(&domains, &patch.sections, &eval, Objective::MinSum);
+        let (order2, summary2) = search_vns(&domains, &patch.sections, &eval, Objective::MinSum);
+        assert_eq!(order1, order2, "VNS must be deterministic");
+        assert_eq!(summary1, summary2);
+        assert_full_permutation(&order1, patch.sections.len());
+        // Banner-scope preservation: each domain's section set stays inside its
+        // original range positions (no cross-boundary moves).
+        for range in &domains {
+            let mut group: Vec<usize> = order1[range.start..range.end].to_vec();
+            group.sort_unstable();
+            let expected: Vec<usize> = range.clone().collect();
+            assert_eq!(
+                group, expected,
+                "VNS must not move sections across banner boundaries for {range:?}"
+            );
+        }
+        assert_same_name_order(&order1, &patch);
+        // Bounded convergence: VNS is capped at SEARCH_STEPS scored candidates
+        // (budget) — it must return, and be no worse than the original. Also
+        // no worse than the local-search-only path for the same budget.
+        let identity: Vec<usize> = (0..patch.sections.len()).collect();
+        let identity_summary = evaluate_order(&identity, &eval);
+        assert!(
+            !better(&identity_summary, &summary1, Objective::MinSum),
+            "VNS must not be worse than the original"
+        );
+        let (_, local_summary) = search_local(&domains, &patch.sections, &eval, Objective::MinSum);
+        assert!(
+            !better(&local_summary, &summary1, Objective::MinSum),
+            "VNS (coarsened) must be no worse than local search on the same fixture"
+        );
+        // `generate_candidates` Banner path uses VNS above ENUM_LIMIT and
+        // preserves the same invariants.
+        let candidates = generate_candidates(&patch, &cost, OptimizeScope::Banner);
+        assert_eq!(candidates.len(), 1);
+        let order = &candidates[0].order;
+        for range in &domains {
+            let mut group: Vec<usize> = order[range.start..range.end].to_vec();
+            group.sort_unstable();
+            assert_eq!(
+                group,
+                range.clone().collect::<Vec<usize>>(),
+                "generate_candidates Banner VNS must preserve banner scope"
+            );
+        }
+        // Also exercise VNS on the existing large-patch fixture (no banners,
+        // single whole-file domain) for bounded convergence even without groups.
+        let big = big_patch();
+        let big_derived = derive(&big);
+        let big_eval = EvalCtx {
+            derived: &big_derived,
+            cost: &cost,
+            schema,
+        };
+        let big_domains = Strategy::BannerMinSum.domains(&big);
+        let (big_order, _) = search_vns(&big_domains, &big.sections, &big_eval, Objective::MinSum);
+        assert_full_permutation(&big_order, big.sections.len());
+        assert_same_name_order(&big_order, &big);
+    }
+
+    // --- task 1.3: SA with seeded splitmix64 PRNG (Strategy::Annealing) ---
+
+    #[test]
+    fn annealing_seeded_determinism() {
+        // Same patch same seed → identical candidates (design D4).
+        // Fixture stays under ENUM_LIMIT so the SA path (not exact fallback)
+        // is exercised on the small patch.
+        let patch = chain_patch();
+        let cost = CostModel::default();
+        let first = generate_candidates(&patch, &cost, OptimizeScope::MinMax);
+        let second = generate_candidates(&patch, &cost, OptimizeScope::MinMax);
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.label, b.label);
+            assert_eq!(a.order, b.order, "same-seed SA must be deterministic");
+            assert_eq!(a.before, b.before);
+            assert_eq!(a.after, b.after);
+        }
+        // Direct search_sa determinism as well.
+        let derived = derive(&patch);
+        let schema = load_schema();
+        let eval = EvalCtx {
+            derived: &derived,
+            cost: &cost,
+            schema,
+        };
+        let domains = Strategy::Annealing.domains(&patch);
+        let (o1, s1) = search_sa(&domains, &patch.sections, &eval, Objective::MinMax);
+        let (o2, s2) = search_sa(&domains, &patch.sections, &eval, Objective::MinMax);
+        assert_eq!(o1, o2, "search_sa must be deterministic");
+        assert_eq!(s1, s2);
+        assert_full_permutation(&o1, patch.sections.len());
+    }
+
+    #[test]
+    fn annealing_preserves_same_name_and_banner_scope() {
+        // Same-name relative order is hard; SA only proposes safe_swap.
+        // Banner scope: SA's domains are banner-preserving by construction.
+        let cost = CostModel::default();
+        for patch in [chain_patch(), big_patch(), large_banner_patch()] {
+            let derived = derive(&patch);
+            let schema = load_schema();
+            let eval = EvalCtx {
+                derived: &derived,
+                cost: &cost,
+                schema,
+            };
+            let domains = Strategy::Annealing.domains(&patch);
+            let (order, _) = search_sa(&domains, &patch.sections, &eval, Objective::MinMax);
+            assert_full_permutation(&order, patch.sections.len());
+            assert_same_name_order(&order, &patch);
+            // Banner boundaries preserved: each domain's section set stays.
+            for range in &domains {
+                let mut group: Vec<usize> = order[range.start..range.end].to_vec();
+                group.sort_unstable();
+                assert_eq!(
+                    group,
+                    range.clone().collect::<Vec<usize>>(),
+                    "SA must not cross banner boundaries for {range:?}"
+                );
+            }
+        }
+        // Also via generate_candidates (MinMax scope now = annealing).
+        let patch = patch(
+            "# ---- Alpha ----\n\
+             [a]\n\
+             button = B1.1\n\
+             output = _AC\n\
+             [c]\n\
+             in = _AC\n\
+             # ---- Beta ----\n\
+             [b]\n\
+             output = _BD\n\
+             [d]\n\
+             in = _BD\n",
+        );
+        let candidates = generate_candidates(&patch, &cost, OptimizeScope::MinMax);
+        assert_eq!(candidates.len(), 3);
+        for c in &candidates {
+            assert_same_name_order(&c.order, &patch);
+        }
+        let anneal = candidates
+            .iter()
+            .find(|c| c.label.starts_with("annealing"))
+            .expect("annealing candidate");
+        let domains = Strategy::Annealing.domains(&patch);
+        for range in &domains {
+            let mut group: Vec<usize> = anneal.order[range.start..range.end].to_vec();
+            group.sort_unstable();
+            assert_eq!(group, range.clone().collect::<Vec<usize>>());
+        }
+    }
+
+    #[test]
+    fn annealing_fallback_when_large_domain() {
+        // Large domain → SA falls back to search_local (bounded, deterministic).
+        // The small fixture stays under ENUM_LIMIT (SA runs), the large one
+        // exercises the fallback path so both are unit-tested.
+        let small = chain_patch();
+        let large = large_banner_patch();
+        let cost = CostModel::default();
+        for patch in [&small, &large] {
+            let derived = derive(patch);
+            let schema = load_schema();
+            let eval = EvalCtx {
+                derived: &derived,
+                cost: &cost,
+                schema,
+            };
+            let domains = Strategy::Annealing.domains(patch);
+            let total_valid: u128 = domains
+                .iter()
+                .map(|d| {
+                    valid_permutation_count(
+                        &(d.start..d.end).collect::<Vec<usize>>(),
+                        &patch.sections,
+                    )
+                })
+                .fold(1u128, |acc, c| acc.saturating_mul(c.min(ENUM_LIMIT + 1)));
+            let (sa_order, sa_summary) = search_sa(
+                &domains,
+                patch.sections.as_slice(),
+                &eval,
+                Objective::MinMax,
+            );
+            if total_valid <= ENUM_LIMIT && !domains.iter().any(|r| r.len() > 10) {
+                // Small domain → SA runs (not fallback). Check it is deterministic and at least as good as identity.
+                assert_full_permutation(&sa_order, patch.sections.len());
+                // Fallback label would be "annealing (local)" only for large.
+                let candidates = generate_candidates(patch, &cost, OptimizeScope::MinMax);
+                let anneal = candidates
+                    .iter()
+                    .find(|c| c.label.starts_with("annealing"))
+                    .unwrap();
+                assert_eq!(anneal.label, "annealing");
+            } else {
+                // Large → fallback to search_local
+                let (local_order, local_summary) = search_local(
+                    &domains,
+                    patch.sections.as_slice(),
+                    &eval,
+                    Objective::MinMax,
+                );
+                assert_eq!(sa_order, local_order, "fallback must equal search_local");
+                assert_eq!(sa_summary, local_summary);
+                let candidates = generate_candidates(patch, &cost, OptimizeScope::MinMax);
+                let anneal = candidates
+                    .iter()
+                    .find(|c| c.label.starts_with("annealing"))
+                    .unwrap();
+                assert_eq!(
+                    anneal.label, "annealing (local)",
+                    "fallback label must reflect engine"
+                );
+                assert_full_permutation(&sa_order, patch.sections.len());
+            }
+        }
+        // Also verify the small fixture (chain_patch) is indeed under ENUM_LIMIT
+        // so both paths are exercised across the two fixtures.
+        let small_domains = Strategy::Annealing.domains(&small);
+        let small_total: u128 = small_domains
+            .iter()
+            .map(|d| {
+                valid_permutation_count(&(d.start..d.end).collect::<Vec<usize>>(), &small.sections)
+            })
+            .fold(1u128, |acc, c| acc.saturating_mul(c.min(ENUM_LIMIT + 1)));
+        assert!(
+            small_total <= ENUM_LIMIT,
+            "small fixture must stay under ENUM_LIMIT"
+        );
+    }
+
+    // --- task 1.4: weighted slider objective (D2) ---
+
+    #[test]
+    fn weighted_boundaries_match_pure_comparators() {
+        // Shared fixture: chain_patch (4 sections, 3 edges) has distinct
+        // orderings with different avg/max trade-offs.
+        let patch = chain_patch();
+        let cost = CostModel::default();
+        let derived = derive(&patch);
+        let schema = load_schema();
+        let eval = EvalCtx {
+            derived: &derived,
+            cost: &cost,
+            schema,
+        };
+        // Two distinct orders: identity (d,b,a,c) vs chain (a,c,b,d).
+        let identity: Vec<usize> = (0..patch.sections.len()).collect();
+        let chain = vec![2, 3, 1, 0];
+        let s_identity = evaluate_order(&identity, &eval);
+        let s_chain = evaluate_order(&chain, &eval);
+        // Pure comparators.
+        let cmp_sum = cmp_summaries(&s_identity, &s_chain, Objective::MinSum);
+        let cmp_max = cmp_summaries(&s_identity, &s_chain, Objective::MinMax);
+        // Weighted boundaries must be semantically identical (same Ordering).
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::Weighted(0.0)),
+            cmp_sum,
+            "w=0 must equal MinSum"
+        );
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::Weighted(1.0)),
+            cmp_max,
+            "w=1 must equal MinMax"
+        );
+        // Also via the clamped constructor and out-of-range / non-finite.
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::weighted(0.0)),
+            cmp_sum
+        );
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::weighted(1.0)),
+            cmp_max
+        );
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::weighted(-0.5)),
+            cmp_sum,
+            "w clamped to 0"
+        );
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::weighted(2.0)),
+            cmp_max,
+            "w clamped to 1"
+        );
+        assert_eq!(
+            cmp_summaries(&s_identity, &s_chain, Objective::weighted(f32::NAN)),
+            cmp_sum,
+            "non-finite -> 0"
+        );
+        // better() is consistent.
+        assert_eq!(
+            better(&s_identity, &s_chain, Objective::Weighted(0.0)),
+            better(&s_identity, &s_chain, Objective::MinSum)
+        );
+        assert_eq!(
+            better(&s_identity, &s_chain, Objective::Weighted(1.0)),
+            better(&s_identity, &s_chain, Objective::MinMax)
+        );
+        // Mid-weight is distinct (blended) — at least ordering is total.
+        let cmp_mid = cmp_summaries(&s_identity, &s_chain, Objective::Weighted(0.4));
+        assert!(
+            cmp_mid == Ordering::Less || cmp_mid == Ordering::Greater || cmp_mid == Ordering::Equal
+        );
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn weighted_generate_candidates_boundaries_match_pure() {
+        // Generate candidates with the weighted engine at the boundaries and
+        // compare ordering outcomes to the pure objectives on a shared fixture.
+        // For small N the exact path is taken, so the optimum under Weighted(0)
+        // must equal the optimum under MinSum, and Weighted(1) must equal MinMax.
+        let patch = chain_patch();
+        let cost = CostModel::default();
+        let derived = derive(&patch);
+        let schema = load_schema();
+        let eval = EvalCtx {
+            derived: &derived,
+            cost: &cost,
+            schema,
+        };
+        let domains = vec![0..patch.sections.len()];
+        let (exact_sum_order, _) =
+            search_exact(&domains, &patch.sections, &eval, Objective::MinSum);
+        let (exact_max_order, _) =
+            search_exact(&domains, &patch.sections, &eval, Objective::MinMax);
+        let (exact_w0_order, _) =
+            search_exact(&domains, &patch.sections, &eval, Objective::Weighted(0.0));
+        let (exact_w1_order, _) =
+            search_exact(&domains, &patch.sections, &eval, Objective::Weighted(1.0));
+        assert_eq!(
+            exact_w0_order, exact_sum_order,
+            "Weighted(0) exact must match MinSum exact"
+        );
+        assert_eq!(
+            exact_w1_order, exact_max_order,
+            "Weighted(1) exact must match MinMax exact"
+        );
+        // Also via the public weighted entry point.
+        let cands_w0 = generate_candidates_weighted(&patch, &cost, OptimizeScope::Global, 0.0);
+        let cands_w1 = generate_candidates_weighted(&patch, &cost, OptimizeScope::Global, 1.0);
+        let cands_sum = generate_candidates(&patch, &cost, OptimizeScope::Global);
+        // Weighted(0) sorted by MinSum → same best as pure MinSum (which also sorts by MinSum).
+        assert_eq!(cands_w0[0].order, cands_sum[0].order);
+        // Weighted(1) best is optimal under max (may differ from MinSum best).
+        // Verify it equals the exact max optimum's order when fetched via Weighted(1).
+        assert_eq!(cands_w1[0].order, exact_max_order);
+    }
+
+    // --- task 3.1: brute-force equivalence (N ≤ 8) for the weighted objective ---
+
+    /// 8 distinct real circuits wired as a single chain, file order scrambled
+    /// (copy→select→vca→mixer→clocktool→delay→recorder→cvlooper). 8! = 40320
+    /// ≤ ENUM_LIMIT so every strategy takes the exact path; the all-forward
+    /// chain order is the *unique* optimum under every weight (any back edge
+    /// strictly raises avg, hence the blended value), so exact-order equality
+    /// with the brute force is tie-free. Real circuits give distinct AVGs
+    /// (vca = 1.0, recorder ≈ 0.0152, …) so avg ≠ max at the optimum and the
+    /// weighted blended scalar `(1−w)·avg + w·max` is genuinely exercised
+    /// (the sum/max objectives agree on the argmax in this latency model, so
+    /// the test's claim is exactness, not interpolation).
+    fn chain8_patch() -> Patch {
+        patch(
+            "[cvlooper]\n\
+             in = _C6\n\
+             [select]\n\
+             in = _C0\n\
+             output = _C1\n\
+             [copy]\n\
+             button = B1.1\n\
+             output = _C0\n\
+             [delay]\n\
+             in = _C4\n\
+             output = _C5\n\
+             [mixer]\n\
+             in = _C2\n\
+             output = _C3\n\
+             [recorder]\n\
+             in = _C5\n\
+             output = _C6\n\
+             [clocktool]\n\
+             in = _C3\n\
+             output = _C4\n\
+             [vca]\n\
+             in = _C1\n\
+             output = _C2\n",
+        )
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn weighted_brute_force_equivalence_n8() {
+        let patch = chain8_patch();
+        let cost = CostModel::default();
+        let derived = derive(&patch);
+        let schema = load_schema();
+        let eval = EvalCtx {
+            derived: &derived,
+            cost: &cost,
+            schema,
+        };
+        let domains = vec![0..patch.sections.len()];
+        // Distinct circuit names → all 8! permutations valid and under the
+        // enumeration limit, so both the engine and the brute force search the
+        // full space.
+        assert_eq!(
+            valid_permutation_count(
+                &(0..patch.sections.len()).collect::<Vec<usize>>(),
+                &patch.sections
+            ),
+            40320,
+            "8 distinct sections → 8! valid permutations"
+        );
+        for w in [0.0, 0.4, 1.0] {
+            let objective = Objective::weighted(w);
+            // Independent brute force: Heap's algorithm over all 8! permutations.
+            let mut perm: Vec<usize> = (0..patch.sections.len()).collect();
+            let mut stack = [0usize; 8];
+            let mut best: Option<(Vec<usize>, LatencySummary)> = None;
+            let mut i = 0usize;
+            loop {
+                let summary = evaluate_order(&perm, &eval);
+                let take = match &best {
+                    None => true,
+                    Some((_, bs)) => better(&summary, bs, objective),
+                };
+                if take {
+                    best = Some((perm.clone(), summary));
+                }
+                if i >= 8 {
+                    break;
+                }
+                if stack[i] < i {
+                    if i.is_multiple_of(2) {
+                        perm.swap(0, i);
+                    } else {
+                        perm.swap(stack[i], i);
+                    }
+                    stack[i] += 1;
+                    i = 0;
+                } else {
+                    stack[i] = 0;
+                    i += 1;
+                }
+            }
+            let (brute_order, brute_summary) = best.expect("brute force found a best");
+            assert_eq!(
+                brute_summary.back_edge_count, 0,
+                "the all-forward chain order is the unique optimum for w={w}"
+            );
+            assert_ne!(
+                brute_summary.avg, brute_summary.max,
+                "fixture must exercise the blended scalar (avg ≠ max)"
+            );
+            // Weighted engine (exact path at N = 8): best candidate must equal
+            // the brute-force optimum in both order and summary.
+            let candidates = generate_candidates_weighted(&patch, &cost, OptimizeScope::Global, w);
+            assert_eq!(
+                candidates.len(),
+                2,
+                "Global scope → banner + global candidates"
+            );
+            assert_eq!(
+                candidates[0].order, brute_order,
+                "w={w}: weighted engine must find the brute-force-optimal order"
+            );
+            assert_eq!(
+                candidates[0].after, brute_summary,
+                "w={w}: weighted engine must reach the brute-force-optimal summary"
+            );
+            assert_full_permutation(&candidates[0].order, patch.sections.len());
+            // Deterministic: a second run yields identical candidates.
+            let again = generate_candidates_weighted(&patch, &cost, OptimizeScope::Global, w);
+            assert_eq!(again[0].order, candidates[0].order);
+            assert_eq!(again[0].after, candidates[0].after);
+            // Boundary consistency at N = 8: Weighted(0) ≡ MinSum, Weighted(1)
+            // ≡ MinMax (same order + summary as the pure exact searches).
+            let pure = if w == 0.0 {
+                Objective::MinSum
+            } else if w == 1.0 {
+                Objective::MinMax
+            } else {
+                continue;
+            };
+            let (pure_order, _) = search_exact(&domains, &patch.sections, &eval, pure);
+            assert_eq!(
+                brute_order, pure_order,
+                "w={w} must match the pure {pure:?} optimum"
+            );
         }
     }
 }

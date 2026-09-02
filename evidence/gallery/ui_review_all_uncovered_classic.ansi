@@ -47,5 +47,5 @@
 
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 134 cols or reduce scal│
+│Loaded all_uncovered | Renders degraded at 100 cols — use ≥ 134 cols or reduce scale | Scale: 1.0 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

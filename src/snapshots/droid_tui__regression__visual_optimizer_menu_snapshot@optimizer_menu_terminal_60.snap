@@ -4,10 +4,10 @@ expression: ansi
 ---
 ┌──────────────────────────────────────────────────────────┐
 │                 DROID: optimizer_latency                 │
-└─╭ Optimizer (3) ───────────────────────────────────────╮─┘
-┌─│▶ banner (default) avg 4.00→1.00 · max 4.00→1.00 · bac│
-│ │   global min-sum avg 4.00→1.00 · max 4.00→1.00 · back│
-│ │   min-max avg 4.00→1.00 · max 4.00→1.00 · back-edges │
+└─╭ Optimizer (3) · w = 0.0 (min-sum) ───────────────────╮─┘
+┌─│▶ banner (default) obj 1.00 · avg 4.00→1.00 · max 4.00│
+│ │   global min-sum obj 1.00 · avg 4.00→1.00 · max 4.00→│
+│ │   annealing obj 1.00 · avg 4.00→1.00 · max 4.00→1.00 │
 │ │                                                      │
 │ │                                                      │
 │ │                                                      │
@@ -30,5 +30,5 @@ expression: ansi
 │ │                                                      │
 └─│                                                      │
 ┌─╰ j/k select · Enter preview · r restore · s export · E╯─┐
-│Optimizer: j/k select · Enter preview · r restore · s expo│
+│Optimizer w = 0.0: j/k select · Enter preview · r restore │
 └──────────────────────────────────────────────────────────┘
