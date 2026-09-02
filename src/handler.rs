@@ -1603,11 +1603,16 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                 } else {
                     match Patch::from_ini_file(&selected_path) {
                         Ok(patch) => {
-                            app.status_message = format!("Loaded patch: {}", patch.name);
-                            app.patch = Some(patch);
+                            // Route through load_patch_at so picker loads run
+                            // validation, the Error gate, and LabelStore path
+                            // keying. The picker must close on both outcomes: a
+                            // gated load has to surface the validation modal,
+                            // and the picker outranks it in key priority.
+                            let _ = app.load_patch_at(&selected_path, patch);
                             app.hovered_component = None;
                             app.selected_file = Some(selected_path);
                             app.showing_picker = false;
+                            app.diff_picker_active = false;
                         }
                         Err(e) => {
                             app.status_message = format!("Failed to load patch: {}", e);
@@ -2292,6 +2297,40 @@ mod tests {
         handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
         assert!(!app.showing_picker);
         assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
+    }
+
+    #[test]
+    fn picker_enter_keys_label_store_path() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.picker_index = picker_index_of(&app, "patch_a.ini");
+        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(!app.showing_picker);
+        assert!(app.patch.is_some());
+        let path = app
+            .current_patch_path
+            .as_ref()
+            .expect("current_patch_path set by picker load");
+        assert!(path.ends_with("patch_a.ini"));
+        // Validation ran on the picker load; the fixture is clean.
+        assert!(app.validation_issues.is_empty());
+    }
+
+    #[test]
+    fn picker_enter_gates_on_error_when_patch_loaded() {
+        let mut app = app_with_fixture();
+        app.picker_dir = std::path::PathBuf::from("fixtures/validation");
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+        app.picker_index = picker_index_of(&app, "ram_overflow.ini");
+        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        // The picker closes on a gated load so the validation modal is reachable.
+        assert!(!app.showing_picker);
+        // Gate keeps the previously loaded patch.
+        assert_eq!(app.patch.as_ref().unwrap().name, "arpeggio1");
+        assert!(app.showing_validation);
+        assert!(app.validation_issues.iter().any(|i| {
+            i.severity == crate::validation::Severity::Error && i.code != "unknown_param"
+        }));
     }
 
     #[test]
