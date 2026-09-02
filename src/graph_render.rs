@@ -95,17 +95,26 @@ impl GraphCamera {
     /// fit zoom is `min(pw/span_w, ph/span_h)`, so a wide graph (a horizontal
     /// chain) scales to fill the width exactly, and a tall graph scales to fit
     /// the height with the whole graph framed. The zoom is additionally clamped
-    /// up to `min_node_px` pixels per world unit so a spread-out world overflows
-    /// rather than collapsing the smallest node below the legible minimum;
-    /// `min_node_px = 0` degrades to a pure fit. The spec's "Legible initial
-    /// fit" scenario requires the camera to frame the graph — the min fit keeps
-    /// every node in view, and the clamp is the only source of overflow.
+    /// up to `min_node_px` pixels per world unit — but only when the *width*
+    /// constraint binds (the "preferring to fill the canvas width" case), so a
+    /// spread-out chain overflows horizontally rather than collapsing the
+    /// smallest node below the legible minimum. When the *height* constraint
+    /// binds (a tall fan-out graph), the pure fit wins so the whole graph stays
+    /// framed — the spec's "Legible initial fit" requires the camera to frame
+    /// the graph, and a height-bound floor would push nodes off-canvas.
+    /// `min_node_px = 0` degrades to a pure fit in both cases.
     pub fn fit_to_world(bounds: WorldBounds, pixel_size: (f32, f32), min_node_px: f32) -> Self {
         let pixel_size = (pixel_size.0.max(1.0), pixel_size.1.max(1.0));
         let span_w = (bounds.max_x - bounds.min_x).max(MIN_SPAN);
         let span_h = (bounds.max_y - bounds.min_y).max(MIN_SPAN);
-        let fit_zoom = (pixel_size.0 / span_w).min(pixel_size.1 / span_h);
-        let zoom = fit_zoom.max(min_node_px).max(MIN_ZOOM);
+        let fit_zoom_w = pixel_size.0 / span_w;
+        let fit_zoom_h = pixel_size.1 / span_h;
+        let fit_zoom = fit_zoom_w.min(fit_zoom_h);
+        let zoom = if fit_zoom_w <= fit_zoom_h {
+            fit_zoom.max(min_node_px).max(MIN_ZOOM)
+        } else {
+            fit_zoom.max(MIN_ZOOM)
+        };
         // When the min-node clamp overrides the fit, the world overflows the
         // canvas; anchor the pan on the world's top-left corner so the initial
         // view shows the graph's start instead of empty space around its
@@ -261,13 +270,11 @@ mod tests {
     }
 
     #[test]
-    fn fit_clamped_zoom_anchors_tall_world_top_left_into_canvas() {
+    fn fit_frames_tall_world_when_height_binds() {
         // Regression: a real patch's solver output is a vertical chain (tall,
-        // narrow world). The fit zoom is height-limited below the min-node
-        // clamp; the clamp overrides the fit, and the pan must anchor on the
-        // world's top-left corner so the graph's start is on-screen instead of
-        // the empty space around the world center (the graph surface rendered
-        // blank).
+        // narrow world). The height-bound fit wins over the min-node floor so
+        // the whole graph stays framed (the graph surface rendered blank when
+        // the clamp pushed the tall world off-canvas).
         let bounds = WorldBounds {
             min_x: -77.0,
             min_y: 3.0,
@@ -277,15 +284,22 @@ mod tests {
         let pixel = (624.0, 304.0); // 100x24 main area minus one node frame
         let min_node_px = 2.2;
         let cam = GraphCamera::fit_to_world(bounds, pixel, min_node_px);
-        // The clamp overrode the fit (fit would be ~0.43).
-        assert!(cam.zoom > 1.0);
-        // The world's top-left corner maps into the canvas.
-        let (px, py) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
-        assert!(px >= 0.0 && py >= 0.0, "top-left corner visible");
-        assert!(px < pixel.0 && py < pixel.1);
-        // A node near the top-left of the chain is on-screen.
-        let (nx, ny) = cam.world_to_pixel(1.0, 3.0);
-        assert!(nx >= 0.0 && ny >= 0.0 && nx < pixel.0 && ny < pixel.1);
+        // The height-bound fit wins over the floor: zoom = ph/span_h.
+        assert_close(cam.zoom, 304.0 / 706.0, 1e-3);
+        assert!(
+            cam.zoom < min_node_px,
+            "floor must not break a height-bound fit"
+        );
+        // Every corner of the world bounds stays inside the viewport.
+        let (left, top) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        let (right, bottom) = cam.world_to_pixel(bounds.max_x, bounds.max_y);
+        assert!(left >= 0.0 && top >= 0.0, "top-left corner off-canvas");
+        assert!(
+            right <= pixel.0 && bottom <= pixel.1,
+            "bottom-right corner off-canvas: ({right},{bottom}) vs ({},{})",
+            pixel.0,
+            pixel.1
+        );
     }
 
     #[test]
@@ -435,6 +449,40 @@ mod tests {
         assert_close(bottom, pixel.1, 1e-2);
         let (right, _) = cam.world_to_pixel(100.0, 0.0);
         assert!(right <= pixel.0, "the whole graph stays framed");
+    }
+
+    #[test]
+    fn fit_frames_a_tall_graph_even_with_a_legibility_floor() {
+        // A tall fan-out graph (like arpeggio1: many buttons stacked vertically
+        // feeding one circuit) must stay framed even when `min_node_px` is set.
+        // The floor applies only when the width constraint binds; here the
+        // height binds, so the pure fit wins and no node is pushed off-canvas.
+        let bounds = WorldBounds {
+            min_x: -76.0,
+            min_y: 2.6,
+            max_x: 97.0,
+            max_y: 700.0,
+        };
+        let pixel = (784.0, 464.0);
+        let min_node_px = 2.2;
+        let cam = GraphCamera::fit_to_world(bounds, pixel, min_node_px);
+
+        // The height-bound fit wins over the floor: zoom = ph/span_h.
+        assert_close(cam.zoom, 464.0 / 697.4, 1e-3);
+        assert!(
+            cam.zoom < min_node_px,
+            "floor must not break a height-bound fit"
+        );
+        // Every corner of the world bounds stays inside the viewport.
+        let (left, top) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        let (right, bottom) = cam.world_to_pixel(bounds.max_x, bounds.max_y);
+        assert!(left >= 0.0 && top >= 0.0, "top-left corner off-canvas");
+        assert!(
+            right <= pixel.0 && bottom <= pixel.1,
+            "bottom-right corner off-canvas: ({right},{bottom}) vs ({},{})",
+            pixel.0,
+            pixel.1
+        );
     }
 
     #[test]

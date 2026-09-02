@@ -41,6 +41,7 @@
 //! Pure module: no terminal, no I/O, no RNG. The patch, cost model and schema
 //! arrive as arguments, so identical input yields byte-identical candidates.
 
+use std::cell::Cell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
@@ -212,6 +213,10 @@ struct EvalCtx<'a> {
     /// Per-edge source/sink node indices (parallel to `derived.edges`).
     edge_src: Vec<usize>,
     edge_sink: Vec<usize>,
+    /// Scored-candidate counter (test observability): incremented on every
+    /// `evaluate_order` call so tests can assert the search budgets are
+    /// respected deterministically instead of timing the search.
+    scored: Cell<usize>,
 }
 
 fn new_eval_ctx<'a>(derived: &'a Derived, cost: &'a CostModel, schema: &'a Schema) -> EvalCtx<'a> {
@@ -241,6 +246,7 @@ fn new_eval_ctx<'a>(derived: &'a Derived, cost: &'a CostModel, schema: &'a Schem
         node_avgs,
         edge_src,
         edge_sink,
+        scored: Cell::new(0),
     }
 }
 
@@ -289,6 +295,7 @@ fn derive(patch: &Patch) -> Derived {
 /// Uses the cached `EvalCtx` indices so no per-candidate HashMap is built;
 /// result is byte-identical to `forward_latency` called with the same positions.
 fn evaluate_order(order: &[usize], eval: &EvalCtx<'_>) -> LatencySummary {
+    eval.scored.set(eval.scored.get() + 1);
     let n = eval.derived.nodes.len();
     if eval.derived.edges.is_empty() {
         return LatencySummary {
@@ -434,17 +441,26 @@ fn valid_permutation_count(domain: &[usize], sections: &[IniSection]) -> u128 {
     for &i in domain {
         *counts.entry(sections[i].name.as_str()).or_insert(0) += 1;
     }
-    let mut numerator: u128 = 1;
-    for k in 2..=n {
-        numerator = numerator.saturating_mul(k);
-    }
-    let mut denominator: u128 = 1;
+    // Multinomial coefficient N! / ∏ cnt! computed incrementally with an early
+    // bail-out: the caller only needs to know whether the count exceeds
+    // ENUM_LIMIT, so we stop as soon as it does. The old saturating-mul
+    // numerator/denominator pair collapsed a huge count to 1 when both
+    // saturated to u128::MAX (checked_div → 1), wrongly passing the
+    // exact-search gate and exploding in `search_exact`.
+    let mut count: u128 = 1;
+    let mut remaining = n;
     for &c in counts.values() {
-        for k in 2..=c {
-            denominator = denominator.saturating_mul(k);
+        // C(remaining, c) = remaining! / (c! · (remaining−c)!), built up as
+        // ∏_{i=0..c} (remaining−i) / (i+1) — exact integer arithmetic, each
+        // step divides evenly.
+        for i in 0..c {
+            count = count * (remaining - i) / (i + 1);
+            if count > ENUM_LIMIT {
+                return ENUM_LIMIT + 1;
+            }
         }
+        remaining -= c;
     }
-    let count = numerator.checked_div(denominator).unwrap_or(0);
     count.min(ENUM_LIMIT + 1)
 }
 
@@ -1202,8 +1218,21 @@ fn generate_candidates_inner_with_budget(
     objective_override: Option<Objective>,
     budget: usize,
 ) -> Vec<CandidateOrdering> {
+    generate_candidates_scored_inner(patch, cost, scope, objective_override, budget).0
+}
+
+/// Same as `generate_candidates_inner_with_budget` but also returns the number
+/// of scored candidates (test observability: asserts the budget is respected
+/// deterministically instead of timing the search).
+fn generate_candidates_scored_inner(
+    patch: &Patch,
+    cost: &CostModel,
+    scope: OptimizeScope,
+    objective_override: Option<Objective>,
+    budget: usize,
+) -> (Vec<CandidateOrdering>, usize) {
     if patch.sections.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let derived = derive(patch);
     let schema = load_schema();
@@ -1213,12 +1242,15 @@ fn generate_candidates_inner_with_budget(
         // single identity candidate so the caller still gets a valid result.
         let identity: Vec<usize> = (0..patch.sections.len()).collect();
         let summary = evaluate_order(&identity, &eval);
-        return vec![CandidateOrdering {
-            label: String::from(Strategy::BannerMinSum.label()),
-            order: identity,
-            before: summary,
-            after: summary,
-        }];
+        return (
+            vec![CandidateOrdering {
+                label: String::from(Strategy::BannerMinSum.label()),
+                order: identity,
+                before: summary,
+                after: summary,
+            }],
+            eval.scored.get(),
+        );
     }
     let identity: Vec<usize> = (0..patch.sections.len()).collect();
     let before = evaluate_order(&identity, &eval);
@@ -1264,12 +1296,13 @@ fn generate_candidates_inner_with_budget(
     }
     let sort_obj = objective_override.unwrap_or(Objective::MinSum);
     candidates.sort_by(|a, b| cmp_summaries(&a.after, &b.after, sort_obj));
-    candidates
+    (candidates, eval.scored.get())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn patch(content: &str) -> Patch {
         Patch::from_ini_str(content, String::from("optimize-test")).expect("fixture parses")
@@ -1959,6 +1992,150 @@ mod tests {
             small_total <= ENUM_LIMIT,
             "small fixture must stay under ENUM_LIMIT"
         );
+    }
+
+    // --- search budgets: scored candidates stay within the step cap ---
+
+    #[test]
+    fn search_respects_step_budget() {
+        // Each heuristic search must stop at its step budget: the number of
+        // scored candidates is bounded by `budget_limit` plus the two fixed
+        // evaluations every search performs (FAS seed + identity). Asserted
+        // via the `EvalCtx` counter, not wall-clock timing.
+        let patch = big_patch();
+        let cost = CostModel::default();
+        let derived = derive(&patch);
+        let schema = load_schema();
+        let eval = new_eval_ctx(&derived, &cost, schema);
+        #[allow(clippy::single_range_in_vec_init)]
+        let domains = vec![0..patch.sections.len()];
+        let budget = 100usize;
+        for objective in [Objective::MinSum, Objective::MinMax] {
+            let (_, _) =
+                search_local_with_budget(&domains, &patch.sections, &eval, objective, budget);
+            assert!(
+                eval.scored.get() <= budget + 2,
+                "search_local scored {} with budget {budget}",
+                eval.scored.get()
+            );
+            eval.scored.set(0);
+            let (_, _) =
+                search_vns_with_budget(&domains, &patch.sections, &eval, objective, budget);
+            assert!(
+                eval.scored.get() <= budget + 2,
+                "search_vns scored {} with budget {budget}",
+                eval.scored.get()
+            );
+            eval.scored.set(0);
+            let (_, _) = search_sa_with_budget(&domains, &patch.sections, &eval, objective, budget);
+            assert!(
+                eval.scored.get() <= budget + 2,
+                "search_sa scored {} with budget {budget}",
+                eval.scored.get()
+            );
+            eval.scored.set(0);
+        }
+    }
+
+    #[test]
+    fn generate_candidates_stays_within_budget() {
+        // The full `g o` path and the interactive slider path must both stay
+        // within their documented budgets: each strategy scores at most
+        // `budget` candidates plus two fixed evaluations (seed + identity),
+        // and the entry point adds one `before` evaluation. MinMax = 3
+        // strategies, so the fast path stays at the documented ≤ 750 budgeted
+        // candidates (plus the 7 fixed evaluations).
+        let cost = CostModel::default();
+        for patch in [big_patch(), large_banner_patch()] {
+            let strategies = OptimizeScope::MinMax.strategies().len();
+            let (candidates, scored) = generate_candidates_scored_inner(
+                &patch,
+                &cost,
+                OptimizeScope::MinMax,
+                None,
+                SEARCH_STEPS,
+            );
+            let bound = 1 + strategies * (2 + SEARCH_STEPS);
+            assert!(
+                scored <= bound,
+                "full path scored {scored} candidates, bound {bound}"
+            );
+            assert_eq!(candidates.len(), strategies);
+            for c in &candidates {
+                assert_full_permutation(&c.order, patch.sections.len());
+            }
+            // Interactive slider path: tighter budget.
+            let (fast, fast_scored) = generate_candidates_scored_inner(
+                &patch,
+                &cost,
+                OptimizeScope::MinMax,
+                Some(Objective::weighted(0.5)),
+                INTERACTIVE_SEARCH_STEPS,
+            );
+            let fast_bound = 1 + strategies * (2 + INTERACTIVE_SEARCH_STEPS);
+            assert!(
+                fast_scored <= fast_bound,
+                "fast path scored {fast_scored} candidates, bound {fast_bound}"
+            );
+            assert_eq!(fast.len(), strategies);
+            for c in &fast {
+                assert_full_permutation(&c.order, patch.sections.len());
+            }
+        }
+    }
+
+    #[test]
+    fn real_patch_optimizer_completes_within_budget() {
+        // Real-world patches (droid_mpfs5drum: 175 sections, droid_mpfs5melody2:
+        // 379 sections) far exceed ENUM_LIMIT, so every strategy takes a
+        // budgeted search path. Both the full `g o` path and the interactive
+        // slider path must complete within their documented budgets on real
+        // data, and every candidate must be a valid full permutation.
+        let cost = CostModel::default();
+        for name in [
+            "fixtures/droid_mpfs5drum.ini",
+            "fixtures/droid_mpfs5melody2.ini",
+        ] {
+            let patch = Patch::from_ini_file(Path::new(name)).unwrap();
+            assert!(
+                patch.sections.len() > 100,
+                "{name} must be a large real patch"
+            );
+            let strategies = OptimizeScope::MinMax.strategies().len();
+            let (candidates, scored) = generate_candidates_scored_inner(
+                &patch,
+                &cost,
+                OptimizeScope::MinMax,
+                None,
+                SEARCH_STEPS,
+            );
+            let bound = 1 + strategies * (2 + SEARCH_STEPS);
+            assert!(
+                scored <= bound,
+                "{name}: full path scored {scored} candidates, bound {bound}"
+            );
+            assert_eq!(candidates.len(), strategies);
+            for c in &candidates {
+                assert_full_permutation(&c.order, patch.sections.len());
+            }
+            let (fast, fast_scored) = generate_candidates_scored_inner(
+                &patch,
+                &cost,
+                OptimizeScope::MinMax,
+                Some(Objective::weighted(0.5)),
+                INTERACTIVE_SEARCH_STEPS,
+            );
+            eprintln!("PROBE: fast path done, scored={fast_scored}");
+            let fast_bound = 1 + strategies * (2 + INTERACTIVE_SEARCH_STEPS);
+            assert!(
+                fast_scored <= fast_bound,
+                "{name}: fast path scored {fast_scored} candidates, bound {fast_bound}"
+            );
+            assert_eq!(fast.len(), strategies);
+            for c in &fast {
+                assert_full_permutation(&c.order, patch.sections.len());
+            }
+        }
     }
 
     // --- task 1.4: weighted slider objective (D2) ---

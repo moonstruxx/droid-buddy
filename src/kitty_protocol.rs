@@ -53,10 +53,14 @@ pub fn chunk_encoded(encoded: &str, max_chunk: usize) -> Vec<&str> {
 }
 
 fn chunk_flag(more: bool) -> u8 {
+    // Kitty graphics protocol: `m=1` for all but the last chunk, `m=0` for the
+    // last. The terminal buffers the image until the final chunk arrives, so an
+    // inverted flag leaves a single-chunk payload (or the final chunk) unflushed
+    // and the image is never displayed.
     if more {
-        0
-    } else {
         1
+    } else {
+        0
     }
 }
 
@@ -276,7 +280,7 @@ mod tests {
         // the real encoder — see commit note; do not hand-recompute).
         assert_eq!(
             escapes[0],
-            "\u{1b}_Ga=t,i=1,f=32,s=2,v=1,o=z,m=1,q=2;eJz7z8DwHwQBEPcD/Q==\u{1b}\\"
+            "\u{1b}_Ga=t,i=1,f=32,s=2,v=1,o=z,m=0,q=2;eJz7z8DwHwQBEPcD/Q==\u{1b}\\"
         );
     }
 
@@ -286,23 +290,23 @@ mod tests {
         let escapes = transmit_escapes(1, 20_000, 1, &rgba).unwrap();
         assert!(escapes.len() > 1, "expected multiple chunks");
 
-        // First chunk: full control data, m=0 (not last).
+        // First chunk: full control data, m=1 (more chunks follow).
         assert!(
-            escapes[0].starts_with("\x1b_Ga=t,i=1,f=32,s=20000,v=1,o=z,m=0,q=2;"),
+            escapes[0].starts_with("\x1b_Ga=t,i=1,f=32,s=20000,v=1,o=z,m=1,q=2;"),
             "first chunk control data wrong: {:?}",
             escapes[0]
         );
-        // Last chunk: m=1 (last), continuation form.
+        // Last chunk: m=0 (last), continuation form.
         assert!(
-            escapes.last().unwrap().starts_with("\x1b_Gm=1,q=2;"),
-            "last chunk must be m=1 continuation: {:?}",
+            escapes.last().unwrap().starts_with("\x1b_Gm=0,q=2;"),
+            "last chunk must be m=0 continuation: {:?}",
             escapes.last().unwrap()
         );
         // Intermediate chunks: only m (and q), never the transmit control data.
         for esc in &escapes[1..escapes.len() - 1] {
             assert!(
-                esc.starts_with("\x1b_Gm=0,q=2;"),
-                "intermediate chunk must be m=0 continuation: {esc:?}"
+                esc.starts_with("\x1b_Gm=1,q=2;"),
+                "intermediate chunk must be m=1 continuation: {esc:?}"
             );
             assert!(
                 !esc.contains("a=t"),
@@ -417,7 +421,7 @@ mod feature_tests {
         let escapes = transmit_escapes(1, 2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
         assert_eq!(
             escapes[0],
-            "\u{1b}_Ga=t,i=1,f=32,s=2,v=1,o=z,m=1,q=2;eJz7z8DwHwQBEPcD/Q==\u{1b}\\"
+            "\u{1b}_Ga=t,i=1,f=32,s=2,v=1,o=z,m=0,q=2;eJz7z8DwHwQBEPcD/Q==\u{1b}\\"
         );
     }
 }
