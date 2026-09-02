@@ -115,14 +115,22 @@ impl GraphCamera {
         } else {
             fit_zoom.max(MIN_ZOOM)
         };
-        let (cx, cy) = (
-            (bounds.min_x + bounds.max_x) / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
-        );
-        let pan = (
-            cx * zoom - pixel_size.0 / 2.0,
-            cy * zoom - pixel_size.1 / 2.0,
-        );
+        // When the min-node clamp overrides the fit, the world overflows the
+        // canvas; anchor the pan on the world's top-left corner so the initial
+        // view shows the graph's start instead of empty space around its
+        // center (a vertical chain's center is a gap between nodes).
+        let pan = if zoom > fit_zoom {
+            (bounds.min_x * zoom, bounds.min_y * zoom)
+        } else {
+            let (cx, cy) = (
+                (bounds.min_x + bounds.max_x) / 2.0,
+                (bounds.min_y + bounds.max_y) / 2.0,
+            );
+            (
+                cx * zoom - pixel_size.0 / 2.0,
+                cy * zoom - pixel_size.1 / 2.0,
+            )
+        };
         Self { zoom, pan }
     }
 
@@ -209,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_to_world_keeps_smallest_node_legible_and_centers_content() {
+    fn fit_to_world_keeps_smallest_node_legible_and_anchors_top_left_when_clamped() {
         // Spread-out world: 1000 nodes one world unit apart. The raw fit zoom
         // (span 999 → 640px) would shrink a one-unit node to <1px; the minimum
         // clamp must hold the tightest spacing readable instead.
@@ -227,7 +235,31 @@ mod tests {
         );
         // Smallest node (the tightest 1.0-unit gap) renders ≥ min_node_px px.
         assert!(1.0 * cam.zoom >= min_node_px, "tightest gap sub-minimum");
-        // Content is centered: the world-bounds center lands on the viewport center.
+        // The clamp overrode the fit, so the pan anchors on the world's
+        // top-left corner: the initial view shows the graph's start, not
+        // empty space around the world center (regression: the graph surface
+        // rendered blank for real patches whose solver output is a vertical
+        // chain).
+        let (px, py) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        assert_close(px, 0.0, 1e-2);
+        assert_close(py, 0.0, 1e-2);
+    }
+
+    #[test]
+    fn fit_centers_content_when_fit_zoom_is_not_clamped() {
+        // A world that fits at the fit zoom (no min-node clamp override) keeps
+        // the center anchor: the world-bounds center lands on the viewport
+        // center.
+        let bounds = WorldBounds {
+            min_x: -10.0,
+            min_y: -5.0,
+            max_x: 30.0,
+            max_y: 15.0,
+        };
+        let pixel = (640.0, 400.0);
+        let cam = GraphCamera::fit_to_world(bounds, pixel, 4.0);
+        // fit_zoom = min(640/40, 400/20) = 16 ≥ 4 → not clamped.
+        assert_close(cam.zoom, 16.0, 1e-3);
         let (cx, cy) = (
             (bounds.min_x + bounds.max_x) / 2.0,
             (bounds.min_y + bounds.max_y) / 2.0,
@@ -235,6 +267,39 @@ mod tests {
         let (px, py) = cam.world_to_pixel(cx, cy);
         assert_close(px, pixel.0 / 2.0, 1e-2);
         assert_close(py, pixel.1 / 2.0, 1e-2);
+    }
+
+    #[test]
+    fn fit_frames_tall_world_when_height_binds() {
+        // Regression: a real patch's solver output is a vertical chain (tall,
+        // narrow world). The height-bound fit wins over the min-node floor so
+        // the whole graph stays framed (the graph surface rendered blank when
+        // the clamp pushed the tall world off-canvas).
+        let bounds = WorldBounds {
+            min_x: -77.0,
+            min_y: 3.0,
+            max_x: 97.0,
+            max_y: 709.0,
+        };
+        let pixel = (624.0, 304.0); // 100x24 main area minus one node frame
+        let min_node_px = 2.2;
+        let cam = GraphCamera::fit_to_world(bounds, pixel, min_node_px);
+        // The height-bound fit wins over the floor: zoom = ph/span_h.
+        assert_close(cam.zoom, 304.0 / 706.0, 1e-3);
+        assert!(
+            cam.zoom < min_node_px,
+            "floor must not break a height-bound fit"
+        );
+        // Every corner of the world bounds stays inside the viewport.
+        let (left, top) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        let (right, bottom) = cam.world_to_pixel(bounds.max_x, bounds.max_y);
+        assert!(left >= 0.0 && top >= 0.0, "top-left corner off-canvas");
+        assert!(
+            right <= pixel.0 && bottom <= pixel.1,
+            "bottom-right corner off-canvas: ({right},{bottom}) vs ({},{})",
+            pixel.0,
+            pixel.1
+        );
     }
 
     #[test]
