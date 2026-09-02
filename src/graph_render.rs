@@ -101,6 +101,7 @@ impl GraphCamera {
     /// fit" scenario requires the camera to frame the graph — the min fit keeps
     /// every node in view, and the clamp is the only source of overflow.
     pub fn fit_to_world(bounds: WorldBounds, pixel_size: (f32, f32), min_node_px: f32) -> Self {
+        let pixel_size = (pixel_size.0.max(1.0), pixel_size.1.max(1.0));
         let span_w = (bounds.max_x - bounds.min_x).max(MIN_SPAN);
         let span_h = (bounds.max_y - bounds.min_y).max(MIN_SPAN);
         let fit_zoom = (pixel_size.0 / span_w).min(pixel_size.1 / span_h);
