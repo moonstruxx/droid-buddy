@@ -910,7 +910,7 @@ impl App {
             return false;
         }
         let weight: f32 = 0.0;
-        let candidates = crate::optimize::generate_candidates_weighted(
+        let candidates = crate::optimize::generate_candidates_weighted_fast(
             patch,
             &self.cost_model,
             OptimizeScope::MinMax,
@@ -958,7 +958,7 @@ impl App {
         let Some(patch) = self.patch.clone() else {
             return;
         };
-        let candidates = crate::optimize::generate_candidates_weighted(
+        let candidates = crate::optimize::generate_candidates_weighted_fast(
             &patch,
             &self.cost_model,
             OptimizeScope::MinMax,
