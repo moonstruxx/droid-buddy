@@ -1,11 +1,11 @@
 ## 1. FavoritesStore persistence
 
 - [x] 1.1 Create `src/favorites.rs` with `FavoritesStore` type (serde `Vec<String>` of absolute paths), `load`/`save`/`save_to_dir` methods following the `LabelStore` XDG + atomic-write pattern (`favourites.toml` in `~/.config/droid-tui/`), and `toggle`/`is_favourite` helpers. <!-- agent: rusty-engineer.build, touches: src/favorites.rs -->
-- [ ] 1.2 Add unit tests for `FavoritesStore`: load missing file yields empty list, save round-trips, toggle adds/removes paths, malformed TOML yields empty list with stderr warning. <!-- agent: horst-engineer.build, touches: src/favorites.rs -->
+- [x] 1.2 Add unit tests for `FavoritesStore`: load missing file yields empty list, save round-trips, toggle adds/removes paths, malformed TOML yields empty list with stderr warning. <!-- agent: horst-engineer.build, touches: src/favorites.rs -->
 
 ## 2. App integration
 
-- [ ] 2.1 Add `favorites: FavoritesStore` field to `App`, load it in `App::new` (or `load_patch` init path), and wire `favorites.save()` into the toggle path. Wire `mod favorites;` in `src/lib.rs`. <!-- agent: rusty-engineer.build, touches: src/app.rs, src/lib.rs -->
+- [x] 2.1 Add `favorites: FavoritesStore` field to `App`, load it in `App::new` (or `load_patch` init path), and wire `favorites.save()` into the toggle path. Wire `mod favorites;` in `src/lib.rs`. <!-- agent: rusty-engineer.build, touches: src/app.rs, src/lib.rs -->
 - [ ] 2.2 Add `picker_entries_with_favourites` method (or modify `refresh_picker_entries`) that prepends favourited `.ini` files (matching absolute paths) to the picker list, marked with a `★` prefix. Ensure navigation index offsets correctly. <!-- agent: rusty-engineer.build, touches: src/app.rs -->
 
 ## 3. Keybinding

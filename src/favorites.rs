@@ -173,6 +173,11 @@ mod tests {
         let path = dir.path().join("favourites.toml");
         let store = FavoritesStore::load_from(&path);
         assert!(store.favourites.is_empty());
+        // Missing directory also yields empty (no panic, no file).
+        let missing_dir = dir.path().join("no").join("such").join("favourites.toml");
+        assert!(FavoritesStore::load_from(&missing_dir)
+            .favourites
+            .is_empty());
     }
 
     #[test]
@@ -183,8 +188,13 @@ mod tests {
         store.favourites.push("/tmp/a.ini".to_string());
         store.favourites.push("/tmp/b.ini".to_string());
         store.save_to(&path).unwrap();
+        // No stray tmp file left beside the target.
+        assert!(!dir.path().join("favourites.toml.tmp").exists());
         let reloaded = FavoritesStore::load_from(&path);
         assert_eq!(reloaded.favourites, store.favourites);
+        // Verify the file is valid TOML containing the favourites array.
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("favourites"), "body: {body}");
     }
 
     #[test]
@@ -194,8 +204,25 @@ mod tests {
         assert!(!store.is_favourite(p));
         assert!(store.toggle(p));
         assert!(store.is_favourite(p));
+        assert_eq!(store.favourites.len(), 1);
         assert!(!store.toggle(p));
         assert!(!store.is_favourite(p));
+        assert!(store.favourites.is_empty());
+    }
+
+    #[test]
+    fn toggle_persists_through_save_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("favourites.toml");
+        let mut store = FavoritesStore::default();
+        let p = Path::new("/tmp/persist.ini");
+        store.toggle(p);
+        store.save_to(&path).unwrap();
+        let reloaded = FavoritesStore::load_from(&path);
+        assert!(reloaded.is_favourite(p));
+        let mut reloaded = reloaded;
+        reloaded.toggle(p);
+        assert!(!reloaded.is_favourite(p));
     }
 
     #[test]
@@ -203,8 +230,25 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("favourites.toml");
         fs::write(&path, "not valid toml [[[ ").unwrap();
+        // load_from warns once on stderr and yields empty (mirrors LabelStore/config.rs).
+        // Run with --nocapture to see: "warning: ignoring malformed favourites file ..."
         let store = FavoritesStore::load_from(&path);
         assert!(store.favourites.is_empty());
+        // Confirm the content indeed fails TOML parsing (proves warn path was taken).
+        assert!(toml::from_str::<FavoritesStore>("not valid toml [[[ ").is_err());
+    }
+
+    #[test]
+    fn malformed_toml_yields_empty_with_empty_file_and_wrong_type() {
+        let dir = tempdir().unwrap();
+        // Empty file is valid TOML and yields empty store without warning.
+        let empty = dir.path().join("empty.toml");
+        fs::write(&empty, "").unwrap();
+        assert!(FavoritesStore::load_from(&empty).favourites.is_empty());
+        // Wrong-type value also triggers the malformed warning path.
+        let wrong = dir.path().join("wrong.toml");
+        fs::write(&wrong, "favourites = 123").unwrap();
+        assert!(FavoritesStore::load_from(&wrong).favourites.is_empty());
     }
 
     #[test]
@@ -213,6 +257,7 @@ mod tests {
         let mut store = FavoritesStore::default();
         store.favourites.push("/abs/path.ini".to_string());
         store.save_to_dir(dir.path()).unwrap();
+        assert!(!dir.path().join("favourites.toml.tmp").exists());
         let loaded = FavoritesStore::load_from(&dir.path().join("favourites.toml"));
         assert_eq!(loaded.favourites, vec!["/abs/path.ini".to_string()]);
     }
