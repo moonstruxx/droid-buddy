@@ -233,9 +233,10 @@ fn render_validation_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Optimizer menu overlay (design D5) — centered, mirroring the validation
-/// modal pattern. Lists up to three candidates (variant label + before→after
-/// `avg`/`max`/back-edges), cursor highlighted via `optimizer_selected_bg`,
-/// with a hint line for j/k/Enter/s/r/Esc. The preview is already applied to
+/// modal pattern. Lists up to three candidates (variant label + weighted
+/// objective + before→after `avg`/`max`/back-edges), cursor highlighted via
+/// `optimizer_selected_bg`, with the weight readout in the title and a hint
+/// line for j/k/Enter/s/r/Esc. The preview is already applied to
 /// `Patch.sections` by the handler; this modal only reflects state.
 fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -262,7 +263,23 @@ fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let count = state.candidates.len();
-    let title = format!(" Optimizer ({count}) ");
+    // Weight readout (design D5): mid-range shows `w = x.x`; the pure
+    // endpoints carry their strategy labels (0.0 ≡ min-sum, 1.0 ≡ min-max).
+    let weight_label = if state.weight == 0.0 {
+        String::from("w = 0.0 (min-sum)")
+    } else if state.weight == 1.0 {
+        String::from("w = 1.0 (min-max)")
+    } else {
+        format!("w = {:.1}", state.weight)
+    };
+    let title = Line::from(vec![
+        Span::raw(format!(" Optimizer ({count}) · ")),
+        Span::styled(
+            weight_label,
+            Style::default().fg(theme::active().optimizer_weight),
+        ),
+        Span::raw(" "),
+    ]);
     let header_hint = " j/k select · Enter preview · r restore · s export · Esc close ";
 
     let block = Block::default()
@@ -307,7 +324,12 @@ fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
     for idx in start..end {
         let candidate = &state.candidates[idx];
         let is_selected = idx == cursor;
-        // Candidate line: `{label} avg X→Y · max A→B · back-edges N→M`.
+        // Weighted objective `(1−w)·avg + w·max` on the *after* summary, what
+        // Weighted(w) sorted the candidates by (Sum is `avg` scaled by the
+        // edge count, constant across candidates).
+        let weighted_obj =
+            (1.0 - state.weight) * candidate.after.avg + state.weight * candidate.after.max;
+        // Candidate line: `{label} obj X.XX · avg X→Y · max A→B · back-edges N→M`.
         let values = format!(
             " avg {:.2}→{:.2} · max {:.2}→{:.2} · back-edges {}→{}",
             candidate.before.avg,
@@ -321,12 +343,16 @@ fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
             candidate.label.clone(),
             Style::default().fg(theme::active().text),
         );
+        let obj = Span::styled(
+            format!(" obj {weighted_obj:.2} ·"),
+            Style::default().fg(theme::active().optimizer_weight),
+        );
         let values = Span::styled(values, Style::default().fg(theme::active().muted));
         let marker = Span::styled(
             if is_selected { "▶ " } else { "   " },
             Style::default().fg(theme::active().text),
         );
-        let mut line = Line::from(vec![marker, label, values]);
+        let mut line = Line::from(vec![marker, label, obj, values]);
         if is_selected {
             line.style = Style::default()
                 .bg(theme::active().optimizer_selected_bg)
@@ -3779,6 +3805,9 @@ mod tests {
         assert!(text.contains("avg"), "candidate values missing");
         assert!(text.contains("back-edges"), "back-edge counts missing");
         assert!(text.contains("Esc close"), "hint line missing");
+        // Default weight is 0.0 on open → pure min-sum strategy label.
+        assert!(text.contains("w = 0.0 (min-sum)"), "weight readout missing");
+        assert!(text.contains("obj"), "weighted objective label missing");
     }
 
     #[test]

@@ -181,6 +181,29 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.optimizer_export(idx);
                 return false;
             }
+            // Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1`
+            // snap to the pure endpoints. This branch returns before the
+            // viewer-split `[`/`]` handler below, so no collision.
+            crossterm::event::KeyCode::Char('[') => {
+                if let Some(state) = app.optimizer.as_ref() {
+                    app.optimizer_set_weight(state.weight - 0.1);
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char(']') => {
+                if let Some(state) = app.optimizer.as_ref() {
+                    app.optimizer_set_weight(state.weight + 0.1);
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('0') => {
+                app.optimizer_set_weight(0.0);
+                return false;
+            }
+            crossterm::event::KeyCode::Char('1') => {
+                app.optimizer_set_weight(1.0);
+                return false;
+            }
             _ => return false,
         }
     }
@@ -2079,6 +2102,81 @@ mod tests {
             .map(|s| s.name.clone())
             .collect();
         assert_eq!(after, original, "Esc must restore the file order");
+    }
+
+    #[test]
+    fn optimizer_weight_keys_step_snap_and_clamp() {
+        // source_navigation.ini is weight-sensitive: its best ordering under
+        // the weighted objective differs from the pure MinSum one, so stepping
+        // w must change the candidate summaries (arpeggio1 ties everywhere).
+        let mut app = app_with_source_navigation();
+        open_optimizer(&mut app);
+        // Starts at the MinSum endpoint.
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
+        let candidates_at_0 = app.optimizer.as_ref().unwrap().candidates.clone();
+
+        // `]` steps +0.1; the status line reports the new weight.
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.1);
+        assert!(
+            app.status_message.contains("w = 0.1"),
+            "status reports w: {:?}",
+            app.status_message
+        );
+        // Candidates are regenerated under the weighted objective: the best
+        // ordering can differ from the MinSum one on this patch.
+        let candidates_at_01 = app.optimizer.as_ref().unwrap().candidates.clone();
+        assert_ne!(
+            candidates_at_01[0].order, candidates_at_0[0].order,
+            "weighted objective must change the best candidate on this fixture"
+        );
+
+        // `[` steps back down to the MinSum endpoint.
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
+
+        // `0`/`1` snap straight to the endpoints.
+        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
+        handle_event(key(crossterm::event::KeyCode::Char('0')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
+
+        // `]` past the top clamps at 1.0; `[` past the bottom clamps at 0.0.
+        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        for _ in 0..5 {
+            handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        }
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
+        // Ten steps down from 1.0 reach 0.0; an eleventh `[` must stay at the floor.
+        for _ in 0..11 {
+            handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        }
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
+
+        // Esc still closes the menu; `g o` still reopens it.
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.optimizer.is_none());
+        open_optimizer(&mut app);
+        assert!(app.optimizer.is_some());
+    }
+
+    #[test]
+    fn optimizer_weight_keys_do_not_shift_viewer_split() {
+        // The optimizer overlay owns `[`/`]` while open (it returns before the
+        // viewer-split branch); closing the menu must hand them back.
+        let mut app = app_with_fixture();
+        open_optimizer(&mut app);
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(
+            app.viewer_split_ratio, 0.6,
+            "optimizer `]` must not adjust the viewer split"
+        );
+        assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.1);
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        // With the menu closed `[`/`]` go back to the viewer split (no-op
+        // without the viewer open).
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.viewer_split_ratio, 0.6);
     }
 
     #[test]

@@ -27,5 +27,5 @@
 │  ││    ││
 └──┘└──▶─┘┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | SHIFT 1 ACTIVE | Renders degraded at 100 cols — use ≥ 228 co│
+│Loaded arpeggio1 | SHIFT 1 ACTIVE | Renders degraded at 100 cols — use ≥ 228 cols or reduce scale │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

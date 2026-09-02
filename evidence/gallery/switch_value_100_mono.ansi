@@ -27,5 +27,5 @@
 │    │
 └────┘
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│No patch loaded. Press 'l' to load. | Renders degraded at 100 cols — use ≥ 50 cols or reduce scale│
+│Loaded switch_value | Renders degraded at 100 cols — use ≥ 50 cols or reduce scale | Scale: 1.0 | │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
