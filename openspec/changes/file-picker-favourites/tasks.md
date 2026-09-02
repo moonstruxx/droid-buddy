@@ -21,4 +21,4 @@
 ## 5. Integration tests
 
 - [x] 5.1 Add integration test: create temp dir with `.ini` files, favourite one via `FavoritesStore`, open picker, verify favourite appears at top with star glyph, press Enter, verify patch loads. <!-- agent: horst-engineer.build, touches: src/handler.rs, src/ui.rs -->
-- [ ] 5.2 Run full verification gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`. <!-- agent: horst-engineer.build, touches: (none) -->
+- [x] 5.2 Run full verification gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`. <!-- agent: horst-engineer.build, touches: (none) -->
