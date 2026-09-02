@@ -1555,6 +1555,48 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
+        crossterm::event::KeyCode::Char('f') | crossterm::event::KeyCode::Char('F') => {
+            // Favourites toggle for the highlighted picker entry (file-picker-favourites 3.1).
+            // Ignore parent sentinel and directories; only file entries are togglable
+            // (`.ini` preferred — the pinned section filters to `.ini`, but any file
+            // can be toggled; non-`.ini` simply won't appear pinned until filtered).
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT)
+            {
+                return false;
+            }
+            if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
+                if is_picker_parent_entry(&selected_path) {
+                    return false;
+                }
+                if selected_path.metadata().is_ok_and(|m| m.is_dir()) {
+                    return false;
+                }
+                let target_key = crate::favorites::FavoritesStore::canonical_key(&selected_path);
+                let now_favourited = app.favorites.toggle(&selected_path);
+                let _ = app.favorites.save();
+                let label = selected_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| selected_path.to_string_lossy().to_string());
+                app.status_message = if now_favourited {
+                    format!("Favourited: {label}")
+                } else {
+                    format!("Unfavourited: {label}")
+                };
+                app.refresh_picker_entries();
+                if let Some(pos) = app
+                    .picker_entries
+                    .iter()
+                    .position(|p| crate::favorites::FavoritesStore::canonical_key(p) == target_key)
+                {
+                    app.picker_index = pos;
+                } else if app.picker_index >= app.picker_entries.len() {
+                    app.picker_index = app.picker_entries.len().saturating_sub(1);
+                }
+            }
+            false
+        }
         crossterm::event::KeyCode::Enter => {
             if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
                 if !is_entry_selectable(&selected_path) {
@@ -1632,6 +1674,12 @@ mod tests {
     use crate::events::Event;
     use crate::patch::Patch;
     use ratatui::layout::Rect;
+    use std::sync::{Mutex, OnceLock};
+
+    fn fav_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn app_with_fixture() -> App {
         let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
@@ -3629,6 +3677,281 @@ mod tests {
             app.graph_positions[idx], pinned_pos,
             "pinned anchor stays put"
         );
+    }
+
+    #[test]
+    fn picker_f_toggles_favourite_and_back_preserving_highlight() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        // Isolate picker dir with a real .ini file on disk.
+        let picker_tmp = TempDir::new().unwrap();
+        let dummy = picker_tmp.path().join("my_patch.ini");
+        std::fs::write(&dummy, "[p2b8]\nbutton1 = B1.1\n").unwrap();
+        // A second file so the picker list has more than one entry.
+        let other = picker_tmp.path().join("other.ini");
+        std::fs::write(&other, "[p2b8]\nbutton1 = B1.2\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+        let dummy_idx = app
+            .picker_entries
+            .iter()
+            .position(|p| {
+                crate::favorites::FavoritesStore::canonical_key(p)
+                    == crate::favorites::FavoritesStore::canonical_key(&dummy)
+            })
+            .expect("dummy must be in picker");
+        app.picker_index = dummy_idx;
+        assert!(
+            !app.favorites.is_favourite(&dummy),
+            "precondition: not favourited"
+        );
+
+        // First press f -> mark favourite.
+        let target_key = crate::favorites::FavoritesStore::canonical_key(&dummy);
+        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(
+            app.favorites.is_favourite(&dummy),
+            "f should mark favourite"
+        );
+        assert!(
+            app.status_message.contains("Favourited"),
+            "status: {:?}",
+            app.status_message
+        );
+        // Highlight must follow the entry even after refresh re-sorts pinned section.
+        let pos = app
+            .picker_entries
+            .iter()
+            .position(|p| crate::favorites::FavoritesStore::canonical_key(p) == target_key)
+            .unwrap();
+        assert_eq!(
+            app.picker_index, pos,
+            "highlight preserved via canonical_key"
+        );
+        // Persisted file exists under the isolated XDG dir.
+        let fav_file = xdg_dir.path().join("droid-tui").join("favourites.toml");
+        assert!(fav_file.exists(), "save() should write favourites.toml");
+        let body = std::fs::read_to_string(&fav_file).unwrap();
+        assert!(body.contains("my_patch.ini"), "body: {body}");
+
+        // Second press f -> unmark favourite (toggle back).
+        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(
+            !app.favorites.is_favourite(&dummy),
+            "second f should unmark favourite"
+        );
+        assert!(
+            app.status_message.contains("Unfavourited"),
+            "status: {:?}",
+            app.status_message
+        );
+        let pos2 = app
+            .picker_entries
+            .iter()
+            .position(|p| crate::favorites::FavoritesStore::canonical_key(p) == target_key)
+            .unwrap();
+        assert_eq!(
+            app.picker_index, pos2,
+            "highlight still preserved after unmark"
+        );
+
+        // Uppercase F behaves identically (case-insensitive toggle key).
+        handle_picker_event(key(crossterm::event::KeyCode::Char('F')), &mut app);
+        assert!(
+            app.favorites.is_favourite(&dummy),
+            "F should also mark favourite"
+        );
+        handle_picker_event(key(crossterm::event::KeyCode::Char('F')), &mut app);
+        assert!(
+            !app.favorites.is_favourite(&dummy),
+            "second F should unmark"
+        );
+
+        // Restore env.
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_f_ignores_parent_dir_and_ctrl_modifier() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let picker_tmp = TempDir::new().unwrap();
+        let dummy = picker_tmp.path().join("a.ini");
+        std::fs::write(&dummy, "[p2b8]\nbutton1 = B1.1\n").unwrap();
+        let subdir = picker_tmp.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+
+        // Parent ".." sentinel is always first when picker_dir has a parent.
+        assert!(
+            is_picker_parent_entry(&app.picker_entries[0]),
+            "first entry should be .."
+        );
+        app.picker_index = 0;
+        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(
+            app.favorites.favourites.is_empty(),
+            "f on parent must not toggle"
+        );
+
+        // Directory entry must also be ignored.
+        let dir_idx = app
+            .picker_entries
+            .iter()
+            .position(|p| p == &subdir)
+            .expect("subdir in picker");
+        app.picker_index = dir_idx;
+        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(
+            app.favorites.favourites.is_empty(),
+            "f on directory must not toggle"
+        );
+
+        // Ctrl+f must be ignored even on a file entry.
+        let file_idx = app
+            .picker_entries
+            .iter()
+            .position(|p| {
+                crate::favorites::FavoritesStore::canonical_key(p)
+                    == crate::favorites::FavoritesStore::canonical_key(&dummy)
+            })
+            .unwrap();
+        app.picker_index = file_idx;
+        let ctrl_f = KeyEvent::new(crossterm::event::KeyCode::Char('f'), KeyModifiers::CONTROL);
+        handle_picker_event(ctrl_f, &mut app);
+        assert!(
+            app.favorites.favourites.is_empty(),
+            "Ctrl+f must not toggle"
+        );
+        assert!(
+            !app.favorites.is_favourite(&dummy),
+            "file still not favourited"
+        );
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_favourite_integration_loads_via_enter() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let picker_tmp = TempDir::new().unwrap();
+        let fav_path = picker_tmp.path().join("alpha.ini");
+        let other_path = picker_tmp.path().join("beta.ini");
+        std::fs::write(&fav_path, "[p2b8]\nbutton = B1.1\n").unwrap();
+        std::fs::write(&other_path, "[p2b8]\nbutton = B1.2\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        // Favourite alpha via FavoritesStore (canonicalized like the real toggle path).
+        assert!(app.favorites.toggle(&fav_path));
+        assert!(app.favorites.is_favourite(&fav_path));
+        assert!(!app.favorites.is_favourite(&other_path));
+
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.picker_index = 0;
+        app.refresh_picker_entries();
+
+        // Favourite must be pinned at index 0, ahead of parent sentinel and directory listing.
+        assert!(!app.picker_entries.is_empty(), "picker should have entries");
+        let first = &app.picker_entries[0];
+        assert_eq!(
+            crate::favorites::FavoritesStore::canonical_key(first),
+            crate::favorites::FavoritesStore::canonical_key(&fav_path),
+            "favourite should be at index 0, got {:?}",
+            first
+        );
+        assert!(
+            app.is_favourite_entry(first),
+            "is_favourite_entry should be true for pinned favourite"
+        );
+        let label = app.picker_entry_label(first);
+        assert!(
+            label.contains('★'),
+            "favourited label should contain ★, got {label:?}"
+        );
+        assert!(
+            label.contains("alpha.ini"),
+            "label should contain leaf name, got {label:?}"
+        );
+        // Other file remains in listing but not at top; parent ".." follows favourites.
+        let other_pos = app
+            .picker_entries
+            .iter()
+            .position(|p| {
+                crate::favorites::FavoritesStore::canonical_key(p)
+                    == crate::favorites::FavoritesStore::canonical_key(&other_path)
+            })
+            .expect("other.ini should be in picker");
+        assert!(
+            other_pos > 0,
+            "other.ini should not be at top (pos {other_pos})"
+        );
+        assert!(
+            !app.is_favourite_entry(&other_path),
+            "other.ini should not be favourited"
+        );
+        assert!(
+            !app.picker_entry_label(&other_path).contains('★'),
+            "non-favourite label should not contain ★"
+        );
+
+        // Simulate Enter on the favourited entry to load the patch.
+        app.picker_index = 0;
+        let quit = handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        assert!(!quit, "Enter should not quit");
+        assert!(
+            !app.showing_picker,
+            "picker should close after successful load"
+        );
+        assert!(app.patch.is_some(), "patch should be loaded");
+        let patch = app.patch.as_ref().unwrap();
+        assert!(
+            patch.hw_components.iter().any(|c| c.id == "B1.1"),
+            "loaded fav patch should contain B1.1"
+        );
+        assert!(app.selected_file.is_some(), "selected_file should be set");
+        assert_eq!(
+            crate::favorites::FavoritesStore::canonical_key(app.selected_file.as_ref().unwrap()),
+            crate::favorites::FavoritesStore::canonical_key(&fav_path)
+        );
+        assert!(
+            app.status_message.contains("Loaded") || app.status_message.contains("Ready"),
+            "status should indicate load success, got {:?}",
+            app.status_message
+        );
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 
     #[test]
