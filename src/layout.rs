@@ -377,7 +377,9 @@ fn edge_pairs(graph: &Graph, index: &HashMap<&NodeId, usize>) -> Vec<(usize, usi
 mod tests {
     use super::*;
     use crate::graph::{Cluster, GraphEdge, GraphNode};
+    use crate::latency::CostModel;
     use crate::patch::Patch;
+    use std::path::Path;
 
     fn node(name: &str, section_index: usize) -> GraphNode {
         GraphNode {
@@ -406,6 +408,21 @@ mod tests {
             validation: vec![],
             ..Default::default()
         }
+    }
+
+    /// Build the signal-flow graph for a fixture patch, mirroring
+    /// `App::open_graph` (banner groups → clusters, shared default cost model).
+    fn graph_from_fixture(name: &str) -> Graph {
+        let patch = Patch::from_ini_file(Path::new(name)).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.as_deref().unwrap_or("(unnamed)").to_string(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        Graph::build_from_patch(&patch, &clusters, &CostModel::default())
     }
 
     fn assert_finite_and_bounded(positions: &[(f32, f32)]) {
@@ -1119,5 +1136,49 @@ mod tests {
             free,
             "out-of-range pins must be ignored"
         );
+    }
+
+    #[test]
+    fn real_patch_solve_settles_quickly() {
+        // A real patch (arpeggio1.ini) must converge via the energy threshold
+        // before the iteration cap: the solver reaches rest, not the cap
+        // cutting off an unsettled layout. The bound matches the committed
+        // `solve_converges_by_energy_threshold_before_cap` convention
+        // (`< MAX_ITERATIONS`); with the raised SPRING_K (0.15) the solver
+        // converges in the high hundreds on real fan-out patches, so a tighter
+        // half-cap bound would be flaky.
+        let graph = graph_from_fixture("fixtures/arpeggio1.ini");
+        assert!(graph.nodes.len() >= 10, "fixture must be non-trivial");
+        let count = solve_iteration_count(&graph);
+        assert!(
+            count < MAX_ITERATIONS,
+            "real patch solve took {count} iterations (cap {MAX_ITERATIONS})"
+        );
+        assert!(count > 0);
+        assert_finite_and_bounded(&solve(&graph, &[]));
+    }
+
+    #[test]
+    fn real_patch_local_resettle_settles_quickly() {
+        // Dragging a node on a real patch re-settles the local neighborhood in
+        // a small fraction of the local budget, so the interactive drag stays
+        // responsive. Asserted via the iteration count, not wall-clock timing.
+        let graph = graph_from_fixture("fixtures/arpeggio1.ini");
+        let mut positions = solve(&graph, &[]);
+        let moved = graph.nodes[0].id.clone();
+        positions[0] = (positions[0].0 + 60.0, positions[0].1 + 40.0);
+        let count = resettle_iteration_count(
+            &graph,
+            &mut positions,
+            &moved,
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+        );
+        assert!(
+            count < LOCAL_ITERATIONS / 2,
+            "real patch re-settle took {count} iterations (cap {LOCAL_ITERATIONS})"
+        );
+        assert!(count > 0);
+        assert_finite_and_bounded(&positions);
     }
 }
