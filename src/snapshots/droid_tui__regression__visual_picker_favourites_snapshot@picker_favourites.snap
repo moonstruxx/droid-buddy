@@ -1,0 +1,26 @@
+---
+source: src/regression.rs
+expression: buffer_to_ansi(&buf)
+---
+
+
+  ┌ File Picker ─────────────────────────────────────────────────────────────┐
+  │▶ ★ fav_alpha.ini                                                         │
+  │  ★ fav_beta.ini                                                          │
+  │── favourites ──                                                          │
+  │  ..                                                                      │
+  │  subdir                                                                  │
+  │  patch_a.ini                                                             │
+  │  readme.txt                                                              │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

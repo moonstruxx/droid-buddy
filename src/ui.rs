@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{is_picker_parent_entry, App, QuadFocus, SourceViewMode, ViewerFocus};
+use crate::app::{App, QuadFocus, SourceViewMode, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
@@ -1341,31 +1341,46 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     let picker_y = area.y + (area.height.saturating_sub(picker_height)) / 2;
     let picker_area = Rect::new(picker_x, picker_y, picker_width, picker_height);
 
-    // Build entry lines with selectability and selection highlighting
-    let entry_lines: Vec<String> = app
-        .picker_entries
-        .iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let is_selected = i == app.picker_index;
-            // The parent entry is a bare ".." sentinel with no file name;
-            // render it as ".." instead of an empty label.
-            let display = if is_picker_parent_entry(path) {
-                "..".to_string()
-            } else {
-                path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            };
+    // Build entry lines with favourites section (★ prefix) and visual separator.
+    // Favourites are pinned at the top of `picker_entries` by `refresh_picker_entries`;
+    // we render them first with the ★ glyph via `picker_entry_label`, then a
+    // muted separator line, then the directory listing. When no favourites exist
+    // no separator is shown.
+    let fav_count = app.picker_entries_with_favourites().len();
+    let has_favourites = fav_count > 0 && !app.picker_entries.is_empty();
 
-            let prefix = if is_selected { "▶ " } else { "  " };
+    let mut lines: Vec<Line> =
+        Vec::with_capacity(app.picker_entries.len() + if has_favourites { 1 } else { 0 });
 
-            format!("{}{}", prefix, display)
-        })
-        .collect();
+    for (i, path) in app.picker_entries.iter().enumerate() {
+        // Insert separator between favourites and directory listing.
+        if has_favourites && i == fav_count {
+            // Only insert when there is actually a directory section following.
+            lines.push(Line::from(Span::styled(
+                "── favourites ──",
+                Style::default()
+                    .fg(theme::active().muted)
+                    .add_modifier(Modifier::DIM),
+            )));
+        }
 
-    let joined = entry_lines.join("\n");
-    let paragraph = Paragraph::new(joined)
+        let is_selected = i == app.picker_index;
+        let label = app.picker_entry_label(path);
+        let prefix = if is_selected { "▶ " } else { "  " };
+        let content = format!("{}{}", prefix, label);
+
+        let style = if is_selected {
+            Style::default()
+                .fg(theme::active().text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::active().text)
+        };
+
+        lines.push(Line::from(Span::styled(content, style)));
+    }
+
+    let paragraph = Paragraph::new(lines)
         .style(Style::default().bg(theme::active().muted))
         .block(
             Block::default()
