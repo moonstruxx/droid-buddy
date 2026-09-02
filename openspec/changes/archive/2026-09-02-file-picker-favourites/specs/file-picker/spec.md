@@ -1,10 +1,4 @@
-# File Picker Specification
-
-## Purpose
-
-Provide an interactive file browser within the TUI for selecting and loading DROID `.ini` patch files from the filesystem.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Open file picker
 The system SHALL display a file picker overlay when the user presses the `l` key and no patch is currently loaded, or when explicitly requested.
@@ -60,6 +54,8 @@ The system SHALL allow the user to cancel the file picker and return to the prev
 #### Scenario: Cancel file picker
 - **WHEN** the user presses `Esc` while the file picker is open
 - **THEN** the file picker closes and the previous view is restored
+
+## ADDED Requirements
 
 ### Requirement: Favourites section in picker
 The system SHALL render favourited `.ini` files in a pinned section at the top of the file picker list, above the directory listing. The favourites section and directory listing are both navigable using the same keys.
