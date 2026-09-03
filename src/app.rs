@@ -451,6 +451,13 @@ pub struct App {
     /// The kitty image's pixel size `(pw, ph)` at the last graph render, so the
     /// handler can anchor zoom and gate pan on overflow. `None` until rendered.
     pub graph_canvas_px: Option<(f32, f32)>,
+    /// Cable tension of the graph surface: the force-directed solver's spring
+    /// stiffness (`layout::SPRING_K`). `[`/`]` on the graph surface step it by
+    /// `layout::TENSION_STEP` within `[TENSION_MIN, TENSION_MAX]` and re-solve
+    /// the layout live. Persists across patch loads (a view preference, like
+    /// `viewer_split_ratio`); determinism holds per value (same patch + same
+    /// machine + same tension → same layout).
+    pub tension: f32,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -629,6 +636,7 @@ impl App {
             graph_camera: None,
             graph_zoom_preset: 1,
             graph_canvas_px: None,
+            tension: crate::layout::DEFAULT_TENSION,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -1835,7 +1843,7 @@ impl App {
                 // before the first solve so it never drifts.
                 self.seed_tip_pin(g);
                 let pins = self.pinned_indices(g);
-                layout::solve(g, &pins)
+                layout::solve(g, &pins, self.tension)
             }
             None => Vec::new(),
         };
@@ -1895,7 +1903,7 @@ impl App {
                 // here so an explicit unpin (`p` on the tip) survives this
                 // rebuild and re-flows until the graph reopens (design D7).
                 let pins = self.pinned_indices(g);
-                layout::solve(g, &pins)
+                layout::solve(g, &pins, self.tension)
             }
             None => Vec::new(),
         };
@@ -1918,7 +1926,7 @@ impl App {
                 if let Some(graph) = self.graph.as_ref() {
                     let filtered = graph.filtered_influence(&sub);
                     let pins = self.pinned_indices(&filtered);
-                    let positions = layout::solve_filtered(&filtered, &pins);
+                    let positions = layout::solve_filtered(&filtered, &pins, self.tension);
                     self.filtered_graph = Some(filtered);
                     self.filtered_positions = positions;
                     self.filtered_node_rects.clear();
@@ -1939,6 +1947,23 @@ impl App {
     /// open, mirroring `clear_graph_cluster_rects`.
     pub fn clear_graph_node_rects(&mut self) {
         self.graph_node_rects.clear();
+    }
+
+    /// Step cable tension by `dir` (±1) on the graph surface: `[` lowers it,
+    /// `]` raises it, each step `layout::TENSION_STEP`, clamped to
+    /// `[TENSION_MIN, TENSION_MAX]`. A real change re-solves the layout live
+    /// (full + filtered) so the graph re-flows under the new spring stiffness;
+    /// the status always reports the (possibly clamped) value. Determinism
+    /// contract: same patch + same machine + same tension → same layout.
+    pub fn adjust_tension(&mut self, dir: i32) {
+        let next = (self.tension + dir as f32 * crate::layout::TENSION_STEP)
+            .clamp(crate::layout::TENSION_MIN, crate::layout::TENSION_MAX);
+        self.status_message = format!("Cable tension: {:.2}", next);
+        if (next - self.tension).abs() < f32::EPSILON {
+            return; // already at the clamp; keep the layout untouched
+        }
+        self.tension = next;
+        self.rebuild_graph();
     }
 
     /// Reset graph-view state on patch load: the graph is rebuilt from a fresh
@@ -1987,7 +2012,7 @@ impl App {
                 Some(g) => {
                     self.seed_tip_pin(g);
                     let pins = self.pinned_indices(g);
-                    layout::solve(g, &pins)
+                    layout::solve(g, &pins, self.tension)
                 }
                 None => Vec::new(),
             };
@@ -2073,7 +2098,7 @@ impl App {
             let graph = Graph::build_from_patch(&patch, &clusters, &self.cost_model);
             self.seed_tip_pin(&graph);
             let pins = self.pinned_indices(&graph);
-            let positions = layout::solve(&graph, &pins);
+            let positions = layout::solve(&graph, &pins, self.tension);
             self.graph = Some(graph);
             self.graph_positions = positions;
             self.graph_cluster_rects.clear();
@@ -2088,7 +2113,7 @@ impl App {
         if let Some(graph) = self.graph.as_ref() {
             let filtered = graph.filtered_influence(&subtree);
             let pins = self.pinned_indices(&filtered);
-            let positions = layout::solve_filtered(&filtered, &pins);
+            let positions = layout::solve_filtered(&filtered, &pins, self.tension);
             self.filtered_graph = Some(filtered);
             self.filtered_positions = positions;
             self.filtered_node_rects.clear();
@@ -2421,6 +2446,60 @@ mod tests {
         app.graph_cluster_rects = vec![(0, Rect::new(0, 0, 5, 5)), (1, Rect::new(1, 1, 5, 5))];
         app.clear_graph_cluster_rects();
         assert!(app.graph_cluster_rects.is_empty());
+    }
+
+    #[test]
+    fn adjust_tension_steps_resolves_and_reports_status() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert_eq!(app.tension, crate::layout::DEFAULT_TENSION);
+        let before = app.graph_positions.clone();
+
+        // `]` raises tension one step and re-solves the layout live.
+        app.adjust_tension(1);
+        assert_eq!(
+            app.tension,
+            crate::layout::DEFAULT_TENSION + crate::layout::TENSION_STEP
+        );
+        assert_eq!(
+            app.status_message,
+            format!("Cable tension: {:.2}", app.tension)
+        );
+        assert_ne!(app.graph_positions, before, "tension change must re-solve");
+
+        // `[` back to the default reproduces the original layout (determinism
+        // per tension value).
+        app.adjust_tension(-1);
+        assert_eq!(app.tension, crate::layout::DEFAULT_TENSION);
+        assert_eq!(app.graph_positions, before);
+    }
+
+    #[test]
+    fn adjust_tension_clamps_at_bounds_without_resolving() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.tension = crate::layout::TENSION_MIN;
+        let before = app.graph_positions.clone();
+
+        // Already at the floor: `[` reports the clamped value and leaves the
+        // layout untouched (no redundant re-solve).
+        app.adjust_tension(-1);
+        assert_eq!(app.tension, crate::layout::TENSION_MIN);
+        assert_eq!(
+            app.status_message,
+            format!("Cable tension: {:.2}", app.tension)
+        );
+        assert_eq!(app.graph_positions, before);
+
+        // Same at the ceiling.
+        app.tension = crate::layout::TENSION_MAX;
+        app.adjust_tension(1);
+        assert_eq!(app.tension, crate::layout::TENSION_MAX);
+        assert_eq!(app.graph_positions, before);
     }
 
     #[test]

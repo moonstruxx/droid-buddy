@@ -629,6 +629,21 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.graph_zoom_preset_step(step);
                 return false;
             }
+            crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']') => {
+                // Cable tension: `[`/`]` lower/raise the solver's spring
+                // stiffness and re-solve the layout live (design D9
+                // determinism holds per tension value). Free on the graph
+                // surface — the viewer-split `[`/`]` handler below only runs
+                // while the embedded viewer is open, and the optimizer menu's
+                // weight slider returns before this branch.
+                let dir = if matches!(key.code, crossterm::event::KeyCode::Char(']')) {
+                    1
+                } else {
+                    -1
+                };
+                app.adjust_tension(dir);
+                return false;
+            }
             crossterm::event::KeyCode::Left
             | crossterm::event::KeyCode::Right
             | crossterm::event::KeyCode::Up
@@ -1320,6 +1335,7 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 layout::LOCAL_RADIUS,
                 layout::LOCAL_ITERATIONS,
                 &pins,
+                app.tension,
             );
             app.notify_node_moved(&node_id);
         }
@@ -1418,6 +1434,7 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
                     layout::LOCAL_RADIUS,
                     layout::LOCAL_ITERATIONS,
                     &pins,
+                    app.tension,
                 );
                 app.notify_node_moved(&node_id);
                 return true;
@@ -1447,6 +1464,7 @@ fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
                     layout::LOCAL_RADIUS,
                     layout::LOCAL_ITERATIONS,
                     &pins,
+                    app.tension,
                 );
                 app.notify_node_moved(&node_id);
                 return true;
@@ -1950,8 +1968,11 @@ mod tests {
         app.open_graph();
         seed_graph_camera(&mut app);
         // Camera fit centers the content; force an overflow so pan is allowed.
+        // The canvas must be small enough to overflow even for the compact
+        // layered seed (a tall fan-out graph fits height-first, so its world
+        // width at the fitted zoom is small).
         let before = app.graph_camera.unwrap().pan;
-        app.graph_canvas_px = Some((100.0, 100.0));
+        app.graph_canvas_px = Some((20.0, 20.0));
         handle_event(key(crossterm::event::KeyCode::Right), &mut app);
         let after = app.graph_camera.unwrap().pan;
         assert!(
@@ -2534,6 +2555,34 @@ mod tests {
         for (x, y) in &app.graph_positions {
             assert!(x.is_finite() && y.is_finite());
         }
+    }
+
+    #[test]
+    fn graph_surface_brackets_adjust_cable_tension() {
+        // `[`/`]` on the graph surface lower/raise cable tension and re-solve
+        // the layout live; the status reports the current value.
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+        let default = crate::layout::DEFAULT_TENSION;
+        assert_eq!(app.tension, default);
+        let before = app.graph_positions.clone();
+
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.tension, default + crate::layout::TENSION_STEP);
+        assert_eq!(
+            app.status_message,
+            format!("Cable tension: {:.2}", app.tension)
+        );
+        assert_ne!(app.graph_positions, before, "tension change re-solves");
+
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.tension, default);
+        assert_eq!(
+            app.graph_positions, before,
+            "same tension reproduces layout"
+        );
     }
 
     #[test]
