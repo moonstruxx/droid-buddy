@@ -395,6 +395,56 @@ pub enum Orientation {
     Landscape,
 }
 
+/// Right-column view slot kind (change `tiled-window-manager`, D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewType {
+    Graph,
+    SourceViewer,
+    Physical,
+    Optimizer,
+}
+
+/// Focused pane in the tiled layout: the left panel pane or a right-column
+/// slot by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusSlot {
+    #[default]
+    Panels,
+    Slot(usize),
+}
+
+/// Right-column view stack (change `tiled-window-manager`, D1): the new home
+/// for which views are open. The legacy `showing_*` bools mirror it until
+/// handler/ui migrate (tasks 4.1/6.1); `App` methods update both.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TileStack {
+    /// Open right-column views, top to bottom.
+    pub slots: Vec<ViewType>,
+    /// Focused pane (`Panels` = left pane).
+    pub focus: FocusSlot,
+}
+
+impl TileStack {
+    pub fn is_open(&self, view: ViewType) -> bool {
+        self.slots.contains(&view)
+    }
+
+    pub fn open(&mut self, view: ViewType) {
+        if !self.slots.contains(&view) {
+            self.slots.push(view);
+        }
+    }
+
+    pub fn close(&mut self, view: ViewType) {
+        self.slots.retain(|v| *v != view);
+        if let FocusSlot::Slot(i) = self.focus {
+            if i >= self.slots.len() {
+                self.focus = FocusSlot::Panels;
+            }
+        }
+    }
+}
+
 /// Application state
 pub struct App {
     pub patch: Option<Patch>,
@@ -413,6 +463,9 @@ pub struct App {
     /// renderer — not the event handler — knows where things actually ended
     /// up on screen.
     pub component_rects: Vec<(usize, Rect)>,
+    /// Right-column view stack (change `tiled-window-manager`, D1). Open-view
+    /// state lives here; the `showing_*` bools mirror it transitionally.
+    pub tile_stack: TileStack,
     /// True when the signal-flow graph view (`g g`) is open.
     pub showing_graph: bool,
     /// The signal-flow graph built from the current patch. `None` until a
@@ -491,6 +544,12 @@ pub struct App {
     /// 0.6 means panels get 60%, source gets 40%.
     /// This is a view preference that persists across patch loads.
     pub viewer_split_ratio: f32,
+    /// Canonical left/right split (change `tiled-window-manager`, D2): the
+    /// renamed, view-agnostic `viewer_split_ratio`. Kept equal to it until
+    /// handler migrates (task 4.2).
+    pub main_split_ratio: f32,
+    /// Left-pane vertical sub-split (0.3 to 0.7), default 0.5. `\` toggles it.
+    pub left_split_ratio: f32,
     /// Synchronous observer event bus (design D6). Re-solve triggers and
     /// topology errors are emitted here for subscribers (renderer, status).
     pub events: EventBus,
@@ -631,6 +690,7 @@ impl App {
             picker_entries: Vec::new(),
             picker_index: 0,
             component_rects: Vec::new(),
+            tile_stack: TileStack::default(),
             showing_graph: false,
             graph: None,
             graph_positions: Vec::new(),
@@ -654,6 +714,8 @@ impl App {
             scale_factor: 1.0,
             orientation: Orientation::Portrait,
             viewer_split_ratio: 0.6,
+            main_split_ratio: 0.6,
+            left_split_ratio: 0.5,
             events: EventBus::default(),
             showing_quad: false,
             quad_focus: QuadFocus::default(),
@@ -939,6 +1001,7 @@ impl App {
             original_order,
             weight,
         });
+        self.tile_stack.open(ViewType::Optimizer);
         self.status_message = format!(
             "Optimizer w = {:.1}: j/k select · Enter preview · r restore · s export · Esc close",
             weight
@@ -1107,6 +1170,13 @@ impl App {
             self.rebuild_graph();
         }
         self.optimizer = None;
+        self.tile_stack.close(ViewType::Optimizer);
+    }
+
+    /// Compat: optimizer-open state from the tile stack (no `showing_optimizer`
+    /// bool ever existed; handler/ui migrate to this in task 5.1).
+    pub fn showing_optimizer(&self) -> bool {
+        self.tile_stack.is_open(ViewType::Optimizer)
     }
 
     /// Open the `?` help modal. Works from any view; the modal is a top-level
@@ -1414,6 +1484,7 @@ impl App {
         self.reset_quad_state();
         self.clear_diff();
         self.optimizer = None;
+        self.tile_stack.close(ViewType::Optimizer);
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
@@ -1530,6 +1601,7 @@ impl App {
         self.reset_quad_state();
         self.clear_diff();
         self.optimizer = None;
+        self.tile_stack.close(ViewType::Optimizer);
         self.patch = Some(patch);
         self.selected_component = None;
         self.occurrence_cursor = 0;
@@ -1885,6 +1957,7 @@ impl App {
         self.graph_zoom_preset = 1;
         self.graph_canvas_px = None;
         self.showing_graph = true;
+        self.tile_stack.open(ViewType::Graph);
         self.emit_graph_built();
     }
 
@@ -1908,6 +1981,7 @@ impl App {
     /// Close the graph view, leaving panel/source-viewer state untouched.
     pub fn close_graph(&mut self) {
         self.showing_graph = false;
+        self.tile_stack.close(ViewType::Graph);
         self.hovered_graph_node = None;
     }
 
@@ -1995,6 +2069,7 @@ impl App {
     /// solve the next time it opens.
     fn reset_graph_state(&mut self) {
         self.showing_graph = false;
+        self.tile_stack.close(ViewType::Graph);
         self.graph = None;
         self.graph_positions.clear();
         self.graph_cluster_rects.clear();
@@ -2241,6 +2316,19 @@ impl App {
     /// Adjust the viewer split ratio by `delta`, clamped to [0.3, 0.7].
     pub fn adjust_viewer_split_ratio(&mut self, delta: f32) {
         self.viewer_split_ratio = (self.viewer_split_ratio + delta).clamp(0.3, 0.7);
+        self.main_split_ratio = self.viewer_split_ratio;
+    }
+
+    /// Adjust the left/right split by `delta`, clamped to [0.3, 0.7].
+    /// Canonical name for `adjust_viewer_split_ratio` (change D2).
+    pub fn adjust_main_split_ratio(&mut self, delta: f32) {
+        self.main_split_ratio = (self.main_split_ratio + delta).clamp(0.3, 0.7);
+        self.viewer_split_ratio = self.main_split_ratio;
+    }
+
+    /// Adjust the left-pane vertical sub-split by `delta`, clamped to [0.3, 0.7].
+    pub fn adjust_left_split_ratio(&mut self, delta: f32) {
+        self.left_split_ratio = (self.left_split_ratio + delta).clamp(0.3, 0.7);
     }
 
     pub fn load_sample_patch(&mut self) {
