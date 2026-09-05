@@ -4,12 +4,13 @@
 //! This module is intentionally pure: no terminal, no ratatui, no `App` — only
 //! `f32` math over the layout solver's world plane, the kitty image's pixel
 //! plane, and `tiny-skia`/`fontdue` rasterization. Scene building (design D3)
-//! emits a backend-neutral [`SceneSpec`] — node frames, per-cable colored
-//! Bézier edges, labels, resolved RGB colors — that both painters consume
-//! under the same [`GraphCamera`]: the tiny-skia [`render_scene`] here and the
-//! egui window painter (task 2.2). [`build_scene`] is the theme-aware leaf
-//! converting the classified tokens from `ui.rs`'s pipeline into the spec and
-//! rasterizing it; below the `Color → RGB` hop everything is RGB-pure.
+//! emits a backend-neutral [`SceneSpec`] — node frames with circuit identity
+//! and port markers, per-cable colored Bézier edges with resolved precedence
+//! state, cluster containers, labels, resolved RGB colors — that both painters
+//! consume under the same [`GraphCamera`]: the tiny-skia [`render_scene`] here
+//! and the egui window painter (task 2.2). [`build_scene`] is the theme-aware
+//! leaf converting the classified tokens from `ui.rs`'s pipeline into the spec
+//! and rasterizing it; below the `Color → RGB` hop everything is RGB-pure.
 
 /// Degenerate-world guard: a zero-span axis (single node, coincident nodes)
 /// behaves as if it spanned `MIN_SPAN` so the fit zoom stays finite.
@@ -541,8 +542,43 @@ mod tests {
 /// D9) happens in [`build_scene_spec`] — no painter ever sees a theme token.
 pub type Rgb = (u8, u8, u8);
 
+/// Cable-kind classification carried on the spec (design D5): mirrors the
+/// four-way inference ui.rs applies per cable so the window painter can
+/// reproduce kind-colored cables and legends. ui.rs's own `CableKind` is
+/// renderer-private, so importing it would invert the dependency — the spec
+/// carries the classification instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CableKind {
+    Control,
+    Audio,
+    Midi,
+    #[default]
+    Unknown,
+}
+
+/// Diff-overlay state of one edge, when the diff is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDiffState {
+    Added,
+    Removed,
+    Changed,
+}
+
+/// Latency state of one edge: the ramp stop index (0–4, cold→hot) and whether
+/// the edge is a back edge. The resolved [`EdgeSpec`] color already encodes
+/// the ramp; the state lets the window painter draw the latency legend and
+/// tooltip readouts without re-deriving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EdgeLatency {
+    pub ramp_stop: usize,
+    pub back_edge: bool,
+}
+
 /// Pixel-space appearance of one graph node: an anti-aliased rounded rect with
-/// an optional centered title.
+/// an optional centered title, plus the circuit identity and port presence the
+/// window painter needs for selection propagation (`x`/`p`/`e`, task 3.1/3.3)
+/// and port markers. The identity fields are neutral (`""`/0/false) on the
+/// terminal path, which classifies these in ui.rs before the token hop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeSpec {
     pub x: f32,
@@ -555,10 +591,24 @@ pub struct NodeSpec {
     pub border_width: f32,
     pub label: String,
     pub label_color: Rgb,
+    /// Circuit/section name of the node (selection and disable targeting).
+    pub circuit: String,
+    /// Zero-based occurrence index among same-named circuits.
+    pub instance_index: usize,
+    /// Left input port marker: the node sinks at least one cable.
+    pub input_port: bool,
+    /// Right output port marker: the node sources at least one cable.
+    pub output_port: bool,
 }
 
-/// Pixel-space appearance of one cable: a quadratic Bézier stroke with a filled
-/// direction arrow at `end`.
+/// Pixel-space appearance of one cable: a quadratic Bézier stroke with a
+/// filled direction arrow at `end`, plus the resolved semantic state (design
+/// D5). `color` is the final winner of the precedence chain (error red, then
+/// diff, then latency ramp, then cable kind, then dim) resolved to RGB; the
+/// state fields let the window painter reproduce legends, tooltips, and
+/// per-state styling without consulting graph.rs. The state is neutral on the
+/// terminal path — ui.rs classifies edges before the token hop and the spec
+/// carries the color.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeSpec {
     pub start: (f32, f32),
@@ -566,16 +616,48 @@ pub struct EdgeSpec {
     pub ctrl: (f32, f32),
     pub color: Rgb,
     pub width: f32,
+    /// Inferred cable kind of the producing circuit.
+    pub kind: CableKind,
+    /// A topology-validation or wiring-outlier finding references the cable.
+    pub error: bool,
+    /// An incident circuit is disabled (`graph_edge_dim` won the chain).
+    pub dim: bool,
+    /// Diff-overlay state when the diff is showing.
+    pub diff: Option<EdgeDiffState>,
+    /// Latency-ramp state when latency coloring is on.
+    pub latency: Option<EdgeLatency>,
 }
 
-/// A fully resolved, backend-neutral graph frame: opaque background plus node
-/// and cable appearance in RGB space. tiny-skia's [`render_scene`] and the egui
-/// window painter (task 2.2) draw the same spec under the same [`GraphCamera`].
+/// Pixel-space cluster container (design D5): a titled bordered box enclosing
+/// its member node rects, mirroring the terminal tile's plain-border union of
+/// member frames. `member_indices` index into [`SceneSpec::nodes`] so the
+/// window painter can map the container back to node identity for diff tinting
+/// (all-added/all-removed members) and hit-testing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClusterSpec {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub title: String,
+    pub border: Rgb,
+    pub title_color: Rgb,
+    pub member_indices: Vec<usize>,
+}
+
+/// A fully resolved, backend-neutral graph frame: opaque background plus node,
+/// cable, and cluster-container appearance in RGB space. tiny-skia's
+/// [`render_scene`] and the egui window painter (task 2.2) draw the same spec
+/// under the same [`GraphCamera`]. The terminal path leaves `clusters` empty —
+/// ui.rs draws cluster containers as overlay geometry on the box path and the
+/// kitty image path does not draw them at all — so the terminal output is
+/// byte-identical to the pre-spec rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneSpec {
     pub background: Rgb,
     pub nodes: Vec<NodeSpec>,
     pub edges: Vec<EdgeSpec>,
+    pub clusters: Vec<ClusterSpec>,
 }
 
 use crate::theme::Theme;
@@ -583,7 +665,9 @@ use ratatui::style::Color as ThemeColor;
 
 /// Theme tokens for one node (design D9): mirror of [`NodeSpec`] whose color
 /// fields carry the classified semantic `Color`s from the existing pipeline
-/// (error red > diff > latency ramp > cable kind) instead of triples.
+/// (error red > diff > latency ramp > cable kind) instead of triples. The
+/// identity/port fields are absent: ui.rs's kitty path classifies them before
+/// the token hop, and the window path constructs [`NodeSpec`] directly.
 #[derive(Clone)]
 pub struct NodeTokenSpec {
     pub x: f32,
@@ -609,18 +693,67 @@ pub struct EdgeTokenSpec {
     pub width: f32,
 }
 
+/// Theme tokens for one cluster container (design D5): the title, the indices
+/// of the member nodes (into the `nodes` slice of [`build_scene_spec`]), and
+/// the container border/title colors. The container rect is the union of the
+/// member node rects inflated by `padding` — the same envelope the box path
+/// derives from `graph_cluster_rect`, computed once here in pixel space.
+#[derive(Clone)]
+pub struct ClusterTokenSpec {
+    pub title: String,
+    pub member_indices: Vec<usize>,
+    pub border: ThemeColor,
+    pub title_color: ThemeColor,
+    pub padding: f32,
+}
+
+/// Pixel rect enclosing the member node rects of a cluster, inflated by
+/// `padding` on each side. `None` when no member node applies (empty or
+/// out-of-range indices — defensive; banner groups always cover sections, but
+/// the node list may be filtered). Shared by [`build_scene_spec`] and the
+/// window path so the container geometry has one definition. Not clamped to a
+/// canvas: the painters clip at draw time, and the spec must not know its
+/// viewport.
+pub fn cluster_rect_from_members(
+    member_indices: &[usize],
+    nodes: &[NodeSpec],
+    padding: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let mut member_rects = member_indices
+        .iter()
+        .filter_map(|&i| nodes.get(i))
+        .map(|n| (n.x, n.y, n.x + n.w, n.y + n.h));
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = member_rects.next()?;
+    for (x, y, x2, y2) in member_rects {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x2);
+        max_y = max_y.max(y2);
+    }
+    Some((
+        min_x - padding,
+        min_y - padding,
+        (max_x - min_x) + 2.0 * padding,
+        (max_y - min_y) + 2.0 * padding,
+    ))
+}
+
 /// Resolve classified theme tokens into a backend-neutral [`SceneSpec`] (design
 /// D3): the single `Color → RGB` hop applied before any painter touches the
 /// spec. Geometry (`x/y/w/h`, curve control points, widths) comes from the
 /// caller; only the tokens are resolved here, so `ui.rs` reuses its
-/// classification pipeline verbatim and both painters stay color-pure.
+/// classification pipeline verbatim and both painters stay color-pure. The
+/// identity/state fields [`NodeSpec`]/[`EdgeSpec`] gain are neutral here (ui.rs
+/// classifies them before the hop) and the terminal path passes no clusters, so
+/// the terminal output is byte-identical to the pre-spec form.
 pub fn build_scene_spec(
     theme: &Theme,
     background: ThemeColor,
     nodes: &[NodeTokenSpec],
     edges: &[EdgeTokenSpec],
+    clusters: &[ClusterTokenSpec],
 ) -> SceneSpec {
-    let nodes = nodes
+    let nodes: Vec<NodeSpec> = nodes
         .iter()
         .map(|n| NodeSpec {
             x: n.x,
@@ -633,6 +766,10 @@ pub fn build_scene_spec(
             border_width: n.border_width,
             label: n.label.clone(),
             label_color: theme.rgb(n.label_color),
+            circuit: String::new(),
+            instance_index: 0,
+            input_port: false,
+            output_port: false,
         })
         .collect();
     let edges = edges
@@ -643,12 +780,34 @@ pub fn build_scene_spec(
             ctrl: e.ctrl,
             color: theme.rgb(e.color),
             width: e.width,
+            kind: CableKind::Unknown,
+            error: false,
+            dim: false,
+            diff: None,
+            latency: None,
+        })
+        .collect();
+    let clusters = clusters
+        .iter()
+        .filter_map(|c| {
+            let (x, y, w, h) = cluster_rect_from_members(&c.member_indices, &nodes, c.padding)?;
+            Some(ClusterSpec {
+                x,
+                y,
+                w,
+                h,
+                title: c.title.clone(),
+                border: theme.rgb(c.border),
+                title_color: theme.rgb(c.title_color),
+                member_indices: c.member_indices.clone(),
+            })
         })
         .collect();
     SceneSpec {
         background: theme.rgb(background),
         nodes,
         edges,
+        clusters,
     }
 }
 
@@ -922,7 +1081,7 @@ pub fn build_scene(
     render_scene(
         width,
         height,
-        &build_scene_spec(theme, background, nodes, edges),
+        &build_scene_spec(theme, background, nodes, edges, &[]),
     )
 }
 
@@ -938,6 +1097,7 @@ mod rasterizer_tests {
             background,
             nodes: nodes.to_vec(),
             edges: edges.to_vec(),
+            clusters: Vec::new(),
         }
     }
 
@@ -970,6 +1130,10 @@ mod rasterizer_tests {
             border_width: 2.0,
             label: "OUT".to_string(),
             label_color: (240, 240, 200),
+            circuit: String::new(),
+            instance_index: 0,
+            input_port: false,
+            output_port: false,
         }
     }
 
@@ -982,6 +1146,11 @@ mod rasterizer_tests {
             end: (170.0, 140.0),
             color: (100, 220, 140),
             width: 3.0,
+            kind: CableKind::Unknown,
+            error: false,
+            dim: false,
+            diff: None,
+            latency: None,
         }
     }
 
@@ -1189,7 +1358,7 @@ mod rasterizer_tests {
             color: theme.graph_edge_error,
             width: 3.0,
         }];
-        let resolved = build_scene_spec(&theme, theme.status_bg, &nodes, &edges);
+        let resolved = build_scene_spec(&theme, theme.status_bg, &nodes, &edges, &[]);
         assert_eq!(
             resolved,
             SceneSpec {
@@ -1205,6 +1374,10 @@ mod rasterizer_tests {
                     border_width: 2.0,
                     label: "OUT".to_string(),
                     label_color: theme.rgb(theme.graph_node_title),
+                    circuit: String::new(),
+                    instance_index: 0,
+                    input_port: false,
+                    output_port: false,
                 }],
                 edges: vec![EdgeSpec {
                     start: (30.0, 140.0),
@@ -1212,16 +1385,23 @@ mod rasterizer_tests {
                     end: (170.0, 140.0),
                     color: theme.rgb(theme.graph_edge_error),
                     width: 3.0,
+                    kind: CableKind::Unknown,
+                    error: false,
+                    dim: false,
+                    diff: None,
+                    latency: None,
                 }],
+                clusters: vec![],
             }
         );
         // Empty inputs collapse to a background-only spec.
         assert_eq!(
-            build_scene_spec(&theme, theme.status_bg, &[], &[]),
+            build_scene_spec(&theme, theme.status_bg, &[], &[], &[]),
             SceneSpec {
                 background: theme.rgb(theme.status_bg),
                 nodes: vec![],
                 edges: vec![],
+                clusters: vec![],
             }
         );
     }
@@ -1257,7 +1437,7 @@ mod rasterizer_tests {
         let via_spec = render_scene(
             200,
             160,
-            &build_scene_spec(&theme, theme.status_bg, &nodes, &edges),
+            &build_scene_spec(&theme, theme.status_bg, &nodes, &edges, &[]),
         )
         .expect("spec scene renders");
         assert_eq!(via_build.rgba, via_spec.rgba);
@@ -1299,6 +1479,7 @@ mod rasterizer_tests {
                 label_color: theme.graph_node_title,
             }],
             &[],
+            &[],
         );
         assert_eq!(resolved.nodes[0].x, px);
         assert_eq!(resolved.nodes[0].y, py);
@@ -1311,5 +1492,255 @@ mod rasterizer_tests {
             (wrx - wx).abs() <= 1e-2 && (wry - wy).abs() <= 1e-2,
             "spec rect must back-project to the world node position"
         );
+    }
+
+    #[test]
+    fn spec_carries_clusters_with_member_union_rects() {
+        // Design D5: the window painter draws cluster containers from the spec.
+        // The container is the union of member node rects inflated by padding,
+        // titled and bordered with the resolved cluster tokens.
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let nodes = [
+            NodeTokenSpec {
+                x: 30.0,
+                y: 30.0,
+                w: 80.0,
+                h: 40.0,
+                radius: 8.0,
+                fill: theme.graph_node_fill,
+                border: theme.graph_node_border,
+                border_width: 2.0,
+                label: String::new(),
+                label_color: theme.graph_node_title,
+            },
+            NodeTokenSpec {
+                x: 140.0,
+                y: 60.0,
+                w: 80.0,
+                h: 40.0,
+                radius: 8.0,
+                fill: theme.graph_node_fill,
+                border: theme.graph_node_border,
+                border_width: 2.0,
+                label: String::new(),
+                label_color: theme.graph_node_title,
+            },
+        ];
+        let clusters = [ClusterTokenSpec {
+            title: "mix".to_string(),
+            member_indices: vec![0, 1],
+            border: theme.graph_cluster_border,
+            title_color: theme.graph_cluster_title,
+            padding: 16.0,
+        }];
+        let resolved = build_scene_spec(&theme, theme.status_bg, &nodes, &[], &clusters);
+        assert_eq!(resolved.clusters.len(), 1);
+        let c = &resolved.clusters[0];
+        // Union of (30,30,110,70) and (140,60,220,100), inflated by 16.
+        assert_eq!(c.x, 14.0);
+        assert_eq!(c.y, 14.0);
+        assert_eq!(c.w, 222.0);
+        assert_eq!(c.h, 102.0);
+        assert_eq!(c.title, "mix");
+        assert_eq!(c.border, theme.rgb(theme.graph_cluster_border));
+        assert_eq!(c.title_color, theme.rgb(theme.graph_cluster_title));
+        assert_eq!(c.member_indices, vec![0, 1]);
+        // The terminal path passes no clusters: the spec stays cluster-free and
+        // the rasterizer output is untouched.
+        let empty = build_scene_spec(&theme, theme.status_bg, &[], &[], &[]);
+        assert!(empty.clusters.is_empty());
+    }
+
+    #[test]
+    fn cluster_rect_from_members_is_none_without_visible_members() {
+        // Defensive: a cluster whose members are all out of range (or absent)
+        // has no container; the painter skips it instead of drawing a box.
+        assert!(cluster_rect_from_members(&[], &[], 16.0).is_none());
+        assert!(cluster_rect_from_members(&[9], &[sample_node()], 16.0).is_none());
+    }
+
+    #[test]
+    fn spec_carries_node_identity_ports_and_edge_state_for_the_window_painter() {
+        // Design D5: the output spec is what the window painter consumes —
+        // nodes carry circuit identity and port presence, edges the resolved
+        // color plus kind/diff/latency state. The terminal token path
+        // classifies these before the hop, so `build_scene_spec` fills neutral
+        // values and the terminal bytes do not change.
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let node = NodeSpec {
+            x: 10.0,
+            y: 10.0,
+            w: 80.0,
+            h: 40.0,
+            radius: 8.0,
+            fill: (0, 0, 0),
+            border: (255, 255, 255),
+            border_width: 2.0,
+            label: "copy (1)".to_string(),
+            label_color: (255, 255, 0),
+            circuit: "copy".to_string(),
+            instance_index: 1,
+            input_port: true,
+            output_port: false,
+        };
+        let edge = EdgeSpec {
+            start: (90.0, 30.0),
+            end: (10.0, 30.0),
+            ctrl: (50.0, 30.0),
+            color: theme.rgb(theme.graph_edge_diff_added),
+            width: 3.0,
+            kind: CableKind::Control,
+            error: false,
+            dim: false,
+            diff: Some(EdgeDiffState::Added),
+            latency: Some(EdgeLatency {
+                ramp_stop: 2,
+                back_edge: false,
+            }),
+        };
+        let spec = SceneSpec {
+            background: (20, 20, 20),
+            nodes: vec![node],
+            edges: vec![edge],
+            clusters: vec![],
+        };
+        assert_eq!(spec.nodes[0].circuit, "copy");
+        assert_eq!(spec.nodes[0].instance_index, 1);
+        assert!(spec.nodes[0].input_port);
+        assert!(!spec.nodes[0].output_port);
+        assert_eq!(spec.edges[0].kind, CableKind::Control);
+        assert_eq!(spec.edges[0].diff, Some(EdgeDiffState::Added));
+        assert_eq!(
+            spec.edges[0].latency,
+            Some(EdgeLatency {
+                ramp_stop: 2,
+                back_edge: false,
+            })
+        );
+        assert!(!spec.edges[0].dim);
+        // Terminal token path: identity and state default to neutral.
+        let tokens = [NodeTokenSpec {
+            x: 10.0,
+            y: 10.0,
+            w: 80.0,
+            h: 40.0,
+            radius: 8.0,
+            fill: theme.graph_node_fill,
+            border: theme.graph_node_border,
+            border_width: 2.0,
+            label: "OUT".to_string(),
+            label_color: theme.graph_node_title,
+        }];
+        let edges = [EdgeTokenSpec {
+            start: (90.0, 30.0),
+            ctrl: (50.0, 30.0),
+            end: (10.0, 30.0),
+            color: theme.graph_edge_control,
+            width: 3.0,
+        }];
+        let resolved = build_scene_spec(&theme, theme.status_bg, &tokens, &edges, &[]);
+        assert_eq!(resolved.nodes[0].circuit, "");
+        assert_eq!(resolved.nodes[0].instance_index, 0);
+        assert!(!resolved.nodes[0].input_port && !resolved.nodes[0].output_port);
+        assert_eq!(resolved.edges[0].kind, CableKind::Unknown);
+        assert!(resolved.edges[0].diff.is_none() && resolved.edges[0].latency.is_none());
+        assert!(!resolved.edges[0].dim && !resolved.edges[0].error);
+    }
+
+    #[test]
+    fn edge_colors_resolve_through_the_precedence_chain() {
+        // The terminal tile classifies each cable to one winning token (error
+        // red > diff > latency ramp > cable kind > dim, design D8). The spec's
+        // resolved RGB is that winner's theme triple, so the window painter
+        // reproduces the tile 1:1 by drawing `EdgeSpec.color`.
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let ramp = theme.graph_edge_latency_ramp();
+        let winners = [
+            theme.graph_edge_error,
+            theme.graph_edge_diff_added,
+            theme.graph_edge_diff_removed,
+            ramp[0],
+            ramp[4],
+            theme.graph_edge_control,
+            theme.graph_edge_audio,
+            theme.graph_edge_midi,
+            theme.graph_edge_unknown,
+            theme.graph_edge_dim,
+        ];
+        for token in winners {
+            let edge = EdgeTokenSpec {
+                start: (0.0, 0.0),
+                ctrl: (5.0, 0.0),
+                end: (10.0, 0.0),
+                color: token,
+                width: 3.0,
+            };
+            let resolved = build_scene_spec(
+                &theme,
+                theme.status_bg,
+                &[],
+                std::slice::from_ref(&edge),
+                &[],
+            );
+            assert_eq!(resolved.edges[0].color, theme.rgb(token));
+        }
+    }
+
+    #[test]
+    fn cluster_container_geometry_survives_camera_round_trip() {
+        // The container rect derives from member pixel rects that come from
+        // the same camera hit-testing uses: back-projecting the container
+        // corners must still enclose the member world positions, so window
+        // painting and hit-testing stay aligned like the terminal tile's
+        // `graph_cluster_rects`.
+        let cam = GraphCamera::fit_to_world(
+            WorldBounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 40.0,
+                max_y: 20.0,
+            },
+            (800.0, 400.0),
+            1.0,
+        );
+        let world_members = [(5.0, 4.0), (20.0, 12.0)];
+        let nodes: Vec<NodeSpec> = world_members
+            .iter()
+            .map(|&(wx, wy)| {
+                let (px, py) = cam.world_to_pixel(wx, wy);
+                NodeSpec {
+                    x: px,
+                    y: py,
+                    w: 80.0,
+                    h: 40.0,
+                    radius: 8.0,
+                    fill: (0, 0, 0),
+                    border: (255, 255, 255),
+                    border_width: 2.0,
+                    label: String::new(),
+                    label_color: (255, 255, 255),
+                    circuit: String::new(),
+                    instance_index: 0,
+                    input_port: false,
+                    output_port: false,
+                }
+            })
+            .collect();
+        let (cx, cy, cw, ch) = cluster_rect_from_members(&[0, 1], &nodes, 16.0).unwrap();
+        // Every member's pixel rect lies inside the inflated container.
+        for n in &nodes {
+            assert!(cx <= n.x && cy <= n.y);
+            assert!(cx + cw >= n.x + n.w && cy + ch >= n.y + n.h);
+        }
+        // The container back-projects to world coordinates that still enclose
+        // the member world positions (camera round trip).
+        let (wx0, wy0) = cam.pixel_to_world(cx, cy);
+        let (wx1, wy1) = cam.pixel_to_world(cx + cw, cy + ch);
+        for &(mx, my) in &world_members {
+            assert!(wx0 <= mx && wy0 <= my && wx1 >= mx && wy1 >= my);
+        }
     }
 }
