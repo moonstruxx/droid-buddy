@@ -6,8 +6,8 @@ use ratatui::layout::Rect;
 use std::collections::HashMap;
 
 use crate::app::{
-    is_entry_selectable, is_picker_parent_entry, App, GraphDrag, PrefixState, QuadFocus,
-    SourceViewMode, ViewerFocus,
+    is_entry_selectable, is_picker_parent_entry, App, FocusSlot, GraphDrag, PrefixState, QuadFocus,
+    SourceViewMode, ViewType, ViewerFocus,
 };
 use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
@@ -16,6 +16,25 @@ use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup
 /// cancelling. The timeout is lazy: it is checked only when the next event
 /// arrives, so no timer thread or event-loop change is needed.
 const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Compat mirror: `viewer_focus` follows tile focus until handler/ui migrate
+/// fully (task 6.1 removes `viewer_focus`). Source-nav gating still reads
+/// `viewer_focus`, so every tile focus change re-derives it.
+fn sync_viewer_focus_from_tiles(app: &mut App) {
+    app.viewer_focus = match app.tile_stack.focus {
+        FocusSlot::Slot(i) if app.tile_stack.slots.get(i) == Some(&ViewType::SourceViewer) => {
+            ViewerFocus::Source
+        }
+        _ => ViewerFocus::Panels,
+    };
+}
+
+/// Focus a right-column slot holding `view` (no-op when not open).
+fn focus_tile_slot(app: &mut App, view: ViewType) {
+    if let Some(i) = app.tile_stack.slots.iter().position(|v| *v == view) {
+        app.tile_stack.focus = FocusSlot::Slot(i);
+    }
+}
 
 fn open_embedded_viewer(app: &mut App) {
     app.showing_viewer = true;
@@ -155,6 +174,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     // Open source viewer and focus it so the jumped span is visible.
                     app.showing_viewer = true;
                     app.viewer_focus = ViewerFocus::Source;
+                    app.tile_stack.open(ViewType::SourceViewer);
+                    focus_tile_slot(app, ViewType::SourceViewer);
                     app.showing_validation = false;
                 }
                 return false;
@@ -269,6 +290,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     app.close_quad();
                 }
                 open_embedded_viewer(app);
+                // Tiled open path (change `tiled-window-manager`, D7): the
+                // viewer takes a right-column slot and focus with it.
+                app.tile_stack.open(ViewType::SourceViewer);
+                focus_tile_slot(app, ViewType::SourceViewer);
                 return false;
             }
             crossterm::event::KeyCode::Char('g') => {
@@ -277,6 +302,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     app.close_quad();
                 }
                 app.open_graph();
+                // Tiled open path: `open_graph` registers the slot; focus
+                // follows it so Esc/keys act on the graph pane.
+                focus_tile_slot(app, ViewType::Graph);
+                sync_viewer_focus_from_tiles(app);
                 app.prefix = None;
                 return false;
             }
@@ -327,6 +356,43 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.status_message = String::from("Diff hidden");
             app.prefix = None;
             return false;
+        }
+    }
+
+    // Focused-pane dispatch (change `tiled-window-manager`, D7): while
+    // right-column slots are open, `Tab` cycles tile focus forward,
+    // `Shift+Tab`/`BackTab` cycles backward, and `Esc` closes the focused
+    // view (or clears the modifier selection on panels). Empty-stack states
+    // fall through to the legacy per-view branches below.
+    if !app.tile_stack.slots.is_empty() {
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            crossterm::event::KeyCode::Tab if !shift => {
+                app.cycle_focus(true);
+                sync_viewer_focus_from_tiles(app);
+                return false;
+            }
+            crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::BackTab => {
+                app.cycle_focus(false);
+                sync_viewer_focus_from_tiles(app);
+                return false;
+            }
+            crossterm::event::KeyCode::Esc => {
+                let closed_viewer = matches!(
+                    app.tile_stack.focus,
+                    FocusSlot::Slot(i)
+                        if app.tile_stack.slots.get(i) == Some(&ViewType::SourceViewer)
+                );
+                app.close_focused_view();
+                // Only a viewer close resets the legacy focus mirror; other
+                // views (graph, optimizer) never owned it.
+                if closed_viewer {
+                    app.viewer_focus = ViewerFocus::Panels;
+                }
+                app.prefix = None;
+                return false;
+            }
+            _ => {}
         }
     }
 
@@ -694,6 +760,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         match key.code {
             crossterm::event::KeyCode::Esc => {
                 app.showing_viewer = false;
+                // Defensive tile sync for pre-tiling open paths; the dispatch
+                // above already removed the slot when one was open.
+                app.tile_stack.close(ViewType::SourceViewer);
                 app.viewer_focus = ViewerFocus::Panels;
                 app.prefix = None;
                 return false;
@@ -1233,6 +1302,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                 } else if app.showing_viewer {
                     app.viewer_focus = ViewerFocus::Panels;
                 }
+                app.tile_stack.focus = FocusSlot::Panels;
             } else {
                 // Empty-panel-space click: clear selection without moving
                 // source_scroll (deselection stability). Ignore clicks on the
@@ -1253,6 +1323,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                         app.quad_focus = QuadFocus::Source;
                     } else {
                         app.viewer_focus = ViewerFocus::Source;
+                        focus_tile_slot(app, ViewType::SourceViewer);
                     }
                 } else {
                     if !on_minimap {
@@ -1263,6 +1334,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     } else if app.showing_viewer {
                         app.viewer_focus = ViewerFocus::Panels;
                     }
+                    app.tile_stack.focus = FocusSlot::Panels;
                 }
             }
         }
@@ -2816,6 +2888,64 @@ mod tests {
         assert!(!app.showing_viewer);
     }
 
+    // ── Task 4.1: focused-pane dispatch (`tiled-window-manager`, D7) ──
+
+    fn shift_tab() -> KeyEvent {
+        KeyEvent::new(crossterm::event::KeyCode::BackTab, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn tiled_tab_cycles_focus_across_panes() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        // Forward: graph slot -> panels -> viewer slot -> graph slot.
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        // Backward from the graph slot lands on the viewer slot.
+        handle_event(shift_tab(), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    }
+
+    #[test]
+    fn tiled_esc_closes_focused_view_keeps_others() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert_eq!(app.tile_stack.slots.len(), 2);
+        // Graph slot focused: Esc closes it, viewer survives.
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(!app.showing_graph);
+        assert!(app.showing_viewer);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn tiled_esc_on_panels_clears_selection_keeps_views() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        open_viewer(&mut app);
+        // Back to panels: Esc clears the selection, viewer stays open.
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.showing_viewer);
+        assert!(app.selected_component.is_none());
+    }
+
     #[test]
     fn viewer_focus_source_live_panel_keys() {
         let mut app = app_with_source_navigation();
@@ -3249,6 +3379,13 @@ mod tests {
         assert!(app.showing_viewer);
         assert!(app.prefix.is_none());
         handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        // Panels focused: Esc clears the selection, the viewer slot stays.
+        assert!(app.showing_viewer);
+        assert!(app.selected_component.is_none());
+        // Tab back to the viewer slot, Esc closes the focused view.
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
         assert!(!app.showing_viewer);
     }
 
@@ -3283,6 +3420,8 @@ mod tests {
         );
         app.open_graph();
         assert!(app.showing_graph);
+        // `g g` focuses the graph slot; mirror that here so Esc acts on it.
+        app.tile_stack.focus = FocusSlot::Slot(0);
         handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
         assert!(!app.showing_graph, "Esc closes the graph");
         assert_eq!(app.selected_component, before.0, "selection kept on close");

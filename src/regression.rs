@@ -290,12 +290,9 @@ fn regression_initial_bof_vs_selected_open() {
         app.minimap_rect.is_some(),
         "minimap published on wide render"
     );
-    // source area should be visible (raw lines contain p2b8 header)
+    // source area should be visible (tiled right-column slot title).
     let text = rendered_text(&mut app, 120, 40);
-    assert!(
-        text.contains("Source Viewer"),
-        "viewer status hints present"
-    );
+    assert!(text.contains(" Source "), "tiled source slot present");
 
     // Selected-open jumps to first occurrence
     let mut app2 = fixture_app();
@@ -1523,10 +1520,12 @@ fn regression_split_ratio_brackets_clamp_snap_and_drive_layout() {
     app.load_patch(other);
     assert!(approx(app.viewer_split_ratio, 0.3), "ratio persists");
 
-    // The rendered split follows the key-driven ratio: panels right border
-    // sits at ~ratio of a 100-col main area (row 3 = panels top border row).
+    // The rendered tiled split follows `main_split_ratio`: panels right
+    // border sits at ~ratio of a 160-col main area (row 3 = panels top
+    // border row; 160 stays above the 120-col collapse). Task 4.2 rebinds
+    // `[`/`]` to this ratio; until then the geometry is driven directly.
     fn border_col(app: &mut App) -> u16 {
-        let buf = buffer_for(app, 100, 40);
+        let buf = buffer_for(app, 160, 40);
         let mut col = 0u16;
         for x in 0..buf.area.width {
             if buf.cell((x, 3)).map(|c| c.symbol() == "┐").unwrap_or(false) {
@@ -1536,15 +1535,13 @@ fn regression_split_ratio_brackets_clamp_snap_and_drive_layout() {
         }
         col
     }
+    app.main_split_ratio = 0.3;
     let at_03 = border_col(&mut app);
-    for _ in 0..4 {
-        handle_event(key(KeyCode::Char(']')), &mut app);
-    }
-    assert!(approx(app.viewer_split_ratio, 0.7));
+    app.main_split_ratio = 0.7;
     let at_07 = border_col(&mut app);
     assert!(at_07 > at_03, "border moves right as panels grow");
-    assert!((28..=31).contains(&at_03), "30% of 100 cols, got {at_03}");
-    assert!((68..=71).contains(&at_07), "70% of 100 cols, got {at_07}");
+    assert!((46..=49).contains(&at_03), "30% of 160 cols, got {at_03}");
+    assert!((110..=113).contains(&at_07), "70% of 160 cols, got {at_07}");
 }
 
 #[test]
@@ -2032,16 +2029,11 @@ fn regression_theme_viewer_sidebar_content_status() {
             has_border_glyph(&buf, t.accent, None),
             "{name}: sidebar border accent"
         );
-        // Source-focused content pane gets the focus border, bold.
+        // Source-focused tiled slot gets the pane focus border, bold.
         assert!(
-            has_border_glyph(&buf, t.focus_border, Some(Modifier::BOLD)),
-            "{name}: focused source border"
+            has_border_glyph(&buf, t.pane_focus_border, Some(Modifier::BOLD)),
+            "{name}: focused source slot border"
         );
-        // Viewer status bar paints its background and key-hint tokens.
-        let status = first_token_style(&buf, "Source Viewer").expect("viewer status rendered");
-        assert_eq!(status.bg, Some(t.status_bg), "{name}: viewer status bg");
-        let esc = first_token_style(&buf, "ESC").expect("key hints rendered");
-        assert_eq!(esc.fg, Some(t.viewer_key), "{name}: viewer key hint fg");
         // Current occurrence rides the occurrence-highlight token.
         assert!(
             has_highlighted_token(

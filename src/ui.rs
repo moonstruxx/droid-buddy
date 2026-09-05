@@ -518,6 +518,10 @@ fn render_tiled_main(frame: &mut Frame, area: Rect, app: &mut App) {
     // in the status bar as "+N views hidden".
     if area.width < QUAD_WIDTH_THRESHOLD {
         app.pane_rects.push((FocusSlot::Panels, area));
+        // No source pane is drawn: retire its published geometry so mouse
+        // hit-testing cannot act on a stale rect from a previous wide frame.
+        app.source_pane_rect = None;
+        app.minimap_rect = None;
         render_tiled_pane(
             frame,
             area,
