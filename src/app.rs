@@ -413,6 +413,14 @@ pub enum FocusSlot {
     Slot(usize),
 }
 
+/// Max right-column slots (spec: 3; a fourth view replaces the oldest
+/// non-focused slot in place).
+const MAX_TILE_SLOTS: usize = 3;
+
+/// Carousel order for `cycle_view_in_slot` (spec: graph, viewer, physical).
+/// The optimizer opens directly via `g o` and never cycles.
+const TILE_CAROUSEL: [ViewType; 3] = [ViewType::Graph, ViewType::SourceViewer, ViewType::Physical];
+
 /// Right-column view stack (change `tiled-window-manager`, D1): the new home
 /// for which views are open. The legacy `showing_*` bools mirror it until
 /// handler/ui migrate (tasks 4.1/6.1); `App` methods update both.
@@ -466,6 +474,10 @@ pub struct App {
     /// Right-column view stack (change `tiled-window-manager`, D1). Open-view
     /// state lives here; the `showing_*` bools mirror it transitionally.
     pub tile_stack: TileStack,
+    /// Tiled-pane rects published by `render_tiled_main` each frame, keyed by
+    /// focused-pane identity (`Panels` = left pane). Hit-testing input for
+    /// focus routing; rebuilt every frame like `component_rects`.
+    pub pane_rects: Vec<(FocusSlot, Rect)>,
     /// True when the signal-flow graph view (`g g`) is open.
     pub showing_graph: bool,
     /// The signal-flow graph built from the current patch. `None` until a
@@ -550,6 +562,9 @@ pub struct App {
     pub main_split_ratio: f32,
     /// Left-pane vertical sub-split (0.3 to 0.7), default 0.5. `\` toggles it.
     pub left_split_ratio: f32,
+    /// Whether the `\` vertical split is active in the left pane (quad
+    /// replacement): panels on top, secondary view below at `left_split_ratio`.
+    pub left_split_active: bool,
     /// Synchronous observer event bus (design D6). Re-solve triggers and
     /// topology errors are emitted here for subscribers (renderer, status).
     pub events: EventBus,
@@ -691,6 +706,7 @@ impl App {
             picker_index: 0,
             component_rects: Vec::new(),
             tile_stack: TileStack::default(),
+            pane_rects: Vec::new(),
             showing_graph: false,
             graph: None,
             graph_positions: Vec::new(),
@@ -716,6 +732,7 @@ impl App {
             viewer_split_ratio: 0.6,
             main_split_ratio: 0.6,
             left_split_ratio: 0.5,
+            left_split_active: false,
             events: EventBus::default(),
             showing_quad: false,
             quad_focus: QuadFocus::default(),
@@ -1161,6 +1178,14 @@ impl App {
     /// Close the optimizer menu (`Esc`): restore the file order if a preview
     /// is active, then drop the menu state.
     pub fn optimizer_close(&mut self) {
+        self.drop_optimizer_state();
+        self.tile_stack.close(ViewType::Optimizer);
+    }
+
+    /// Drop optimizer menu state, restoring file order after a preview. The
+    /// flag-only half of `optimizer_close`; the tile entry is removed by the
+    /// caller (in-place slot replacement) or `optimizer_close`.
+    fn drop_optimizer_state(&mut self) {
         let was_previewing = self
             .optimizer
             .as_ref()
@@ -1170,13 +1195,185 @@ impl App {
             self.rebuild_graph();
         }
         self.optimizer = None;
-        self.tile_stack.close(ViewType::Optimizer);
     }
 
     /// Compat: optimizer-open state from the tile stack (no `showing_optimizer`
     /// bool ever existed; handler/ui migrate to this in task 5.1).
     pub fn showing_optimizer(&self) -> bool {
         self.tile_stack.is_open(ViewType::Optimizer)
+    }
+
+    /// Open `view` as a right-column slot: an already-open view only takes
+    /// focus; a full stack evicts the oldest non-focused slot in place.
+    /// The opened view takes focus.
+    pub fn open_view(&mut self, view: ViewType) {
+        if view == ViewType::Optimizer {
+            if self.tile_stack.is_open(ViewType::Optimizer) {
+                self.focus_slot_with(ViewType::Optimizer);
+                return;
+            }
+            if !self.open_optimizer() {
+                return;
+            }
+            // `open_optimizer` pushed at the end; refold through the capped
+            // path so a full stack evicts instead of growing a fourth slot.
+            if self.tile_stack.slots.last() == Some(&ViewType::Optimizer) {
+                self.tile_stack.slots.pop();
+            }
+            let idx = self.insert_view_slot(ViewType::Optimizer);
+            self.tile_stack.focus = FocusSlot::Slot(idx);
+            return;
+        }
+        let idx = self.insert_view_slot(view);
+        match view {
+            ViewType::Graph => {
+                self.open_graph();
+                self.recompute_influence();
+            }
+            ViewType::SourceViewer => self.showing_viewer = true,
+            ViewType::Physical | ViewType::Optimizer => {}
+        }
+        self.tile_stack.focus = FocusSlot::Slot(idx);
+    }
+
+    /// Close the focused view (`Esc` on a right-column slot), mirroring the
+    /// removal into legacy flags. On panels, clear the modifier selection.
+    pub fn close_focused_view(&mut self) {
+        let slot = match self.tile_stack.focus {
+            FocusSlot::Panels => {
+                self.clear_selected_component();
+                return;
+            }
+            FocusSlot::Slot(i) => i,
+        };
+        let Some(view) = self.tile_stack.slots.get(slot).copied() else {
+            self.tile_stack.focus = FocusSlot::Panels;
+            return;
+        };
+        match view {
+            ViewType::Graph => self.close_graph(),
+            ViewType::Optimizer => self.optimizer_close(),
+            ViewType::SourceViewer => {
+                self.showing_viewer = false;
+                self.tile_stack.close(ViewType::SourceViewer);
+            }
+            ViewType::Physical => self.tile_stack.close(ViewType::Physical),
+        }
+    }
+
+    /// Cycle focus across panels + right-column slots (`Tab` forward,
+    /// `Shift+Tab` backward). A stale slot index clamps, never panics.
+    pub fn cycle_focus(&mut self, forward: bool) {
+        let n = self.tile_stack.slots.len() + 1;
+        if n <= 1 {
+            self.tile_stack.focus = FocusSlot::Panels;
+            return;
+        }
+        let cur = match self.tile_stack.focus {
+            FocusSlot::Panels => 0,
+            FocusSlot::Slot(i) => (i + 1).min(n - 1),
+        };
+        let next = if forward {
+            (cur + 1) % n
+        } else {
+            (cur + n - 1) % n
+        };
+        self.tile_stack.focus = if next == 0 {
+            FocusSlot::Panels
+        } else {
+            FocusSlot::Slot(next - 1)
+        };
+    }
+
+    /// Rotate the focused slot through the carousel: the slot takes the next
+    /// view, or focus jumps to its existing slot without duplicating it.
+    /// No-op while panels are focused.
+    pub fn cycle_view_in_slot(&mut self, forward: bool) {
+        let slot = match self.tile_stack.focus {
+            FocusSlot::Slot(i) => i,
+            FocusSlot::Panels => return,
+        };
+        if slot >= self.tile_stack.slots.len() {
+            self.tile_stack.focus = FocusSlot::Panels;
+            return;
+        }
+        let current = self.tile_stack.slots[slot];
+        let len = TILE_CAROUSEL.len();
+        let next = match TILE_CAROUSEL.iter().position(|v| *v == current) {
+            Some(p) => {
+                TILE_CAROUSEL[if forward {
+                    (p + 1) % len
+                } else {
+                    (p + len - 1) % len
+                }]
+            }
+            None => TILE_CAROUSEL[if forward { 0 } else { len - 1 }],
+        };
+        if next == current {
+            return;
+        }
+        if let Some(j) = self.tile_stack.slots.iter().position(|v| *v == next) {
+            self.tile_stack.focus = FocusSlot::Slot(j);
+            return;
+        }
+        self.sync_view_closed(current);
+        self.tile_stack.slots[slot] = next;
+        match next {
+            ViewType::Graph => {
+                self.open_graph();
+                self.recompute_influence();
+            }
+            ViewType::SourceViewer => self.showing_viewer = true,
+            ViewType::Physical | ViewType::Optimizer => {}
+        }
+    }
+
+    /// Toggle the `\` vertical split in the left pane (quad replacement).
+    pub fn toggle_left_split(&mut self) {
+        self.left_split_active = !self.left_split_active;
+    }
+
+    /// Focus the slot holding `view`. No-op when it is not open.
+    fn focus_slot_with(&mut self, view: ViewType) {
+        if let Some(i) = self.tile_stack.slots.iter().position(|v| *v == view) {
+            self.tile_stack.focus = FocusSlot::Slot(i);
+        }
+    }
+
+    /// Insert `view` into the stack, returning its slot index. Evicts the
+    /// oldest non-focused slot in place at the slot cap.
+    fn insert_view_slot(&mut self, view: ViewType) -> usize {
+        if let Some(i) = self.tile_stack.slots.iter().position(|v| *v == view) {
+            return i;
+        }
+        if self.tile_stack.slots.len() >= MAX_TILE_SLOTS {
+            let focused = match self.tile_stack.focus {
+                FocusSlot::Slot(i) => Some(i),
+                FocusSlot::Panels => None,
+            };
+            if let Some(evict) = (0..self.tile_stack.slots.len()).find(|i| Some(*i) != focused) {
+                let old = self.tile_stack.slots[evict];
+                self.sync_view_closed(old);
+                self.tile_stack.slots[evict] = view;
+                return evict;
+            }
+        }
+        self.tile_stack.open(view);
+        self.tile_stack.slots.len() - 1
+    }
+
+    /// Mirror a view's removal into legacy flags/state. The tile entry itself
+    /// is removed by the caller (in-place replacement) or `TileStack::close`.
+    fn sync_view_closed(&mut self, view: ViewType) {
+        match view {
+            ViewType::Graph => {
+                self.showing_graph = false;
+                self.hovered_graph_node = None;
+            }
+            ViewType::SourceViewer => self.showing_viewer = false,
+            ViewType::Physical => {}
+            ViewType::Optimizer => self.drop_optimizer_state(),
+        }
     }
 
     /// Open the `?` help modal. Works from any view; the modal is a top-level
@@ -2189,10 +2386,12 @@ impl App {
         self.active_modifier_var = Some(vars[0].clone());
         let subtree = patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits);
         self.influence = Some(subtree.clone());
-        // Only (re)build full-graph state when a graph already exists or quad
-        // is open. Otherwise keep influence without eagerly constructing a graph
-        // so plain panel interactions don't emit GraphRebuilt.
-        let needs_graph = self.graph.is_some() || self.showing_quad;
+        // Only (re)build full-graph state when a graph already exists, quad
+        // is open, or the graph tile is open. Otherwise keep influence without
+        // eagerly constructing a graph so plain panel interactions don't emit
+        // GraphRebuilt.
+        let needs_graph =
+            self.graph.is_some() || self.showing_quad || self.tile_stack.is_open(ViewType::Graph);
         if needs_graph && self.graph.is_none() {
             let clusters = clusters_from_patch(&patch);
             let graph = Graph::build_from_patch(&patch, &clusters, &self.cost_model);
@@ -3710,5 +3909,196 @@ mod tests {
             "degraded render must not block load_patch"
         );
         assert!(app.patch.is_some());
+    }
+
+    #[test]
+    fn open_view_stacks_views_and_focuses_each() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.open_view(ViewType::Physical);
+        assert_eq!(
+            app.tile_stack.slots,
+            vec![ViewType::Graph, ViewType::SourceViewer, ViewType::Physical]
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(2));
+        assert!(app.showing_graph && app.showing_viewer);
+    }
+
+    #[test]
+    fn open_view_reopen_focuses_without_duplicating() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.open_view(ViewType::Graph);
+        assert_eq!(
+            app.tile_stack.slots,
+            vec![ViewType::Graph, ViewType::SourceViewer]
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+    }
+
+    #[test]
+    fn open_view_fourth_evicts_oldest_nonfocused() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.open_view(ViewType::Physical);
+        // Focus sits on Physical (slot 2), so the optimizer evicts Graph.
+        app.open_view(ViewType::Optimizer);
+        assert_eq!(
+            app.tile_stack.slots,
+            vec![
+                ViewType::Optimizer,
+                ViewType::SourceViewer,
+                ViewType::Physical
+            ]
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert!(!app.showing_graph);
+        assert!(app.showing_optimizer());
+    }
+
+    #[test]
+    fn open_view_eviction_skips_focused_slot() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.open_view(ViewType::Physical);
+        app.cycle_focus(false);
+        app.cycle_focus(false);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        app.open_view(ViewType::Optimizer);
+        // Oldest non-focused slot is the viewer at slot 1.
+        assert_eq!(
+            app.tile_stack.slots,
+            vec![ViewType::Graph, ViewType::Optimizer, ViewType::Physical]
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        assert!(!app.showing_viewer);
+        assert!(app.showing_graph);
+    }
+
+    #[test]
+    fn close_focused_view_removes_slot_and_mirrors_flags() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.close_focused_view();
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Graph]);
+        assert!(!app.showing_viewer);
+        assert!(app.showing_graph);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn close_focused_view_on_panels_clears_selection() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.selected_component.is_some());
+        app.tile_stack.focus = FocusSlot::Panels;
+        app.close_focused_view();
+        assert!(app.selected_component.is_none());
+        assert!(app.influence.is_none());
+    }
+
+    #[test]
+    fn cycle_focus_tabs_across_panes_and_back() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.tile_stack.focus = FocusSlot::Panels;
+        app.cycle_focus(true);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        app.cycle_focus(true);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        app.cycle_focus(true);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        app.cycle_focus(false);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+    }
+
+    #[test]
+    fn cycle_focus_without_slots_stays_on_panels() {
+        let mut app = App::new();
+        app.cycle_focus(true);
+        app.cycle_focus(false);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn cycle_view_in_slot_rotates_carousel() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.cycle_view_in_slot(true);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
+        assert!(!app.showing_graph && app.showing_viewer);
+        app.cycle_view_in_slot(true);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+        assert!(!app.showing_viewer);
+        app.cycle_view_in_slot(true);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Graph]);
+        assert!(app.showing_graph);
+        app.cycle_view_in_slot(false);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+    }
+
+    #[test]
+    fn cycle_view_in_slot_jumps_to_existing_slot() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.open_view(ViewType::SourceViewer);
+        app.tile_stack.focus = FocusSlot::Slot(0);
+        app.cycle_view_in_slot(true);
+        assert_eq!(
+            app.tile_stack.slots,
+            vec![ViewType::Graph, ViewType::SourceViewer]
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        assert!(app.showing_graph);
+    }
+
+    #[test]
+    fn cycle_view_in_slot_noop_on_panels() {
+        let mut app = App::new();
+        app.open_view(ViewType::Graph);
+        app.tile_stack.focus = FocusSlot::Panels;
+        app.cycle_view_in_slot(true);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Graph]);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn toggle_left_split_flips_without_touching_ratio() {
+        let mut app = App::new();
+        assert!(!app.left_split_active);
+        app.toggle_left_split();
+        assert!(app.left_split_active);
+        assert!((app.left_split_ratio - 0.5).abs() < f32::EPSILON);
+        app.toggle_left_split();
+        assert!(!app.left_split_active);
+    }
+
+    #[test]
+    fn open_view_graph_applies_selection_influence() {
+        let mut app = App::new();
+        let patch =
+            Patch::from_ini_file(Path::new("fixtures/modifier_switch_passthrough.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        let influence = app.influence.clone().expect("selection derives influence");
+        assert!(!influence.influenced_nodes.is_empty());
+        assert!(app.graph.is_none());
+        app.open_view(ViewType::Graph);
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.highlighted_nodes.is_empty());
+        assert_eq!(graph.highlighted_nodes, influence.influenced_nodes);
+        assert!(app.filtered_graph.is_some());
     }
 }
