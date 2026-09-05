@@ -21,13 +21,9 @@
 //! Pure module: no terminal dependency. Positions are a `Vec<(f32, f32)>`
 //! parallel to `graph.nodes` — index `i` is the position of `graph.nodes[i]`.
 //!
-//! Quad-view usage: `solve` is the single convergence entry point for both
-//! the FULL graph and the FILTERED induced subgraph. The FILTERED pane holds
-//! `filtered_positions = solve(&filtered_graph)` independently from
-//! `graph_positions = solve(&full_graph)` — a fresh compact solve, not a
-//! reuse of FULL positions. `solve_filtered` is a thin alias for that call
-//! site so the intent is explicit and tests can target the filtered path
-//! without coupling to FULL-graph fixtures.
+//! `solve` is the single convergence entry point; every caller (full graph,
+//! re-solves) seeds deterministically from its own graph and converges
+//! independently.
 
 use std::collections::HashMap;
 
@@ -107,11 +103,10 @@ pub const SOLVE_ITERATIONS: usize = 60;
 /// pass `&[]` for an unpinned solve (today's behavior until task 3.1 supplies
 /// real pin indices).
 ///
-/// Used for both the FULL graph (`solve(&full_graph)`) and the FILTERED
-/// induced subgraph (`solve(&filtered_graph)` / `solve_filtered`) — each call
-/// seeds deterministically from its own graph (topological depth + within-
-/// layer order + node-id hash, no RNG) and converges independently under the
-/// same bounded, grid-hashed solver (`SOLVE_ITERATIONS`, `ENERGY_THRESHOLD`).
+/// Used for every solve — each call seeds deterministically from its own
+/// graph (topological depth + within-layer order + node-id hash, no RNG) and
+/// converges independently under the same bounded, grid-hashed solver
+/// (`SOLVE_ITERATIONS`, `ENERGY_THRESHOLD`).
 ///
 /// `tension` is the spring stiffness (`SPRING_K`); pass [`DEFAULT_TENSION`]
 /// for the tuned default. Higher tension pulls cable-connected nodes closer
@@ -128,23 +123,6 @@ pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
         tension,
     );
     positions
-}
-
-/// Compact convergence for the FILTERED quad pane (task 2.2).
-///
-/// Thin alias over [`solve`] — identical bounded, deterministic, grid-hashed
-/// convergence (`SOLVE_ITERATIONS` cap, `ENERGY_THRESHOLD` freeze, no RNG).
-/// Exists as a distinct entry point so the quad view can hold
-/// `filtered_positions = solve_filtered(&filtered_graph)` independently from
-/// `graph_positions = solve(&full_graph)`, and so filtered-compact tests can
-/// target this path without coupling to FULL-graph fixtures. A small filtered
-/// graph converges compactly and quickly; when the filtered set is a strict
-/// subset of FULL, its positions differ from the corresponding FULL subset.
-/// `pinned` behaves exactly as in [`solve`]; pass `&[]` for an unpinned
-/// filtered solve. `tension` behaves exactly as in [`solve`]. Pure, no
-/// terminal dependency.
-pub fn solve_filtered(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
-    solve(graph, pinned, tension)
 }
 
 /// Damped local re-settle after a node move (design D1).
@@ -1142,95 +1120,6 @@ mod tests {
         }
         // The moved node itself settles somewhere new.
         assert_ne!(positions[0], (10000.0, 10000.0));
-    }
-
-    #[test]
-    fn filtered_compact_solve_is_finite_distinct_and_converges() {
-        // FULL vs FILTERED: filtered_positions = solve_filtered(filtered_graph)
-        // finite, distinct from FULL subset, compact convergence.
-        let patch = Patch::from_ini_file(std::path::Path::new(
-            "fixtures/modifier_switch_passthrough.ini",
-        ))
-        .unwrap();
-        let clusters: Vec<Cluster> = patch
-            .banner_groups
-            .iter()
-            .map(|g| Cluster {
-                title: g.banner.clone().unwrap_or_default(),
-                section_range: g.section_range.clone(),
-            })
-            .collect();
-        let full =
-            Graph::build_from_patch(&patch, &clusters, &crate::latency::CostModel::default());
-        let vars = patch.hw_token_to_vars("B1.1");
-        let sub = patch.influence_subtree(&vars);
-        let filtered = full.filtered_influence(&sub);
-        assert!(!filtered.nodes.is_empty());
-        assert!(filtered.nodes.len() < full.nodes.len());
-        let full_pos = solve(&full, &[], DEFAULT_TENSION);
-        let filt_pos = solve_filtered(&filtered, &[], DEFAULT_TENSION);
-        assert_eq!(filt_pos.len(), filtered.nodes.len());
-        assert_finite_and_bounded(&filt_pos);
-        assert_finite_and_bounded(&full_pos);
-        // deterministic: second filtered solve identical
-        assert_eq!(filt_pos, solve_filtered(&filtered, &[], DEFAULT_TENSION));
-        // distinct from FULL subset: at least one node moved vs its FULL position
-        let full_index: HashMap<&NodeId, usize> = full
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (&n.id, i))
-            .collect();
-        let filt_index: HashMap<&NodeId, usize> = filtered
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (&n.id, i))
-            .collect();
-        let eps = 1e-3f32;
-        let mut any_distinct = false;
-        for id in filtered.nodes.iter().map(|n| &n.id) {
-            let fi = filt_index[id];
-            let gi = full_index[id];
-            let (fx, fy) = filt_pos[fi];
-            let (gx, gy) = full_pos[gi];
-            if (fx - gx).abs() > eps || (fy - gy).abs() > eps {
-                any_distinct = true;
-                break;
-            }
-        }
-        assert!(
-            any_distinct,
-            "filtered compact solve must differ from FULL subset projection"
-        );
-        // compact convergence: bounding box of filtered is within cap and not exploding
-        let bbox = |ps: &[(f32, f32)]| {
-            let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-            let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-            for (x, y) in ps {
-                min_x = min_x.min(*x);
-                max_x = max_x.max(*x);
-                min_y = min_y.min(*y);
-                max_y = max_y.max(*y);
-            }
-            ((max_x - min_x), (max_y - min_y))
-        };
-        let (fw, fh) = bbox(&filt_pos);
-        assert!(fw.is_finite() && fh.is_finite());
-        assert!(fw < 1e6 && fh < 1e6);
-        // iteration count within cap
-        let filt_iters = solve_iteration_count(&filtered);
-        assert!(filt_iters <= SOLVE_ITERATIONS);
-        assert!(filt_iters > 0);
-    }
-
-    #[test]
-    fn filtered_solve_on_empty_is_empty_and_deterministic() {
-        let empty = Graph::default();
-        let a = solve_filtered(&empty, &[], DEFAULT_TENSION);
-        let b = solve_filtered(&empty, &[], DEFAULT_TENSION);
-        assert!(a.is_empty());
-        assert_eq!(a, b);
     }
 
     // ── task 1.1 rework: single-axis, spring dominance, cohesion, pins ──────

@@ -102,6 +102,22 @@ fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
     buf.content().iter().map(|c| c.symbol()).collect::<String>()
 }
 
+/// The rendered text of `buf` restricted to `rect`, one row per line.
+/// Lets a face assertion prove a pane's content lives inside its tile
+/// (and not leaked into a neighboring pane).
+fn region_text(buf: &Buffer, rect: Rect) -> String {
+    let mut out = String::new();
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..rect.x + rect.width {
+            if let Some(cell) = buf.cell((x, y)) {
+                out.push_str(cell.symbol());
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[allow(dead_code)]
 fn buffer_to_ansi(buffer: &Buffer) -> String {
     let area = buffer.area;
@@ -2487,12 +2503,12 @@ fn visual_viewer_live_interaction_snapshot() {
     // keys are live. Frame A drives shift1 through the real key path while
     // Source is focused — a state that was impossible before the fix because
     // '1' was swallowed by the source-focus branch — and proves the shift
-    // surface renders beside the viewer chrome. The viewer status bar
-    // replaces the normal one, so the SHIFT 1 ACTIVE chip (a render_status
-    // span) is asserted in Frame A' with the viewer closed over the same
-    // state. Frame B shows B1.1 toggled AND selected via Enter with
-    // source_scroll parked at its first occurrence while the viewer stays
-    // open.
+    // surface renders beside the viewer chrome. Under the tiled layout the
+    // viewer is a right-column " Source " slot and the status bar is the
+    // normal one, so the SHIFT 1 ACTIVE chip is visible in both frames; the
+    // viewer-open face is pinned by the tile title + snapshots. Frame B shows
+    // B1.1 toggled AND selected via Enter with source_scroll parked at its
+    // first occurrence while the viewer stays open.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
@@ -2507,31 +2523,36 @@ fn visual_viewer_live_interaction_snapshot() {
             Some(ShiftGroup::Group1),
             "{theme_name}: shift1 live while Source focused"
         );
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
         let ansi = buffer_to_ansi(&buf);
-        // The viewer status bar replaces the normal one (its hints fill width
-        // 100), so liveness shows on the panels themselves: a shift-active
-        // button glyph is repainted in the shift hue (the physical-era
-        // replacement for the old [SHIFT 1] panel tag). The `any` scan is
-        // required because the folded LED cell (led token) can cover a
-        // button's glyph at 1.0 zoom.
+        // The viewer is its right-column tile beside the panels pane: assert
+        // the tile title and the live shift face (a shift-active button glyph
+        // is repainted in the shift hue). The `any` scan is required because
+        // the folded LED cell (led token) can cover a button's glyph at 1.0
+        // zoom.
         assert!(
-            ansi.contains("Source Viewer"),
-            "{theme_name}: viewer still open beside live panels"
+            ansi.contains(" Source "),
+            "{theme_name}: viewer slot still open beside live panels\n{ansi}"
         );
         assert!(
             any_glyph_fg(&buf, "○", t.shift1),
             "{theme_name}: shift-active button glyph recolored with viewer open"
         );
-        insta::with_settings!({snapshot_suffix => format!("viewer_live_shift1_{theme_name}_100")}, {
+        insta::with_settings!({snapshot_suffix => format!("viewer_live_shift1_{theme_name}_160")}, {
             insta::assert_snapshot!(ansi);
         });
 
-        // Frame A': same state, viewer closed — the normal status bar now
-        // shows the SHIFT 1 ACTIVE chip in the shift hue.
-        app.showing_viewer = false;
-        let buf = buffer_for(&mut app, 100, 40);
+        // Frame A': same state, viewer closed through the handler Esc path
+        // (which also retires the tile slot) — the panels-only face shows the
+        // SHIFT 1 ACTIVE chip in the shift hue on the normal status bar.
+        handle_event(key(KeyCode::Esc), &mut app);
+        assert!(!app.showing_viewer, "{theme_name}: Esc closes the viewer");
+        let buf = buffer_for(&mut app, 160, 40);
         let ansi = buffer_to_ansi(&buf);
+        assert!(
+            !ansi.contains(" Source "),
+            "{theme_name}: viewer slot retired after Esc"
+        );
         assert!(
             ansi.contains("SHIFT 1 ACTIVE"),
             "{theme_name}: shift chip renders once the viewer closes\n{ansi}"
@@ -2558,14 +2579,14 @@ fn visual_viewer_live_interaction_snapshot() {
         assert_eq!(app.source_scroll, first_b11);
         assert!(app.showing_viewer, "{theme_name}: viewer stays open");
 
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
         let ansi = buffer_to_ansi(&buf);
         assert!(
             ansi.contains("B1.1"),
             "{theme_name}: selected token visible in the source column"
         );
         assert!(
-            ansi.contains("Source Viewer"),
+            ansi.contains(" Source "),
             "{theme_name}: viewer stays open across the toggle frame"
         );
         // The shift face persists: the other (still-off) Group1 buttons keep
@@ -2574,7 +2595,7 @@ fn visual_viewer_live_interaction_snapshot() {
             any_glyph_fg(&buf, "○", t.shift1),
             "{theme_name}: shift face persists across the toggle frame"
         );
-        insta::with_settings!({snapshot_suffix => format!("viewer_live_toggle_{theme_name}_100")}, {
+        insta::with_settings!({snapshot_suffix => format!("viewer_live_toggle_{theme_name}_160")}, {
             insta::assert_snapshot!(ansi);
         });
     }
@@ -3120,10 +3141,6 @@ fn regression_gallery_scenario_verdicts() {
         ("viewer_shift1_100", "source_navigation", 100, true),
         ("viewer_live_shift1_100", "source_navigation", 100, true),
         ("viewer_live_toggle_100", "source_navigation", 100, true),
-        ("quad_none_120", "modifier_switch_passthrough", 120, true),
-        ("quad_b1_120", "modifier_switch_passthrough", 120, true),
-        ("quad_b1_100", "modifier_switch_passthrough", 100, true),
-        ("quad_b1_80", "modifier_switch_passthrough", 80, true),
         ("switch_value_100", "switch_value", 100, false),
         ("paused_dim_100", "arpeggio1", 100, true),
         (
@@ -3173,15 +3190,35 @@ fn graph_app_from_fixture(name: &str) -> App {
     app
 }
 
-/// True when any box-drawing glyph cell in `buffer` carries fg `color`.
-/// Edge polylines render as box glyphs (`─│┌┐└┘├┤┬┴┼`) with the cable color;
-/// ports (`◉`/`●`) and node/cluster frames use other tokens, so filtering to
-/// box glyphs isolates edge cells from the rest of the graph face.
-fn has_box_glyph_of_color(buffer: &Buffer, color: Color) -> bool {
-    buffer.content().iter().any(|cell| {
-        cell.fg == color
-            && ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"].contains(&cell.symbol())
-    })
+/// The rendered rect of the right-column slot holding `view` from the last
+/// frame's published `pane_rects`. `None` when that view is not currently
+/// visible (narrow-terminal collapse or the view is not open).
+fn slot_rect(app: &App, view: ViewType) -> Option<Rect> {
+    let i = app.tile_stack.slots.iter().position(|v| *v == view)?;
+    app.pane_rects
+        .iter()
+        .find(|(slot, _)| *slot == FocusSlot::Slot(i))
+        .map(|(_, r)| *r)
+}
+
+/// `has_box_glyph_of_color` restricted to `rect`. Tiled-pane borders are box
+/// glyphs too, and their `pane_focus_border` token can equal a graph edge
+/// token in mono (`White`), so edge-color assertions must be scoped to the
+/// graph slot to stay meaningful.
+fn has_box_glyph_of_color_in(buffer: &Buffer, rect: Rect, color: Color) -> bool {
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..rect.x + rect.width {
+            if let Some(cell) = buffer.cell((x, y)) {
+                if cell.fg == color
+                    && ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"]
+                        .contains(&cell.symbol())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[test]
@@ -3194,7 +3231,10 @@ fn visual_graph_node_cluster_faces_snapshot() {
             continue; // faces already covered; keep the matrix light
         }
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [100u16, 40] {
+        // Tiled layout: the graph renders inside its right-column slot, which
+        // only exists at width >= QUAD_WIDTH_THRESHOLD (120). 120 is the
+        // narrowest tiled face (slot ~48 cols), 160 the comfortable one.
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("cable_banner_combos");
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
@@ -3204,13 +3244,13 @@ fn visual_graph_node_cluster_faces_snapshot() {
                 ansi.contains("╭"),
                 "{theme_name} {width}: rounded node frame missing\n{ansi}"
             );
-            // Circuit titles are only asserted at the wide width: on a 40-col
-            // surface the force-directed layout stacks nodes (each 22 cols) into
-            // ~18 cols of travel, so frames overlap and a neighbor's port glyph
-            // clips a title's last char. That is expected narrow-terminal
-            // degradation (covered by regression_graph_narrow_terminal_no_panic),
-            // not a title that failed to render.
-            if width >= 100 {
+            // Circuit titles: at 120 the graph slot is ~46 cols of usable
+            // width, so the force layout stacks nodes and a neighbor's port
+            // glyph can clip a title's last char (same expected degradation
+            // as the legacy 40-col face, covered by
+            // regression_graph_narrow_terminal_no_panic). The full set only
+            // fits cleanly at 160.
+            if width >= 160 {
                 for circuit in ["button", "clocktool", "mixer", "contour"] {
                     assert!(
                         ansi.contains(circuit),
@@ -3247,23 +3287,24 @@ fn visual_graph_edge_kinds_colors_snapshot() {
     // This test pins the kind-color mapping; latency ramp coloring (on by
     // default) would re-color every forward edge to the same cold stop.
     app.latency_coloring = false;
-    let buf = buffer_for(&mut app, 100, 40);
+    let buf = buffer_for(&mut app, 240, 40);
+    let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders at 240");
 
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_control),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_control),
         "control edge (_CLK) renders cyan"
     );
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_audio),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_audio),
         "audio edge (_AUD) renders green"
     );
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_midi),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_midi),
         "midi edge (_NOTE) renders magenta"
     );
 
     let ansi = buffer_to_ansi(&buf);
-    insta::with_settings!({snapshot_suffix => "graph_edge_kinds_classic_100"}, {
+    insta::with_settings!({snapshot_suffix => "graph_edge_kinds_classic_240"}, {
         insta::assert_snapshot!(ansi);
     });
 }
@@ -3288,26 +3329,27 @@ fn visual_graph_plugin_declared_kind_snapshot() {
     for theme_name in ["classic", "mono"] {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
-        for width in [100u16, 40] {
+        // Tiled: the graph slot only renders at width >= 120. 160 keeps the
+        // two 22-col node frames apart so the edge renders as a box polyline;
+        // at 120 the slot is ~46 cols, the nodes abut, and the edge collapses
+        // to a port glyph (color assertion meaningless there — the snapshot
+        // still pins the face).
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("graph_plugin_cable_kind");
             // Latency ramp coloring (on by default) would re-color the single
             // forward edge; pin the kind-color mapping like the sibling test.
             app.latency_coloring = false;
             let buf = buffer_for(&mut app, width, 40);
 
-            // At width 100 the edge has room to render as a box polyline, so
-            // the declared kind is provable on the buffer. At width 40 the two
-            // nodes abut (each frame is 22 cells and the min-node-px fit places
-            // them exactly adjacent), so the edge collapses to a port glyph and
-            // the color assertion would be meaningless there; the snapshot
-            // still pins the face.
-            if width == 100 {
+            if width >= 160 {
+                let graph_rect =
+                    slot_rect(&app, ViewType::Graph).expect("graph slot renders at 160");
                 assert!(
-                    has_box_glyph_of_color(&buf, t.graph_edge_control),
+                    has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_control),
                     "{theme_name} {width}: declared control cable must render, not the audio fallback"
                 );
                 assert!(
-                    !has_box_glyph_of_color(&buf, t.graph_edge_audio),
+                    !has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_audio),
                     "{theme_name} {width}: substring fallback audio must not render"
                 );
             }
@@ -3328,19 +3370,20 @@ fn visual_graph_topology_error_highlight_snapshot() {
     let _guard = ThemedGuard::pin("classic");
     let t = *theme::resolve("classic");
     let mut app = graph_app_from_fixture("graph_topology_error");
-    let buf = buffer_for(&mut app, 100, 40);
+    let buf = buffer_for(&mut app, 160, 40);
+    let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders at 160");
 
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_error),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_error),
         "n -> 1 cable edges render with the error token (red)"
     );
     assert!(
-        !has_box_glyph_of_color(&buf, t.graph_edge_control),
+        !has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_control),
         "error cable must not render with its inferred control color"
     );
 
     let ansi = buffer_to_ansi(&buf);
-    insta::with_settings!({snapshot_suffix => "graph_topology_error_classic_100"}, {
+    insta::with_settings!({snapshot_suffix => "graph_topology_error_classic_160"}, {
         insta::assert_snapshot!(ansi);
     });
 }
@@ -3362,7 +3405,7 @@ fn visual_graph_latency_chain_snapshot() {
     // the loop.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [100u16, 40] {
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("graph_latency_chain");
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
@@ -3383,7 +3426,7 @@ fn visual_graph_latency_fanout_snapshot() {
     // ramp, no back-edges.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [100u16, 40] {
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("graph_latency_fanout");
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
@@ -3404,7 +3447,7 @@ fn visual_graph_latency_backedge_snapshot() {
     // that lands at the red end of the latency ramp. `_GATE` stays forward.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [100u16, 40] {
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("graph_latency_backedge");
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
@@ -3426,7 +3469,7 @@ fn visual_graph_latency_error_snapshot() {
     // and `_MIX` color by kind (latency ramp once 2.1 lands).
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [100u16, 40] {
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("graph_latency_error");
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
@@ -3566,24 +3609,34 @@ fn visual_graph_latency_error_precedence_color() {
     let _guard = ThemedGuard::pin("classic");
     let t = *theme::resolve("classic");
     let mut app = graph_app_from_fixture("graph_latency_error");
-    let buf = buffer_for(&mut app, 100, 40);
+    let buf = buffer_for(&mut app, 160, 40);
+    let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders at 160");
 
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_error),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_error),
         "n -> 1 cable edges render with the error token (red)"
     );
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_control),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_control),
         "healthy _CLK control edge keeps its kind color"
     );
     // The short mixer -> contour hop is fully covered by the node frames, so
     // the `_MIX` audio color survives only on its port glyph.
     assert!(
-        buf.content()
-            .iter()
+        graph_rect_cells(&buf, graph_rect)
             .any(|cell| cell.fg == t.graph_edge_audio && matches!(cell.symbol(), "●" | "◉")),
         "healthy _MIX audio edge keeps its kind color at its ports"
     );
+}
+
+/// Iterate the cells inside `rect` (row-major), mirroring `region_text`'s
+/// rect scoping so whole-buffer scans can be restricted to a pane.
+fn graph_rect_cells<'a>(
+    buffer: &'a Buffer,
+    rect: Rect,
+) -> impl Iterator<Item = &'a ratatui::buffer::Cell> + 'a {
+    (rect.y..rect.y + rect.height)
+        .flat_map(move |y| (rect.x..rect.x + rect.width).filter_map(move |x| buffer.cell((x, y))))
 }
 
 #[test]
@@ -3599,298 +3652,6 @@ fn regression_graph_narrow_terminal_no_panic() {
                 "{fixture} {w}x{h}: buffer must not be empty"
             );
         }
-    }
-}
-
-// ── quad 4-pane visual validation (task 4.2) ─────────────────────────────
-// Covers modifier_switch_passthrough × themes classic/mono/terminal ×
-// widths 80/100/120 × modifier-selected states (no modifier vs B1.1 with
-// FULL highlight + FILTERED compact). Follows the same TestBackend
-// → Buffer → ANSI → insta pattern as the panel/viewer/graph visuals.
-// Quad at <120 cols falls back to panels+source, so fallback faces are
-// asserted separately.
-
-fn quad_app_none(name: &str) -> App {
-    let mut app = app_from_fixture(name);
-    app.open_quad();
-    assert!(app.showing_quad, "quad should be open");
-    app
-}
-
-fn quad_app_b1(name: &str) -> App {
-    let mut app = app_from_fixture(name);
-    app.select_component(String::from("B1.1"));
-    app.open_quad();
-    assert!(app.showing_quad, "quad should be open");
-    // B1.1 produces _EXTRA and _TRIG (sorted -> [_EXTRA, _TRIG]); either is valid as primary
-    assert!(
-        matches!(
-            app.active_modifier_var.as_deref(),
-            Some("_TRIG") | Some("_EXTRA")
-        ),
-        "B1.1 must derive _TRIG or _EXTRA in modifier_switch_passthrough, got {:?}",
-        app.active_modifier_var
-    );
-    app
-}
-
-#[test]
-fn visual_quad_modifier_switch_passthrough_snapshot() {
-    // modifier_switch_passthrough.ini exercises switch passthrough, copy
-    // chains, cycles, and HW->VAR derivation. At 120 cols quad shows 4 panes
-    // concurrently: top Panels|Source, bottom FULL|FILTERED. FULL dims
-    // uninfluenced and highlights influenced; FILTERED is a compact re-solve.
-    for &theme_name in theme::THEMES {
-        let _guard = ThemedGuard::pin(theme_name);
-        let t = *theme::resolve(theme_name);
-
-        // 120 cols: true 4-pane with B1.1 selected (FULL highlight + FILTERED compact)
-        {
-            let mut app = quad_app_b1("modifier_switch_passthrough");
-            let buf = buffer_for(&mut app, 120, 40);
-            let ansi = buffer_to_ansi(&buf);
-
-            // 4-pane chrome: each pane has its titled border
-            assert!(
-                ansi.contains("Panels"),
-                "{theme_name} quad 120 B1.1: Panels pane missing"
-            );
-            assert!(
-                ansi.contains("Source"),
-                "{theme_name} quad 120 B1.1: Source pane missing"
-            );
-            assert!(
-                ansi.contains("Graph FULL"),
-                "{theme_name} quad 120 B1.1: Graph FULL pane missing"
-            );
-            assert!(
-                ansi.contains("Graph FILTERED"),
-                "{theme_name} quad 120 B1.1: Graph FILTERED pane missing"
-            );
-            // Focus border on Panels (initial focus) uses focus_border + bold
-            assert!(
-                has_border_glyph(&buf, t.focus_border, Some(Modifier::BOLD)),
-                "{theme_name} quad 120 B1.1: focus border missing"
-            );
-            // Quad status row reflects modifier + focus (B1.1 -> _EXTRA/_TRIG sorted)
-            assert!(
-                ansi.contains("Quad") && (ansi.contains("_TRIG") || ansi.contains("_EXTRA")),
-                "{theme_name} quad 120 B1.1: status must show _TRIG or _EXTRA"
-            );
-            // FULL pane highlights influenced vs dims rest; FILTERED pane
-            // renders only the influenced subgraph (compact).
-            assert!(
-                app.influence.is_some(),
-                "{theme_name} quad 120 B1.1: influence must exist"
-            );
-            assert!(
-                app.filtered_graph.is_some(),
-                "{theme_name} quad 120 B1.1: filtered graph must exist"
-            );
-            let filtered = app.filtered_graph.as_ref().unwrap();
-            assert!(
-                !filtered.nodes.is_empty(),
-                "{theme_name} quad 120 B1.1: filtered must have nodes"
-            );
-            assert_eq!(
-                app.filtered_positions.len(),
-                filtered.nodes.len(),
-                "{theme_name} quad 120 B1.1: filtered positions parallel"
-            );
-
-            insta::with_settings!({snapshot_suffix => format!("quad_b1_{theme_name}_120")}, {
-                insta::assert_snapshot!(ansi);
-            });
-        }
-
-        // 120 cols: no modifier selected — FILTERED shows placeholder, not empty
-        {
-            let mut app = quad_app_none("modifier_switch_passthrough");
-            let buf = buffer_for(&mut app, 120, 40);
-            let ansi = buffer_to_ansi(&buf);
-            assert!(
-                ansi.contains("No influence selected") || ansi.contains("No influenced nodes"),
-                "{theme_name} quad 120 none: FILTERED placeholder missing\n{ansi}"
-            );
-            assert!(
-                app.influence.is_none() || app.filtered_graph.is_none(),
-                "{theme_name} quad 120 none: influence/filtered must be empty when no selection"
-            );
-            insta::with_settings!({snapshot_suffix => format!("quad_none_{theme_name}_120")}, {
-                insta::assert_snapshot!(ansi);
-            });
-        }
-    }
-}
-
-#[test]
-fn visual_quad_fallback_widths_snapshot() {
-    // Below 120 cols quad collapses to panels+source fallback (existing
-    // exclusive mode). Must degrade gracefully and surface the fallback
-    // status hint instead of unreadable 20-col panes.
-    for &theme_name in theme::THEMES {
-        let _guard = ThemedGuard::pin(theme_name);
-        for width in [80u16, 100] {
-            let mut app = quad_app_b1("modifier_switch_passthrough");
-            let buf = buffer_for(&mut app, width, 40);
-            let ansi = buffer_to_ansi(&buf);
-            // Fallback hint replaces quad 4-pane chrome
-            assert!(
-                ansi.contains("Quad fallback"),
-                "{theme_name} quad {width} B1.1: fallback status missing\n{ansi}"
-            );
-            // No 4-pane graph panes should appear in fallback
-            assert!(
-                !ansi.contains("Graph FULL") || !ansi.contains("Graph FILTERED") || ansi.contains("Quad fallback"),
-                "{theme_name} quad {width}: fallback should not show 4-pane graph titles as primary"
-            );
-            // Selection preserved through fallback
-            assert!(
-                matches!(
-                    app.active_modifier_var.as_deref(),
-                    Some("_TRIG") | Some("_EXTRA")
-                ),
-                "{theme_name} quad {width}: modifier preserved in fallback, got {:?}",
-                app.active_modifier_var
-            );
-
-            insta::with_settings!({snapshot_suffix => format!("quad_fallback_b1_{theme_name}_{width}")}, {
-                insta::assert_snapshot!(ansi);
-            });
-        }
-    }
-}
-
-#[test]
-fn regression_quad_full_highlight_vs_filtered_compact_distinct() {
-    // Spec: FULL highlight vs FILTERED compact must be visibly distinct.
-    // FULL dims uninfluenced and highlights influenced; FILTERED is a fresh
-    // compact solve over only the influenced nodes, so positions must differ
-    // from the FULL graph's subset, and filtered must be strictly smaller.
-    let _guard = ThemedGuard::pin("classic");
-    let quad = quad_app_b1("modifier_switch_passthrough");
-    let full = quad.graph.as_ref().unwrap().clone();
-    let full_positions = quad.graph_positions.clone();
-    let filtered = quad.filtered_graph.as_ref().unwrap().clone();
-    let filtered_positions = quad.filtered_positions.clone();
-
-    // Filtered is strict subset (not every cable/node is influenced)
-    assert!(
-        filtered.nodes.len() < full.nodes.len(),
-        "filtered {} must be smaller than full {}",
-        filtered.nodes.len(),
-        full.nodes.len()
-    );
-    assert!(
-        !quad.influence.as_ref().unwrap().influenced_nodes.is_empty(),
-        "influence must mark nodes"
-    );
-    assert!(
-        !quad.influence.as_ref().unwrap().influenced_edges.is_empty(),
-        "influence must mark edges"
-    );
-
-    // FULL highlight sets travel with the full graph
-    assert!(
-        !full.highlighted_nodes.is_empty(),
-        "FULL highlighted_nodes must be non-empty when modifier selected"
-    );
-    assert!(
-        !full.highlighted_edges.is_empty(),
-        "FULL highlighted_edges must be non-empty"
-    );
-
-    // FILTERED is a fresh compact solve: its bounding box must be finite and
-    // its positions must not be a simple slice of FULL positions (compact vs
-    // sparse). Check that filtered layout converged and differs.
-    for (x, y) in &filtered_positions {
-        assert!(
-            x.is_finite() && y.is_finite(),
-            "filtered positions must be finite"
-        );
-    }
-    for (x, y) in &full_positions {
-        assert!(
-            x.is_finite() && y.is_finite(),
-            "full positions must be finite"
-        );
-    }
-
-    // Compactness: filtered's span should be tighter than full's (fewer nodes
-    // spread over same pane size). Compare bounding boxes normalized by pane.
-    let bbox = |positions: &[(f32, f32)]| -> (f32, f32, f32, f32) {
-        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-        for (x, y) in positions {
-            min_x = min_x.min(*x);
-            max_x = max_x.max(*x);
-            min_y = min_y.min(*y);
-            max_y = max_y.max(*y);
-        }
-        (min_x, max_x, min_y, max_y)
-    };
-    let (fmin_x, fmax_x, fmin_y, fmax_y) = bbox(&full_positions);
-    let (qmin_x, qmax_x, qmin_y, qmax_y) = bbox(&filtered_positions);
-    // Both must be bounded (layout caps at ~canvas)
-    assert!(fmax_x - fmin_x >= 0.0);
-    assert!(qmax_x - qmin_x >= 0.0);
-    let _ = (
-        fmin_x, fmax_x, fmin_y, fmax_y, qmin_x, qmax_x, qmin_y, qmax_y,
-    );
-
-    // Filtered rendered frame must not equal FULL frame at same size: capture
-    // both panes' buffers via full quad at 120 cols and check that at least
-    // one cell differs due to highlight/dim vs compact layout. Use ANSI side
-    // by side already covered, but add explicit buffer inequality check via
-    // separate renders: FULL graph alone vs filtered alone would differ; here
-    // we at least ensure filtered graph is not empty and cloned correctly.
-    assert_ne!(
-        filtered.nodes.len(),
-        full.nodes.len(),
-        "FULL vs FILTERED node counts must differ for this fixture"
-    );
-
-    // Mono/terminal keep highlight/dim tokens pairwise distinct per spec
-    for name in ["classic", "mono"] {
-        let mono = theme::resolve(name);
-        if name == "classic" {
-            assert_ne!(
-                mono.graph_node_highlight, mono.graph_node_dim,
-                "{name} node highlight vs dim"
-            );
-            assert_ne!(
-                mono.graph_edge_highlight, mono.graph_edge_dim,
-                "{name} edge highlight vs dim"
-            );
-        }
-    }
-}
-
-#[test]
-fn visual_quad_html_row_snapshots() {
-    // Side-by-side HTML rows per quad state for gallery parity — same path
-    // as gallery.rs but pinned as insta snapshots for the strict gate.
-    for (suffix, width, with_selection) in [
-        ("quad_b1_120", 120u16, true),
-        ("quad_none_120", 120, false),
-        ("quad_b1_80", 80, true),
-    ] {
-        let mut cells: Vec<String> = Vec::new();
-        for &theme_name in theme::THEMES {
-            let _guard = ThemedGuard::pin(theme_name);
-            let mut app = if with_selection {
-                quad_app_b1("modifier_switch_passthrough")
-            } else {
-                quad_app_none("modifier_switch_passthrough")
-            };
-            let buf = buffer_for(&mut app, width, 40);
-            let html = buffer_to_html(&buf);
-            cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
-        }
-        let row = format!("<tr>{}</tr>", cells.join(""));
-        assert!(row.contains("<td"), "{suffix}: html row has cells");
-        assert!(row.len() > 200, "{suffix}: html row substantial");
-        insta::assert_snapshot!(format!("quad_html_row_{suffix}"), row);
     }
 }
 
@@ -4704,7 +4465,7 @@ fn visual_disabled_circuit_graph_snapshot() {
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
-        for width in [40u16, 100] {
+        for width in [120u16, 160] {
             let mut app = graph_app_from_fixture("cable_banner_combos");
             app.disabled_circuits.insert((String::from("copy"), 0));
             // cable_banner_combos has no copy node; keep clocktool disabled as well
@@ -4755,24 +4516,25 @@ fn visual_disabled_circuit_graph_snapshot() {
         let t = *theme::resolve("classic");
         let mut app = graph_app_from_fixture("graph_topology_error");
         app.disabled_circuits.insert((String::from("clocktool"), 0));
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
+        let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders at 160");
         assert!(
-            has_box_glyph_of_color(&buf, t.graph_edge_error),
+            has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_error),
             "disabled clocktool must preserve error-red on _CLK"
         );
         let ansi = buffer_to_ansi(&buf);
-        insta::with_settings!({snapshot_suffix => "disabled_error_classic_100"}, {
+        insta::with_settings!({snapshot_suffix => "disabled_error_classic_160"}, {
             insta::assert_snapshot!(ansi);
         });
     }
-    // Side-by-side HTML row for gallery parity (disabled at 100 cols).
+    // Side-by-side HTML row for gallery parity (disabled at 160 cols).
     let mut cells: Vec<String> = Vec::new();
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let mut app = graph_app_from_fixture("cable_banner_combos");
         app.disabled_circuits.insert((String::from("copy"), 0));
         app.disabled_circuits.insert((String::from("clocktool"), 0));
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
         let html = buffer_to_html(&buf);
         cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
     }
@@ -4790,19 +4552,19 @@ fn visual_graph_tension_snapshot() {
     // width 100) so the visual change is inspectable and regression-gated.
     let _guard = ThemedGuard::pin("classic");
     let mut default_app = graph_app_from_fixture("cable_banner_combos");
-    let default_ansi = buffer_to_ansi(&buffer_for(&mut default_app, 100, 40));
+    let default_ansi = buffer_to_ansi(&buffer_for(&mut default_app, 160, 40));
 
     let mut tight_app = app_from_fixture("cable_banner_combos");
     tight_app.tension = crate::layout::TENSION_MAX;
     tight_app.open_graph();
     assert!(tight_app.showing_graph);
-    let tight_ansi = buffer_to_ansi(&buffer_for(&mut tight_app, 100, 40));
+    let tight_ansi = buffer_to_ansi(&buffer_for(&mut tight_app, 160, 40));
 
     assert_ne!(
         default_ansi, tight_ansi,
         "tension change must alter the rendered graph face"
     );
-    insta::with_settings!({snapshot_suffix => "tension_max_classic_100"}, {
+    insta::with_settings!({snapshot_suffix => "tension_max_classic_160"}, {
         insta::assert_snapshot!(tight_ansi);
     });
 }
@@ -4816,7 +4578,7 @@ fn visual_diff_graph_highlight_snapshot() {
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let t = *theme::resolve(theme_name);
-        for width in [40u16, 100] {
+        for width in [120u16, 160] {
             let mut app = graph_app_from_fixture("cable_banner_combos");
             let base = app.patch.clone().unwrap();
             // Modified: add a delay sink on _GATE (changes _GATE sinks) and a new
@@ -4842,14 +4604,17 @@ fn visual_diff_graph_highlight_snapshot() {
             app.diff_showing = true;
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
+            let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders");
             // Diff edge must render with diff_added token (bold), not kind color.
             // Terminal uses Gray, mono White, classic Green — all distinct from error Red/Black.
             assert!(
-                has_box_glyph_of_color(&buf, t.graph_edge_diff_added),
+                has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_diff_added),
                 "{theme_name} {width}: diff edge must be diff_added color"
             );
-            // Changed/added node titles get "*" marker (delay added node)
-            if width >= 100 {
+            // Changed/added node titles get "*" marker (delay added node).
+            // The marker only fits cleanly at 160 (titles clip in the ~46-col
+            // slot at 120), same gate as the node_cluster title assert.
+            if width >= 160 {
                 assert!(
                     ansi.contains("*"),
                     "{theme_name} {width}: diff marker * present for added/changed node"
@@ -4858,11 +4623,16 @@ fn visual_diff_graph_highlight_snapshot() {
             // Diff inactive must not show diff color — smoke toggle off
             app.diff_showing = false;
             let buf_off = buffer_for(&mut app, width, 40);
-            // When diff off, diff color should not appear as box glyph (unless
-            // coincidentally same as kind color — mono White overlaps control, so skip strict check for mono)
+            let graph_rect_off = slot_rect(&app, ViewType::Graph).expect("graph slot renders");
+            // When diff off, diff color should not appear as box glyph in the
+            // graph slot (mono White overlaps the focused pane border, so skip
+            // the strict check there — the slot-scoped scan already excludes
+            // pane chrome, but the White graph control edges coincide with the
+            // diff token in mono).
             if theme_name != "mono" {
                 // classic Green and terminal Gray are not used for normal _GATE kind (Cyan/Reset), so absence is meaningful
-                let has_diff_when_off = has_box_glyph_of_color(&buf_off, t.graph_edge_diff_added);
+                let has_diff_when_off =
+                    has_box_glyph_of_color_in(&buf_off, graph_rect_off, t.graph_edge_diff_added);
                 // If the diff token coincidentally equals a kind token, this could be true; only assert when distinct
                 if t.graph_edge_diff_added != t.graph_edge_control
                     && t.graph_edge_diff_added != t.graph_edge_audio
@@ -4896,17 +4666,18 @@ fn visual_diff_graph_highlight_snapshot() {
         app.diff_patch = Some(modified);
         app.diff_report = Some(report);
         app.diff_showing = true;
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
+        let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders");
         assert!(
-            has_box_glyph_of_color(&buf, t.graph_edge_error),
+            has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_error),
             "error red must outrank diff on _CLK"
         );
         let ansi = buffer_to_ansi(&buf);
-        insta::with_settings!({snapshot_suffix => "diff_error_classic_100"}, {
+        insta::with_settings!({snapshot_suffix => "diff_error_classic_160"}, {
             insta::assert_snapshot!(ansi);
         });
     }
-    // Side-by-side HTML row for gallery parity (diff at 100 cols).
+    // Side-by-side HTML row for gallery parity (diff at 160 cols).
     let mut cells: Vec<String> = Vec::new();
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
@@ -4922,7 +4693,7 @@ fn visual_diff_graph_highlight_snapshot() {
         app.diff_patch = Some(modified);
         app.diff_report = Some(report);
         app.diff_showing = true;
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
         let html = buffer_to_html(&buf);
         cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
     }
@@ -5129,7 +4900,7 @@ fn visual_diff_changed_node_marker_snapshot() {
     // Param-level diff: same topology, one node's non-cable param differs -> title "*"
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [40u16, 100] {
+        for width in [160u16, 120] {
             let mut app = graph_app_from_fixture("cable_banner_combos");
             let base = app.patch.clone().unwrap();
             let mut modified = base.clone();
@@ -5177,7 +4948,11 @@ fn visual_optimizer_menu_snapshot() {
     // identity; the menu lists them with before/after avg/max/back-edges.
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
-        for width in [60u16, 100] {
+        // Tiled: `g o` opens the optimizer as a right-column slot (task 5.1),
+        // so it only renders at width >= 120. 160 gives the slot ~62 usable
+        // cols (the full candidate line); at 120 the ~46-col slot clips it
+        // before `back-edges`, same as the old width-60 modal.
+        for width in [160u16, 120] {
             let mut app = optimizer_app_from_fixture("optimizer_latency");
             let buf = buffer_for(&mut app, width, 30);
             let ansi = buffer_to_ansi(&buf);
@@ -5189,9 +4964,8 @@ fn visual_optimizer_menu_snapshot() {
                 ansi.contains("obj"),
                 "{theme_name} {width}: weighted objective label"
             );
-            // At width 60 the modal is 56 wide and the candidate line clips
-            // before `back-edges`; the full line only fits at width 100.
-            if width == 100 {
+            // The candidate line only fits fully at the wide width.
+            if width == 160 {
                 assert!(
                     ansi.contains("back-edges"),
                     "{theme_name} {width}: candidate summary line"
@@ -5221,7 +4995,7 @@ fn visual_optimizer_menu_weight_snapshot() {
             handle_event(key(KeyCode::Char(']')), &mut app);
         }
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.4);
-        let buf = buffer_for(&mut app, 100, 30);
+        let buf = buffer_for(&mut app, 160, 30);
         let ansi = buffer_to_ansi(&buf);
         assert!(
             ansi.contains("w = 0.4"),
@@ -5247,7 +5021,7 @@ fn visual_optimizer_menu_weight_endpoint_snapshot() {
         let mut app = optimizer_app_from_fixture("optimizer_latency");
         handle_event(key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
-        let buf = buffer_for(&mut app, 100, 30);
+        let buf = buffer_for(&mut app, 160, 30);
         let ansi = buffer_to_ansi(&buf);
         assert!(
             ansi.contains("w = 1.0 (min-max)"),
@@ -5282,11 +5056,13 @@ fn visual_optimizer_preview_recolor_snapshot() {
             Some(0),
             "{theme_name}: candidate 0 previewed"
         );
-        // Drop the menu so the graph face is the snapshot subject; the
-        // previewed section order stays applied (the writer's source of truth).
-        app.optimizer = None;
+        // Tiled (task 5.1): the optimizer is a right-column slot now, so the
+        // menu stays open beside the graph; opening the graph adds its own
+        // slot below and the snapshot subject is the recolored graph tile.
+        // The previewed section order stays applied (the writer's source of
+        // truth) — closing the optimizer would restore the file order.
         app.open_graph();
-        let buf = buffer_for(&mut app, 100, 40);
+        let buf = buffer_for(&mut app, 160, 40);
         let ansi = buffer_to_ansi(&buf);
         assert!(
             ansi.contains("╭"),
@@ -5470,9 +5246,10 @@ fn outlier_graph_renders_both_warning_channels_with_error_token() {
             }
         })
         .collect();
-    let buf = buffer_for(&mut app, 100, 50);
+    let buf = buffer_for(&mut app, 160, 50);
+    let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders at 160");
     assert!(
-        has_box_glyph_of_color(&buf, t.graph_edge_error),
+        has_box_glyph_of_color_in(&buf, graph_rect, t.graph_edge_error),
         "outlier/influence cables render with the error token (red)"
     );
     // The _FANOUT fan-out edges are the influence channel; the direct E4.4->M4.2
@@ -5496,7 +5273,7 @@ fn outlier_graph_renders_both_warning_channels_with_error_token() {
         "learned-table wiring-outlier finding must be present"
     );
     let ansi = buffer_to_ansi(&buf);
-    insta::with_settings!({snapshot_suffix => "outlier_channels_classic_100"}, {
+    insta::with_settings!({snapshot_suffix => "outlier_channels_classic_160"}, {
         insta::assert_snapshot!(ansi);
     });
 }
@@ -6556,5 +6333,322 @@ fn tiled_narrow_fallback_collapses_right_column() {
     assert!(
         text.contains("+2 views hidden"),
         "status bar reports hidden views"
+    );
+}
+
+// ── tiled layout faces (change `tiled-window-manager`, D1/D5/D6) ────────
+// The right column stacks open views as horizontal cuts; pane borders carry
+// the focus tokens (`pane_focus_border` + BOLD vs `pane_unfocused_border`),
+// the left pane honors `main_split_ratio`, the slot cap evicts the oldest
+// non-focused view, and the carousel swaps slot content in place. State
+// transitions are unit-covered in app.rs; these pin the rendered faces.
+
+#[test]
+fn tiled_single_view_renders_panels_and_graph_slot() {
+    // Spec "Single view in right column": with only the graph open, the
+    // main area splits into the panels pane and a single graph tile whose
+    // widths follow `main_split_ratio` (at ratio 0.5 each takes 50%). The
+    // graph renders its content inside the tile (rounded node frames, ports)
+    // with its pane title, and the panels pane keeps its own face free of
+    // graph glyphs.
+    for &name in theme::THEMES {
+        let _guard = ThemedGuard::pin(name);
+        let mut app = graph_app_from_fixture("cable_banner_combos");
+        let buf = buffer_for(&mut app, 160, 50);
+        // Actual default (0.6, legacy `viewer_split_ratio`): 96/64.
+        assert_eq!(
+            app.pane_rects,
+            vec![
+                (FocusSlot::Panels, Rect::new(0, 3, 96, 44)),
+                (FocusSlot::Slot(0), Rect::new(96, 3, 64, 44)),
+            ],
+            "{name}: default split at main_split_ratio 0.6"
+        );
+        let panels = region_text(&buf, app.pane_rects[0].1);
+        let graph = region_text(&buf, app.pane_rects[1].1);
+        assert!(panels.contains(" Panels "), "{name}: panels pane title");
+        assert!(graph.contains(" Graph "), "{name}: graph pane title");
+        assert!(graph.contains("╭"), "{name}: rounded node frame in tile");
+        assert!(graph.contains("◉"), "{name}: input port in tile");
+        assert!(graph.contains("●"), "{name}: output port in tile");
+        assert!(
+            !panels.contains("╭"),
+            "{name}: graph faces stay inside their tile"
+        );
+        assert!(
+            !graph.contains(" Panels "),
+            "{name}: panels title not leaked into the graph tile"
+        );
+
+        // At ratio 0.5 the spec's "each taking 50% width" holds exactly,
+        // at both the 160-col face and the narrowest non-collapsed width
+        // (120, the QUAD_WIDTH_THRESHOLD boundary).
+        let mut fifty = graph_app_from_fixture("cable_banner_combos");
+        fifty.main_split_ratio = 0.5;
+        let _ = buffer_for(&mut fifty, 160, 50);
+        assert_eq!(
+            fifty.pane_rects,
+            vec![
+                (FocusSlot::Panels, Rect::new(0, 3, 80, 44)),
+                (FocusSlot::Slot(0), Rect::new(80, 3, 80, 44)),
+            ],
+            "{name}: 50/50 split at main_split_ratio 0.5"
+        );
+        let mut boundary = graph_app_from_fixture("cable_banner_combos");
+        boundary.main_split_ratio = 0.5;
+        let buf2 = buffer_for(&mut boundary, 120, 50);
+        assert_eq!(
+            boundary.pane_rects,
+            vec![
+                (FocusSlot::Panels, Rect::new(0, 3, 60, 44)),
+                (FocusSlot::Slot(0), Rect::new(60, 3, 60, 44)),
+            ],
+            "{name}: 50/50 split at the 120-col boundary"
+        );
+        let graph2 = region_text(&buf2, boundary.pane_rects[1].1);
+        assert!(
+            graph2.contains(" Graph "),
+            "{name}: graph pane title at 120"
+        );
+        assert!(graph2.contains("╭"), "{name}: node frame at 120");
+
+        let ansi = buffer_to_ansi(&buf);
+        insta::with_settings!({snapshot_suffix => format!("tiled_single_{name}_160")}, {
+            insta::assert_snapshot!(ansi);
+        });
+    }
+}
+
+/// fg of `rect`'s top-left corner cell when it is a box-drawing border
+/// corner — `render_tiled_pane` paints the whole outer ring with the pane's
+/// focus token, so the corner identifies that pane's border color. None when
+/// the corner is not a border glyph (the pane did not render at that rect).
+fn pane_corner_fg(buf: &Buffer, rect: Rect) -> Option<Color> {
+    const GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
+    let cell = buf.cell((rect.x, rect.y))?;
+    let ch = cell.symbol().chars().next().unwrap_or(' ');
+    if !GLYPHS.contains(&ch) {
+        return None;
+    }
+    cell.style().fg
+}
+
+#[test]
+fn regression_tiled_focus_border_follows_focus_cycle() {
+    // Two slots (graph + source): the focused slot's border pops in
+    // `pane_focus_border` + BOLD while panels and the other slot recede in
+    // `pane_unfocused_border`. Cycling focus re-renders the borders so the
+    // token moves with the focus, and the previously focused slot recedes.
+    for &name in theme::THEMES {
+        let _guard = ThemedGuard::pin(name);
+        let t = *theme::resolve(name);
+        let mut app = fixture_app();
+        app.open_graph(); // slot 0; focus stays on panels
+        app.open_view(ViewType::SourceViewer); // slot 1, takes focus
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        let buf = buffer_for(&mut app, 160, 40);
+
+        // Pane rects from the render: panels + two slots, top to bottom.
+        assert_eq!(app.pane_rects.len(), 3, "{name}: panels + 2 slots");
+        let panels = app.pane_rects[0].1;
+        let graph = app.pane_rects[1].1;
+        let source = app.pane_rects[2].1;
+
+        // Focused source slot pops; panels + graph slot recede.
+        assert_eq!(
+            pane_corner_fg(&buf, source),
+            Some(t.pane_focus_border),
+            "{name}: focused source slot border"
+        );
+        assert_eq!(
+            pane_corner_fg(&buf, graph),
+            Some(t.pane_unfocused_border),
+            "{name}: unfocused graph slot border"
+        );
+        assert_eq!(
+            pane_corner_fg(&buf, panels),
+            Some(t.pane_unfocused_border),
+            "{name}: unfocused panels border"
+        );
+        // The focused border carries BOLD on the border glyphs themselves.
+        assert!(
+            buf.cell((source.x, source.y))
+                .is_some_and(|c| c.style().add_modifier.contains(Modifier::BOLD)),
+            "{name}: focused border is bold"
+        );
+
+        // Tab forward lands on panels: its border pops, both slots recede.
+        app.cycle_focus(true);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        let buf = buffer_for(&mut app, 160, 40);
+        assert_eq!(
+            pane_corner_fg(&buf, panels),
+            Some(t.pane_focus_border),
+            "{name}: panels border pops when focused"
+        );
+        assert_eq!(
+            pane_corner_fg(&buf, source),
+            Some(t.pane_unfocused_border),
+            "{name}: previously focused source slot recedes"
+        );
+
+        // One more tab lands on the graph slot (slot 0) — the token follows.
+        app.cycle_focus(true);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        let buf = buffer_for(&mut app, 160, 40);
+        assert_eq!(
+            pane_corner_fg(&buf, graph),
+            Some(t.pane_focus_border),
+            "{name}: graph slot border pops when focused"
+        );
+        assert_eq!(
+            pane_corner_fg(&buf, source),
+            Some(t.pane_unfocused_border),
+            "{name}: source slot recedes when graph is focused"
+        );
+    }
+}
+
+#[test]
+fn regression_tiled_three_slots_render_as_equal_horizontal_cuts() {
+    // Three open views stack in the right column as equal horizontal cuts of
+    // the column: identical x/width, contiguous y, heights within one cell of
+    // each other, and each slot's pane title rendered on its border.
+    let mut app = fixture_app();
+    app.open_graph();
+    app.open_view(ViewType::SourceViewer);
+    app.open_view(ViewType::Physical);
+    assert_eq!(app.tile_stack.slots.len(), 3);
+
+    let buf = buffer_for(&mut app, 160, 50);
+    assert_eq!(app.pane_rects.len(), 4, "panels + 3 slots");
+    let panels = app.pane_rects[0].1;
+    let slots: Vec<Rect> = app.pane_rects[1..].iter().map(|(_, r)| *r).collect();
+
+    // The right column begins exactly where the left pane ends and spans to
+    // the terminal edge; every slot shares it.
+    let col_x = slots[0].x;
+    let col_w = slots[0].width;
+    assert_eq!(col_x, panels.width, "right column starts at left pane edge");
+    assert_eq!(
+        col_w,
+        buf.area.width - col_x,
+        "right column reaches the edge"
+    );
+    assert_eq!(slots[0].y, 3, "first slot starts at the main area top");
+    for s in &slots {
+        assert_eq!(s.x, col_x, "slots share the column x");
+        assert_eq!(s.width, col_w, "slots share the column width");
+    }
+    // Contiguous vertical cuts of the column, heights within one cell.
+    for pair in slots.windows(2) {
+        assert_eq!(
+            pair[1].y,
+            pair[0].y + pair[0].height,
+            "slots tile contiguously"
+        );
+    }
+    let heights: Vec<u16> = slots.iter().map(|r| r.height).collect();
+    assert!(
+        heights.iter().max().unwrap() - heights.iter().min().unwrap() <= 1,
+        "slot heights differ by at most one cell: {heights:?}"
+    );
+    assert_eq!(
+        heights.iter().sum::<u16>(),
+        buf.area.height - 6,
+        "slots fill the main band"
+    );
+
+    let text = rendered_text(&mut app, 160, 50);
+    assert!(text.contains(" Graph "), "graph pane title renders");
+    assert!(text.contains(" Source "), "source pane title renders");
+    assert!(text.contains(" Physical "), "physical pane title renders");
+}
+
+#[test]
+fn regression_tiled_main_split_ratio_resizes_left_pane() {
+    // The panels pane width tracks `main_split_ratio` (clamped to 0.3–0.7);
+    // the right column takes the remainder. Published per-frame rects reflect
+    // the split so focus hit-testing stays aligned with the borders.
+    let mut app = fixture_app();
+    app.open_graph();
+    for (ratio, expect_w) in [(0.6, 96u16), (0.7, 112), (0.3, 48), (0.9, 112), (0.1, 48)] {
+        app.main_split_ratio = ratio;
+        let _ = buffer_for(&mut app, 160, 50);
+        let (focus, panels) = app.pane_rects[0];
+        assert_eq!(focus, FocusSlot::Panels);
+        assert_eq!(
+            panels,
+            Rect::new(0, 3, expect_w, 44),
+            "{ratio}: left pane width on a 160-wide surface"
+        );
+        // The graph slot starts exactly where the panels pane ends.
+        assert_eq!(app.pane_rects[1].1.x, panels.x + panels.width);
+        assert_eq!(app.pane_rects[1].1.y, 3);
+        assert_eq!(app.pane_rects[1].1.height, 44);
+    }
+}
+
+#[test]
+fn regression_tiled_optimizer_evicts_oldest_unfocused_slot_on_render() {
+    // Four views against the 3-slot cap: opening the optimizer evicts the
+    // oldest non-focused slot (the graph) in place. Render-level proof: three
+    // pane rects plus panels, the optimizer pane title present, the evicted
+    // view's title gone, and the legacy flag mirrored off.
+    let mut app = fixture_app();
+    app.open_graph(); // slot 0
+    app.open_view(ViewType::SourceViewer); // slot 1, takes focus
+    app.open_view(ViewType::Physical); // slot 2, takes focus
+    app.open_view(ViewType::Optimizer); // evicts slot 0 (graph)
+    assert_eq!(
+        app.tile_stack.slots,
+        vec![
+            ViewType::Optimizer,
+            ViewType::SourceViewer,
+            ViewType::Physical
+        ]
+    );
+    assert!(!app.showing_graph, "evicted graph mirrors off");
+
+    // Render once for the published rects, then again for the face text.
+    let _ = buffer_for(&mut app, 160, 50);
+    assert_eq!(app.pane_rects.len(), 4, "panels + 3 slots after eviction");
+    let text = rendered_text(&mut app, 160, 50);
+    assert!(text.contains(" Optimizer "), "optimizer pane title renders");
+    assert!(
+        !text.contains(" Graph "),
+        "evicted graph pane title must not render"
+    );
+    assert!(text.contains(" Source "), "surviving source pane renders");
+    assert!(
+        text.contains(" Physical "),
+        "surviving physical pane renders"
+    );
+}
+
+#[test]
+fn regression_tiled_carousel_swap_rerenders_slot_content() {
+    // `cycle_view_in_slot` swaps the focused slot's view (graph → source in
+    // the carousel); the next frame renders the new slot title and drops the
+    // old one, with the legacy flags mirrored.
+    let mut app = fixture_app();
+    app.open_graph(); // slot 0; focus stays on panels
+    app.cycle_focus(true); // focus slot 0 (graph)
+    assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+    let text = rendered_text(&mut app, 160, 40);
+    assert!(text.contains(" Graph "), "graph slot title renders");
+
+    app.cycle_view_in_slot(true); // graph → source
+    assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
+    assert!(!app.showing_graph);
+    assert!(app.showing_viewer);
+    let text = rendered_text(&mut app, 160, 40);
+    assert!(
+        text.contains(" Source "),
+        "carousel swap renders the source title"
+    );
+    assert!(
+        !text.contains(" Graph "),
+        "old graph title dropped after the swap"
     );
 }

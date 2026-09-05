@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use std::collections::HashMap;
 
 use crate::app::{
-    is_entry_selectable, is_picker_parent_entry, App, FocusSlot, GraphDrag, PrefixState, QuadFocus,
+    is_entry_selectable, is_picker_parent_entry, App, FocusSlot, GraphDrag, PrefixState,
     SourceViewMode, ViewType, ViewerFocus,
 };
 use crate::layout;
@@ -233,8 +233,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     {
         let has_label_target = app.hovered_graph_node.is_some()
             || app.hovered_component.is_some()
-            || (app.showing_viewer && app.viewer_focus == ViewerFocus::Source)
-            || (app.showing_quad && app.quad_focus == QuadFocus::Source);
+            || (app.showing_viewer && app.viewer_focus == ViewerFocus::Source);
         if !has_label_target {
             app.showing_validation = true;
             if app.validation_cursor >= app.validation_issues.len() {
@@ -260,9 +259,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if app.prefix.is_some() {
         match key.code {
             crossterm::event::KeyCode::Char('v') => {
-                if app.showing_quad {
-                    app.close_quad();
-                }
                 open_embedded_viewer(app);
                 // Tiled open path (change `tiled-window-manager`, D7): the
                 // viewer takes a right-column slot and focus with it.
@@ -272,20 +268,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             crossterm::event::KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
-                if app.showing_quad {
-                    app.close_quad();
-                }
                 app.open_graph();
                 // Tiled open path: `open_graph` registers the slot; focus
                 // follows it so Esc/keys act on the graph pane.
                 focus_tile_slot(app, ViewType::Graph);
                 sync_viewer_focus_from_tiles(app);
-                app.prefix = None;
-                return false;
-            }
-            crossterm::event::KeyCode::Char('q') => {
-                // `g q` opens the quad concurrent view (panels | source / FULL | FILTERED).
-                app.open_quad();
                 app.prefix = None;
                 return false;
             }
@@ -321,7 +308,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
     }
 
-    // Diff overlay Esc handling: clear scope first, then overlay (before viewer/graph/quad Esc).
+    // Diff overlay Esc handling: clear scope first, then overlay (before viewer/graph Esc).
     if matches!(key.code, crossterm::event::KeyCode::Esc) {
         if app.diff_scope.is_some() {
             app.diff_scope = None;
@@ -473,17 +460,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
             }
         }
-        // Also check filtered graph when quad filtered focused
-        if app.showing_quad {
-            if let Some(fg) = app.filtered_graph.as_ref() {
-                // Use filtered_positions hit? For now reuse hovered_graph_node for full; filtered drag has no hover index.
-                // Fall through to source/panel if no full hover.
-                let _ = fg;
-            }
-        }
         // 2) Source header focused -> Circuit instance at source_scroll
-        let source_focused = (app.showing_viewer && app.viewer_focus == ViewerFocus::Source)
-            || (app.showing_quad && app.quad_focus == QuadFocus::Source);
+        let source_focused = app.showing_viewer && app.viewer_focus == ViewerFocus::Source;
         if source_focused {
             if let Some(patch) = app.patch.as_ref() {
                 let line = app.source_scroll;
@@ -571,105 +549,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
             }
         }
-    }
-
-    // Quad concurrent view handling — picker and prefix remain highest priority.
-    if app.showing_quad {
-        match key.code {
-            crossterm::event::KeyCode::Esc => {
-                app.close_quad();
-                app.prefix = None;
-                return false;
-            }
-            crossterm::event::KeyCode::Tab => {
-                app.cycle_quad_focus();
-                return false;
-            }
-            crossterm::event::KeyCode::Char('q') => {
-                return true;
-            }
-            crossterm::event::KeyCode::Char('c')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                return true;
-            }
-            crossterm::event::KeyCode::Char('l') => {
-                app.showing_picker = true;
-                app.picker_dir = std::env::current_dir().unwrap_or_default();
-                app.picker_index = 0;
-                app.refresh_picker_entries();
-                return false;
-            }
-            crossterm::event::KeyCode::Char('p') => {
-                app.toggle_processing_pause();
-                return false;
-            }
-            crossterm::event::KeyCode::Char('t') if app.quad_focus == QuadFocus::Source => {
-                app.source_view_mode = match app.source_view_mode {
-                    SourceViewMode::Raw => SourceViewMode::Prettified,
-                    SourceViewMode::Prettified => SourceViewMode::Raw,
-                };
-                return false;
-            }
-            crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']')
-                if app.quad_focus == QuadFocus::Source =>
-            {
-                let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
-                    -0.1
-                } else {
-                    0.1
-                };
-                app.adjust_viewer_split_ratio(delta);
-                app.viewer_split_ratio = (app.viewer_split_ratio * 10.0).round() / 10.0;
-                let pct_panels = app.viewer_split_ratio * 100.0;
-                let pct_source = 100.0 - pct_panels;
-                app.status_message =
-                    format!("Panels/Source split: {:.0}%/{:.0}%", pct_panels, pct_source);
-                return false;
-            }
-            _ => {}
-        }
-        // Source-pane navigation when quad focus is on Source — mirrors the
-        // embedded viewer's Source focus handling (Up/Down/Home/End only).
-        if app.quad_focus == QuadFocus::Source {
-            match key.code {
-                crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
-                    if app.selected_component.is_some() {
-                        let next = app.occurrence_cursor.saturating_add(1);
-                        app.jump_to_occurrence(next);
-                    }
-                    return false;
-                }
-                crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
-                    if app.selected_component.is_some() {
-                        let prev = app.occurrence_cursor.saturating_sub(1);
-                        app.jump_to_occurrence(prev);
-                    }
-                    return false;
-                }
-                crossterm::event::KeyCode::Home => {
-                    if app.selected_component.is_some() {
-                        app.jump_to_occurrence(0);
-                    }
-                    return false;
-                }
-                crossterm::event::KeyCode::End => {
-                    if let Some(token) = app.selected_component.clone() {
-                        if let Some(patch) = app.patch.as_ref() {
-                            if let Some(spans) = patch.occurrence_index.get(&token) {
-                                if !spans.is_empty() {
-                                    app.jump_to_occurrence(spans.len() - 1);
-                                }
-                            }
-                        }
-                    }
-                    return false;
-                }
-                _ => {}
-            }
-        }
-        // Fall through to normal panel handling for Panels/Graph* focuses so
-        // shift/scale/orientation/toggle still work while quad is open.
     }
 
     // Graph surface handling (`g g`). Esc closes it and restores the prior
@@ -976,10 +855,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
             }
         }
-        // Source header (quad or viewer) — resolve to section instance at source focus.
-        if (app.showing_viewer && app.viewer_focus == ViewerFocus::Source)
-            || (app.showing_quad && app.quad_focus == QuadFocus::Source)
-        {
+        // Source header (viewer) — resolve to section instance at source focus.
+        if app.showing_viewer && app.viewer_focus == ViewerFocus::Source {
             if let Some(patch) = app.patch.as_ref() {
                 // Use selected component's section or fallback to first section.
                 let target_idx = app
@@ -1181,7 +1058,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         crossterm::event::KeyCode::Char('\\') => {
-            // Left-pane vertical split toggle (quad replacement, D3).
+            // Left-pane vertical split toggle (D3).
             app.toggle_left_split();
             app.status_message = if app.left_split_active {
                 String::from("Left split on")
@@ -1261,7 +1138,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     }
     // Help modal click-outside close (design D4): a left-button Down outside
     // the renderer-published modal rect closes help over any surface. Checked
-    // before the picker/quad/graph branches so it works even when help
+    // before the picker/graph branches so it works even when help
     // overlays them (a click over the picker or graph closes help instead of
     // selecting a file or dragging a node).
     if app.showing_help {
@@ -1276,23 +1153,33 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if app.showing_picker {
         return;
     }
-    // While the quad view is open both graph panes own mouse drag input.
-    // A drag started in one pane continues until Up regardless of hit.
-    if app.showing_quad && handle_quad_mouse(mouse, app) {
-        return;
-    }
-    // While the graph surface is open it owns all mouse input; nothing falls
-    // through to panel/minimap handling below.
-    if app.showing_graph {
+    // Tiled mouse routing (change `tiled-window-manager`): the graph is a
+    // right-column slot, not a full-screen surface, so its mouse handling
+    // applies only while the pointer is inside the graph pane's published
+    // rect. A left-click inside the tile focuses it (spec "Mouse click sets
+    // focus"); events elsewhere fall through to the panel/source routing
+    // below, and the pointer leaving the graph pane clears node hover so the
+    // graph cannot keep a stale hover highlight.
+    let graph_pane = app.pane_rects.iter().find(|(focus, rect)| {
+        matches!(
+            focus,
+            FocusSlot::Slot(i) if app.tile_stack.slots.get(*i) == Some(&ViewType::Graph)
+        ) && rect_contains(rect, mouse.column, mouse.row)
+    });
+    if let Some((focus, _)) = graph_pane {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            app.tile_stack.focus = *focus;
+        }
         handle_graph_mouse(mouse, app);
         return;
     }
+    app.hovered_graph_node = None;
     // Minimap click-to-scroll: uses renderer-published minimap geometry with
     // the same proportional mapping as the viewport indicator in ui.rs
     // (indicator: scroll * inner_h / total_lines). Click must work whenever
-    // the embedded viewer or quad is visible, regardless of focus, and takes
+    // the embedded viewer is visible, regardless of focus, and takes
     // precedence over panel interactions (picker already returned above).
-    if app.showing_viewer || app.showing_quad {
+    if app.showing_viewer {
         if let Some(rect) = app.minimap_rect {
             if rect_contains(&rect, mouse.column, mouse.row)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -1364,10 +1251,8 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     app.select_component(token);
                 }
                 // Clicking a component is a panel interaction: hand keyboard
-                // focus back to the panels while the viewer/quad stays open.
-                if app.showing_quad {
-                    app.quad_focus = QuadFocus::Panels;
-                } else if app.showing_viewer {
+                // focus back to the panels while the viewer stays open.
+                if app.showing_viewer {
                     app.viewer_focus = ViewerFocus::Panels;
                 }
                 app.tile_stack.focus = FocusSlot::Panels;
@@ -1381,25 +1266,19 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                 // Bare source-pane space (no component, no minimap) focuses
                 // the source pane without side effects; the selection must
                 // survive so occurrence navigation keeps working there.
-                let in_source_pane = (app.showing_viewer || app.showing_quad)
+                let in_source_pane = app.showing_viewer
                     && !on_minimap
                     && app
                         .source_pane_rect
                         .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
                 if in_source_pane {
-                    if app.showing_quad {
-                        app.quad_focus = QuadFocus::Source;
-                    } else {
-                        app.viewer_focus = ViewerFocus::Source;
-                        focus_tile_slot(app, ViewType::SourceViewer);
-                    }
+                    app.viewer_focus = ViewerFocus::Source;
+                    focus_tile_slot(app, ViewType::SourceViewer);
                 } else {
                     if !on_minimap {
                         app.clear_selected_component();
                     }
-                    if app.showing_quad {
-                        app.quad_focus = QuadFocus::Panels;
-                    } else if app.showing_viewer {
+                    if app.showing_viewer {
                         app.viewer_focus = ViewerFocus::Panels;
                     }
                     app.tile_stack.focus = FocusSlot::Panels;
@@ -1410,7 +1289,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
             // Physical-view wheel-pan (4.3): when the rack overflows
             // vertically the wheel pans instead of adjusting the hovered
             // knob/fader value (design D5; `physical_pan_if_overflow` also
-            // gates viewer/quad/graph surfaces away).
+            // gates viewer/graph surfaces away).
             let panned = app.physical_pan_if_overflow(0, -1);
             if !panned {
                 if let Some(idx) = hit {
@@ -1538,143 +1417,6 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
             app.graph_pan_if_overflow(0, 1);
         }
         _ => {}
-    }
-}
-
-/// Handle mouse for the quad concurrent view's two graph panes.
-/// Returns true if the event was consumed as a graph drag (Down on a node,
-/// Drag while a grab is active, or Up releasing a grab).
-fn handle_quad_mouse(mouse: MouseEvent, app: &mut App) -> bool {
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            // Prioritize filtered pane hit, then full pane. Both use the same
-            // renderer-published rect contract; quad_focus tracks selection.
-            if let Some(idx) = app
-                .filtered_node_rects
-                .iter()
-                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
-                .map(|(i, _)| *i)
-            {
-                app.quad_focus = QuadFocus::GraphFiltered;
-                if let Some((px, py)) = app.filtered_positions.get(idx).copied() {
-                    app.filtered_drag = Some(GraphDrag {
-                        node_index: idx,
-                        offset_x: px - mouse.column as f32,
-                        offset_y: py - mouse.row as f32,
-                    });
-                }
-                return true;
-            }
-            if let Some(idx) = app
-                .graph_node_rects
-                .iter()
-                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
-                .map(|(i, _)| *i)
-            {
-                app.quad_focus = QuadFocus::GraphFull;
-                if let Some((px, py)) = app.graph_positions.get(idx).copied() {
-                    app.graph_drag = Some(GraphDrag {
-                        node_index: idx,
-                        offset_x: px - mouse.column as f32,
-                        offset_y: py - mouse.row as f32,
-                    });
-                }
-                return true;
-            }
-            false
-        }
-        MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(drag) = app.filtered_drag.as_ref() {
-                let node_index = drag.node_index;
-                let offset_x = drag.offset_x;
-                let offset_y = drag.offset_y;
-                let filtered = app.filtered_graph.clone();
-                let Some(graph) = filtered else {
-                    return true;
-                };
-                let Some(node_id) = graph.nodes.get(node_index).map(|n| n.id.clone()) else {
-                    return true;
-                };
-                if let Some(pos) = app.filtered_positions.get_mut(node_index) {
-                    *pos = (
-                        clamp_drag(mouse.column as f32 + offset_x),
-                        clamp_drag(mouse.row as f32 + offset_y),
-                    );
-                }
-                let pins = app.pinned_indices(&graph);
-                layout::local_resettle(
-                    &graph,
-                    &mut app.filtered_positions,
-                    &node_id,
-                    layout::LOCAL_RADIUS,
-                    layout::LOCAL_ITERATIONS,
-                    &pins,
-                    app.tension,
-                );
-                app.notify_node_moved(&node_id);
-                return true;
-            }
-            if let Some(drag) = app.graph_drag.as_ref() {
-                let node_index = drag.node_index;
-                let offset_x = drag.offset_x;
-                let offset_y = drag.offset_y;
-                let graph = app.graph.clone();
-                let Some(graph) = graph else {
-                    return true;
-                };
-                let Some(node_id) = graph.nodes.get(node_index).map(|n| n.id.clone()) else {
-                    return true;
-                };
-                if let Some(pos) = app.graph_positions.get_mut(node_index) {
-                    *pos = (
-                        clamp_drag(mouse.column as f32 + offset_x),
-                        clamp_drag(mouse.row as f32 + offset_y),
-                    );
-                }
-                let pins = app.pinned_indices(&graph);
-                layout::local_resettle(
-                    &graph,
-                    &mut app.graph_positions,
-                    &node_id,
-                    layout::LOCAL_RADIUS,
-                    layout::LOCAL_ITERATIONS,
-                    &pins,
-                    app.tension,
-                );
-                app.notify_node_moved(&node_id);
-                return true;
-            }
-            false
-        }
-        MouseEventKind::Up(_) => {
-            let was_dragging = app.filtered_drag.is_some() || app.graph_drag.is_some();
-            // Task 3.1 (design D7): drag auto-pins in the quad panes too — a
-            // dropped node becomes a fixed anchor in the full graph.
-            if let Some(drag) = app.filtered_drag.take() {
-                if let Some(node) = app
-                    .filtered_graph
-                    .as_ref()
-                    .and_then(|g| g.nodes.get(drag.node_index))
-                {
-                    app.pinned.insert(node.id.clone());
-                }
-            }
-            if let Some(drag) = app.graph_drag.take() {
-                if let Some(node) = app
-                    .graph
-                    .as_ref()
-                    .and_then(|g| g.nodes.get(drag.node_index))
-                {
-                    app.pinned.insert(node.id.clone());
-                }
-            }
-            was_dragging
-        }
-        MouseEventKind::Moved => {
-            // Hover does not consume in quad; let panel hover run.
-            false
-        }
-        _ => false,
     }
 }
 
@@ -2098,11 +1840,6 @@ mod tests {
         app.showing_graph = true;
         handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the graph");
-
-        let mut app = App::new();
-        app.showing_quad = true;
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
-        assert!(app.showing_help, "help must open over the quad");
 
         let mut app = App::new();
         app.showing_validation = true;
@@ -3270,6 +3007,99 @@ mod tests {
         assert_eq!(app.source_scroll, scroll_before);
     }
 
+    #[test]
+    fn tiled_mouse_click_component_focuses_panels_slot() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Slot(0),
+            "viewer open takes the source slot focus"
+        );
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Panels,
+            "component click hands focus to the panels slot"
+        );
+    }
+
+    #[test]
+    fn tiled_mouse_click_source_pane_focuses_source_slot() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        open_viewer(&mut app);
+        // Start from panels focus to prove a bare source-pane click switches
+        // the tiled focus back to the source slot.
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        app.source_pane_rect = Some(Rect::new(60, 3, 40, 20));
+        app.minimap_rect = None;
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 80, 10),
+            &mut app,
+        );
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Slot(0),
+            "source-pane click focuses the source slot"
+        );
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    }
+
+    #[test]
+    fn tiled_mouse_click_graph_pane_focuses_graph_slot() {
+        // Spec "Mouse click sets focus": a click inside the graph pane moves
+        // tiled focus to the graph slot. Also pins tiled mouse routing: the
+        // graph tile must not swallow clicks aimed at the panels pane.
+        let mut app = app_with_source_navigation();
+        // Slot 0 is the source viewer, slot 1 the graph.
+        app.open_view(ViewType::SourceViewer);
+        app.open_graph();
+        app.tile_stack.focus = FocusSlot::Slot(0);
+        // Renderer-published rects: panels left, two stacked slots right.
+        app.pane_rects = vec![
+            (FocusSlot::Panels, Rect::new(0, 0, 40, 40)),
+            (FocusSlot::Slot(0), Rect::new(40, 0, 120, 20)),
+            (FocusSlot::Slot(1), Rect::new(40, 20, 120, 20)),
+        ];
+        // Click inside the graph pane (no node): focus moves to the graph
+        // slot without starting a drag.
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 100, 25),
+            &mut app,
+        );
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Slot(1),
+            "click inside the graph pane focuses the graph slot"
+        );
+        assert!(app.graph_drag.is_none(), "no node under the click");
+
+        // A click on a panel component must reach the panels pane even while
+        // the graph tile is open.
+        app.component_rects = vec![(0, Rect::new(2, 2, 16, 2))];
+        let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 3),
+            &mut app,
+        );
+        assert_ne!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            state_before,
+            "panel component click toggles while the graph tile is open"
+        );
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Panels,
+            "component click hands focus to the panels slot"
+        );
+    }
+
     // ---- Task 3.2: selection-into-commit, deselection stability, occurrence bounds ----
 
     fn idx_for(app: &App, token: &str) -> usize {
@@ -3529,6 +3359,14 @@ mod tests {
         app.graph_node_rects = (0..node_count)
             .map(|i| (i, Rect::new(10 + (i as u16) * 20, 10, 16, 3)))
             .collect();
+        // Tiled renderer contract (change `tiled-window-manager`): the graph
+        // is a right-column slot whose published pane rect gates mouse
+        // routing. Mirror a rendered layout so graph events route to graph
+        // handling instead of falling through to the panels pane.
+        app.pane_rects = vec![
+            (FocusSlot::Panels, Rect::new(0, 0, 8, 40)),
+            (FocusSlot::Slot(0), Rect::new(8, 0, 192, 40)),
+        ];
         app
     }
 
@@ -3966,6 +3804,12 @@ mod tests {
         app.graph_node_rects = (0..node_count)
             .map(|i| (i, Rect::new(i as u16 * 22, 0, 22, 5)))
             .collect();
+        // Tiled renderer contract (change `tiled-window-manager`): publish
+        // the graph slot rect so mouse events route to graph handling.
+        app.pane_rects = vec![
+            (FocusSlot::Panels, Rect::new(0, 0, 8, 40)),
+            (FocusSlot::Slot(0), Rect::new(8, 0, 192, 40)),
+        ];
         app
     }
 

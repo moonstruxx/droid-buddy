@@ -1,13 +1,15 @@
-//! Pixel-space camera and offscreen rasterizer for the graph surface.
+//! Pixel-space camera, backend-neutral scene spec, and offscreen rasterizer
+//! for the graph surface.
 //!
 //! This module is intentionally pure: no terminal, no ratatui, no `App` — only
 //! `f32` math over the layout solver's world plane, the kitty image's pixel
-//! plane, and `tiny-skia`/`fontdue` rasterization. Task 2.1 wires it into
-//! `render_graph` by replacing the bounding-box fit with the camera and
-//! deriving `graph_node_rects` through the inverse; task 2.2 supplies the
-//! `Color → RGB` hop that feeds `render_scene` via [`build_scene`], the
-//! theme-aware leaf converting the classified tokens from `ui.rs`'s pipeline —
-//! below that hop everything is RGB-pure.
+//! plane, and `tiny-skia`/`fontdue` rasterization. Scene building (design D3)
+//! emits a backend-neutral [`SceneSpec`] — node frames, per-cable colored
+//! Bézier edges, labels, resolved RGB colors — that both painters consume
+//! under the same [`GraphCamera`]: the tiny-skia [`render_scene`] here and the
+//! egui window painter (task 2.2). [`build_scene`] is the theme-aware leaf
+//! converting the classified tokens from `ui.rs`'s pipeline into the spec and
+//! rasterizing it; below the `Color → RGB` hop everything is RGB-pure.
 
 /// Degenerate-world guard: a zero-span axis (single node, coincident nodes)
 /// behaves as if it spanned `MIN_SPAN` so the fit zoom stays finite.
@@ -531,7 +533,128 @@ mod tests {
     }
 }
 // ---------------------------------------------------------------------------
+// Backend-neutral scene spec (design D3): the description both painters
+// consume — no tiny-skia types, only plain tuples, `f32`, and `String`.
+// ---------------------------------------------------------------------------
+
+/// RGB color triple in the neutral scene spec. The `Color → RGB` hop (design
+/// D9) happens in [`build_scene_spec`] — no painter ever sees a theme token.
+pub type Rgb = (u8, u8, u8);
+
+/// Pixel-space appearance of one graph node: an anti-aliased rounded rect with
+/// an optional centered title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeSpec {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+    pub fill: Rgb,
+    pub border: Rgb,
+    pub border_width: f32,
+    pub label: String,
+    pub label_color: Rgb,
+}
+
+/// Pixel-space appearance of one cable: a quadratic Bézier stroke with a filled
+/// direction arrow at `end`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeSpec {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub ctrl: (f32, f32),
+    pub color: Rgb,
+    pub width: f32,
+}
+
+/// A fully resolved, backend-neutral graph frame: opaque background plus node
+/// and cable appearance in RGB space. tiny-skia's [`render_scene`] and the egui
+/// window painter (task 2.2) draw the same spec under the same [`GraphCamera`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneSpec {
+    pub background: Rgb,
+    pub nodes: Vec<NodeSpec>,
+    pub edges: Vec<EdgeSpec>,
+}
+
+use crate::theme::Theme;
+use ratatui::style::Color as ThemeColor;
+
+/// Theme tokens for one node (design D9): mirror of [`NodeSpec`] whose color
+/// fields carry the classified semantic `Color`s from the existing pipeline
+/// (error red > diff > latency ramp > cable kind) instead of triples.
+#[derive(Clone)]
+pub struct NodeTokenSpec {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+    pub fill: ThemeColor,
+    pub border: ThemeColor,
+    pub border_width: f32,
+    pub label: String,
+    pub label_color: ThemeColor,
+}
+
+/// Theme tokens for one cable (design D9): mirror of [`EdgeSpec`] carrying the
+/// classified edge `Color` (error red > diff > latency ramp > cable kind).
+#[derive(Clone)]
+pub struct EdgeTokenSpec {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub ctrl: (f32, f32),
+    pub color: ThemeColor,
+    pub width: f32,
+}
+
+/// Resolve classified theme tokens into a backend-neutral [`SceneSpec`] (design
+/// D3): the single `Color → RGB` hop applied before any painter touches the
+/// spec. Geometry (`x/y/w/h`, curve control points, widths) comes from the
+/// caller; only the tokens are resolved here, so `ui.rs` reuses its
+/// classification pipeline verbatim and both painters stay color-pure.
+pub fn build_scene_spec(
+    theme: &Theme,
+    background: ThemeColor,
+    nodes: &[NodeTokenSpec],
+    edges: &[EdgeTokenSpec],
+) -> SceneSpec {
+    let nodes = nodes
+        .iter()
+        .map(|n| NodeSpec {
+            x: n.x,
+            y: n.y,
+            w: n.w,
+            h: n.h,
+            radius: n.radius,
+            fill: theme.rgb(n.fill),
+            border: theme.rgb(n.border),
+            border_width: n.border_width,
+            label: n.label.clone(),
+            label_color: theme.rgb(n.label_color),
+        })
+        .collect();
+    let edges = edges
+        .iter()
+        .map(|e| EdgeSpec {
+            start: e.start,
+            end: e.end,
+            ctrl: e.ctrl,
+            color: theme.rgb(e.color),
+            width: e.width,
+        })
+        .collect();
+    SceneSpec {
+        background: theme.rgb(background),
+        nodes,
+        edges,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Offscreen rasterizer (design.md D2 rounded rects, D3 fontdue labels, D5 f=32)
+// — one consumer of the shared scene spec.
 // ---------------------------------------------------------------------------
 
 use fontdue::{Font, FontSettings};
@@ -540,11 +663,6 @@ use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PremultipliedColorU8,
     Stroke, Transform,
 };
-
-/// RGB color triple in the rasterizer's own space. The `Color → RGB` hop (task
-/// 2.2, design D9) happens in [`build_scene`] — the pixel path never hardcodes
-/// or converts theme colors.
-pub type Rgb = (u8, u8, u8);
 
 /// Canvas cap for runaway pan/zoom: larger sizes are clamped before
 /// `Pixmap::new`, so a stretched camera can never exhaust memory (design.md D2
@@ -567,33 +685,6 @@ fn bundled_font() -> Option<&'static Font> {
     .as_ref()
 }
 
-/// Pixel-space appearance of one graph node: an anti-aliased rounded rect with
-/// an optional centered title.
-#[derive(Clone)]
-pub struct NodeSpec {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    pub radius: f32,
-    pub fill: Rgb,
-    pub border: Rgb,
-    pub border_width: f32,
-    pub label: String,
-    pub label_color: Rgb,
-}
-
-/// Pixel-space appearance of one cable: a quadratic Bézier stroke with a filled
-/// direction arrow at `end`.
-#[derive(Clone)]
-pub struct EdgeSpec {
-    pub start: (f32, f32),
-    pub end: (f32, f32),
-    pub ctrl: (f32, f32),
-    pub color: Rgb,
-    pub width: f32,
-}
-
 /// A finished raster pass: opaque RGBA8 (`alpha == 255`, so premultiplied ==
 /// straight — design.md D5) ready for the `f=32` kitty transport.
 pub struct Scene {
@@ -602,31 +693,21 @@ pub struct Scene {
     pub rgba: Vec<u8>,
 }
 
-/// Rasterize one graph frame: opaque background, cable curves behind
-/// rounded-rect nodes, labels on top. Pure over RGB tuples; `None` on
-/// degenerate sizes or a broken bundled font.
-pub fn render_scene(
-    width: u32,
-    height: u32,
-    background: Rgb,
-    nodes: &[NodeSpec],
-    edges: &[EdgeSpec],
-) -> Option<Scene> {
+/// Rasterize one graph frame from the shared spec: opaque background, cable
+/// curves behind rounded-rect nodes, labels on top. Pure over RGB tuples;
+/// `None` on degenerate sizes or a broken bundled font.
+pub fn render_scene(width: u32, height: u32, spec: &SceneSpec) -> Option<Scene> {
     let font = bundled_font()?;
     let width = width.min(MAX_DIM);
     let height = height.min(MAX_DIM);
     let mut pixmap = Pixmap::new(width, height)?;
-    pixmap.fill(Color::from_rgba8(
-        background.0,
-        background.1,
-        background.2,
-        255,
-    ));
+    let bg = spec.background;
+    pixmap.fill(Color::from_rgba8(bg.0, bg.1, bg.2, 255));
 
-    for edge in edges {
+    for edge in &spec.edges {
         draw_edge(&mut pixmap, edge);
     }
-    for node in nodes {
+    for node in &spec.nodes {
         draw_node(&mut pixmap, node, font);
     }
 
@@ -824,37 +905,6 @@ fn draw_edge(pixmap: &mut Pixmap, edge: &EdgeSpec) {
 // Theme-aware Scene builder (design D9: the `Color → RGB` hop)
 // ---------------------------------------------------------------------------
 
-use crate::theme::Theme;
-use ratatui::style::Color as ThemeColor;
-
-/// Theme tokens for one rasterized node (design D9): mirror of [`NodeSpec`]
-/// whose color fields carry the classified semantic `Color`s from the existing
-/// pipeline (error red > diff > latency ramp > cable kind) instead of triples.
-#[derive(Clone)]
-pub struct NodeTokenSpec {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    pub radius: f32,
-    pub fill: ThemeColor,
-    pub border: ThemeColor,
-    pub border_width: f32,
-    pub label: String,
-    pub label_color: ThemeColor,
-}
-
-/// Theme tokens for one cable (design D9): mirror of [`EdgeSpec`] carrying the
-/// classified edge `Color` (error red > diff > latency ramp > cable kind).
-#[derive(Clone)]
-pub struct EdgeTokenSpec {
-    pub start: (f32, f32),
-    pub end: (f32, f32),
-    pub ctrl: (f32, f32),
-    pub color: ThemeColor,
-    pub width: f32,
-}
-
 /// Build a raster scene from classified theme tokens (design D9): the single
 /// `Color → RGB` hop applied before anything touches the pixel path. Geometry
 /// (`x/y/w/h`, curve control points, widths) comes from the caller; only the
@@ -869,32 +919,11 @@ pub fn build_scene(
     nodes: &[NodeTokenSpec],
     edges: &[EdgeTokenSpec],
 ) -> Option<Scene> {
-    let nodes: Vec<NodeSpec> = nodes
-        .iter()
-        .map(|n| NodeSpec {
-            x: n.x,
-            y: n.y,
-            w: n.w,
-            h: n.h,
-            radius: n.radius,
-            fill: theme.rgb(n.fill),
-            border: theme.rgb(n.border),
-            border_width: n.border_width,
-            label: n.label.clone(),
-            label_color: theme.rgb(n.label_color),
-        })
-        .collect();
-    let edges: Vec<EdgeSpec> = edges
-        .iter()
-        .map(|e| EdgeSpec {
-            start: e.start,
-            end: e.end,
-            ctrl: e.ctrl,
-            color: theme.rgb(e.color),
-            width: e.width,
-        })
-        .collect();
-    render_scene(width, height, theme.rgb(background), &nodes, &edges)
+    render_scene(
+        width,
+        height,
+        &build_scene_spec(theme, background, nodes, edges),
+    )
 }
 
 #[cfg(test)]
@@ -902,6 +931,15 @@ mod rasterizer_tests {
     use super::*;
 
     const BG: Rgb = (20, 20, 20);
+
+    /// Wrap a background + slices into the shared spec for direct raster calls.
+    fn spec(background: Rgb, nodes: &[NodeSpec], edges: &[EdgeSpec]) -> SceneSpec {
+        SceneSpec {
+            background,
+            nodes: nodes.to_vec(),
+            edges: edges.to_vec(),
+        }
+    }
 
     fn pixel(scene: &Scene, x: u32, y: u32) -> (u8, u8, u8) {
         let i = ((y * scene.width + x) * 4) as usize;
@@ -949,7 +987,7 @@ mod rasterizer_tests {
 
     #[test]
     fn render_small_node_and_edge_produces_non_blank_pixels() {
-        let scene = render_scene(200, 160, BG, &[sample_node()], &[sample_edge()])
+        let scene = render_scene(200, 160, &spec(BG, &[sample_node()], &[sample_edge()]))
             .expect("bounded scene renders");
         assert!(
             all_opaque(&scene),
@@ -978,7 +1016,8 @@ mod rasterizer_tests {
             border_width: 0.0,
             ..sample_node()
         };
-        let scene = render_scene(120, 80, BG, std::slice::from_ref(&node), &[]).expect("renders");
+        let scene =
+            render_scene(120, 80, &spec(BG, std::slice::from_ref(&node), &[])).expect("renders");
         assert!(all_opaque(&scene));
         // Scan the top-left corner square (arc center (18,18), r=8): the AA
         // edge must contain a pixel strictly between background and fill
@@ -1017,7 +1056,8 @@ mod rasterizer_tests {
             h: 56.0,
             ..sample_node()
         };
-        let scene = render_scene(200, 120, BG, std::slice::from_ref(&node), &[]).expect("renders");
+        let scene =
+            render_scene(200, 120, &spec(BG, std::slice::from_ref(&node), &[])).expect("renders");
         assert!(all_opaque(&scene));
         // Glyph interiors at full coverage composite to exactly the label color;
         // nothing else in the scene uses it, so this proves legible text.
@@ -1081,8 +1121,8 @@ mod rasterizer_tests {
         // (f=32 premultiplied == straight), and pixels away from any content
         // stay at the painted background.
         let (w, h) = (200u32, 160u32);
-        let scene =
-            render_scene(w, h, BG, &[sample_node()], &[sample_edge()]).expect("bounded scene");
+        let scene = render_scene(w, h, &spec(BG, &[sample_node()], &[sample_edge()]))
+            .expect("bounded scene");
         assert_eq!(scene.rgba.len(), (w * h * 4) as usize);
         assert!(all_opaque(&scene));
         // Top-left corner (5,5) is clear of the node (x 30..110, y 30..70) and
@@ -1094,20 +1134,20 @@ mod rasterizer_tests {
     fn degenerate_dimensions_return_none() {
         // Task 3.2: a zero-width or zero-height canvas has no Pixmap; the
         // caller falls back to box drawing instead of receiving garbage.
-        assert!(render_scene(0, 160, BG, &[], &[]).is_none());
-        assert!(render_scene(200, 0, BG, &[], &[]).is_none());
-        assert!(render_scene(0, 0, BG, &[], &[]).is_none());
+        assert!(render_scene(0, 160, &spec(BG, &[], &[])).is_none());
+        assert!(render_scene(200, 0, &spec(BG, &[], &[])).is_none());
+        assert!(render_scene(0, 0, &spec(BG, &[], &[])).is_none());
     }
 
     #[test]
     fn huge_dimensions_clamp_to_max_dim() {
         // Task 3.2: runaway pan/zoom must never reach `Pixmap::new` unchecked;
         // larger requests clamp to MAX_DIM on each axis (design D2).
-        let wide = render_scene(2 * MAX_DIM, 10, BG, &[], &[]).expect("clamped wide canvas");
+        let wide = render_scene(2 * MAX_DIM, 10, &spec(BG, &[], &[])).expect("clamped wide canvas");
         assert_eq!(wide.width, MAX_DIM);
         assert_eq!(wide.height, 10);
         assert_eq!(wide.rgba.len(), (MAX_DIM * 10 * 4) as usize);
-        let tall = render_scene(10, 2 * MAX_DIM, BG, &[], &[]).expect("clamped tall canvas");
+        let tall = render_scene(10, 2 * MAX_DIM, &spec(BG, &[], &[])).expect("clamped tall canvas");
         assert_eq!(tall.width, 10);
         assert_eq!(tall.height, MAX_DIM);
         assert_eq!(tall.rgba.len(), (10 * MAX_DIM * 4) as usize);
@@ -1119,10 +1159,157 @@ mod rasterizer_tests {
         // inputs produce byte-identical buffers (same frames do not flicker).
         let nodes = [sample_node()];
         let edges = [sample_edge()];
-        let a = render_scene(200, 160, BG, &nodes, &edges).expect("first run");
-        let b = render_scene(200, 160, BG, &nodes, &edges).expect("second run");
+        let a = render_scene(200, 160, &spec(BG, &nodes, &edges)).expect("first run");
+        let b = render_scene(200, 160, &spec(BG, &nodes, &edges)).expect("second run");
         assert_eq!(a.width, b.width);
         assert_eq!(a.height, b.height);
         assert_eq!(a.rgba, b.rgba);
+    }
+
+    #[test]
+    fn build_scene_spec_resolves_tokens_to_rgb_and_preserves_geometry() {
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let nodes = [NodeTokenSpec {
+            x: 30.0,
+            y: 30.0,
+            w: 80.0,
+            h: 40.0,
+            radius: 8.0,
+            fill: theme.graph_node_dim,
+            border: theme.graph_node_border,
+            border_width: 2.0,
+            label: "OUT".to_string(),
+            label_color: theme.graph_node_title,
+        }];
+        let edges = [EdgeTokenSpec {
+            start: (30.0, 140.0),
+            ctrl: (100.0, 20.0),
+            end: (170.0, 140.0),
+            color: theme.graph_edge_error,
+            width: 3.0,
+        }];
+        let resolved = build_scene_spec(&theme, theme.status_bg, &nodes, &edges);
+        assert_eq!(
+            resolved,
+            SceneSpec {
+                background: theme.rgb(theme.status_bg),
+                nodes: vec![NodeSpec {
+                    x: 30.0,
+                    y: 30.0,
+                    w: 80.0,
+                    h: 40.0,
+                    radius: 8.0,
+                    fill: theme.rgb(theme.graph_node_dim),
+                    border: theme.rgb(theme.graph_node_border),
+                    border_width: 2.0,
+                    label: "OUT".to_string(),
+                    label_color: theme.rgb(theme.graph_node_title),
+                }],
+                edges: vec![EdgeSpec {
+                    start: (30.0, 140.0),
+                    ctrl: (100.0, 20.0),
+                    end: (170.0, 140.0),
+                    color: theme.rgb(theme.graph_edge_error),
+                    width: 3.0,
+                }],
+            }
+        );
+        // Empty inputs collapse to a background-only spec.
+        assert_eq!(
+            build_scene_spec(&theme, theme.status_bg, &[], &[]),
+            SceneSpec {
+                background: theme.rgb(theme.status_bg),
+                nodes: vec![],
+                edges: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn build_scene_composes_spec_then_rasterizer_byte_identically() {
+        // The public entry point is exactly `build_scene_spec` + `render_scene`:
+        // both routes produce identical bytes, so the neutral layer cannot
+        // drift from what ui.rs sees.
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let nodes = [NodeTokenSpec {
+            x: 30.0,
+            y: 30.0,
+            w: 80.0,
+            h: 40.0,
+            radius: 8.0,
+            fill: theme.graph_node_dim,
+            border: theme.graph_node_border,
+            border_width: 2.0,
+            label: "OUT".to_string(),
+            label_color: theme.graph_node_title,
+        }];
+        let edges = [EdgeTokenSpec {
+            start: (30.0, 140.0),
+            ctrl: (100.0, 20.0),
+            end: (170.0, 140.0),
+            color: theme.graph_edge_error,
+            width: 3.0,
+        }];
+        let via_build = build_scene(&theme, 200, 160, theme.status_bg, &nodes, &edges)
+            .expect("composed scene renders");
+        let via_spec = render_scene(
+            200,
+            160,
+            &build_scene_spec(&theme, theme.status_bg, &nodes, &edges),
+        )
+        .expect("spec scene renders");
+        assert_eq!(via_build.rgba, via_spec.rgba);
+    }
+
+    #[test]
+    fn node_spec_geometry_follows_camera_mapping() {
+        // The neutral spec is the camera's downstream consumer: a world node
+        // position projected through `fit_to_world` lands exactly where the
+        // spec's pixel rect starts, and the rect back-projects to the same
+        // world position — painting and hit-testing share one camera.
+        use crate::theme::Theme;
+        let theme = Theme::classic();
+        let cam = GraphCamera::fit_to_world(
+            WorldBounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 100.0,
+                max_y: 40.0,
+            },
+            (800.0, 320.0),
+            4.0,
+        );
+        let (wx, wy) = (25.0, 10.0);
+        let (px, py) = cam.world_to_pixel(wx, wy);
+        let resolved = build_scene_spec(
+            &theme,
+            theme.status_bg,
+            &[NodeTokenSpec {
+                x: px,
+                y: py,
+                w: 80.0,
+                h: 40.0,
+                radius: 8.0,
+                fill: theme.graph_node_fill,
+                border: theme.graph_node_border,
+                border_width: 3.0,
+                label: "OUT".to_string(),
+                label_color: theme.graph_node_title,
+            }],
+            &[],
+        );
+        assert_eq!(resolved.nodes[0].x, px);
+        assert_eq!(resolved.nodes[0].y, py);
+        assert_eq!(
+            resolved.nodes[0].label_color,
+            theme.rgb(theme.graph_node_title)
+        );
+        let (wrx, wry) = cam.pixel_to_world(resolved.nodes[0].x, resolved.nodes[0].y);
+        assert!(
+            (wrx - wx).abs() <= 1e-2 && (wry - wy).abs() <= 1e-2,
+            "spec rect must back-project to the world node position"
+        );
     }
 }

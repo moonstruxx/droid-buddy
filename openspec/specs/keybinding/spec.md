@@ -93,16 +93,6 @@ Given viewer is open and focused
 When user presses Up or Down
 Then occurrence navigation runs (not one-line scroll)
 
-### Requirement: Viewer close
-While the source pane is open, `Esc` SHALL close it (`app.showing_viewer = false`) and return focus to the panel area. Component selection is preserved; on reopen the initial-position rule applies again.
-
-#### Scenario: Close viewer with Escape
-Given viewer is open
-When user presses `Esc`
-Then `app.showing_viewer` becomes false
-And focus returns to the panels
-And any selected component stays selected
-
 ### Requirement: Occurrence navigation keys
 While the source pane is focused, Up SHALL move to the previous occurrence of the selected component, Down to the next occurrence, Home to the first, and End to the last, saturating at the bounds.
 
@@ -130,19 +120,6 @@ Then prettified circuit blocks are shown
 When user presses `t` again
 Then raw text is shown again
 
-### Requirement: Focus switching key
-While the source pane is open, `Tab` SHALL switch focus between the source pane and the panel area.
-
-#### Scenario: Tab moves focus to panels
-Given viewer is open and focused
-When user presses `Tab`
-Then the panel area is focused and component keys work again
-
-#### Scenario: Tab returns focus to viewer
-Given viewer is open and focus is on panels
-When user presses `Tab`
-Then the source pane is focused again
-
 ### Requirement: Live panel interaction while viewer is open
 While the source pane is open, component toggles (Enter/Space/click), shift-group changes (`1`–`4`), scale (`+`/`-`), and orientation (`o`) SHALL work regardless of viewer focus. Only conflicting navigation keys (`j`/`k`, Up/Down/Home/End) are routed by `ViewerFocus`; `Tab` switches focus.
 
@@ -151,13 +128,6 @@ Given viewer is open and source is focused
 When user presses a digit, `+`, `o`, or Space on a hovered component
 Then the shift group / scale / orientation / component state changes accordingly
 And selecting a component scrolls the source view to its first occurrence
-
-#### Scenario: Mouse click routes focus
-Given viewer is open and source is focused
-When the user left-clicks a component rect
-Then the component toggles and focus becomes Panels
-When the user left-clicks inside the source pane area
-Then focus becomes Source without toggling anything or clearing the selection
 
 ### Requirement: Esc cancels prefix without clearing shift group
 `Esc` while the prefix is armed (and the viewer is closed) SHALL cancel the prefix without other side effects; it does not clear the active shift group.
@@ -234,22 +204,22 @@ The system SHALL display the current mode in the status bar to provide clear fee
 - **THEN** status shows "RESIZE MODE (free) - Arrows: width/height, Shift+Arrows: opposite dim, Esc: cancel"
 
 ### Requirement: Split ratio keys
-When the source viewer is open, the `[` and `]` keys SHALL adjust the panels | source split ratio.
+When any view is open in the right column, the `[` and `]` keys SHALL adjust the horizontal split ratio between the left panel pane and the right column.
 
-#### Scenario: Widen source
-- **WHEN** the user presses `]` while the source viewer is open
-- **THEN** the source pane widens by 10% and the panels column shrinks accordingly
+#### Scenario: Widen right column
+- **WHEN** the user presses `]`
+- **THEN** the right column widens by 10% and the panels column shrinks accordingly
 
-#### Scenario: Narrow source
-- **WHEN** the user presses `[` while the source viewer is open
-- **THEN** the source pane narrows by 10% and the panels column grows accordingly
+#### Scenario: Narrow right column
+- **WHEN** the user presses `[`
+- **THEN** the right column narrows by 10% and the panels column widens accordingly
 
 #### Scenario: Ratio clamped
 - **WHEN** the user adjusts past either bound
 - **THEN** the ratio stops at 30% / 70% for either side
 
-#### Scenario: Viewer closed
-- **WHEN** the source viewer is not open
+#### Scenario: No right column
+- **WHEN** no view is open in the right column
 - **THEN** pressing `[` or `]` has no effect on layout state
 
 ### Requirement: p toggles global processing pause
@@ -293,6 +263,49 @@ The system SHALL provide keys to pan the physical view when the rack overflows t
 
 - **WHEN** the user presses the skeleton-toggle key
 - **THEN** the main view switches between full and skeleton presentation of the same layout, and back.
+
+### Requirement: Carousel rotation keys
+
+The system SHALL provide `Tab` and `Shift+Tab` to cycle views through the right-column slots. `Tab` cycles forward (graph → source viewer → physical → graph...); `Shift+Tab` cycles backward.
+
+#### Scenario: Tab cycles forward
+- **WHEN** the right column contains the graph view and the user presses `Tab`
+- **THEN** the graph slot is replaced with the source viewer
+
+#### Scenario: Shift+Tab cycles backward
+- **WHEN** the right column contains the source viewer and the user presses `Shift+Tab`
+- **THEN** the source viewer slot is replaced with the graph view
+
+### Requirement: Vertical split toggle
+
+The `\` key SHALL toggle an optional vertical split inside the left panel pane, replacing the quad view (`g q`) binding.
+
+#### Scenario: Toggle vertical split
+- **WHEN** the user presses `\`
+- **THEN** the left pane splits vertically into panels (top) and a secondary view (bottom)
+
+### Requirement: Narrow-terminal carousel
+
+When the terminal width is below 120 columns and the right column is collapsed, `Tab` SHALL temporarily replace the left panel pane with the next view in the carousel, and `Esc` SHALL return to panels.
+
+#### Scenario: Inspect hidden view
+- **WHEN** the terminal is narrow and the user presses `Tab`
+- **THEN** the left pane temporarily shows the next view type, and `Esc` returns to panels
+
+### Requirement: Zoom family keys
+
+The system SHALL consolidate zoom-like actions onto `+`/`-` with modifier variants:
+- `+`/`-` (no modifier): scale the focused pane (panels scale when panels focused, graph camera zoom when graph focused).
+- `Shift++`/`Shift+-`: scale the other (non-focused) pane.
+- `Alt+[`/`Alt+]`: adjust cable tension when graph has focus.
+
+#### Scenario: Scale focused pane
+- **WHEN** the graph pane is focused and the user presses `+`
+- **THEN** the graph camera zooms in
+
+#### Scenario: Scale other pane
+- **WHEN** the graph pane is focused and the user presses `Shift++`
+- **THEN** the panel pane scale increases
 
 ## Design Decisions
 
