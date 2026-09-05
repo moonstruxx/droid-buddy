@@ -95,10 +95,20 @@ pub struct Theme {
     /// span for a predicted render degradation. Distinct from error surfaces —
     /// the warning is advisory (like topology findings), never gating.
     pub render_outlier_warning: Color,
-    /// Optimizer menu (`g o`, design D5): border + selected-row background,
-    /// distinct from the validation modal since the menu is advisory (a
-    /// preview/export tool), not an error surface.
+    /// Tiled panes (tiled-window-manager D6): focused pane border vs
+    /// unfocused pane border. The optimizer pane reuses the focus token
+    /// instead of a modal-specific border.
+    pub pane_focus_border: Color,
+    pub pane_unfocused_border: Color,
+    /// Deprecated alias kept for `ui.rs` compat (`render_optimizer_modal`
+    /// still reads it until task 5.1 promotes the optimizer to a pane).
+    /// New code must use `pane_focus_border`. No `#[deprecated]` attribute
+    /// so `cargo clippy -- -D warnings` stays green until the modal path
+    /// is removed.
     pub optimizer_modal_border: Color,
+    /// Optimizer menu (`g o`, design D5): selected-row background, distinct
+    /// from the validation modal since the menu is advisory (a preview/export
+    /// tool), not an error surface.
     pub optimizer_selected_bg: Color,
     /// Optimizer weight readout (design D5): the `w = x.x` header span plus the
     /// per-candidate weighted-objective `obj` label. An accent value so the
@@ -185,6 +195,10 @@ impl Theme {
             // Advisory render-outlier hint: warning yellow, same family as
             // validation_warning but never an error surface.
             render_outlier_warning: Color::Yellow,
+            // Focused pane pops (same family as focus_border); unfocused
+            // panes recede into the muted chrome.
+            pane_focus_border: Color::Yellow,
+            pane_unfocused_border: Color::DarkGray,
             optimizer_modal_border: Color::Blue,
             optimizer_selected_bg: Color::DarkGray,
             // Same accent family as graph_node_title: the weight readout is an
@@ -263,6 +277,9 @@ impl Theme {
             validation_modal_border: Color::Reset,
             validation_selected_bg: Color::Reset,
             render_outlier_warning: Color::Reset,
+            // Terminal defers every token to the user's terminal.
+            pane_focus_border: Color::Reset,
+            pane_unfocused_border: Color::Reset,
             optimizer_modal_border: Color::Reset,
             optimizer_selected_bg: Color::Reset,
             optimizer_weight: Color::Reset,
@@ -356,6 +373,10 @@ impl Theme {
             // Advisory render-outlier hint: brightest gray so the BOLD span
             // stays tellable in the grayscale palette.
             render_outlier_warning: Color::White,
+            // Brightest gray for the focused pane, muted gray for the rest
+            // so focus stays tellable in the grayscale palette.
+            pane_focus_border: Color::White,
+            pane_unfocused_border: Color::DarkGray,
             optimizer_modal_border: Color::White,
             optimizer_selected_bg: Color::Black,
             // Brightest gray so the weight span stays tellable against the
@@ -670,6 +691,8 @@ mod tests {
             t.physical_skeleton_port_in,
             t.physical_skeleton_port_out,
             t.display_placeholder,
+            t.pane_focus_border,
+            t.pane_unfocused_border,
         ] {
             assert_eq!(color, Color::Reset);
         }
@@ -894,6 +917,29 @@ mod tests {
     }
 
     #[test]
+    fn all_palettes_define_pane_borders() {
+        // Task 2.1 (tiled-window-manager): focused vs unfocused pane borders
+        // exist in every palette — classic/mono keep them distinct so the
+        // focused pane pops, terminal defers both to the terminal.
+        assert_eq!(Theme::classic().pane_focus_border, Color::Yellow);
+        assert_eq!(Theme::classic().pane_unfocused_border, Color::DarkGray);
+        assert_ne!(
+            Theme::classic().pane_focus_border,
+            Theme::classic().pane_unfocused_border,
+            "classic pane borders must be distinct"
+        );
+        assert_eq!(Theme::terminal().pane_focus_border, Color::Reset);
+        assert_eq!(Theme::terminal().pane_unfocused_border, Color::Reset);
+        assert_eq!(Theme::mono().pane_focus_border, Color::White);
+        assert_eq!(Theme::mono().pane_unfocused_border, Color::DarkGray);
+        assert_ne!(
+            Theme::mono().pane_focus_border,
+            Theme::mono().pane_unfocused_border,
+            "mono pane borders must be distinct"
+        );
+    }
+
+    #[test]
     fn every_token_in_every_palette_maps_to_a_deterministic_rgb_triple() {
         // Task 2.2 + 3.2 verification: every semantic token the UI/graph
         // surface and the rasterizer consume (component kinds, shift groups,
@@ -963,6 +1009,8 @@ mod tests {
                 theme.validation_modal_border,
                 theme.validation_selected_bg,
                 theme.render_outlier_warning,
+                theme.pane_focus_border,
+                theme.pane_unfocused_border,
                 theme.optimizer_modal_border,
                 theme.optimizer_selected_bg,
                 theme.optimizer_weight,
