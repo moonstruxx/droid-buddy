@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, QuadFocus, SourceViewMode, ViewerFocus};
+use crate::app::{App, FocusSlot, QuadFocus, SourceViewMode, ViewType, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
@@ -55,7 +55,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     render_header(frame, chunks[0], app);
-    if app.showing_quad {
+    if !app.tile_stack.slots.is_empty() {
+        render_tiled_main(frame, chunks[1], app);
+        render_status(frame, chunks[2], app);
+    } else if app.showing_quad {
         // Responsive fallback: below threshold quad panes would be unreadable.
         if frame.area().width < QUAD_WIDTH_THRESHOLD {
             render_embedded_main(frame, chunks[1], app);
@@ -491,6 +494,142 @@ fn render_empty(frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(theme::active().muted))
         .alignment(Alignment::Center);
     frame.render_widget(msg, area);
+}
+
+/// Max right-column slots the tiled layout shows (design D1); extra views
+/// stay in `tile_stack.slots` but render offscreen until focused.
+const MAX_TILED_SLOTS: usize = 3;
+
+/// Tiled main band (change `tiled-window-manager`, D1/D6): full-height left
+/// pane always shows panels; open right-column views stack as horizontal
+/// cuts. Publishes `pane_rects` for focus hit-testing; pane borders use the
+/// `pane_focus_border`/`pane_unfocused_border` tokens.
+fn render_tiled_main(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.pane_rects.clear();
+    app.component_rects.clear();
+    app.physical_skeleton_rects.clear();
+    app.physical_full_rects.clear();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let visible: Vec<ViewType> = app
+        .tile_stack
+        .slots
+        .iter()
+        .take(MAX_TILED_SLOTS)
+        .copied()
+        .collect();
+    if visible.is_empty() {
+        app.pane_rects.push((FocusSlot::Panels, area));
+        render_tiled_pane(
+            frame,
+            area,
+            app,
+            FocusSlot::Panels,
+            " Panels ",
+            ViewType::Physical,
+        );
+        return;
+    }
+    let left_pct = (app.main_split_ratio.clamp(0.3, 0.7) * 100.0) as u16;
+    let right_pct = 100u16.saturating_sub(left_pct);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(left_pct),
+            Constraint::Percentage(right_pct),
+        ])
+        .split(area);
+    if columns.len() < 2 {
+        return;
+    }
+    app.pane_rects.push((FocusSlot::Panels, columns[0]));
+    render_tiled_pane(
+        frame,
+        columns[0],
+        app,
+        FocusSlot::Panels,
+        " Panels ",
+        ViewType::Physical,
+    );
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            visible
+                .iter()
+                .map(|_| Constraint::Ratio(1, visible.len() as u32)),
+        )
+        .split(columns[1]);
+    for (i, view) in visible.iter().enumerate() {
+        if i >= rows.len() {
+            break;
+        }
+        let focus = FocusSlot::Slot(i);
+        app.pane_rects.push((focus, rows[i]));
+        render_tiled_pane(frame, rows[i], app, focus, tiled_slot_title(*view), *view);
+    }
+}
+
+/// One bordered tiled pane: outer border carries the focus token, inner area
+/// reuses the existing view renderer for `view`.
+fn render_tiled_pane(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    focus: FocusSlot,
+    title: &str,
+    view: ViewType,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let border_style = if app.tile_stack.focus == focus {
+        Style::default()
+            .fg(theme::active().pane_focus_border)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::active().pane_unfocused_border)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(border_style)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    match view {
+        ViewType::Graph => render_graph(frame, inner, app),
+        ViewType::SourceViewer => render_source_pane(frame, inner, app),
+        ViewType::Physical => render_tiled_physical(frame, inner, app),
+        ViewType::Optimizer => render_optimizer_modal(frame, app, inner),
+    }
+}
+
+/// Physical-view content shared by the left panels pane and Physical slots:
+/// skeleton or full render per the presentation switch, same as `render_main`.
+fn render_tiled_physical(frame: &mut Frame, area: Rect, app: &mut App) {
+    if let Some(patch) = app.patch.clone() {
+        if app.physical_show_skeleton {
+            render_physical_skeleton(frame, area, &patch, app);
+        } else {
+            render_physical_full(frame, area, &patch, app);
+        }
+    } else {
+        render_empty(frame, area);
+    }
+}
+
+/// Right-column slot title for `view`.
+fn tiled_slot_title(view: ViewType) -> &'static str {
+    match view {
+        ViewType::Graph => " Graph ",
+        ViewType::SourceViewer => " Source ",
+        ViewType::Physical => " Physical ",
+        ViewType::Optimizer => " Optimizer ",
+    }
 }
 
 // pub(crate): the render-metrics extractor (src/rendermetrics.rs) mirrors these
