@@ -512,6 +512,22 @@ fn render_tiled_main(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // Narrow-terminal fallback (change `tiled-window-manager`, D5): below
+    // 120 cols the right column collapses; only the panels pane stays
+    // visible. Hidden views remain in `tile_stack.slots` and are reported
+    // in the status bar as "+N views hidden".
+    if area.width < QUAD_WIDTH_THRESHOLD {
+        app.pane_rects.push((FocusSlot::Panels, area));
+        render_tiled_pane(
+            frame,
+            area,
+            app,
+            FocusSlot::Panels,
+            " Panels ",
+            ViewType::Physical,
+        );
+        return;
+    }
     let visible: Vec<ViewType> = app
         .tile_stack
         .slots
@@ -1450,6 +1466,21 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         },
         Style::default().fg(theme::active().text),
     )];
+
+    // Narrow-terminal tiled fallback hint (change `tiled-window-manager`,
+    // D5): while the right column is collapsed, report how many views are
+    // hidden so the carousel state stays discoverable. Placed first so it
+    // survives right-edge truncation on short terminals.
+    if !app.tile_stack.slots.is_empty() && area.width < QUAD_WIDTH_THRESHOLD {
+        let hidden = app.tile_stack.slots.len();
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            format!("+{hidden} views hidden"),
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     // Explicit pause marker: a bold accent "stop" span so the paused state is
     // visible even in short terminals where the status message is truncated.

@@ -17,7 +17,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 
-use crate::app::{App, SourceViewMode, ViewerFocus};
+use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
 use crate::graph::{Cluster, Graph, TopologySeverity};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
@@ -6525,5 +6525,44 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
     assert_ne!(
         free_moved[tip], drop,
         "unpinned dragged node should re-flow off its drop"
+    );
+}
+
+// ── tiled narrow-terminal fallback (change `tiled-window-manager`, D5) ────
+// Below 120 cols the right column collapses: only the panels pane renders,
+// hidden views stay in `tile_stack.slots`, and the status bar reports them.
+
+#[test]
+fn tiled_narrow_fallback_collapses_right_column() {
+    let mut app = fixture_app();
+    // `open_view` (not the legacy `g v` path, which migrates in 4.1).
+    app.open_view(ViewType::SourceViewer);
+    app.open_graph();
+    assert_eq!(app.tile_stack.slots.len(), 2, "two views open");
+
+    // Wide render: panels pane plus one rect per open slot.
+    let _ = buffer_for(&mut app, 160, 40);
+    assert_eq!(
+        app.pane_rects.len(),
+        3,
+        "wide tiled layout publishes panels + 2 slot rects"
+    );
+
+    // Narrow render: single panels pane, slots retained in state.
+    let _ = buffer_for(&mut app, 80, 24);
+    assert_eq!(
+        app.pane_rects,
+        vec![(FocusSlot::Panels, Rect::new(0, 3, 80, 18))],
+        "narrow render publishes only the panels pane"
+    );
+    assert_eq!(
+        app.tile_stack.slots.len(),
+        2,
+        "collapsed views stay in the tile stack"
+    );
+    let text = rendered_text(&mut app, 80, 24);
+    assert!(
+        text.contains("+2 views hidden"),
+        "status bar reports hidden views"
     );
 }
