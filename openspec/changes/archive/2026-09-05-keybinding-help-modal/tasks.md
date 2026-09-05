@@ -1,0 +1,17 @@
+# Tasks: keybinding-help-modal
+
+## 1. Core: help content + state + handler
+
+- [x] 1.1 Add the pure help-content module `src/help.rs`: `HelpView` enum (Panels, Viewer, Graph, Quad, Validation, Optimizer, Picker), `active_view(&App) -> HelpView` mirroring the handler priority chain (picker > validation > optimizer > graph > quad > viewer > panels), and `keybindings(HelpView) -> Vec<(&'static str, &'static str)>` returning the binding list per view. Wire the module in `src/lib.rs`. Verify: `cargo test help::` — active_view mapping and non-empty keybindings per view. <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/help.rs, src/lib.rs] -->
+- [x] 1.2 Add help-modal state to `App`: `showing_help: bool`, `help_modal_rect: Option<Rect>`, and helpers `open_help`/`close_help`/`clear_help_modal_rect` (rect cleared per frame like `graph_node_rects`). Verify: `cargo test app::` — open/close flips state, rect clear. <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/app.rs] -->
+- [x] 1.3 Wire the handler: in `handle_event`, after the edit-overlay branch, add a `showing_help` branch that eats all keys except `Esc`/`q` (both close help and return false, so `q` does not quit while help is open); handle `KeyCode::Char('?')` without a modifier guard (the key arrives with SHIFT, like `+`) to open help from any view. In `handle_mouse_event`, close help on a left-button Down outside `app.help_modal_rect`, checked before the quad/graph mouse branches. Verify: `cargo test handler::` — `?` opens from panels/graph/viewer, Esc/q close without quitting, click-outside closes, click-inside keeps it open. <!-- agent: rusty-engineer.build, depends_on: [1.1, 1.2], touches: [src/handler.rs] -->
+
+## 2. Render: modal + theme
+
+- [x] 2.1 Add `render_help_modal(frame, app, area)` in `src/ui.rs`: centered floating popup (60% x 70%, mirroring the validation modal) listing `help::keybindings(help::active_view(app))` as key/description rows, publishing `app.help_modal_rect` per frame; wire it as the top z-layer in `render` (below the edit overlay, and over the picker's early-return path). Verify: `cargo insta test --check` — new snapshot scenario renders the modal across classic/terminal/mono. <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 1.3], touches: [src/ui.rs] -->
+- [x] 2.2 Add `help_modal_border` and `help_modal_selected_bg` tokens to all three palettes in `src/theme.rs`, following the `optimizer_modal_*` precedent. Verify: `cargo test theme::` — tokens resolve per palette. <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/theme.rs] -->
+
+## 3. Tests
+
+- [x] 3.1 Unit tests for the help modal: `?` opens from each view (panels, viewer, graph, quad, validation, optimizer, picker); Esc closes; q closes without quitting (returns false); click-outside closes; click-inside keeps it open; `active_view` mapping; `keybindings` non-empty per view. Verify: `cargo test handler:: help::`. <!-- agent: horst-engineer.build, depends_on: [1.3], touches: [src/handler.rs, src/help.rs] -->
+- [x] 3.2 Regression snapshot matrix: extend `src/regression.rs` + fixtures with a help-modal scenario (open over the panels view and over the graph surface) across classic/terminal/mono. Verify: `cargo insta test --check` green (strict CI gate). <!-- agent: horst-engineer.build, depends_on: [2.1, 2.2], touches: [src/regression.rs, fixtures/] -->

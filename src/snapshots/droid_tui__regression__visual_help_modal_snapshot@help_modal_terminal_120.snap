@@ -1,0 +1,34 @@
+---
+source: src/regression.rs
+expression: buffer_to_ansi(&buf)
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                   DROID: arpeggio1                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌──┐┌────┐┐
+◉ ◉…  CV …              ╭ Help — Panels / Physical ────────────────────────────────────────────╮
+0%0%│    ││             │ l             open file picker                                       │
+│  ││    ││             │ g v           open source viewer                                     │
+│  ││    ││             │ g g           open signal-flow graph                                 │
+│  ││    ││             │ g q           open quad view                                         │
+│  ││    ││             │ g d           diff against another patch                             │
+│  ││    ││             │ g o           open latency optimizer                                 │
+│  ││    ││             │ ?             show this help                                         │
+│  ││    ││             │ 1-4           shift groups                                           │
+│  ││    ││             │ +/-           scale presets                                          │
+│○○││    ││             │ s             toggle skeleton presentation                           │
+│……││    ││             │ arrows/wheel  pan when rack overflows                                │
+│  ││    ││             │ Enter/Space   toggle component                                       │
+│  ││    ││             │ e             edit label / validation modal                          │
+│○○│◀  ▶ ││             │ p             pause processing                                       │
+│○○│…  … ││             │ q             quit                                                   │
+│  ││    ││             │                                                                      │
+│  ││    ││             │                                                                      │
+│  ││    ││             │                                                                      │
+│○○││    ││             │                                                                      │
+│……││    ││             ╰ Esc/q:close click-outside:close ─────────────────────────────────────╯
+│  ││    ││
+└──┘└──▶─┘┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Loaded arpeggio1 | Renders degraded at 120 cols — use ≥ 228 cols or reduce scale | Scale: 1.0 | Orientation: Portrait │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

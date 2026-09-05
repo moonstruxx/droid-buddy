@@ -611,6 +611,11 @@ pub struct App {
     pub validation_cursor: usize,
     /// Open `g o` optimizer menu state. `None` when the menu is closed.
     pub optimizer: Option<OptimizerState>,
+    /// True when the `?` help modal is shown.
+    pub showing_help: bool,
+    /// Renderer-published rect of the help modal, for click-outside hit-testing.
+    /// Cleared per frame like `graph_node_rects`.
+    pub help_modal_rect: Option<Rect>,
 }
 
 impl App {
@@ -685,6 +690,8 @@ impl App {
             showing_validation: false,
             validation_cursor: 0,
             optimizer: None,
+            showing_help: false,
+            help_modal_rect: None,
         }
     }
 
@@ -1100,6 +1107,24 @@ impl App {
             self.rebuild_graph();
         }
         self.optimizer = None;
+    }
+
+    /// Open the `?` help modal. Works from any view; the modal is a top-level
+    /// surface that eats all keys except `Esc`/`q` until closed.
+    pub fn open_help(&mut self) {
+        self.showing_help = true;
+    }
+
+    /// Close the `?` help modal (`Esc`/`q`/click-outside).
+    pub fn close_help(&mut self) {
+        self.showing_help = false;
+        self.help_modal_rect = None;
+    }
+
+    /// Clear the renderer-published help modal rect each frame, mirroring how
+    /// `graph_node_rects` is rebuilt per draw.
+    pub fn clear_help_modal_rect(&mut self) {
+        self.help_modal_rect = None;
     }
 
     /// Clear validation state (no issues, modal hidden, cursor 0).
@@ -3535,6 +3560,7 @@ mod tests {
     #[test]
     fn refresh_picker_entries_labels_parent_and_sorts_dirs_first() {
         let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
         app.picker_dir = PathBuf::from("fixtures/picker_test");
         app.refresh_picker_entries();
         // Parent sentinel is the first entry, rendered as "..".

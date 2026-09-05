@@ -105,6 +105,11 @@ pub struct Theme {
     /// weight the menu is scored on stays distinct from the muted candidate
     /// values.
     pub optimizer_weight: Color,
+    /// Help modal (`?`, design D5): border + key-column background, following
+    /// the `optimizer_modal_*` precedent (a neutral informational surface, not
+    /// an error surface).
+    pub help_modal_border: Color,
+    pub help_modal_selected_bg: Color,
 }
 
 impl Theme {
@@ -185,6 +190,10 @@ impl Theme {
             // Same accent family as graph_node_title: the weight readout is an
             // accent value, not a muted statistic.
             optimizer_weight: Color::Yellow,
+            // Help modal: neutral informational surface — blue border like the
+            // optimizer, dark-gray key column so keys read as a distinct band.
+            help_modal_border: Color::Blue,
+            help_modal_selected_bg: Color::DarkGray,
         }
     }
 
@@ -257,6 +266,8 @@ impl Theme {
             optimizer_modal_border: Color::Reset,
             optimizer_selected_bg: Color::Reset,
             optimizer_weight: Color::Reset,
+            help_modal_border: Color::Reset,
+            help_modal_selected_bg: Color::Reset,
         }
     }
 
@@ -350,6 +361,10 @@ impl Theme {
             // Brightest gray so the weight span stays tellable against the
             // Black selected-row background in the grayscale palette.
             optimizer_weight: Color::White,
+            // Brightest gray so the key column stays tellable against the
+            // Black selected-row background in the grayscale palette.
+            help_modal_border: Color::White,
+            help_modal_selected_bg: Color::Black,
         }
     }
 
@@ -951,6 +966,8 @@ mod tests {
                 theme.optimizer_modal_border,
                 theme.optimizer_selected_bg,
                 theme.optimizer_weight,
+                theme.help_modal_border,
+                theme.help_modal_selected_bg,
             ];
             for token in tokens {
                 let rgb = theme.rgb(token);
