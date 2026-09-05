@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, FocusSlot, QuadFocus, SourceViewMode, ViewType, ViewerFocus};
@@ -88,8 +88,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_help_modal(frame, app, frame.area());
     } else if app.showing_validation {
         render_validation_modal(frame, app, frame.area());
-    } else if app.optimizer.is_some() {
-        render_optimizer_modal(frame, app, frame.area());
     }
 }
 
@@ -312,34 +310,18 @@ fn render_help_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, modal_area);
 }
 
-/// Optimizer menu overlay (design D5) — centered, mirroring the validation
-/// modal pattern. Lists up to three candidates (variant label + weighted
-/// objective + before→after `avg`/`max`/back-edges), cursor highlighted via
-/// `optimizer_selected_bg`, with the weight readout in the title and a hint
-/// line for j/k/Enter/s/r/Esc. The preview is already applied to
-/// `Patch.sections` by the handler; this modal only reflects state.
-fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
+/// Optimizer pane content (change `tiled-window-manager`, 5.1): fills the
+/// right-column slot's inner area as a bordered tiled pane — the centered
+/// modal overlay is gone. The header row carries the candidate count + weight
+/// readout, the bottom row the key hints; the windowed candidate list scrolls
+/// to keep the cursor visible and wraps long value lines so no metric is
+/// clipped. The preview is already applied to `Patch.sections` by the
+/// handler; this pane only reflects state.
+fn render_optimizer_pane(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let is_narrow = area.width < QUAD_WIDTH_THRESHOLD;
-    let modal_width = if is_narrow {
-        area.width.saturating_sub(4).max(24)
-    } else {
-        (area.width * 60 / 100).clamp(40, 80).max(24)
-    };
-    let modal_height = if is_narrow {
-        area.height.saturating_sub(4).max(10)
-    } else {
-        (area.height * 70 / 100).clamp(12, 40).max(10)
-    };
-    let x = area.x + area.width.saturating_sub(modal_width) / 2;
-    let y = area.y + area.height.saturating_sub(modal_height) / 2;
-    let modal_area = Rect::new(x, y, modal_width, modal_height);
-    frame.render_widget(Clear, modal_area);
-
-    let state = app.optimizer.as_ref();
-    let Some(state) = state else {
+    let Some(state) = app.optimizer.as_ref() else {
         return;
     };
     let count = state.candidates.len();
@@ -352,7 +334,7 @@ fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("w = {:.1}", state.weight)
     };
-    let title = Line::from(vec![
+    let header = Line::from(vec![
         Span::raw(format!(" Optimizer ({count}) · ")),
         Span::styled(
             weight_label,
@@ -360,90 +342,79 @@ fn render_optimizer_modal(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw(" "),
     ]);
-    let header_hint = " j/k select · Enter preview · r restore · s export · Esc close ";
+    let hint = Line::from(Span::styled(
+        " j/k select · Enter preview · r restore · s export · Esc close ",
+        Style::default().fg(theme::active().muted),
+    ));
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(title)
-        .title_bottom(Line::from(Span::styled(
-            header_hint,
-            Style::default().fg(theme::active().muted),
-        )))
-        .border_style(Style::default().fg(theme::active().optimizer_modal_border));
-
-    let inner = block.inner(modal_area);
-    if inner.width == 0 || inner.height == 0 {
-        frame.render_widget(block, modal_area);
-        return;
-    }
-
+    let rows = area.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(header);
     if count == 0 {
-        let empty = Paragraph::new(Line::from(Span::styled(
+        lines.push(Line::from(Span::styled(
             "No candidate orderings",
             Style::default().fg(theme::active().muted),
-        )))
-        .alignment(Alignment::Center)
-        .block(block);
-        frame.render_widget(empty, modal_area);
-        return;
-    }
-
-    let cursor = state.cursor.min(count.saturating_sub(1));
-    let max_rows = inner.height as usize;
-    let start = if count <= max_rows || cursor < max_rows / 2 {
-        0
-    } else if cursor + max_rows / 2 >= count {
-        count - max_rows
+        )));
     } else {
-        cursor - max_rows / 2
-    };
-    let end = (start + max_rows).min(count);
-
-    let mut lines: Vec<Line> = Vec::with_capacity(end - start);
-    for idx in start..end {
-        let candidate = &state.candidates[idx];
-        let is_selected = idx == cursor;
-        // Weighted objective `(1−w)·avg + w·max` on the *after* summary, what
-        // Weighted(w) sorted the candidates by (Sum is `avg` scaled by the
-        // edge count, constant across candidates).
-        let weighted_obj =
-            (1.0 - state.weight) * candidate.after.avg + state.weight * candidate.after.max;
-        // Candidate line: `{label} obj X.XX · avg X→Y · max A→B · back-edges N→M`.
-        let values = format!(
-            " avg {:.2}→{:.2} · max {:.2}→{:.2} · back-edges {}→{}",
-            candidate.before.avg,
-            candidate.after.avg,
-            candidate.before.max,
-            candidate.after.max,
-            candidate.before.back_edge_count,
-            candidate.after.back_edge_count
-        );
-        let label = Span::styled(
-            candidate.label.clone(),
-            Style::default().fg(theme::active().text),
-        );
-        let obj = Span::styled(
-            format!(" obj {weighted_obj:.2} ·"),
-            Style::default().fg(theme::active().optimizer_weight),
-        );
-        let values = Span::styled(values, Style::default().fg(theme::active().muted));
-        let marker = Span::styled(
-            if is_selected { "▶ " } else { "   " },
-            Style::default().fg(theme::active().text),
-        );
-        let mut line = Line::from(vec![marker, label, obj, values]);
-        if is_selected {
-            line.style = Style::default()
-                .bg(theme::active().optimizer_selected_bg)
-                .add_modifier(Modifier::BOLD);
+        let cursor = state.cursor.min(count.saturating_sub(1));
+        // Window the candidate rows to the pane (minus header and hint rows),
+        // scrolling to keep the cursor visible like the modal did.
+        let max_rows = rows.saturating_sub(2).max(1);
+        let start = if count <= max_rows || cursor < max_rows / 2 {
+            0
+        } else if cursor + max_rows / 2 >= count {
+            count.saturating_sub(max_rows)
         } else {
-            line.style = Style::default().add_modifier(Modifier::DIM);
+            cursor - max_rows / 2
+        };
+        let end = (start + max_rows).min(count);
+        for idx in start..end {
+            let candidate = &state.candidates[idx];
+            let is_selected = idx == cursor;
+            // Weighted objective `(1−w)·avg + w·max` on the *after* summary, what
+            // Weighted(w) sorted the candidates by (Sum is `avg` scaled by the
+            // edge count, constant across candidates).
+            let weighted_obj =
+                (1.0 - state.weight) * candidate.after.avg + state.weight * candidate.after.max;
+            // Candidate line: `{label} obj X.XX · avg X→Y · max A→B · back-edges N→M`.
+            let values = format!(
+                " avg {:.2}→{:.2} · max {:.2}→{:.2} · back-edges {}→{}",
+                candidate.before.avg,
+                candidate.after.avg,
+                candidate.before.max,
+                candidate.after.max,
+                candidate.before.back_edge_count,
+                candidate.after.back_edge_count
+            );
+            let label = Span::styled(
+                candidate.label.clone(),
+                Style::default().fg(theme::active().text),
+            );
+            let obj = Span::styled(
+                format!(" obj {weighted_obj:.2} ·"),
+                Style::default().fg(theme::active().optimizer_weight),
+            );
+            let values = Span::styled(values, Style::default().fg(theme::active().muted));
+            let marker = Span::styled(
+                if is_selected { "▶ " } else { "   " },
+                Style::default().fg(theme::active().text),
+            );
+            let mut line = Line::from(vec![marker, label, obj, values]);
+            if is_selected {
+                line.style = Style::default()
+                    .bg(theme::active().optimizer_selected_bg)
+                    .add_modifier(Modifier::BOLD);
+            } else {
+                line.style = Style::default().add_modifier(Modifier::DIM);
+            }
+            lines.push(line);
         }
-        lines.push(line);
     }
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, modal_area);
+    if rows > 1 {
+        lines.push(hint);
+    }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -624,7 +595,7 @@ fn render_tiled_pane(
         ViewType::Graph => render_graph(frame, inner, app),
         ViewType::SourceViewer => render_source_pane(frame, inner, app),
         ViewType::Physical => render_tiled_physical(frame, inner, app),
-        ViewType::Optimizer => render_optimizer_modal(frame, app, inner),
+        ViewType::Optimizer => render_optimizer_pane(frame, app, inner),
     }
 }
 
@@ -4059,20 +4030,23 @@ mod tests {
     }
 
     #[test]
-    fn renders_optimizer_menu_overlay_with_candidates() {
+    fn renders_optimizer_pane_with_candidates() {
         use crate::handler::handle_event;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
         let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
         let mut app = App::new();
         app.patch = Some(patch);
-        // Open the optimizer menu via `g o`.
+        // Open the optimizer pane via `g o` (change `tiled-window-manager`,
+        // 5.1: it fills a right-column tile slot, no modal overlay).
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('o')), &mut app);
         assert!(app.optimizer.is_some());
-        let text = rendered_text(&mut app, 100, 40);
-        assert!(text.contains("Optimizer"), "menu title missing");
+        // Wide enough for the tiled right column (narrow terminals collapse
+        // it and the optimizer hides behind the panels fallback).
+        let text = rendered_text(&mut app, 200, 40);
+        assert!(text.contains("Optimizer"), "pane title missing");
         assert!(text.contains("avg"), "candidate values missing");
         assert!(text.contains("back-edges"), "back-edge counts missing");
         assert!(text.contains("Esc close"), "hint line missing");

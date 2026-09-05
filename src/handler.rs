@@ -38,6 +38,16 @@ fn graph_slot_focused(app: &App) -> bool {
     }
 }
 
+/// True when keys should act on the optimizer pane: the optimizer slot holds
+/// tile focus. No legacy flag path exists — the optimizer was a modal overlay
+/// until task 5.1 — so Panels focus never routes here.
+fn optimizer_slot_focused(app: &App) -> bool {
+    match app.tile_stack.focus {
+        FocusSlot::Slot(i) => app.tile_stack.slots.get(i) == Some(&ViewType::Optimizer),
+        FocusSlot::Panels => false,
+    }
+}
+
 /// Cycle the physical panel scale presets (shared by the panels arm and the
 /// graph arm's scale-the-other-pane path).
 fn cycle_panel_scale(app: &mut App, plus: bool) {
@@ -213,72 +223,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             _ => return false,
         }
     }
-    // Optimizer menu overlay (`g o`): while open it eats keys — j/k
-    // navigate, Enter previews, r restores, s exports, Esc closes (+restore
-    // if previewing). Priority after validation, before everything else.
-    if let Some(state) = app.optimizer.as_ref() {
-        let len = state.candidates.len();
-        match key.code {
-            crossterm::event::KeyCode::Esc => {
-                app.optimizer_close();
-                return false;
-            }
-            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
-                if let Some(state) = app.optimizer.as_mut() {
-                    if state.cursor + 1 < len {
-                        state.cursor += 1;
-                    }
-                }
-                return false;
-            }
-            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
-                if let Some(state) = app.optimizer.as_mut() {
-                    if state.cursor > 0 {
-                        state.cursor -= 1;
-                    }
-                }
-                return false;
-            }
-            crossterm::event::KeyCode::Enter => {
-                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
-                app.optimizer_preview(idx);
-                return false;
-            }
-            crossterm::event::KeyCode::Char('r') => {
-                app.optimizer_restore();
-                return false;
-            }
-            crossterm::event::KeyCode::Char('s') => {
-                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
-                app.optimizer_export(idx);
-                return false;
-            }
-            // Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1`
-            // snap to the pure endpoints. This branch returns before the
-            // viewer-split `[`/`]` handler below, so no collision.
-            crossterm::event::KeyCode::Char('[') => {
-                if let Some(state) = app.optimizer.as_ref() {
-                    app.optimizer_set_weight(state.weight - 0.1);
-                }
-                return false;
-            }
-            crossterm::event::KeyCode::Char(']') => {
-                if let Some(state) = app.optimizer.as_ref() {
-                    app.optimizer_set_weight(state.weight + 0.1);
-                }
-                return false;
-            }
-            crossterm::event::KeyCode::Char('0') => {
-                app.optimizer_set_weight(0.0);
-                return false;
-            }
-            crossterm::event::KeyCode::Char('1') => {
-                app.optimizer_set_weight(1.0);
-                return false;
-            }
-            _ => return false,
-        }
-    }
     // `e` toggles validation modal open when not already showing and issues exist.
     // Respects label-edit priority: if a hovered node/component or source header
     // would consume `e` for label editing, let that handler run instead.
@@ -358,8 +302,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             crossterm::event::KeyCode::Char('o') => {
-                // `g o` generates + opens the optimizer menu (design D5).
-                app.open_optimizer();
+                // `g o` opens the optimizer as a right-column pane (change
+                // `tiled-window-manager`, 5.1): `open_view` handles the
+                // already-open focus case and the slot cap, and lands focus
+                // on the pane.
+                app.open_view(ViewType::Optimizer);
+                sync_viewer_focus_from_tiles(app);
                 app.prefix = None;
                 return false;
             }
@@ -420,6 +368,75 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     app.viewer_focus = ViewerFocus::Panels;
                 }
                 app.prefix = None;
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    // Optimizer pane (change `tiled-window-manager`, 5.1): the optimizer is
+    // a right-column view, so its keys respond only while the optimizer slot
+    // holds focus (mirroring the graph/viewer pane dispatch). Esc already
+    // closed the slot above via `close_focused_view`; unhandled keys fall
+    // through so q/Ctrl+C quit and `l` still opens the picker.
+    if optimizer_slot_focused(app) {
+        match key.code {
+            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+                let len = app
+                    .optimizer
+                    .as_ref()
+                    .map(|s| s.candidates.len())
+                    .unwrap_or(0);
+                if let Some(state) = app.optimizer.as_mut() {
+                    if state.cursor + 1 < len {
+                        state.cursor += 1;
+                    }
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+                if let Some(state) = app.optimizer.as_mut() {
+                    if state.cursor > 0 {
+                        state.cursor -= 1;
+                    }
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Enter => {
+                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
+                app.optimizer_preview(idx);
+                return false;
+            }
+            crossterm::event::KeyCode::Char('r') => {
+                app.optimizer_restore();
+                return false;
+            }
+            crossterm::event::KeyCode::Char('s') => {
+                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
+                app.optimizer_export(idx);
+                return false;
+            }
+            // Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1`
+            // snap to the endpoints. Returned here so the split-ratio
+            // handlers never see them while the optimizer pane is focused.
+            crossterm::event::KeyCode::Char('[') => {
+                if let Some(state) = app.optimizer.as_ref() {
+                    app.optimizer_set_weight(state.weight - 0.1);
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char(']') => {
+                if let Some(state) = app.optimizer.as_ref() {
+                    app.optimizer_set_weight(state.weight + 0.1);
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('0') => {
+                app.optimizer_set_weight(0.0);
+                return false;
+            }
+            crossterm::event::KeyCode::Char('1') => {
+                app.optimizer_set_weight(1.0);
                 return false;
             }
             _ => {}
