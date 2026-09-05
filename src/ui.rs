@@ -27,9 +27,17 @@ use crate::kitty_protocol;
 const QUAD_WIDTH_THRESHOLD: u16 = 120;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    // The help modal rect is rebuilt per frame (design D4); clear it up front
+    // so a frame where help is not open leaves no stale rect for hit-testing.
+    app.clear_help_modal_rect();
     // Picker takes absolute precedence – overlay on top of anything.
     if app.showing_picker {
         render_picker(frame, frame.area(), app);
+        // Help is the top z-layer (below the edit overlay), so it can overlay
+        // the picker too (design D2/D4).
+        if app.showing_help {
+            render_help_modal(frame, app, frame.area());
+        }
         return;
     }
 
@@ -73,6 +81,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // graph_edge_error red kept for influence elsewhere.
     if app.editing.is_some() {
         render_overlay(frame, app);
+    } else if app.showing_help {
+        render_help_modal(frame, app, frame.area());
     } else if app.showing_validation {
         render_validation_modal(frame, app, frame.area());
     } else if app.optimizer.is_some() {
@@ -228,6 +238,73 @@ fn render_validation_modal(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(line);
         let _ = is_selected; // suppress unused warning if lint
     }
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, modal_area);
+}
+
+/// Help modal overlay (`?`, design D3/D4) — centered 60% width, 70% height,
+/// listing the active view's keybindings as key/description rows. Mirrors the
+/// validation modal's geometry; publishes `app.help_modal_rect` per frame for
+/// click-outside hit-testing. The key column uses `help_modal_selected_bg` so
+/// keys read as a distinct band from their descriptions.
+fn render_help_modal(frame: &mut Frame, app: &mut App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let is_narrow = area.width < QUAD_WIDTH_THRESHOLD;
+    let modal_width = if is_narrow {
+        area.width.saturating_sub(4).max(24)
+    } else {
+        (area.width * 60 / 100).clamp(40, 80).max(24)
+    };
+    let modal_height = if is_narrow {
+        area.height.saturating_sub(4).max(10)
+    } else {
+        (area.height * 70 / 100).clamp(12, 40).max(10)
+    };
+    let x = area.x + area.width.saturating_sub(modal_width) / 2;
+    let y = area.y + area.height.saturating_sub(modal_height) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+    app.help_modal_rect = Some(modal_area);
+    frame.render_widget(Clear, modal_area);
+
+    let view = crate::help::active_view(app);
+    let title = format!(" Help — {} ", view.title());
+    let header_hint = " Esc/q:close click-outside:close ";
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .title_bottom(Line::from(Span::styled(
+            header_hint,
+            Style::default().fg(theme::active().muted),
+        )))
+        .border_style(Style::default().fg(theme::active().help_modal_border));
+
+    let inner = block.inner(modal_area);
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, modal_area);
+        return;
+    }
+
+    let bindings = crate::help::keybindings(view);
+    let max_rows = inner.height as usize;
+    let lines: Vec<Line> = bindings
+        .iter()
+        .take(max_rows)
+        .map(|(key, desc)| {
+            let key_span = Span::styled(
+                format!(" {key:<12} "),
+                Style::default()
+                    .fg(theme::active().text)
+                    .bg(theme::active().help_modal_selected_bg),
+            );
+            let desc_span =
+                Span::styled(desc.to_string(), Style::default().fg(theme::active().text));
+            Line::from(vec![key_span, Span::raw(" "), desc_span])
+        })
+        .collect();
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
 }

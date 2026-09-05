@@ -876,6 +876,7 @@ fn visual_picker_parent_entry_snapshot() {
     // parent dir's plain name) and real entries sort dirs-first then .ini.
     let _guard = ThemedGuard::pin("classic");
     let mut app = App::new();
+    app.favorites = crate::favorites::FavoritesStore::default();
     app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
     app.showing_picker = true;
     app.refresh_picker_entries();
@@ -3076,6 +3077,34 @@ fn visual_render_outlier_hint_snapshot() {
             {snapshot_suffix => "render_outlier_terminal_80"},
             { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
         );
+    }
+}
+
+#[test]
+fn visual_help_modal_snapshot() {
+    // Task 3.2: the `?` help modal renders the active view's keybindings as
+    // key/description rows over the panels view, across themes and widths.
+    // The modal is a top z-layer (design D4), so it overlays the panels.
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_fixture("arpeggio1");
+            app.showing_help = true;
+            let buf = buffer_for(&mut app, width, 30);
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            assert!(
+                text.contains("Help — Panels / Physical"),
+                "{theme_name} {width}: help modal title must render"
+            );
+            assert!(
+                text.contains("open file picker"),
+                "{theme_name} {width}: a keybinding row must render"
+            );
+            insta::with_settings!(
+                {snapshot_suffix => format!("help_modal_{theme_name}_{width}")},
+                { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
+            );
+        }
     }
 }
 

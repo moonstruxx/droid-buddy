@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod graph;
 pub mod graph_render;
 pub mod handler;
+pub mod help;
 pub mod kitty_protocol;
 pub mod latency;
 pub mod layout;

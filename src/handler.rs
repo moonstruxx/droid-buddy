@@ -99,6 +99,27 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             _ => return false,
         }
     }
+    // Help modal (design D1): sits directly below the edit overlay in the
+    // priority chain (overlay > help > picker > validation > optimizer > ...).
+    // While open it eats all keys except Esc and q, both of which close it and
+    // return false — so `q` closes help instead of quitting, scoped to the
+    // modal's lifetime.
+    if app.showing_help {
+        match key.code {
+            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => {
+                app.close_help();
+                return false;
+            }
+            _ => return false,
+        }
+    }
+    // `?` opens the help modal from any view (design D2). Matched without a
+    // modifier guard because the key arrives with SHIFT (Shift+/), the same
+    // convention as `+` (Shift+=). The edit overlay above already eats it.
+    if matches!(key.code, crossterm::event::KeyCode::Char('?')) {
+        app.open_help();
+        return false;
+    }
     // If file picker is showing, handle picker navigation
     if app.showing_picker {
         return handle_picker_event(key, app);
@@ -1101,6 +1122,20 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if app.editing.is_some() {
         return;
     }
+    // Help modal click-outside close (design D4): a left-button Down outside
+    // the renderer-published modal rect closes help over any surface. Checked
+    // before the picker/quad/graph branches so it works even when help
+    // overlays them (a click over the picker or graph closes help instead of
+    // selecting a file or dragging a node).
+    if app.showing_help {
+        let inside = app
+            .help_modal_rect
+            .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !inside {
+            app.close_help();
+            return;
+        }
+    }
     if app.showing_picker {
         return;
     }
@@ -1895,6 +1930,122 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    // Task 3.1: help modal (`?`).
+    //
+    // `?` opens the help modal from any view; while open it eats all keys
+    // except Esc/q (both close it and return false, so q does not quit), and a
+    // left-button Down outside the published modal rect closes it over any
+    // surface (design D1/D2/D4).
+
+    #[test]
+    fn question_mark_opens_help_from_panels() {
+        let mut app = App::new();
+        assert!(!app.showing_help);
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(!quit);
+        assert!(app.showing_help);
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_every_view() {
+        // Panels (default) is covered above; exercise the other surfaces.
+        let mut app = App::new();
+        app.showing_viewer = true;
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "help must open over the viewer");
+
+        let mut app = App::new();
+        app.showing_graph = true;
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "help must open over the graph");
+
+        let mut app = App::new();
+        app.showing_quad = true;
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "help must open over the quad");
+
+        let mut app = App::new();
+        app.showing_validation = true;
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "help must open over the validation modal");
+
+        let mut app = App::new();
+        app.patch = Some(
+            crate::patch::Patch::from_ini_str("[button]\n    button = B1.1\n", String::from("t"))
+                .unwrap(),
+        );
+        assert!(app.open_optimizer());
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "help must open over the optimizer");
+
+        let mut app = App::new();
+        app.showing_picker = true;
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "help must open over the picker");
+    }
+
+    #[test]
+    fn esc_closes_help_and_returns_false() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help);
+        let quit = handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(!quit);
+        assert!(!app.showing_help);
+    }
+
+    #[test]
+    fn q_closes_help_without_quitting() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help);
+        // q while help is open closes help and does NOT quit.
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('q')), &mut app);
+        assert!(!quit, "q must not quit while help is open");
+        assert!(!app.showing_help);
+    }
+
+    #[test]
+    fn help_eats_other_keys() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help);
+        // A random key while help is open is swallowed (returns false, no quit).
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('l')), &mut app);
+        assert!(!quit);
+        assert!(app.showing_help, "help stays open on unrelated keys");
+    }
+
+    #[test]
+    fn click_outside_closes_help() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help);
+        // Publish a modal rect, then click well outside it.
+        app.help_modal_rect = Some(Rect::new(10, 10, 40, 20));
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 2),
+            &mut app,
+        );
+        assert!(!app.showing_help, "click outside the modal must close help");
+    }
+
+    #[test]
+    fn click_inside_keeps_help_open() {
+        let mut app = App::new();
+        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help);
+        app.help_modal_rect = Some(Rect::new(10, 10, 40, 20));
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 20, 15),
+            &mut app,
+        );
+        assert!(
+            app.showing_help,
+            "click inside the modal must keep help open"
+        );
+    }
+
     #[test]
     fn plus_and_minus_cycle_scale_presets_with_status() {
         let mut app = App::new();
@@ -2338,6 +2489,7 @@ mod tests {
 
     fn picker_app_at(dir: &str) -> App {
         let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
         app.picker_dir = std::path::PathBuf::from(dir);
         app.showing_picker = true;
         app.refresh_picker_entries();
