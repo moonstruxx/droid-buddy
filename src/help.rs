@@ -17,8 +17,6 @@ pub enum HelpView {
     Viewer,
     /// Signal-flow graph surface (`g g`).
     Graph,
-    /// Quad concurrent view (`g q`).
-    Quad,
     /// Validation modal (`e`).
     Validation,
     /// Optimizer menu (`g o`).
@@ -34,7 +32,6 @@ impl HelpView {
             HelpView::Panels => "Panels / Physical",
             HelpView::Viewer => "Source Viewer",
             HelpView::Graph => "Signal-flow Graph",
-            HelpView::Quad => "Quad View",
             HelpView::Validation => "Validation",
             HelpView::Optimizer => "Optimizer",
             HelpView::Picker => "File Picker",
@@ -43,7 +40,7 @@ impl HelpView {
 }
 
 /// The active view, mirroring the handler priority chain
-/// (picker > validation > optimizer > graph > quad > viewer > panels).
+/// (picker > validation > optimizer > graph > viewer > panels).
 pub fn active_view(app: &App) -> HelpView {
     if app.showing_picker {
         HelpView::Picker
@@ -53,8 +50,6 @@ pub fn active_view(app: &App) -> HelpView {
         HelpView::Optimizer
     } else if app.showing_graph {
         HelpView::Graph
-    } else if app.showing_quad {
-        HelpView::Quad
     } else if app.showing_viewer {
         HelpView::Viewer
     } else {
@@ -69,7 +64,6 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("l", "open file picker"),
             ("g v", "open source viewer"),
             ("g g", "open signal-flow graph"),
-            ("g q", "open quad view"),
             ("g d", "diff against another patch"),
             ("g o", "open latency optimizer"),
             ("?", "show this help"),
@@ -103,15 +97,6 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("arrows", "pan camera"),
             ("[/]", "cable tension"),
             ("Esc", "close graph"),
-            ("?", "show this help"),
-        ],
-        HelpView::Quad => vec![
-            ("Tab", "switch pane focus"),
-            ("t", "toggle raw/prettified (source)"),
-            ("[/]", "adjust panels/source split"),
-            ("Up/Down/Home/End", "navigate occurrences"),
-            ("e", "edit label"),
-            ("Esc", "close quad"),
             ("?", "show this help"),
         ],
         HelpView::Validation => vec![
@@ -178,10 +163,6 @@ mod tests {
         assert_eq!(active_view(&a), HelpView::Graph);
 
         let mut a = app();
-        a.showing_quad = true;
-        assert_eq!(active_view(&a), HelpView::Quad);
-
-        let mut a = app();
         a.showing_viewer = true;
         assert_eq!(active_view(&a), HelpView::Viewer);
     }
@@ -192,7 +173,6 @@ mod tests {
             HelpView::Panels,
             HelpView::Viewer,
             HelpView::Graph,
-            HelpView::Quad,
             HelpView::Validation,
             HelpView::Optimizer,
             HelpView::Picker,
@@ -215,7 +195,6 @@ mod tests {
             HelpView::Panels,
             HelpView::Viewer,
             HelpView::Graph,
-            HelpView::Quad,
             HelpView::Validation,
             HelpView::Optimizer,
             HelpView::Picker,

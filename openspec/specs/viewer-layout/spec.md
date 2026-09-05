@@ -7,30 +7,15 @@ Embedded source-pane layout for displaying DROID `.ini` patch source in the main
 ## Requirements
 
 ### Requirement: Embedded source pane layout
-The source viewer SHALL render as an embedded split pane of the main TUI instead of a separate process window, with the panels | source column split ratio adjustable and defaulting in favor of the panels (60% panels / 40% source).
+The source viewer SHALL render as a slot in the right column of the tiled layout, not as a fixed split pane. When the source viewer is the only view in the right column, it shares the width split ratio with the left panel pane (default 60% panels / 40% source). When multiple views share the right column, the source viewer occupies one horizontal slot and its height is determined by the number of visible slots. The source pane's internal two-pane layout (sidebar + main area) remains unchanged.
 
-#### Scenario: Default split
-- **WHEN** the user opens the source viewer
+#### Scenario: Default split with source only
+- **WHEN** the user opens the source viewer as the only view in the right column
 - **THEN** the panels column takes 60% of the width and the source pane takes 40%
 
-#### Scenario: Adjust ratio
-- **WHEN** the user presses `[` or `]` while the source viewer is open
-- **THEN** the source pane narrows or widens by ±10% per keypress
-
-#### Scenario: Ratio clamped
-- **WHEN** the user adjusts past the bounds
-- **THEN** the source pane never takes more than 70% or less than 30% of the width
-
-### Requirement: Two-pane circuit layout
-The source pane SHALL keep the diff-viewer style two-pane layout: a left sidebar listing circuits and a main area rendering circuit content. The sidebar occupies ~20% width (minimum 20 columns, capped so the main area retains at least 20 columns), bordered `Color::Blue` titled "Circuits"; the main area occupies the remaining width bordered `Color::DarkGray`.
-
-#### Scenario: Sidebar and main area proportions
-- **WHEN** the source pane renders in a 100-column terminal
-- **THEN** the sidebar is 20 columns wide and the main area takes the remaining 80
-
-#### Scenario: Narrow terminal
-- **WHEN** the terminal is 50 columns wide
-- **THEN** the sidebar gets 20 columns (minimum) and the main area gets 30
+#### Scenario: Source with other views
+- **WHEN** the source viewer shares the right column with the graph view
+- **THEN** the source pane occupies one horizontal slot in the right column at the configured split ratio
 
 ### Requirement: Sidebar circuit jump points
 The sidebar SHALL list every circuit from the loaded patch in parse order. The selected sidebar entry SHALL be highlighted with `Modifier::REVERSED`. Repeated circuit names SHALL be disambiguated with a suffix index: the first occurrence bare, subsequent ones " (1)", " (2)", etc.
@@ -56,13 +41,6 @@ The source main area SHALL scroll vertically through its content, saturating at 
 #### Scenario: Scroll bounds respected
 - **WHEN** the user scrolls above the first line or below the last line
 - **THEN** the scroll position saturates at the boundary instead of underflowing or overshooting
-
-### Requirement: Viewer status bar
-While the source pane is open, a status bar SHALL render at the bottom with dark-gray background showing the viewer hints including close (`ESC`), line scroll (`j/k`), occurrence navigation (`Up/Down`, `Home/End`), view-mode toggle (`t`), and focus switch (`Tab`).
-
-#### Scenario: Status hints reflect controls
-- **WHEN** the source pane is open
-- **THEN** the status bar mentions ESC to close, j/k scroll, Up/Down occurrences, t for raw/prettified, and Tab focus
 
 ### Requirement: Empty patch state
 When no patch is loaded, the source main area SHALL display "No patch loaded" centered in dark-gray and the sidebar SHALL render empty with only its border.
@@ -98,11 +76,11 @@ The source pane SHALL render a minimap column summarizing the entire file so the
 - **THEN** the minimap is not rendered and the source keeps usable width
 
 ### Requirement: Pane focus indication
-Exactly one of the panel area and the source pane SHALL be focused at a time; the focused side SHALL be visually emphasized (border color/intensity) so the target of keyboard input is unambiguous.
+Exactly one pane SHALL be focused at a time; the focused pane SHALL be visually emphasized via the `pane_focus_border` theme token. When the source pane is focused, its border renders with the focus token; when focus moves away, the border returns to `pane_unfocused_border`.
 
 #### Scenario: Focus follows Tab
 - **WHEN** the source pane is focused and the user presses `Tab`
-- **THEN** focus moves to the panel area and the border emphasis switches accordingly
+- **THEN** focus moves to the next pane in the carousel and the source pane's border updates to unfocused styling
 
 ## Design Decisions
 

@@ -151,69 +151,6 @@ impl Graph {
         out
     }
 
-    /// Build the induced subgraph for `subtree` (FILTERED pane).
-    ///
-    /// - `nodes` = those with `id` in `subtree.influenced_nodes`
-    /// - `edges` = those with `cable` in `subtree.influenced_edges` and both
-    ///   endpoints in the filtered node set
-    /// - `clusters` = banner clusters filtered to ranges intersecting the
-    ///   filtered node `section_indices`
-    /// - `validation` = filtered to cables in `subtree.influenced_edges`
-    ///   (re-runs topology validation on the subgraph; the filtered validation
-    ///   never introduces new cables, only narrows the FULL graph's findings)
-    /// - `highlighted_*` for the filtered graph is cleared — the pane is
-    ///   uniformly highlighted (compact re-solve), so dim/highlight is not
-    ///   needed.
-    ///
-    /// Deterministic: node/edge order is preserved (edges were already
-    /// sorted by `(cable, source, sink)` in `build_edges`), clusters keep
-    /// caller order. Pure, no IO.
-    pub fn filtered_influence(&self, subtree: &InfluenceSubtree) -> Graph {
-        let nodes: Vec<GraphNode> = self
-            .nodes
-            .iter()
-            .filter(|n| subtree.influenced_nodes.contains(&n.id))
-            .cloned()
-            .collect();
-        let node_ids: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
-        let mut edges: Vec<GraphEdge> = self
-            .edges
-            .iter()
-            .filter(|e| {
-                subtree.influenced_edges.contains(&e.cable)
-                    && node_ids.contains(&e.source)
-                    && node_ids.contains(&e.sink)
-            })
-            .cloned()
-            .collect();
-        edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
-        let clusters: Vec<Cluster> = self
-            .clusters
-            .iter()
-            .filter(|c| {
-                nodes
-                    .iter()
-                    .any(|n| c.section_range.contains(&n.section_index))
-            })
-            .cloned()
-            .collect();
-        let validation: Vec<TopologyIssue> = self
-            .validation
-            .iter()
-            .filter(|iss| subtree.influenced_edges.contains(&iss.cable))
-            .cloned()
-            .collect();
-        Graph {
-            nodes,
-            edges,
-            clusters,
-            validation,
-            latency: None,
-            highlighted_nodes: HashSet::new(),
-            highlighted_edges: HashSet::new(),
-        }
-    }
-
     /// Index of the banner-group cluster whose `section_range` contains
     /// `section_index`, if any. This is the cluster-membership mapping the
     /// layout solver consumes for per-cluster cohesion (design D3): a node
@@ -777,60 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn filtered_membership_is_induced_subgraph() {
-        let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n[other]\n";
-        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
-        let sub = patch.influence_subtree(&[String::from("_A")]);
-        let filt = graph.filtered_influence(&sub);
-        // nodes are strict subset
-        assert!(filt.nodes.len() < graph.nodes.len());
-        for n in &filt.nodes {
-            assert!(sub.influenced_nodes.contains(&n.id));
-            assert!(graph.nodes.iter().any(|g| g.id == n.id));
-        }
-        // edges are subset: cable in influenced_edges and endpoints in filtered nodes
-        let filt_ids: HashSet<NodeId> = filt.nodes.iter().map(|n| n.id.clone()).collect();
-        for e in &filt.edges {
-            assert!(sub.influenced_edges.contains(&e.cable));
-            assert!(filt_ids.contains(&e.source));
-            assert!(filt_ids.contains(&e.sink));
-        }
-        assert!(filt.edges.len() <= graph.edges.len());
-        // highlighted sets cleared for filtered pane
-        assert!(filt.highlighted_nodes.is_empty());
-        assert!(filt.highlighted_edges.is_empty());
-        // validation filtered to influenced edges only
-        for iss in &filt.validation {
-            assert!(sub.influenced_edges.contains(&iss.cable));
-        }
-        // edges sorted deterministically
-        let mut sorted = filt.edges.clone();
-        sorted.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
-        assert_eq!(filt.edges, sorted);
-    }
-
-    #[test]
-    fn filtered_preserves_cluster_intersection() {
-        let content = "# ---- G1 ----\n[button]\n    button = B1.1\n    output = _A\n[copy]\n    input = _A\n    output = O1\n# ---- G2 ----\n[other]\n";
-        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let clusters: Vec<Cluster> = patch
-            .banner_groups
-            .iter()
-            .map(|g| Cluster {
-                title: g.banner.clone().unwrap_or_default(),
-                section_range: g.section_range.clone(),
-            })
-            .collect();
-        let graph = Graph::build_from_patch(&patch, &clusters, &CostModel::default());
-        let sub = patch.influence_subtree(&[String::from("_A")]);
-        let filt = graph.filtered_influence(&sub);
-        // only G1 intersects influenced nodes (clocktool, copy); G2 ([other]) is excluded
-        assert_eq!(filt.clusters.len(), 1);
-        assert_eq!(filt.clusters[0].title, "G1");
-    }
-
-    #[test]
     fn with_highlights_empty_subtree_clears_highlights() {
         let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
@@ -844,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_filtered_and_highlight_sets() {
+    fn fixture_highlight_sets() {
         let patch = Patch::from_ini_file(std::path::Path::new(
             "fixtures/modifier_switch_passthrough.ini",
         ))
@@ -866,14 +749,8 @@ mod tests {
         let hl = graph.with_highlights(&sub);
         assert_eq!(hl.highlighted_nodes, sub.influenced_nodes);
         assert_eq!(hl.highlighted_edges, sub.influenced_edges);
-        let filt = graph.filtered_influence(&sub);
-        assert!(!filt.nodes.is_empty());
-        assert!(filt.nodes.len() < graph.nodes.len());
-        assert!(filt.highlighted_nodes.is_empty());
-        assert!(filt.highlighted_edges.is_empty());
         // switch passthrough cable present
         assert!(sub.influenced_edges.contains("_SWOUT"));
-        assert!(filt.edges.iter().any(|e| e.cable == "_SWOUT"));
         // copy chain cables present
         assert!(sub.influenced_edges.contains("_COPY1"));
         assert!(sub.influenced_edges.contains("_COPY2"));
@@ -941,16 +818,13 @@ mod tests {
     }
 
     #[test]
-    fn filtered_clears_latency_while_highlights_keep_it() {
+    fn with_highlights_keeps_latency() {
         let content =
             "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
         let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
         assert!(graph.latency.is_some());
         let sub = patch.influence_subtree(&[String::from("_A")]);
-        // The induced subgraph has a different edge set; latency is not
-        // recomputed there.
-        assert_eq!(graph.filtered_influence(&sub).latency, None);
         // with_highlights keeps the full graph's topology, so latency survives.
         assert_eq!(graph.with_highlights(&sub).latency, graph.latency);
     }

@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, FocusSlot, QuadFocus, SourceViewMode, ViewType, ViewerFocus};
+use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphNode};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
@@ -58,15 +58,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if !app.tile_stack.slots.is_empty() {
         render_tiled_main(frame, chunks[1], app);
         render_status(frame, chunks[2], app);
-    } else if app.showing_quad {
-        // Responsive fallback: below threshold quad panes would be unreadable.
-        if frame.area().width < QUAD_WIDTH_THRESHOLD {
-            render_embedded_main(frame, chunks[1], app);
-            render_quad_fallback_status(frame, chunks[2], app);
-        } else {
-            render_quad(frame, chunks[1], app);
-            render_quad_status(frame, chunks[2], app);
-        }
     } else if app.showing_graph {
         render_graph(frame, chunks[1], app);
         render_status(frame, chunks[2], app);
@@ -493,6 +484,10 @@ fn render_tiled_main(frame: &mut Frame, area: Rect, app: &mut App) {
         // hit-testing cannot act on a stale rect from a previous wide frame.
         app.source_pane_rect = None;
         app.minimap_rect = None;
+        // The graph slot is not drawn either: its published node/cluster
+        // rects are stale after a wide frame and must not hit-test.
+        app.clear_graph_node_rects();
+        app.clear_graph_cluster_rects();
         render_tiled_pane(
             frame,
             area,
@@ -2413,14 +2408,6 @@ fn polyline_cells(x_s: i16, y_s: i16, x_t: i16, y_t: i16) -> Vec<(i16, i16)> {
     cells
 }
 
-/// Draw every cable as a colored box-drawing polyline between its ports,
-/// clipped to `area`. Edges draw before node frames so the frames cover the
-/// port cells for a clean join. When two polylines share a cell the later
-/// edge in `graph.edges` wins, keeping crossings deterministic.
-fn render_graph_edges(frame: &mut Frame, area: Rect, graph: &Graph, node_rects: &[Rect]) {
-    render_graph_edges_with_highlight(frame, area, graph, node_rects, GraphEdgeOpts::default());
-}
-
 /// Grouped options for `render_graph_edges_with_highlight` to stay under
 /// clippy's 7-argument limit.
 #[derive(Default)]
@@ -2748,12 +2735,6 @@ fn graph_cluster_rect(
     ))
 }
 
-/// Draw a cluster's bordered container. The implicit unnamed group (empty
-/// title) renders as a plain bordered area without a title.
-fn render_graph_cluster_frame(frame: &mut Frame, rect: Rect, cluster: &Cluster) {
-    render_graph_cluster_frame_with_diff(frame, rect, cluster, None, false, &[]);
-}
-
 fn render_graph_cluster_frame_with_diff(
     frame: &mut Frame,
     rect: Rect,
@@ -2812,312 +2793,6 @@ fn clamp_rect(rect: Rect, within: Rect) -> Rect {
     let max_w = within.x + within.width - x;
     let max_h = within.y + within.height - y;
     Rect::new(x, y, rect.width.min(max_w), rect.height.min(max_h))
-}
-
-// ── Quad concurrent view (3.2) ───────────────────────────────────────────
-
-fn render_quad(frame: &mut Frame, area: Rect, app: &mut App) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    app.component_rects.clear();
-    app.clear_graph_cluster_rects();
-    app.clear_graph_node_rects();
-    app.clear_filtered_cluster_rects();
-    app.clear_filtered_node_rects();
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    if rows.len() < 2 {
-        return;
-    }
-    let top = rows[0];
-    let bottom = rows[1];
-
-    let panels_pct = (app.viewer_split_ratio.clamp(0.3, 0.7) * 100.0) as u16;
-    let source_pct = 100u16.saturating_sub(panels_pct);
-    let top_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(panels_pct),
-            Constraint::Percentage(source_pct),
-        ])
-        .split(top);
-    let bottom_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(bottom);
-
-    if top_cols.len() < 2 || bottom_cols.len() < 2 {
-        return;
-    }
-
-    render_quad_pane(frame, top_cols[0], app, QuadFocus::Panels, " Panels ");
-    render_quad_pane(frame, top_cols[1], app, QuadFocus::Source, " Source ");
-    render_quad_pane(
-        frame,
-        bottom_cols[0],
-        app,
-        QuadFocus::GraphFull,
-        " Graph FULL ",
-    );
-    render_quad_pane(
-        frame,
-        bottom_cols[1],
-        app,
-        QuadFocus::GraphFiltered,
-        " Graph FILTERED ",
-    );
-
-    // Content inside each pane
-    render_quad_panels_content(frame, top_cols[0], app);
-    render_quad_source_content(frame, top_cols[1], app);
-    render_quad_graph_full_content(frame, bottom_cols[0], app);
-    render_quad_graph_filtered_content(frame, bottom_cols[1], app);
-}
-
-fn quad_border_style(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .fg(theme::active().focus_border)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::active().muted)
-    }
-}
-
-fn render_quad_pane(frame: &mut Frame, area: Rect, app: &App, focus: QuadFocus, title: &str) {
-    let focused = app.quad_focus == focus;
-    let style = quad_border_style(focused);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(style)
-        .border_style(style);
-    frame.render_widget(block, area);
-}
-
-fn render_quad_panels_content(frame: &mut Frame, area: Rect, app: &mut App) {
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    if let Some(patch) = app.patch.clone() {
-        render_physical_full(frame, inner, &patch, app);
-    } else {
-        render_empty(frame, inner);
-    }
-}
-
-fn render_quad_source_content(frame: &mut Frame, area: Rect, app: &mut App) {
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    if inner.width == 0 || inner.height == 0 {
-        app.source_pane_rect = Some(area);
-        return;
-    }
-    // Reuse source pane rendering but ensure source_pane_rect is the quad source pane
-    render_source_pane(frame, inner, app);
-    // Publish outer quad source pane rect for focus routing (handler checks source_pane_rect)
-    app.source_pane_rect = Some(area);
-}
-
-fn render_quad_graph_full_content(frame: &mut Frame, area: Rect, app: &mut App) {
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let empty = match app.graph.as_ref() {
-        None => true,
-        Some(g) => g.nodes.is_empty() || app.graph_positions.len() != g.nodes.len(),
-    };
-    if empty {
-        render_graph_empty(frame, inner);
-        return;
-    }
-    // Circuit label store for FULL node titles — captured before clone borrows.
-    let circuit_store = app.current_circuit_store();
-    let patch_for_title = app.patch.clone();
-    // Need to split borrows: graph + positions + rect fields
-    let graph = match app.graph.as_ref() {
-        Some(g) => g.clone(),
-        None => return,
-    };
-    let positions = app.graph_positions.clone();
-    let disabled = app.disabled_circuits.clone();
-    let hovered = app.hovered_graph_node;
-    let surface = inner;
-    let node_rects = graph_node_rects(&positions, inner, &graph.nodes);
-    // Clusters
-    let cluster_rects: Vec<(usize, Rect)> = graph
-        .clusters
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| {
-            graph_cluster_rect(c, &graph.nodes, &node_rects, surface).map(|r| (i, r))
-        })
-        .collect();
-    for (i, rect) in &cluster_rects {
-        app.graph_cluster_rects.push((*i, *rect));
-        render_graph_cluster_frame(frame, *rect, &graph.clusters[*i]);
-    }
-    // Highlight sets from influence: graph.highlighted_* already populated by recompute_influence
-    let highlight_edges: Option<HashSet<String>> = if graph.highlighted_edges.is_empty() {
-        None
-    } else {
-        Some(graph.highlighted_edges.clone())
-    };
-    let highlight_nodes: Option<HashSet<(String, usize)>> = if graph.highlighted_nodes.is_empty() {
-        None
-    } else {
-        Some(graph.highlighted_nodes.clone())
-    };
-    render_graph_edges_with_highlight(
-        frame,
-        inner,
-        &graph,
-        &node_rects,
-        GraphEdgeOpts {
-            highlight: highlight_edges.as_ref(),
-            disabled: Some(&disabled),
-            diff_report: None,
-            diff_showing: false,
-            latency: graph.latency.as_ref(),
-            latency_coloring: app.latency_coloring,
-        },
-    );
-    for (i, node) in graph.nodes.iter().enumerate() {
-        let nr = node_rects[i];
-        if nr.width == 0 || nr.height == 0 {
-            continue; // off-viewport node: nothing to draw or hit-test
-        }
-        app.graph_node_rects.push((i, nr));
-        render_graph_node_with_highlight(
-            frame,
-            nr,
-            node,
-            &graph,
-            highlight_nodes.as_ref(),
-            Some(&disabled),
-            hovered == Some(i),
-            patch_for_title.as_ref(),
-            Some(&circuit_store),
-            None,
-            false,
-        );
-    }
-}
-
-fn render_quad_graph_filtered_content(frame: &mut Frame, area: Rect, app: &mut App) {
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let Some(graph) = app.filtered_graph.clone() else {
-        let msg = Paragraph::new("No influence selected")
-            .style(Style::default().fg(theme::active().muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(msg, inner);
-        return;
-    };
-    if graph.nodes.is_empty() || app.filtered_positions.len() != graph.nodes.len() {
-        let msg = Paragraph::new("No influenced nodes")
-            .style(Style::default().fg(theme::active().muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(msg, inner);
-        return;
-    }
-    let circuit_store = app.current_circuit_store();
-    let patch_for_title = app.patch.clone();
-    let positions = app.filtered_positions.clone();
-    let surface = inner;
-    let node_rects = graph_node_rects(&positions, inner, &graph.nodes);
-    for (i, cluster) in graph.clusters.iter().enumerate() {
-        if let Some(rect) = graph_cluster_rect(cluster, &graph.nodes, &node_rects, surface) {
-            app.filtered_cluster_rects.push((i, rect));
-            render_graph_cluster_frame(frame, rect, cluster);
-        }
-    }
-    // FILTERED is uniformly highlighted — no dim, use normal cable colors or highlight color
-    // Use no highlight dimming (all nodes are influenced)
-    render_graph_edges(frame, inner, &graph, &node_rects);
-    for (i, node) in graph.nodes.iter().enumerate() {
-        let nr = node_rects[i];
-        if nr.width == 0 || nr.height == 0 {
-            continue; // off-viewport node: nothing to draw or hit-test
-        }
-        app.filtered_node_rects.push((i, nr));
-        render_graph_node_with_highlight(
-            frame,
-            nr,
-            node,
-            &graph,
-            None,
-            None,
-            false,
-            patch_for_title.as_ref(),
-            Some(&circuit_store),
-            None,
-            false,
-        );
-    }
-}
-
-fn render_quad_status(frame: &mut Frame, area: Rect, app: &App) {
-    let focus_label = match app.quad_focus {
-        QuadFocus::Panels => "Panels",
-        QuadFocus::Source => "Source",
-        QuadFocus::GraphFull => "Graph FULL",
-        QuadFocus::GraphFiltered => "Graph FILTERED",
-    };
-    let modifier_info = app.active_modifier_var.as_deref().unwrap_or("no modifier");
-    let spans = vec![
-        Span::styled(
-            format!(
-                "Quad [Tab] focus: {} | Modifier: {}",
-                focus_label, modifier_info
-            ),
-            Style::default()
-                .fg(theme::active().text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::styled("Esc", Style::default().fg(theme::active().viewer_key)),
-        Span::raw(" close | "),
-        Span::styled("Tab", Style::default().fg(theme::active().viewer_key)),
-        Span::raw(" cycle"),
-    ];
-    let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(theme::active().status_bg))
-        .alignment(Alignment::Left)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::active().muted)),
-        );
-    frame.render_widget(status, area);
-}
-
-fn render_quad_fallback_status(frame: &mut Frame, area: Rect, _app: &App) {
-    let spans = vec![
-        Span::styled(
-            "Quad fallback (<120 cols): showing panels+source",
-            Style::default().fg(theme::active().text),
-        ),
-        Span::raw(" | "),
-        Span::styled("Esc", Style::default().fg(theme::active().viewer_key)),
-        Span::raw(" close"),
-    ];
-    let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(theme::active().status_bg))
-        .alignment(Alignment::Left)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::active().muted)),
-        );
-    frame.render_widget(status, area);
 }
 
 // ── Embedded viewer layout (task 4.1) ──────────────────────────────────────
@@ -5929,16 +5604,49 @@ mod graph_view_tests {
     }
 
     #[test]
-    fn graph_view_renders_at_wide_and_narrow_sizes() {
-        for (w, h) in [(120, 40), (60, 20)] {
-            let mut app = graph_app();
-            let text = rendered_text(&mut app, w, h);
-            assert!(text.contains("╭"), "{w}×{h}: rounded node frame missing");
-            assert!(
-                text.contains("clocktool"),
-                "{w}×{h}: node title bar missing"
-            );
-        }
+    fn graph_renders_wide_collapses_narrow_with_hidden_hint() {
+        // Tiled collapse (change `tiled-window-manager`, D5): below 120 cols
+        // the right column is hidden, so the graph surface does not render;
+        // the status bar reports the hidden view count instead.
+        let mut app = graph_app();
+        let text = rendered_text(&mut app, 120, 40);
+        assert!(text.contains("╭"), "120×40: rounded node frame missing");
+        assert!(text.contains("clocktool"), "120×40: node title bar missing");
+        assert!(
+            !text.contains("views hidden"),
+            "120×40: hint must not show while the right column is visible"
+        );
+        let text = rendered_text(&mut app, 60, 20);
+        assert!(
+            !text.contains("╭"),
+            "60×20: right column collapsed, no node frames"
+        );
+        assert!(
+            !text.contains("clocktool"),
+            "60×20: right column collapsed, no node titles"
+        );
+        assert!(
+            text.contains("+1 views hidden"),
+            "60×20: hidden-view hint must report the collapsed graph"
+        );
+    }
+
+    #[test]
+    fn tiled_narrow_reports_all_hidden_views_and_hides_pane_titles() {
+        // Two open slots collapse together: neither pane title renders and the
+        // hint counts both hidden views.
+        let mut app = graph_app();
+        app.open_view(ViewType::SourceViewer);
+        let text = rendered_text(&mut app, 80, 24);
+        assert!(!text.contains(" Graph "), "80×24: graph pane title hidden");
+        assert!(
+            !text.contains(" Source "),
+            "80×24: source pane title hidden"
+        );
+        assert!(
+            text.contains("+2 views hidden"),
+            "80×24: hint must report both collapsed views"
+        );
     }
 
     #[test]
@@ -5948,37 +5656,50 @@ mod graph_view_tests {
         // min-node zoom clamp, and the old center-anchored pan showed only
         // empty space. The camera now anchors the world's top-left corner, so
         // the graph's start must be visible at realistic terminal sizes.
-        for (w, h) in [(100, 30), (120, 40)] {
-            let mut app = App::new();
-            let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-            app.load_patch(patch);
-            app.open_graph();
-            let text = rendered_text(&mut app, w, h);
-            assert!(text.contains("╭"), "{w}×{h}: rounded node frame missing");
-            assert!(
-                text.contains("p2b8"),
-                "{w}×{h}: first circuit title missing"
-            );
-        }
+        // Below 120 cols the tiled layout collapses the right column, so only
+        // the wide case renders the surface.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let text = rendered_text(&mut app, 120, 40);
+        assert!(text.contains("╭"), "120×40: rounded node frame missing");
+        assert!(text.contains("p2b8"), "120×40: first circuit title missing");
+        let text = rendered_text(&mut app, 100, 30);
+        assert!(
+            !text.contains("╭"),
+            "100×30: right column collapsed, no node frames"
+        );
+        assert!(
+            text.contains("+1 views hidden"),
+            "100×30: hidden-view hint must report the collapsed graph"
+        );
     }
 
     #[test]
-    fn graph_node_rects_real_patch_solver_output_has_visible_nodes() {
+    fn graph_node_rects_real_patch_published_wide_only() {
         // Regression: with the old center-anchored pan, the real solver output
         // (vertical chain) published zero in-area node rects at realistic
         // terminal sizes — the surface rendered blank. The top-left anchor
-        // must publish at least one non-zero in-area rect.
+        // must publish at least one non-zero in-area rect at wide width.
+        // Below 120 cols the right column collapses and the graph is not
+        // rendered, so no rects are published at all.
         let mut app = App::new();
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         buffer_for(&mut app, 100, 30);
-        let area = graph_main_area(100, 30);
+        assert!(
+            app.graph_node_rects.is_empty(),
+            "100×30: collapsed graph must publish no node rects"
+        );
+        buffer_for(&mut app, 120, 40);
+        let area = graph_main_area(120, 40);
         assert!(
             app.graph_node_rects.iter().any(|(_, rect)| {
                 rect.width > 0 && rect.height > 0 && rect.x < area.width && rect.y < area.height
             }),
-            "at least one node rect must be visible in the main area"
+            "120×40: at least one node rect must be visible in the main area"
         );
     }
 
