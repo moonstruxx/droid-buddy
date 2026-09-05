@@ -15,7 +15,7 @@
 ## 4. Keybinding and Focus Routing
 
 - [x] 4.1 Rewrite `handle_event` key priority chain: focused pane dispatch replaces per-view flags. `Tab` cycles focus across panes; `Shift+Tab` cycles backward. `Esc` closes focused view or clears modifier selection. Verify `cargo test` passes with updated handler tests. <!-- agent: rusty-engineer.build, depends_on: [1.2], touches: [src/handler.rs] -->
-- [ ] 4.2 Consolidate zoom family: `+`/`-` scale focused pane, `Shift++`/`Shift+-` scale other pane, `[`/`]` adjust `main_split_ratio`, `Alt+[`/`Alt+]` adjust cable tension (graph-focused), `\` toggles left vertical split. Verify keybinding tests pass. <!-- agent: rusty-engineer.build, depends_on: [4.1], touches: [src/handler.rs] -->
+- [x] 4.2 Consolidate zoom family: `+`/`-` scale focused pane, `Shift++`/`Shift+-` scale other pane, `[`/`]` adjust `main_split_ratio`, `Alt+[`/`Alt+]` adjust cable tension (graph-focused), `\` toggles left vertical split. Verify keybinding tests pass. <!-- agent: rusty-engineer.build, depends_on: [4.1], touches: [src/handler.rs] -->
 
 ## 5. Optimizer Pane
 

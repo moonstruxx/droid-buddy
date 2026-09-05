@@ -29,6 +29,36 @@ fn sync_viewer_focus_from_tiles(app: &mut App) {
     };
 }
 
+/// True when keys should act on the graph pane: the graph slot holds tile
+/// focus, or no tiles exist yet (legacy flag-owned graph surface).
+fn graph_slot_focused(app: &App) -> bool {
+    match app.tile_stack.focus {
+        FocusSlot::Slot(i) => app.tile_stack.slots.get(i) == Some(&ViewType::Graph),
+        FocusSlot::Panels => app.tile_stack.slots.is_empty(),
+    }
+}
+
+/// Cycle the physical panel scale presets (shared by the panels arm and the
+/// graph arm's scale-the-other-pane path).
+fn cycle_panel_scale(app: &mut App, plus: bool) {
+    // Cycle through the scaling presets defined by the module-scaling spec.
+    const PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
+    let idx = PRESETS
+        .iter()
+        .position(|p| (*p - app.scale_factor).abs() < f32::EPSILON)
+        .unwrap_or(1);
+    let step = if plus { 1 } else { PRESETS.len() - 1 };
+    let next = PRESETS[(idx + step) % PRESETS.len()];
+    app.scale_factor = next;
+    // The physical renderers link `physical_zoom` from `scale_factor`
+    // every frame; sync it here so the status hint below shows the
+    // new zoom immediately instead of lagging one frame.
+    app.physical_zoom = next;
+    app.status_message = app
+        .physical_status_hint()
+        .unwrap_or_else(|| format!("Scaling: {}%", (next * 100.0) as u32));
+}
+
 /// Focus a right-column slot holding `view` (no-op when not open).
 fn focus_tile_slot(app: &mut App, view: ViewType) {
     if let Some(i) = app.tile_stack.slots.iter().position(|v| *v == view) {
@@ -704,31 +734,49 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
-                // Task 2.3: `+`/`-` cycle the graph camera zoom presets on the
-                // graph surface, mirroring the physical view's scale presets.
-                // The camera re-seeds a fit on open; pan/zoom both re-emit the
+                // Zoom family (change `tiled-window-manager`, 4.2): plain
+                // scales the focused pane (graph camera zoom when the graph
+                // slot is focused), `Shift` scales the other pane. The
+                // camera re-seeds a fit on open; pan/zoom both re-emit the
                 // image on the next draw (drag/hover/x/e are unchanged).
-                let step = if matches!(key.code, crossterm::event::KeyCode::Char('+')) {
-                    1
+                let plus = matches!(key.code, crossterm::event::KeyCode::Char('+'));
+                let step = if plus { 1 } else { -1 };
+                if key.modifiers.contains(KeyModifiers::SHIFT) == graph_slot_focused(app) {
+                    cycle_panel_scale(app, plus);
                 } else {
-                    -1
-                };
-                app.graph_zoom_preset_step(step);
+                    app.graph_zoom_preset_step(step);
+                }
                 return false;
             }
             crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']') => {
-                // Cable tension: `[`/`]` lower/raise the solver's spring
-                // stiffness and re-solve the layout live (design D9
-                // determinism holds per tension value). Free on the graph
-                // surface — the viewer-split `[`/`]` handler below only runs
-                // while the embedded viewer is open, and the optimizer menu's
-                // weight slider returns before this branch.
-                let dir = if matches!(key.code, crossterm::event::KeyCode::Char(']')) {
-                    1
+                // Zoom family (change `tiled-window-manager`, 4.2): `Alt`
+                // adjusts cable tension on the focused graph pane (design D9
+                // determinism holds per tension value); plain brackets adjust
+                // the tiled left/right split. The optimizer menu's weight
+                // slider returns before this branch.
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    if graph_slot_focused(app) {
+                        let dir = if matches!(key.code, crossterm::event::KeyCode::Char(']')) {
+                            1
+                        } else {
+                            -1
+                        };
+                        app.adjust_tension(dir);
+                    }
+                    return false;
+                }
+                let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
+                    -0.1
                 } else {
-                    -1
+                    0.1
                 };
-                app.adjust_tension(dir);
+                app.adjust_main_split_ratio(delta);
+                // Snap to a clean 0.1 step so repeated presses stay exact.
+                app.main_split_ratio = (app.main_split_ratio * 10.0).round() / 10.0;
+                let pct_panels = app.main_split_ratio * 100.0;
+                let pct_source = 100.0 - pct_panels;
+                app.status_message =
+                    format!("Panels/Source split: {:.0}%/{:.0}%", pct_panels, pct_source);
                 return false;
             }
             crossterm::event::KeyCode::Left
@@ -782,16 +830,19 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']') => {
+                // Zoom family (change `tiled-window-manager`, 4.2): brackets
+                // adjust the tiled left/right split for any right-column
+                // view (both ratios stay synced by the method).
                 let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
                     -0.1
                 } else {
                     0.1
                 };
-                app.adjust_viewer_split_ratio(delta);
+                app.adjust_main_split_ratio(delta);
                 // Snap to a clean 0.1 step so repeated presses stay exact
                 // (avoids float drift such as 0.7000000000000001).
-                app.viewer_split_ratio = (app.viewer_split_ratio * 10.0).round() / 10.0;
-                let pct_panels = app.viewer_split_ratio * 100.0;
+                app.main_split_ratio = (app.main_split_ratio * 10.0).round() / 10.0;
+                let pct_panels = app.main_split_ratio * 100.0;
                 let pct_source = 100.0 - pct_panels;
                 app.status_message =
                     format!("Panels/Source split: {:.0}%/{:.0}%", pct_panels, pct_source);
@@ -1100,26 +1151,26 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
-            // Cycle through the scaling presets defined by the module-scaling spec.
-            const PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
-            let idx = PRESETS
-                .iter()
-                .position(|p| (p - app.scale_factor).abs() < f32::EPSILON)
-                .unwrap_or(1);
-            let step = if matches!(key.code, crossterm::event::KeyCode::Char('+')) {
-                1
+            // Zoom family (change `tiled-window-manager`, 4.2): plain scales
+            // the panels pane; `Shift` would scale the other pane, which the
+            // graph arm above already owns while the graph is open.
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                return false;
+            }
+            cycle_panel_scale(
+                app,
+                matches!(key.code, crossterm::event::KeyCode::Char('+')),
+            );
+            false
+        }
+        crossterm::event::KeyCode::Char('\\') => {
+            // Left-pane vertical split toggle (quad replacement, D3).
+            app.toggle_left_split();
+            app.status_message = if app.left_split_active {
+                String::from("Left split on")
             } else {
-                PRESETS.len() - 1
+                String::from("Left split off")
             };
-            let next = PRESETS[(idx + step) % PRESETS.len()];
-            app.scale_factor = next;
-            // The physical renderers link `physical_zoom` from `scale_factor`
-            // every frame; sync it here so the status hint below shows the
-            // new zoom immediately instead of lagging one frame.
-            app.physical_zoom = next;
-            app.status_message = app
-                .physical_status_hint()
-                .unwrap_or_else(|| format!("Scaling: {}%", (next * 100.0) as u32));
             false
         }
         crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
@@ -2156,10 +2207,21 @@ mod tests {
         app.graph_canvas_px = Some((960.0, 480.0));
     }
 
+    fn alt_key(code: crossterm::event::KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    fn shift_key(code: crossterm::event::KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
     #[test]
     fn graph_plus_cycles_zoom_presets_and_wraps() {
         let mut app = app_with_fixture();
         app.open_graph();
+        // Direct `open_graph` leaves focus on panels; `g g` focuses the
+        // graph slot, which the zoom arm requires.
+        app.tile_stack.focus = FocusSlot::Slot(0);
         seed_graph_camera(&mut app);
 
         let z0 = app.graph_camera.unwrap().zoom;
@@ -2210,6 +2272,7 @@ mod tests {
         // panic and must leave the camera None (old navigation preserved).
         let mut app = app_with_fixture();
         app.open_graph();
+        app.tile_stack.focus = FocusSlot::Slot(0);
         assert!(app.graph_camera.is_none());
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
         handle_event(key(crossterm::event::KeyCode::Up), &mut app);
@@ -2783,8 +2846,9 @@ mod tests {
 
     #[test]
     fn graph_surface_brackets_adjust_cable_tension() {
-        // `[`/`]` on the graph surface lower/raise cable tension and re-solve
-        // the layout live; the status reports the current value.
+        // `Alt+[`/`Alt+]` on the focused graph pane lower/raise cable tension
+        // and re-solve the layout live; the status reports the current value.
+        // Plain brackets now adjust the tiled split instead (task 4.2).
         let mut app = app_with_fixture();
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
         handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
@@ -2793,7 +2857,7 @@ mod tests {
         assert_eq!(app.tension, default);
         let before = app.graph_positions.clone();
 
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(alt_key(crossterm::event::KeyCode::Char(']')), &mut app);
         assert_eq!(app.tension, default + crate::layout::TENSION_STEP);
         assert_eq!(
             app.status_message,
@@ -2801,12 +2865,60 @@ mod tests {
         );
         assert_ne!(app.graph_positions, before, "tension change re-solves");
 
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(alt_key(crossterm::event::KeyCode::Char('[')), &mut app);
         assert_eq!(app.tension, default);
         assert_eq!(
             app.graph_positions, before,
             "same tension reproduces layout"
         );
+    }
+
+    #[test]
+    fn zoom_family_plain_and_shift_route_by_focus() {
+        // Graph slot focused: plain `+` zooms the camera, `Shift+`+`` scales
+        // the panels pane instead.
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        seed_graph_camera(&mut app);
+        let z0 = app.graph_camera.unwrap().zoom;
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert!((app.graph_camera.unwrap().zoom - z0 * 1.5).abs() < 1e-2);
+        let scale_before = app.scale_factor;
+        handle_event(shift_key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert_ne!(app.scale_factor, scale_before, "other pane scales");
+        assert!((app.graph_camera.unwrap().zoom - z0 * 1.5).abs() < 1e-2);
+        // Panels focused: plain `+` scales panels, camera untouched.
+        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        let z1 = app.graph_camera.unwrap().zoom;
+        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        assert!((app.graph_camera.unwrap().zoom - z1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn brackets_adjust_main_split_ratio() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(app.main_split_ratio, 0.7);
+        assert_eq!(app.viewer_split_ratio, 0.7, "ratios stay synced");
+        assert_eq!(app.status_message, "Panels/Source split: 70%/30%");
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(app.main_split_ratio, 0.5);
+    }
+
+    #[test]
+    fn backslash_toggles_left_split() {
+        let mut app = App::new();
+        assert!(!app.left_split_active);
+        handle_event(key(crossterm::event::KeyCode::Char('\\')), &mut app);
+        assert!(app.left_split_active);
+        assert_eq!(app.status_message, "Left split on");
+        handle_event(key(crossterm::event::KeyCode::Char('\\')), &mut app);
+        assert!(!app.left_split_active);
+        assert_eq!(app.status_message, "Left split off");
     }
 
     #[test]
