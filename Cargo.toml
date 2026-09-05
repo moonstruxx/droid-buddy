@@ -17,6 +17,14 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 fontdue = "0.9"
 base64 = "0.22"
 flate2 = "1"
+# GPU graph window stack — optional behind the non-default `gui` feature
+# (gpu-graph-window design D2): the terminal-only builds never compile the
+# wgpu dependency tree.
+winit = { version = "0.30", optional = true }
+egui = { version = "0.36", optional = true }
+egui-winit = { version = "0.36", optional = true }
+egui-wgpu = { version = "0.36", optional = true }
+wgpu = { version = "30", optional = true }
 
 [features]
 # Kitty-graphics is the default graph renderer (design D6); the box-drawing
@@ -24,6 +32,16 @@ flate2 = "1"
 # when the feature is compiled out via --no-default-features.
 default = ["kitty-gfx"]
 kitty-gfx = []
+# GPU graph window (design D2): egui paints through wgpu (Vulkan/Metal/DX12).
+# Non-default so default and --no-default-features builds stay lean and
+# headless environments keep the kitty/box-drawing fallback.
+gui = [
+    "dep:winit",
+    "dep:egui",
+    "dep:egui-winit",
+    "dep:egui-wgpu",
+    "dep:wgpu",
+]
 
 [dev-dependencies]
 tempfile = "3"

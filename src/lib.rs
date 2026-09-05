@@ -7,6 +7,8 @@ pub mod gallery;
 pub mod geometry;
 pub mod graph;
 pub mod graph_render;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod handler;
 pub mod help;
 pub mod kitty_protocol;
