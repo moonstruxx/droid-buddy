@@ -15,6 +15,7 @@ use std::future::Future;
 use std::task::{Context as TaskContext, Poll};
 
 use winit::dpi::LogicalSize;
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -28,6 +29,33 @@ pub enum WindowState {
     Closed,
     /// A window surface exists and is being driven.
     Open,
+}
+
+/// Graph-window keys mapped onto existing `App` mutations (task 3.1): the
+/// windowed loop applies them to the hovered node, mirroring the terminal
+/// graph surface's `x`/`p`/`e`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowGraphKey {
+    /// `x`: toggle per-circuit processing for the hovered node.
+    ToggleProcessing,
+    /// `p`: toggle the pin anchor of the hovered node.
+    TogglePin,
+    /// `e`: begin the circuit label edit overlay for the hovered node.
+    BeginEdit,
+}
+
+/// Raw window-frame input the loop turns into `App` mutations (task 3.1).
+/// Pointer positions are egui points, which the painter maps 1:1 to spec
+/// pixels (one spec pixel = one egui point, see [`EguiSurface::paint`]);
+/// `None` means the pointer is not over the window. `keys` holds the
+/// [`WindowGraphKey`]s pressed during the frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WindowFrame {
+    pub pointer: Option<(f32, f32)>,
+    pub primary_pressed: bool,
+    pub primary_down: bool,
+    pub primary_released: bool,
+    pub keys: Vec<WindowGraphKey>,
 }
 
 /// Why a window could not be opened.
@@ -157,6 +185,31 @@ impl GraphWindow {
         WINDOW.with(|slot| slot.borrow().as_ref().map(Window::id))
     }
 
+    /// Feeds one winit window event into the egui input pipeline (task 3.1).
+    /// The painter consumes the accumulated input via
+    /// [`egui_winit::State::take_egui_input`]; forwarding here is the matching
+    /// `on_window_event` path, so pointer and keyboard input reaches egui.
+    /// No-op while the egui surface is not attached (window closed or not yet
+    /// painted).
+    pub fn window_event(&self, event: &WindowEvent) {
+        WINDOW.with(|slot| {
+            let window = slot.borrow();
+            let Some(window) = window.as_ref() else {
+                return;
+            };
+            let repaint = EGUI.with(|slot| {
+                slot.borrow_mut()
+                    .as_mut()
+                    .map(|surface| surface.winit_state.on_window_event(window, event).repaint)
+                    .unwrap_or(false)
+            });
+            // egui asks for an immediate redraw (animation, focus change, ...).
+            if repaint {
+                window.request_redraw();
+            }
+        });
+    }
+
     /// Borrows the live window for a short-lived operation.
     ///
     /// Returns `None` while the window is closed. The painter reads the
@@ -178,13 +231,15 @@ impl GraphWindow {
         self.request_redraw();
     }
 
-    /// Paints one frame into the window (task 2.2: the egui painter backend).
+    /// Paints one frame into the window (task 2.2: the egui painter backend)
+    /// and reports the frame's input state for the loop to map onto `App`
+    /// mutations (task 3.1).
     ///
     /// The egui/wgpu stack attaches lazily on the first frame: wgpu init is
     /// async and can fail on headless or software setups, and in that case
     /// the window simply stays unpainted while the terminal loop continues
     /// (no panic, matching the existing [`WindowError`] fallback).
-    pub fn fill_placeholder(&mut self) {
+    pub fn fill_placeholder(&mut self) -> Option<WindowFrame> {
         self.with_window(|window| {
             if EGUI.with(|slot| slot.borrow().is_none()) {
                 if let Err(err) = init_surface(window) {
@@ -197,11 +252,12 @@ impl GraphWindow {
             }
             let scene = self.scene.as_ref();
             EGUI.with(|slot| {
-                if let Some(surface) = slot.borrow_mut().as_mut() {
-                    surface.paint(window, scene);
-                }
-            });
-        });
+                slot.borrow_mut()
+                    .as_mut()
+                    .map(|surface| surface.paint(window, scene))
+            })
+        })
+        .flatten()
     }
 }
 
@@ -311,8 +367,11 @@ fn init_surface(window: &Window) -> Result<(), String> {
 }
 
 impl EguiSurface {
-    /// Paint one egui frame into the window and present it.
-    fn paint(&mut self, window: &Window, scene: Option<&SceneSpec>) {
+    /// Paint one egui frame into the window and present it, reporting the
+    /// frame's input state (task 3.1) for the loop to map onto `App`
+    /// mutations. Pointer positions are egui points; the scene is painted 1:1
+    /// (one spec pixel = one egui point), so they double as spec-pixel coords.
+    fn paint(&mut self, window: &Window, scene: Option<&SceneSpec>) -> WindowFrame {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         let scale = window.scale_factor() as f32;
@@ -343,6 +402,36 @@ impl EguiSurface {
 
         let full_output = self.context.run_ui(raw_input, |ui| {
             paint_scene(ui.painter(), ui.max_rect().size(), scene);
+        });
+
+        // Task 3.1: snapshot the processed input so the loop can drive `App`
+        // mutations (hit-testing happens in handler.rs against the shared
+        // camera). `e` requires no modifiers, mirroring the terminal `e`;
+        // `x`/`p` have no modifier guard there either.
+        let window_frame = self.context.input(|i| {
+            let pointer = i.pointer.latest_pos().map(|p| (p.x, p.y));
+            let mut keys = Vec::new();
+            if i.key_pressed(egui::Key::X) {
+                keys.push(WindowGraphKey::ToggleProcessing);
+            }
+            if i.key_pressed(egui::Key::P) {
+                keys.push(WindowGraphKey::TogglePin);
+            }
+            if i.key_pressed(egui::Key::E)
+                && !(i.modifiers.shift
+                    || i.modifiers.ctrl
+                    || i.modifiers.alt
+                    || i.modifiers.command)
+            {
+                keys.push(WindowGraphKey::BeginEdit);
+            }
+            WindowFrame {
+                pointer,
+                primary_pressed: i.pointer.primary_pressed(),
+                primary_down: i.pointer.primary_down(),
+                primary_released: i.pointer.primary_released(),
+                keys,
+            }
         });
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
@@ -398,9 +487,9 @@ impl EguiSurface {
             }
             other => {
                 // Lost/outdated/occluded: skip this frame; the next redraw
-                // (or resize reconfiguration) retries.
+                // (or resize reconfiguration) retries. Input is still valid.
                 eprintln!("[warn] graph window frame acquire failed: {other:?}");
-                return;
+                return window_frame;
             }
         };
         let view = frame
@@ -441,6 +530,7 @@ impl EguiSurface {
         if self.context.has_requested_repaint() {
             window.request_redraw();
         }
+        window_frame
     }
 }
 

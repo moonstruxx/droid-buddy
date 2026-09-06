@@ -360,6 +360,17 @@ pub struct GraphDrag {
     pub offset_y: f32,
 }
 
+/// Fixed pixel size of one node in the GPU graph window (task 3.1). The window
+/// hit-test derives node world rects from this at the current camera zoom
+/// (`pixel → world → node index`), mirroring how the terminal surface derives
+/// cell rects from fixed node cell dims. The window scene builder (task 3.2)
+/// must construct [`crate::graph_render::NodeSpec`]s at the same size so clicks
+/// line up with what is drawn.
+#[cfg(feature = "gui")]
+pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
+#[cfg(feature = "gui")]
+pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
+
 /// Which pane receives keyboard input while the embedded source pane is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ViewerFocus {

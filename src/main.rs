@@ -246,10 +246,17 @@ mod windowed {
             match event {
                 WindowEvent::CloseRequested => self.window.close(),
                 WindowEvent::RedrawRequested => {
-                    self.window.fill_placeholder();
+                    // Task 3.1: the frame reports the window's input state;
+                    // the loop owns `app`, so it maps the interactions here
+                    // (D6: the loop acts on what it owns).
+                    if let Some(frame) = self.window.fill_placeholder() {
+                        handler::handle_graph_window_frame(&frame, &mut self.app);
+                    }
                     self.needs_redraw = true;
                 }
-                _ => {}
+                // Task 3.1: every other event feeds the egui input pipeline
+                // so pointer/keyboard input reaches the painter's WinitState.
+                other => self.window.window_event(&other),
             }
         }
 
