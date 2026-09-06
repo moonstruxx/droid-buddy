@@ -2652,6 +2652,18 @@ mod tests {
         assert!(app.graph_cluster_rects.is_empty());
     }
 
+    #[cfg(feature = "gui")]
+    #[test]
+    fn app_init_disables_graph_window_by_default() {
+        // `[gui] graph_window` is off unless configured, and `main.rs`'s
+        // `seed_app` is the only place that flips it: under `cargo test` the
+        // flag must stay false and no window request be pending, so the gui
+        // path never opens a winit window in the suite.
+        let app = App::new();
+        assert!(!app.graph_window_enabled);
+        assert_eq!(app.graph_window_request, GraphWindowRequest::None);
+    }
+
     #[test]
     fn open_graph_builds_and_solves_a_loaded_patch() {
         let mut app = App::new();
@@ -3052,6 +3064,30 @@ mod tests {
         app.clear_circuit_selection();
         assert!(app.selected_circuit.is_none());
         assert_eq!(app.source_scroll, 99, "deselection must not move scroll");
+    }
+
+    #[test]
+    fn select_circuit_re_select_is_idempotent() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        let section_index = app.graph.as_ref().unwrap().nodes[0].section_index;
+        let header_line = app.patch.as_ref().unwrap().sections[section_index]
+            .header_span
+            .line;
+        app.select_circuit(node.clone());
+        let first_scroll = app.source_scroll;
+        // Re-selecting the same node keeps selection, scroll, cursor, and the
+        // open viewer slot put: no re-jump or state churn.
+        app.select_circuit(node.clone());
+        assert_eq!(app.selected_circuit(), Some(&node));
+        assert_eq!(app.source_scroll, first_scroll);
+        assert_eq!(app.source_scroll, header_line);
+        assert_eq!(app.occurrence_cursor, 0);
+        assert!(app.showing_viewer);
+        assert!(app.tile_stack.is_open(ViewType::SourceViewer));
     }
 
     #[test]
