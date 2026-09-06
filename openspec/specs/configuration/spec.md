@@ -67,6 +67,22 @@ The system SHALL accept an optional `[plugins]` section in `config.toml` with `d
 - **WHEN** `config.toml` sets `[plugins] dir = "/some/other/dir"`
 - **THEN** plugin files are discovered in that directory instead of the default
 
+### Requirement: GUI window configuration
+
+The config file SHALL accept an optional `[gui]` section with a single boolean key `graph_window`, defaulting to `false`. When `true` and the `gui` feature is enabled, `g g` opens the GPU graph window instead of the terminal tile. Malformed values SHALL warn once on stderr and fall back to the default, matching the existing config handling.
+
+#### Scenario: Default behavior
+- **WHEN** `config.toml` has no `[gui]` section
+- **THEN** `graph_window` is `false` and `g g` opens the terminal tile
+
+#### Scenario: Window preferred
+- **WHEN** `config.toml` sets `[gui] graph_window = true` and the `gui` feature is enabled
+- **THEN** `g g` opens the GPU graph window
+
+#### Scenario: Malformed value
+- **WHEN** `config.toml` sets `[gui] graph_window = "yes"`
+- **THEN** the app warns once on stderr and falls back to `false`
+
 ### Requirement: GUI window flag seeded at startup
 
 When the `gui` feature is enabled, the app SHALL seed the runtime graph-window preference from the `[gui] graph_window` config value during startup (`seed_app`), so the windowed run-loop's per-frame request consumption acts on the configured preference.
