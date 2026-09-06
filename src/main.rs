@@ -70,6 +70,13 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     );
     app.physical_show_skeleton = settings.physical.show_skeleton;
     app.physical_rack_spec = settings.physical.rack.clone();
+
+    // [gui] graph_window: seed the GPU-window preference (gpu-graph-window D6);
+    // inert without the `gui` feature, matching App::new's default.
+    #[cfg(feature = "gui")]
+    {
+        app.graph_window_enabled = settings.gui.graph_window;
+    }
 }
 
 #[cfg(not(feature = "gui"))]
