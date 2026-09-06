@@ -1,0 +1,4 @@
+{
+  "status": "skipped",
+  "reason": "Backend-only change (src/main.rs seed_app wiring, gui-gated). No user-visible UI files or routes changed; the evidence skill's capture contract (pnpm run dev web stack) does not apply to this Rust TUI project. Verified by gui-gated unit test (1.2) and the full verification gate (2.1)."
+}
