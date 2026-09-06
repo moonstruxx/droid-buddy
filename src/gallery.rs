@@ -400,6 +400,29 @@ fn setup_optimizer_weighted(app: &mut App) {
     }
 }
 
+fn setup_picker_favourites(app: &mut App) {
+    // Open picker over a patch with a favourited FILE and DIRECTORY pinned in
+    // the favourites section. The store is set directly (not via the `f` key)
+    // because `f` calls FavoritesStore::save() and would write the real XDG
+    // favourites.toml; canonical keys make the store deterministic.
+    *app = app_from_fixture("arpeggio1");
+    app.favorites = crate::favorites::FavoritesStore {
+        favourites: vec![
+            crate::favorites::FavoritesStore::canonical_key(Path::new(
+                "fixtures/picker_test/patch_a.ini",
+            )),
+            crate::favorites::FavoritesStore::canonical_key(Path::new(
+                "fixtures/picker_test/subdir",
+            )),
+        ],
+    };
+    app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
+    app.showing_picker = true;
+    app.refresh_picker_entries();
+    // picker_index stays 0 so the first pinned favourite (the file) renders
+    // with the `▶ ` selection prefix + BOLD on top of its favourite colour.
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "arpeggio_80",
@@ -569,6 +592,13 @@ const SCENARIOS: &[Scenario] = &[
         width: 100,
         height: 30,
         setup: setup_optimizer_weighted,
+    },
+    Scenario {
+        id: "picker_favourites_100",
+        label: "picker · favourites (file vs dir)",
+        width: 100,
+        height: 40,
+        setup: setup_picker_favourites,
     },
     // ── controller-front review matrix: fixtures/ui_review/* (6.2) ────────
     // Renders each newly-created controller-front fixture in the default
@@ -807,4 +837,72 @@ pub fn should_generate_gallery() -> bool {
         return true;
     }
     std::env::args().any(|a| a == "--generate-gallery" || a == "generate-gallery")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picker_favourites_file_vs_dir_tokens() {
+        // file-picker-favourites gallery proof: the pinned FILE favourite
+        // renders in picker_fav_file and the pinned DIRECTORY favourite in
+        // picker_fav_dir (distinct tokens), the selected file keeps BOLD on
+        // top, and plain listing entries stay in `text`. This is the colour
+        // distinction the ANSI snapshot path cannot make — buffer_to_ansi
+        // strips styles, so this test (plus the gallery HTML sidecar) is the
+        // only in-process proof of the favourite colours.
+        let _guard = ThemedGuard::pin("classic");
+        let t = *crate::theme::active();
+        let mut app = App::new();
+        setup_picker_favourites(&mut app);
+        let buf = buffer_for(&mut app, 100, 40);
+
+        let stars: Vec<_> = buf.content().iter().filter(|c| c.symbol() == "★").collect();
+        assert_eq!(stars.len(), 2, "file + dir favourites pinned");
+        assert_eq!(
+            stars[0].style().fg,
+            Some(t.picker_fav_file),
+            "selected file favourite keeps picker_fav_file"
+        );
+        assert!(
+            stars[0].style().add_modifier.contains(Modifier::BOLD),
+            "selection stays bold on top of the favourite colour"
+        );
+        assert_eq!(
+            stars[1].style().fg,
+            Some(t.picker_fav_dir),
+            "dir favourite renders picker_fav_dir"
+        );
+        assert!(
+            !stars[1].style().add_modifier.contains(Modifier::BOLD),
+            "unselected dir favourite is not bold"
+        );
+
+        // Plain listing entries (readme.txt) stay in the default `text` colour.
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        let row = rows
+            .iter()
+            .position(|r| r.contains("readme.txt"))
+            .expect("directory listing shows readme.txt");
+        for x in 0..buf.area.width {
+            let cell = buf.cell((x, row as u16)).unwrap();
+            // Skip the picker's border glyphs (accent-coloured) — only the
+            // listing entry itself must stay in `text`.
+            if cell.symbol() != " " && !matches!(cell.symbol(), "│" | "─" | "┌" | "┐" | "└" | "┘")
+            {
+                assert_eq!(
+                    cell.style().fg,
+                    Some(t.text),
+                    "plain listing entry stays in text colour"
+                );
+            }
+        }
+    }
 }

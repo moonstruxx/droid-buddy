@@ -25,6 +25,12 @@ pub struct Theme {
     pub accent: Color,
     pub muted: Color,
     pub text: Color,
+    /// File-picker favourites: a favourited file's line vs a favourited
+    /// directory's line. Two tokens so the pinned section tells the kinds
+    /// apart at a glance; both stay apart from `text` (the listing's colour)
+    /// and from each other in every palette.
+    pub picker_fav_file: Color,
+    pub picker_fav_dir: Color,
     pub viewer_key: Color,
     pub status_bg: Color,
     pub focus_border: Color,
@@ -144,6 +150,11 @@ impl Theme {
             accent: Color::Blue,
             muted: Color::DarkGray,
             text: Color::Reset,
+            // Gold-star amber for file favourites, bright green for directory
+            // favourites: the bright variants stay distinct from the plain
+            // Yellow (shift1/focus) and Green (cv_out/shift4) tokens.
+            picker_fav_file: Color::LightYellow,
+            picker_fav_dir: Color::LightGreen,
             viewer_key: Color::Cyan,
             status_bg: Color::DarkGray,
             focus_border: Color::Yellow,
@@ -229,6 +240,8 @@ impl Theme {
             accent: Color::Reset,
             muted: Color::Reset,
             text: Color::Reset,
+            picker_fav_file: Color::Reset,
+            picker_fav_dir: Color::Reset,
             viewer_key: Color::Reset,
             status_bg: Color::Reset,
             focus_border: Color::Reset,
@@ -310,6 +323,11 @@ impl Theme {
             accent: Color::White,
             muted: Color::DarkGray,
             text: Color::White,
+            // Mid-gray for file favourites, black for directory favourites so
+            // the two kinds stay tellable from each other and from the White
+            // listing text in the grayscale palette.
+            picker_fav_file: Color::Gray,
+            picker_fav_dir: Color::Black,
             viewer_key: Color::Gray,
             status_bg: Color::Black,
             focus_border: Color::White,
@@ -669,6 +687,8 @@ mod tests {
             t.accent,
             t.muted,
             t.text,
+            t.picker_fav_file,
+            t.picker_fav_dir,
             t.viewer_key,
             t.status_bg,
             t.focus_border,
