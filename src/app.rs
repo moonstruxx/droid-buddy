@@ -565,6 +565,12 @@ pub struct App {
     /// hardware token id (e.g. "B1.1") so it can be looked up directly in
     /// `Patch::occurrence_index`.
     pub selected_component: Option<String>,
+    /// The currently selected circuit node (circuit name + instance index), set
+    /// by clicking a node in the graph window or the terminal graph tile (design
+    /// D4). Drives the source-viewer jump, the panel hardware highlight, and the
+    /// terminal tile node highlight. Lives here, not in the window, so selection
+    /// survives surface switches and a window close.
+    pub selected_circuit: Option<NodeId>,
     /// Which pane has keyboard focus while the viewer is open.
     pub viewer_focus: ViewerFocus,
     /// Raw vs prettified rendering for the source pane. Defaults to Raw.
@@ -740,6 +746,7 @@ impl App {
             prefix: None,
             showing_viewer: false,
             selected_component: None,
+            selected_circuit: None,
             viewer_focus: ViewerFocus::Panels,
             source_view_mode: SourceViewMode::Raw,
             occurrence_cursor: 0,
@@ -1654,6 +1661,7 @@ impl App {
             self.clear_diff();
             self.patch = Some(patch);
             self.selected_component = None;
+            self.selected_circuit = None;
             self.occurrence_cursor = 0;
             self.source_scroll = 0;
             self.source_view_mode = SourceViewMode::Raw;
@@ -1702,6 +1710,7 @@ impl App {
         self.tile_stack.close(ViewType::Optimizer);
         self.patch = Some(patch);
         self.selected_component = None;
+        self.selected_circuit = None;
         self.occurrence_cursor = 0;
         self.source_scroll = 0;
         self.source_view_mode = SourceViewMode::Raw;
@@ -1774,6 +1783,7 @@ impl App {
             self.clear_diff();
             self.patch = Some(patch);
             self.selected_component = None;
+            self.selected_circuit = None;
             self.occurrence_cursor = 0;
             self.source_scroll = 0;
             self.source_view_mode = SourceViewMode::Raw;
@@ -1819,6 +1829,7 @@ impl App {
         self.tile_stack.close(ViewType::Optimizer);
         self.patch = Some(patch);
         self.selected_component = None;
+        self.selected_circuit = None;
         self.occurrence_cursor = 0;
         self.source_scroll = 0;
         self.source_view_mode = SourceViewMode::Raw;
@@ -2486,6 +2497,77 @@ impl App {
         self.recompute_influence();
     }
 
+    pub fn select_circuit(&mut self, node: NodeId) {
+        let section_line = self
+            .graph
+            .as_ref()
+            .and_then(|g| g.nodes.iter().find(|n| n.id == node))
+            .map(|n| n.section_index)
+            .and_then(|si| self.patch.as_ref().and_then(|p| p.sections.get(si)))
+            .map(|s| s.header_span.line);
+        self.selected_circuit = Some(node);
+        if let Some(line) = section_line {
+            self.source_scroll = line;
+        }
+        self.occurrence_cursor = 0;
+        // Open + focus the source viewer so the jump is visible (design D4).
+        // `open_view` inserts a tiled slot (deduping if one is already open)
+        // and sets `showing_viewer`, mirroring the validation-modal Enter jump
+        // — a bare `showing_viewer = true` renders nothing once tiles are up.
+        self.viewer_focus = ViewerFocus::Source;
+        self.open_view(ViewType::SourceViewer);
+    }
+
+    /// Clear the circuit selection without moving `source_scroll`.
+    pub fn clear_circuit_selection(&mut self) {
+        self.selected_circuit = None;
+    }
+
+    /// The currently selected circuit node, if any.
+    pub fn selected_circuit(&self) -> Option<&NodeId> {
+        self.selected_circuit.as_ref()
+    }
+
+    /// Global hardware-component indices belonging to the selected circuit's
+    /// section, for the panel hardware highlight. Empty when nothing is
+    /// selected or the section cannot be resolved. Reuses the hover emphasis
+    /// in the physical renderer.
+    pub fn circuit_hw_token_indices(&self) -> Vec<usize> {
+        let Some(node) = self.selected_circuit.as_ref() else {
+            return Vec::new();
+        };
+        let Some(graph) = self.graph.as_ref() else {
+            return Vec::new();
+        };
+        let Some(section_index) = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == *node)
+            .map(|n| n.section_index)
+        else {
+            return Vec::new();
+        };
+        let Some(patch) = self.patch.as_ref() else {
+            return Vec::new();
+        };
+        let Some(section) = patch.sections.get(section_index) else {
+            return Vec::new();
+        };
+        let mut ids: HashSet<String> = HashSet::new();
+        for (_, value) in &section.entries {
+            for token in crate::patch::scan_hw_tokens(value) {
+                ids.insert(token);
+            }
+        }
+        patch
+            .hw_components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| ids.contains(&c.id))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Move occurrence cursor saturating at bounds and sync `source_scroll`
     /// to that occurrence's line. No-op when nothing is selected.
     pub fn jump_to_occurrence(&mut self, idx: usize) {
@@ -2909,6 +2991,147 @@ mod tests {
         assert!(app.selected_component.is_none());
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, 99, "deselection must not move scroll");
+    }
+
+    #[test]
+    fn select_circuit_jumps_source_and_opens_viewer() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        let section_index = app.graph.as_ref().unwrap().nodes[0].section_index;
+        let header_line = app.patch.as_ref().unwrap().sections[section_index]
+            .header_span
+            .line;
+        app.select_circuit(node.clone());
+        assert_eq!(app.selected_circuit(), Some(&node));
+        assert_eq!(
+            app.source_scroll, header_line,
+            "jumps to the section header"
+        );
+        assert_eq!(app.occurrence_cursor, 0);
+        assert!(
+            app.showing_viewer,
+            "source viewer opens so the jump is visible"
+        );
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(
+            app.tile_stack.is_open(ViewType::SourceViewer),
+            "a tiled source-viewer slot opens so the jump renders in the tiled layout"
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+    }
+
+    #[test]
+    fn select_circuit_unknown_node_selects_without_moving_scroll() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.source_scroll = 7;
+        app.select_circuit((String::from("nope"), 99));
+        assert_eq!(app.selected_circuit(), Some(&(String::from("nope"), 99)));
+        assert_eq!(app.source_scroll, 7, "unknown node must not move scroll");
+        assert!(app.showing_viewer);
+        assert!(
+            app.tile_stack.is_open(ViewType::SourceViewer),
+            "selection still opens the viewer slot even for an unknown node"
+        );
+    }
+
+    #[test]
+    fn clear_circuit_selection_keeps_scroll() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        app.select_circuit(node);
+        app.source_scroll = 99;
+        app.clear_circuit_selection();
+        assert!(app.selected_circuit.is_none());
+        assert_eq!(app.source_scroll, 99, "deselection must not move scroll");
+    }
+
+    #[test]
+    fn circuit_hw_token_indices_covers_section_hardware() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        // A node whose section declares a hardware token in its values
+        // (e.g. `button = B1.1`): selecting it must surface that component.
+        let node = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| {
+                app.patch.as_ref().unwrap().sections[n.section_index]
+                    .entries
+                    .iter()
+                    .any(|(_, v)| v.contains("B1.1"))
+            })
+            .expect("arpeggio1 has a button section with B1.1")
+            .id
+            .clone();
+        app.select_circuit(node);
+        let indices = app.circuit_hw_token_indices();
+        let b11_idx = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("B1.1 is a hardware component");
+        assert!(
+            indices.contains(&b11_idx),
+            "section hardware includes B1.1 ({indices:?})"
+        );
+    }
+
+    #[test]
+    fn circuit_hw_token_indices_empty_without_selection() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.circuit_hw_token_indices().is_empty());
+    }
+
+    #[test]
+    fn close_graph_keeps_circuit_selection() {
+        // Design D4: selection is shared App state, so it survives surface
+        // switches (including closing the graph view) instead of living in
+        // the window.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        app.select_circuit(node.clone());
+        app.close_graph();
+        assert_eq!(app.selected_circuit(), Some(&node));
+    }
+
+    #[test]
+    fn load_patch_resets_circuit_selection() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        app.select_circuit(node);
+        assert!(app.selected_circuit.is_some());
+        let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        app.load_patch(second);
+        assert!(
+            app.selected_circuit.is_none(),
+            "a new patch clears the stale circuit selection"
+        );
     }
 
     #[test]

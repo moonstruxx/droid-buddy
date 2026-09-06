@@ -1336,6 +1336,12 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 return;
             };
             app.hovered_graph_node = Some(node_index);
+            // Clicking a node selects its circuit (design D4): shared selection
+            // drives the source-viewer jump, panel hardware highlight, and the
+            // terminal-tile node highlight. Mirrors the window's press-select.
+            if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(node_index)) {
+                app.select_circuit(node.id.clone());
+            }
             // Record the grab offset so the node follows the pointer without
             // jumping to the grab point on the first drag delta.
             if let Some((px, py)) = app.graph_positions.get(node_index).copied() {
@@ -1486,10 +1492,21 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// painted frame (D6: the loop acts on what it owns).
 #[cfg(feature = "gui")]
 pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
-    let Some(camera) = app.graph_camera else {
+    let Some(mut camera) = app.graph_camera else {
         app.hovered_graph_node = None;
         return;
     };
+    // Window pan/zoom reaches the shared camera (design D5): both surfaces
+    // consume the same camera, so a middle-drag or wheel zoom in the window
+    // moves the terminal tile identically. Applied before hit-testing so the
+    // hover/drag hit rects stay aligned with the freshly painted view.
+    if frame.pan_delta != (0.0, 0.0) {
+        camera = crate::gui::camera_pan(&camera, frame.pan_delta.0, frame.pan_delta.1);
+    }
+    if let Some((factor, anchor)) = frame.zoom {
+        camera = crate::gui::camera_zoom_about(&camera, factor, anchor);
+    }
+    app.graph_camera = Some(camera);
     // The node's pixel rect is `world × zoom − pan` at a fixed pixel size, so
     // its world size is the fixed size divided by the zoom (mirrors how the
     // terminal derives node cell rects from fixed node cell dims).
@@ -1512,6 +1529,11 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             return;
         };
         app.hovered_graph_node = Some(node_index);
+        // Clicking a node selects its circuit (design D4) — shared selection
+        // propagates to the source viewer, panels, and terminal tile.
+        if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(node_index)) {
+            app.select_circuit(node.id.clone());
+        }
         let Some((px, py)) = frame.pointer else {
             return;
         };
@@ -3725,6 +3747,56 @@ mod tests {
         assert_eq!(start_moves.get(), 0, "no events fired off-node");
     }
 
+    #[test]
+    fn graph_mouse_down_selects_circuit_and_opens_viewer() {
+        let mut app = graph_app();
+        let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
+            &mut app,
+        );
+        assert_eq!(app.selected_circuit(), Some(&node_id));
+        assert!(
+            app.showing_viewer,
+            "selecting a circuit opens the source viewer"
+        );
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(
+            app.tile_stack.is_open(ViewType::SourceViewer),
+            "a tiled viewer slot opens so the jump renders"
+        );
+        // A click on empty space clears hover but keeps the selection.
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 200, 60),
+            &mut app,
+        );
+        assert_eq!(app.selected_circuit(), Some(&node_id));
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_frame_press_selects_circuit() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph_window();
+        let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        let (x, y) = app.graph_positions[0];
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 5.0, y + 5.0)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.selected_circuit(), Some(&node_id));
+        assert!(app.showing_viewer);
+        assert!(
+            app.tile_stack.is_open(ViewType::SourceViewer),
+            "window press opens a tiled viewer slot"
+        );
+    }
+
     // ── 5.1 regression anchoring inside handler.rs (fixtures/source_navigation.ini) ──
     // Each test below drives real flows end-to-end through handle_event/handle_mouse_event + render
     // so they break if geometry, prefix, or viewer routing drifts. The dedicated
@@ -4352,6 +4424,40 @@ mod tests {
         );
         let editing = app.editing.as_ref().expect("e opens the edit overlay");
         assert_eq!(editing.kind, EditKind::Circuit { node: node.id });
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_pan_and_zoom_reach_shared_camera() {
+        use crate::gui::{camera_pan, camera_zoom_about, WindowFrame};
+        let mut app = app_with_graph_window();
+        let before = app.graph_camera.unwrap();
+        handle_graph_window_frame(
+            &WindowFrame {
+                pan_delta: (10.0, -5.0),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let panned = camera_pan(&before, 10.0, -5.0);
+        assert_eq!(
+            app.graph_camera.unwrap(),
+            panned,
+            "window pan reaches the shared camera"
+        );
+        let anchor = (100.0, 100.0);
+        handle_graph_window_frame(
+            &WindowFrame {
+                zoom: Some((1.5, anchor)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.graph_camera.unwrap(),
+            camera_zoom_about(&panned, 1.5, anchor),
+            "window wheel zoom reaches the shared camera"
+        );
     }
 
     #[cfg(feature = "gui")]
