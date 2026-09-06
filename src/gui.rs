@@ -19,7 +19,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::graph_render::SceneSpec;
+use crate::graph_render::{GraphCamera, SceneSpec};
 
 /// Lifecycle state of the graph window.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -56,6 +56,23 @@ pub struct WindowFrame {
     pub primary_down: bool,
     pub primary_released: bool,
     pub keys: Vec<WindowGraphKey>,
+    /// Middle-button drag pan (spec pixels) to apply to the shared camera.
+    pub pan_delta: (f32, f32),
+    /// Wheel zoom: scale factor plus the pixel anchor the cursor stays on.
+    pub zoom: Option<(f32, (f32, f32))>,
+    /// Active marquee selection over nodes (empty-background left drag).
+    pub marquee: Option<MarqueeSelection>,
+}
+
+/// A marquee (rubber-band) selection over the canvas: the pixel-space drag
+/// rect plus the node indices whose frames intersect it (task 3.3). The rect
+/// is normalized so the drag direction does not matter.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarqueeSelection {
+    /// Pixel rect `(x, y, w, h)` of the drag, in egui points / spec pixels.
+    pub rect: (f32, f32, f32, f32),
+    /// Indices into `SceneSpec::nodes` selected by the marquee.
+    pub nodes: Vec<usize>,
 }
 
 /// Why a window could not be opened.
@@ -124,6 +141,12 @@ pub struct GraphWindow {
     state: WindowState,
     /// The scene spec the window draws; `None` paints an empty canvas.
     scene: Option<SceneSpec>,
+    /// Window-local marquee selection (task 3.2): indices into the current
+    /// scene's nodes picked by an empty-canvas drag. Task 3.3 hooks this into
+    /// the shared `App` selection; here it only drives the canvas highlight.
+    /// Cleared when a new scene replaces the current one (stale indices must
+    /// not survive a graph rebuild).
+    selected_nodes: Vec<usize>,
 }
 
 /// Reports a failed GPU init once; the window stays open but unpainted and
@@ -225,8 +248,18 @@ impl GraphWindow {
 
     /// Sets the scene spec the window draws on its next frame; `None` clears
     /// the canvas. Task 3.1 calls this from `App` with the shared camera and
-    /// theme each frame, so both surfaces show the same graph.
+    /// theme each frame, so both surfaces show the same graph. A scene with a
+    /// different node count replaces the previous one (graph rebuilt), so the
+    /// window-local marquee selection is dropped rather than left stale.
     pub fn set_scene(&mut self, scene: Option<&SceneSpec>) {
+        let replaced = match (&self.scene, scene) {
+            (Some(prev), Some(next)) => prev.nodes.len() != next.nodes.len(),
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        if replaced {
+            self.selected_nodes.clear();
+        }
         self.scene = scene.cloned();
         self.request_redraw();
     }
@@ -251,13 +284,19 @@ impl GraphWindow {
                 }
             }
             let scene = self.scene.as_ref();
+            let selected = &self.selected_nodes;
             EGUI.with(|slot| {
                 slot.borrow_mut()
                     .as_mut()
-                    .map(|surface| surface.paint(window, scene))
+                    .map(|surface| surface.paint(window, scene, selected))
             })
         })
         .flatten()
+        // Commit the frame's marquee state into the window-local selection so
+        // the highlight survives the drag (task 3.2).
+        .inspect(|frame| {
+            self.selected_nodes = next_selection(frame, &self.selected_nodes);
+        })
     }
 }
 
@@ -371,7 +410,13 @@ impl EguiSurface {
     /// frame's input state (task 3.1) for the loop to map onto `App`
     /// mutations. Pointer positions are egui points; the scene is painted 1:1
     /// (one spec pixel = one egui point), so they double as spec-pixel coords.
-    fn paint(&mut self, window: &Window, scene: Option<&SceneSpec>) -> WindowFrame {
+    /// `selected` is the window-local marquee selection driving the highlight.
+    fn paint(
+        &mut self,
+        window: &Window,
+        scene: Option<&SceneSpec>,
+        selected: &[usize],
+    ) -> WindowFrame {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         let scale = window.scale_factor() as f32;
@@ -401,7 +446,13 @@ impl EguiSurface {
             .native_pixels_per_point = Some(scale);
 
         let full_output = self.context.run_ui(raw_input, |ui| {
-            paint_scene(ui.painter(), ui.max_rect().size(), scene);
+            paint_scene(
+                ui.painter(),
+                ui.max_rect().size(),
+                scene,
+                &self.context,
+                selected,
+            );
         });
 
         // Task 3.1: snapshot the processed input so the loop can drive `App`
@@ -425,12 +476,32 @@ impl EguiSurface {
             {
                 keys.push(WindowGraphKey::BeginEdit);
             }
+            // Task 3.2/3.3: middle-drag pans the shared camera, wheel zooms
+            // about the cursor, and an empty-canvas left drag selects nodes.
+            // `smooth_scroll_delta.y` is positive when scrolling down (zoom
+            // out), so the negation makes wheel-up zoom in.
+            let pan_delta = if i.pointer.middle_down() {
+                let d = i.pointer.delta();
+                (d.x, d.y)
+            } else {
+                (0.0, 0.0)
+            };
+            let zoom = if i.smooth_scroll_delta.y.abs() > f32::EPSILON {
+                let factor = ((-i.smooth_scroll_delta.y) * ZOOM_SENSITIVITY).exp();
+                let factor = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
+                pointer.map(|p| (factor, p))
+            } else {
+                None
+            };
             WindowFrame {
                 pointer,
                 primary_pressed: i.pointer.primary_pressed(),
                 primary_down: i.pointer.primary_down(),
                 primary_released: i.pointer.primary_released(),
                 keys,
+                pan_delta,
+                zoom,
+                marquee: frame_marquee(scene, i),
             }
         });
         self.winit_state
@@ -540,7 +611,13 @@ impl EguiSurface {
 /// shared `GraphCamera`, painted 1:1 (one spec pixel = one egui point), so
 /// both surfaces show the same view. Colors come only from the resolved spec
 /// RGB — never theme tokens below the spec.
-fn paint_scene(painter: &egui::Painter, canvas: egui::Vec2, scene: Option<&SceneSpec>) {
+fn paint_scene(
+    painter: &egui::Painter,
+    canvas: egui::Vec2,
+    scene: Option<&SceneSpec>,
+    ctx: &egui::Context,
+    selected: &[usize],
+) {
     let Some(spec) = scene else {
         return; // No scene: the swapchain clear color shows through.
     };
@@ -639,6 +716,9 @@ fn paint_scene(painter: &egui::Painter, canvas: egui::Vec2, scene: Option<&Scene
             );
         }
     }
+
+    // Task 3.2/3.3: selection, navigation and inspection overlays.
+    paint_polish(painter, canvas, scene, ctx, selected);
 }
 
 /// Fill the direction arrow at an edge's `end`, mirroring the tiny-skia
@@ -672,6 +752,399 @@ fn rgb((r, g, b): (u8, u8, u8)) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
 }
 
+fn rgba((r, g, b): (u8, u8, u8), a: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// Wheel-zoom sensitivity: exponent multiplier on the scroll delta so a
+/// typical wheel tick reads as a gentle zoom step.
+const ZOOM_SENSITIVITY: f32 = 0.01;
+/// Largest factor a single scroll event may apply; bounds wheel zoom so a
+/// fast spin cannot blow the camera off the scene.
+const MAX_ZOOM_STEP: f32 = 1.5;
+/// Fixed minimap size `(w, h)` in egui points, bottom-left corner.
+const MINIMAP_SIZE: (f32, f32) = (180.0, 120.0);
+/// Margin between the minimap panel and the canvas edge.
+const MINIMAP_PAD: f32 = 10.0;
+/// Pixel margin around a node frame when attributing an edge endpoint to it.
+const EDGE_ATTRIB_MARGIN: f32 = 8.0;
+/// Minimum drag extent before a marquee is reported; a click on empty canvas
+/// (no movement) is not a marquee.
+const MARQUEE_MIN_DRAG: f32 = 2.0;
+
+/// Copy of `cam` panned by `(dx, dy)` spec pixels. Exposed so the windowed
+/// loop can apply the window's middle-drag pan to the shared
+/// `App::graph_camera` through the existing `GraphCamera::pan_by` API.
+/// Pure and window-free.
+pub fn camera_pan(cam: &GraphCamera, dx: f32, dy: f32) -> GraphCamera {
+    let mut next = *cam;
+    next.pan_by(dx, dy);
+    next
+}
+
+/// Copy of `cam` zoomed by `factor` about the spec-pixel anchor `(ax, ay)`:
+/// the world point under the anchor stays under the anchor after the zoom.
+/// Mirrors the terminal `+`/`-` zoom, but anchored at the cursor instead of
+/// the canvas centre. Pure and window-free.
+pub fn camera_zoom_about(cam: &GraphCamera, factor: f32, anchor_px: (f32, f32)) -> GraphCamera {
+    let mut next = *cam;
+    let (wx, wy) = next.pixel_to_world(anchor_px.0, anchor_px.1);
+    next.zoom_by(factor, (wx, wy));
+    next
+}
+
+/// Index of the `scene` node whose pixel frame contains `(px, py)`, first
+/// match wins (mirrors the terminal handler's hit-testing over the spec's own
+/// pixel rects). `None` over empty canvas.
+fn node_at(scene: &SceneSpec, px: f32, py: f32) -> Option<usize> {
+    scene
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, n)| px >= n.x && px < n.x + n.w && py >= n.y && py < n.y + n.h)
+        .map(|(i, _)| i)
+}
+
+/// The axis-aligned rect spanning two pixel corners, normalized so the drag
+/// direction is irrelevant.
+fn normalize_rect(a: (f32, f32), b: (f32, f32)) -> (f32, f32, f32, f32) {
+    (
+        a.0.min(b.0),
+        a.1.min(b.1),
+        (a.0 - b.0).abs(),
+        (a.1 - b.1).abs(),
+    )
+}
+
+/// Indices of `scene` nodes whose pixel frames intersect `rect`, strict AABB
+/// overlap (a zero-area touch on a shared edge does not count).
+fn nodes_in_rect(scene: &SceneSpec, (x, y, w, h): (f32, f32, f32, f32)) -> Vec<usize> {
+    scene
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.x < x + w && n.x + n.w > x && n.y < y + h && n.y + n.h > y)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The active marquee over `scene` for the given pointer state: present only
+/// while the primary button is held and the press began on empty canvas (a
+/// press on a node is a node drag, not a marquee). `None` when idle.
+fn frame_marquee(scene: Option<&SceneSpec>, i: &egui::InputState) -> Option<MarqueeSelection> {
+    if !i.pointer.primary_down() {
+        return None;
+    }
+    let origin = i.pointer.press_origin()?;
+    let scene = scene?;
+    if node_at(scene, origin.x, origin.y).is_some() {
+        return None;
+    }
+    let cur = i.pointer.latest_pos()?;
+    let rect = normalize_rect((origin.x, origin.y), (cur.x, cur.y));
+    if rect.2 < MARQUEE_MIN_DRAG && rect.3 < MARQUEE_MIN_DRAG {
+        return None; // a click, not a marquee drag
+    }
+    let nodes = nodes_in_rect(scene, rect);
+    Some(MarqueeSelection { rect, nodes })
+}
+
+/// The window-local selection after this frame: a live or committed marquee
+/// replaces the previous selection (so the highlight follows the drag), a
+/// fresh press that is not a marquee (a node grab or a plain empty click)
+/// clears it, and anything else keeps it. Pure so the marquee lifecycle tests
+/// without a window.
+fn next_selection(frame: &WindowFrame, previous: &[usize]) -> Vec<usize> {
+    if let Some(marquee) = &frame.marquee {
+        return marquee.nodes.clone();
+    }
+    if frame.primary_pressed {
+        return Vec::new();
+    }
+    previous.to_vec()
+}
+
+/// Scene pixel bounds `(min_x, min_y, max_x, max_y)` over every node frame,
+/// for the minimap's world-to-mini mapping. All zeros on an empty scene.
+fn scene_bounds(scene: &SceneSpec) -> (f32, f32, f32, f32) {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for n in &scene.nodes {
+        min_x = min_x.min(n.x);
+        min_y = min_y.min(n.y);
+        max_x = max_x.max(n.x + n.w);
+        max_y = max_y.max(n.y + n.h);
+    }
+    if scene.nodes.is_empty() {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (min_x, min_y, max_x, max_y)
+    }
+}
+
+/// Minimap layout: the bottom-left panel rect, the scaled viewport box (the
+/// whole canvas in scene space), and each node's scaled frame. Pure geometry
+/// so it tests without a window.
+struct Minimap {
+    panel: (f32, f32, f32, f32),
+    viewport: (f32, f32, f32, f32),
+    nodes: Vec<(f32, f32, f32, f32)>,
+}
+
+fn minimap_layout(scene: &SceneSpec, canvas: egui::Vec2) -> Option<Minimap> {
+    if scene.nodes.is_empty() {
+        return None;
+    }
+    let (mw, mh) = MINIMAP_SIZE;
+    let (px, py) = (MINIMAP_PAD, canvas.y - mh - MINIMAP_PAD);
+    let panel = (px, py, mw, mh);
+    let (bx, by, bw, bh) = scene_bounds(scene);
+    if bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    // A layout that fits the canvas needs no map; only show the minimap when
+    // the world overflows the viewport in at least one axis.
+    if bw <= canvas.x && bh <= canvas.y {
+        return None;
+    }
+    let inner = (px + 4.0, py + 4.0, mw - 8.0, mh - 8.0);
+    let (ix, iy, iw, ih) = inner;
+    let sx = iw / bw;
+    let sy = ih / bh;
+    let map = |wx: f32, wy: f32| (ix + (wx - bx) * sx, iy + (wy - by) * sy);
+    let nodes = scene
+        .nodes
+        .iter()
+        .map(|n| {
+            let (x0, y0) = map(n.x, n.y);
+            let (x1, y1) = map(n.x + n.w, n.y + n.h);
+            (x0, y0, x1 - x0, y1 - y0)
+        })
+        .collect();
+    // The visible canvas occupies `[0,0] x canvas` in scene-pixel space.
+    let (v0, v0y) = map(0.0, 0.0);
+    let (v1, v1y) = map(canvas.x, canvas.y);
+    // Clamp the viewport box to the panel: when the canvas is larger than the
+    // scene (zoomed out so the whole scene fits), the full-canvas box would
+    // overrun the panel; clamping makes it read as "the whole scene is
+    // visible". When zoomed in, the box is already a sub-rect and is
+    // unchanged.
+    let (px2, py2, pw2, ph2) = panel;
+    let cx = v0.clamp(px2, px2 + pw2);
+    let cy = v0y.clamp(py2, py2 + ph2);
+    let cx2 = (v1).clamp(px2, px2 + pw2);
+    let cy2 = (v1y).clamp(py2, py2 + ph2);
+    let viewport = (cx, cy, cx2 - cx, cy2 - cy);
+    Some(Minimap {
+        panel,
+        viewport,
+        nodes,
+    })
+}
+
+/// The node whose frame is nearest to a scene point, within a margin: used to
+/// attribute an edge's start/end port to its source/sink node for the latency
+/// readout. The nearest-centre tiebreak keeps two abutting nodes from both
+/// claiming a shared-edge port.
+fn nearest_node_at(scene: &SceneSpec, px: f32, py: f32) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, n) in scene.nodes.iter().enumerate() {
+        if px >= n.x - EDGE_ATTRIB_MARGIN
+            && px <= n.x + n.w + EDGE_ATTRIB_MARGIN
+            && py >= n.y - EDGE_ATTRIB_MARGIN
+            && py <= n.y + n.h + EDGE_ATTRIB_MARGIN
+        {
+            let dx = n.x + n.w / 2.0 - px;
+            let dy = n.y + n.h / 2.0 - py;
+            let d = dx * dx + dy * dy;
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Tooltip text for a hovered node: the circuit label (with the occurrence
+/// index when the name repeats) plus a latency readout aggregated from the
+/// node's outgoing edges' resolved [`EdgeLatency`] states. No latency data
+/// yields just the label. The window cannot consult `latency::CostModel` (the
+/// scene is the only shared source it sees), so it reports the same ramp
+/// classification the terminal colours edges with.
+fn node_tooltip(scene: &SceneSpec, node_index: usize) -> String {
+    let node = &scene.nodes[node_index];
+    let repeated = scene
+        .nodes
+        .iter()
+        .filter(|n| n.circuit == node.circuit && !node.circuit.is_empty())
+        .count()
+        > 1;
+    let mut label = if node.circuit.is_empty() {
+        format!("node #{node_index}")
+    } else if repeated {
+        format!("{} ({})", node.circuit, node.instance_index)
+    } else {
+        node.circuit.clone()
+    };
+    let outgoing = scene
+        .edges
+        .iter()
+        .filter(|e| nearest_node_at(scene, e.start.0, e.start.1) == Some(node_index))
+        .collect::<Vec<_>>();
+    let latencies = outgoing
+        .iter()
+        .filter_map(|e| e.latency)
+        .collect::<Vec<_>>();
+    if latencies.is_empty() {
+        return label;
+    }
+    let hot = latencies.iter().map(|l| l.ramp_stop).max().unwrap_or(0);
+    let back = latencies.iter().filter(|l| l.back_edge).count();
+    label.push_str(&format!(
+        " · latency {hot}/4 · {back} back edge{}",
+        if back == 1 { "" } else { "s" }
+    ));
+    label
+}
+
+/// Draws the canvas polish overlays on top of `paint_scene`: the minimap, the
+/// active marquee selection, the committed selection's node highlight, and the
+/// hovered node's latency tooltip. Every color derives from the resolved scene
+/// spec RGB (never hardcoded). The tooltip is drawn last so it stays readable
+/// above marquee, selection, and minimap.
+fn paint_polish(
+    painter: &egui::Painter,
+    canvas: egui::Vec2,
+    scene: Option<&SceneSpec>,
+    ctx: &egui::Context,
+    selected: &[usize],
+) {
+    let Some(spec) = scene else {
+        return;
+    };
+    let accent = spec
+        .nodes
+        .first()
+        .map(|n| n.border)
+        .or_else(|| spec.clusters.first().map(|c| c.border))
+        .unwrap_or(spec.background);
+    if let Some(minimap) = minimap_layout(spec, canvas) {
+        paint_minimap(painter, spec, &minimap, accent);
+    }
+    // The committed marquee selection: an accent overlay border on each picked
+    // node frame, drawn above the scene but below the in-progress marquee rect
+    // and the tooltip. Out-of-range indices (stale after a rebuild) are skipped.
+    for &i in selected {
+        let Some(node) = spec.nodes.get(i) else {
+            continue;
+        };
+        let rect =
+            egui::Rect::from_min_size(egui::pos2(node.x, node.y), egui::vec2(node.w, node.h));
+        painter.rect(
+            rect,
+            egui::CornerRadius::same(node.radius.clamp(0.0, node.w.min(node.h) / 2.0) as u8),
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(2.0, rgb(accent)),
+            egui::StrokeKind::Middle,
+        );
+    }
+    ctx.input(|i| {
+        if let Some(marquee) = frame_marquee(Some(spec), i) {
+            let (x, y, w, h) = marquee.rect;
+            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+            painter.rect_filled(rect, 0.0, rgba(accent, 30));
+            painter.rect(
+                rect,
+                0.0,
+                egui::Color32::TRANSPARENT,
+                egui::Stroke::new(1.0, rgb(accent)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(pos) = i.pointer.latest_pos() {
+            if let Some(idx) = node_at(spec, pos.x, pos.y) {
+                paint_tooltip(painter, spec, canvas, pos, idx);
+            }
+        }
+    });
+}
+
+/// The hovered node's tooltip card: a translucent backdrop with the accent
+/// border, placed above-right of the cursor and clamped to the canvas.
+fn paint_tooltip(
+    painter: &egui::Painter,
+    spec: &SceneSpec,
+    canvas: egui::Vec2,
+    pos: egui::Pos2,
+    node_index: usize,
+) {
+    let node = &spec.nodes[node_index];
+    let font = egui::FontId::proportional(13.0);
+    let galley =
+        painter.layout_no_wrap(node_tooltip(spec, node_index), font, rgb(node.label_color));
+    let pad = 6.0;
+    let size = galley.size() + egui::vec2(pad * 2.0, pad * 2.0);
+    let min_x = (pos.x + 12.0).clamp(0.0, (canvas.x - size.x).max(0.0));
+    let min_y = (pos.y - size.y - 8.0).clamp(0.0, (canvas.y - size.y).max(0.0));
+    let min = egui::pos2(min_x, min_y);
+    let rect = egui::Rect::from_min_size(min, size);
+    painter.rect(
+        rect,
+        egui::CornerRadius::same(4),
+        rgba(spec.background, 235),
+        egui::Stroke::new(1.0, rgb(node.border)),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        rect.min + egui::vec2(pad, pad),
+        galley,
+        rgb(node.label_color),
+    );
+}
+
+/// The minimap panel: translucent scene-background backdrop, accent-bordered,
+/// node frames as accent rects, and a viewport indicator showing what the
+/// canvas currently displays.
+fn paint_minimap(
+    painter: &egui::Painter,
+    spec: &SceneSpec,
+    minimap: &Minimap,
+    accent: (u8, u8, u8),
+) {
+    let (px, py, pw, ph) = minimap.panel;
+    let panel = egui::Rect::from_min_size(egui::pos2(px, py), egui::vec2(pw, ph));
+    painter.rect_filled(
+        panel,
+        egui::CornerRadius::same(4),
+        rgba(spec.background, 215),
+    );
+    painter.rect(
+        panel,
+        egui::CornerRadius::same(4),
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, rgb(accent)),
+        egui::StrokeKind::Inside,
+    );
+    for &(x, y, w, h) in &minimap.nodes {
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w.max(1.0), h.max(1.0))),
+            egui::CornerRadius::same(1),
+            rgb(accent),
+        );
+    }
+    let (vx, vy, vw, vh) = minimap.viewport;
+    let vrect = egui::Rect::from_min_size(egui::pos2(vx, vy), egui::vec2(vw, vh));
+    painter.rect(
+        vrect,
+        0.0,
+        rgba(accent, 40),
+        egui::Stroke::new(1.0, rgb(accent)),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// Destroys the graph window surface and its canvas; called by the panic hook
 /// in `main.rs` so a panic cannot leave an orphaned window on the desktop.
 ///
@@ -694,4 +1167,212 @@ pub fn destroy_window_for_panic() {
             *handle = None;
         }
     });
+}
+#[cfg(all(test, feature = "gui"))]
+mod tests {
+    use super::*;
+    use crate::graph_render::{CableKind, EdgeLatency, EdgeSpec, NodeSpec};
+
+    fn scene() -> SceneSpec {
+        SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![
+                NodeSpec {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 80.0,
+                    radius: 8.0,
+                    fill: (20, 20, 20),
+                    border: (200, 200, 200),
+                    border_width: 1.0,
+                    label: "copy".into(),
+                    label_color: (255, 255, 255),
+                    circuit: "copy".into(),
+                    instance_index: 0,
+                    input_port: false,
+                    output_port: true,
+                },
+                NodeSpec {
+                    x: 260.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 80.0,
+                    radius: 8.0,
+                    fill: (20, 20, 20),
+                    border: (200, 200, 200),
+                    border_width: 1.0,
+                    label: "seq".into(),
+                    label_color: (255, 255, 255),
+                    circuit: "seq".into(),
+                    instance_index: 0,
+                    input_port: true,
+                    output_port: true,
+                },
+                NodeSpec {
+                    x: 500.0,
+                    y: 300.0,
+                    w: 200.0,
+                    h: 80.0,
+                    radius: 8.0,
+                    fill: (20, 20, 20),
+                    border: (200, 200, 200),
+                    border_width: 1.0,
+                    label: "seq".into(),
+                    label_color: (255, 255, 255),
+                    circuit: "seq".into(),
+                    instance_index: 1,
+                    input_port: true,
+                    output_port: false,
+                },
+            ],
+            edges: vec![EdgeSpec {
+                start: (200.0, 40.0),
+                end: (260.0, 40.0),
+                ctrl: (230.0, 40.0),
+                color: (0, 255, 0),
+                width: 2.0,
+                kind: CableKind::Audio,
+                error: false,
+                dim: false,
+                diff: None,
+                latency: Some(EdgeLatency {
+                    ramp_stop: 2,
+                    back_edge: false,
+                }),
+            }],
+            clusters: vec![],
+        }
+    }
+
+    #[test]
+    fn camera_pan_shifts_pan() {
+        let cam = GraphCamera::default();
+        let next = camera_pan(&cam, 12.0, -5.0);
+        assert_eq!(next.pan, (cam.pan.0 + 12.0, cam.pan.1 - 5.0));
+    }
+
+    #[test]
+    fn camera_zoom_about_keeps_anchor_pixel_stable() {
+        let cam = GraphCamera::default();
+        let anchor = (333.0, 111.0);
+        let (wx, wy) = cam.pixel_to_world(anchor.0, anchor.1);
+        let next = camera_zoom_about(&cam, 1.5, anchor);
+        let (px, py) = next.world_to_pixel(wx, wy);
+        assert!((px - anchor.0).abs() < 1e-3 && (py - anchor.1).abs() < 1e-3);
+    }
+
+    #[test]
+    fn node_at_hits_frame_and_misses_empty() {
+        let s = scene();
+        assert_eq!(node_at(&s, 10.0, 10.0), Some(0));
+        assert_eq!(node_at(&s, 199.0, 79.0), Some(0));
+        assert_eq!(node_at(&s, 200.0, 40.0), None); // shared edge is excluded
+        assert_eq!(node_at(&s, 999.0, 999.0), None);
+    }
+
+    #[test]
+    fn nodes_in_rect_selects_intersecting_frames() {
+        let s = scene();
+        // Span the top row only: nodes 0 and 1.
+        assert_eq!(nodes_in_rect(&s, (50.0, -10.0, 600.0, 100.0)), vec![0, 1]);
+        // A rect over node 2 alone.
+        assert_eq!(nodes_in_rect(&s, (510.0, 310.0, 10.0, 10.0)), vec![2]);
+        // No overlap at all.
+        assert!(nodes_in_rect(&s, (900.0, 900.0, 10.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn normalize_rect_orders_any_drag_direction() {
+        let a = (300.0, 50.0);
+        let b = (100.0, 200.0);
+        let (x, y, w, h) = normalize_rect(a, b);
+        assert_eq!((x, y, w, h), (100.0, 50.0, 200.0, 150.0));
+        assert_eq!(normalize_rect(b, a), normalize_rect(a, b));
+    }
+
+    #[test]
+    fn tooltip_shows_circuit_and_latency_readout() {
+        let s = scene();
+        // Node 0 has an outgoing edge with ramp_stop 2, no back edge.
+        let tip = node_tooltip(&s, 0);
+        assert!(tip.contains("copy"));
+        assert!(tip.contains("latency 2/4"));
+        assert!(tip.contains("0 back edges"));
+        // Node 2 has no outgoing edges: label only.
+        assert_eq!(node_tooltip(&s, 2), "seq (1)");
+    }
+
+    #[test]
+    fn tooltip_disambiguates_repeated_circuit_names() {
+        let s = scene();
+        let tip = node_tooltip(&s, 1);
+        assert!(tip.contains("seq (0)"));
+    }
+
+    #[test]
+    fn minimap_maps_nodes_and_viewport_into_panel() {
+        let s = scene();
+        // Scene bounds (700×380) overflow the 400×300 canvas, so the map shows.
+        let m = minimap_layout(&s, egui::vec2(400.0, 300.0)).unwrap();
+        let (px, py, pw, ph) = m.panel;
+        assert_eq!((px, py, pw, ph), (10.0, 170.0, 180.0, 120.0));
+        // Every node frame lands inside the panel's inner area.
+        for &(x, y, w, h) in &m.nodes {
+            assert!(x >= px && x + w <= px + pw && y >= py && y + h <= py + ph);
+        }
+        // The viewport box is the whole canvas mapped into mini space; the
+        // scene starts at the origin, so the viewport's top-left is the
+        // mapping of (0,0) and must sit inside the panel.
+        let (vx, vy, vw, vh) = m.viewport;
+        assert!(vx >= px && vy >= py && vx + vw <= px + pw && vy + vh <= py + ph);
+        assert!(vw > 0.0 && vh > 0.0);
+    }
+
+    #[test]
+    fn minimap_hidden_when_layout_fits_canvas() {
+        let s = scene();
+        // Scene bounds (700×380) fit the 1000×800 canvas: no map needed.
+        assert!(minimap_layout(&s, egui::vec2(1000.0, 800.0)).is_none());
+    }
+
+    #[test]
+    fn next_selection_commits_marquee_and_clears_on_plain_press() {
+        let s = scene();
+        let mut prev: Vec<usize> = Vec::new();
+        // A live marquee over the top row selects nodes 0 and 1.
+        let marquee = MarqueeSelection {
+            rect: (50.0, -10.0, 600.0, 100.0),
+            nodes: nodes_in_rect(&s, (50.0, -10.0, 600.0, 100.0)),
+        };
+        let dragging = WindowFrame {
+            marquee: Some(marquee.clone()),
+            primary_pressed: false,
+            ..WindowFrame::default()
+        };
+        prev = next_selection(&dragging, &prev);
+        assert_eq!(prev, vec![0, 1]);
+        // The release frame has no marquee (primary no longer down) and no
+        // fresh press: the committed selection survives.
+        let released = WindowFrame::default();
+        assert_eq!(next_selection(&released, &prev), vec![0, 1]);
+        // A fresh press that is not a marquee (a node grab or empty click)
+        // clears the window-local selection.
+        let pressed = WindowFrame {
+            primary_pressed: true,
+            ..WindowFrame::default()
+        };
+        assert!(next_selection(&pressed, &prev).is_empty());
+    }
+
+    #[test]
+    fn minimap_empty_scene_is_none() {
+        let empty = SceneSpec {
+            background: (0, 0, 0),
+            nodes: vec![],
+            edges: vec![],
+            clusters: vec![],
+        };
+        assert!(minimap_layout(&empty, egui::vec2(800.0, 600.0)).is_none());
+    }
 }
