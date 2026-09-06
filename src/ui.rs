@@ -2047,6 +2047,25 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // The box path shares the persistent camera with the kitty path (design
+    // D7): seed a frame-the-graph fit on the first frame and publish the
+    // canvas pixel size, so `+`/`-` zoom presets and arrow pan apply to both
+    // renderers identically (`render_graph_kitty` seeds on its own first
+    // frame). `graph_canvas_px` anchors preset zoom at the canvas centre.
+    if app.graph_camera.is_none()
+        && app
+            .graph
+            .as_ref()
+            .is_some_and(|g| app.graph_positions.len() == g.nodes.len())
+    {
+        app.graph_camera = Some(graph_fit_camera(&app.graph_positions, area));
+    }
+    let canvas_px = (
+        (area.width as f32 * GRAPH_CELL_W_PX).max(2.0) as u32,
+        (area.height as f32 * GRAPH_CELL_H_PX).max(2.0) as u32,
+    );
+    app.graph_canvas_px = Some((canvas_px.0 as f32, canvas_px.1 as f32));
+
     // Circuit-label override for node titles (FULL pane): store + patch
     // captured before the borrow split below.
     let circuit_store = app.current_circuit_store();
@@ -2062,6 +2081,7 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     // Copyable state read before the borrow split below.
     let hovered = app.hovered_graph_node;
     let latency_coloring = app.latency_coloring;
+    let cam = app.graph_camera;
 
     // Split `app` field borrows so reading the graph and publishing cluster
     // rects (a renderer→handler handoff) coexist within one frame.
@@ -2070,6 +2090,8 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         graph_positions,
         graph_cluster_rects,
         graph_node_rects: node_rect_field,
+        graph_camera: camera_field,
+        graph_zoom_preset: zoom_preset_field,
         disabled_circuits,
         ..
     } = app;
@@ -2077,11 +2099,22 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // Map frozen solver positions (floats in a virtual plane) onto the surface:
-    // the bounding box of all positions stretches to fill the usable area, so
-    // any set of positions lands on-screen deterministically (design D8/Open
-    // Questions allow an implementation-time fit).
-    let node_rects = graph_node_rects(graph_positions, area, &graph.nodes);
+    // Map frozen solver positions (floats in a virtual plane) onto the surface
+    // through the stored camera (seeded to the fit on the first frame above):
+    // the camera's zoom/pan — preset `+`/`-` multipliers and arrow pan — now
+    // drive the box render exactly like the kitty image path (design D7).
+    let mut cam = cam.unwrap_or_else(|| graph_fit_camera(graph_positions, area));
+    let mut node_rects = graph_node_rects_with_camera(graph_positions, area, &graph.nodes, cam);
+    if !node_rects.iter().any(|r| r.width > 0 && r.height > 0) {
+        // The stored camera maps every node off-canvas (extreme zoom-out or
+        // pan): re-anchor to the frame-the-graph fit so the pane never stays
+        // blank — a legitimately zoomed-out view shows the graph small but
+        // present, never an empty pane. User pan/zoom survives otherwise.
+        cam = graph_fit_camera(graph_positions, area);
+        node_rects = graph_node_rects_with_camera(graph_positions, area, &graph.nodes, cam);
+        *camera_field = Some(cam);
+        *zoom_preset_field = 5;
+    }
     let surface = frame.area();
 
     // Clusters first so node frames draw over their containers' interiors.
@@ -2147,17 +2180,31 @@ fn render_graph_empty(frame: &mut Frame, area: Rect) {
 /// Map each frozen solver position onto a screen rect for its node frame,
 /// through the same width-first camera fit as the kitty image path (design
 /// D5): the fit preserves aspect ratio, prefers filling the canvas width, and
-/// the `GRAPH_MIN_NODE_PX` clamp keeps tight node chains at least
-/// `GRAPH_NODE_WIDTH` cells apart so frames never mush into 1–2 chars.
-/// Deterministic: the same positions + area always map to the same rects. A
-/// node whose frame lies fully outside the area maps to a zero rect — callers
-/// skip zero rects (drawing, edges, cluster union) so an overflowing world
-/// never draws off-screen ghosts.
+/// frames the whole world — framing wins over the `GRAPH_MIN_NODE_PX` floor
+/// (bug droid_tui-ttz), so the initial view shows every circuit and `+`/`-`
+/// zoom about that fit. Deterministic: the same positions + area always map
+/// to the same rects. A node whose frame lies fully outside the area maps to
+/// a zero rect — callers skip zero rects (drawing, edges, cluster union) so
+/// an overflowing world never draws off-screen ghosts.
+#[cfg(test)]
 fn graph_node_rects(positions: &[(f32, f32)], area: Rect, nodes: &[GraphNode]) -> Vec<Rect> {
+    graph_node_rects_with_camera(positions, area, nodes, graph_fit_camera(positions, area))
+}
+
+/// Map each frozen solver position onto a screen rect through a *given*
+/// camera (`graph_node_rects` fits one; the render path passes the stored
+/// `App::graph_camera` so preset zoom and pan apply to the box path too —
+/// design D7). The `node_rect_at` clamp is shared, so published hit rects
+/// stay in-bounds and drag/hover stay aligned with the drawn frames.
+fn graph_node_rects_with_camera(
+    positions: &[(f32, f32)],
+    area: Rect,
+    nodes: &[GraphNode],
+    cam: GraphCamera,
+) -> Vec<Rect> {
     if positions.len() != nodes.len() {
         return Vec::new();
     }
-    let cam = graph_fit_camera(positions, area);
     positions
         .iter()
         .map(|&(x, y)| {
@@ -5750,6 +5797,448 @@ mod graph_view_tests {
         for r in &rects {
             assert!(r.width >= 1 && r.height >= 1, "tall world stays framed");
             assert!(r.x + r.width <= area.width && r.y + r.height <= area.height);
+        }
+    }
+
+    #[test]
+    fn initial_fit_frames_every_node_of_a_wide_world_in_area() {
+        // Bug droid_tui-ttz: the initial-fit legibility floor overrode the
+        // width-first fit on a wide world, zooming in to a single circuit
+        // and zero-recting (skipping) every other node. Framing now wins, so
+        // after one full box-path render (TestBackend, kitty forced
+        // unsupported) the whole chain publishes in-area: the publish loop
+        // skips zero rects, so the count matching the node count is the proof
+        // that no node landed off-viewport.
+        let nodes: Vec<GraphNode> = (0..40)
+            .map(|i| node(&format!("n{i}"), 0, "copy", i))
+            .collect();
+        let positions: Vec<(f32, f32)> =
+            (0..40).map(|i| (i as f32 * 25.0, (i % 4) as f32)).collect();
+        let graph = Graph {
+            nodes: nodes.clone(),
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, positions);
+        let buf = buffer_for(&mut app, 120, 40);
+        let area = graph_main_area(120, 40);
+
+        assert_eq!(
+            app.graph_node_rects.len(),
+            nodes.len(),
+            "every node publishes a frame: {} of {} skipped",
+            nodes.len() - app.graph_node_rects.len(),
+            nodes.len()
+        );
+        for &(i, r) in &app.graph_node_rects {
+            assert!(
+                r.width >= 1 && r.height >= 1,
+                "node {i} frame must not be zero"
+            );
+            assert!(r.x >= area.x && r.y >= area.y, "node {i} starts in-area");
+            assert!(
+                r.x + r.width <= area.x + area.width && r.y + r.height <= area.y + area.height,
+                "node {i} frame overflows the pane: {r:?}"
+            );
+        }
+        // The far corner of the chain is on-screen, and frames actually drew.
+        let last = app.graph_node_rects.last().unwrap().1;
+        assert!(last.x + last.width <= area.width, "last node visible");
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("╭"), "box frames drawn for the whole chain");
+    }
+
+    #[test]
+    fn box_path_zoom_presets_change_published_rects_and_never_blank() {
+        // The box path must render through the stored camera (seeded on the
+        // first frame exactly like the kitty path), so `+`/`-` presets change
+        // the published node rects — before this change each frame re-fit from
+        // scratch and 75% vs 150% rendered identically. Stepping the presets
+        // 1.0 → 0.5 → 0.25 → 0.125 → 0.0625 must visibly change the render and
+        // keep at least one node in the pane at every preset (never an empty
+        // pane). TestBackend forces the box path (kitty unsupported).
+        let nodes: Vec<GraphNode> = (0..40)
+            .map(|i| node(&format!("n{i}"), 0, "copy", i))
+            .collect();
+        let positions: Vec<(f32, f32)> =
+            (0..40).map(|i| (i as f32 * 25.0, (i % 4) as f32)).collect();
+        let graph = Graph {
+            nodes: nodes.clone(),
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, positions);
+        let area = graph_main_area(120, 40);
+
+        // First frame: the box path seeds the fit camera and publishes the
+        // canvas pixel size (both previously kitty-only), so preset zoom has
+        // a camera to drive and an anchor to zoom about.
+        buffer_for(&mut app, 120, 40);
+        assert!(
+            app.graph_camera.is_some(),
+            "box path must seed the camera on frame one"
+        );
+        assert!(
+            app.graph_canvas_px.is_some(),
+            "box path must publish the canvas pixel size for the zoom anchor"
+        );
+        let mut prior: Vec<Rect> = app.graph_node_rects.iter().map(|(_, r)| *r).collect();
+        assert_eq!(prior.len(), nodes.len(), "fit frame publishes every node");
+
+        // Step the presets down from 1.0 (index 5) to 0.0625 (index 0),
+        // rendering after each step.
+        for step in 1..=5 {
+            assert!(
+                app.graph_zoom_preset_step(-1),
+                "preset step {step}: seeded camera makes the step apply"
+            );
+            buffer_for(&mut app, 120, 40);
+            let rects: Vec<Rect> = app.graph_node_rects.iter().map(|(_, r)| *r).collect();
+            assert_eq!(
+                rects.len(),
+                nodes.len(),
+                "preset step {step}: every node still publishes a frame"
+            );
+            assert!(
+                rects != prior,
+                "preset step {step}: zoom must change the published rects (the box path must not ignore the camera)"
+            );
+            assert!(
+                rects.iter().any(|r| {
+                    r.width > 0
+                        && r.height > 0
+                        && r.x >= area.x
+                        && r.y >= area.y
+                        && r.x + r.width <= area.x + area.width
+                        && r.y + r.height <= area.y + area.height
+                }),
+                "preset step {step}: at least one node frame stays in the pane — never an empty pane"
+            );
+            prior = rects;
+        }
+    }
+
+    #[test]
+    fn box_path_reanchors_when_stored_camera_maps_every_node_off_canvas() {
+        // A stored camera that maps every node outside the pane (extreme pan
+        // or zoom-out) must not render blank: the box path re-anchors to the
+        // frame-the-graph fit and republishes in-area rects — a legitimately
+        // zoomed-out view shows the graph small but present, never an empty
+        // pane.
+        let nodes: Vec<GraphNode> = (0..8)
+            .map(|i| node(&format!("n{i}"), 0, "copy", i))
+            .collect();
+        let positions: Vec<(f32, f32)> = (0..8).map(|i| (i as f32 * 25.0, 0.0)).collect();
+        let graph = Graph {
+            nodes: nodes.clone(),
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let mut app = graph_app_from(graph, positions);
+        // Everything far off the top-left: `world_to_cell` yields negative
+        // cells for every node, so every published rect would be zero.
+        app.graph_camera = Some(GraphCamera {
+            zoom: 1.0,
+            pan: (1.0e9, 1.0e9),
+        });
+        buffer_for(&mut app, 120, 40);
+        assert!(
+            app.graph_camera.is_some_and(|c| c.pan != (1.0e9, 1.0e9)),
+            "blank frame re-anchors the camera to the fit"
+        );
+        assert_eq!(
+            app.graph_zoom_preset, 5,
+            "re-anchor resets the preset index to the fitted zoom"
+        );
+        assert!(
+            app.graph_node_rects
+                .iter()
+                .any(|(_, r)| r.width > 0 && r.height > 0),
+            "re-anchored frame publishes in-area rects"
+        );
+    }
+
+    #[test]
+    fn prod_tiled_slot_box_path_publishes_in_area_rects_and_draws_frames() {
+        // Bug droid_tui-0is (regression from droid_tui-zbs): the graph pane
+        // rendered always empty in production. The zbs visual-proof tests
+        // build the app with `graph_app_from`, whose empty tile stack takes
+        // the `showing_graph` branch with a zero-origin area — production
+        // opens a real tile slot, so `render_graph` gets the bordered
+        // right-column slot with a nonzero origin. Mirror that flow: real
+        // `load_patch` + `open_graph`, wide terminal so the tiled layout
+        // routes the graph to Slot(0). TestBackend forces the box path.
+        let mut app = graph_app();
+        let buf = buffer_for(&mut app, 200, 50);
+        let slot = app
+            .pane_rects
+            .iter()
+            .find(|(f, _)| *f == FocusSlot::Slot(0))
+            .map(|(_, r)| *r)
+            .expect("tiled layout publishes the graph slot");
+        assert!(
+            slot.x > 0 && slot.y > 0,
+            "this test must exercise a nonzero-origin slot, got {slot:?}"
+        );
+        assert!(
+            app.graph_node_rects
+                .iter()
+                .any(|(_, r)| r.width > 0 && r.height > 0),
+            "box path publishes no in-area rects for slot {slot:?} (camera {:?})",
+            app.graph_camera
+        );
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("\u{256d}"),
+            "box path drew no node frames into the production slot {slot:?}"
+        );
+    }
+
+    #[cfg(feature = "kitty-gfx")]
+    #[test]
+    fn prod_tiled_slot_kitty_path_publishes_in_area_rects() {
+        // Same production flow as above, through `render_graph_kitty`
+        // (first-frame seeding → scene → emit → publish). Called directly so
+        // no process-global kitty override is touched — the suite renders
+        // concurrently and that flag is process-global. Emitted escapes go to
+        // the test's captured stdout; the return value and the published hit
+        // rects on the nonzero-origin slot are what this pins.
+        let mut app = graph_app();
+        let _ = buffer_for(&mut app, 200, 50);
+        let slot = app
+            .pane_rects
+            .iter()
+            .find(|(f, _)| *f == FocusSlot::Slot(0))
+            .map(|(_, r)| *r)
+            .expect("tiled layout publishes the graph slot");
+        assert!(
+            slot.x > 0 && slot.y > 0,
+            "this test must exercise a nonzero-origin slot, got {slot:?}"
+        );
+        // First-frame state, as production enters it: camera unseeded.
+        app.graph_camera = None;
+        app.graph_canvas_px = None;
+        app.clear_graph_node_rects();
+        assert!(
+            render_graph_kitty(slot, &mut app),
+            "kitty path must handle the production slot {slot:?}"
+        );
+        assert!(
+            app.graph_node_rects
+                .iter()
+                .any(|(_, r)| r.width > 0 && r.height > 0),
+            "kitty path publishes no in-area rects for slot {slot:?}"
+        );
+    }
+
+    #[test]
+    fn prod_tiled_slot_draws_frames_for_large_fixtures() {
+        // Bug droid_tui-0is: production patches are large (100+ sections)
+        // with far-flung outlier nodes, so the fit zoom is tiny and the
+        // world piles into a few cells. The pane must still draw node
+        // frames on the production slot — never an empty pane. Box path
+        // only (no kitty flag touched; the suite renders concurrently).
+        for name in ["arpeggio1.ini", "alg27_2.ini", "droid_mpfs5drum.ini"] {
+            let mut app = App::new();
+            let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{name}"))).unwrap();
+            app.load_patch(patch);
+            app.open_graph();
+            let buf = buffer_for(&mut app, 200, 50);
+            let slot = app
+                .pane_rects
+                .iter()
+                .find(|(f, _)| *f == FocusSlot::Slot(0))
+                .map(|(_, r)| *r)
+                .expect("tiled layout publishes the graph slot");
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            assert!(
+                text.contains("\u{256d}"),
+                "{name}: box path drew no node frames into slot {slot:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_node_graph_renders_visibly_at_fit_100_percent_box_path() {
+        // Bug droid_tui-0is (decisive repro): a single-node graph (one
+        // hardware controller, no circuits, zero-span world) at the fit
+        // preset (100%) must render a visible node frame on the production
+        // slot — never an empty pane. The zero-span camera is a distinct
+        // branch (MIN_SPAN fallback + centre anchor), so it gets its own
+        // pin beyond the multi-node production tests.
+        let content = "# ---- Solo ----\n[p2b8]\n    button1 = B1.1\n";
+        for (w, h) in [(120u16, 50u16), (200u16, 50u16), (240u16, 40u16)] {
+            let mut app = App::new();
+            let patch = Patch::from_ini_str(content, String::from("solo")).unwrap();
+            app.load_patch(patch);
+            app.open_graph();
+            let graph = app.graph.as_ref().expect("single-node graph builds");
+            assert_eq!(graph.nodes.len(), 1, "fixture must be a single-node graph");
+            assert_eq!(app.graph_zoom_preset, 5, "opens at the fit preset (100%)");
+            let buf = buffer_for(&mut app, w, h);
+            let slot = app
+                .pane_rects
+                .iter()
+                .find(|(f, _)| *f == FocusSlot::Slot(0))
+                .map(|(_, r)| *r)
+                .expect("tiled layout publishes the graph slot");
+            assert!(
+                app.graph_node_rects.iter().any(|(_, r)| {
+                    r.width > 0
+                        && r.height > 0
+                        && r.x >= slot.x
+                        && r.y >= slot.y
+                        && r.x + r.width <= slot.x + slot.width
+                        && r.y + r.height <= slot.y + slot.height
+                }),
+                "{w}x{h}: box path publishes no in-area node rect for the single node (cam {:?} rects {:?})",
+                app.graph_camera,
+                app.graph_node_rects
+            );
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            assert!(
+                text.contains("\u{256d}"),
+                "{w}x{h}: box path drew no node frame for the single node"
+            );
+        }
+    }
+
+    #[cfg(feature = "kitty-gfx")]
+    #[test]
+    fn single_node_kitty_scene_has_visible_content_at_fit_100_percent() {
+        // The kitty image path skips box drawing once it returns true, so its
+        // scene must carry the single node as real pixels — an all-background
+        // scene would present as an empty pane even though the hit rect
+        // publishes. Pure `graph_kitty_frame` at the fit camera on a
+        // production-like slot.
+        let content = "# ---- Solo ----\n[p2b8]\n    button1 = B1.1\n";
+        let mut app = App::new();
+        let patch = Patch::from_ini_str(content, String::from("solo")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let graph = app.graph.as_ref().unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        let area = Rect::new(120, 4, 79, 42);
+        let disabled = HashSet::new();
+        let store = HashMap::new();
+        let opts = GraphKittyOpts {
+            disabled: &disabled,
+            diff_report: None,
+            diff_showing: false,
+            latency_coloring: false,
+            hovered: None,
+            patch: None,
+            circuit_store: &store,
+        };
+        let cam = graph_fit_camera(&app.graph_positions, area);
+        let (scene, rects) = graph_kitty_frame(graph, &app.graph_positions, area, opts, cam)
+            .expect("kitty frame renders on the single node");
+        let bg = [scene.rgba[0], scene.rgba[1], scene.rgba[2], scene.rgba[3]];
+        assert!(
+            scene.rgba.chunks_exact(4).any(|px| px != bg),
+            "single-node kitty scene is all background — would present as an empty pane"
+        );
+        assert!(
+            rects.iter().any(|(_, r)| r.width > 0 && r.height > 0),
+            "single-node kitty frame publishes no in-area rect (cam {cam:?})"
+        );
+    }
+
+    #[cfg(feature = "kitty-gfx")]
+    #[test]
+    fn prod_tiled_slot_kitty_scene_has_visible_content() {
+        // Bug droid_tui-0is: the kitty path skips box drawing once it
+        // returns true, so its scene must carry visible pixels — an
+        // all-background image would present as an empty pane. Pure
+        // `graph_kitty_frame` on the production slot: no terminal, no IO,
+        // no process-global flag.
+        let app = graph_app();
+        let graph = app.graph.as_ref().unwrap();
+        let area = Rect::new(120, 4, 79, 42);
+        let disabled = HashSet::new();
+        let store = HashMap::new();
+        let opts = GraphKittyOpts {
+            disabled: &disabled,
+            diff_report: None,
+            diff_showing: false,
+            latency_coloring: false,
+            hovered: None,
+            patch: None,
+            circuit_store: &store,
+        };
+        let cam = graph_fit_camera(&app.graph_positions, area);
+        let (scene, rects) = graph_kitty_frame(graph, &app.graph_positions, area, opts, cam)
+            .expect("kitty frame renders on the production slot");
+        assert_eq!(
+            scene.rgba.len(),
+            scene.width as usize * scene.height as usize * 4,
+            "scene payload matches its dimensions"
+        );
+        let bg = [scene.rgba[0], scene.rgba[1], scene.rgba[2], scene.rgba[3]];
+        assert!(
+            scene.rgba.chunks_exact(4).any(|px| px != bg),
+            "kitty scene is all background — the terminal would show an empty pane"
+        );
+        assert!(
+            rects.iter().any(|(_, r)| r.width > 0 && r.height > 0),
+            "kitty frame publishes no in-area rects for slot {area:?}"
+        );
+    }
+
+    #[cfg(feature = "kitty-gfx")]
+    #[test]
+    fn kitty_path_zoom_presets_keep_a_node_in_area_at_every_preset() {
+        // The kitty image path renders through the stored camera; stepping the
+        // zoom presets down to the deepest zoom-out (6.25% of the fit) must
+        // keep at least one node in the pane at every preset — the empty-pane
+        // guard in `render_graph_kitty` falls back to box drawing, and the box
+        // path re-anchors, so a blank pane is impossible on either path.
+        let app = graph_app();
+        let graph = app.graph.as_ref().unwrap();
+        let area = Rect::new(0, 3, 120, 34);
+        let disabled = HashSet::new();
+        let store = HashMap::new();
+        let opts = GraphKittyOpts {
+            disabled: &disabled,
+            diff_report: None,
+            diff_showing: false,
+            latency_coloring: false,
+            hovered: None,
+            patch: None,
+            circuit_store: &store,
+        };
+        let pw = area.width as f32 * GRAPH_CELL_W_PX;
+        let ph = area.height as f32 * GRAPH_CELL_H_PX;
+        let mut cam = GraphCamera::fit_to_world(
+            WorldBounds::from_positions(&app.graph_positions),
+            (pw, ph),
+            GRAPH_MIN_NODE_PX,
+        );
+        // Mirror `App::graph_zoom_preset_step`'s 1.0 → 0.0625 walk: each step
+        // applies the preset ratio about the canvas centre in world coords.
+        let mut preset = 5usize; // 1.0
+        for step in 1..=5 {
+            let next =
+                (preset as i32 - 1).rem_euclid(App::GRAPH_ZOOM_PRESETS.len() as i32) as usize;
+            let factor = App::GRAPH_ZOOM_PRESETS[next] / App::GRAPH_ZOOM_PRESETS[preset];
+            let anchor = cam.pixel_to_world(pw / 2.0, ph / 2.0);
+            cam.zoom_by(factor, anchor);
+            preset = next;
+            let (_, rects) = graph_kitty_frame(graph, &app.graph_positions, area, opts, cam)
+                .expect("kitty frame renders at every preset");
+            assert!(
+                rects
+                    .iter()
+                    .any(|(i, r)| { *i < graph.nodes.len() && r.width > 0 && r.height > 0 }),
+                "preset {:.4} (step {step}): kitty frame keeps a node in-area",
+                App::GRAPH_ZOOM_PRESETS[preset]
+            );
         }
     }
 

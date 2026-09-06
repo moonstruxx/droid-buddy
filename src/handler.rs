@@ -2147,18 +2147,22 @@ mod tests {
             (z1 - z0 * 1.5).abs() < 1e-2,
             "'+' zooms in one preset: {z0} -> {z1}"
         );
-        assert_eq!(app.graph_zoom_preset, 2);
+        // Presets are now multipliers of the fitted zoom: 1.0 is index 5,
+        // one '+' lands on 1.5 (index 6).
+        assert_eq!(app.graph_zoom_preset, 6);
         assert!(app.status_message.contains("Graph zoom"));
 
-        // Wrap at the top preset (200%) back to the bottom (75%).
+        // Wrap at the top preset (200%) back to the bottom (6.25%): the
+        // deep zoom-out steps exist so a fitted camera can reach the true
+        // fit of a large patch (bug droid_tui-ttz).
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
         let z2 = app.graph_camera.unwrap().zoom;
         assert!((z2 - z1 * (2.0 / 1.5)).abs() < 1e-2);
         handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
         let z3 = app.graph_camera.unwrap().zoom;
         assert!(
-            (z3 - z2 * (0.75 / 2.0)).abs() < 1e-2,
-            "wrap from 200% to 75%: {z2} -> {z3}"
+            (z3 - z2 * (0.0625 / 2.0)).abs() < 1e-2,
+            "wrap from 200% to 6.25%: {z2} -> {z3}"
         );
         assert_eq!(app.graph_zoom_preset, 0);
     }
@@ -2205,7 +2209,8 @@ mod tests {
         app.graph_canvas_px = Some((1280.0, 720.0));
         app.open_graph();
         assert!(app.graph_camera.is_none());
-        assert_eq!(app.graph_zoom_preset, 1);
+        // Default preset is the fitted zoom (1.0, index 5), not a stale one.
+        assert_eq!(app.graph_zoom_preset, 5);
         assert!(app.graph_canvas_px.is_none());
     }
 
