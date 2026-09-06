@@ -386,6 +386,7 @@ fn init_surface(window: &Window) -> Result<(), String> {
     })?;
 
     let context = egui::Context::default();
+    context.set_visuals(themed_visuals());
     let winit_state = egui_winit::State::new(
         context.clone(),
         egui::ViewportId::ROOT,
@@ -403,6 +404,45 @@ fn init_surface(window: &Window) -> Result<(), String> {
         });
     });
     Ok(())
+}
+
+/// The egui chrome palette, derived from the active semantic theme
+/// (gpu-graph-window design D7): panel/window fills come from the graph canvas
+/// background token, text from the text token, and selection/muted surfaces
+/// from the accent/muted tokens. Every color flows through [`Theme::egui_color`]
+/// (itself [`Theme::rgb`]) — no egui default or hardcoded RGB survives here, so
+/// switching the theme in `config.toml` re-themes the window and the terminal
+/// together. The scene painters ignore these and use the spec RGB directly;
+/// this only styles egui's own chrome (window fill, default text, selection).
+fn themed_visuals() -> egui::Visuals {
+    let theme = crate::theme::active();
+    let bg = theme.egui_color(theme.graph_canvas_bg);
+    let text = theme.egui_color(theme.text);
+    let accent = theme.egui_color(theme.accent);
+    let muted = theme.egui_color(theme.muted);
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = bg;
+    visuals.window_fill = bg;
+    visuals.extreme_bg_color = bg;
+    visuals.faint_bg_color = muted.gamma_multiply(0.15);
+    visuals.override_text_color = Some(text);
+    visuals.selection.bg_fill = accent.gamma_multiply(0.4);
+    visuals.selection.stroke.color = accent;
+    visuals
+}
+
+/// The wgpu clear color for an empty canvas (design D7): the active theme's
+/// graph-canvas background token, so letterboxing and the no-scene state show
+/// the palette background, never a hardcoded black.
+fn theme_clear_color() -> wgpu::Color {
+    let theme = crate::theme::active();
+    let (r, g, b) = theme.rgb(theme.graph_canvas_bg);
+    wgpu::Color {
+        r: r as f64 / 255.0,
+        g: g as f64 / 255.0,
+        b: b as f64 / 255.0,
+        a: 1.0,
+    }
 }
 
 impl EguiSurface {
@@ -515,7 +555,11 @@ impl EguiSurface {
             size_in_pixels: [w, h],
             pixels_per_point,
         };
-        let clear = scene.map_or(wgpu::Color::BLACK, |spec| wgpu::Color {
+        // Canvas clear color (design D7): with a scene it is the scene's
+        // already-themed background; without one (empty canvas / letterboxed
+        // resize) it falls back to the active theme's graph-canvas token so no
+        // egui/wgpu default or hardcoded RGB ever shows through.
+        let clear = scene.map_or(theme_clear_color(), |spec| wgpu::Color {
             r: spec.background.0 as f64 / 255.0,
             g: spec.background.1 as f64 / 255.0,
             b: spec.background.2 as f64 / 255.0,

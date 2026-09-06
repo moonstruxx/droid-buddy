@@ -20,7 +20,7 @@
 
 ## 5. Theme bridge
 
-- [ ] 5.1 Map theme semantic tokens to egui colors; window styling consistent with terminal palettes <!-- agent: layout-designer-engineer.build, depends_on: [2.2], touches: [src/theme.rs, src/gui.rs] -->
+- [x] 5.1 Map theme semantic tokens to egui colors; window styling consistent with terminal palettes <!-- agent: layout-designer-engineer.build, depends_on: [2.2], touches: [src/theme.rs, src/gui.rs] -->
 
 ## 6. Tests
 
