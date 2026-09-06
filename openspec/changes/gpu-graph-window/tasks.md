@@ -28,4 +28,4 @@
 
 ## 7. Verification gate
 
-- [ ] 7.1 fmt, clippy all-features, test (default + gui), release build <!-- agent: rusty-engineer.fast, depends_on: [6.1], touches: [] -->
+- [x] 7.1 fmt, clippy all-features, test (default + gui), release build <!-- agent: rusty-engineer.fast, depends_on: [6.1], touches: [] -->
