@@ -97,14 +97,12 @@ impl GraphCamera {
     /// preserves aspect ratio while *preferring to fill the canvas width* — the
     /// fit zoom is `min(pw/span_w, ph/span_h)`, so a wide graph (a horizontal
     /// chain) scales to fill the width exactly, and a tall graph scales to fit
-    /// the height with the whole graph framed. The zoom is additionally clamped
-    /// up to `min_node_px` pixels per world unit — but only when the *width*
-    /// constraint binds (the "preferring to fill the canvas width" case), so a
-    /// spread-out chain overflows horizontally rather than collapsing the
-    /// smallest node below the legible minimum. When the *height* constraint
-    /// binds (a tall fan-out graph), the pure fit wins so the whole graph stays
-    /// framed — the spec's "Legible initial fit" requires the camera to frame
-    /// the graph, and a height-bound floor would push nodes off-canvas.
+    /// the height with the whole graph framed. Framing wins over legibility:
+    /// the `min_node_px` floor applies only when the floored zoom still frames
+    /// the whole world — otherwise the pure fit wins, so a large patch never
+    /// over-zooms to a single circuit (bug droid_tui-ttz: a 2.2 floor on a
+    /// ~0.1 fit showed one node and the `+`/`-` presets could not reach the
+    /// fit). Zoom out/in from the fitted camera for detail.
     /// `min_node_px = 0` degrades to a pure fit in both cases.
     pub fn fit_to_world(bounds: WorldBounds, pixel_size: (f32, f32), min_node_px: f32) -> Self {
         let pixel_size = (pixel_size.0.max(1.0), pixel_size.1.max(1.0));
@@ -113,7 +111,14 @@ impl GraphCamera {
         let fit_zoom_w = pixel_size.0 / span_w;
         let fit_zoom_h = pixel_size.1 / span_h;
         let fit_zoom = fit_zoom_w.min(fit_zoom_h);
-        let zoom = if fit_zoom_w <= fit_zoom_h {
+        // The floor must still frame the graph: it binds only when the floored
+        // world fits the canvas on both axes (i.e. it is already ≤ the fit and
+        // hence a no-op raise). A floor above the fit would push nodes
+        // off-canvas, so the pure fit wins and every corner stays in view.
+        let floor_frames = min_node_px > 0.0
+            && span_w * min_node_px <= pixel_size.0
+            && span_h * min_node_px <= pixel_size.1;
+        let zoom = if floor_frames {
             fit_zoom.max(min_node_px).max(MIN_ZOOM)
         } else {
             fit_zoom.max(MIN_ZOOM)
@@ -220,32 +225,36 @@ mod tests {
     }
 
     #[test]
-    fn fit_to_world_keeps_smallest_node_legible_and_anchors_top_left_when_clamped() {
-        // Spread-out world: 1000 nodes one world unit apart. The raw fit zoom
-        // (span 999 → 640px) would shrink a one-unit node to <1px; the minimum
-        // clamp must hold the tightest spacing readable instead.
+    fn fit_to_world_frames_a_spread_world_instead_of_clamping() {
+        // Bug droid_tui-ttz: a spread-out world (1000 nodes one world unit
+        // apart) with a legibility floor far above the fit over-zoomed to a
+        // single circuit. Framing wins: the pure fit applies and every corner
+        // of the world stays inside the viewport.
         let positions: Vec<(f32, f32)> = (0..1000).map(|i| (i as f32, (i % 50) as f32)).collect();
         let bounds = WorldBounds::from_positions(&positions);
         let pixel = (640.0, 400.0);
         let min_node_px = 20.0;
         let cam = GraphCamera::fit_to_world(bounds, pixel, min_node_px);
 
-        // The min clamp kicked in: zoom ≥ min_node_px px per world unit.
+        // The width-bound fit wins over the floor: zoom = pw/span_w.
+        let span_w = (bounds.max_x - bounds.min_x).max(MIN_SPAN);
+        let span_h = (bounds.max_y - bounds.min_y).max(MIN_SPAN);
+        let fit_zoom = (pixel.0 / span_w).min(pixel.1 / span_h);
+        assert_close(cam.zoom, fit_zoom, 1e-3);
         assert!(
-            cam.zoom >= min_node_px,
-            "fit zoom {} shrank nodes below the {min_node_px}px minimum",
-            cam.zoom
+            cam.zoom < min_node_px,
+            "floor must not break a fit that needs to be smaller"
         );
-        // Smallest node (the tightest 1.0-unit gap) renders ≥ min_node_px px.
-        assert!(1.0 * cam.zoom >= min_node_px, "tightest gap sub-minimum");
-        // The clamp overrode the fit, so the pan anchors on the world's
-        // top-left corner: the initial view shows the graph's start, not
-        // empty space around the world center (regression: the graph surface
-        // rendered blank for real patches whose solver output is a vertical
-        // chain).
-        let (px, py) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
-        assert_close(px, 0.0, 1e-2);
-        assert_close(py, 0.0, 1e-2);
+        // Every corner of the world bounds stays inside the viewport.
+        let (left, top) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        let (right, bottom) = cam.world_to_pixel(bounds.max_x, bounds.max_y);
+        assert!(left >= 0.0 && top >= 0.0, "top-left corner off-canvas");
+        assert!(
+            right <= pixel.0 && bottom <= pixel.1,
+            "bottom-right corner off-canvas: ({right},{bottom}) vs ({},{})",
+            pixel.0,
+            pixel.1
+        );
     }
 
     #[test]

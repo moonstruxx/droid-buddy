@@ -523,13 +523,16 @@ pub struct App {
     /// is not over a node or the graph is closed.
     pub hovered_graph_node: Option<usize>,
     /// Persistent world→pixel camera of the graph surface (task 2.3). Seeded by
-    /// the kitty renderer to a legible `fit_to_world` on the first frame after
-    /// open, then mutated by `+`/`-` (zoom presets) and arrow/wheel (pan).
-    /// `None` when the graph has not been rendered (the box-drawing path never
-    /// reads it); reset on open and on patch load so a new graph re-fits.
+    /// both renderers (kitty image path and box-drawing fallback) to a
+    /// frame-the-graph `fit_to_world` on the first frame after open, then
+    /// mutated by `+`/`-` (zoom presets) and arrow/wheel (pan).
+    /// `None` until the graph has been rendered; reset on open and on patch
+    /// load so a new graph re-fits.
     pub graph_camera: Option<GraphCamera>,
-    /// Index into `GRAPH_ZOOM_PRESETS` (mirrors the physical view's scale
-    /// presets); `+`/`-` cycle it with wrap-around. Default `1` (100%).
+    /// Index into `GRAPH_ZOOM_PRESETS`; `+`/`-` cycle it with wrap-around.
+    /// Default `5` (100% of the fitted zoom). The deep zoom-out steps exist so
+    /// a fitted-then-zoomed camera can always reach back down to (and below)
+    /// the frame-the-graph fit of a large patch.
     pub graph_zoom_preset: u8,
     /// The kitty image's pixel size `(pw, ph)` at the last graph render, so the
     /// handler can anchor zoom and gate pan on overflow. `None` until rendered.
@@ -731,7 +734,7 @@ impl App {
             graph_drag: None,
             hovered_graph_node: None,
             graph_camera: None,
-            graph_zoom_preset: 1,
+            graph_zoom_preset: 5,
             graph_canvas_px: None,
             tension: crate::layout::DEFAULT_TENSION,
             prefix: None,
@@ -1512,11 +1515,13 @@ impl App {
         true
     }
 
-    /// Zoom presets for the graph camera, mirroring the physical view's scale
-    /// presets (`0.75 → 1.0 → 1.5 → 2.0` with wrap-around). The camera's zoom is
-    /// absolute pixels-per-world-unit after the initial fit; `+`/`-` step the
-    /// preset multiplier, keeping the viewport centre anchored (task 2.3).
-    pub const GRAPH_ZOOM_PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
+    /// Zoom presets for the graph camera as multipliers of the fitted zoom
+    /// (`1.0` = the frame-the-graph fit, with wrap-around at both ends). The
+    /// steps below `0.75` reach the true fit of a large patch from an
+    /// over-zoomed camera (bug droid_tui-ttz: `0.75` bottomed out ~7x above a
+    /// `~0.1` fit). `+`/`-` apply the ratio about the canvas centre so the
+    /// visible content stays anchored and the pane never empties (task 2.3).
+    pub const GRAPH_ZOOM_PRESETS: [f32; 8] = [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
     /// One wheel/arrow pan step of the graph camera in pixels, mirroring
     /// `PHYSICAL_PAN_STEP`; the handler gating on overflow reuses this step.
     pub const GRAPH_PAN_STEP_PX: f32 = 24.0;
@@ -1535,7 +1540,7 @@ impl App {
     /// Step the graph camera's zoom preset by `dir` (±1), wrapping at both ends
     /// like the physical view's scale presets. The new zoom is applied about the
     /// canvas centre so the visible content stays put. No-op (returns false)
-    /// when the camera has not been seeded yet; the caller keeps the box path.
+    /// only before the first render has seeded the camera.
     pub fn graph_zoom_preset_step(&mut self, dir: i32) -> bool {
         if self.graph_camera.is_none() {
             return false;
@@ -2164,7 +2169,7 @@ impl App {
         // renderer seeds a legible `fit_to_world` on the next kitty frame; a
         // previously-zoomed/panned camera must not linger across a new solve.
         self.graph_camera = None;
-        self.graph_zoom_preset = 1;
+        self.graph_zoom_preset = 5;
         self.graph_canvas_px = None;
         self.showing_graph = true;
         self.tile_stack.open(ViewType::Graph);
@@ -2294,7 +2299,7 @@ impl App {
         self.graph_drag = None;
         self.hovered_graph_node = None;
         self.graph_camera = None;
-        self.graph_zoom_preset = 1;
+        self.graph_zoom_preset = 5;
         self.graph_canvas_px = None;
         // Manual pins are per-patch graph state: cleared on every load so a
         // new patch re-seeds its own tip on the next open (design D3/D7).
