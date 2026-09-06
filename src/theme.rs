@@ -436,6 +436,19 @@ impl Theme {
             Color::Indexed(v) => xterm256_rgb(v),
         }
     }
+
+    /// The theme → egui bridge (gpu-graph-window design D7): resolve a semantic
+    /// token through the same [`Theme::rgb`] hop the kitty rasterizer uses and
+    /// wrap it as an egui [`egui::Color32`]. The window chrome and any egui
+    /// surface derive every color from here, so switching the theme in
+    /// `config.toml` re-themes the window and the terminal together. Gated on
+    /// the `gui` feature because `egui` types exist only under it; the default
+    /// build stays byte-identical and never links egui.
+    #[cfg(feature = "gui")]
+    pub fn egui_color(&self, color: Color) -> egui::Color32 {
+        let (r, g, b) = self.rgb(color);
+        egui::Color32::from_rgb(r, g, b)
+    }
 }
 
 /// The single ANSI-16 → RGB table, shared by the named variants in
@@ -1198,6 +1211,34 @@ mod tests {
                 t.rgb(*color),
                 "Indexed({v}) must agree with the named ANSI-16 variant"
             );
+        }
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn egui_color_matches_rgb_output() {
+        // gpu-graph-window D7: the egui bridge is a pure wrap of `Theme::rgb`,
+        // so a token's Color32 must agree channel-for-channel with the kitty
+        // RGB triple across every palette and a spread of tokens.
+        for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
+            for token in [
+                theme.graph_canvas_bg,
+                theme.text,
+                theme.accent,
+                theme.muted,
+                theme.focus_border,
+                theme.pane_focus_border,
+                theme.graph_node_border,
+                theme.graph_edge_error,
+                theme.graph_edge_latency_4,
+            ] {
+                let rgb = theme.rgb(token);
+                assert_eq!(
+                    theme.egui_color(token),
+                    egui::Color32::from_rgb(rgb.0, rgb.1, rgb.2),
+                    "egui_color({token:?}) must equal rgb() for theme {theme:?}"
+                );
+            }
         }
     }
 
