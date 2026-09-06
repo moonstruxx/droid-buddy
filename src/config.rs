@@ -1,5 +1,6 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
-//! and `[physical.rack]`, `[plugins]`) stored in `config.toml` under the XDG config home.
+//! and `[physical.rack]`, `[plugins]`, `[gui]`) stored in `config.toml` under
+//! the XDG config home.
 //! Loaded once at startup, before the terminal UI initializes (design decision 5).
 //!
 //! This module stays decoupled from the theme catalog: canonical name
@@ -36,6 +37,11 @@ pub const MAX_PHYSICAL_ZOOM: f64 = 2.0;
 /// override (the standard XDG plugins dir applies).
 pub const DEFAULT_PLUGINS_ENABLED: bool = true;
 
+/// GPU-graph-window default under `[gui]` (gpu-graph-window D6): the window is
+/// off unless configured, so `g g` keeps its terminal-tile behavior out of the
+/// box, and without the `gui` feature the value is inert.
+pub const DEFAULT_GRAPH_WINDOW: bool = false;
+
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -65,6 +71,10 @@ fn default_physical_offset() -> f64 {
 
 fn default_plugins_enabled() -> bool {
     DEFAULT_PLUGINS_ENABLED
+}
+
+fn default_graph_window() -> bool {
+    DEFAULT_GRAPH_WINDOW
 }
 
 /// Per-label configuration under `[labels]`.
@@ -166,6 +176,26 @@ impl Plugins {
     }
 }
 
+/// GPU-window preference under `[gui]` (gpu-graph-window D6).
+///
+/// `graph_window = true` makes `g g` open the native graph window instead of
+/// the terminal graph tile. Only meaningful with the non-default `gui`
+/// feature; the value is inert otherwise (the handler keys are equally
+/// feature-gated, and the windowed loop lives in `main.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gui {
+    #[serde(default = "default_graph_window")]
+    pub graph_window: bool,
+}
+
+impl Default for Gui {
+    fn default() -> Self {
+        Self {
+            graph_window: default_graph_window(),
+        }
+    }
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions). `Eq` is intentionally not
 /// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
@@ -181,6 +211,8 @@ pub struct Settings {
     pub physical: Physical,
     #[serde(default)]
     pub plugins: Plugins,
+    #[serde(default)]
+    pub gui: Gui,
 }
 
 impl Default for Settings {
@@ -191,6 +223,7 @@ impl Default for Settings {
             latency: Latency::default(),
             physical: Physical::default(),
             plugins: Plugins::default(),
+            gui: Gui::default(),
         }
     }
 }
@@ -465,6 +498,7 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical::default(),
                 plugins: Plugins::default(),
+                gui: Gui::default(),
             },
         )
         .unwrap();
@@ -497,6 +531,7 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical::default(),
                 plugins: Plugins::default(),
+                gui: Gui::default(),
             },
         )
         .unwrap();
@@ -570,6 +605,7 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical::default(),
                 plugins: Plugins::default(),
+                gui: Gui::default(),
             },
         )
         .unwrap();
@@ -597,6 +633,7 @@ mod tests {
                     latency: Latency::default(),
                     physical: Physical::default(),
                     plugins: Plugins::default(),
+                    gui: Gui::default(),
                 },
             )
             .unwrap();
@@ -623,6 +660,7 @@ mod tests {
             },
             physical: Physical::default(),
             plugins: Plugins::default(),
+            gui: Gui::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -693,6 +731,7 @@ mod tests {
                 },
                 physical: Physical::default(),
                 plugins: Plugins::default(),
+                gui: Gui::default(),
             },
         )
         .unwrap();
@@ -868,6 +907,7 @@ mod tests {
                 },
             },
             plugins: Plugins::default(),
+            gui: Gui::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -907,6 +947,7 @@ mod tests {
                     },
                 },
                 plugins: Plugins::default(),
+                gui: Gui::default(),
             },
         )
         .unwrap();
@@ -1021,6 +1062,7 @@ mod tests {
                 dir: Some(PathBuf::from("/custom/plugins")),
                 enabled: false,
             },
+            gui: Gui::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1031,5 +1073,69 @@ mod tests {
             &TEST_CATALOG,
         );
         assert_eq!(loaded.plugins, settings.plugins);
+    }
+
+    // ── gpu-graph-window 3.2: [gui] graph_window ──
+
+    #[test]
+    fn gui_defaults_when_table_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.gui, Gui::default());
+        assert!(!loaded.gui.graph_window);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn gui_graph_window_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[gui]\ngraph_window = true\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert!(loaded.gui.graph_window);
+    }
+
+    #[test]
+    fn gui_save_round_trips_through_load() {
+        let dir = TempDir::new().unwrap();
+        let settings = Settings {
+            theme: "classic".to_string(),
+            labels: Labels::default(),
+            latency: Latency::default(),
+            physical: Physical::default(),
+            plugins: Plugins::default(),
+            gui: Gui { graph_window: true },
+        };
+        save_to_dir(dir.path(), &settings).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[gui]"), "body: {body}");
+        assert!(body.contains("graph_window = true"), "body: {body}");
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.gui, settings.gui);
+    }
+
+    #[test]
+    fn malformed_gui_value_falls_back_to_defaults() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[gui]\ngraph_window = \"yes\"\n",
+        )
+        .unwrap();
+        assert_eq!(load_at(&dir), Settings::default());
     }
 }

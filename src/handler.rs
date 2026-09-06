@@ -5,6 +5,8 @@ use ratatui::layout::Rect;
 
 use std::collections::HashMap;
 
+#[cfg(feature = "gui")]
+use crate::app::GraphWindowRequest;
 use crate::app::{
     is_entry_selectable, is_picker_parent_entry, App, FocusSlot, GraphDrag, PrefixState,
     SourceViewMode, ViewType, ViewerFocus,
@@ -268,6 +270,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             crossterm::event::KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
+                #[cfg(feature = "gui")]
+                if app.graph_window_enabled {
+                    // `[gui] graph_window = true`: open the GPU graph window
+                    // instead of the terminal tile (gpu-graph-window D6); the
+                    // windowed loop in main.rs consumes the request next frame.
+                    app.request_graph_window(GraphWindowRequest::Open);
+                    app.prefix = None;
+                    return false;
+                }
                 app.open_graph();
                 // Tiled open path: `open_graph` registers the slot; focus
                 // follows it so Esc/keys act on the graph pane.
@@ -295,6 +306,24 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // on the pane.
                 app.open_view(ViewType::Optimizer);
                 sync_viewer_focus_from_tiles(app);
+                app.prefix = None;
+                return false;
+            }
+            crossterm::event::KeyCode::Char('w') => {
+                // `g w` toggles the GPU graph window (gpu-graph-window D6).
+                // The handler cannot reach GraphWindow (owned by the windowed
+                // loop in main.rs), so it records a request the loop consumes
+                // on its next frame; without the `gui` feature the key shows a
+                // status hint and does nothing else (keybinding spec).
+                #[cfg(feature = "gui")]
+                {
+                    app.request_graph_window(GraphWindowRequest::Toggle);
+                }
+                #[cfg(not(feature = "gui"))]
+                {
+                    app.status_message =
+                        String::from("GPU graph window requires the `gui` feature");
+                }
                 app.prefix = None;
                 return false;
             }
@@ -2545,6 +2574,60 @@ mod tests {
         assert!(app.prefix.is_none());
         // Esc while a prefix is armed must not also clear the shift group.
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
+    }
+
+    // `g w` / `g g` GPU-graph-window keys (gpu-graph-window 3.2). The handler
+    // only records requests; the windowed loop in main.rs consumes them.
+
+    #[cfg(not(feature = "gui"))]
+    #[test]
+    fn g_w_without_gui_feature_shows_status_hint() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('w')), &mut app);
+        assert!(!quit);
+        assert!(app.prefix.is_none());
+        assert_eq!(
+            app.status_message,
+            "GPU graph window requires the `gui` feature"
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn g_w_queues_window_toggle_request() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('w')), &mut app);
+        assert!(!quit);
+        assert!(app.prefix.is_none());
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
+        // One-shot: the consumer's poll-and-clear leaves nothing behind.
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn g_g_with_window_enabled_queues_open_without_tile() {
+        let mut app = app_with_fixture();
+        app.graph_window_enabled = true;
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(!quit);
+        assert!(!app.showing_graph, "window replaces the terminal tile");
+        assert!(app.tile_stack.slots.is_empty());
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn g_g_with_window_disabled_still_opens_terminal_tile() {
+        let mut app = app_with_fixture();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(!quit);
+        assert!(app.showing_graph, "default: `g g` opens the terminal tile");
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
     }
 
     #[test]
