@@ -298,3 +298,28 @@ mod windowed {
         handler.error.map_or(Ok(()), Err)
     }
 }
+
+/// `seed_app` wires the `[gui] graph_window` preference into `App` (design D6).
+/// The module is gui-gated because `App::graph_window_enabled` only exists
+/// under the feature; plain `cargo test` (default features) compiles it out.
+#[cfg(all(test, feature = "gui"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_app_enables_graph_window_from_setting() {
+        let mut settings = config::Settings::default();
+        settings.gui.graph_window = true;
+        let mut app = App::new();
+        seed_app(&mut app, &settings);
+        assert!(app.graph_window_enabled);
+    }
+
+    #[test]
+    fn seed_app_keeps_graph_window_disabled_by_default() {
+        let settings = config::Settings::default();
+        let mut app = App::new();
+        seed_app(&mut app, &settings);
+        assert!(!app.graph_window_enabled);
+    }
+}
