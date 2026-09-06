@@ -118,7 +118,7 @@ mod windowed {
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::window::WindowId;
 
-    use droid_tui::app::App;
+    use droid_tui::app::{App, GraphWindowRequest};
     use droid_tui::gui::GraphWindow;
     use droid_tui::ui::render;
     use droid_tui::{config, handler};
@@ -158,7 +158,38 @@ mod windowed {
                     }
                 }
             }
+            self.act_on_window_request(event_loop);
             self.redraw_if_needed(event_loop);
+        }
+
+        /// Consume the handler's pending GPU-graph-window request (design D6):
+        /// the handler cannot reach `GraphWindow` (owned by this loop), so it
+        /// queues Open/Toggle on `App` and the loop performs the matching
+        /// open/close on its next frame. A failed open (headless display)
+        /// falls back to the terminal graph tile.
+        fn act_on_window_request(&mut self, event_loop: &ActiveEventLoop) {
+            match self.app.take_graph_window_request() {
+                GraphWindowRequest::None => {}
+                GraphWindowRequest::Open => {
+                    if !self.window.is_open() {
+                        self.open_window_or_tile(event_loop);
+                    }
+                }
+                GraphWindowRequest::Toggle => {
+                    if self.window.is_open() {
+                        self.window.close();
+                    } else {
+                        self.open_window_or_tile(event_loop);
+                    }
+                }
+            }
+        }
+
+        fn open_window_or_tile(&mut self, event_loop: &ActiveEventLoop) {
+            if let Err(err) = self.window.open(event_loop) {
+                eprintln!("[warn] graph window open failed ({err}); using terminal tile");
+                self.app.open_graph();
+            }
         }
 
         fn dispatch(&mut self, event: Event, event_loop: &ActiveEventLoop) {

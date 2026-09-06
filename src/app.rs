@@ -443,6 +443,23 @@ impl TileStack {
     }
 }
 
+/// A pending GPU-graph-window action (gpu-graph-window D6): set by the
+/// handler on `g w`/`g g`, consumed (and reset) by the windowed run-loop in
+/// `main.rs` on its next frame. Only exists with the `gui` feature; non-`gui`
+/// builds never construct it.
+#[cfg(feature = "gui")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GraphWindowRequest {
+    /// Nothing pending; the windowed loop only acts on a non-default value.
+    #[default]
+    None,
+    /// Open the window if closed (idempotent; from `g g` with
+    /// `[gui] graph_window = true`).
+    Open,
+    /// Open when closed, close when open (from `g w`).
+    Toggle,
+}
+
 /// Application state
 pub struct App {
     pub patch: Option<Patch>,
@@ -506,6 +523,18 @@ pub struct App {
     /// The kitty image's pixel size `(pw, ph)` at the last graph render, so the
     /// handler can anchor zoom and gate pan on overflow. `None` until rendered.
     pub graph_canvas_px: Option<(f32, f32)>,
+    /// Whether `g g` should open the GPU graph window instead of the terminal
+    /// graph tile (gpu-graph-window D6). Seeded from `[gui] graph_window` at
+    /// startup by `seed_app` in `main.rs` (same contract as
+    /// `physical_rack_spec`); inert without the `gui` feature.
+    #[cfg(feature = "gui")]
+    pub graph_window_enabled: bool,
+    /// Pending GPU-graph-window request (gpu-graph-window D6): set by the
+    /// handler, consumed by the windowed run-loop in `main.rs` via
+    /// [`App::take_graph_window_request`] each frame. See
+    /// [`GraphWindowRequest`].
+    #[cfg(feature = "gui")]
+    graph_window_request: GraphWindowRequest,
     /// Cable tension of the graph surface: the force-directed solver's spring
     /// stiffness (`layout::SPRING_K`). `[`/`]` on the graph surface step it by
     /// `layout::TENSION_STEP` within `[TENSION_MIN, TENSION_MAX]` and re-solve
@@ -717,6 +746,10 @@ impl App {
             physical_offset: (0.0, 0.0),
             physical_zoom: 1.0,
             physical_rack_spec: crate::physical::RackSpec::default(),
+            #[cfg(feature = "gui")]
+            graph_window_enabled: false,
+            #[cfg(feature = "gui")]
+            graph_window_request: GraphWindowRequest::default(),
             physical_rack_size: (0, 0),
             physical_viewport: None,
             active_modifier_var: None,
@@ -2125,6 +2158,25 @@ impl App {
         self.showing_graph = true;
         self.tile_stack.open(ViewType::Graph);
         self.emit_graph_built();
+    }
+
+    /// Queue a GPU-graph-window action for the windowed run-loop
+    /// (gpu-graph-window D6). The handler cannot reach `GraphWindow` (owned by
+    /// the windowed loop in `main.rs`), so it records the request here and the
+    /// loop performs the matching open/close on its next frame.
+    #[cfg(feature = "gui")]
+    pub fn request_graph_window(&mut self, request: GraphWindowRequest) {
+        self.graph_window_request = request;
+    }
+
+    /// Poll-and-clear the pending GPU-graph-window request (gpu-graph-window
+    /// D6). The windowed run-loop in `main.rs` calls this every frame and acts
+    /// on a non-`None` value (`Open` → `GraphWindow::open`, `Toggle` →
+    /// `open`/`close` by `GraphWindow::is_open`). When `Open` cannot succeed
+    /// (headless display), the loop falls back to the terminal graph tile.
+    #[cfg(feature = "gui")]
+    pub fn take_graph_window_request(&mut self) -> GraphWindowRequest {
+        std::mem::take(&mut self.graph_window_request)
     }
 
     /// Publish `GraphRebuilt`, plus a `TopologyError` per validation finding,
