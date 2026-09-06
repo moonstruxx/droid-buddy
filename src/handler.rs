@@ -466,27 +466,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     {
         // 1) Graph hovered node -> Circuit
         if let Some(idx) = app.hovered_graph_node {
-            if let Some(graph) = app.graph.as_ref() {
-                if let Some(node) = graph.nodes.get(idx).cloned() {
-                    let draft = app
-                        .current_patch_path
-                        .as_ref()
-                        .and_then(|p| app.label_store.circuit_label(p, &node.id))
-                        .unwrap_or_default();
-                    app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
-                    let s = crate::config::load(
-                        &crate::theme::canonical_theme_name,
-                        crate::theme::THEMES,
-                    );
-                    if let Some(line) =
-                        app.editing_status_line(s.labels.layers_enabled, s.labels.max_shift_layer)
-                    {
-                        app.status_message = line;
-                    } else {
-                        app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
-                    }
-                    return false;
-                }
+            if begin_graph_node_edit(app, idx) {
+                return false;
             }
         }
         // 2) Source header focused -> Circuit instance at source_scroll
@@ -612,20 +593,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // no-op without hover; the rebuild + re-solve re-anchors the
                 // layout. Processing pause stays on `p` on every other
                 // surface.
-                let Some(idx) = app.hovered_graph_node else {
-                    return false;
-                };
-                let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
-                    return false;
-                };
-                let now_pinned = app.toggle_pin(&node.id);
-                app.rebuild_graph();
-                if now_pinned {
-                    app.status_message =
-                        format!("Pinned: {} {}", node.circuit, node.instance_index);
-                } else {
-                    app.status_message =
-                        format!("Unpinned: {} {}", node.circuit, node.instance_index);
+                if let Some(idx) = app.hovered_graph_node {
+                    graph_node_pin_toggle(app, idx);
                 }
                 return false;
             }
@@ -636,25 +605,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             crossterm::event::KeyCode::Char('x') => {
-                let Some(idx) = app.hovered_graph_node else {
-                    return false;
-                };
-                let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
-                    return false;
-                };
-                let now_disabled =
-                    app.toggle_circuit_processing(&node.circuit, node.instance_index);
-                app.rebuild_graph();
-                if now_disabled {
-                    app.status_message = format!(
-                        "Processing disabled: {} {}",
-                        node.circuit, node.instance_index
-                    );
-                } else {
-                    app.status_message = format!(
-                        "Processing enabled: {} {}",
-                        node.circuit, node.instance_index
-                    );
+                if let Some(idx) = app.hovered_graph_node {
+                    graph_node_processing_toggle(app, idx);
                 }
                 return false;
             }
@@ -1457,6 +1409,187 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
 const DRAG_POSITION_LIMIT: f32 = 10_000.0;
 fn clamp_drag(v: f32) -> f32 {
     v.clamp(-DRAG_POSITION_LIMIT, DRAG_POSITION_LIMIT)
+}
+
+/// `x` on the hovered graph node: toggle per-circuit processing and rebuild
+/// the graph (terminal graph key; shared with the GPU window, task 3.1).
+/// No-op without a hovered node; the caller has already consumed the key.
+fn graph_node_processing_toggle(app: &mut App, idx: usize) {
+    let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
+        return;
+    };
+    let now_disabled = app.toggle_circuit_processing(&node.circuit, node.instance_index);
+    app.rebuild_graph();
+    app.status_message = if now_disabled {
+        format!(
+            "Processing disabled: {} {}",
+            node.circuit, node.instance_index
+        )
+    } else {
+        format!(
+            "Processing enabled: {} {}",
+            node.circuit, node.instance_index
+        )
+    };
+}
+
+/// `p` on the hovered graph node: toggle the pin anchor and rebuild the graph
+/// (terminal graph key; shared with the GPU window, task 3.1). No-op without
+/// a hovered node.
+fn graph_node_pin_toggle(app: &mut App, idx: usize) {
+    let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
+        return;
+    };
+    let now_pinned = app.toggle_pin(&node.id);
+    app.rebuild_graph();
+    app.status_message = if now_pinned {
+        format!("Pinned: {} {}", node.circuit, node.instance_index)
+    } else {
+        format!("Unpinned: {} {}", node.circuit, node.instance_index)
+    };
+}
+
+/// `e` on the hovered graph node: open the circuit label edit overlay with the
+/// stored label as draft (the terminal graph `e` branch, extracted so the GPU
+/// window shares it, task 3.1). Returns whether an edit was started.
+fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
+    let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
+        return false;
+    };
+    let draft = app
+        .current_patch_path
+        .as_ref()
+        .and_then(|p| app.label_store.circuit_label(p, &node.id))
+        .unwrap_or_default();
+    app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    if let Some(line) = app.editing_status_line(
+        settings.labels.layers_enabled,
+        settings.labels.max_shift_layer,
+    ) {
+        app.status_message = line;
+    } else {
+        app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
+    }
+    true
+}
+
+/// Apply one GPU-graph-window frame to the shared `App` (task 3.1).
+///
+/// The window is another pointer/keyboard surface over the same graph: hover
+/// and drag hit-test window-space pointers against the graph layout via
+/// [`crate::graph_render::GraphCamera`] (`pixel → world → node index`),
+/// mirroring how `graph_node_rects` drives the terminal surface. `x`/`p`/`e`
+/// act on the hovered node exactly like the terminal graph keys. No camera
+/// yet (graph not fitted) means nothing is interactive. The windowed loop in
+/// `main.rs` owns both the window and the `App`, so it calls this once per
+/// painted frame (D6: the loop acts on what it owns).
+#[cfg(feature = "gui")]
+pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
+    let Some(camera) = app.graph_camera else {
+        app.hovered_graph_node = None;
+        return;
+    };
+    // The node's pixel rect is `world × zoom − pan` at a fixed pixel size, so
+    // its world size is the fixed size divided by the zoom (mirrors how the
+    // terminal derives node cell rects from fixed node cell dims).
+    let nw = crate::app::GRAPH_WINDOW_NODE_W / camera.zoom;
+    let nh = crate::app::GRAPH_WINDOW_NODE_H / camera.zoom;
+    let hit = frame.pointer.and_then(|(px, py)| {
+        let (wx, wy) = camera.pixel_to_world(px, py);
+        app.graph_positions
+            .iter()
+            .enumerate()
+            .find_map(|(i, &(x, y))| {
+                (wx >= x && wx < x + nw && wy >= y && wy < y + nh).then_some(i)
+            })
+    });
+    app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
+
+    if frame.primary_pressed {
+        let Some(node_index) = hit else {
+            app.hovered_graph_node = None;
+            return;
+        };
+        app.hovered_graph_node = Some(node_index);
+        let Some((px, py)) = frame.pointer else {
+            return;
+        };
+        let (wx, wy) = camera.pixel_to_world(px, py);
+        if let Some((nx, ny)) = app.graph_positions.get(node_index).copied() {
+            // Grab offset in world units so the node follows the pointer
+            // without jumping on the first drag delta (mirrors GraphDrag).
+            app.graph_drag = Some(GraphDrag {
+                node_index,
+                offset_x: nx - wx,
+                offset_y: ny - wy,
+            });
+        }
+    }
+
+    // A drag frame moves the node only when the button was already down at
+    // the start of this frame: egui reports `primary_pressed` and
+    // `primary_down` together on the press frame, and the press frame only
+    // grabs the node (mirrors the terminal Down/Drag event split).
+    if frame.primary_down && !frame.primary_pressed {
+        let Some(drag) = app.graph_drag.as_ref() else {
+            return;
+        };
+        let Some(graph) = app.graph.as_ref() else {
+            return;
+        };
+        let Some(node_id) = graph.nodes.get(drag.node_index).map(|n| n.id.clone()) else {
+            return;
+        };
+        let Some((px, py)) = frame.pointer else {
+            return;
+        };
+        let (wx, wy) = camera.pixel_to_world(px, py);
+        if let Some(pos) = app.graph_positions.get_mut(drag.node_index) {
+            *pos = (
+                clamp_drag(wx + drag.offset_x),
+                clamp_drag(wy + drag.offset_y),
+            );
+        }
+        let pins = app.pinned_indices(graph);
+        layout::local_resettle(
+            graph,
+            &mut app.graph_positions,
+            &node_id,
+            layout::LOCAL_RADIUS,
+            layout::LOCAL_ITERATIONS,
+            &pins,
+            app.tension,
+        );
+        app.notify_node_moved(&node_id);
+    }
+
+    if frame.primary_released {
+        // Design D7: the dropped node becomes a fixed anchor so it stays where
+        // placed instead of snapping back on a rebuild (mirrors the terminal).
+        if let Some(drag) = app.graph_drag.take() {
+            if let Some(node) = app
+                .graph
+                .as_ref()
+                .and_then(|g| g.nodes.get(drag.node_index))
+            {
+                app.pinned.insert(node.id.clone());
+            }
+        }
+    }
+
+    for key in &frame.keys {
+        let Some(idx) = app.hovered_graph_node else {
+            continue;
+        };
+        match key {
+            crate::gui::WindowGraphKey::ToggleProcessing => graph_node_processing_toggle(app, idx),
+            crate::gui::WindowGraphKey::TogglePin => graph_node_pin_toggle(app, idx),
+            crate::gui::WindowGraphKey::BeginEdit => {
+                begin_graph_node_edit(app, idx);
+            }
+        }
+    }
 }
 
 fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
@@ -3993,6 +4126,250 @@ mod tests {
         handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
         assert!(!app.pinned.contains(&node.id), "second p unpins");
         assert!(!app.processing_paused, "pause untouched throughout");
+    }
+
+    // --- GPU graph window interaction mapping (task 3.1) --------------------
+    // The window hit-tests pointers against the graph layout via the camera;
+    // with an identity camera (zoom 1, pan 0) world == pixel, so pointers can
+    // be taken straight from `graph_positions`.
+
+    #[cfg(feature = "gui")]
+    fn app_with_graph_window() -> App {
+        let mut app = app_with_graph();
+        app.graph_camera = Some(crate::graph_render::GraphCamera::new());
+        app
+    }
+
+    /// Pointer just inside `target`'s top-left corner, accepted only when no
+    /// earlier node's rect also claims it (hit-testing takes the first match),
+    /// so the sample deterministically hits `target`.
+    #[cfg(feature = "gui")]
+    fn clean_sample_point(app: &App, target: usize) -> Option<(f32, f32)> {
+        let (px, py) = app.graph_positions[target];
+        let (sx, sy) = (px + 5.0, py + 5.0);
+        let nw = crate::app::GRAPH_WINDOW_NODE_W;
+        let nh = crate::app::GRAPH_WINDOW_NODE_H;
+        let claims = |i: usize| {
+            let (nx, ny) = app.graph_positions[i];
+            sx >= nx && sx < nx + nw && sy >= ny && sy < ny + nh
+        };
+        (claims(target) && !(0..target).any(claims)).then_some((sx, sy))
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_hover_sets_and_clears_hovered_node() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph_window();
+        let (x, y) = app.graph_positions[0];
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 10.0, y + 10.0)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, Some(0));
+        // A pointer beyond every node's right edge misses all rects.
+        let max_right = app
+            .graph_positions
+            .iter()
+            .map(|&(nx, _)| nx + crate::app::GRAPH_WINDOW_NODE_W)
+            .fold(f32::MIN, f32::max);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((max_right + 50.0, 0.0)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, None);
+        // Leaving the window clears hover too.
+        handle_graph_window_frame(&WindowFrame::default(), &mut app);
+        assert_eq!(app.hovered_graph_node, None);
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_drag_moves_node_and_auto_pins_on_release() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph_window();
+        let (x, y) = app.graph_positions[0];
+        let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        // Press on node 0: grabs the node, no move yet (mirrors the terminal
+        // Down/Drag split).
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 5.0, y + 5.0)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, Some(0));
+        let drag = app.graph_drag.as_ref().expect("press grabs the node");
+        assert_eq!(drag.node_index, 0);
+        // Drag the pointer +30/+20: the node follows without jumping.
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 35.0, y + 25.0)),
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let (nx, ny) = app.graph_positions[0];
+        assert!((nx - (x + 30.0)).abs() < 1e-3, "node x follows the drag");
+        assert!((ny - (y + 20.0)).abs() < 1e-3, "node y follows the drag");
+        // Release auto-pins the dropped node (design D7).
+        handle_graph_window_frame(
+            &WindowFrame {
+                primary_released: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(app.graph_drag.is_none());
+        assert!(app.pinned.contains(&node_id));
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_drag_emits_node_moved_event() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph_window();
+        let received = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let store = std::rc::Rc::clone(&received);
+        app.events.subscribe(move |event| {
+            if let Event::NodeMoved(_) = event {
+                store.borrow_mut().push(event.clone());
+            }
+        });
+        let (x, y) = app.graph_positions[0];
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 5.0, y + 5.0)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 35.0, y + 25.0)),
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(received.borrow().len(), 1, "one NodeMoved per drag frame");
+        assert!(matches!(received.borrow()[0], Event::NodeMoved(_)));
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_keys_act_on_hovered_node() {
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        let (x, y) = app.graph_positions[0];
+        let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 5.0, y + 5.0)),
+                keys: vec![WindowGraphKey::ToggleProcessing],
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(
+            app.disabled_circuits
+                .contains(&(node.circuit.clone(), node.instance_index)),
+            "window x disables the hovered circuit"
+        );
+        assert_eq!(
+            app.status_message,
+            format!(
+                "Processing disabled: {} {}",
+                node.circuit, node.instance_index
+            )
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_pin_key_toggles_pin_on_hovered_node() {
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        assert!(node_count >= 2, "fixture needs a non-tip node to toggle");
+        // Pick the highest non-tip node with a sample point no earlier node
+        // overlaps, so the hit deterministically lands on it.
+        let (idx, point) = (1..node_count)
+            .rev()
+            .find_map(|i| clean_sample_point(&app, i).map(|p| (i, p)))
+            .expect("fixture has a clean non-tip sample point");
+        let node = app.graph.as_ref().unwrap().nodes[idx].clone();
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(point),
+                keys: vec![WindowGraphKey::TogglePin],
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(
+            app.pinned.contains(&node.id),
+            "window p pins the hovered node"
+        );
+        assert_eq!(
+            app.status_message,
+            format!("Pinned: {} {}", node.circuit, node.instance_index)
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_edit_key_opens_circuit_overlay() {
+        use crate::app::EditKind;
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        let (x, y) = app.graph_positions[0];
+        let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 5.0, y + 5.0)),
+                keys: vec![WindowGraphKey::BeginEdit],
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let editing = app.editing.as_ref().expect("e opens the edit overlay");
+        assert_eq!(editing.kind, EditKind::Circuit { node: node.id });
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn graph_window_without_camera_is_inert() {
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph(); // no camera
+        app.hovered_graph_node = Some(0);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((5.0, 5.0)),
+                primary_pressed: true,
+                keys: vec![WindowGraphKey::ToggleProcessing],
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.hovered_graph_node, None,
+            "hover cleared when no camera can hit-test"
+        );
+        assert!(app.graph_drag.is_none());
+        assert!(app.disabled_circuits.is_empty());
     }
 
     #[test]
