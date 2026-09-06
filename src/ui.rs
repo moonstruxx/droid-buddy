@@ -1033,6 +1033,11 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         .map(|(i, c)| (c.id.as_str(), i))
         .collect();
 
+    // Circuit-selection hardware highlight (design D4): global component
+    // indices whose hardware tokens appear in the selected circuit's section.
+    // Empty when nothing is selected, so existing frames are byte-identical.
+    let hw_highlight = app.circuit_hw_token_indices();
+
     let t = theme::active();
     let module_outline = Style::default().fg(t.physical_skeleton_module_outline);
     let case_style = Style::default().fg(t.graph_cluster_border);
@@ -1102,6 +1107,9 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
         let comp = &chain.modules[module_idx].components[cell_idx];
         let global_idx = index_of[comp.id.as_str()];
         let is_hovered = app.hovered_component == Some(global_idx);
+        // Reuse the hover emphasis for the selected circuit's hardware so the
+        // panel highlight needs no new styling (design D4).
+        let is_circuit_hw = hw_highlight.contains(&global_idx);
         let is_shift_active = comp.shift_group.is_some() && comp.shift_group == app.active_shift;
         let shift: u8 = match comp.shift_group {
             Some(ShiftGroup::Group1) => 1,
@@ -1128,7 +1136,7 @@ fn render_physical_full(frame: &mut Frame, area: Rect, patch: &crate::patch::Pat
             && matches!(comp.kind, ComponentKind::Knob | ComponentKind::Encoder);
         let (symbol, state_text, fg_color) = physical_visuals(comp, is_shift_active, is_fader);
         let display_style = dim_style(
-            if is_hovered {
+            if is_hovered || is_circuit_hw {
                 Style::default()
                     .fg(fg_color)
                     .bg(theme::active().muted)
@@ -1727,6 +1735,7 @@ struct GraphKittyOpts<'a> {
     diff_showing: bool,
     latency_coloring: bool,
     hovered: Option<usize>,
+    selected: Option<&'a (String, usize)>,
     patch: Option<&'a crate::patch::Patch>,
     circuit_store: &'a HashMap<(String, usize), String>,
 }
@@ -1841,6 +1850,10 @@ fn graph_kitty_frame(
         // background has no pixel equivalent); disabled dim outranks hover.
         let (border, title_color) = if is_disabled {
             (theme.graph_node_dim, theme.graph_node_dim)
+        } else if opts.selected == Some(&node.id) {
+            // Selected circuit (design D4): same highlight token as hover so
+            // the window and terminal surfaces agree on the emphasized node.
+            (theme.graph_node_highlight, theme.graph_node_highlight)
         } else if opts.hovered == Some(i) {
             (theme.graph_node_highlight, theme.graph_node_highlight)
         } else {
@@ -1961,6 +1974,7 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
     let diff_report_owned = app.filtered_report();
     let hovered = app.hovered_graph_node;
     let latency_coloring = app.latency_coloring;
+    let selected_circuit = app.selected_circuit.clone();
 
     let App {
         graph,
@@ -1982,6 +1996,7 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
         diff_showing,
         latency_coloring,
         hovered,
+        selected: selected_circuit.as_ref(),
         patch: patch_for_title.as_ref(),
         circuit_store: &circuit_store,
     };
@@ -2082,6 +2097,9 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     let hovered = app.hovered_graph_node;
     let latency_coloring = app.latency_coloring;
     let cam = app.graph_camera;
+    // Circuit-selection highlight (design D4): the terminal tile highlights the
+    // node the window/tile selection points at.
+    let selected_circuit = app.selected_circuit.clone();
 
     // Split `app` field borrows so reading the graph and publishing cluster
     // rects (a renderer→handler handoff) coexist within one frame.
@@ -2160,6 +2178,7 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             None,
             Some(disabled_circuits),
             hovered == Some(i),
+            selected_circuit.as_ref() == Some(&node.id),
             patch_for_title.as_ref(),
             Some(&circuit_store),
             diff_report_ref,
@@ -2637,7 +2656,7 @@ fn render_graph_edges_with_highlight(
 #[allow(dead_code)]
 fn render_graph_node(frame: &mut Frame, area: Rect, node: &GraphNode, graph: &Graph) {
     render_graph_node_with_highlight(
-        frame, area, node, graph, None, None, false, None, None, None, false,
+        frame, area, node, graph, None, None, false, false, None, None, None, false,
     );
 }
 
@@ -2650,6 +2669,7 @@ fn render_graph_node_with_highlight(
     highlight_nodes: Option<&HashSet<(String, usize)>>,
     disabled: Option<&HashSet<(String, usize)>>,
     hovered: bool,
+    selected: bool,
     patch: Option<&crate::patch::Patch>,
     circuit_store: Option<&HashMap<(String, usize), String>>,
     diff_report: Option<&crate::diff::DiffReport>,
@@ -2669,6 +2689,14 @@ fn render_graph_node_with_highlight(
             theme::active().graph_node_dim,
             theme::active().graph_node_dim,
             Modifier::DIM,
+        )
+    } else if selected {
+        // Selected circuit (design D4): the same highlight token as an
+        // influenced node, but without dimming the rest of the graph.
+        (
+            theme::active().graph_node_highlight,
+            theme::active().graph_node_highlight,
+            Modifier::BOLD,
         )
     } else if has_active {
         if is_highlighted {
@@ -5759,6 +5787,122 @@ mod graph_view_tests {
     }
 
     #[test]
+    fn graph_tile_highlights_selected_circuit_node() {
+        // Design D4: the terminal tile highlights the node the shared circuit
+        // selection points at. Render the graph surface directly so the
+        // assertion is independent of tiled-layout concerns.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_graph(frame, frame.area(), &mut app))
+            .unwrap();
+        let plain = terminal.backend().buffer().clone();
+
+        app.select_circuit(node.clone());
+        terminal
+            .draw(|frame| render_graph(frame, frame.area(), &mut app))
+            .unwrap();
+        let selected = terminal.backend().buffer().clone();
+
+        assert_ne!(
+            plain.content(),
+            selected.content(),
+            "selection must change the graph render"
+        );
+
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .position(|n| n.id == node)
+            .unwrap();
+        let rect = app
+            .graph_node_rects
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, r)| *r)
+            .expect("selected node has a published rect");
+        let cell = selected.cell((rect.x, rect.y)).unwrap();
+        assert_eq!(
+            cell.style().fg,
+            Some(theme::active().graph_node_highlight),
+            "selected node frame carries the highlight token"
+        );
+        let plain_cell = plain.cell((rect.x, rect.y)).unwrap();
+        assert_ne!(
+            plain_cell.style().fg,
+            Some(theme::active().graph_node_highlight),
+            "unselected render must not highlight the node"
+        );
+    }
+
+    #[test]
+    fn physical_view_highlights_selected_circuit_hardware() {
+        // Design D4: selecting a circuit emphasizes the hardware components
+        // whose tokens appear in that circuit's section (reusing the hover
+        // emphasis — no new styling).
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let b11_idx = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("B1.1 is a hardware component");
+
+        let plain = buffer_for(&mut app, 140, 40);
+        let (_, rect) = app
+            .component_rects
+            .iter()
+            .find(|(i, _)| *i == b11_idx)
+            .copied()
+            .expect("B1.1 has a published hit rect");
+        let plain_cell = plain.cell((rect.x, rect.y)).unwrap();
+        assert!(
+            !plain_cell.style().add_modifier.contains(Modifier::REVERSED),
+            "unselected render must not emphasize B1.1"
+        );
+
+        let node = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| {
+                app.patch.as_ref().unwrap().sections[n.section_index]
+                    .entries
+                    .iter()
+                    .any(|(_, v)| v.contains("B1.1"))
+            })
+            .expect("a button section owns B1.1")
+            .id
+            .clone();
+        app.select_circuit(node);
+        let selected = buffer_for(&mut app, 140, 40);
+        let selected_cell = selected.cell((rect.x, rect.y)).unwrap();
+        assert!(
+            selected_cell
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "B1.1 must emphasize as the selected circuit's hardware"
+        );
+    }
+
+    #[test]
     fn graph_node_rects_box_fit_frames_the_graph_and_fills_width() {
         // Design D5: the box fit preserves aspect ratio, prefers filling the
         // canvas width (a horizontal chain starts at the left edge and spans
@@ -6133,6 +6277,7 @@ mod graph_view_tests {
             diff_showing: false,
             latency_coloring: false,
             hovered: None,
+            selected: None,
             patch: None,
             circuit_store: &store,
         };
@@ -6169,6 +6314,7 @@ mod graph_view_tests {
             diff_showing: false,
             latency_coloring: false,
             hovered: None,
+            selected: None,
             patch: None,
             circuit_store: &store,
         };
@@ -6210,6 +6356,7 @@ mod graph_view_tests {
             diff_showing: false,
             latency_coloring: false,
             hovered: None,
+            selected: None,
             patch: None,
             circuit_store: &store,
         };
@@ -6339,6 +6486,7 @@ mod graph_view_tests {
                 diff_showing: false,
                 latency_coloring: false,
                 hovered: None,
+                selected: None,
                 patch: None,
                 circuit_store: &store,
             };
@@ -6385,6 +6533,7 @@ mod graph_view_tests {
                 diff_showing: false,
                 latency_coloring: false,
                 hovered: None,
+                selected: None,
                 patch: None,
                 circuit_store: &store,
             };
