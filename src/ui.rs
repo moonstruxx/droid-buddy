@@ -1594,12 +1594,26 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
         let prefix = if is_selected { "▶ " } else { "  " };
         let content = format!("{}{}", prefix, label);
 
-        let style = if is_selected {
-            Style::default()
-                .fg(theme::active().text)
-                .add_modifier(Modifier::BOLD)
+        // Favourites pop in their own colour (file vs directory) so the pinned
+        // section reads at a glance; the listing stays in `text`. The `..`
+        // sentinel is never favourited, so it never reaches the colour branch.
+        // `metadata` is a per-favourite stat, skipped for listing entries.
+        let base_fg = if app.is_favourite_entry(path) {
+            if path.metadata().is_ok_and(|m| m.is_dir()) {
+                theme::active().picker_fav_dir
+            } else {
+                theme::active().picker_fav_file
+            }
         } else {
-            Style::default().fg(theme::active().text)
+            theme::active().text
+        };
+
+        // Selection keeps the `▶ ` prefix and BOLD on top of the favourite
+        // colour, so the chosen line still dominates the section.
+        let style = if is_selected {
+            Style::default().fg(base_fg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(base_fg)
         };
 
         lines.push(Line::from(Span::styled(content, style)));
@@ -4429,6 +4443,44 @@ mod tests {
         assert!(text.contains("File Picker"), "picker overlay should win");
         // picker renders on top; still no panic
         render_at(&mut app, 80, 24);
+    }
+
+    #[test]
+    fn picker_favourite_lines_use_picker_tokens_and_selection_stays_bold() {
+        // file-picker-favourites 4.2: favourites render in the dedicated
+        // picker_fav_file token (not `text`), and the selected favourite keeps
+        // BOLD on top of that colour so the choice still dominates.
+        let _pin = ThemePin::pin("classic");
+        let t = *crate::theme::active();
+        let mut app = App::new();
+        app.favorites.favourites = vec![
+            "/tmp/fav_file_a.ini".to_string(),
+            "/tmp/fav_file_b.ini".to_string(),
+        ];
+        app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+        let buf = buffer_for(&mut app, 80, 24);
+        let stars: Vec<_> = buf.content().iter().filter(|c| c.symbol() == "★").collect();
+        assert_eq!(stars.len(), 2, "both favourites pinned");
+        assert_eq!(
+            stars[0].style().fg,
+            Some(t.picker_fav_file),
+            "selected file favourite keeps the file token"
+        );
+        assert!(
+            stars[0].style().add_modifier.contains(Modifier::BOLD),
+            "selection stays bold on top of the favourite colour"
+        );
+        assert_eq!(
+            stars[1].style().fg,
+            Some(t.picker_fav_file),
+            "unselected file favourite uses the file token"
+        );
+        assert!(
+            !stars[1].style().add_modifier.contains(Modifier::BOLD),
+            "unselected favourite is not bold"
+        );
     }
 
     #[test]

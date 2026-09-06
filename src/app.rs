@@ -797,8 +797,9 @@ impl App {
         }
     }
 
-    /// Favourited `.ini` files as sorted absolute `PathBuf`s (pinned section).
-    /// Filters `favorites.favourites` to `.ini` extension and sorts for stable
+    /// Favourited `.ini` files and directories as sorted absolute `PathBuf`s
+    /// (pinned section). Filters `favorites.favourites` to entries that are a
+    /// directory on disk or carry the `.ini` extension, then sorts for stable
     /// picker ordering. Uses stored absolute strings directly — canonicalization
     /// is handled at toggle time via `FavoritesStore::canonical_key`.
     pub fn picker_entries_with_favourites(&self) -> Vec<PathBuf> {
@@ -807,7 +808,9 @@ impl App {
             .favourites
             .iter()
             .map(PathBuf::from)
-            .filter(|p| p.extension().is_some_and(|e| e == "ini"))
+            .filter(|p| {
+                p.metadata().is_ok_and(|m| m.is_dir()) || p.extension().is_some_and(|e| e == "ini")
+            })
             .collect();
         favs.sort();
         favs
@@ -818,8 +821,9 @@ impl App {
         self.favorites.is_favourite(path)
     }
 
-    /// Display label for a picker entry, prefixing favourited files with `★ `.
-    /// The parent sentinel `..` is never considered favourited.
+    /// Display label for a picker entry: favourited files keep their leaf name
+    /// with `★ `, favourited directories add a trailing `/`. The parent sentinel
+    /// `..` is never considered favourited.
     pub fn picker_entry_label(&self, path: &Path) -> String {
         let base = if is_picker_parent_entry(path) {
             "..".to_string()
@@ -829,7 +833,11 @@ impl App {
                 .unwrap_or_default()
         };
         if !is_picker_parent_entry(path) && self.is_favourite_entry(path) {
-            format!("★ {base}")
+            if path.metadata().is_ok_and(|m| m.is_dir()) {
+                format!("★ {base}/")
+            } else {
+                format!("★ {base}")
+            }
         } else {
             base
         }
@@ -837,10 +845,10 @@ impl App {
 
     pub fn refresh_picker_entries(&mut self) {
         self.picker_entries.clear();
-        // Pinned favourites section at the top. Favourited `.ini` files are
-        // prepended even when not in `picker_dir`, sorted for stable order.
-        // They use absolute paths from the store, so `file_name()` still
-        // renders the leaf name and `is_favourite_entry` marks them with ★.
+        // Pinned favourites section at the top. Favourited `.ini` files and
+        // directories are prepended even when not in `picker_dir`, sorted for
+        // stable order. They use absolute paths from the store, so `file_name()`
+        // still renders the leaf name and `is_favourite_entry` marks them with ★.
         let favs = self.picker_entries_with_favourites();
         // Deduplicate directory listing against favourites (compare canonical keys)
         // so a favourited file in the current directory appears only in the
@@ -4050,6 +4058,50 @@ mod tests {
                 "fixtures/picker_test/readme.txt",
             ]
         );
+    }
+
+    #[test]
+    fn picker_entries_with_favourites_pins_dirs_and_inis_sorted() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let subdir = tmp.path().join("adir");
+        std::fs::create_dir(&subdir).unwrap();
+        let ini = tmp.path().join("z.ini");
+        std::fs::write(&ini, "[p2b8]\n").unwrap();
+        let txt = tmp.path().join("m.txt");
+        std::fs::write(&txt, "x").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.favorites.toggle(&subdir);
+        app.favorites.toggle(&ini);
+        app.favorites.toggle(&txt);
+
+        // The .txt favourite stays excluded; dir and .ini are pinned, sorted.
+        let favs = app.picker_entries_with_favourites();
+        assert_eq!(favs.len(), 2);
+        assert!(favs[0].ends_with("adir"));
+        assert!(favs[1].ends_with("z.ini"));
+    }
+
+    #[test]
+    fn picker_entry_label_prefixes_favourited_dir_with_slash() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let subdir = tmp.path().join("dirname");
+        std::fs::create_dir(&subdir).unwrap();
+        let ini = tmp.path().join("name.ini");
+        std::fs::write(&ini, "[p2b8]\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.favorites.toggle(&subdir);
+        app.favorites.toggle(&ini);
+
+        assert_eq!(app.picker_entry_label(&subdir), "★ dirname/");
+        assert_eq!(app.picker_entry_label(&ini), "★ name.ini");
+        // Parent sentinel is never favourited and keeps its plain label.
+        assert_eq!(app.picker_entry_label(Path::new("..")), "..");
     }
 
     #[test]

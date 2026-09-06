@@ -4,6 +4,7 @@ use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEve
 use ratatui::layout::Rect;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[cfg(feature = "gui")]
 use crate::app::GraphWindowRequest;
@@ -1676,9 +1677,8 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
         }
         crossterm::event::KeyCode::Char('f') | crossterm::event::KeyCode::Char('F') => {
             // Favourites toggle for the highlighted picker entry (file-picker-favourites 3.1).
-            // Ignore parent sentinel and directories; only file entries are togglable
-            // (`.ini` preferred — the pinned section filters to `.ini`, but any file
-            // can be toggled; non-`.ini` simply won't appear pinned until filtered).
+            // Directories toggle like files; the pinned section shows both. Only the
+            // parent sentinel is excluded.
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT)
             {
@@ -1686,9 +1686,6 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             }
             if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
                 if is_picker_parent_entry(&selected_path) {
-                    return false;
-                }
-                if selected_path.metadata().is_ok_and(|m| m.is_dir()) {
                     return false;
                 }
                 let target_key = crate::favorites::FavoritesStore::canonical_key(&selected_path);
@@ -1716,6 +1713,22 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
+        crossterm::event::KeyCode::Char(d @ '0'..='9') => {
+            // Digit keys fast-select a pinned favourite slot (0-based in the
+            // sorted favourites list). Directories navigate in, files open like
+            // Enter; out-of-range digits are silent.
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT)
+            {
+                return false;
+            }
+            let slot = d.to_digit(10).unwrap_or(0) as usize;
+            let favs = app.picker_entries_with_favourites();
+            if let Some(fav) = favs.get(slot) {
+                open_picker_entry(app, fav.clone());
+            }
+            false
+        }
         crossterm::event::KeyCode::Enter => {
             if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
                 if !is_entry_selectable(&selected_path) {
@@ -1732,58 +1745,68 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                     }
                     return false;
                 }
-                let is_dir = selected_path.metadata().is_ok_and(|m| m.is_dir());
-                if is_dir {
-                    app.picker_dir = selected_path;
-                    app.picker_index = 0;
-                    app.refresh_picker_entries();
-                } else if app.diff_picker_active {
-                    match app.load_diff_patch(&selected_path) {
-                        Ok(()) => {
-                            if let Some(scoped) = app.status_for_scope() {
-                                app.status_message = scoped;
-                            } else if let Some(report) = &app.diff_report {
-                                app.status_message = format!(
-                                    "Diff loaded: +{} -{} ~{} cables, +{} -{} ~{} nodes",
-                                    report.added_cables.len(),
-                                    report.removed_cables.len(),
-                                    report.changed_cables.len(),
-                                    report.added_nodes.len(),
-                                    report.removed_nodes.len(),
-                                    report.changed_nodes.len()
-                                );
-                            }
-                            app.selected_file = Some(selected_path);
-                            app.showing_picker = false;
-                            app.diff_picker_active = false;
-                        }
-                        Err(e) => {
-                            app.status_message = format!("Failed to load diff patch: {}", e);
-                        }
-                    }
-                } else {
-                    match Patch::from_ini_file(&selected_path) {
-                        Ok(patch) => {
-                            // Route through load_patch_at so picker loads run
-                            // validation, the Error gate, and LabelStore path
-                            // keying. The picker must close on both outcomes: a
-                            // gated load has to surface the validation modal,
-                            // and the picker outranks it in key priority.
-                            let _ = app.load_patch_at(&selected_path, patch);
-                            app.hovered_component = None;
-                            app.selected_file = Some(selected_path);
-                            app.showing_picker = false;
-                            app.diff_picker_active = false;
-                        }
-                        Err(e) => {
-                            app.status_message = format!("Failed to load patch: {}", e);
-                        }
-                    }
-                }
+                open_picker_entry(app, selected_path);
             }
             false
         }
         _ => false,
+    }
+}
+
+/// Open a picker entry: directories navigate in-place (picker stays open),
+/// `.ini` files load through the diff or patch path and close the picker.
+/// Shared by the Enter arm and the digit-slot fast-select arm so both keep
+/// identical open semantics.
+fn open_picker_entry(app: &mut App, path: PathBuf) {
+    let is_dir = path.metadata().is_ok_and(|m| m.is_dir());
+    if is_dir {
+        app.picker_dir = path;
+        app.picker_index = 0;
+        app.refresh_picker_entries();
+        return;
+    }
+    if app.diff_picker_active {
+        match app.load_diff_patch(&path) {
+            Ok(()) => {
+                if let Some(scoped) = app.status_for_scope() {
+                    app.status_message = scoped;
+                } else if let Some(report) = &app.diff_report {
+                    app.status_message = format!(
+                        "Diff loaded: +{} -{} ~{} cables, +{} -{} ~{} nodes",
+                        report.added_cables.len(),
+                        report.removed_cables.len(),
+                        report.changed_cables.len(),
+                        report.added_nodes.len(),
+                        report.removed_nodes.len(),
+                        report.changed_nodes.len()
+                    );
+                }
+                app.selected_file = Some(path);
+                app.showing_picker = false;
+                app.diff_picker_active = false;
+            }
+            Err(e) => {
+                app.status_message = format!("Failed to load diff patch: {}", e);
+            }
+        }
+    } else {
+        match Patch::from_ini_file(&path) {
+            Ok(patch) => {
+                // Route through load_patch_at so picker loads run
+                // validation, the Error gate, and LabelStore path
+                // keying. The picker must close on both outcomes: a
+                // gated load has to surface the validation modal,
+                // and the picker outranks it in key priority.
+                let _ = app.load_patch_at(&path, patch);
+                app.hovered_component = None;
+                app.selected_file = Some(path);
+                app.showing_picker = false;
+                app.diff_picker_active = false;
+            }
+            Err(e) => {
+                app.status_message = format!("Failed to load patch: {}", e);
+            }
+        }
     }
 }
 
@@ -4676,8 +4699,6 @@ mod tests {
         let picker_tmp = TempDir::new().unwrap();
         let dummy = picker_tmp.path().join("a.ini");
         std::fs::write(&dummy, "[p2b8]\nbutton1 = B1.1\n").unwrap();
-        let subdir = picker_tmp.path().join("subdir");
-        std::fs::create_dir(&subdir).unwrap();
 
         let mut app = App::new();
         app.favorites = crate::favorites::FavoritesStore::default();
@@ -4695,19 +4716,6 @@ mod tests {
         assert!(
             app.favorites.favourites.is_empty(),
             "f on parent must not toggle"
-        );
-
-        // Directory entry must also be ignored.
-        let dir_idx = app
-            .picker_entries
-            .iter()
-            .position(|p| p == &subdir)
-            .expect("subdir in picker");
-        app.picker_index = dir_idx;
-        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
-        assert!(
-            app.favorites.favourites.is_empty(),
-            "f on directory must not toggle"
         );
 
         // Ctrl+f must be ignored even on a file entry.
@@ -4831,6 +4839,191 @@ mod tests {
             "status should indicate load success, got {:?}",
             app.status_message
         );
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_f_toggles_directory_favourite_and_back() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let picker_tmp = TempDir::new().unwrap();
+        let subdir = picker_tmp.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        let other = picker_tmp.path().join("other.ini");
+        std::fs::write(&other, "[p2b8]\nbutton1 = B1.2\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+        let dir_idx = app
+            .picker_entries
+            .iter()
+            .position(|p| p == &subdir)
+            .expect("subdir in picker");
+        app.picker_index = dir_idx;
+        assert!(!app.favorites.is_favourite(&subdir));
+
+        // First press f -> mark directory favourite.
+        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(
+            app.favorites.is_favourite(&subdir),
+            "f should favourite a directory"
+        );
+        assert!(
+            app.status_message.contains("Favourited"),
+            "status: {:?}",
+            app.status_message
+        );
+        // Directory is pinned at the top; highlight follows the re-sorted list.
+        let target_key = crate::favorites::FavoritesStore::canonical_key(&subdir);
+        let pos = app
+            .picker_entries
+            .iter()
+            .position(|p| crate::favorites::FavoritesStore::canonical_key(p) == target_key)
+            .unwrap();
+        assert_eq!(app.picker_index, pos, "highlight follows the pinned entry");
+
+        // Second press f -> unmark.
+        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(
+            !app.favorites.is_favourite(&subdir),
+            "second f should unfavourite a directory"
+        );
+        assert!(
+            app.status_message.contains("Unfavourited"),
+            "status: {:?}",
+            app.status_message
+        );
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_digit_on_file_favourite_loads_and_closes() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let picker_tmp = TempDir::new().unwrap();
+        let alpha = picker_tmp.path().join("alpha.ini");
+        std::fs::write(&alpha, "[p2b8]\nbutton = B1.1\n").unwrap();
+        let beta = picker_tmp.path().join("beta.ini");
+        std::fs::write(&beta, "[p2b8]\nbutton = B1.2\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.favorites.toggle(&alpha);
+        app.favorites.toggle(&beta);
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+
+        // Slot order follows the sorted favourites list: alpha.ini (0), beta.ini (1).
+        let favs = app.picker_entries_with_favourites();
+        assert_eq!(favs.len(), 2);
+        assert!(favs[0].ends_with("alpha.ini"));
+        assert!(favs[1].ends_with("beta.ini"));
+
+        // '1' opens favourite slot 1: patch loads, picker closes.
+        app.picker_index = 0;
+        handle_picker_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        assert!(!app.showing_picker, "digit on file favourite closes picker");
+        assert!(app.patch.is_some(), "digit loads the favourite patch");
+        assert!(
+            app.selected_file
+                .as_ref()
+                .is_some_and(|p| p.ends_with("beta.ini")),
+            "selected_file: {:?}",
+            app.selected_file
+        );
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_digit_on_directory_favourite_navigates_in() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let picker_tmp = TempDir::new().unwrap();
+        let subdir = picker_tmp.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("inner.ini"), "[p2b8]\nbutton = B1.1\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.favorites.toggle(&subdir);
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+
+        // '0' on slot 0 (the directory favourite) navigates into it.
+        handle_picker_event(key(crossterm::event::KeyCode::Char('0')), &mut app);
+        assert!(app.showing_picker, "digit on directory keeps picker open");
+        assert!(app.picker_dir.ends_with("subdir"));
+        assert!(app.patch.is_none());
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_digit_out_of_range_and_modifiers_are_noop() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let picker_tmp = TempDir::new().unwrap();
+        let alpha = picker_tmp.path().join("alpha.ini");
+        std::fs::write(&alpha, "[p2b8]\nbutton = B1.1\n").unwrap();
+
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.favorites.toggle(&alpha);
+        app.picker_dir = picker_tmp.path().to_path_buf();
+        app.showing_picker = true;
+        app.refresh_picker_entries();
+
+        // '9' has no slot: silent no-op, picker stays open.
+        handle_picker_event(key(crossterm::event::KeyCode::Char('9')), &mut app);
+        assert!(app.showing_picker);
+        assert!(app.patch.is_none());
+        assert!(app.selected_file.is_none());
+
+        // Ctrl/Alt-held digits never fire (mirrors the f-handler guard).
+        let ctrl_zero = KeyEvent::new(crossterm::event::KeyCode::Char('0'), KeyModifiers::CONTROL);
+        handle_picker_event(ctrl_zero, &mut app);
+        assert!(app.showing_picker, "Ctrl+digit must not open a favourite");
+        assert!(app.patch.is_none());
+        let alt_zero = KeyEvent::new(crossterm::event::KeyCode::Char('0'), KeyModifiers::ALT);
+        handle_picker_event(alt_zero, &mut app);
+        assert!(app.showing_picker, "Alt+digit must not open a favourite");
+        assert!(app.patch.is_none());
 
         match orig_xdg {
             Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
