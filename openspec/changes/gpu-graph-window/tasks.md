@@ -24,7 +24,7 @@
 
 ## 6. Tests
 
-- [ ] 6.1 Unit tests: scene-spec pipeline, interaction mapping, selection propagation, config parse; no window opens under cargo test <!-- agent: horst-engineer.build, depends_on: [2.1, 3.1, 3.3, 4.1], touches: [src/gui.rs, src/config.rs, src/app.rs] -->
+- [x] 6.1 Unit tests: scene-spec pipeline, interaction mapping, selection propagation, config parse; no window opens under cargo test <!-- agent: horst-engineer.build, depends_on: [2.1, 3.1, 3.3, 4.1], touches: [src/gui.rs, src/config.rs, src/app.rs] -->
 
 ## 7. Verification gate
 

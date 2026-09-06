@@ -1419,4 +1419,79 @@ mod tests {
         };
         assert!(minimap_layout(&empty, egui::vec2(800.0, 600.0)).is_none());
     }
+
+    /// A default node frame at a given origin, for tight two-node scenes that
+    /// exercise edge-port attribution without dragging the whole fixture in.
+    fn node_spec(x: f32, y: f32) -> NodeSpec {
+        NodeSpec {
+            x,
+            y,
+            w: 200.0,
+            h: 80.0,
+            radius: 8.0,
+            fill: (20, 20, 20),
+            border: (200, 200, 200),
+            border_width: 1.0,
+            label: "copy".into(),
+            label_color: (255, 255, 255),
+            circuit: "copy".into(),
+            instance_index: 0,
+            input_port: false,
+            output_port: true,
+        }
+    }
+
+    #[test]
+    fn clean_window_frame_defaults_to_no_gesture() {
+        // A fresh frame carries no pointer, no pan/zoom, and no marquee: the
+        // loop must not act on state a clean frame does not provide.
+        let frame = WindowFrame::default();
+        assert_eq!(frame.pointer, None);
+        assert!(!frame.primary_pressed);
+        assert!(!frame.primary_down);
+        assert!(!frame.primary_released);
+        assert!(frame.keys.is_empty());
+        assert_eq!(frame.pan_delta, (0.0, 0.0));
+        assert_eq!(frame.zoom, None);
+        assert_eq!(frame.marquee, None);
+    }
+
+    #[test]
+    fn nearest_node_at_attributes_edge_ports_and_returns_none_in_gap() {
+        let s = scene();
+        // The edge start sits on node 0's right frame and its end on node 1's
+        // left frame, so nearest-node attribution maps them to source and sink.
+        assert_eq!(nearest_node_at(&s, 200.0, 40.0), Some(0));
+        assert_eq!(nearest_node_at(&s, 260.0, 40.0), Some(1));
+        // A point in the 200..=260 gap (wider than the 8px margin) matches no
+        // node frame, and far-off points miss every margin.
+        assert_eq!(nearest_node_at(&s, 230.0, 40.0), None);
+        assert_eq!(nearest_node_at(&s, 1000.0, 1000.0), None);
+    }
+
+    #[test]
+    fn nearest_node_at_tiebreaks_abutting_nodes_by_centre() {
+        // Two nodes share an edge at x = 200. A point just right of the seam
+        // is closer to the second node's centre, so it resolves there; the
+        // exact seam is equidistant to both centres and the first match wins.
+        let s = SceneSpec {
+            background: (0, 0, 0),
+            nodes: vec![node_spec(0.0, 0.0), node_spec(200.0, 0.0)],
+            edges: vec![],
+            clusters: vec![],
+        };
+        assert_eq!(nearest_node_at(&s, 210.0, 40.0), Some(1));
+        assert_eq!(nearest_node_at(&s, 200.0, 40.0), Some(0));
+    }
+
+    #[test]
+    fn graph_window_new_stays_closed_without_an_event_loop() {
+        // `GraphWindow::new()` must not touch the display or build an event
+        // loop (winit permits one loop per process), so under `cargo test` a
+        // fresh handle stays closed and windowless.
+        let window = GraphWindow::new();
+        assert!(!window.is_open());
+        assert_eq!(window.window_id(), None);
+        assert!(window.with_window(|_| true).is_none());
+    }
 }
