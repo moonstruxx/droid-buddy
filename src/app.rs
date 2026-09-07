@@ -270,7 +270,7 @@ use ratatui::layout::Rect;
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::favorites::FavoritesStore;
-use crate::graph::{Cluster, Graph, GraphOptions, NodeId};
+use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind};
 use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
 use crate::layout;
@@ -734,6 +734,19 @@ pub struct App {
     /// node; dragging a node auto-pins it at the dropped position (design
     /// D7). Cleared on every `load_patch`.
     pub pinned: HashSet<NodeId>,
+    /// Select-state filtering (`g s` menu, change C task 4.1). `None` with no
+    /// menu open; the assumed values feed the graph build's `GraphOptions`.
+    /// Reset on patch load via `reset_graph_state`.
+    /// Upstream dependency filter (change D task 2.1): the frozen root node
+    /// while the `f` filter is active. Cleared by a second `f`, Esc, a patch
+    /// load, and graph close; presentation-only, never mutates the graph.
+    pub dependency_root: Option<NodeId>,
+    /// Node indices (into `graph.nodes`) of the dependency set, BFS order root
+    /// first; empty when the filter is inactive.
+    pub dependency_nodes: Vec<usize>,
+    /// Edge indices (into `graph.edges`) with both endpoints in the set;
+    /// empty when the filter is inactive.
+    pub dependency_edges: Vec<usize>,
     /// Per-patch XDG label store (`~/.config/droid-tui/labels.toml`), keyed by
     /// canonicalized absolute patch path. Loaded once at `App::new` via
     /// `LabelStore::load()` (warn-once, empty fallback) and persisted atomically
@@ -846,6 +859,9 @@ impl App {
             influence: None,
             disabled_circuits: HashSet::new(),
             pinned: HashSet::new(),
+            dependency_root: None,
+            dependency_nodes: Vec::new(),
+            dependency_edges: Vec::new(),
             label_store: LabelStore::load(),
             favorites: FavoritesStore::load(),
             editing: None,
@@ -2472,6 +2488,23 @@ impl App {
                 graph.highlighted_edges = sub.influenced_edges.clone();
             }
         }
+        // A rebuild (tension, select-state cycle) keeps an active dependency
+        // filter applied: recompute the subset over the fresh graph and solve
+        // it as its own layout. If the frozen root no longer exists (e.g. a
+        // hide_unselected build dropped it), the filter clears.
+        if let Some(root) = self.dependency_root.clone() {
+            let root_present = self
+                .graph
+                .as_ref()
+                .is_some_and(|g| g.nodes.iter().any(|n| n.id == root));
+            if root_present {
+                self.apply_dependency_subset();
+            } else {
+                self.dependency_root = None;
+                self.dependency_nodes.clear();
+                self.dependency_edges.clear();
+            }
+        }
     }
 
     /// Clear the renderer-published cluster rects each frame while the graph is
@@ -2503,6 +2536,135 @@ impl App {
         self.rebuild_graph();
     }
 
+    /// Toggle the upstream dependency filter rooted at the hovered graph node,
+    /// falling back to the shared circuit selection; a second `f` clears it
+    /// (change D task 2.1). With neither root available the view is unchanged
+    /// and the status hints.
+    pub fn toggle_dependency_filter(&mut self) {
+        if self.dependency_root.is_some() {
+            self.clear_dependency_filter();
+            return;
+        }
+        let Some(graph) = &self.graph else {
+            self.status_message = String::from("Open the graph first");
+            return;
+        };
+        let root_idx = self.hovered_graph_node.or_else(|| {
+            self.selected_circuit()
+                .and_then(|id| graph.nodes.iter().position(|n| n.id == *id))
+        });
+        let Some(root_idx) = root_idx else {
+            self.status_message = String::from("No graph node selected");
+            return;
+        };
+        let root = graph.nodes[root_idx].id.clone();
+        self.dependency_root = Some(root);
+        self.apply_dependency_subset();
+        let label = self.dependency_root_label();
+        self.status_message = format!(
+            "Dependencies of {label}: {} nodes",
+            self.dependency_nodes.len()
+        );
+    }
+
+    /// Clear the dependency filter and restore the full graph solve (change D
+    /// task 2.1).
+    pub fn clear_dependency_filter(&mut self) {
+        if self.dependency_root.is_none() {
+            return;
+        }
+        self.dependency_root = None;
+        self.dependency_nodes.clear();
+        self.dependency_edges.clear();
+        self.rebuild_graph();
+    }
+
+    /// Recompute the dependency subset from the frozen root over the current
+    /// graph and solve it as its own layout, writing the subset positions back
+    /// into the full-length array (change D tasks 2.1/3.1). Deterministic per
+    /// root: same patch + same tension + same pins → same subset layout.
+    fn apply_dependency_subset(&mut self) {
+        let (deps, edges) = {
+            let Some(root) = &self.dependency_root else {
+                return;
+            };
+            let Some(graph) = &self.graph else {
+                return;
+            };
+            let Some(root_idx) = graph.nodes.iter().position(|n| n.id == *root) else {
+                return;
+            };
+            let deps = graph.upstream_dependencies(&graph.nodes[root_idx].id);
+            let members: HashSet<usize> = deps.iter().copied().collect();
+            let edges = graph.internal_edges(&members);
+            (deps, edges)
+        };
+        self.dependency_nodes = deps;
+        self.dependency_edges = edges;
+
+        let (subset, pins) = {
+            let Some(graph) = &self.graph else {
+                return;
+            };
+            let nodes: Vec<GraphNode> = self
+                .dependency_nodes
+                .iter()
+                .map(|&i| graph.nodes[i].clone())
+                .collect();
+            let edges: Vec<GraphEdge> = self
+                .dependency_edges
+                .iter()
+                .map(|&i| graph.edges[i].clone())
+                .collect();
+            let subset = Graph {
+                nodes,
+                edges,
+                clusters: Vec::new(),
+                validation: Vec::new(),
+                latency: None,
+                highlighted_nodes: HashSet::new(),
+                highlighted_edges: HashSet::new(),
+                not_selected: HashSet::new(),
+            };
+            let pins: Vec<usize> = self
+                .dependency_nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
+                .map(|(pi, _)| pi)
+                .collect();
+            (subset, pins)
+        };
+        let sub_pos = crate::layout::solve(&subset, &pins, self.tension);
+        let mut positions = vec![(0.0, 0.0); self.graph.as_ref().map_or(0, |g| g.nodes.len())];
+        for (pi, &fi) in self.dependency_nodes.iter().enumerate() {
+            positions[fi] = sub_pos[pi];
+        }
+        self.graph_positions = positions;
+        self.graph_cluster_rects.clear();
+        self.graph_node_rects.clear();
+    }
+
+    /// Display label of the frozen dependency root for the status line: the
+    /// circuit name (+ instance), the controller name, or the jack token.
+    fn dependency_root_label(&self) -> String {
+        let Some(graph) = &self.graph else {
+            return String::new();
+        };
+        let Some(root) = &self.dependency_root else {
+            return String::new();
+        };
+        let Some(node) = graph.nodes.iter().find(|n| &n.id == root) else {
+            return format!("{root:?}");
+        };
+        match &node.kind {
+            NodeKind::Circuit if node.instance_index > 0 => {
+                format!("{} {}", node.circuit, node.instance_index + 1)
+            }
+            _ => node.circuit.clone(),
+        }
+    }
+
     /// Reset graph-view state on patch load: the graph is rebuilt from a fresh
     /// solve the next time it opens.
     fn reset_graph_state(&mut self) {
@@ -2521,6 +2683,11 @@ impl App {
         // new patch re-seeds its own tip on the next open (design D3/D7).
         self.pinned.clear();
         self.select_state = None;
+        // The dependency filter is per-patch presentation state: cleared on
+        // graph close and patch load (change D task 2.1).
+        self.dependency_root = None;
+        self.dependency_nodes.clear();
+        self.dependency_edges.clear();
     }
 
     /// Recompute the influence subtree for the currently selected hardware token.

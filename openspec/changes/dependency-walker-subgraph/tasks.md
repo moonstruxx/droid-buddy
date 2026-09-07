@@ -4,7 +4,7 @@
 
 ## 2. Filter state and the `f` key
 
-- [ ] 2.1 Add `App.dependency_root: Option<NodeId>` reset on `load_patch` and graph close. On the graph pane, `f` engages the filter rooted at the hovered node (fallback: `selected_circuit`; neither -> no-op with a status hint), freezing the root; a second `f`, Esc, patch load, and graph close clear it. Status: `Dependencies of <label>: N nodes`. Verify: handler unit tests assert engage/clear transitions and the fallback chain. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/app.rs, src/handler.rs] -->
+- [x] 2.1 Add `App.dependency_root: Option<NodeId>` reset on `load_patch` and graph close. On the graph pane, `f` engages the filter rooted at the hovered node (fallback: `selected_circuit`; neither -> no-op with a status hint), freezing the root; a second `f`, Esc, patch load, and graph close clear it. Status: `Dependencies of <label>: N nodes`. Verify: handler unit tests assert engage/clear transitions and the fallback chain. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/app.rs, src/handler.rs] -->
 
 ## 3. Filtered rendering
 
