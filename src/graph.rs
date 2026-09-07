@@ -5,7 +5,7 @@
 //! plus caller-supplied banner clusters into a graph the renderer can draw and
 //! the layout solver can position.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
 use crate::geometry::{BindingFeatures, RackGeometry, WiringOutlierScorer};
@@ -58,6 +58,20 @@ pub struct GraphEdge {
     pub cable: String,
     pub source: NodeId,
     pub sink: NodeId,
+}
+
+impl GraphEdge {
+    /// Index of this edge's source node in `nodes`, if present (change D task
+    /// 1.1 subset mapping).
+    pub fn source_index(&self, nodes: &[GraphNode]) -> Option<usize> {
+        nodes.iter().position(|n| n.id == self.source)
+    }
+
+    /// Index of this edge's sink node in `nodes`, if present (change D task
+    /// 1.1 subset mapping).
+    pub fn sink_index(&self, nodes: &[GraphNode]) -> Option<usize> {
+        nodes.iter().position(|n| n.id == self.sink)
+    }
 }
 
 /// A banner-group cluster: a titled range of sections.
@@ -331,6 +345,79 @@ impl Graph {
         self.clusters
             .iter()
             .position(|c| c.section_range.contains(&section_index))
+    }
+
+    /// Every node that feeds `root` transitively, following incoming edges
+    /// (reversed) breadth-first; returns indices into `self.nodes` in BFS
+    /// order, root first (change D task 1.1).
+    ///
+    /// Each node is visited once, so cycles terminate. The walk stops at
+    /// controller and input-jack nodes: their incoming edges (LED writes,
+    /// button feedback) are not dependencies. A controller or input-jack root
+    /// yields only itself.
+    pub fn upstream_dependencies(&self, root: &NodeId) -> Vec<usize> {
+        let Some(root_idx) = self.nodes.iter().position(|n| &n.id == root) else {
+            return Vec::new();
+        };
+        if self.nodes[root_idx].kind != NodeKind::Circuit {
+            // Controller and input-jack nodes are sources: nothing feeds them.
+            return vec![root_idx];
+        }
+
+        // Reverse adjacency: sink -> producing sources (built per call; the
+        // graph is at DROID scale, and this runs once per root toggle).
+        let mut incoming: HashMap<&NodeId, Vec<usize>> = HashMap::new();
+        for (ei, edge) in self.edges.iter().enumerate() {
+            incoming.entry(&edge.sink).or_default().push(ei);
+        }
+
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        let mut out: Vec<usize> = Vec::new();
+        visited.insert(root_idx);
+        queue.push_back(root_idx);
+        while let Some(idx) = queue.pop_front() {
+            out.push(idx);
+            if self.nodes[idx].kind != NodeKind::Circuit {
+                // Controller/input-jack leaf: never follow its incoming edges.
+                continue;
+            }
+            let Some(producers) = incoming.get(&self.nodes[idx].id) else {
+                continue;
+            };
+            let mut sources: Vec<usize> = producers
+                .iter()
+                .map(|ei| {
+                    self.edges[*ei]
+                        .source_index(&self.nodes)
+                        .expect("edge source always resolves")
+                })
+                .collect();
+            sources.sort_unstable();
+            sources.dedup();
+            for s in sources {
+                if visited.insert(s) {
+                    queue.push_back(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// Edge indices whose endpoints are both in `members` (a node-index set) -
+    /// the internal edges of a subgraph (change D task 1.1).
+    pub fn internal_edges(&self, members: &HashSet<usize>) -> Vec<usize> {
+        self.edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let src = e.source_index(&self.nodes);
+                let sink = e.sink_index(&self.nodes);
+                src.is_some_and(|s| members.contains(&s))
+                    && sink.is_some_and(|s| members.contains(&s))
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 }
 
@@ -1409,6 +1496,172 @@ mod tests {
 
         // Total edges: 5 cable edges + 7 register edges = 12
         assert_eq!(graph.edges.len(), 12);
+    }
+    fn dep_node(id: NodeId, kind: NodeKind) -> GraphNode {
+        GraphNode {
+            id,
+            kind,
+            circuit: String::new(),
+            instance_index: 0,
+            section_index: 0,
+        }
+    }
+
+    fn dep_edge(cable: &str, source: NodeId, sink: NodeId) -> GraphEdge {
+        GraphEdge {
+            cable: cable.to_string(),
+            source,
+            sink,
+        }
+    }
+
+    /// 0 controller, 1 ledw, 2 feed, 3 root, 4 other (writes the controller's
+    /// LED), 5 clk, 6 c (cycle partner of root).
+    fn dependency_graph() -> Graph {
+        let nodes = vec![
+            dep_node(
+                NodeId::Controller(String::from("p2b8"), 1),
+                NodeKind::Controller,
+            ),
+            dep_node(NodeId::circuit("ledw", 0), NodeKind::Circuit),
+            dep_node(NodeId::circuit("feed", 0), NodeKind::Circuit),
+            dep_node(NodeId::circuit("root", 0), NodeKind::Circuit),
+            dep_node(NodeId::circuit("other", 0), NodeKind::Circuit),
+            dep_node(NodeId::circuit("clk", 0), NodeKind::Circuit),
+            dep_node(NodeId::circuit("c", 0), NodeKind::Circuit),
+        ];
+        let edges = vec![
+            dep_edge("_g", NodeId::circuit("ledw", 0), NodeId::circuit("root", 0)),
+            dep_edge("_h", NodeId::circuit("clk", 0), NodeId::circuit("root", 0)),
+            dep_edge("_f", NodeId::circuit("feed", 0), NodeId::circuit("ledw", 0)),
+            dep_edge(
+                "_REG:B1.1",
+                NodeId::Controller(String::from("p2b8"), 1),
+                NodeId::circuit("ledw", 0),
+            ),
+            dep_edge(
+                "_REG:L1.1",
+                NodeId::circuit("other", 0),
+                NodeId::Controller(String::from("p2b8"), 1),
+            ),
+            dep_edge("_r", NodeId::circuit("root", 0), NodeId::circuit("c", 0)),
+            dep_edge("_c", NodeId::circuit("c", 0), NodeId::circuit("root", 0)),
+        ];
+        Graph {
+            nodes,
+            edges,
+            clusters: Vec::new(),
+            validation: Vec::new(),
+            latency: None,
+            highlighted_nodes: HashSet::new(),
+            highlighted_edges: HashSet::new(),
+            not_selected: HashSet::new(),
+        }
+    }
+
+    fn deps_of(graph: &Graph, root: &NodeId) -> Vec<NodeId> {
+        graph
+            .upstream_dependencies(root)
+            .iter()
+            .map(|&i| graph.nodes[i].id.clone())
+            .collect()
+    }
+
+    /// The walk covers a linear chain (feed → ledw → root), a fork (ledw and
+    /// clk both feed root), and a cycle (root ↔ c) without revisiting nodes.
+    #[test]
+    fn upstream_dependencies_chain_fork_and_cycle() {
+        let graph = dependency_graph();
+        let deps = deps_of(&graph, &NodeId::circuit("root", 0));
+        // BFS order: root, then its producers ledw/clk/c, then their upstream.
+        assert_eq!(deps[0], NodeId::circuit("root", 0));
+        let set: HashSet<NodeId> = deps.iter().cloned().collect();
+        assert_eq!(
+            set,
+            [
+                NodeId::circuit("root", 0),
+                NodeId::circuit("ledw", 0),
+                NodeId::circuit("clk", 0),
+                NodeId::circuit("c", 0),
+                NodeId::circuit("feed", 0),
+                NodeId::Controller(String::from("p2b8"), 1),
+            ]
+            .into_iter()
+            .collect()
+        );
+        // Cycle: each of root and c appears exactly once.
+        assert_eq!(
+            deps.iter()
+                .filter(|n| **n == NodeId::circuit("root", 0))
+                .count(),
+            1
+        );
+        assert_eq!(
+            deps.iter()
+                .filter(|n| **n == NodeId::circuit("c", 0))
+                .count(),
+            1
+        );
+    }
+
+    /// The walk stops at the controller: its incoming LED-write edge from
+    /// `other` is not followed, so `other` stays out of the dependency set.
+    #[test]
+    fn upstream_dependencies_stops_at_controller_leaf() {
+        let graph = dependency_graph();
+        let deps = deps_of(&graph, &NodeId::circuit("root", 0));
+        assert!(!deps.contains(&NodeId::circuit("other", 0)));
+        // The controller itself is reached (it feeds ledw via B1.1) and is a leaf.
+        assert!(deps.contains(&NodeId::Controller(String::from("p2b8"), 1)));
+    }
+
+    /// A controller or input-jack root is a leaf: the walk yields only it.
+    #[test]
+    fn upstream_dependencies_root_is_leaf() {
+        let graph = dependency_graph();
+        let controller = NodeId::Controller(String::from("p2b8"), 1);
+        assert_eq!(deps_of(&graph, &controller), vec![controller.clone()]);
+
+        let mut jack_graph = dependency_graph();
+        jack_graph.nodes.push(dep_node(
+            NodeId::Jack(String::from("I1")),
+            NodeKind::InputJack,
+        ));
+        let jack = NodeId::Jack(String::from("I1"));
+        assert_eq!(deps_of(&jack_graph, &jack), vec![jack]);
+    }
+
+    /// An unknown root yields nothing.
+    #[test]
+    fn upstream_dependencies_unknown_root_yields_nothing() {
+        let graph = dependency_graph();
+        assert!(graph
+            .upstream_dependencies(&NodeId::circuit("ghost", 0))
+            .is_empty());
+    }
+
+    /// `internal_edges` returns exactly the edges whose endpoints are both in
+    /// the member set.
+    #[test]
+    fn internal_edges_keeps_only_edges_within_members() {
+        let graph = dependency_graph();
+        let members: HashSet<usize> = graph
+            .upstream_dependencies(&NodeId::circuit("root", 0))
+            .into_iter()
+            .collect();
+        let cables: HashSet<&str> = graph
+            .internal_edges(&members)
+            .iter()
+            .map(|&i| graph.edges[i].cable.as_str())
+            .collect();
+        // feed -> ledw is internal; the LED write into the controller is not
+        // (the controller is a member, `other` is not).
+        assert_eq!(
+            cables,
+            ["_g", "_h", "_f", "_REG:B1.1", "_r", "_c"]
+                .into_iter()
+                .collect()
+        );
     }
 }
 /// Fixture-driven suite through the public `Graph::build_from_patch` entry
