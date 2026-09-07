@@ -18,7 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 
 use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
-use crate::graph::{Cluster, Graph, TopologySeverity};
+use crate::graph::{Cluster, Graph, NodeId, TopologySeverity};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
     local_resettle, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS, LOCAL_RADIUS,
@@ -3504,7 +3504,7 @@ fn regression_graph_latency_chain_data() {
     let avg_of = |node: &crate::graph::NodeId| -> f32 {
         let ramsize = schema
             .circuits
-            .get(&node.0.to_lowercase())
+            .get(&node.name().to_lowercase())
             .map_or(0, |def| def.ramsize);
         if ramsize == 0 || loop_budget == 0 {
             1.0
@@ -4467,10 +4467,11 @@ fn visual_disabled_circuit_graph_snapshot() {
         let t = *theme::resolve(theme_name);
         for width in [120u16, 160] {
             let mut app = graph_app_from_fixture("cable_banner_combos");
-            app.disabled_circuits.insert((String::from("copy"), 0));
+            app.disabled_circuits.insert(NodeId::circuit("copy", 0));
             // cable_banner_combos has no copy node; keep clocktool disabled as well
             // so the dim-story still renders while the required ("copy",0) contract is present.
-            app.disabled_circuits.insert((String::from("clocktool"), 0));
+            app.disabled_circuits
+                .insert(NodeId::circuit("clocktool", 0));
             let buf = buffer_for(&mut app, width, 40);
             let ansi = buffer_to_ansi(&buf);
             // Disabled nodes must be dimmed (muted-equivalent dim token + DIM),
@@ -4515,7 +4516,8 @@ fn visual_disabled_circuit_graph_snapshot() {
         let _guard = ThemedGuard::pin("classic");
         let t = *theme::resolve("classic");
         let mut app = graph_app_from_fixture("graph_topology_error");
-        app.disabled_circuits.insert((String::from("clocktool"), 0));
+        app.disabled_circuits
+            .insert(NodeId::circuit("clocktool", 0));
         let buf = buffer_for(&mut app, 160, 40);
         let graph_rect = slot_rect(&app, ViewType::Graph).expect("graph slot renders at 160");
         assert!(
@@ -4532,8 +4534,9 @@ fn visual_disabled_circuit_graph_snapshot() {
     for &theme_name in theme::THEMES {
         let _guard = ThemedGuard::pin(theme_name);
         let mut app = graph_app_from_fixture("cable_banner_combos");
-        app.disabled_circuits.insert((String::from("copy"), 0));
-        app.disabled_circuits.insert((String::from("clocktool"), 0));
+        app.disabled_circuits.insert(NodeId::circuit("copy", 0));
+        app.disabled_circuits
+            .insert(NodeId::circuit("clocktool", 0));
         let buf = buffer_for(&mut app, 160, 40);
         let html = buffer_to_html(&buf);
         cells.push(format!("<td data-theme=\"{theme_name}\">{html}</td>"));
@@ -4592,7 +4595,7 @@ fn visual_diff_graph_highlight_snapshot() {
             let report = crate::diff::diff_patches(&base, &modified);
             // Sanity: added delay node and _GATE changed
             assert!(
-                report.added_nodes.contains(&("delay".to_string(), 0)),
+                report.added_nodes.contains(&NodeId::circuit("delay", 0)),
                 "{theme_name} {width}: delay node added"
             );
             assert!(
@@ -4911,7 +4914,7 @@ fn visual_diff_changed_node_marker_snapshot() {
             }
             let report = crate::diff::diff_patches(&base, &modified);
             assert!(
-                report.changed_nodes.iter().any(|n| n.id.0 == "mixer"),
+                report.changed_nodes.iter().any(|n| n.id.name() == "mixer"),
                 "mixer changed"
             );
             app.diff_patch = Some(modified);

@@ -88,7 +88,7 @@ impl CostModel {
     /// ramsize-proportional heuristic (the producing circuit's RAM footprint
     /// relative to the largest master budget).
     pub fn circuit_avg(&self, node: &NodeId, schema: &Schema) -> f32 {
-        let circuit = node.0.to_lowercase();
+        let circuit = node.name().to_lowercase();
         if let Some(&avg) = self.overrides.get(&circuit) {
             return avg;
         }
@@ -201,13 +201,13 @@ mod tests {
     fn edge(cable: &str, source: (&str, usize), sink: (&str, usize)) -> GraphEdge {
         GraphEdge {
             cable: cable.to_string(),
-            source: (source.0.to_string(), source.1),
-            sink: (sink.0.to_string(), sink.1),
+            source: NodeId::circuit(source.0, source.1),
+            sink: NodeId::circuit(sink.0, sink.1),
         }
     }
 
     fn node(id: (&str, usize), section_index: usize) -> (NodeId, usize) {
-        ((id.0.to_string(), id.1), section_index)
+        (NodeId::circuit(id.0, id.1), section_index)
     }
 
     /// Modules `A B C D` in file order (positions 0..3), as in the spec
@@ -304,7 +304,7 @@ mod tests {
         let nodes = abcd_nodes();
         let edges = vec![edge("_AD", ("A", 0), ("D", 0))];
         let (latencies, _) = forward_latency(&edges, &nodes, |id| {
-            if *id == ("A".to_string(), 0) {
+            if *id == NodeId::circuit("A", 0) {
                 2.0
             } else {
                 1.0
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn override_wins_over_heuristic() {
         let schema = crate::schema::load_schema();
-        let node: NodeId = ("clocktool".to_string(), 0);
+        let node: NodeId = NodeId::circuit("clocktool", 0);
         let model = cost_from(&[("clocktool", 42.0)]);
         assert_eq!(model.circuit_avg(&node, schema), 42.0);
         assert_ne!(
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn absent_override_falls_back_to_heuristic() {
         let schema = crate::schema::load_schema();
-        let node: NodeId = ("clocktool".to_string(), 0);
+        let node: NodeId = NodeId::circuit("clocktool", 0);
         // No overrides (default settings) → the pure ramsize heuristic.
         let model = CostModel::from_config(&crate::config::Settings::default());
         assert_eq!(
@@ -387,12 +387,12 @@ mod tests {
         };
         let model = CostModel::from_config(&settings);
         assert_eq!(
-            model.circuit_avg(&("clocktool".to_string(), 0), schema),
+            model.circuit_avg(&NodeId::circuit("clocktool", 0), schema),
             7.5
         );
         // Overrides apply to every instance of the circuit, not just instance 0.
         assert_eq!(
-            model.circuit_avg(&("clocktool".to_string(), 2), schema),
+            model.circuit_avg(&NodeId::circuit("clocktool", 2), schema),
             7.5
         );
     }
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn unknown_circuit_without_override_degrades_to_unit_cost() {
         let schema = crate::schema::load_schema();
-        let node: NodeId = ("not_a_circuit".to_string(), 0);
+        let node: NodeId = NodeId::circuit("not_a_circuit", 0);
         assert_eq!(CostModel::default().circuit_avg(&node, schema), 1.0);
     }
 }

@@ -16,7 +16,7 @@ use ratatui::Terminal;
 
 use crate::app::{App, ViewerFocus};
 use crate::handler::handle_event;
-use crate::patch::{ComponentState, ShiftGroup};
+use crate::patch::{ComponentState, NodeId, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
 use crate::theme;
 use crate::ui::render;
@@ -366,7 +366,8 @@ fn setup_paused_dim(app: &mut App) {
 fn setup_disabled_circuit_graph(app: &mut App) {
     *app = app_from_fixture("cable_banner_combos");
     app.open_graph();
-    app.disabled_circuits.insert((String::from("clocktool"), 0));
+    app.disabled_circuits
+        .insert(NodeId::circuit("clocktool", 0));
 }
 fn setup_physical_arpeggio_skeleton(app: &mut App) {
     *app = app_from_fixture("arpeggio1");

@@ -140,7 +140,7 @@ mod tests {
         });
 
         bus.dispatch(&Event::GraphRebuilt);
-        bus.dispatch(&Event::NodeMoved((String::from("osc"), 0)));
+        bus.dispatch(&Event::NodeMoved(NodeId::circuit("osc", 0)));
         bus.dispatch(&Event::TopologyError(issue("_BUS")));
         bus.dispatch(&Event::ValidationCompleted {
             count: 1,
@@ -155,7 +155,7 @@ mod tests {
     fn dispatch_with_no_subscribers_is_a_noop() {
         let mut bus = EventBus::new();
         bus.dispatch(&Event::GraphRebuilt);
-        bus.dispatch(&Event::NodeMoved((String::from("osc"), 0)));
+        bus.dispatch(&Event::NodeMoved(NodeId::circuit("osc", 0)));
         bus.dispatch(&Event::TopologyError(issue("_BUS")));
     }
 

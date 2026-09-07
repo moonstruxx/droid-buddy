@@ -227,8 +227,8 @@ impl LabelStore {
     }
 
     /// Convenience for circuits: get label for `(patch, NodeId)`.
-    pub fn circuit_label(&self, patch_path: &Path, node: &(String, usize)) -> Option<String> {
-        let key = Self::encode_node_id(&node.0, node.1);
+    pub fn circuit_label(&self, patch_path: &Path, node: &NodeId) -> Option<String> {
+        let key = Self::encode_node_id(node.name(), node.instance());
         self.patch_labels(patch_path)
             .and_then(|b| b.circuits.get(&key))
             .and_then(|s| {
@@ -660,14 +660,14 @@ pub struct App {
     /// instance index)`. Disabled circuits stay influenced but act as a dead
     /// end in the influence walk: nothing downstream of them is reached.
     /// Cleared on every `load_patch`.
-    pub disabled_circuits: HashSet<(String, usize)>,
+    pub disabled_circuits: HashSet<NodeId>,
     /// Circuits pinned as fixed layout anchors, keyed by `NodeId` (circuit
     /// name, instance index). Pinned nodes are fixed anchors the solver never
     /// moves (design D3). The graph's tip — the first circuit in `.ini` order
     /// — is seeded by default on open; `p` toggles membership on the hovered
     /// node; dragging a node auto-pins it at the dropped position (design
     /// D7). Cleared on every `load_patch`.
-    pub pinned: HashSet<(String, usize)>,
+    pub pinned: HashSet<NodeId>,
     /// Per-patch XDG label store (`~/.config/droid-tui/labels.toml`), keyed by
     /// canonicalized absolute patch path. Loaded once at `App::new` via
     /// `LabelStore::load()` (warn-once, empty fallback) and persisted atomically
@@ -1906,7 +1906,7 @@ impl App {
             if let Some((name, idx)) = LabelStore::decode_node_id(k) {
                 let trimmed = v.trim();
                 if !trimmed.is_empty() {
-                    out.insert((name, idx), trimmed.to_string());
+                    out.insert(NodeId::circuit(&name, idx), trimmed.to_string());
                 }
             }
         }
@@ -1982,7 +1982,7 @@ impl App {
                 }
             }
             EditKind::Circuit { node } => {
-                let store_key = LabelStore::encode_node_id(&node.0, node.1);
+                let store_key = LabelStore::encode_node_id(node.name(), node.instance());
                 let key = LabelStore::canonical_key(&patch_path);
                 if is_empty {
                     if let Some(bucket) = self.label_store.patches.get_mut(&key) {
@@ -2096,13 +2096,17 @@ impl App {
                 if let Some(inf) = self.editing_influence() {
                     Some(format!(
                         "{}:{} \u{2192} {} ckts / {} cables",
-                        node.0,
-                        node.1,
+                        node.name(),
+                        node.instance(),
                         inf.influenced_nodes.len(),
                         inf.influenced_edges.len()
                     ))
                 } else {
-                    Some(format!("Editing circuit {}:{}", node.0, node.1))
+                    Some(format!(
+                        "Editing circuit {}:{}",
+                        node.name(),
+                        node.instance()
+                    ))
                 }
             }
         }
@@ -2113,7 +2117,7 @@ impl App {
     pub fn editing_hue_token(&self) -> Option<String> {
         match self.editing.as_ref()?.kind {
             EditKind::Hw { ref token, .. } => Some(token.clone()),
-            EditKind::Circuit { ref node } => Some(node.0.clone()),
+            EditKind::Circuit { ref node } => Some(node.name().to_string()),
         }
     }
 
@@ -2139,7 +2143,7 @@ impl App {
                 let mut target_idx: Option<usize> = None;
                 for (idx, section) in patch.sections.iter().enumerate() {
                     let entry = counts.entry(section.name.clone()).or_insert(0);
-                    let nid = (section.name.clone(), *entry);
+                    let nid = NodeId::circuit(&section.name, *entry);
                     if &nid == node {
                         target_idx = Some(idx);
                         break;
@@ -2407,7 +2411,7 @@ impl App {
     /// `recompute_influence` keeps influence cleared, so the toggle only
     /// flips the set.
     pub fn toggle_circuit_processing(&mut self, name: &str, instance: usize) -> bool {
-        let key = (name.to_string(), instance);
+        let key = NodeId::circuit(name, instance);
         let now_disabled = if self.disabled_circuits.contains(&key) {
             self.disabled_circuits.remove(&key);
             false
@@ -3050,8 +3054,8 @@ mod tests {
         app.load_patch(patch);
         app.open_graph();
         app.source_scroll = 7;
-        app.select_circuit((String::from("nope"), 99));
-        assert_eq!(app.selected_circuit(), Some(&(String::from("nope"), 99)));
+        app.select_circuit(NodeId::circuit("nope", 99));
+        assert_eq!(app.selected_circuit(), Some(&NodeId::circuit("nope", 99)));
         assert_eq!(app.source_scroll, 7, "unknown node must not move scroll");
         assert!(app.showing_viewer);
         assert!(
@@ -3422,7 +3426,7 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
-        let ghost = (String::from("ghost"), 99);
+        let ghost = NodeId::circuit("ghost", 99);
         app.pinned.insert(ghost.clone());
         let graph = app.graph.as_ref().unwrap();
         let pins = app.pinned_indices(graph);
@@ -3448,22 +3452,22 @@ mod tests {
         app.select_component(String::from("B1.1"));
 
         let sub = app.influence.as_ref().unwrap();
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 9)));
-        assert!(sub.influenced_nodes.contains(&(String::from("switch"), 5)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 9)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("switch", 5)));
         assert!(sub.influenced_edges.contains("_CHAIN1"));
         assert!(sub.influenced_edges.contains("_CHAIN2"));
 
         let now_disabled = app.toggle_circuit_processing("copy", 9);
         assert!(now_disabled, "toggle returns the new disabled state");
-        assert!(app.disabled_circuits.contains(&(String::from("copy"), 9)));
+        assert!(app.disabled_circuits.contains(&NodeId::circuit("copy", 9)));
 
         let sub = app.influence.as_ref().unwrap();
         assert!(
-            sub.influenced_nodes.contains(&(String::from("copy"), 9)),
+            sub.influenced_nodes.contains(&NodeId::circuit("copy", 9)),
             "disabled circuit itself stays influenced"
         );
         assert!(
-            !sub.influenced_nodes.contains(&(String::from("switch"), 5)),
+            !sub.influenced_nodes.contains(&NodeId::circuit("switch", 5)),
             "downstream circuit cut from influence"
         );
         assert!(sub.influenced_edges.contains("_CHAIN1"));
@@ -3476,7 +3480,7 @@ mod tests {
         assert!(!now_disabled, "second toggle re-enables");
         assert!(app.disabled_circuits.is_empty());
         let sub = app.influence.as_ref().unwrap();
-        assert!(sub.influenced_nodes.contains(&(String::from("switch"), 5)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("switch", 5)));
         assert!(sub.influenced_edges.contains("_CHAIN2"));
     }
 
@@ -3559,23 +3563,23 @@ mod tests {
         app.label_store = LabelStore::default();
         app.load_patch_at(&patch_path, patch);
         app.editing = Some(EditState::new_circuit(
-            ("motorfader".to_string(), 0),
+            NodeId::circuit("motorfader", 0),
             "  T1 Accu  ".to_string(),
         ));
         app.commit_edit_to_dir(dir.path()).unwrap();
         assert_eq!(
             app.label_store
-                .circuit_label(&patch_path, &("motorfader".to_string(), 0)),
+                .circuit_label(&patch_path, &NodeId::circuit("motorfader", 0)),
             Some("T1 Accu".to_string())
         );
         app.editing = Some(EditState::new_circuit(
-            ("motorfader".to_string(), 0),
+            NodeId::circuit("motorfader", 0),
             "   ".to_string(),
         ));
         app.commit_edit_to_dir(dir.path()).unwrap();
         assert_eq!(
             app.label_store
-                .circuit_label(&patch_path, &("motorfader".to_string(), 0)),
+                .circuit_label(&patch_path, &NodeId::circuit("motorfader", 0)),
             None
         );
     }
@@ -3666,7 +3670,7 @@ mod tests {
         let mut app = App::new();
         assert!(!app.cycle_edit_layer(2));
         app.editing = Some(EditState::new_circuit(
-            ("motorfader".to_string(), 0),
+            NodeId::circuit("motorfader", 0),
             "x".to_string(),
         ));
         assert!(!app.cycle_edit_layer(2));
@@ -3756,7 +3760,7 @@ mod tests {
         ));
         app.commit_edit_to_dir(dir.path()).unwrap();
         app.editing = Some(EditState::new_circuit(
-            ("motorfader".to_string(), 12),
+            NodeId::circuit("motorfader", 12),
             " T1 Accu ".to_string(),
         ));
         app.commit_edit_to_dir(dir.path()).unwrap();
@@ -3772,7 +3776,7 @@ mod tests {
         );
         assert_eq!(
             app.label_store
-                .circuit_label(&patch_path, &("motorfader".to_string(), 12)),
+                .circuit_label(&patch_path, &NodeId::circuit("motorfader", 12)),
             Some("T1 Accu".to_string())
         );
         // Atomic: no stray tmp.
@@ -3790,7 +3794,7 @@ mod tests {
             Some("[RATC]".to_string())
         );
         assert_eq!(
-            reloaded.circuit_label(&patch_path, &("motorfader".to_string(), 12)),
+            reloaded.circuit_label(&patch_path, &NodeId::circuit("motorfader", 12)),
             Some("T1 Accu".to_string())
         );
 
@@ -3822,7 +3826,7 @@ mod tests {
         );
         // Circuit pruned -> absent.
         assert_eq!(
-            pruned.circuit_label(&patch_path, &("motorfader".to_string(), 12)),
+            pruned.circuit_label(&patch_path, &NodeId::circuit("motorfader", 12)),
             None
         );
     }
@@ -3900,7 +3904,7 @@ mod tests {
         let patch_path = dir.path().join("patch.ini");
         std::fs::write(&patch_path, "[motorfader]\nled = L1.1\n").unwrap();
         let patch = Patch::from_ini_str("[motorfader]\nled = L1.1\n", "patch".to_string()).unwrap();
-        let node: NodeId = ("motorfader".to_string(), 0);
+        let node: NodeId = NodeId::circuit("motorfader", 0);
         let mut app = App::new();
         app.label_store = LabelStore::default();
         app.load_patch_at(&patch_path, patch.clone());
@@ -3919,7 +3923,7 @@ mod tests {
         );
 
         // Source/header and graph node both use same store; instance matters.
-        let other_node: NodeId = ("motorfader".to_string(), 1);
+        let other_node: NodeId = NodeId::circuit("motorfader", 1);
         assert_eq!(
             patch.circuit_display_label(&other_node, &store),
             "motorfader"
@@ -3985,11 +3989,11 @@ mod tests {
         assert_eq!(store.hw_label(&path, "B1.1", 1), None);
         assert_eq!(store.hw_label(&path, "B1.1", 2), Some("kept".to_string()));
         assert_eq!(
-            store.circuit_label(&path, &("motorfader".to_string(), 0)),
+            store.circuit_label(&path, &NodeId::circuit("motorfader", 0)),
             None
         );
         assert_eq!(
-            store.circuit_label(&path, &("motorfader".to_string(), 1)),
+            store.circuit_label(&path, &NodeId::circuit("motorfader", 1)),
             Some("T1".to_string())
         );
     }
@@ -4011,7 +4015,7 @@ mod tests {
         assert_eq!(app.effective_edit_layer(true, 0), Some(1)); // max 0 clamped to 1
                                                                 // Circuit edit -> None.
         app.editing = Some(EditState::new_circuit(
-            ("motorfader".to_string(), 12),
+            NodeId::circuit("motorfader", 12),
             "T1".to_string(),
         ));
         assert_eq!(app.effective_edit_layer(true, 4), None);

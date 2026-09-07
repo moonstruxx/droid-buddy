@@ -508,14 +508,15 @@ fn edge_pairs(graph: &Graph, index: &HashMap<&NodeId, usize>) -> Vec<(usize, usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Cluster, GraphEdge, GraphNode};
+    use crate::graph::{Cluster, GraphEdge, GraphNode, NodeId, NodeKind};
     use crate::latency::CostModel;
     use crate::patch::Patch;
     use std::path::Path;
 
     fn node(name: &str, section_index: usize) -> GraphNode {
         GraphNode {
-            id: (name.to_string(), 0),
+            id: NodeId::circuit(name, 0),
+            kind: NodeKind::Circuit,
             circuit: name.to_string(),
             instance_index: 0,
             section_index,
@@ -691,7 +692,7 @@ mod tests {
         let found = local_resettle(
             &graph,
             &mut positions,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
@@ -714,7 +715,7 @@ mod tests {
         let found = local_resettle(
             &graph,
             &mut positions,
-            &(String::from("nope"), 0),
+            &NodeId::circuit("nope", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
@@ -744,13 +745,13 @@ mod tests {
             edges: vec![
                 GraphEdge {
                     cable: "_C".to_string(),
-                    source: (String::from("n0"), 0),
-                    sink: (String::from("n1"), 0),
+                    source: NodeId::circuit("n0", 0),
+                    sink: NodeId::circuit("n1", 0),
                 },
                 GraphEdge {
                     cable: "_C".to_string(),
-                    source: (String::from("n1"), 0),
-                    sink: (String::from("n2"), 0),
+                    source: NodeId::circuit("n1", 0),
+                    sink: NodeId::circuit("n2", 0),
                 },
             ],
             clusters,
@@ -801,13 +802,13 @@ mod tests {
             edges: vec![
                 GraphEdge {
                     cable: "_X".to_string(),
-                    source: (String::from("A"), 0),
-                    sink: (String::from("D"), 0),
+                    source: NodeId::circuit("A", 0),
+                    sink: NodeId::circuit("D", 0),
                 },
                 GraphEdge {
                     cable: "_Y".to_string(),
-                    source: (String::from("B"), 0),
-                    sink: (String::from("C"), 0),
+                    source: NodeId::circuit("B", 0),
+                    sink: NodeId::circuit("C", 0),
                 },
             ],
             ..Default::default()
@@ -1008,7 +1009,7 @@ mod tests {
         local_resettle(
             &graph,
             &mut a,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
@@ -1020,7 +1021,7 @@ mod tests {
         local_resettle(
             &graph,
             &mut b,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
@@ -1066,7 +1067,7 @@ mod tests {
         let resettle_count = resettle_iteration_count(
             &graph,
             &mut positions,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
         );
@@ -1102,7 +1103,7 @@ mod tests {
         let found = local_resettle(
             &graph,
             &mut positions,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
@@ -1288,7 +1289,7 @@ mod tests {
         let found = local_resettle(
             &graph,
             &mut a,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[0],
@@ -1305,7 +1306,7 @@ mod tests {
         let found = local_resettle(
             &graph,
             &mut b,
-            &(String::from("n0"), 0),
+            &NodeId::circuit("n0", 0),
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[1],

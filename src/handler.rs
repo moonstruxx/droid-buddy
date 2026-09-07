@@ -13,7 +13,7 @@ use crate::app::{
     SourceViewMode, ViewType, ViewerFocus,
 };
 use crate::layout;
-use crate::patch::{ComponentKind, ComponentState, HwComponent, Patch, ShiftGroup};
+use crate::patch::{ComponentKind, ComponentState, HwComponent, NodeId, Patch, ShiftGroup};
 
 /// How long an armed `g` prefix waits for its follow-up key before silently
 /// cancelling. The timeout is lazy: it is checked only when the next event
@@ -487,11 +487,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 if let Some(idx) = chosen {
                     let name = patch.sections[idx].name.clone();
                     let mut counts: HashMap<String, usize> = HashMap::new();
-                    let mut node: Option<(String, usize)> = None;
+                    let mut node: Option<NodeId> = None;
                     for (i, sec) in patch.sections.iter().enumerate() {
                         let entry = counts.entry(sec.name.clone()).or_insert(0);
                         if i == idx {
-                            node = Some((name.clone(), *entry));
+                            node = Some(NodeId::circuit(&name, *entry));
                             break;
                         }
                         *entry += 1;
@@ -513,7 +513,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         ) {
                             app.status_message = line;
                         } else {
-                            app.status_message = format!("Editing circuit {}:{}", nid.0, nid.1);
+                            app.status_message =
+                                format!("Editing circuit {}:{}", nid.name(), nid.instance());
                         }
                         return false;
                     }
@@ -831,7 +832,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     ) {
                         app.status_message = line;
                     } else {
-                        app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
+                        app.status_message =
+                            format!("Editing circuit {}:{}", node.id.name(), node.id.instance());
                     }
                     return false;
                 }
@@ -853,7 +855,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     std::collections::HashMap::new();
                 for section in patch.sections.iter() {
                     let entry = counts.entry(section.name.clone()).or_insert(0);
-                    let nid = (section.name.clone(), *entry);
+                    let nid = NodeId::circuit(&section.name, *entry);
                     // First section as fallback when no better mapping.
                     if target_idx == 0 {
                         let draft = app
@@ -872,7 +874,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         ) {
                             app.status_message = line;
                         } else {
-                            app.status_message = format!("Editing circuit {}:{}", nid.0, nid.1);
+                            app.status_message =
+                                format!("Editing circuit {}:{}", nid.name(), nid.instance());
                         }
                         return false;
                     }
@@ -1476,7 +1479,7 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
     ) {
         app.status_message = line;
     } else {
-        app.status_message = format!("Editing circuit {}:{}", node.id.0, node.id.1);
+        app.status_message = format!("Editing circuit {}:{}", node.id.name(), node.id.instance());
     }
     true
 }
@@ -4139,7 +4142,7 @@ mod tests {
         assert!(app.showing_graph, "x must not close the graph surface");
         assert!(
             app.disabled_circuits
-                .contains(&(node.circuit.clone(), node.instance_index)),
+                .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
             "hovered circuit should be disabled"
         );
         assert_eq!(
@@ -4165,12 +4168,12 @@ mod tests {
         handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
         assert!(app
             .disabled_circuits
-            .contains(&(node.circuit.clone(), node.instance_index)));
+            .contains(&NodeId::circuit(&node.circuit, node.instance_index)));
         // Second x on same hovered node re-enables.
         handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
         assert!(
             !app.disabled_circuits
-                .contains(&(node.circuit.clone(), node.instance_index)),
+                .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
             "second x re-enables"
         );
         assert_eq!(
@@ -4385,7 +4388,7 @@ mod tests {
         );
         assert!(
             app.disabled_circuits
-                .contains(&(node.circuit.clone(), node.instance_index)),
+                .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
             "window x disables the hovered circuit"
         );
         assert_eq!(
