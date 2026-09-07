@@ -485,7 +485,7 @@ impl EguiSurface {
             .or_default()
             .native_pixels_per_point = Some(scale);
 
-        let full_output = self.context.run_ui(raw_input, |ui| {
+        let mut full_output = self.context.run_ui(raw_input, |ui| {
             paint_scene(
                 ui.painter(),
                 ui.max_rect().size(),
@@ -640,6 +640,11 @@ impl EguiSurface {
         for id in &full_output.textures_delta.free {
             self.canvas.renderer.free_texture(id);
         }
+        // update_texture/free_texture take references and never consume the
+        // delta entries, so full_output.textures_delta stays populated after
+        // this point. TexturesDelta's Drop asserts it is empty (debug builds
+        // only), so clear it explicitly once both deltas are applied.
+        full_output.textures_delta.clear();
 
         // Keep the multiplexed loop hot for egui animations/repaint requests.
         if self.context.has_requested_repaint() {
