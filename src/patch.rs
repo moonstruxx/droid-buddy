@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::schema::load_schema;
+
 /// 0-based line and byte-column span: line is 0-based, column range is
 /// [col_start, col_end) byte offsets within that raw line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1654,11 +1656,15 @@ fn collect_cable_index(sections: &[IniSection]) -> HashMap<String, CableIndexEnt
         for (key, value) in &section.entries {
             let key_lower = key.to_lowercase();
 
-            // Check if this is an "output = _NAME" entry (value is purely _NAME).
-            // The entire value must be just _NAME with nothing else — if the value
-            // is an expression like `output = _X * 2`, then _X is a sink reference,
-            // not a source.
-            if key_lower == "output" {
+            // Check if this entry is a producer (value is purely _NAME). A
+            // parameter is a producer when the catalog classifies it as an
+            // output, or — for circuits/parameters absent from the catalog —
+            // when the conventional `output` key is used. The entire value must
+            // be just _NAME with nothing else: if the value is an expression
+            // like `output = _X * 2`, then _X is a sink reference, not a source.
+            let kind = load_schema().get_param_kind(&section.name, &key_lower);
+            let is_producer = kind == Some("output") || (kind.is_none() && key_lower == "output");
+            if is_producer {
                 let names = scan_internal_tokens(value);
                 // Value is purely _NAME if scan_internal_tokens returns exactly one
                 // token and it equals the full value.
@@ -1707,7 +1713,10 @@ fn collect_circuit_outputs(sections: &[IniSection]) -> Vec<Vec<String>> {
         let mut vars: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for (k, v) in &section.entries {
-            if k.to_lowercase() == "output" {
+            let key_lower = k.to_lowercase();
+            let kind = load_schema().get_param_kind(&section.name, &key_lower);
+            let is_producer = kind == Some("output") || (kind.is_none() && key_lower == "output");
+            if is_producer {
                 let names = scan_internal_tokens(v);
                 if names.len() == 1 && names[0] == *v && seen.insert(names[0].clone()) {
                     vars.push(names[0].clone());
@@ -2979,6 +2988,98 @@ mod tests {
         assert_eq!(
             entry.sink_refs,
             vec![(String::from("clocktool"), String::from("output"))]
+        );
+    }
+
+    /// Minimal schema fixture for catalog-driven producer classification:
+    /// circuit `pulser` declares a nonstandard output param `pulse` and an
+    /// input param `input`. Leaked to `&'static` for `set_test_schema`.
+    fn catalog_test_schema() -> &'static crate::schema::Schema {
+        let schema: crate::schema::Schema = serde_json::from_str(
+            r#"{
+            "firmware_version": "test",
+            "jacktable_initial_size": 0,
+            "available_memory": {},
+            "circuits": {
+                "pulser": {
+                    "category": "test",
+                    "title": "Pulser",
+                    "description": "test circuit",
+                    "ramsize": 100,
+                    "inputs": [
+                        {
+                            "name": "input",
+                            "short": "in",
+                            "type": "in",
+                            "description": "input",
+                            "essential": 0,
+                            "ramhint": "",
+                            "autotitle": false
+                        }
+                    ],
+                    "outputs": [
+                        {
+                            "name": "pulse",
+                            "short": "pulse",
+                            "type": "out",
+                            "description": "output",
+                            "essential": 0,
+                            "ramhint": "",
+                            "autotitle": false
+                        }
+                    ],
+                    "presets": 0,
+                    "manual": 0
+                }
+            },
+            "controllers": {},
+            "manual_references": {}
+        }"#,
+        )
+        .unwrap();
+        Box::leak(Box::new(schema))
+    }
+
+    #[test]
+    fn cable_index_catalog_driven_producer_classification() {
+        // A catalog output param with a non-`output` key produces a source, a
+        // catalog input param produces a sink, and an unknown circuit keeps the
+        // `output` convention. Pin the fixture schema for the parse, then
+        // restore immediately so a failing assert cannot leave the override
+        // behind for later tests on this thread.
+        let schema = catalog_test_schema();
+        crate::schema::set_test_schema(Some(schema));
+        let content = "[p2b8]\n[pulser]\n    pulse = _OUT\n    input = _IN\n[unknowncircuit]\n    output = _Z\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        crate::schema::reset_test_schema();
+
+        // Catalog output with a non-`output` key is a source.
+        let out = patch.cable_index.get("_OUT").unwrap();
+        assert_eq!(out.sources, vec![String::from("pulser")]);
+        assert!(out.sink_refs.is_empty());
+
+        // Catalog input never produces a source; it is a sink ref.
+        let input = patch.cable_index.get("_IN").unwrap();
+        assert!(input.sources.is_empty());
+        assert_eq!(
+            input.sink_refs,
+            vec![(String::from("pulser"), String::from("input"))]
+        );
+
+        // Unknown circuit falls back to the `output` key convention.
+        let z = patch.cable_index.get("_Z").unwrap();
+        assert_eq!(z.sources, vec![String::from("unknowncircuit")]);
+        assert!(z.sink_refs.is_empty());
+
+        // The same nonstandard output key appears in circuit_outputs.
+        let pulser_idx = patch
+            .sections
+            .iter()
+            .position(|s| s.name == "pulser")
+            .unwrap();
+        assert_eq!(
+            patch.circuit_outputs[pulser_idx],
+            vec![String::from("_OUT")]
         );
     }
 
