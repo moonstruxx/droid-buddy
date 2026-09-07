@@ -178,6 +178,26 @@ pub struct Patch {
     /// empty value produces no entry and falls through to derived.
     #[serde(default)]
     pub preamble_labels: HashMap<String, String>,
+    /// Ordered controller-declaring sections: (type, panel label, ordinal)
+    /// in patch order, from `BARE_SYNTHESIS`/`KNOWN_CONTROLLER_SECTIONS`.
+    /// The same recognition and chain numbering the panel view uses, so the
+    /// signal-flow graph's controller set always agrees with it. Populated by
+    /// `from_ini_str`; hand-built patches (e.g. `sample()`) carry none.
+    #[serde(default)]
+    pub controllers: Vec<ControllerDecl>,
+}
+
+/// One controller-declaring section the parser recognized: the section name
+/// (type), the panel label, and the controller ordinal (chain position for
+/// bare-synthesized controllers, the leading token number for named
+/// sections). Two sections may share an ordinal when they are different
+/// types (e.g. a bare `[p2b8]` and a `[faderbank]` both numbered 1); the
+/// graph distinguishes them by type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerDecl {
+    pub name: String,
+    pub panel: String,
+    pub ordinal: u32,
 }
 
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
@@ -483,6 +503,7 @@ impl Patch {
             banner_groups: Vec::new(),
             circuit_outputs: Vec::new(),
             preamble_labels: HashMap::new(),
+            controllers: Vec::new(),
         }
     }
 
@@ -736,6 +757,10 @@ impl Patch {
         // for components NOT pinned to their declaring section's panel.
         let mut controller_types: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
+        // Ordered controller-declaring sections, in patch order — the same
+        // recognition and numbering as `controller_types`/`pinned_panels`,
+        // exposed for the signal-flow graph's controller nodes.
+        let mut controllers: Vec<ControllerDecl> = Vec::new();
 
         for section in &sections {
             // --- LED association: scan this section for a `led = L.N` entry
@@ -769,6 +794,11 @@ impl Patch {
                 controller_types
                     .entry(n)
                     .or_insert_with(|| panel.to_string());
+                controllers.push(ControllerDecl {
+                    name: section.name.clone(),
+                    panel: panel.to_string(),
+                    ordinal: n,
+                });
                 for id in synthesize_controller_tokens(&mut components, &mut seen_ids, n, plan) {
                     pinned_panels.insert(id, panel.to_string());
                 }
@@ -784,6 +814,11 @@ impl Patch {
                 }) {
                     let panel = titlecase(&section.name);
                     controller_types.entry(n).or_insert_with(|| panel.clone());
+                    controllers.push(ControllerDecl {
+                        name: section.name.clone(),
+                        panel: panel.clone(),
+                        ordinal: n,
+                    });
                     // Pin every token this section declares to its own
                     // faceplate, so two explicit types sharing a controller
                     // number coexist on separate panels instead of the later
@@ -932,6 +967,7 @@ impl Patch {
             banner_groups,
             circuit_outputs,
             preamble_labels,
+            controllers,
         })
     }
 
@@ -1660,6 +1696,86 @@ fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec
                         col_end: col_offset + i,
                     },
                 ));
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Like `scan_hw_tokens` but for the graph's register-edge pass: scans a
+/// value expression for hardware register references over the `JACK_TABLE`
+/// prefix set (`P1.1`, `O3`, `G1.4`, ...), returning `(token, unit, pin)`
+/// per match. The wider letter set (G/N/R included) covers jacks the
+/// component scanner deliberately ignores, without touching it.
+///
+/// Same boundary rule as `scan_hw_tokens`: a register letter immediately
+/// followed by a digit, not preceded by an alphanumeric/underscore character,
+/// with a clean end, so `_ENV1_DECAY_POT`-style internal variables and cable
+/// names are not matched.
+pub(crate) fn scan_register_refs(value: &str) -> Vec<(String, u32, Option<u32>)> {
+    let chars: Vec<char> = value.chars().collect();
+    // Letter set read from the schema's jack table (single source of truth,
+    // read-only) rather than mirrored here; patch.rs already imports schema
+    // for `load_schema`.
+    let prefixes: Vec<char> = crate::schema::JACK_TABLE
+        .iter()
+        .filter_map(|rule| rule.prefix.chars().next())
+        .collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
+        let starts_token = prefixes.contains(&c)
+            && i + 1 < chars.len()
+            && chars[i + 1].is_ascii_digit()
+            && boundary_ok;
+
+        if starts_token {
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < chars.len()
+                && chars[i] == '.'
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+            {
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            let clean_end = i >= chars.len()
+                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
+            if clean_end {
+                let token: String = chars[start..i].iter().collect();
+                let unit_end = start
+                    + 1
+                    + chars[start + 1..i]
+                        .iter()
+                        .take_while(|c| c.is_ascii_digit())
+                        .count();
+                let unit: u32 = chars[start + 1..unit_end]
+                    .iter()
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0);
+                let pin = if unit_end < i {
+                    Some(
+                        chars[unit_end + 1..i]
+                            .iter()
+                            .collect::<String>()
+                            .parse()
+                            .unwrap_or(0),
+                    )
+                } else {
+                    None
+                };
+                out.push((token, unit, pin));
             }
             continue;
         }
@@ -2601,6 +2717,83 @@ mod tests {
     }
 
     #[test]
+    fn controllers_list_matches_chain_order_numbering() {
+        // The exposed controller list must agree with the panel-view
+        // numbering: bare controllers advance a chain ordinal per module in
+        // patch order (BARE_SYNTHESIS), named controller sections take the
+        // leading number of their first hardware token
+        // (KNOWN_CONTROLLER_SECTIONS).
+        let content = "\
+[m4]
+[m4]
+[b32]
+[e4]
+[p2b8]
+[notebuttons]
+    button1 = B6.1
+    led1 = L6.1
+";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let expected = vec![
+            ControllerDecl {
+                name: "m4".into(),
+                panel: "M4".into(),
+                ordinal: 1,
+            },
+            ControllerDecl {
+                name: "m4".into(),
+                panel: "M4".into(),
+                ordinal: 2,
+            },
+            ControllerDecl {
+                name: "b32".into(),
+                panel: "B32".into(),
+                ordinal: 3,
+            },
+            ControllerDecl {
+                name: "e4".into(),
+                panel: "E4".into(),
+                ordinal: 4,
+            },
+            ControllerDecl {
+                name: "p2b8".into(),
+                panel: "P2B8".into(),
+                ordinal: 5,
+            },
+            ControllerDecl {
+                name: "notebuttons".into(),
+                panel: "Notebuttons".into(),
+                ordinal: 6,
+            },
+        ];
+        assert_eq!(patch.controllers, expected);
+
+        // Every controller's panel label agrees with the component assignment
+        // the panel view derives from the same numbering (controller_types
+        // fallback plus pinned panels).
+        for decl in &patch.controllers {
+            let probe = match decl.name.as_str() {
+                "m4" => format!("P{}.1", decl.ordinal),
+                "b32" => format!("B{}.1", decl.ordinal),
+                "e4" => format!("E{}.1", decl.ordinal),
+                "p2b8" => format!("B{}.1", decl.ordinal),
+                "notebuttons" => format!("B{}.1", decl.ordinal),
+                other => panic!("unexpected controller {other}"),
+            };
+            let comp = patch
+                .hw_components
+                .iter()
+                .find(|c| c.id == probe)
+                .unwrap_or_else(|| panic!("{probe} must exist"));
+            assert_eq!(
+                comp.controller, decl.panel,
+                "{probe} on the {} panel",
+                decl.panel
+            );
+        }
+    }
+
+    #[test]
     fn bare_controllers_synthesize_complete_token_sets() {
         // droid_tui-2b4: bare [p8s8]/[b32]/[m4]/[e4] declare their full front
         // panels (manual §6.8–6.10) on the correct panel, like bare [p2b8].
@@ -2834,6 +3027,76 @@ mod tests {
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
         assert_eq!(patch.hw_components.len(), 1);
         assert_eq!(patch.hw_components[0].id, "O2");
+    }
+
+    #[test]
+    fn scan_register_refs_covers_every_jack_family() {
+        // Each JACK_TABLE family (I/O/G/B/L/P/M/S/E/N/R) is scanned; the
+        // unit is the leading digit run, the pin the optional `.channel`.
+        let cases: &[(&str, &str, u32, Option<u32>)] = &[
+            ("B1.1", "B1.1", 1, Some(1)),
+            ("L2.3", "L2.3", 2, Some(3)),
+            ("P1.1", "P1.1", 1, Some(1)),
+            ("O3", "O3", 3, None),
+            ("I4", "I4", 4, None),
+            ("E1.2", "E1.2", 1, Some(2)),
+            ("S2.1", "S2.1", 2, Some(1)),
+            ("G1.4", "G1.4", 1, Some(4)),
+            ("M1.1", "M1.1", 1, Some(1)),
+            ("N2", "N2", 2, None),
+            ("R5", "R5", 5, None),
+        ];
+        for &(input, token, unit, pin) in cases {
+            assert_eq!(
+                scan_register_refs(input),
+                vec![(token.to_string(), unit, pin)],
+                "input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_register_refs_channel_and_multi_ref_values() {
+        // Channel-bearing tokens produce a pin, bare jacks none; several refs
+        // in one expression are all captured in order.
+        assert_eq!(
+            scan_register_refs("P1.1 + O3 * G1.4"),
+            vec![
+                ("P1.1".to_string(), 1, Some(1)),
+                ("O3".to_string(), 3, None),
+                ("G1.4".to_string(), 1, Some(4)),
+            ]
+        );
+        // A stray `.channel` on a no-channel family still parses (mirrors
+        // scan_hw_tokens' optional channel rule).
+        assert_eq!(
+            scan_register_refs("I3.1"),
+            vec![("I3.1".to_string(), 3, Some(1))]
+        );
+        // Multi-digit units and pins.
+        assert_eq!(
+            scan_register_refs("B10.11"),
+            vec![("B10.11".to_string(), 10, Some(11))]
+        );
+    }
+
+    #[test]
+    fn scan_register_refs_boundary_cases() {
+        // Internal `_ENV1_DECAY_POT`-style variables, cable names, lowercase
+        // letters, and tokens glued to alphanumerics are not register refs.
+        assert_eq!(scan_register_refs("_ENV1_DECAY_POT"), vec![]);
+        assert_eq!(scan_register_refs("_CLK"), vec![]);
+        assert_eq!(scan_register_refs("_P1"), vec![]);
+        assert_eq!(scan_register_refs("p1.1"), vec![]);
+        assert_eq!(scan_register_refs("xP1.1"), vec![]);
+        assert_eq!(scan_register_refs("P1.1x"), vec![]);
+        assert_eq!(scan_register_refs("P1.1.2"), vec![]);
+        assert_eq!(scan_register_refs("G1.4foo"), vec![]);
+        // A ref embedded after a space boundary still matches.
+        assert_eq!(
+            scan_register_refs("copy O3 out"),
+            vec![("O3".to_string(), 3, None)]
+        );
     }
 
     #[test]
@@ -3643,13 +3906,19 @@ button = B1.3
         // direct consumption: _BASE -> copy (+ leaf)
         let base = patch.influence_subtree(&[String::from("_BASE")]);
         assert!(base.influenced_nodes.iter().any(|id| id.name() == "copy"));
-        assert!(base.influenced_nodes.iter().any(|id| id.name() == "contour"));
+        assert!(base
+            .influenced_nodes
+            .iter()
+            .any(|id| id.name() == "contour"));
         assert!(base.influenced_edges.contains("_BASE"));
         // switch passthrough: _TRIG -> switch -> _SWOUT -> quantizer/mixer
         let trig = patch.influence_subtree(&[String::from("_TRIG")]);
         assert!(trig.influenced_nodes.iter().any(|id| id.name() == "switch"));
         assert!(trig.influenced_edges.contains("_SWOUT"));
-        assert!(trig.influenced_nodes.iter().any(|id| id.name() == "quantizer"));
+        assert!(trig
+            .influenced_nodes
+            .iter()
+            .any(|id| id.name() == "quantizer"));
         assert!(trig.influenced_nodes.iter().any(|id| id.name() == "mixer"));
         // copy chain: _COPY1 -> _COPY2 -> contour/logic
         assert!(trig.influenced_edges.contains("_COPY1"));
