@@ -1,6 +1,6 @@
 ## 1. Widen the node model
 
-- [ ] 1.1 Introduce `NodeKind` (Circuit, Controller, InputJack, OutputJack) and widen `NodeId` to an enum (`Circuit(String, usize)`, `Controller(String, usize)`, `Jack(String)`); add `kind` to `GraphNode`; adapt every in-repo consumer (`App.pinned`, `Graph.highlighted_nodes`, handler, ui, graph_render, graph tests). Verify: `cargo test` compiles and passes with behavior unchanged. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/graph.rs, src/app.rs, src/handler.rs, src/ui.rs, src/graph_render.rs] -->
+- [x] 1.1 Introduce `NodeKind` (Circuit, Controller, InputJack, OutputJack) and widen `NodeId` to an enum (`Circuit(String, usize)`, `Controller(String, usize)`, `Jack(String)`); add `kind` to `GraphNode`; adapt every in-repo consumer (`App.pinned`, `Graph.highlighted_nodes`, handler, ui, graph_render, graph tests). Verify: `cargo test` compiles and passes with behavior unchanged. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/graph.rs, src/app.rs, src/handler.rs, src/ui.rs, src/graph_render.rs] -->
 
 ## 2. Controller nodes and register references
 
