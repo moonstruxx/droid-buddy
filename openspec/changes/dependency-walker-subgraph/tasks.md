@@ -13,4 +13,4 @@
 ## 4. Regression and full gate
 
 - [x] 4.1 Add a graph-level regression fixture: an output jack fed by two producers (one through a cable, one direct register), plus an unrelated circuit, and assert the dependency set excludes the unrelated circuit and the walk stops at the controller feeding a LED-write branch. Verify: `cargo test` passes. <!-- agent: horst-engineer.build, depends_on: [3.1], touches: [src/graph.rs, fixtures/] -->
-- [ ] 4.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [4.1], touches: [] -->
+- [x] 4.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [4.1], touches: [] -->
