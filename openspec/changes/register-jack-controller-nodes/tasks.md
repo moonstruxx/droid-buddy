@@ -1,0 +1,21 @@
+## 1. Widen the node model
+
+- [ ] 1.1 Introduce `NodeKind` (Circuit, Controller, InputJack, OutputJack) and widen `NodeId` to an enum (`Circuit(String, usize)`, `Controller(String, usize)`, `Jack(String)`); add `kind` to `GraphNode`; adapt every in-repo consumer (`App.pinned`, `Graph.highlighted_nodes`, handler, ui, graph_render, graph tests). Verify: `cargo test` compiles and passes with behavior unchanged. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/graph.rs, src/app.rs, src/handler.rs, src/ui.rs, src/graph_render.rs] -->
+
+## 2. Controller nodes and register references
+
+- [ ] 2.1 Expose an ordered controller list (type + ordinal) from `Patch`, built from the controller-declaring sections the parser already recognizes (`BARE_SYNTHESIS`/`KNOWN_CONTROLLER_SECTIONS`, chain order). Verify: a unit test asserts the list matches the parser's `controller_types` numbering for the p2b8/b32 fixtures. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/patch.rs] -->
+- [ ] 2.2 Add `scan_register_refs(value) -> Vec<(String, u32, Option<u32>)>` (token, unit, pin) over the `JACK_TABLE` prefix set with the same boundary rule as `scan_hw_tokens`, leaving `scan_hw_tokens` untouched. Verify: unit tests cover each family (B/L/P/O/I/E/S/G/M/N/R), channel vs no-channel tokens, and boundary cases (internal `_ENV1_DECAY_POT` style variables are not matched). <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/patch.rs, src/schema.rs] -->
+
+## 3. Register edges in the graph build
+
+- [ ] 3.1 In `build_from_patch`, create controller nodes from the `Patch` controller list, then in the register-edge pass scan each section's entries with `scan_register_refs`: a catalog-output parameter writes its register refs (circuit to controller node when the letter is in `PBESLR` and the unit is a declared controller ordinal, else circuit to output-jack node), a catalog-input parameter reads them (controller or input-jack node to circuit); fallback for unknown circuits: family `output`/`led` writes, everything else reads. Jack nodes are shared on demand and deduplicated; identical edges are deduplicated. Verify: model tests assert edge direction for write and read on both controller and master registers, jack-node sharing, input/output jack classification, and the unknown-circuit fallback. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1, 2.2], touches: [src/graph.rs] -->
+
+## 4. Rendering and theme tokens
+
+- [ ] 4.1 Add theme tokens `graph_node_controller`, `graph_node_jack_input`, `graph_node_jack_output`, and `graph_edge_register` to all three palettes (classic/terminal/mono), and render per-kind node frames (controller nodes with the panel label `P2B8 #1`, jack nodes with the token as title) on both the box-drawing and kitty paths; register edges use the `graph_edge_register` token under the existing precedence (topology-error red > diff > latency > cable kind). Verify: per-theme frame snapshots render the new node kinds and register edges. <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/theme.rs, src/ui.rs, src/graph_render.rs] -->
+
+## 5. Regression and full gate
+
+- [ ] 5.1 Add graph-level regression tests: a fixture where a button circuit reads `B1.1` (controller edge in), a circuit writes `L1.1` (controller edge out), a circuit reads `I1` (input-jack edge in) and writes `O3` (output-jack edge out), plus a controller-register letter without a matching unit falling back to a jack; keep every existing fixture byte-identical and assert cable edges are unchanged. Verify: `cargo test` passes. <!-- agent: horst-engineer.build, depends_on: [4.1], touches: [src/graph.rs, src/patch.rs] -->
+- [ ] 5.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [5.1], touches: [] -->
