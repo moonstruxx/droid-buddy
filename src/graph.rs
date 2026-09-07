@@ -359,7 +359,10 @@ impl Graph {
         let Some(root_idx) = self.nodes.iter().position(|n| &n.id == root) else {
             return Vec::new();
         };
-        if self.nodes[root_idx].kind != NodeKind::Circuit {
+        if matches!(
+            self.nodes[root_idx].kind,
+            NodeKind::Controller | NodeKind::InputJack
+        ) {
             // Controller and input-jack nodes are sources: nothing feeds them.
             return vec![root_idx];
         }
@@ -378,7 +381,10 @@ impl Graph {
         queue.push_back(root_idx);
         while let Some(idx) = queue.pop_front() {
             out.push(idx);
-            if self.nodes[idx].kind != NodeKind::Circuit {
+            if matches!(
+                self.nodes[idx].kind,
+                NodeKind::Controller | NodeKind::InputJack
+            ) {
                 // Controller/input-jack leaf: never follow its incoming edges.
                 continue;
             }
@@ -1631,6 +1637,28 @@ mod tests {
         assert_eq!(deps_of(&jack_graph, &jack), vec![jack]);
     }
 
+    /// An output-jack root is NOT a leaf: its producers are walked (the
+    /// typical dependency cut starts at an output jack).
+    #[test]
+    fn upstream_dependencies_output_jack_root_walks_producers() {
+        let mut graph = dependency_graph();
+        // producer → O1: the jack's incoming edge is a dependency.
+        graph.nodes.push(dep_node(
+            NodeId::Jack(String::from("O1")),
+            NodeKind::OutputJack,
+        ));
+        graph.edges.push(dep_edge(
+            "_REG:O1",
+            NodeId::circuit("root", 0),
+            NodeId::Jack(String::from("O1")),
+        ));
+        let deps = deps_of(&graph, &NodeId::Jack(String::from("O1")));
+        assert!(deps.contains(&NodeId::Jack(String::from("O1"))));
+        assert!(deps.contains(&NodeId::circuit("root", 0)));
+        assert!(deps.contains(&NodeId::circuit("ledw", 0)));
+        assert!(!deps.contains(&NodeId::circuit("other", 0)));
+    }
+
     /// An unknown root yields nothing.
     #[test]
     fn upstream_dependencies_unknown_root_yields_nothing() {
@@ -2339,5 +2367,66 @@ mod fixture_tests {
         assert_eq!(g_default.validation, g_empty.validation);
         assert!(g_default.edges.iter().any(|e| e.cable == "_REG:B1.1"));
         assert!(g_default.edges.iter().any(|e| e.cable == "_REG:B2.1"));
+    }
+
+    /// Build the dependency-walk fixture's graph with default options.
+    fn dependency_walk_graph() -> Graph {
+        let patch = Patch::from_ini_file(Path::new("fixtures/graph_dependency_walk.ini")).unwrap();
+        Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default())
+    }
+
+    /// The O1 output jack's dependency set covers its two producers (one via
+    /// the _mix cable, one direct) and the controllers feeding their buttons,
+    /// while the unrelated circuit and the LED-write branch stay cut at the
+    /// controller (task D 4.1).
+    #[test]
+    fn dependency_walk_fixture_covers_producers_and_stops_at_controller() {
+        let graph = dependency_walk_graph();
+        let deps: HashSet<NodeId> = graph
+            .upstream_dependencies(&NodeId::Jack(String::from("O1")))
+            .into_iter()
+            .map(|i| graph.nodes[i].id.clone())
+            .collect();
+        let expected: HashSet<NodeId> = [
+            NodeId::Jack(String::from("O1")),
+            NodeId::circuit("mixer", 0),
+            NodeId::circuit("producer_a", 0),
+            NodeId::circuit("producer_b", 0),
+            NodeId::Controller(String::from("p2b8"), 1),
+            NodeId::Controller(String::from("p2b8"), 2),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(deps, expected, "O1 dependency set mismatch");
+        // The unrelated circuit and the LED-write branch are excluded: the
+        // walk stops at the controller and never follows its incoming LED edge.
+        assert!(!deps.contains(&NodeId::circuit("unrelated", 0)));
+        assert!(!deps.contains(&NodeId::circuit("led_writer", 0)));
+    }
+
+    /// The dependency set's internal edges are exactly the edges with both
+    /// endpoints in the set (task D 4.1): the _mix cable, the two _REG:O1
+    /// edges, and the two button-feedback register edges.
+    #[test]
+    fn dependency_walk_fixture_internal_edges_are_within_members() {
+        let graph = dependency_walk_graph();
+        let members: HashSet<usize> = graph
+            .upstream_dependencies(&NodeId::Jack(String::from("O1")))
+            .into_iter()
+            .collect();
+        let cables: HashSet<String> = graph
+            .internal_edges(&members)
+            .iter()
+            .map(|&i| graph.edges[i].cable.clone())
+            .collect();
+        let expected: HashSet<String> = [
+            String::from("_mix"),
+            String::from("_REG:O1"),
+            String::from("_REG:B1.1"),
+            String::from("_REG:B2.1"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(cables, expected, "internal edge set mismatch");
     }
 }
