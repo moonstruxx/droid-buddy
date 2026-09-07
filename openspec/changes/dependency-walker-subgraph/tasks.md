@@ -1,6 +1,6 @@
 ## 1. Upstream dependency walk
 
-- [ ] 1.1 Add `Graph::upstream_dependencies(&self, root: NodeId) -> Vec<NodeId>`: reversed-edge BFS over `edges` (sink -> sources), cycle-safe via a visited set, stopping at controller and input-jack nodes; a controller or input-jack root yields just itself. Add a subset helper returning the edges whose endpoints are both in a node set. Verify: unit tests cover a linear chain, a fork (two producers of one input), a cycle (visited once), a controller leaf (walk stops, LED-write edges are not followed), and the root-is-leaf degenerate case. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/graph.rs] -->
+- [x] 1.1 Add `Graph::upstream_dependencies(&self, root: NodeId) -> Vec<NodeId>`: reversed-edge BFS over `edges` (sink -> sources), cycle-safe via a visited set, stopping at controller and input-jack nodes; a controller or input-jack root yields just itself. Add a subset helper returning the edges whose endpoints are both in a node set. Verify: unit tests cover a linear chain, a fork (two producers of one input), a cycle (visited once), a controller leaf (walk stops, LED-write edges are not followed), and the root-is-leaf degenerate case. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/graph.rs] -->
 
 ## 2. Filter state and the `f` key
 
