@@ -456,6 +456,56 @@ mod tests {
         Graph::build_from_patch(&patch, clusters, &CostModel::default())
     }
 
+    /// Minimal schema fixture for catalog-driven edge direction: circuit `pulser`
+    /// declares a nonstandard output param `pulse` and an input param `input`.
+    /// Leaked to `&'static` for `set_test_schema`; sibling of the patch.rs one so
+    /// the graph test does not reach into that module's private fixture.
+    fn catalog_test_schema() -> &'static crate::schema::Schema {
+        let schema: crate::schema::Schema = serde_json::from_str(
+            r#"{
+            "firmware_version": "test",
+            "jacktable_initial_size": 0,
+            "available_memory": {},
+            "circuits": {
+                "pulser": {
+                    "category": "test",
+                    "title": "Pulser",
+                    "description": "test circuit",
+                    "ramsize": 100,
+                    "inputs": [
+                        {
+                            "name": "input",
+                            "short": "in",
+                            "type": "in",
+                            "description": "input",
+                            "essential": 0,
+                            "ramhint": "",
+                            "autotitle": false
+                        }
+                    ],
+                    "outputs": [
+                        {
+                            "name": "pulse",
+                            "short": "pulse",
+                            "type": "out",
+                            "description": "output",
+                            "essential": 0,
+                            "ramhint": "",
+                            "autotitle": false
+                        }
+                    ],
+                    "presets": 0,
+                    "manual": 0
+                }
+            },
+            "controllers": {},
+            "manual_references": {}
+        }"#,
+        )
+        .unwrap();
+        Box::leak(Box::new(schema))
+    }
+
     #[test]
     fn node_set_matches_circuits_with_repeated_instances() {
         let graph = build(
@@ -556,6 +606,47 @@ mod tests {
         let issue = &graph.validation[0];
         assert_eq!(issue.cable, "_ORPHAN");
         assert_eq!(issue.severity, TopologySeverity::Warning);
+    }
+
+    #[test]
+    fn catalog_driven_edge_direction() {
+        // `pulser`'s `pulse` is a catalog output and `input` a catalog input, so
+        // the graph must produce `_OUT` from `pulser` and consume `_IN` at
+        // `pulser`, even though neither key is the conventional `output`. A
+        // second (catalog-unknown) circuit completes both cables so real directed
+        // edges exist. Pin the fixture schema for the parse, then restore so a
+        // failing assert cannot leak the override to later tests on this thread.
+        let schema = catalog_test_schema();
+        crate::schema::set_test_schema(Some(schema));
+        let graph = build(
+            "[p2b8]\n\
+             [pulser]\n    pulse = _OUT\n    input = _IN\n\
+             [sink]\n    input = _OUT\n    output = _IN\n",
+            &[],
+        );
+        crate::schema::reset_test_schema();
+
+        // The catalog output `pulse` is the source of `_OUT`, fanned to `sink`.
+        let out_edge = graph
+            .edges
+            .iter()
+            .find(|e| e.cable == "_OUT")
+            .expect("_OUT edge exists");
+        assert_eq!(out_edge.source, (String::from("pulser"), 0));
+        assert_eq!(out_edge.sink, (String::from("sink"), 0));
+
+        // The catalog input `input` consumes `_IN` at `pulser`, produced by
+        // `sink`'s conventional `output`.
+        let in_edge = graph
+            .edges
+            .iter()
+            .find(|e| e.cable == "_IN")
+            .expect("_IN edge exists");
+        assert_eq!(in_edge.source, (String::from("sink"), 0));
+        assert_eq!(in_edge.sink, (String::from("pulser"), 0));
+
+        // Exactly the two directed edges, so direction comes from the catalog.
+        assert_eq!(graph.edges.len(), 2);
     }
 
     #[test]
