@@ -8,7 +8,7 @@
 
 ## 3. Filtered rendering
 
-- [ ] 3.1 When `dependency_root` is set, render only the dependency set and its internal edges through the existing graph-slot machinery, solved deterministically as a subset (positions parallel to the subset). Verify: a rendering snapshot shows the filtered view for an output-jack root on a fixture with producers and an unrelated branch, with the unrelated branch absent. <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/ui.rs] -->
+- [x] 3.1 When `dependency_root` is set, render only the dependency set and its internal edges through the existing graph-slot machinery, solved deterministically as a subset (positions parallel to the subset). Verify: a rendering snapshot shows the filtered view for an output-jack root on a fixture with producers and an unrelated branch, with the unrelated branch absent. <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/ui.rs] -->
 
 ## 4. Regression and full gate
 
