@@ -403,6 +403,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
     }
 
+    // Dependency-filter Esc handling (change D task 2.1): Esc clears the
+    // filter before the tiled Esc that would close the focused view.
+    if matches!(key.code, crossterm::event::KeyCode::Esc) && app.dependency_root.is_some() {
+        app.clear_dependency_filter();
+        app.prefix = None;
+        return false;
+    }
+
     // Focused-pane dispatch (change `tiled-window-manager`, D7): while
     // right-column slots are open, `Tab` cycles tile focus forward,
     // `Shift+Tab`/`BackTab` cycles backward, and `Esc` closes the focused
@@ -659,6 +667,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 if let Some(idx) = app.hovered_graph_node {
                     graph_node_processing_toggle(app, idx);
                 }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('f') => {
+                // Change D task 2.1: `f` toggles the upstream dependency
+                // filter rooted at the hovered node (fallback: the shared
+                // circuit selection); a second `f` restores the full graph.
+                app.toggle_dependency_filter();
                 return false;
             }
             crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
@@ -2309,6 +2324,74 @@ mod tests {
         // Default preset is the fitted zoom (1.0, index 5), not a stale one.
         assert_eq!(app.graph_zoom_preset, 5);
         assert!(app.graph_canvas_px.is_none());
+    }
+
+    /// Open the graph slot via `g` then `g`.
+    fn open_graph_slot(app: &mut App) {
+        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
+        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
+        assert!(app.showing_graph);
+    }
+
+    #[test]
+    fn f_engages_dependency_filter_on_hovered_node() {
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        app.hovered_graph_node = Some(0);
+        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert_eq!(app.dependency_root, Some(root));
+        assert!(!app.dependency_nodes.is_empty());
+        assert!(
+            app.status_message.starts_with("Dependencies of "),
+            "unexpected status: {:?}",
+            app.status_message
+        );
+        // The subset solves deterministically: every subset node has a finite
+        // position in the full-length array.
+        for &i in &app.dependency_nodes {
+            let (x, y) = app.graph_positions[i];
+            assert!(x.is_finite() && y.is_finite(), "node {i} unsolved");
+        }
+    }
+
+    #[test]
+    fn f_falls_back_to_circuit_selection_when_nothing_hovered() {
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        app.selected_circuit = Some(root.clone());
+        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert_eq!(app.dependency_root, Some(root));
+    }
+
+    #[test]
+    fn f_without_hover_or_selection_hints_and_keeps_full_graph() {
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(app.dependency_root.is_none());
+        assert_eq!(app.status_message, "No graph node selected");
+    }
+
+    #[test]
+    fn f_toggles_off_and_esc_clears_the_filter() {
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        app.hovered_graph_node = Some(0);
+        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(app.dependency_root.is_some());
+        // A second `f` restores the full graph.
+        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(app.dependency_root.is_none());
+        assert!(app.dependency_nodes.is_empty());
+        // Re-engage, then Esc clears without closing the graph slot.
+        app.hovered_graph_node = Some(0);
+        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        assert!(app.dependency_root.is_some());
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.dependency_root.is_none());
+        assert!(app.showing_graph, "Esc clears the filter, not the graph");
     }
 
     #[test]
