@@ -1874,6 +1874,10 @@ struct GraphKittyOpts<'a> {
     selected: Option<&'a NodeId>,
     patch: Option<&'a crate::patch::Patch>,
     circuit_store: &'a HashMap<NodeId, String>,
+    /// Dependency-subset node indices (empty = unfiltered, change D task 3.1).
+    dep_nodes: &'a [usize],
+    /// Dependency-subset edge indices (empty = unfiltered, change D task 3.1).
+    dep_edges: &'a [usize],
 }
 
 /// Color for one cable on the kitty image path — a mirror of the box-drawing
@@ -1979,7 +1983,13 @@ fn graph_kitty_frame(
         let (wx, wy) = positions[i];
         // World position is the node's top-left corner, matching the box path.
         let (px, py) = cam.world_to_pixel(wx, wy);
-        node_topleft.push((px, py));
+        let in_subset = opts.dep_nodes.is_empty() || opts.dep_nodes.contains(&i);
+        // Keep `node_topleft` index-aligned so the edge pass can still look
+        // up skipped nodes (their edges are filtered out anyway).
+        node_topleft.push(if in_subset { (px, py) } else { (0.0, 0.0) });
+        if !in_subset {
+            continue; // outside the dependency subset (change D task 3.1)
+        }
 
         let is_disabled = circuit_disabled(opts.disabled, &node.circuit, node.instance_index);
         let is_not_selected = graph.not_selected.contains(&node.section_index);
@@ -2047,6 +2057,9 @@ fn graph_kitty_frame(
     // node bodies cover the port cells for a clean join.
     let mut edge_specs = Vec::with_capacity(graph.edges.len());
     for (edge_index, edge) in graph.edges.iter().enumerate() {
+        if !opts.dep_edges.is_empty() && !opts.dep_edges.contains(&edge_index) {
+            continue; // outside the dependency subset (change D task 3.1)
+        }
         let Some(src) = graph.nodes.iter().position(|n| n.id == edge.source) else {
             continue;
         };
@@ -2106,7 +2119,17 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
             .as_ref()
             .is_some_and(|g| app.graph_positions.len() == g.nodes.len())
     {
-        app.graph_camera = Some(graph_fit_camera(&app.graph_positions, area));
+        // Fit the camera over the dependency subset's positions while the
+        // filter is active, so the cut reads as its own scene (change D).
+        let fit_src: Vec<(f32, f32)> = if app.dependency_nodes.is_empty() {
+            app.graph_positions.clone()
+        } else {
+            app.dependency_nodes
+                .iter()
+                .map(|&i| app.graph_positions[i])
+                .collect()
+        };
+        app.graph_camera = Some(graph_fit_camera(&fit_src, area));
     }
     app.graph_canvas_px = Some((pw as f32, ph as f32));
     let Some(cam) = app.graph_camera else {
@@ -2121,6 +2144,10 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
     let hovered = app.hovered_graph_node;
     let latency_coloring = app.latency_coloring;
     let selected_circuit = app.selected_circuit.clone();
+    // Dependency filter (change D task 3.1): only the subset nodes and their
+    // internal edges rasterize; topleft stays index-aligned for skipped nodes.
+    let dependency_nodes = app.dependency_nodes.clone();
+    let dependency_edges = app.dependency_edges.clone();
 
     let App {
         graph,
@@ -2145,6 +2172,8 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
         selected: selected_circuit.as_ref(),
         patch: patch_for_title.as_ref(),
         circuit_store: &circuit_store,
+        dep_nodes: &dependency_nodes,
+        dep_edges: &dependency_edges,
     };
     let Some((scene, rects)) = graph_kitty_frame(graph, graph_positions, area, opts, cam) else {
         return false;
@@ -2219,7 +2248,17 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             .as_ref()
             .is_some_and(|g| app.graph_positions.len() == g.nodes.len())
     {
-        app.graph_camera = Some(graph_fit_camera(&app.graph_positions, area));
+        // Fit the camera over the dependency subset's positions while the
+        // filter is active, so the cut reads as its own scene (change D).
+        let fit_src: Vec<(f32, f32)> = if app.dependency_nodes.is_empty() {
+            app.graph_positions.clone()
+        } else {
+            app.dependency_nodes
+                .iter()
+                .map(|&i| app.graph_positions[i])
+                .collect()
+        };
+        app.graph_camera = Some(graph_fit_camera(&fit_src, area));
     }
     let canvas_px = (
         (area.width as f32 * GRAPH_CELL_W_PX).max(2.0) as u32,
@@ -2246,6 +2285,11 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     // Circuit-selection highlight (design D4): the terminal tile highlights the
     // node the window/tile selection points at.
     let selected_circuit = app.selected_circuit.clone();
+    // Dependency filter (change D task 3.1): when active, only the subset
+    // nodes and their internal edges render; the camera fits the subset.
+    let dependency_nodes = app.dependency_nodes.clone();
+    let dependency_edges = app.dependency_edges.clone();
+    let filtered = !dependency_nodes.is_empty();
 
     // Split `app` field borrows so reading the graph and publishing cluster
     // rects (a renderer→handler handoff) coexist within one frame.
@@ -2266,15 +2310,24 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     // Map frozen solver positions (floats in a virtual plane) onto the surface
     // through the stored camera (seeded to the fit on the first frame above):
     // the camera's zoom/pan — preset `+`/`-` multipliers and arrow pan — now
-    // drive the box render exactly like the kitty image path (design D7).
-    let mut cam = cam.unwrap_or_else(|| graph_fit_camera(graph_positions, area));
+    // drive the box render exactly like the kitty image path (design D7). The
+    // fit source is the subset's positions while the filter is active.
+    let fit_src: Vec<(f32, f32)> = if filtered {
+        dependency_nodes
+            .iter()
+            .map(|&i| graph_positions[i])
+            .collect()
+    } else {
+        graph_positions.clone()
+    };
+    let mut cam = cam.unwrap_or_else(|| graph_fit_camera(&fit_src, area));
     let mut node_rects = graph_node_rects_with_camera(graph_positions, area, &graph.nodes, cam);
     if !node_rects.iter().any(|r| r.width > 0 && r.height > 0) {
         // The stored camera maps every node off-canvas (extreme zoom-out or
         // pan): re-anchor to the frame-the-graph fit so the pane never stays
         // blank — a legitimately zoomed-out view shows the graph small but
         // present, never an empty pane. User pan/zoom survives otherwise.
-        cam = graph_fit_camera(graph_positions, area);
+        cam = graph_fit_camera(&fit_src, area);
         node_rects = graph_node_rects_with_camera(graph_positions, area, &graph.nodes, cam);
         *camera_field = Some(cam);
         *zoom_preset_field = 5;
@@ -2282,20 +2335,29 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     let surface = frame.area();
 
     // Clusters first so node frames draw over their containers' interiors.
-    for (i, cluster) in graph.clusters.iter().enumerate() {
-        if let Some(rect) = graph_cluster_rect(cluster, &graph.nodes, &node_rects, surface) {
-            graph_cluster_rects.push((i, rect));
-            render_graph_cluster_frame_with_diff(
-                frame,
-                rect,
-                cluster,
-                diff_report_ref,
-                diff_showing,
-                &graph.nodes,
-            );
+    // The dependency subset is a focused cut that can span banners: cluster
+    // containers are skipped while the filter is active.
+    if !filtered {
+        for (i, cluster) in graph.clusters.iter().enumerate() {
+            if let Some(rect) = graph_cluster_rect(cluster, &graph.nodes, &node_rects, surface) {
+                graph_cluster_rects.push((i, rect));
+                render_graph_cluster_frame_with_diff(
+                    frame,
+                    rect,
+                    cluster,
+                    diff_report_ref,
+                    diff_showing,
+                    &graph.nodes,
+                );
+            }
         }
     }
     // Edges before nodes so node frames draw over the port cells.
+    let edge_filter: Option<HashSet<usize>> = if filtered {
+        Some(dependency_edges.iter().copied().collect())
+    } else {
+        None
+    };
     render_graph_edges_with_highlight(
         frame,
         area,
@@ -2308,9 +2370,13 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
             diff_showing,
             latency: graph.latency.as_ref(),
             latency_coloring,
+            edge_filter: edge_filter.as_ref(),
         },
     );
     for (i, node) in graph.nodes.iter().enumerate() {
+        if filtered && !dependency_nodes.contains(&i) {
+            continue; // outside the dependency subset (change D task 3.1)
+        }
         let node_rect = node_rects[i];
         if node_rect.width == 0 || node_rect.height == 0 {
             continue; // off-viewport node: nothing to draw or hit-test
@@ -2633,6 +2699,9 @@ struct GraphEdgeOpts<'a> {
     /// When true the latency ramp replaces the cable-kind color for non-error,
     /// non-diff cables (error > diff > ramp > kind precedence).
     latency_coloring: bool,
+    /// When Some, only edges whose `graph.edges` index is in the set render
+    /// (the dependency-subset view, change D task 3.1).
+    edge_filter: Option<&'a HashSet<usize>>,
 }
 
 fn render_graph_edges_with_highlight(
@@ -2649,8 +2718,12 @@ fn render_graph_edges_with_highlight(
         diff_showing,
         latency,
         latency_coloring,
+        edge_filter,
     } = opts;
     for (edge_index, edge) in graph.edges.iter().enumerate() {
+        if edge_filter.is_some_and(|s| !s.contains(&edge_index)) {
+            continue; // outside the dependency subset
+        }
         let (Some(src), Some(sink)) = (
             graph.nodes.iter().position(|n| n.id == edge.source),
             graph.nodes.iter().position(|n| n.id == edge.sink),
@@ -6496,6 +6569,8 @@ mod graph_view_tests {
             selected: None,
             patch: None,
             circuit_store: &store,
+            dep_nodes: &[],
+            dep_edges: &[],
         };
         let cam = graph_fit_camera(&app.graph_positions, area);
         let (scene, rects) = graph_kitty_frame(graph, &app.graph_positions, area, opts, cam)
@@ -6533,6 +6608,8 @@ mod graph_view_tests {
             selected: None,
             patch: None,
             circuit_store: &store,
+            dep_nodes: &[],
+            dep_edges: &[],
         };
         let cam = graph_fit_camera(&app.graph_positions, area);
         let (scene, rects) = graph_kitty_frame(graph, &app.graph_positions, area, opts, cam)
@@ -6575,6 +6652,8 @@ mod graph_view_tests {
             selected: None,
             patch: None,
             circuit_store: &store,
+            dep_nodes: &[],
+            dep_edges: &[],
         };
         let pw = area.width as f32 * GRAPH_CELL_W_PX;
         let ph = area.height as f32 * GRAPH_CELL_H_PX;
@@ -6705,6 +6784,8 @@ mod graph_view_tests {
                 selected: None,
                 patch: None,
                 circuit_store: &store,
+                dep_nodes: &[],
+                dep_edges: &[],
             };
             let cam = GraphCamera::fit_to_world(
                 WorldBounds::from_positions(&app.graph_positions),
@@ -6752,6 +6833,8 @@ mod graph_view_tests {
                 selected: None,
                 patch: None,
                 circuit_store: &store,
+                dep_nodes: &[],
+                dep_edges: &[],
             };
             let cam = GraphCamera::fit_to_world(
                 WorldBounds::from_positions(&app.graph_positions),
