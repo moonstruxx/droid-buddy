@@ -2087,7 +2087,7 @@ mod tests {
     #[test]
     fn real_patch_optimizer_completes_within_budget() {
         // Real-world patches (droid_mpfs5drum: 175 sections, droid_mpfs5melody2:
-        // 379 sections) far exceed ENUM_LIMIT, so every strategy takes a
+        // 532 sections) far exceed ENUM_LIMIT, so every strategy takes a
         // budgeted search path. Both the full `g o` path and the interactive
         // slider path must complete within their documented budgets on real
         // data, and every candidate must be a valid full permutation.
