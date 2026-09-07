@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use crate::geometry::{BindingFeatures, RackGeometry, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
-use crate::patch::{InfluenceSubtree, Patch};
+use crate::patch::{scan_register_refs, InfluenceSubtree, Patch};
 use crate::schema::load_schema;
 
 // Euclidean-distance wiring-outlier detection is delegated to the learned
@@ -134,11 +134,24 @@ impl Graph {
     /// topology-validation pass (task 2.2), which operates on the cable index
     /// entries by name, keeping that convention consistent.
     pub fn build_from_patch(patch: &Patch, clusters: &[Cluster], cost: &CostModel) -> Graph {
-        let nodes = build_nodes(patch);
+        let mut nodes = build_nodes(patch);
         let node_by_name = name_to_first_node(&nodes);
-        let edges = build_edges(patch, &node_by_name);
+        let cable_edges = build_edges(patch, &node_by_name);
+
         let validation = validate_topology(patch);
-        let latency = compute_latency(&nodes, &edges, cost);
+        // Latency measures signal-path cables only — compute from circuit
+        // nodes before registering controller/jack register nodes.
+        let latency = compute_latency(&nodes, &cable_edges, cost);
+
+        // Register edges: controller/jack nodes + register connections.
+        let (reg_nodes, reg_edges) = build_register_nodes_and_edges(patch);
+        nodes.extend(reg_nodes);
+
+        // Merge cable + register edges, sorted deterministically.
+        let mut edges = cable_edges;
+        edges.extend(reg_edges);
+        edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+
         Graph {
             nodes,
             edges,
@@ -274,9 +287,141 @@ fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<Graph
     // renderer's shared-cell ownership, so a stable order is required for
     // reproducible layouts (design D9).
     edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+    edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
     edges
 }
 
+/// Controller-register prefix letters that map to on-controller register
+/// families (buttons, pots/faders, encoders, switches, LEDs, R). Letters
+/// outside this set (I, O, G, M, N) are master-jack families.
+const CONTROLLER_REGISTER_PREFIXES: &str = "PBESLR";
+
+/// Build controller/jack nodes and register edges from the patch's controller
+/// list and section entries.
+///
+/// Register edges connect circuits to the physical controls (buttons, knobs,
+/// LEDs, jacks) they reference. Direction comes from the schema catalog: an
+/// output parameter writes its register refs (circuit → target), an input
+/// parameter reads them (target → circuit). Unknown-circuit fallback follows
+/// the `output`/`led` key convention.
+///
+/// A register belongs to a declared controller when its letter is in PBESLR
+/// and a controller with that unit number exists; otherwise it is a jack on
+/// the master (input when the letter is I, N, or a controller-register
+/// letter without a matching unit, output otherwise).
+fn build_register_nodes_and_edges(patch: &Patch) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    let schema = load_schema();
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut seen_jacks: HashSet<String> = HashSet::new();
+    let mut seen_edges: HashSet<(NodeId, NodeId, String)> = HashSet::new();
+
+    // 1. Create controller nodes from the patch's controller list.
+    for ctrl in &patch.controllers {
+        nodes.push(GraphNode {
+            id: NodeId::Controller(ctrl.name.clone(), ctrl.ordinal as usize),
+            kind: NodeKind::Controller,
+            circuit: ctrl.panel.clone(),
+            instance_index: ctrl.ordinal as usize,
+            section_index: 0,
+        });
+    }
+
+    // 2. Build occurrence-counted node IDs for each section so register edges
+    //    target the correct circuit instance.
+    let mut instance_counts: HashMap<&str, usize> = HashMap::new();
+    let section_node_ids: Vec<NodeId> = patch
+        .sections
+        .iter()
+        .map(|section| {
+            let count = instance_counts.entry(section.name.as_str()).or_insert(0);
+            let idx = *count;
+            *count += 1;
+            NodeId::circuit(&section.name, idx)
+        })
+        .collect();
+
+    // 3. Scan each section's entries for register references and build edges.
+    for (section_idx, section) in patch.sections.iter().enumerate() {
+        let circuit = &section.name;
+        let circuit_node = &section_node_ids[section_idx];
+
+        for (key, value) in &section.entries {
+            let is_output = schema
+                .get_param_kind(circuit, key)
+                .map(|k| k == "output")
+                .unwrap_or_else(|| {
+                    // Fallback: output/led families write, everything else reads.
+                    let lk = key.to_lowercase();
+                    lk.contains("output") || lk.contains("led")
+                });
+
+            for (token, unit, _pin) in scan_register_refs(value) {
+                let prefix = match token.chars().next() {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                // Classify target: controller node or jack node.
+                let upper = prefix.to_ascii_uppercase();
+                let target = if CONTROLLER_REGISTER_PREFIXES.contains(upper)
+                    && patch.controllers.iter().any(|c| c.ordinal == unit)
+                {
+                    let ctrl = patch
+                        .controllers
+                        .iter()
+                        .find(|c| c.ordinal == unit)
+                        .unwrap();
+                    NodeId::Controller(ctrl.name.clone(), ctrl.ordinal as usize)
+                } else {
+                    NodeId::Jack(token.clone())
+                };
+
+                // Create jack nodes on demand.
+                if let NodeId::Jack(ref tok) = target {
+                    if seen_jacks.insert(tok.clone()) {
+                        let kind = if upper == 'I'
+                            || upper == 'N'
+                            || (CONTROLLER_REGISTER_PREFIXES.contains(upper)
+                                && !patch.controllers.iter().any(|c| c.ordinal == unit))
+                        {
+                            NodeKind::InputJack
+                        } else {
+                            NodeKind::OutputJack
+                        };
+                        nodes.push(GraphNode {
+                            id: NodeId::Jack(tok.clone()),
+                            kind,
+                            circuit: tok.clone(),
+                            instance_index: 0,
+                            section_index: 0,
+                        });
+                    }
+                }
+
+                // Build edge with direction from catalog.
+                let (src, sink) = if is_output {
+                    (circuit_node.clone(), target)
+                } else {
+                    (target, circuit_node.clone())
+                };
+
+                let cable = format!("_REG:{token}");
+                if seen_edges.insert((src.clone(), sink.clone(), cable.clone())) {
+                    edges.push(GraphEdge {
+                        cable,
+                        source: src,
+                        sink,
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort deterministically (same contract as build_edges).
+    edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+    (nodes, edges)
+}
 /// Topology validation as a graph-build step (design D4). For every cable in
 /// the patch's cable index, exactly one source is valid; zero sources (a
 /// dangling reference: some section sinks a cable nobody produces) is a
@@ -529,18 +674,25 @@ mod tests {
             &[],
         );
 
-        // Five sections → five nodes, including both [copy] instances.
-        assert_eq!(graph.nodes.len(), 5);
-
-        let copies: Vec<_> = graph.nodes.iter().filter(|n| n.circuit == "copy").collect();
+        // Five sections → five circuit nodes, including both [copy] instances.
+        // (The [p2b8] section also creates a Controller node.)
+        let circuit_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Circuit)
+            .collect();
+        assert_eq!(circuit_nodes.len(), 5);
+        let copies: Vec<_> = circuit_nodes
+            .iter()
+            .filter(|n| n.circuit == "copy")
+            .collect();
         assert_eq!(copies.len(), 2);
         assert_eq!(copies[0].instance_index, 0);
         assert_eq!(copies[1].instance_index, 1);
         assert_ne!(copies[0].id, copies[1].id);
 
-        // Section indices are the distinct 0..n positions.
-        let mut section_indices: Vec<usize> = graph.nodes.iter().map(|n| n.section_index).collect();
-        section_indices.sort_unstable();
+        // Section indices are the distinct 0..n positions (circuit nodes only).
+        let section_indices: Vec<usize> = circuit_nodes.iter().map(|n| n.section_index).collect();
         assert_eq!(section_indices, vec![0, 1, 2, 3, 4]);
     }
 
@@ -970,33 +1122,37 @@ mod fixture_tests {
         // 14 sections → 14 nodes; repeated [button] (8) and [copy] (2) names
         // are distinct instances with zero-based indices.
         let graph = fixture_graph("arpeggio1.ini");
-        assert_eq!(graph.nodes.len(), 14);
-
-        let buttons: Vec<&GraphNode> = graph
+        let circuit_nodes: Vec<&GraphNode> = graph
             .nodes
             .iter()
-            .filter(|n| n.circuit == "button")
+            .filter(|n| n.kind == NodeKind::Circuit)
             .collect();
-        assert_eq!(buttons.len(), 8);
+        assert_eq!(circuit_nodes.len(), 14);
+
+        let buttons: Vec<&GraphNode> = circuit_nodes
+            .iter()
+            .filter(|n| n.circuit == "button")
+            .copied()
+            .collect();
         for (i, b) in buttons.iter().enumerate() {
             assert_eq!(b.instance_index, i);
             assert_eq!(b.id, NodeId::circuit("button", i));
         }
 
-        let copies: Vec<&GraphNode> = graph.nodes.iter().filter(|n| n.circuit == "copy").collect();
-        assert_eq!(copies.len(), 2);
+        let copies: Vec<&GraphNode> = circuit_nodes
+            .iter()
+            .filter(|n| n.circuit == "copy")
+            .copied()
+            .collect();
         assert_eq!(copies[0].instance_index, 0);
         assert_eq!(copies[1].instance_index, 1);
         assert_ne!(copies[0].id, copies[1].id);
 
-        // Section indices are the distinct 0..14 positions.
-        let mut section_indices: Vec<usize> = graph.nodes.iter().map(|n| n.section_index).collect();
-        section_indices.sort_unstable();
-        assert_eq!(section_indices, (0..14).collect::<Vec<_>>());
+        // Canonical circuit set (single occurrence of each distinct name).
 
         // Canonical circuit set (single occurrence of each distinct name).
-        let mut circuits: Vec<&str> = graph.nodes.iter().map(|n| n.circuit.as_str()).collect();
-        circuits.sort_unstable();
+        let mut circuits: Vec<&str> = circuit_nodes.iter().map(|n| n.circuit.as_str()).collect();
+        circuits.sort();
         circuits.dedup();
         assert_eq!(
             circuits,
@@ -1009,9 +1165,14 @@ mod fixture_tests {
         // Each virtual cable is produced by a [button] and consumed by the
         // [arpeggio] section; _SCALE fans out to four select params.
         let graph = fixture_graph("arpeggio1.ini");
-        assert_eq!(graph.edges.len(), 11);
+        let cable_edges: Vec<&GraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| !e.cable.starts_with("_REG:"))
+            .collect();
+        assert_eq!(cable_edges.len(), 11);
 
-        for e in &graph.edges {
+        for e in &cable_edges {
             assert_eq!(
                 e.source,
                 NodeId::circuit("button", 0),
@@ -1027,8 +1188,11 @@ mod fixture_tests {
         }
 
         // _SCALE reaches four arpeggio select params (fan-out within the patch).
-        let scale_edges: Vec<&GraphEdge> =
-            graph.edges.iter().filter(|e| e.cable == "_SCALE").collect();
+        let scale_edges: Vec<&GraphEdge> = cable_edges
+            .iter()
+            .filter(|e| e.cable == "_SCALE")
+            .copied()
+            .collect();
         assert_eq!(scale_edges.len(), 4);
         for e in &scale_edges {
             assert_eq!(e.sink, NodeId::circuit("arpeggio", 0));
@@ -1040,9 +1204,15 @@ mod fixture_tests {
         // 164 sections across 22 distinct circuit names; repeated names get
         // unique ids rather than colliding.
         let graph = fixture_graph("alg27_2.ini");
-        assert_eq!(graph.nodes.len(), 164);
+        let circuit_nodes: Vec<&GraphNode> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Circuit)
+            .collect();
+        assert_eq!(circuit_nodes.len(), 164);
 
-        let mut section_indices: Vec<usize> = graph.nodes.iter().map(|n| n.section_index).collect();
+        let mut section_indices: Vec<usize> =
+            circuit_nodes.iter().map(|n| n.section_index).collect();
         section_indices.sort_unstable();
         assert_eq!(section_indices, (0..164).collect::<Vec<_>>());
 
