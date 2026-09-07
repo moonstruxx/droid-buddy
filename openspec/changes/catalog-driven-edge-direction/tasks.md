@@ -8,5 +8,5 @@
 
 ## 3. Regression and full gate
 
-- [ ] 3.1 Add a graph-level regression test that builds the graph from a schema-level fixture whose source uses a catalog output parameter and whose sink uses a catalog input parameter, and asserts the edge direction matches the catalog; keep every existing fixture byte-identical. Verify: `cargo test` passes. <!-- agent: horst-engineer.build, depends_on: [2.1], touches: [src/patch.rs, src/graph.rs] -->
+- [x] 3.1 Add a graph-level regression test that builds the graph from a schema-level fixture whose source uses a catalog output parameter and whose sink uses a catalog input parameter, and asserts the edge direction matches the catalog; keep every existing fixture byte-identical. Verify: `cargo test` passes. <!-- agent: horst-engineer.build, depends_on: [2.1], touches: [src/patch.rs, src/graph.rs] -->
 - [ ] 3.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [3.1], touches: [] -->
