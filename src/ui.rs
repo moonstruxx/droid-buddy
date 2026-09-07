@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
-use crate::graph::{Cluster, Graph, GraphNode, NodeId};
+use crate::graph::{Cluster, Graph, GraphNode, NodeId, NodeKind};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
 use crate::schema;
@@ -1871,7 +1871,16 @@ fn graph_kitty_frame(
         } else if opts.hovered == Some(i) {
             (theme.graph_node_highlight, theme.graph_node_highlight)
         } else {
-            (theme.graph_node_border, theme.graph_node_title)
+            // Per-kind node frame (task 4.1): controller and jack nodes use
+            // their kind tokens on the kitty path too, mirroring the box path.
+            match node.kind {
+                NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
+                NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
+                NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
+                NodeKind::OutputJack => {
+                    (theme.graph_node_jack_output, theme.graph_node_jack_output)
+                }
+            }
         };
         let mut label = graph_node_display_title(node, opts.patch, Some(opts.circuit_store));
         if opts.diff_showing
@@ -2407,6 +2416,12 @@ fn cable_color_with_diff(
     if graph.validation.iter().any(|issue| issue.cable == cable) {
         return theme.graph_edge_error;
     }
+    // Register edges (task 4.1): `_REG:`-prefixed cables use the register
+    // token instead of the cable-kind-based color. Precedence: error >
+    // register > diff > latency ramp > cable kind.
+    if cable.starts_with("_REG:") {
+        return theme.graph_edge_register;
+    }
     if diff_showing {
         if let Some(report) = diff_report {
             if report.added_cables.contains(&cable.to_string()) {
@@ -2721,11 +2736,27 @@ fn render_graph_node_with_highlight(
             )
         }
     } else {
-        (
-            theme::active().graph_node_border,
-            theme::active().graph_node_title,
-            Modifier::empty(),
-        )
+        // Per-kind node frame (task 4.1): controller and jack nodes
+        // render with distinct border/title colors.
+        let (border, title) = match node.kind {
+            NodeKind::Circuit => (
+                theme::active().graph_node_border,
+                theme::active().graph_node_title,
+            ),
+            NodeKind::Controller => (
+                theme::active().graph_node_controller,
+                theme::active().graph_node_controller,
+            ),
+            NodeKind::InputJack => (
+                theme::active().graph_node_jack_input,
+                theme::active().graph_node_jack_input,
+            ),
+            NodeKind::OutputJack => (
+                theme::active().graph_node_jack_output,
+                theme::active().graph_node_jack_output,
+            ),
+        };
+        (border, title, Modifier::empty())
     };
     let mut border_style = Style::default().fg(border_color).add_modifier(extra_mod);
     let mut title_style = Style::default().fg(title_color).add_modifier(extra_mod);
@@ -6269,7 +6300,15 @@ mod graph_view_tests {
             app.load_patch(patch);
             app.open_graph();
             let graph = app.graph.as_ref().expect("single-node graph builds");
-            assert_eq!(graph.nodes.len(), 1, "fixture must be a single-node graph");
+            assert_eq!(
+                graph
+                    .nodes
+                    .iter()
+                    .filter(|n| n.kind == crate::graph::NodeKind::Circuit)
+                    .count(),
+                1,
+                "fixture must be a single-node graph"
+            );
             assert_eq!(app.graph_zoom_preset, 5, "opens at the fit preset (100%)");
             let buf = buffer_for(&mut app, w, h);
             let slot = app
@@ -6313,7 +6352,14 @@ mod graph_view_tests {
         app.load_patch(patch);
         app.open_graph();
         let graph = app.graph.as_ref().unwrap();
-        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|n| n.kind == crate::graph::NodeKind::Circuit)
+                .count(),
+            1
+        );
         let area = Rect::new(120, 4, 79, 42);
         let disabled = HashSet::new();
         let store = HashMap::new();

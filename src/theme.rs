@@ -70,6 +70,15 @@ pub struct Theme {
     pub graph_edge_dim: Color,
     pub graph_edge_diff_added: Color,
     pub graph_edge_diff_removed: Color,
+    /// Per-kind node frame tokens (task 4.1): controller and jack nodes
+    /// render with distinct border/title colors so the graph surface
+    /// distinguishes node kinds at a glance.
+    pub graph_node_controller: Color,
+    pub graph_node_jack_input: Color,
+    pub graph_node_jack_output: Color,
+    /// Register-edge token (task 4.1): `_REG:`-prefixed cables use this
+    /// color instead of the cable-kind-based color.
+    pub graph_edge_register: Color,
     /// Cable latency ramp (design D2): 5 cold→hot stops used to color
     /// non-error cables by forward-loop latency when `App.latency_coloring` is
     /// on. `graph_edge_latency_0` is the lowest-latency end, `_4` the hottest
@@ -184,6 +193,14 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::Green,
             graph_edge_diff_removed: Color::Magenta,
+            // Per-kind node frames (task 4.1): controller green, jack
+            // input cyan, jack output green (same family as cv_out).
+            graph_node_controller: Color::Green,
+            graph_node_jack_input: Color::Cyan,
+            graph_node_jack_output: Color::Green,
+            // Register edges: muted dark-gray so they recede behind
+            // signal-path cables.
+            graph_edge_register: Color::DarkGray,
             // Cold (blue) → hot (red) latency ramp through the ANSI-16 hues.
             graph_edge_latency_0: Color::Blue,
             graph_edge_latency_1: Color::Cyan,
@@ -273,6 +290,14 @@ impl Theme {
             graph_edge_dim: Color::Reset,
             graph_edge_diff_added: Color::Gray,
             graph_edge_diff_removed: Color::DarkGray,
+            // Per-kind node frames: all Reset (matching existing graph tokens
+            // in the terminal palette).
+            graph_node_controller: Color::Reset,
+            graph_node_jack_input: Color::Reset,
+            graph_node_jack_output: Color::Reset,
+            // Register edges: Reset (matching the terminal palette's
+            // deferral to the user's terminal).
+            graph_edge_register: Color::Reset,
             graph_edge_latency_0: Color::Reset,
             graph_edge_latency_1: Color::Reset,
             graph_edge_latency_2: Color::Reset,
@@ -365,6 +390,14 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::White,
             graph_edge_diff_removed: Color::Gray,
+            // Per-kind node frames (task 4.1): controller white, jack input
+            // gray, jack output white (same family as graph_node_border).
+            graph_node_controller: Color::White,
+            graph_node_jack_input: Color::Gray,
+            graph_node_jack_output: Color::White,
+            // Register edges: blue so they stand out as a distinct category
+            // (all existing edge tokens are grayscale or Reset).
+            graph_edge_register: Color::Blue,
             // Grayscale latency ramp: four ANSI grays darkening toward the hot
             // end, with `Reset` (bright terminal default) as the hottest stop so
             // back-edges pop against the dim mid-ramp cables. Only four gray
@@ -710,6 +743,12 @@ mod tests {
             t.graph_edge_midi,
             t.graph_edge_unknown,
             t.graph_edge_error,
+            // Per-kind node frames + register edge: all Reset in the terminal
+            // palette (matching existing graph tokens).
+            t.graph_node_controller,
+            t.graph_node_jack_input,
+            t.graph_node_jack_output,
+            t.graph_edge_register,
             // `graph_edge_diff_added/removed` are intentionally Gray/DarkGray
             // (diff needs distinguishability even in the colorless terminal
             // theme); latency ramp + legend are all Reset.
@@ -925,6 +964,40 @@ mod tests {
     }
 
     #[test]
+    fn all_palettes_define_per_kind_node_tokens() {
+        // Task 4.1: per-kind node frame + register edge tokens exist in every
+        // palette — classic green/cyan/green/dark-gray, terminal Reset,
+        // mono white/gray/white/dark-gray (pairwise distinct within each
+        // category).
+        let classic = Theme::classic();
+        let terminal = Theme::terminal();
+        let mono = Theme::mono();
+        // Classic: controller green, jack input cyan, jack output green.
+        assert_eq!(classic.graph_node_controller, Color::Green);
+        assert_eq!(classic.graph_node_jack_input, Color::Cyan);
+        assert_eq!(classic.graph_node_jack_output, Color::Green);
+        assert_eq!(classic.graph_edge_register, Color::DarkGray);
+        // Terminal: all Reset.
+        assert_eq!(terminal.graph_node_controller, Color::Reset);
+        assert_eq!(terminal.graph_node_jack_input, Color::Reset);
+        assert_eq!(terminal.graph_node_jack_output, Color::Reset);
+        assert_eq!(terminal.graph_edge_register, Color::Reset);
+        // Mono: controller white, jack input gray, jack output white,
+        // register blue.
+        assert_eq!(mono.graph_node_controller, Color::White);
+        assert_eq!(mono.graph_node_jack_input, Color::Gray);
+        assert_eq!(mono.graph_node_jack_output, Color::White);
+        assert_eq!(mono.graph_edge_register, Color::Blue);
+        // Register edge must be distinct from the four edge-kind + error
+        // tokens in mono (type/severity carried by color alone).
+        assert_ne!(mono.graph_edge_register, mono.graph_edge_control);
+        assert_ne!(mono.graph_edge_register, mono.graph_edge_audio);
+        assert_ne!(mono.graph_edge_register, mono.graph_edge_midi);
+        assert_ne!(mono.graph_edge_register, mono.graph_edge_unknown);
+        assert_ne!(mono.graph_edge_register, mono.graph_edge_error);
+    }
+
+    #[test]
     fn all_palettes_define_display_placeholder() {
         // Task 1.1 (db8e-oled-display-placeholder): display_placeholder exists in
         // every palette — classic muted neutral, terminal Reset, mono mid-gray
@@ -1025,6 +1098,11 @@ mod tests {
                 theme.graph_edge_dim,
                 theme.graph_edge_diff_added,
                 theme.graph_edge_diff_removed,
+                // Per-kind node frames + register edge (task 4.1).
+                theme.graph_node_controller,
+                theme.graph_node_jack_input,
+                theme.graph_node_jack_output,
+                theme.graph_edge_register,
                 theme.graph_edge_latency_0,
                 theme.graph_edge_latency_1,
                 theme.graph_edge_latency_2,
