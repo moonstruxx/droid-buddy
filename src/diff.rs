@@ -36,7 +36,7 @@ fn build_node_ids(sections: &[crate::patch::IniSection]) -> Vec<NodeId> {
     let mut out = Vec::with_capacity(sections.len());
     for s in sections {
         let c = counts.entry(s.name.clone()).or_insert(0);
-        out.push((s.name.clone(), *c));
+        out.push(NodeId::circuit(&s.name, *c));
         *c += 1;
     }
     out
@@ -46,7 +46,7 @@ fn section_name_to_node_ids(patch: &Patch) -> HashMap<String, Vec<NodeId>> {
     let ids = build_node_ids(&patch.sections);
     let mut m: HashMap<String, Vec<NodeId>> = HashMap::new();
     for nid in ids {
-        m.entry(nid.0.clone()).or_default().push(nid);
+        m.entry(nid.name().to_string()).or_default().push(nid);
     }
     for v in m.values_mut() {
         v.sort();
@@ -75,7 +75,7 @@ fn resolve_sinks(
             }
         } else {
             // fallback: circuit not found as section (e.g. preamble) — use sentinel
-            out.insert(((sink_circuit.clone(), 0), sink_param.clone()));
+            out.insert((NodeId::circuit(sink_circuit, 0), sink_param.clone()));
         }
     }
     out
@@ -338,7 +338,7 @@ mod tests {
         let extended =
             p("[p2b8]\n[lfo]\nbutton = B1.1\nrate = 0.5\n[env]\nbutton = B1.2\ndecay = 0.2\n");
         let r = diff_patches(&base, &extended);
-        assert_eq!(r.added_nodes, vec![("env".to_string(), 0)]);
+        assert_eq!(r.added_nodes, vec![NodeId::circuit("env", 0)]);
         assert!(r.removed_nodes.is_empty());
         assert!(r.changed_nodes.is_empty());
     }
@@ -350,7 +350,7 @@ mod tests {
         let trimmed = p("[p2b8]\n[lfo]\nbutton = B1.1\nrate = 0.5\n");
         let r = diff_patches(&base, &trimmed);
         assert!(r.added_nodes.is_empty());
-        assert_eq!(r.removed_nodes, vec![("env".to_string(), 0)]);
+        assert_eq!(r.removed_nodes, vec![NodeId::circuit("env", 0)]);
         assert!(r.changed_nodes.is_empty());
     }
 
@@ -416,8 +416,8 @@ mod tests {
         let cc = &r.changed_cables[0];
         assert_eq!(cc.cable, "_CLK");
         // old sinks point to lfo, new sinks point to env
-        assert!(cc.old_sinks.iter().any(|(nid, _)| nid.0 == "lfo"));
-        assert!(cc.new_sinks.iter().any(|(nid, _)| nid.0 == "env"));
+        assert!(cc.old_sinks.iter().any(|(nid, _)| nid.name() == "lfo"));
+        assert!(cc.new_sinks.iter().any(|(nid, _)| nid.name() == "env"));
         assert_ne!(cc.old_sinks, cc.new_sinks);
         // sources unchanged -> both singletons clock
         assert_eq!(cc.old_sources, vec!["clock".to_string()]);
@@ -457,7 +457,7 @@ mod tests {
         assert!(r.added_nodes.is_empty() && r.removed_nodes.is_empty());
         assert_eq!(r.changed_nodes.len(), 1);
         let cn = &r.changed_nodes[0];
-        assert_eq!(cn.id, ("lfo".to_string(), 0));
+        assert_eq!(cn.id, NodeId::circuit("lfo", 0));
         assert_eq!(cn.changed_params, vec!["rate".to_string()]);
     }
 
@@ -626,7 +626,7 @@ mod tests {
             scoped
                 .changed_nodes
                 .iter()
-                .any(|cn| cn.id == ("lfo".to_string(), 0)),
+                .any(|cn| cn.id == NodeId::circuit("lfo", 0)),
             "B1.1 scope must include lfo, got {:?}",
             scoped.changed_nodes
         );
@@ -634,7 +634,7 @@ mod tests {
             !scoped
                 .changed_nodes
                 .iter()
-                .any(|cn| cn.id == ("env".to_string(), 0)),
+                .any(|cn| cn.id == NodeId::circuit("env", 0)),
             "B1.1 scope must NOT include env, got {:?}",
             scoped.changed_nodes
         );

@@ -61,12 +61,46 @@ pub struct BannerGroup {
     pub section_range: Range<usize>,
 }
 
-/// Node identity for the influence walk: `(circuit_name, instance_index)`.
+/// Node identity in the signal-flow graph.
 ///
-/// Repeated section names are distinct circuit instances, so the name alone
-/// is not unique. Mirrors `crate::graph::NodeId` but lives in `patch` so
-/// the walk stays pure and avoids a `patch -> graph` dependency (ARCHITECTURE).
-pub type NodeId = (String, usize);
+/// `Circuit(name, idx)` is a circuit section: `name` is the section name and
+/// `idx` is the zero-based occurrence order among same-named sections.
+/// `Controller(type, ordinal)` is a declared controller in chain order, and
+/// `Jack(token)` is a master input/output jack (e.g. `I1`, `O3`, `G1.4`).
+/// The enum lives in `patch` (not `graph`) because the influence walk needs
+/// it and a `patch -> graph` dependency is forbidden (ARCHITECTURE); `graph`
+/// re-exports it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum NodeId {
+    Circuit(String, usize),
+    Controller(String, usize),
+    Jack(String),
+}
+
+impl NodeId {
+    /// Build a circuit node id, the exact replacement for the former
+    /// `(name, idx)` tuple form.
+    pub fn circuit(name: &str, idx: usize) -> NodeId {
+        NodeId::Circuit(name.to_string(), idx)
+    }
+
+    /// The circuit/controller type name or jack token as `&str`.
+    pub fn name(&self) -> &str {
+        match self {
+            NodeId::Circuit(n, _) | NodeId::Controller(n, _) => n,
+            NodeId::Jack(t) => t,
+        }
+    }
+
+    /// The zero-based instance ordinal for `Circuit`/`Controller`; `0` for
+    /// `Jack` (a jack has no instance ordinal).
+    pub fn instance(&self) -> usize {
+        match self {
+            NodeId::Circuit(_, i) | NodeId::Controller(_, i) => *i,
+            NodeId::Jack(_) => 0,
+        }
+    }
+}
 
 /// Forward influence result: the set of circuits and cables reachable from a
 /// modifier's root variable(s) via structural hops (any circuit on the current
@@ -552,14 +586,14 @@ impl Patch {
         })
     }
 
-    /// Convenience: circuit label with derived fallback to `node.0` (circuit name).
+    /// Convenience: circuit label with derived fallback to the circuit name.
     pub fn circuit_display_label(
         &self,
         node: &NodeId,
         circuit_store: &HashMap<NodeId, String>,
     ) -> String {
         self.circuit_label(node, circuit_store)
-            .unwrap_or_else(|| node.0.clone())
+            .unwrap_or_else(|| node.name().to_string())
     }
 
     /// Get components belonging to a specific shift group
@@ -1081,15 +1115,15 @@ impl Patch {
                         let nid = node_ids
                             .get(idx)
                             .cloned()
-                            .unwrap_or_else(|| (section.name.clone(), 0));
+                            .unwrap_or_else(|| NodeId::circuit(&section.name, 0));
                         sink_entries.push((nid, idx, k_lower.clone()));
                     }
                 }
             }
             // Sort by (section_name, param_key, section_index) for deterministic BFS expansion.
             sink_entries.sort_by(|a, b| {
-                let an = &a.0 .0;
-                let bn = &b.0 .0;
+                let an = a.0.name();
+                let bn = b.0.name();
                 an.cmp(bn)
                     .then_with(|| a.2.cmp(&b.2))
                     .then_with(|| a.1.cmp(&b.1))
@@ -1739,7 +1773,7 @@ fn build_node_ids(sections: &[IniSection]) -> Vec<NodeId> {
         let count = counts.entry(section.name.clone()).or_insert(0);
         let idx = *count;
         *count += 1;
-        ids.push((section.name.clone(), idx));
+        ids.push(NodeId::circuit(&section.name, idx));
     }
     ids
 }
@@ -3376,7 +3410,7 @@ button = B1.3
         )
         .unwrap();
         let nodes = influenced_nodes_sorted(&patch, &[String::from("_CLK")]);
-        assert_eq!(nodes, vec![(String::from("copy"), 0)]);
+        assert_eq!(nodes, vec![NodeId::circuit("copy", 0)]);
         let edges = influenced_edges_sorted(&patch, &[String::from("_CLK")]);
         assert_eq!(edges, vec![String::from("_CLK")]);
     }
@@ -3392,10 +3426,10 @@ button = B1.3
         )
         .unwrap();
         let sub = patch.influence_subtree(&[String::from("_SEL")]);
-        assert!(sub.influenced_nodes.contains(&(String::from("switch"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("switch", 0)));
         assert!(sub
             .influenced_nodes
-            .contains(&(String::from("quantizer"), 0)));
+            .contains(&NodeId::circuit("quantizer", 0)));
         assert!(sub.influenced_edges.contains("_SEL"));
         assert!(sub.influenced_edges.contains("_B"));
     }
@@ -3409,8 +3443,8 @@ button = B1.3
         )
         .unwrap();
         let sub = patch.influence_subtree(&[String::from("_A")]);
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
-        assert!(sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("sink", 0)));
         assert!(sub.influenced_edges.contains("_A"));
         assert!(sub.influenced_edges.contains("_B"));
     }
@@ -3424,8 +3458,8 @@ button = B1.3
         )
         .unwrap();
         let sub = patch.influence_subtree(&[String::from("_A")]);
-        assert!(sub.influenced_nodes.contains(&(String::from("mixer"), 0)));
-        assert!(sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("mixer", 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("sink", 0)));
         assert!(sub.influenced_edges.contains("_MIX"));
     }
 
@@ -3437,9 +3471,9 @@ button = B1.3
         )
         .unwrap();
         let sub = patch.influence_subtree(&[String::from("_A")]);
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 1)));
-        assert!(sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 1)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("sink", 0)));
         assert!(sub.influenced_edges.contains("_A"));
         assert!(sub.influenced_edges.contains("_B"));
         assert!(sub.influenced_edges.contains("_C"));
@@ -3457,9 +3491,9 @@ button = B1.3
         assert_eq!(a, b, "influence walk must be deterministic");
         assert!(a.influenced_edges.contains("_A"));
         assert!(a.influenced_edges.contains("_B"));
-        assert!(a.influenced_nodes.contains(&(String::from("copy"), 0)));
-        assert!(a.influenced_nodes.contains(&(String::from("copy"), 1)));
-        assert!(a.influenced_nodes.contains(&(String::from("switch"), 0)));
+        assert!(a.influenced_nodes.contains(&NodeId::circuit("copy", 0)));
+        assert!(a.influenced_nodes.contains(&NodeId::circuit("copy", 1)));
+        assert!(a.influenced_nodes.contains(&NodeId::circuit("switch", 0)));
     }
 
     #[test]
@@ -3470,7 +3504,7 @@ button = B1.3
         )
         .unwrap();
         let sub = patch.influence_subtree(&[String::from("_A")]);
-        assert!(sub.influenced_nodes.contains(&(String::from("led"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("led", 0)));
         assert!(sub.influenced_edges.contains("_A"));
         // led has no output, so no further cables queued
         assert_eq!(sub.influenced_edges.len(), 1);
@@ -3532,7 +3566,7 @@ button = B1.3
             .unwrap();
         let sub = patch.influence_subtree(&[String::from("_ORPHAN")]);
         assert!(sub.influenced_edges.contains("_ORPHAN"));
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 0)));
     }
 
     #[test]
@@ -3544,10 +3578,10 @@ button = B1.3
             String::from("t"),
         )
         .unwrap();
-        let disabled: HashSet<NodeId> = HashSet::from([(String::from("copy"), 0)]);
+        let disabled: HashSet<NodeId> = HashSet::from([NodeId::circuit("copy", 0)]);
         let sub = patch.influence_subtree_with_disabled(&[String::from("_A")], &disabled);
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
-        assert!(!sub.influenced_nodes.contains(&(String::from("sink"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 0)));
+        assert!(!sub.influenced_nodes.contains(&NodeId::circuit("sink", 0)));
         assert!(sub.influenced_edges.contains("_A"));
         assert!(!sub.influenced_edges.contains("_B"));
     }
@@ -3561,12 +3595,12 @@ button = B1.3
             String::from("t"),
         )
         .unwrap();
-        let disabled: HashSet<NodeId> = HashSet::from([(String::from("copy"), 1)]);
+        let disabled: HashSet<NodeId> = HashSet::from([NodeId::circuit("copy", 1)]);
         let sub = patch.influence_subtree_with_disabled(&[String::from("_A")], &disabled);
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 0)));
-        assert!(sub.influenced_nodes.contains(&(String::from("copy"), 1)));
-        assert!(sub.influenced_nodes.contains(&(String::from("sinkb"), 0)));
-        assert!(!sub.influenced_nodes.contains(&(String::from("sinkc"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("copy", 1)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("sinkb", 0)));
+        assert!(!sub.influenced_nodes.contains(&NodeId::circuit("sinkc", 0)));
         assert!(sub.influenced_edges.contains("_B"));
         assert!(!sub.influenced_edges.contains("_C"));
     }
@@ -3592,8 +3626,8 @@ button = B1.3
         )
         .unwrap();
         let sub = patch.influence_subtree(&[String::from("_A"), String::from("_B")]);
-        assert!(sub.influenced_nodes.contains(&(String::from("sinka"), 0)));
-        assert!(sub.influenced_nodes.contains(&(String::from("sinkb"), 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("sinka", 0)));
+        assert!(sub.influenced_nodes.contains(&NodeId::circuit("sinkb", 0)));
         assert!(sub.influenced_edges.contains("_A"));
         assert!(sub.influenced_edges.contains("_B"));
     }
@@ -3608,23 +3642,23 @@ button = B1.3
         assert_eq!(vars, vec![String::from("_EXTRA"), String::from("_TRIG")]);
         // direct consumption: _BASE -> copy (+ leaf)
         let base = patch.influence_subtree(&[String::from("_BASE")]);
-        assert!(base.influenced_nodes.iter().any(|(n, _)| n == "copy"));
-        assert!(base.influenced_nodes.iter().any(|(n, _)| n == "contour"));
+        assert!(base.influenced_nodes.iter().any(|id| id.name() == "copy"));
+        assert!(base.influenced_nodes.iter().any(|id| id.name() == "contour"));
         assert!(base.influenced_edges.contains("_BASE"));
         // switch passthrough: _TRIG -> switch -> _SWOUT -> quantizer/mixer
         let trig = patch.influence_subtree(&[String::from("_TRIG")]);
-        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "switch"));
+        assert!(trig.influenced_nodes.iter().any(|id| id.name() == "switch"));
         assert!(trig.influenced_edges.contains("_SWOUT"));
-        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "quantizer"));
-        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "mixer"));
+        assert!(trig.influenced_nodes.iter().any(|id| id.name() == "quantizer"));
+        assert!(trig.influenced_nodes.iter().any(|id| id.name() == "mixer"));
         // copy chain: _COPY1 -> _COPY2 -> contour/logic
         assert!(trig.influenced_edges.contains("_COPY1"));
         assert!(trig.influenced_edges.contains("_COPY2"));
         assert!(trig.influenced_edges.contains("_LOGICOUT"));
         // any-input+output hop: logic must be in the walk
-        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "logic"));
+        assert!(trig.influenced_nodes.iter().any(|id| id.name() == "logic"));
         // leaf: led consumes _SWOUT but has no output -> no extra cable
-        assert!(trig.influenced_nodes.iter().any(|(n, _)| n == "led"));
+        assert!(trig.influenced_nodes.iter().any(|id| id.name() == "led"));
         // cycle-safe: _CYCLE_A / _CYCLE_B reachable but finite
         assert!(trig.influenced_edges.contains("_CYCLE_A"));
         assert!(trig.influenced_edges.contains("_CYCLE_B"));
@@ -3801,41 +3835,41 @@ button = B1.3
         .unwrap();
         let mut store: HashMap<NodeId, String> = HashMap::new();
         assert_eq!(
-            patch.circuit_label(&("motorfader".to_string(), 0), &store),
+            patch.circuit_label(&NodeId::circuit("motorfader", 0), &store),
             None
         );
         assert_eq!(
-            patch.circuit_display_label(&("motorfader".to_string(), 0), &store),
+            patch.circuit_display_label(&NodeId::circuit("motorfader", 0), &store),
             "motorfader"
         );
-        store.insert(("motorfader".to_string(), 12), "  T1 Accu  ".to_string());
+        store.insert(NodeId::circuit("motorfader", 12), "  T1 Accu  ".to_string());
         assert_eq!(
-            patch.circuit_label(&("motorfader".to_string(), 12), &store),
+            patch.circuit_label(&NodeId::circuit("motorfader", 12), &store),
             Some("T1 Accu".to_string())
         );
         assert_eq!(
-            patch.circuit_display_label(&("motorfader".to_string(), 12), &store),
+            patch.circuit_display_label(&NodeId::circuit("motorfader", 12), &store),
             "T1 Accu"
         );
-        store.insert(("motorfader".to_string(), 1), "   ".to_string());
+        store.insert(NodeId::circuit("motorfader", 1), "   ".to_string());
         assert_eq!(
-            patch.circuit_label(&("motorfader".to_string(), 1), &store),
+            patch.circuit_label(&NodeId::circuit("motorfader", 1), &store),
             None
         );
         assert_eq!(
-            patch.circuit_display_label(&("motorfader".to_string(), 1), &store),
+            patch.circuit_display_label(&NodeId::circuit("motorfader", 1), &store),
             "motorfader"
         );
-        store.insert(("motorfader".to_string(), 0), "A".to_string());
+        store.insert(NodeId::circuit("motorfader", 0), "A".to_string());
         // overwrite trimmed value for instance 0 test still A
-        store.insert(("motorfader".to_string(), 0), "A".to_string());
-        store.insert(("motorfader".to_string(), 1), "B".to_string());
+        store.insert(NodeId::circuit("motorfader", 0), "A".to_string());
+        store.insert(NodeId::circuit("motorfader", 1), "B".to_string());
         assert_eq!(
-            patch.circuit_label(&("motorfader".to_string(), 0), &store),
+            patch.circuit_label(&NodeId::circuit("motorfader", 0), &store),
             Some("A".to_string())
         );
         assert_eq!(
-            patch.circuit_label(&("motorfader".to_string(), 1), &store),
+            patch.circuit_label(&NodeId::circuit("motorfader", 1), &store),
             Some("B".to_string())
         );
     }

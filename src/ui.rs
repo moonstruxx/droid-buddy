@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
-use crate::graph::{Cluster, Graph, GraphNode};
+use crate::graph::{Cluster, Graph, GraphNode, NodeId};
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::rendermetrics::{score_render, RenderFeatures};
 use crate::schema;
@@ -1744,14 +1744,14 @@ const KITTY_GRAPH_IMAGE_ID: u32 = 0;
 #[cfg(feature = "kitty-gfx")]
 #[derive(Clone, Copy)]
 struct GraphKittyOpts<'a> {
-    disabled: &'a HashSet<(String, usize)>,
+    disabled: &'a HashSet<NodeId>,
     diff_report: Option<&'a crate::diff::DiffReport>,
     diff_showing: bool,
     latency_coloring: bool,
     hovered: Option<usize>,
-    selected: Option<&'a (String, usize)>,
+    selected: Option<&'a NodeId>,
     patch: Option<&'a crate::patch::Patch>,
-    circuit_store: &'a HashMap<(String, usize), String>,
+    circuit_store: &'a HashMap<NodeId, String>,
 }
 
 /// Color for one cable on the kitty image path — a mirror of the box-drawing
@@ -2308,7 +2308,7 @@ fn graph_node_title(node: &GraphNode) -> String {
 fn graph_node_display_title(
     node: &GraphNode,
     patch: Option<&crate::patch::Patch>,
-    circuit_store: Option<&HashMap<(String, usize), String>>,
+    circuit_store: Option<&HashMap<NodeId, String>>,
 ) -> String {
     if let (Some(patch), Some(store)) = (patch, circuit_store) {
         patch.circuit_display_label(&node.id, store)
@@ -2320,14 +2320,8 @@ fn graph_node_display_title(
 /// Whether a circuit instance has processing disabled: `App.disabled_circuits`
 /// is keyed by `(circuit name, instance index)`, the same identity a
 /// `GraphNode` carries (`circuit` + `instance_index`).
-fn circuit_disabled(
-    disabled: &HashSet<(String, usize)>,
-    circuit: &str,
-    instance_index: usize,
-) -> bool {
-    disabled
-        .iter()
-        .any(|(name, idx)| name == circuit && *idx == instance_index)
+fn circuit_disabled(disabled: &HashSet<NodeId>, circuit: &str, instance_index: usize) -> bool {
+    disabled.contains(&NodeId::circuit(circuit, instance_index))
 }
 
 /// Inferred cable type for edge coloring (design D8). DROID cables carry no
@@ -2493,7 +2487,7 @@ fn polyline_cells(x_s: i16, y_s: i16, x_t: i16, y_t: i16) -> Vec<(i16, i16)> {
 #[derive(Default)]
 struct GraphEdgeOpts<'a> {
     highlight: Option<&'a HashSet<String>>,
-    disabled: Option<&'a HashSet<(String, usize)>>,
+    disabled: Option<&'a HashSet<NodeId>>,
     diff_report: Option<&'a crate::diff::DiffReport>,
     diff_showing: bool,
     /// Per-edge latency (design D2), parallel to `graph.edges` by index.
@@ -2680,12 +2674,12 @@ fn render_graph_node_with_highlight(
     area: Rect,
     node: &GraphNode,
     graph: &Graph,
-    highlight_nodes: Option<&HashSet<(String, usize)>>,
-    disabled: Option<&HashSet<(String, usize)>>,
+    highlight_nodes: Option<&HashSet<NodeId>>,
+    disabled: Option<&HashSet<NodeId>>,
     hovered: bool,
     selected: bool,
     patch: Option<&crate::patch::Patch>,
-    circuit_store: Option<&HashMap<(String, usize), String>>,
+    circuit_store: Option<&HashMap<NodeId, String>>,
     diff_report: Option<&crate::diff::DiffReport>,
     diff_showing: bool,
 ) {
@@ -2837,7 +2831,7 @@ fn render_graph_cluster_frame_with_diff(
     if diff_showing {
         if let Some(report) = diff_report {
             // Tint when all member NodeIds are added or all removed.
-            let member_ids: Vec<(String, usize)> = nodes
+            let member_ids: Vec<NodeId> = nodes
                 .iter()
                 .enumerate()
                 .filter(|(_, n)| cluster.section_range.contains(&n.section_index))
@@ -3133,7 +3127,7 @@ fn render_source_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|s| {
             let idx = *counts.get(&s.name).unwrap_or(&0);
-            let node_id = (s.name.clone(), idx);
+            let node_id = NodeId::circuit(&s.name, idx);
             counts.insert(s.name.clone(), idx + 1);
             patch.circuit_display_label(&node_id, &circuit_store)
         })
@@ -3397,7 +3391,7 @@ fn build_prettified_highlighted_lines(
     let mut counts: HashMap<String, usize> = HashMap::new();
     for circuit in &circuits {
         let idx = *counts.get(&circuit.name).unwrap_or(&0);
-        let node_id = (circuit.name.clone(), idx);
+        let node_id = NodeId::circuit(&circuit.name, idx);
         let display_name = patch.circuit_display_label(&node_id, &circuit_store);
         counts.insert(circuit.name.clone(), idx + 1);
         let color = circuit_color(&circuit.name);
@@ -5505,7 +5499,7 @@ mod paused_rendering_tests {
 #[cfg(test)]
 mod graph_view_tests {
     use super::*;
-    use crate::graph::{GraphEdge, TopologyIssue, TopologySeverity};
+    use crate::graph::{GraphEdge, NodeId, NodeKind, TopologyIssue, TopologySeverity};
     use crate::patch::Patch;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -5575,8 +5569,8 @@ mod graph_view_tests {
             ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![],
             validation: vec![],
@@ -6618,7 +6612,8 @@ mod graph_view_tests {
 
     fn node(name: &str, idx: usize, circuit: &str, section_index: usize) -> GraphNode {
         GraphNode {
-            id: (name.to_string(), idx),
+            id: NodeId::circuit(name, idx),
+            kind: NodeKind::Circuit,
             circuit: circuit.to_string(),
             instance_index: idx,
             section_index,
@@ -6797,18 +6792,18 @@ mod graph_view_tests {
             edges: vec![
                 GraphEdge {
                     cable: "_CLK".into(),
-                    source: ("clock".into(), 0),
-                    sink: ("osc".into(), 0),
+                    source: NodeId::circuit("clock", 0),
+                    sink: NodeId::circuit("osc", 0),
                 },
                 GraphEdge {
                     cable: "_AUD".into(),
-                    source: ("osc".into(), 0),
-                    sink: ("midi".into(), 0),
+                    source: NodeId::circuit("osc", 0),
+                    sink: NodeId::circuit("midi", 0),
                 },
                 GraphEdge {
                     cable: "_NOTE".into(),
-                    source: ("midi".into(), 0),
-                    sink: ("clock".into(), 0),
+                    source: NodeId::circuit("midi", 0),
+                    sink: NodeId::circuit("clock", 0),
                 },
             ],
             clusters: vec![],
@@ -6843,8 +6838,8 @@ mod graph_view_tests {
             nodes: vec![node("clock", 0, "clocktool", 0), node("osc", 0, "osc", 1)],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![],
             validation: vec![],
@@ -6896,8 +6891,8 @@ mod graph_view_tests {
             ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![],
             validation: vec![],
@@ -6931,13 +6926,13 @@ mod graph_view_tests {
             edges: vec![
                 GraphEdge {
                     cable: "_CLK".into(),
-                    source: ("a".into(), 0),
-                    sink: ("c".into(), 0),
+                    source: NodeId::circuit("a", 0),
+                    sink: NodeId::circuit("c", 0),
                 },
                 GraphEdge {
                     cable: "_AUD".into(),
-                    source: ("b".into(), 0),
-                    sink: ("d".into(), 0),
+                    source: NodeId::circuit("b", 0),
+                    sink: NodeId::circuit("d", 0),
                 },
             ],
             clusters: vec![],
@@ -6962,12 +6957,12 @@ mod graph_view_tests {
         let a_idx = graph
             .nodes
             .iter()
-            .position(|n| n.id == ("a".into(), 0))
+            .position(|n| n.id == NodeId::circuit("a", 0))
             .unwrap();
         let c_idx = graph
             .nodes
             .iter()
-            .position(|n| n.id == ("c".into(), 0))
+            .position(|n| n.id == NodeId::circuit("c", 0))
             .unwrap();
         let x_s = rects[a_idx].x as i32 + rects[a_idx].width as i32 - 1;
         let x_t = rects[c_idx].x as i32;
@@ -6999,8 +6994,8 @@ mod graph_view_tests {
             ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![
                 Cluster {
@@ -7038,8 +7033,8 @@ mod graph_view_tests {
             ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![],
             validation: vec![TopologyIssue {
@@ -7068,8 +7063,8 @@ mod graph_view_tests {
             ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![],
             validation: vec![],
@@ -7171,18 +7166,18 @@ mod graph_view_tests {
             edges: vec![
                 GraphEdge {
                     cable: "_CLK".into(),
-                    source: ("clock".into(), 0),
-                    sink: ("osc".into(), 0),
+                    source: NodeId::circuit("clock", 0),
+                    sink: NodeId::circuit("osc", 0),
                 },
                 GraphEdge {
                     cable: "_AUD".into(),
-                    source: ("clock".into(), 0),
-                    sink: ("vca".into(), 0),
+                    source: NodeId::circuit("clock", 0),
+                    sink: NodeId::circuit("vca", 0),
                 },
                 GraphEdge {
                     cable: "_MOD".into(),
-                    source: ("osc".into(), 0),
-                    sink: ("vca".into(), 0),
+                    source: NodeId::circuit("osc", 0),
+                    sink: NodeId::circuit("vca", 0),
                 },
             ],
             clusters: vec![],
@@ -7212,7 +7207,7 @@ mod graph_view_tests {
             ..Default::default()
         };
         let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (7.0, 5.0)]));
-        app.disabled_circuits.insert((String::from("copy"), 0));
+        app.disabled_circuits.insert(NodeId::circuit("copy", 0));
         let buf = buffer_for(&mut app, 120, 40);
         let graph = app.graph.as_ref().unwrap();
         let copy_idx = graph
@@ -7277,7 +7272,8 @@ mod graph_view_tests {
             graph,
             padded_positions(&[(2.0, 5.0), (7.0, 3.0), (7.0, 7.0)]),
         );
-        app.disabled_circuits.insert((String::from("clocktool"), 0));
+        app.disabled_circuits
+            .insert(NodeId::circuit("clocktool", 0));
         let buf = buffer_for(&mut app, 120, 40);
         let theme = theme::active();
 
@@ -7347,7 +7343,7 @@ mod graph_view_tests {
             ..Default::default()
         };
         let mut app = graph_app_from(graph, padded_positions(&[(3.0, 5.0), (7.0, 5.0)]));
-        app.disabled_circuits.insert((String::from("copy"), 0));
+        app.disabled_circuits.insert(NodeId::circuit("copy", 0));
         let copy_idx = app
             .graph
             .as_ref()
@@ -7415,8 +7411,8 @@ mod graph_view_tests {
             ],
             edges: vec![GraphEdge {
                 cable: "_CLK".into(),
-                source: ("clock".into(), 0),
-                sink: ("osc".into(), 0),
+                source: NodeId::circuit("clock", 0),
+                sink: NodeId::circuit("osc", 0),
             }],
             clusters: vec![],
             validation: vec![],

@@ -258,7 +258,7 @@ fn derive(patch: &Patch) -> Derived {
         .enumerate()
         .map(|(section_index, section)| {
             let instance = counts.entry(section.name.as_str()).or_insert(0);
-            let id = (section.name.clone(), *instance);
+            let id = NodeId::circuit(&section.name, *instance);
             *instance += 1;
             (id, section_index)
         })
@@ -266,7 +266,7 @@ fn derive(patch: &Patch) -> Derived {
     // Name → first node, exactly like `graph.rs::name_to_first_node`.
     let mut first: HashMap<&str, NodeId> = HashMap::new();
     for (id, _) in &nodes {
-        first.entry(id.0.as_str()).or_insert_with(|| id.clone());
+        first.entry(id.name()).or_insert_with(|| id.clone());
     }
     let mut edges = Vec::new();
     for (cable, entry) in &patch.cable_index {
@@ -847,7 +847,7 @@ fn coarsen_by_banner(
     // One synthetic coarse node per banner group.
     let mut coarse_nodes: Vec<(NodeId, usize)> = Vec::with_capacity(domains.len());
     for gi in 0..domains.len() {
-        coarse_nodes.push(((format!("__coarse_{gi}"), 0), gi));
+        coarse_nodes.push((NodeId::circuit(&format!("__coarse_{gi}"), 0), gi));
     }
     let mut coarse_edges: Vec<GraphEdge> = Vec::new();
     for edge in &derived.edges {

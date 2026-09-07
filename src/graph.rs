@@ -19,17 +19,28 @@ use crate::schema::load_schema;
 // `validate_wiring_outliers`. Invariant guards (adjacent / co-located / via-
 // cable) stay explicit at the call site and never reach the scorer.
 
-/// A node's identity: `(circuit_name, instance_index)`.
-///
-/// Repeated section names are distinct circuit instances (e.g. two `[copy]`
-/// sections), so the section name alone is not a unique key. `instance_index`
-/// is the zero-based occurrence order among same-named sections in the file.
-pub type NodeId = (String, usize);
+/// Node identity: `Circuit(name, idx)`, `Controller(type, ordinal)`, or
+/// `Jack(token)`. Defined in `patch` (the influence walk needs it and `patch`
+/// must not depend on `graph`); re-exported here for graph consumers.
+pub use crate::patch::NodeId;
+
+/// The kind of a graph node: a circuit section, a declared controller, or a
+/// master input/output jack. All nodes render as circuits until task 4.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeKind {
+    Circuit,
+    Controller,
+    InputJack,
+    OutputJack,
+}
 
 /// A circuit (section) rendered as a graph node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphNode {
     pub id: NodeId,
+    /// Node kind. Always `Circuit` today; controller/jack nodes arrive in
+    /// task 3.1.
+    pub kind: NodeKind,
     /// Circuit/section name, e.g. `"clocktool"`.
     pub circuit: String,
     /// Zero-based occurrence index among same-named sections.
@@ -214,7 +225,8 @@ fn build_nodes(patch: &Patch) -> Vec<GraphNode> {
             let instance_index = *count;
             *count += 1;
             GraphNode {
-                id: (section.name.clone(), instance_index),
+                id: NodeId::circuit(&section.name, instance_index),
+                kind: NodeKind::Circuit,
                 circuit: section.name.clone(),
                 instance_index,
                 section_index,
@@ -547,15 +559,15 @@ mod tests {
         assert_eq!(graph.edges.len(), 3);
         for edge in &graph.edges {
             assert_eq!(edge.cable, "_CLK");
-            assert_eq!(edge.source, (String::from("src"), 0));
+            assert_eq!(edge.source, NodeId::circuit("src", 0));
         }
         let sinks: Vec<&NodeId> = graph.edges.iter().map(|e| &e.sink).collect();
         assert_eq!(
             sinks,
             vec![
-                &(String::from("sink1"), 0),
-                &(String::from("sink2"), 0),
-                &(String::from("sink3"), 0),
+                &NodeId::circuit("sink1", 0),
+                &NodeId::circuit("sink2", 0),
+                &NodeId::circuit("sink3", 0),
             ]
         );
     }
@@ -632,8 +644,8 @@ mod tests {
             .iter()
             .find(|e| e.cable == "_OUT")
             .expect("_OUT edge exists");
-        assert_eq!(out_edge.source, (String::from("pulser"), 0));
-        assert_eq!(out_edge.sink, (String::from("sink"), 0));
+        assert_eq!(out_edge.source, NodeId::circuit("pulser", 0));
+        assert_eq!(out_edge.sink, NodeId::circuit("sink", 0));
 
         // The catalog input `input` consumes `_IN` at `pulser`, produced by
         // `sink`'s conventional `output`.
@@ -642,8 +654,8 @@ mod tests {
             .iter()
             .find(|e| e.cable == "_IN")
             .expect("_IN edge exists");
-        assert_eq!(in_edge.source, (String::from("sink"), 0));
-        assert_eq!(in_edge.sink, (String::from("pulser"), 0));
+        assert_eq!(in_edge.source, NodeId::circuit("sink", 0));
+        assert_eq!(in_edge.sink, NodeId::circuit("pulser", 0));
 
         // Exactly the two directed edges, so direction comes from the catalog.
         assert_eq!(graph.edges.len(), 2);
@@ -968,7 +980,7 @@ mod fixture_tests {
         assert_eq!(buttons.len(), 8);
         for (i, b) in buttons.iter().enumerate() {
             assert_eq!(b.instance_index, i);
-            assert_eq!(b.id, (String::from("button"), i));
+            assert_eq!(b.id, NodeId::circuit("button", i));
         }
 
         let copies: Vec<&GraphNode> = graph.nodes.iter().filter(|n| n.circuit == "copy").collect();
@@ -1002,13 +1014,13 @@ mod fixture_tests {
         for e in &graph.edges {
             assert_eq!(
                 e.source,
-                (String::from("button"), 0),
+                NodeId::circuit("button", 0),
                 "cable {} must be produced by the first button instance",
                 e.cable
             );
             assert_eq!(
                 e.sink,
-                (String::from("arpeggio"), 0),
+                NodeId::circuit("arpeggio", 0),
                 "cable {} must be consumed by the arpeggio section",
                 e.cable
             );
@@ -1019,7 +1031,7 @@ mod fixture_tests {
             graph.edges.iter().filter(|e| e.cable == "_SCALE").collect();
         assert_eq!(scale_edges.len(), 4);
         for e in &scale_edges {
-            assert_eq!(e.sink, (String::from("arpeggio"), 0));
+            assert_eq!(e.sink, NodeId::circuit("arpeggio", 0));
         }
     }
 
@@ -1064,12 +1076,12 @@ mod fixture_tests {
             .collect();
         assert_eq!(clk.len(), 12);
         for e in &clk {
-            assert_eq!(e.source, (String::from("clocktool"), 0));
+            assert_eq!(e.source, NodeId::circuit("clocktool", 0));
         }
         let sinks: std::collections::HashSet<&NodeId> = clk.iter().map(|e| &e.sink).collect();
         assert_eq!(sinks.len(), 2, "sinks resolve to copy and clocktool only");
-        assert!(sinks.contains(&(String::from("clocktool"), 0)));
-        assert!(sinks.contains(&(String::from("copy"), 0)));
+        assert!(sinks.contains(&NodeId::circuit("clocktool", 0)));
+        assert!(sinks.contains(&NodeId::circuit("copy", 0)));
     }
 
     #[test]
@@ -1084,8 +1096,8 @@ mod fixture_tests {
             .collect();
         assert_eq!(mx.len(), 7);
         for e in &mx {
-            assert_eq!(e.source, (String::from("pot"), 0));
-            assert_eq!(e.sink, (String::from("matrixmixer"), 0));
+            assert_eq!(e.source, NodeId::circuit("pot", 0));
+            assert_eq!(e.sink, NodeId::circuit("matrixmixer", 0));
         }
     }
 
