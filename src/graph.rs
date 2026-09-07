@@ -653,6 +653,46 @@ mod tests {
                     ],
                     "presets": 0,
                     "manual": 0
+                },
+                "buttonwriter": {
+                    "category": "test",
+                    "title": "Button Writer",
+                    "description": "writes to button registers",
+                    "ramsize": 10,
+                    "inputs": [],
+                    "outputs": [
+                        {
+                            "name": "button",
+                            "short": "btn",
+                            "type": "out",
+                            "description": "button output",
+                            "essential": 0,
+                            "ramhint": "",
+                            "autotitle": false
+                        }
+                    ],
+                    "presets": 0,
+                    "manual": 0
+                },
+                "potreader": {
+                    "category": "test",
+                    "title": "Pot Reader",
+                    "description": "reads from pot registers",
+                    "ramsize": 10,
+                    "inputs": [
+                        {
+                            "name": "pot",
+                            "short": "pot",
+                            "type": "in",
+                            "description": "pot input",
+                            "essential": 0,
+                            "ramhint": "",
+                            "autotitle": false
+                        }
+                    ],
+                    "outputs": [],
+                    "presets": 0,
+                    "manual": 0
                 }
             },
             "controllers": {},
@@ -1082,6 +1122,133 @@ mod tests {
         let sub = patch.influence_subtree(&[String::from("_A")]);
         // with_highlights keeps the full graph's topology, so latency survives.
         assert_eq!(graph.with_highlights(&sub).latency, graph.latency);
+    }
+
+    #[test]
+    fn register_edges_build_nodes_and_edges() {
+        let schema = catalog_test_schema();
+        crate::schema::set_test_schema(Some(schema));
+        let patch = Patch::from_ini_file(std::path::Path::new("fixtures/graph_register_edges.ini"))
+            .unwrap();
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        crate::schema::reset_test_schema();
+
+        // --- Nodes: 9 circuit nodes + 1 controller node + 3 jack nodes ---
+        let circuit_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Circuit)
+            .collect();
+        assert_eq!(circuit_nodes.len(), 9);
+        let ctrl_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Controller)
+            .collect();
+        assert_eq!(ctrl_nodes.len(), 1);
+        assert_eq!(
+            ctrl_nodes[0].id,
+            NodeId::Controller(String::from("p2b8"), 1)
+        );
+        // L1.1 resolves to the P2B8 controller (L is in PBESLR and ordinal 1
+        // matches), so only O1, I1, and B2.1 create jack nodes.
+        let jack_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind != NodeKind::Circuit && n.kind != NodeKind::Controller)
+            .collect();
+        assert_eq!(jack_nodes.len(), 3);
+        let jack_ids: HashSet<&NodeId> = jack_nodes.iter().map(|n| &n.id).collect();
+        assert!(jack_ids.contains(&NodeId::Jack(String::from("O1"))));
+        assert!(jack_ids.contains(&NodeId::Jack(String::from("I1"))));
+        // B2.1 is a PBESLR letter with no declared controller ordinal 2, so it
+        // falls back to an input jack on the master.
+        assert!(jack_ids.contains(&NodeId::Jack(String::from("B2.1"))));
+        assert_eq!(
+            jack_nodes
+                .iter()
+                .find(|n| n.id == NodeId::Jack(String::from("I1")))
+                .unwrap()
+                .kind,
+            NodeKind::InputJack
+        );
+
+        // --- Register edges (cable prefix "_REG:") ---
+        let reg_edges: Vec<&GraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.cable.starts_with("_REG:"))
+            .collect();
+        // Expected register edges:
+        //   buttonwriter -> P2B8  (B1.1, output)
+        //   P2B8 -> potreader     (P1.1, input)
+        //   jackwriter -> O1      (O1, output)
+        //   jacksharer -> O1      (O1, via cv key fallback)
+        //   unknowncircuit_foobar -> P2B8  (L1.1, fallback led heuristic)
+        //   I1 -> jackreader      (I1, input)
+        //   B2.1 -> b2fallback    (B2.1, unmatched ordinal → input jack)
+        assert_eq!(reg_edges.len(), 7);
+
+        // Controller write: buttonwriter -> P2B8
+        let btn_edge = reg_edges
+            .iter()
+            .find(|e| e.cable == "_REG:B1.1")
+            .expect("_REG:B1.1 edge");
+        assert_eq!(btn_edge.source, NodeId::circuit("buttonwriter", 0));
+        assert_eq!(btn_edge.sink, NodeId::Controller(String::from("p2b8"), 1));
+
+        // Controller read: P2B8 -> potreader
+        let pot_edge = reg_edges
+            .iter()
+            .find(|e| e.cable == "_REG:P1.1")
+            .expect("_REG:P1.1 edge");
+        assert_eq!(pot_edge.source, NodeId::Controller(String::from("p2b8"), 1));
+        assert_eq!(pot_edge.sink, NodeId::circuit("potreader", 0));
+
+        // Output jack: jackwriter -> O1
+        let ow_edge = reg_edges
+            .iter()
+            .find(|e| e.cable == "_REG:O1")
+            .expect("_REG:O1 edge");
+        assert_eq!(ow_edge.source, NodeId::circuit("jackwriter", 0));
+        assert_eq!(ow_edge.sink, NodeId::Jack(String::from("O1")));
+
+        // Shared jack node: jacksharer reads from O1 (cv key → input fallback)
+        let sh_edge = reg_edges
+            .iter()
+            .filter(|e| e.cable == "_REG:O1")
+            .find(|e| e.sink == NodeId::circuit("jacksharer", 0))
+            .expect("O1 -> jacksharer edge");
+        assert_eq!(sh_edge.source, NodeId::Jack(String::from("O1")));
+
+        // Fallback output heuristic: unknowncircuit_foobar -> P2B8 (led key)
+        let led_edge = reg_edges
+            .iter()
+            .find(|e| e.cable == "_REG:L1.1")
+            .expect("_REG:L1.1 edge");
+        assert_eq!(led_edge.source, NodeId::circuit("unknowncircuit_foobar", 0));
+        assert_eq!(led_edge.sink, NodeId::Controller(String::from("p2b8"), 1));
+
+        // Input jack: I1 -> jackreader
+        let ij_edge = reg_edges
+            .iter()
+            .find(|e| e.cable == "_REG:I1")
+            .expect("_REG:I1 edge");
+        assert_eq!(ij_edge.source, NodeId::Jack(String::from("I1")));
+        assert_eq!(ij_edge.sink, NodeId::circuit("jackreader", 0));
+
+        // Unmatched-ordinal fallback: B2.1 has no declared controller ordinal
+        // 2, so the button ref lands on an input-jack node; the unknown
+        // circuit reads it (button is not an output/led key).
+        let b2_edge = reg_edges
+            .iter()
+            .find(|e| e.cable == "_REG:B2.1")
+            .expect("_REG:B2.1 edge");
+        assert_eq!(b2_edge.source, NodeId::Jack(String::from("B2.1")));
+        assert_eq!(b2_edge.sink, NodeId::circuit("b2fallback", 0));
+
+        // Total edges: 5 cable edges + 7 register edges = 12
+        assert_eq!(graph.edges.len(), 12);
     }
 }
 /// Fixture-driven suite through the public `Graph::build_from_patch` entry
