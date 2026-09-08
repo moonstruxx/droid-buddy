@@ -1974,4 +1974,117 @@ mod fixture_tests {
         );
         assert_eq!(g_default.edges.len(), g_hide_false.edges.len());
     }
+
+    #[test]
+    fn select_state_fixture_drops_losing_controller_edges() {
+        // fixtures/graph_select_state.ini: sel_a (selectat 0) and sel_b
+        // (selectat 1) both select on S7.1; a button circuit carries no
+        // select and an outputjack drives O1. Assuming each S7.1 value drops
+        // the losing circuit's controller edge while its cable and jack
+        // edges survive.
+        let patch = Patch::from_ini_file(Path::new("fixtures/graph_select_state.ini")).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+
+        // S7.1 = 0: sel_b (selectat 1) is NotSelected.
+        let opts0 = GraphOptions {
+            state: HashMap::from([(String::from("S7.1"), 0.0)]),
+            hide_unselected: false,
+        };
+        let g0 = Graph::build_from_patch(&patch, &clusters, &CostModel::default(), &opts0);
+        assert!(
+            g0.not_selected.contains(&3),
+            "sel_b (section 3) is NotSelected under S7.1=0"
+        );
+        assert!(
+            !g0.edges.iter().any(|e| e.cable == "_REG:B2.1"),
+            "S7.1=0 drops sel_b's controller edge"
+        );
+        assert!(
+            g0.edges.iter().any(|e| e.cable == "_REG:B1.1"),
+            "S7.1=0 keeps sel_a's controller edge"
+        );
+        assert!(
+            g0.edges.iter().any(|e| e.cable == "_SELB"),
+            "S7.1=0 keeps sel_b's cable edge"
+        );
+        assert!(
+            g0.edges.iter().any(|e| e.cable == "_REG:S7.1"),
+            "S7.1=0 keeps the select jack edge"
+        );
+        assert!(
+            g0.edges.iter().any(|e| e.cable == "_REG:O1"),
+            "S7.1=0 keeps the output jack edge"
+        );
+
+        // S7.1 = 1: sel_a (selectat 0) is NotSelected.
+        let opts1 = GraphOptions {
+            state: HashMap::from([(String::from("S7.1"), 1.0)]),
+            hide_unselected: false,
+        };
+        let g1 = Graph::build_from_patch(&patch, &clusters, &CostModel::default(), &opts1);
+        assert!(
+            g1.not_selected.contains(&2),
+            "sel_a (section 2) is NotSelected under S7.1=1"
+        );
+        assert!(
+            !g1.edges.iter().any(|e| e.cable == "_REG:B1.1"),
+            "S7.1=1 drops sel_a's controller edge"
+        );
+        assert!(
+            g1.edges.iter().any(|e| e.cable == "_REG:B2.1"),
+            "S7.1=1 keeps sel_b's controller edge"
+        );
+        assert!(
+            g1.edges.iter().any(|e| e.cable == "_SELA"),
+            "S7.1=1 keeps sel_a's cable edge"
+        );
+        assert!(
+            g1.edges.iter().any(|e| e.cable == "_REG:O1"),
+            "S7.1=1 keeps the output jack edge"
+        );
+    }
+
+    #[test]
+    fn select_state_fixture_default_build_is_stable() {
+        // No assumed state: the unassumed build is byte-identical to the
+        // pre-select-state build (nothing gated, nothing dropped), and both
+        // controller edges stay present.
+        let patch = Patch::from_ini_file(Path::new("fixtures/graph_select_state.ini")).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let g_default = Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
+        let g_empty = Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions {
+                state: HashMap::new(),
+                hide_unselected: false,
+            },
+        );
+        assert!(g_default.not_selected.is_empty());
+        assert_eq!(g_default.nodes, g_empty.nodes);
+        assert_eq!(g_default.edges, g_empty.edges);
+        assert_eq!(g_default.validation, g_empty.validation);
+        assert!(g_default.edges.iter().any(|e| e.cable == "_REG:B1.1"));
+        assert!(g_default.edges.iter().any(|e| e.cable == "_REG:B2.1"));
+    }
 }
