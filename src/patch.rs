@@ -2116,6 +2116,228 @@ fn build_modifier_index(
     index
 }
 
+/// Kind of a discovered select signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SelectSignalKind {
+    Register,
+    Cable,
+}
+
+/// One inferred candidate value for a select signal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectCandidate {
+    pub value: f64,
+    pub count: usize,
+}
+
+/// One discovered signal referenced by `select` entries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectSignal {
+    pub signal: String,
+    pub kind: SelectSignalKind,
+    pub usage: usize,
+    pub candidates: Vec<SelectCandidate>,
+}
+
+/// Ranked result of the select-signal discovery pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SelectDiscovery {
+    pub signals: Vec<SelectSignal>,
+}
+
+/// Alias matching the task description's suggested name.
+pub type SelectSignalDiscovery = SelectDiscovery;
+
+fn parse_candidate_value(raw: &str) -> Option<f64> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(num) = t.strip_suffix('V') {
+        let n: f64 = num.trim().parse().ok()?;
+        Some(n / 10.0)
+    } else {
+        t.parse::<f64>().ok()
+    }
+}
+
+fn format_candidate(v: f64) -> String {
+    // Canonical textual form for lexicographic tie-break.
+    if v == 0.0 {
+        return String::from("0");
+    }
+    // `to_string` is minimal and deterministic for the small values used here.
+    let mut s = format!("{v}");
+    // Trim unnecessary ".0" already handled above; keep as-is.
+    if s.contains('.') {
+        // Remove trailing zeros after decimal for stable lexical order.
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    s
+}
+
+/// Discovery pass scanning every section's `select` entries.
+///
+/// For each distinct signal referenced (registers via `scan_register_refs`,
+/// cables via `scan_internal_tokens`) the result holds usage and ranked
+/// candidates: literal `selectat` when select is that signal alone, literal
+/// `valueN` from button-group circuits driving the signal via `output`, and
+/// the default `0`/`1` pair. Signals and candidates are sorted by descending
+/// usage then lexicographic name.
+pub fn discover_select_signals(patch: &Patch) -> SelectDiscovery {
+    let mut usage: HashMap<String, usize> = HashMap::new();
+    let mut kind_map: HashMap<String, SelectSignalKind> = HashMap::new();
+
+    for section in &patch.sections {
+        for (k, v) in &section.entries {
+            if k != "select" {
+                continue;
+            }
+            let sel = v.trim();
+            if sel.is_empty() {
+                continue;
+            }
+            let mut entry_signals: HashSet<String> = HashSet::new();
+            for (tok, _, _) in scan_register_refs(sel) {
+                entry_signals.insert(tok);
+            }
+            for tok in scan_internal_tokens(sel) {
+                entry_signals.insert(tok);
+            }
+            for sig in entry_signals {
+                let kind = if sig.starts_with('_') {
+                    SelectSignalKind::Cable
+                } else {
+                    SelectSignalKind::Register
+                };
+                *usage.entry(sig.clone()).or_insert(0) += 1;
+                kind_map.entry(sig).or_insert(kind);
+            }
+        }
+    }
+
+    if usage.is_empty() {
+        return SelectDiscovery {
+            signals: Vec::new(),
+        };
+    }
+
+    let mut candidate_counts: HashMap<String, HashMap<u64, (f64, usize)>> = HashMap::new();
+    for sig in usage.keys() {
+        candidate_counts.insert(sig.clone(), HashMap::new());
+    }
+
+    for section in &patch.sections {
+        let selectat_val = section
+            .entries
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == "selectat")
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|s| !s.is_empty());
+        for (k, v) in &section.entries {
+            if k != "select" {
+                continue;
+            }
+            let sel = v.trim();
+            if let Some(map) = candidate_counts.get_mut(sel) {
+                if let Some(sa) = &selectat_val {
+                    if let Some(val) = parse_candidate_value(sa) {
+                        let canon = if val == 0.0 { 0.0 } else { val };
+                        let bits = canon.to_bits();
+                        let entry = map.entry(bits).or_insert((canon, 0));
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    for (signal, map) in candidate_counts.iter_mut() {
+        for section in &patch.sections {
+            let lname = section.name.to_lowercase();
+            if lname != "buttongroup" && lname != "button" {
+                continue;
+            }
+            let mut drives = false;
+            for (k, v) in &section.entries {
+                let kl = k.to_lowercase();
+                let kind = load_schema().get_param_kind(&section.name, &kl);
+                let is_output = kind == Some("output") || (kind.is_none() && kl == "output");
+                if is_output && v.trim() == signal.as_str() {
+                    drives = true;
+                    break;
+                }
+            }
+            if !drives {
+                continue;
+            }
+            for (k, v) in &section.entries {
+                let kl = k.to_lowercase();
+                if !kl.starts_with("value") {
+                    continue;
+                }
+                let suffix = &kl[5..];
+                if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                if let Some(val) = parse_candidate_value(v) {
+                    let canon = if val == 0.0 { 0.0 } else { val };
+                    let bits = canon.to_bits();
+                    let entry = map.entry(bits).or_insert((canon, 0));
+                    entry.1 += 1;
+                }
+            }
+        }
+    }
+
+    for map in candidate_counts.values_mut() {
+        for def in [0.0f64, 1.0f64] {
+            let bits = def.to_bits();
+            map.entry(bits).or_insert((def, 0));
+        }
+    }
+
+    let mut names: Vec<String> = usage.keys().cloned().collect();
+    names.sort_by(|a, b| {
+        let ua = usage.get(a).copied().unwrap_or(0);
+        let ub = usage.get(b).copied().unwrap_or(0);
+        ub.cmp(&ua).then_with(|| a.cmp(b))
+    });
+
+    let mut signals: Vec<SelectSignal> = Vec::new();
+    for name in names {
+        let us = usage.get(&name).copied().unwrap_or(0);
+        let kind = kind_map
+            .get(&name)
+            .cloned()
+            .unwrap_or(SelectSignalKind::Register);
+        let cand_map = candidate_counts.remove(&name).unwrap_or_default();
+        let mut cands: Vec<SelectCandidate> = cand_map
+            .into_values()
+            .map(|(v, c)| SelectCandidate { value: v, count: c })
+            .collect();
+        cands.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| format_candidate(a.value).cmp(&format_candidate(b.value)))
+        });
+        signals.push(SelectSignal {
+            signal: name,
+            kind,
+            usage: us,
+            candidates: cands,
+        });
+    }
+
+    SelectDiscovery { signals }
+}
+
 pub fn token_kind(id: &str) -> Option<ComponentKind> {
     match id.chars().next()? {
         'B' => Some(ComponentKind::Button),
