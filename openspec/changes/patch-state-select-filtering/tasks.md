@@ -1,0 +1,20 @@
+## 1. Expression evaluator
+
+- [x] 1.1 Add `src/expression.rs` with `evaluate_droid_expr(expr: &str, values: &HashMap<String, f64>) -> Option<f64>`: anchored left-to-right tokenizer (numeric literals with optional `V` suffix dividing by 10, `_CABLE` tokens, register tokens via `scan_register_refs`, `+ - * /` operators), unary leading minus as `0 - operand`, zero-divisor yielding 0, any unrecognized token or malformed trailing operator yielding `None`. Verify: unit tests cover literals, `1V` = 0.1, `_T1_ARP * 100 + _SELECTED_TRACK`, leading minus, division by zero, and unknown-token abort. Wire the module into lib.rs. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/expression.rs, src/lib.rs] -->
+
+## 2. Select-signal discovery
+
+- [x] 2.1 Add a discovery pass that scans every section's `select` entries, collects their referenced signals (registers via `scan_register_refs`, cables via `scan_internal_tokens`), and infers candidates: the literal `selectat` value when the select value is that signal alone, the literal values of `valueN` outputs of button-group circuits driving the signal, plus the default `0`/`1` pair. Rank by descending usage, then name. Verify: unit tests assert candidate sets and ranking for a fixture with shared selects and a button-group valueN output. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/expression.rs, src/patch.rs] -->
+
+## 3. Per-circuit selection and graph gating
+
+- [ ] 3.1 Add `GraphOptions { state: HashMap<String, f64>, hide_unselected: bool }` (default: no state, false) to `build_from_patch`. Classify each section as Selected (no `select` entry, or expression equals the assumed value of its root signal), NotSelected (evaluates to another value), or Unknown (unevaluable). NotSelected circuits skip their controller register edges from change B but keep jack and cable edges; with `hide_unselected` they leave the node set. Verify: model tests assert the Selected/NotSelected/Unknown matrix, that a NotSelected circuit keeps its cable and jack edges, and that the default build is byte-identical to today. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1], touches: [src/graph.rs] -->
+
+## 4. Select-state menu and rendering
+
+- [ ] 4.1 Add `App.select_state: Option<SelectState>` (discovered signals, assumed values map) reset on `load_patch`; `g s` opens the menu (centered list: token, kind, candidates, usage, current value), `j`/`k` navigate, `[`/`]` cycle the focused signal's candidates with live graph rebuild, Esc clears and restores the unassumed graph; status shows `Select state: N selected / M unselected / K unknown`. NotSelected nodes render with `graph_node_dim` and their controller edges are absent; the menu reuses the validation-modal border tokens. Verify: unit tests for the state transitions and a menu-rendering snapshot. <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs, src/ui.rs] -->
+
+## 5. Regression and full gate
+
+- [ ] 5.1 Add a graph-level regression fixture: two circuits selecting on `S7.1` with different `selectat` values, one button circuit without select, and an output jack; assert that assuming each `S7.1` value drops the losing circuit's controller edges while keeping cables/jacks, and that no assumed state changes the unassumed snapshot. Verify: `cargo test` passes. <!-- agent: horst-engineer.build, depends_on: [4.1], touches: [src/graph.rs, fixtures/] -->
+- [ ] 5.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [5.1], touches: [] -->
