@@ -1934,7 +1934,7 @@ fn build_occurrence_index(token_spans: &[(String, Span)]) -> HashMap<String, Vec
     map
 }
 
-fn scan_internal_tokens(value: &str) -> Vec<String> {
+pub(crate) fn scan_internal_tokens(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;

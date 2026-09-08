@@ -18,7 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
 
 use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
-use crate::graph::{Cluster, Graph, NodeId, TopologySeverity};
+use crate::graph::{Cluster, Graph, GraphOptions, NodeId, TopologySeverity};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
     local_resettle, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS, LOCAL_RADIUS,
@@ -5152,7 +5152,7 @@ fn outlier_invariant_matrix_at_scorer_level() {
     // back to the threshold rule — at the `BindingFeatures` +
     // `WiringOutlierScorer` boundary plus the guarded build path.
     use crate::geometry::{BindingFeatures, WiringOutlierScorer};
-    use crate::graph::Graph;
+    use crate::graph::{Graph, GraphOptions};
     use crate::patch::Patch;
     let scorer = WiringOutlierScorer::embedded();
     let content = "[p2b8]\n\
@@ -5165,7 +5165,12 @@ fn outlier_invariant_matrix_at_scorer_level() {
     assert!(far.cable_hops > 0, "via-cable binding has hops");
     // Via-cable invariant is a call-site guard (design D5): the learned table
     // would flag E->M (rule `* 5 8 flag`), but the guarded build must not.
-    let graph = Graph::build_from_patch(&patch, &[], &crate::latency::CostModel::default());
+    let graph = Graph::build_from_patch(
+        &patch,
+        &[],
+        &crate::latency::CostModel::default(),
+        &GraphOptions::default(),
+    );
     assert!(
         !graph
             .validation
@@ -6089,7 +6094,12 @@ fn solver_fixture(name: &str) -> (Patch, Graph) {
             section_range: g.section_range.clone(),
         })
         .collect();
-    let graph = Graph::build_from_patch(&patch, &clusters, &crate::latency::CostModel::default());
+    let graph = Graph::build_from_patch(
+        &patch,
+        &clusters,
+        &crate::latency::CostModel::default(),
+        &GraphOptions::default(),
+    );
     (patch, graph)
 }
 

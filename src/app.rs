@@ -270,7 +270,7 @@ use ratatui::layout::Rect;
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::favorites::FavoritesStore;
-use crate::graph::{Cluster, Graph, NodeId};
+use crate::graph::{Cluster, Graph, GraphOptions, NodeId};
 use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
 use crate::layout;
@@ -2168,7 +2168,12 @@ impl App {
         let graph = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
-                Some(Graph::build_from_patch(patch, &clusters, &self.cost_model))
+                Some(Graph::build_from_patch(
+                    patch,
+                    &clusters,
+                    &self.cost_model,
+                    &GraphOptions::default(),
+                ))
             }
             None => Some(Graph::default()),
         };
@@ -2249,7 +2254,12 @@ impl App {
         let graph = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
-                Some(Graph::build_from_patch(patch, &clusters, &self.cost_model))
+                Some(Graph::build_from_patch(
+                    patch,
+                    &clusters,
+                    &self.cost_model,
+                    &GraphOptions::default(),
+                ))
             }
             None => Some(Graph::default()),
         };
@@ -2365,7 +2375,12 @@ impl App {
         let needs_graph = self.graph.is_some() || self.tile_stack.is_open(ViewType::Graph);
         if needs_graph && self.graph.is_none() {
             let clusters = clusters_from_patch(&patch);
-            let graph = Graph::build_from_patch(&patch, &clusters, &self.cost_model);
+            let graph = Graph::build_from_patch(
+                &patch,
+                &clusters,
+                &self.cost_model,
+                &GraphOptions::default(),
+            );
             self.seed_tip_pin(&graph);
             let pins = self.pinned_indices(&graph);
             let positions = layout::solve(&graph, &pins, self.tension);

@@ -8,7 +8,7 @@
 
 ## 3. Per-circuit selection and graph gating
 
-- [ ] 3.1 Add `GraphOptions { state: HashMap<String, f64>, hide_unselected: bool }` (default: no state, false) to `build_from_patch`. Classify each section as Selected (no `select` entry, or expression equals the assumed value of its root signal), NotSelected (evaluates to another value), or Unknown (unevaluable). NotSelected circuits skip their controller register edges from change B but keep jack and cable edges; with `hide_unselected` they leave the node set. Verify: model tests assert the Selected/NotSelected/Unknown matrix, that a NotSelected circuit keeps its cable and jack edges, and that the default build is byte-identical to today. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1], touches: [src/graph.rs] -->
+- [x] 3.1 Add `GraphOptions { state: HashMap<String, f64>, hide_unselected: bool }` (default: no state, false) to `build_from_patch`. Classify each section as Selected (no `select` entry, or expression equals the assumed value of its root signal), NotSelected (evaluates to another value), or Unknown (unevaluable). NotSelected circuits skip their controller register edges from change B but keep jack and cable edges; with `hide_unselected` they leave the node set. Verify: model tests assert the Selected/NotSelected/Unknown matrix, that a NotSelected circuit keeps its cable and jack edges, and that the default build is byte-identical to today. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [2.1], touches: [src/graph.rs] -->
 
 ## 4. Select-state menu and rendering
 

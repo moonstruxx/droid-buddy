@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::graph::{Graph, NodeId};
+use crate::graph::{Graph, GraphOptions, NodeId};
 
 /// Freeze when total kinetic energy (sum of |velocity|², unit mass) is below.
 const ENERGY_THRESHOLD: f32 = 0.5;
@@ -555,7 +555,12 @@ mod tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        Graph::build_from_patch(&patch, &clusters, &CostModel::default())
+        Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        )
     }
 
     fn assert_finite_and_bounded(positions: &[(f32, f32)]) {

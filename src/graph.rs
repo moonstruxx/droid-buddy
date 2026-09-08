@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use crate::geometry::{BindingFeatures, RackGeometry, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
-use crate::patch::{scan_register_refs, InfluenceSubtree, Patch};
+use crate::patch::{scan_internal_tokens, scan_register_refs, InfluenceSubtree, Patch};
 use crate::schema::load_schema;
 
 // Euclidean-distance wiring-outlier detection is delegated to the learned
@@ -116,6 +116,90 @@ pub struct Graph {
     pub highlighted_edges: HashSet<String>,
 }
 
+/// Options for `Graph::build_from_patch` controlling select-state filtering.
+#[derive(Debug, Clone, Default)]
+pub struct GraphOptions {
+    pub state: HashMap<String, f64>,
+    pub hide_unselected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectClass {
+    Selected,
+    NotSelected,
+    Unknown,
+}
+
+fn classify_sections(patch: &Patch, options: &GraphOptions) -> Vec<SelectClass> {
+    patch
+        .sections
+        .iter()
+        .map(|section| {
+            let select_value = section
+                .entries
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == "select")
+                .map(|(_, v)| v.as_str());
+            let Some(raw) = select_value else {
+                return SelectClass::Selected;
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return SelectClass::Unknown;
+            }
+            let root: Option<String> = {
+                let regs = scan_register_refs(trimmed);
+                if regs.len() == 1 && regs[0].0 == trimmed {
+                    Some(regs[0].0.clone())
+                } else if trimmed.starts_with('_') {
+                    let cables = scan_internal_tokens(trimmed);
+                    if cables.len() == 1 && cables[0] == trimmed {
+                        Some(cables[0].clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            let Some(root) = root else {
+                return SelectClass::Unknown;
+            };
+            // If the section has a `selectat` value, the circuit is selected
+            // when that literal equals the assumed value for the root signal.
+            // This matches DROID's `select` / `selectat` wiring where a shared
+            // switch chooses one of several circuits by value.
+            if let Some(selectat_raw) = section
+                .entries
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == "selectat")
+                .map(|(_, v)| v.trim())
+            {
+                if let Some(v) =
+                    crate::expression::evaluate_droid_expr(selectat_raw, &HashMap::new())
+                        .or_else(|| selectat_raw.parse::<f64>().ok())
+                {
+                    match options.state.get(&root) {
+                        Some(assumed) if (v - assumed).abs() < 1e-9 => {
+                            return SelectClass::Selected
+                        }
+                        Some(_) => return SelectClass::NotSelected,
+                        None => return SelectClass::Unknown,
+                    }
+                }
+            }
+            let Some(eval) = crate::expression::evaluate_droid_expr(trimmed, &options.state) else {
+                return SelectClass::Unknown;
+            };
+            match options.state.get(&root) {
+                Some(assumed) if (eval - assumed).abs() < 1e-9 => SelectClass::Selected,
+                Some(_) => SelectClass::NotSelected,
+                None => SelectClass::Unknown,
+            }
+        })
+        .collect()
+}
+
 impl Graph {
     /// Build a signal-flow graph from a parsed `Patch`.
     ///
@@ -133,8 +217,29 @@ impl Graph {
     /// to the first instance. Instance-accurate attribution is left to the
     /// topology-validation pass (task 2.2), which operates on the cable index
     /// entries by name, keeping that convention consistent.
-    pub fn build_from_patch(patch: &Patch, clusters: &[Cluster], cost: &CostModel) -> Graph {
+    pub fn build_from_patch(
+        patch: &Patch,
+        clusters: &[Cluster],
+        cost: &CostModel,
+        options: &GraphOptions,
+    ) -> Graph {
+        let classes = classify_sections(patch, options);
+        let not_selected: HashSet<usize> = classes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                if *c == SelectClass::NotSelected {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
         let mut nodes = build_nodes(patch);
+        let node_to_section: HashMap<NodeId, usize> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.section_index))
+            .collect();
         let node_by_name = name_to_first_node(&nodes);
         let cable_edges = build_edges(patch, &node_by_name);
 
@@ -145,11 +250,49 @@ impl Graph {
 
         // Register edges: controller/jack nodes + register connections.
         let (reg_nodes, reg_edges) = build_register_nodes_and_edges(patch);
+        let filtered_reg_edges: Vec<GraphEdge> = reg_edges
+            .into_iter()
+            .filter(|e| {
+                let circuit_id_opt = if matches!(e.source, NodeId::Circuit(_, _)) {
+                    Some(&e.source)
+                } else if matches!(e.sink, NodeId::Circuit(_, _)) {
+                    Some(&e.sink)
+                } else {
+                    None
+                };
+                let Some(circuit_id) = circuit_id_opt else {
+                    return true;
+                };
+                let Some(&sec_idx) = node_to_section.get(circuit_id) else {
+                    return true;
+                };
+                if !not_selected.contains(&sec_idx) {
+                    return true;
+                }
+                let other = if circuit_id == &e.source {
+                    &e.sink
+                } else {
+                    &e.source
+                };
+                match other {
+                    NodeId::Controller(_, _) => false,
+                    _ => true,
+                }
+            })
+            .collect();
         nodes.extend(reg_nodes);
+        if options.hide_unselected {
+            nodes.retain(|n| {
+                if n.kind != NodeKind::Circuit {
+                    return true;
+                }
+                !not_selected.contains(&n.section_index)
+            });
+        }
 
         // Merge cable + register edges, sorted deterministically.
         let mut edges = cable_edges;
-        edges.extend(reg_edges);
+        edges.extend(filtered_reg_edges);
         edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
 
         Graph {
@@ -610,7 +753,12 @@ mod tests {
 
     fn build(content: &str, clusters: &[Cluster]) -> Graph {
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        Graph::build_from_patch(&patch, clusters, &CostModel::default())
+        Graph::build_from_patch(
+            &patch,
+            clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        )
     }
 
     /// Minimal schema fixture for catalog-driven edge direction: circuit `pulser`
@@ -995,7 +1143,8 @@ mod tests {
         let content =
             "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
         let sub = patch.influence_subtree(&[String::from("_A")]);
         let hl = graph.with_highlights(&sub);
         assert_eq!(hl.highlighted_nodes, sub.influenced_nodes);
@@ -1012,7 +1161,8 @@ mod tests {
     fn with_highlights_empty_subtree_clears_highlights() {
         let content = "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
         let empty = crate::patch::InfluenceSubtree::default();
         let hl = graph.with_highlights(&empty);
         assert!(hl.highlighted_nodes.is_empty());
@@ -1035,7 +1185,12 @@ mod tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        let graph = Graph::build_from_patch(&patch, &clusters, &CostModel::default());
+        let graph = Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
         let vars = patch.hw_token_to_vars("B1.1");
         // B1.1 drives _TRIG and _EXTRA → at least those two cables in union
         assert!(vars.contains(&String::from("_TRIG")));
@@ -1117,7 +1272,8 @@ mod tests {
         let content =
             "[p2b8]\n[clocktool]\n    output = _A\n[copy]\n    input = _A\n    output = _B\n[sink]\n    input = _B\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
         assert!(graph.latency.is_some());
         let sub = patch.influence_subtree(&[String::from("_A")]);
         // with_highlights keeps the full graph's topology, so latency survives.
@@ -1130,7 +1286,8 @@ mod tests {
         crate::schema::set_test_schema(Some(schema));
         let patch = Patch::from_ini_file(std::path::Path::new("fixtures/graph_register_edges.ini"))
             .unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
         crate::schema::reset_test_schema();
 
         // --- Nodes: 9 circuit nodes + 1 controller node + 3 jack nodes ---
@@ -1272,7 +1429,12 @@ mod fixture_tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        Graph::build_from_patch(&patch, &clusters, &CostModel::default())
+        Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        )
     }
 
     /// Cluster → `(title, section_range)` snapshot for a graph.
@@ -1484,7 +1646,12 @@ mod fixture_tests {
                 section_range: g.section_range.clone(),
             })
             .collect();
-        let graph = Graph::build_from_patch(&patch, &clusters, &CostModel::default());
+        let graph = Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
 
         assert_eq!(
             cluster_spans(&graph),
@@ -1567,7 +1734,8 @@ mod fixture_tests {
             content.push_str(&format!("[copy]\n    input = _A\n    output = _OUT{i}\n"));
         }
         let patch = Patch::from_ini_str(&content, String::from("extreme")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
         let z = patch
             .token_influence_z_score("B1.1")
             .expect("B-kind has stats");
@@ -1596,7 +1764,8 @@ mod fixture_tests {
              [button]\n    button = B1.1\n    output = _A\n\
              [copy]\n    input = _A\n    output = _OUT\n";
         let patch = Patch::from_ini_str(content, String::from("typical")).unwrap();
-        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default());
+        let graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
         let z = patch
             .token_influence_z_score("B1.1")
             .expect("B-kind has stats");
@@ -1608,5 +1777,198 @@ mod fixture_tests {
                 .any(|i| i.message.contains("influence outlier")),
             "typical patch must not produce an influence warning"
         );
+    }
+
+    #[test]
+    fn select_state_classification_matrix() {
+        let content = "\
+[p2b8]\n\
+[foo]\n    button = B1.1\n\
+[bar]\n    select = S1.1\n    selectat = 0\n    button = B1.1\n\
+[baz]\n    select = _CABLE\n    button = B1.1\n\
+[qux]\n    select = _A + 1\n    button = B1.1\n\
+[quux]\n    select = S9.9\n    button = B1.1\n";
+        let patch = Patch::from_ini_str(content, String::from("matrix")).unwrap();
+        // foo has no select => Selected regardless of state
+        let opts_empty = GraphOptions::default();
+        let g0 = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_empty);
+        assert_eq!(g0.nodes.iter().filter(|n| n.circuit == "foo").count(), 1);
+        // bar select S1.1 with no state => Unknown (keeps edges, not filtered)
+        let unknown_graph =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_empty);
+        // bar should keep controller edge when Unknown
+        let bar_ctrl = unknown_graph
+            .edges
+            .iter()
+            .any(|e| e.cable == "_REG:B1.1" && e.sink == NodeId::circuit("bar", 0));
+        assert!(bar_ctrl, "Unknown keeps controller edge");
+        // bar with matching state => Selected keeps controller edge
+        let mut state_match = HashMap::new();
+        state_match.insert(String::from("S1.1"), 0.0);
+        let opts_match = GraphOptions {
+            state: state_match.clone(),
+            hide_unselected: false,
+        };
+        let g_match = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_match);
+        let bar_match = g_match
+            .edges
+            .iter()
+            .any(|e| e.cable == "_REG:B1.1" && e.sink == NodeId::circuit("bar", 0));
+        assert!(bar_match, "Selected keeps controller edge");
+        // bar with mismatched state => NotSelected drops controller edge
+        // bar has select=S1.1 selectat=0, so state S1.1=1 mismatches selectat 0 => NotSelected
+        let mut state_mismatch = HashMap::new();
+        state_mismatch.insert(String::from("S1.1"), 1.0);
+        let opts_mismatch = GraphOptions {
+            state: state_mismatch,
+            hide_unselected: false,
+        };
+        let g_mismatch =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_mismatch);
+        let bar_mismatch = g_mismatch
+            .edges
+            .iter()
+            .any(|e| e.cable == "_REG:B1.1" && e.sink == NodeId::circuit("bar", 0));
+        assert!(
+            !bar_mismatch,
+            "NotSelected drops controller edge (selectat 0 vs S1.1=1)"
+        );
+        // baz select _CABLE with matching state
+        let mut cable_state = HashMap::new();
+        cable_state.insert(String::from("_CABLE"), 2.5);
+        let opts_cable = GraphOptions {
+            state: cable_state,
+            hide_unselected: false,
+        };
+        let g_cable = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_cable);
+        let baz_keep = g_cable
+            .edges
+            .iter()
+            .any(|e| e.cable == "_REG:B1.1" && e.sink == NodeId::circuit("baz", 0));
+        assert!(baz_keep, "Selected _CABLE keeps controller");
+        // qux select is non-single-token => Unknown, never NotSelected even with state
+        let mut state_q = HashMap::new();
+        state_q.insert(String::from("_A"), 0.0);
+        let opts_q = GraphOptions {
+            state: state_q,
+            hide_unselected: false,
+        };
+        let g_q = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_q);
+        let qux_edge = g_q
+            .edges
+            .iter()
+            .any(|e| e.cable == "_REG:B1.1" && e.sink == NodeId::circuit("qux", 0));
+        assert!(qux_edge, "complex expression is Unknown, keeps edge");
+        // quux select S9.9 not in state => Unknown keeps edge
+        let g_quux = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_q);
+        let quux_edge = g_quux
+            .edges
+            .iter()
+            .any(|e| e.cable == "_REG:B1.1" && e.sink == NodeId::circuit("quux", 0));
+        assert!(quux_edge, "root not in state => Unknown keeps edge");
+    }
+
+    #[test]
+    fn not_selected_keeps_cable_and_jack_edges() {
+        let content = "\
+[p2b8]\n\
+[foo]\n    select = S1.1\n    selectat = 0\n    button = B1.1\n    input = _FOO\n    cv_in = I1\n    cv_out = O1\n\
+[bar]\n    output = _FOO\n";
+        let patch = Patch::from_ini_str(content, String::from("keep")).unwrap();
+        let mut state = HashMap::new();
+        state.insert(String::from("S1.1"), 1.0);
+        let opts = GraphOptions {
+            state,
+            hide_unselected: false,
+        };
+        let graph = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts);
+        // cable edge bar -> foo must remain
+        assert!(
+            graph.edges.iter().any(|e| e.cable == "_FOO"),
+            "NotSelected keeps cable edge"
+        );
+        // InputJack I1 -> foo must remain
+        assert!(
+            graph.edges.iter().any(|e| e.cable == "_REG:I1"),
+            "NotSelected keeps InputJack edge"
+        );
+        // foo -> OutputJack O1 must remain
+        assert!(
+            graph.edges.iter().any(|e| e.cable == "_REG:O1"),
+            "NotSelected keeps OutputJack edge"
+        );
+        // Controller edge B1.1 must be dropped
+        let has_ctrl = graph.edges.iter().any(|e| {
+            e.cable == "_REG:B1.1"
+                && (e.source == NodeId::circuit("foo", 0) || e.sink == NodeId::circuit("foo", 0))
+        });
+        assert!(!has_ctrl, "NotSelected drops controller edge");
+        // hide_unselected true drops the circuit node but keeps jacks/cable edge
+        let mut state2 = HashMap::new();
+        state2.insert(String::from("S1.1"), 1.0);
+        let opts_hide = GraphOptions {
+            state: state2,
+            hide_unselected: true,
+        };
+        let graph_hide = Graph::build_from_patch(&patch, &[], &CostModel::default(), &opts_hide);
+        assert!(
+            !graph_hide
+                .nodes
+                .iter()
+                .any(|n| n.id == NodeId::circuit("foo", 0)),
+            "hide_unselected drops NotSelected circuit node"
+        );
+        assert!(
+            graph_hide
+                .nodes
+                .iter()
+                .any(|n| n.id == NodeId::circuit("bar", 0)),
+            "Selected nodes remain"
+        );
+        assert!(
+            graph_hide
+                .nodes
+                .iter()
+                .any(|n| n.id == NodeId::Jack(String::from("I1"))),
+            "jack nodes survive hide"
+        );
+        assert!(
+            graph_hide.edges.iter().any(|e| e.cable == "_FOO"),
+            "cable edge survives hide"
+        );
+    }
+
+    #[test]
+    fn default_graph_is_byte_identical_to_unassumed() {
+        let content = "\
+[p2b8]\n\
+[foo]\n    button = B1.1\n    output = _A\n\
+[bar]\n    input = _A\n    cv_in = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("identical")).unwrap();
+        let g_default =
+            Graph::build_from_patch(&patch, &[], &CostModel::default(), &GraphOptions::default());
+        let g_empty_state = Graph::build_from_patch(
+            &patch,
+            &[],
+            &CostModel::default(),
+            &GraphOptions {
+                state: HashMap::new(),
+                hide_unselected: false,
+            },
+        );
+        assert_eq!(g_default.nodes, g_empty_state.nodes);
+        assert_eq!(g_default.edges, g_empty_state.edges);
+        assert_eq!(g_default.validation, g_empty_state.validation);
+        // also check that hide false with empty state equals old no-options build
+        let g_hide_false = Graph::build_from_patch(
+            &patch,
+            &[],
+            &CostModel::default(),
+            &GraphOptions {
+                state: HashMap::new(),
+                hide_unselected: false,
+            },
+        );
+        assert_eq!(g_default.edges.len(), g_hide_false.edges.len());
     }
 }
