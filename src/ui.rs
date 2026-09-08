@@ -79,6 +79,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_help_modal(frame, app, frame.area());
     } else if app.showing_validation {
         render_validation_modal(frame, app, frame.area());
+    } else if app.select_state.is_some() {
+        render_select_menu(frame, app, frame.area());
     }
 }
 
@@ -229,6 +231,116 @@ fn render_validation_modal(frame: &mut Frame, app: &App, area: Rect) {
         // Keep line bg but ensure sev span still has its fg; ratatui composes.
         lines.push(line);
         let _ = is_selected; // suppress unused warning if lint
+    }
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, modal_area);
+}
+
+/// Select-state menu overlay (change C 4.1): centered list of discovered
+/// select signals (token, kind, candidates, usage, current value) with cursor
+/// navigation; `[/]` cycle candidates, `Esc` clears. Mirrors the validation
+/// modal's geometry and reuses its border token.
+fn render_select_menu(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let is_narrow = area.width < QUAD_WIDTH_THRESHOLD;
+    let modal_width = if is_narrow {
+        area.width.saturating_sub(4).max(24)
+    } else {
+        (area.width * 60 / 100).clamp(40, 80).max(24)
+    };
+    let modal_height = if is_narrow {
+        area.height.saturating_sub(4).max(10)
+    } else {
+        (area.height * 70 / 100).clamp(12, 40).max(10)
+    };
+    let x = area.x + area.width.saturating_sub(modal_width) / 2;
+    let y = area.y + area.height.saturating_sub(modal_height) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+    frame.render_widget(Clear, modal_area);
+
+    let count = app
+        .select_state
+        .as_ref()
+        .map(|s| s.signals.len())
+        .unwrap_or(0);
+    let title = format!(" Select state ({count}) ");
+    let header_hint = " j/k:navigate [/]:cycle Esc:clear ";
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .title_bottom(Line::from(Span::styled(
+            header_hint,
+            Style::default().fg(theme::active().muted),
+        )))
+        .border_style(Style::default().fg(theme::active().validation_modal_border));
+
+    let inner = block.inner(modal_area);
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, modal_area);
+        return;
+    }
+
+    let Some(state) = app.select_state.as_ref() else {
+        frame.render_widget(block, modal_area);
+        return;
+    };
+    let count = state.signals.len();
+    if count == 0 {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No select signals",
+            Style::default().fg(theme::active().muted),
+        )))
+        .alignment(Alignment::Center)
+        .block(block);
+        frame.render_widget(empty, modal_area);
+        return;
+    }
+
+    let max_rows = inner.height as usize;
+    let cursor = state.cursor.min(count.saturating_sub(1));
+    let start = if count <= max_rows || cursor < max_rows / 2 {
+        0
+    } else if cursor + max_rows / 2 >= count {
+        count - max_rows
+    } else {
+        cursor - max_rows / 2
+    };
+    let end = (start + max_rows).min(count);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(end - start);
+    for idx in start..end {
+        let signal = &state.signals[idx];
+        let is_selected = idx == cursor;
+        let current = state.state.get(&signal.signal).copied();
+        let kind_label = match signal.kind {
+            crate::patch::SelectSignalKind::Register => "register",
+            crate::patch::SelectSignalKind::Cable => "cable",
+        };
+        let cands = signal
+            .candidates
+            .iter()
+            .map(|c| format!("{}", c.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cur = current
+            .map(|v| format!("{v}"))
+            .unwrap_or_else(|| String::from("-"));
+        let line = format!(
+            "{} [{}] x{}  candidates: {}  current: {}",
+            signal.signal, kind_label, signal.usage, cands, cur
+        );
+        let row_style = if is_selected {
+            Style::default()
+                .bg(theme::active().validation_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        lines.push(Line::from(Span::styled(line, row_style)));
     }
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
@@ -1536,6 +1648,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    if let Some(txt) = app.select_status_text() {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            txt,
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Display scale and orientation permanently in the status bar
     spans.push(Span::raw(" | "));
     spans.push(Span::styled(
@@ -1860,9 +1982,10 @@ fn graph_kitty_frame(
         node_topleft.push((px, py));
 
         let is_disabled = circuit_disabled(opts.disabled, &node.circuit, node.instance_index);
+        let is_not_selected = graph.not_selected.contains(&node.section_index);
         // Hover emphasis uses the highlight token (the box path's REVERSED
         // background has no pixel equivalent); disabled dim outranks hover.
-        let (border, title_color) = if is_disabled {
+        let (border, title_color) = if is_disabled || is_not_selected {
             (theme.graph_node_dim, theme.graph_node_dim)
         } else if opts.selected == Some(&node.id) {
             // Selected circuit (design D4): same highlight token as hover so
@@ -2701,13 +2824,14 @@ fn render_graph_node_with_highlight(
     let is_disabled = disabled
         .map(|set| circuit_disabled(set, &node.circuit, node.instance_index))
         .unwrap_or(false);
+    let is_not_selected = graph.not_selected.contains(&node.section_index);
     let has_active = highlight_nodes.map(|s| !s.is_empty()).unwrap_or(false);
     let is_highlighted = highlight_nodes
         .map(|s| s.contains(&node.id))
         .unwrap_or(false);
-    let (border_color, title_color, extra_mod) = if is_disabled {
-        // Disabled circuit: dim token + DIM override any influence highlight
-        // (dim > influence).
+    let (border_color, title_color, extra_mod) = if is_disabled || is_not_selected {
+        // Disabled circuit or a NotSelected select-state circuit: dim token +
+        // DIM override any influence highlight (dim > influence).
         (
             theme::active().graph_node_dim,
             theme::active().graph_node_dim,

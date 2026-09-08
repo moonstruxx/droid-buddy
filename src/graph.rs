@@ -114,6 +114,11 @@ pub struct Graph {
     #[allow(clippy::type_complexity)]
     pub highlighted_nodes: HashSet<NodeId>,
     pub highlighted_edges: HashSet<String>,
+    /// Section indices of circuits classified NotSelected by the select-state
+    /// filter (change C 4.1). The renderer dims these nodes; their controller
+    /// register edges are already absent from `edges`. Empty when no select
+    /// state is assumed.
+    pub not_selected: HashSet<usize>,
 }
 
 /// Options for `Graph::build_from_patch` controlling select-state filtering.
@@ -274,10 +279,7 @@ impl Graph {
                 } else {
                     &e.source
                 };
-                match other {
-                    NodeId::Controller(_, _) => false,
-                    _ => true,
-                }
+                !matches!(other, NodeId::Controller(_, _))
             })
             .collect();
         nodes.extend(reg_nodes);
@@ -303,6 +305,7 @@ impl Graph {
             latency,
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
+            not_selected,
         }
     }
 

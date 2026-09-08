@@ -349,6 +349,72 @@ pub struct OptimizerState {
     pub weight: f32,
 }
 
+/// Select-state assumed values for `select` signals (change C 4.1).
+#[derive(Debug, Clone)]
+pub struct SelectState {
+    pub signals: Vec<crate::patch::SelectSignal>,
+    pub state: HashMap<String, f64>,
+    pub cursor: usize,
+    pub hide_unselected: bool,
+}
+
+fn classify_for_status(section: &crate::patch::IniSection, opts: &GraphOptions) -> u8 {
+    let raw = section
+        .entries
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == "select")
+        .map(|(_, v)| v.as_str());
+    let Some(raw) = raw else {
+        return 0;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return 2;
+    }
+    let root: Option<String> = {
+        let regs = crate::patch::scan_register_refs(trimmed);
+        if regs.len() == 1 && regs[0].0 == trimmed {
+            Some(regs[0].0.clone())
+        } else if trimmed.starts_with('_') {
+            let cables = crate::patch::scan_internal_tokens(trimmed);
+            if cables.len() == 1 && cables[0] == trimmed {
+                Some(cables[0].clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    let Some(root) = root else {
+        return 2;
+    };
+    if let Some(selectat_raw) = section
+        .entries
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == "selectat")
+        .map(|(_, v)| v.trim())
+    {
+        if let Some(v) = crate::expression::evaluate_droid_expr(selectat_raw, &HashMap::new())
+            .or_else(|| selectat_raw.parse::<f64>().ok())
+        {
+            return match opts.state.get(&root) {
+                Some(a) if (v - a).abs() < 1e-9 => 0,
+                Some(_) => 1,
+                None => 2,
+            };
+        }
+    }
+    let Some(eval) = crate::expression::evaluate_droid_expr(trimmed, &opts.state) else {
+        return 2;
+    };
+    match opts.state.get(&root) {
+        Some(a) if (eval - a).abs() < 1e-9 => 0,
+        Some(_) => 1,
+        None => 2,
+    }
+}
+
 /// Grabbed-node state for a graph drag (design D1/D7). Holds the index of the
 /// dragged node in `graph.nodes` plus the grab offset (node position minus the
 /// Down point) so the node follows the pointer without jumping on the first
@@ -715,6 +781,9 @@ pub struct App {
     /// Renderer-published rect of the help modal, for click-outside hit-testing.
     /// Cleared per frame like `graph_node_rects`.
     pub help_modal_rect: Option<Rect>,
+    /// Select-state assumed values (change C 4.1). `None` when no assumed
+    /// state is active; reset on `load_patch`.
+    pub select_state: Option<SelectState>,
 }
 
 impl App {
@@ -794,6 +863,7 @@ impl App {
             optimizer: None,
             showing_help: false,
             help_modal_rect: None,
+            select_state: None,
         }
     }
 
@@ -1423,6 +1493,119 @@ impl App {
     /// `graph_node_rects` is rebuilt per draw.
     pub fn clear_help_modal_rect(&mut self) {
         self.help_modal_rect = None;
+    }
+
+    fn select_graph_options(&self) -> GraphOptions {
+        if let Some(s) = &self.select_state {
+            GraphOptions {
+                state: s.state.clone(),
+                hide_unselected: s.hide_unselected,
+            }
+        } else {
+            GraphOptions::default()
+        }
+    }
+
+    pub fn open_select_menu(&mut self) -> bool {
+        let patch = match &self.patch {
+            Some(p) => p.clone(),
+            None => {
+                self.status_message = String::from("No patch loaded. Press 'l' to load.");
+                return false;
+            }
+        };
+        let disc = crate::patch::discover_select_signals(&patch);
+        if disc.signals.is_empty() {
+            self.status_message = String::from("No select signals");
+            return false;
+        }
+        let mut state = HashMap::new();
+        for sig in &disc.signals {
+            if let Some(first) = sig.candidates.first() {
+                state.insert(sig.signal.clone(), first.value);
+            }
+        }
+        self.select_state = Some(SelectState {
+            signals: disc.signals,
+            state,
+            cursor: 0,
+            hide_unselected: false,
+        });
+        self.rebuild_graph();
+        if let Some(msg) = self.select_status_text() {
+            self.status_message = msg;
+        }
+        true
+    }
+
+    pub fn close_select_menu(&mut self) {
+        self.select_state = None;
+        self.rebuild_graph();
+        self.status_message = String::from("Select state cleared");
+    }
+
+    pub fn cycle_select_candidate(&mut self, delta: i32) {
+        let (sig_name, candidates) = {
+            let st = match &self.select_state {
+                Some(s) => s,
+                None => return,
+            };
+            if st.signals.is_empty() {
+                return;
+            }
+            let idx = st.cursor.min(st.signals.len() - 1);
+            let sig = &st.signals[idx];
+            (sig.signal.clone(), sig.candidates.clone())
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let cur_val = self
+            .select_state
+            .as_ref()
+            .and_then(|s| s.state.get(&sig_name).copied())
+            .unwrap_or(candidates[0].value);
+        let cur_idx = candidates
+            .iter()
+            .position(|c| (c.value - cur_val).abs() < 1e-9)
+            .unwrap_or(0) as i32;
+        let n = candidates.len() as i32;
+        let next = (cur_idx + delta).rem_euclid(n) as usize;
+        if let Some(st) = self.select_state.as_mut() {
+            st.state.insert(sig_name, candidates[next].value);
+        }
+        self.rebuild_graph();
+        if let Some(msg) = self.select_status_text() {
+            self.status_message = msg;
+        }
+    }
+
+    pub fn select_counts(&self) -> Option<(usize, usize, usize)> {
+        let st = self.select_state.as_ref()?;
+        let patch = self.patch.as_ref()?;
+        let opts = GraphOptions {
+            state: st.state.clone(),
+            hide_unselected: st.hide_unselected,
+        };
+        let mut sel = 0;
+        let mut unsel = 0;
+        let mut unk = 0;
+        for section in &patch.sections {
+            let c = classify_for_status(section, &opts);
+            match c {
+                0 => sel += 1,
+                1 => unsel += 1,
+                _ => unk += 1,
+            }
+        }
+        Some((sel, unsel, unk))
+    }
+
+    pub fn select_status_text(&self) -> Option<String> {
+        let (s, u, k) = self.select_counts()?;
+        Some(format!(
+            "Select state: {s} selected / {u} unselected / {k} unknown"
+        ))
     }
 
     /// Clear validation state (no issues, modal hidden, cursor 0).
@@ -2172,7 +2355,7 @@ impl App {
                     patch,
                     &clusters,
                     &self.cost_model,
-                    &GraphOptions::default(),
+                    &self.select_graph_options(),
                 ))
             }
             None => Some(Graph::default()),
@@ -2258,7 +2441,7 @@ impl App {
                     patch,
                     &clusters,
                     &self.cost_model,
-                    &GraphOptions::default(),
+                    &self.select_graph_options(),
                 ))
             }
             None => Some(Graph::default()),
@@ -2337,6 +2520,7 @@ impl App {
         // Manual pins are per-patch graph state: cleared on every load so a
         // new patch re-seeds its own tip on the next open (design D3/D7).
         self.pinned.clear();
+        self.select_state = None;
     }
 
     /// Recompute the influence subtree for the currently selected hardware token.
@@ -2379,7 +2563,7 @@ impl App {
                 &patch,
                 &clusters,
                 &self.cost_model,
-                &GraphOptions::default(),
+                &self.select_graph_options(),
             );
             self.seed_tip_pin(&graph);
             let pins = self.pinned_indices(&graph);
@@ -4352,5 +4536,104 @@ mod tests {
         let graph = app.graph.as_ref().unwrap();
         assert!(!graph.highlighted_nodes.is_empty());
         assert_eq!(graph.highlighted_nodes, influence.influenced_nodes);
+    }
+
+    // ---- change C 4.1: select-state menu state transitions ----
+
+    /// A patch whose first `button` circuit selects on S1.1 with selectat 0,
+    /// whose second selects on `_CABLE`, and whose third carries no select.
+    /// Real circuits so `load_patch` validation stays clean (unknown circuits
+    /// would gate the second load).
+    fn select_fixture() -> Patch {
+        let content = "\
+[p2b8]\n\
+[button]\n    select = S1.1\n    selectat = 0\n    button = B1.1\n\
+[button]\n    select = _CABLE\n    button = B1.2\n\
+[button]\n    button = B1.3\n";
+        Patch::from_ini_str(content, String::from("select_fixture")).unwrap()
+    }
+
+    #[test]
+    fn open_select_menu_populates_state_and_rebuilds() {
+        let mut app = App::new();
+        assert!(app.load_patch(select_fixture()));
+        assert!(app.select_state.is_none());
+        assert!(app.open_select_menu());
+        let st = app.select_state.as_ref().expect("menu opened");
+        assert_eq!(st.signals.len(), 2);
+        // First candidate of each signal is assumed (0.0 for the register
+        // selectat, the cable's default first candidate).
+        assert_eq!(st.state.get("S1.1"), Some(&0.0));
+        assert!(app.graph.is_some(), "menu open rebuilds the graph");
+    }
+
+    #[test]
+    fn open_select_menu_without_patch_reports_status() {
+        let mut app = App::new();
+        assert!(!app.open_select_menu());
+        assert!(app.select_state.is_none());
+        assert!(
+            app.status_message.contains("No patch"),
+            "{}: status must explain the failure",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn cycle_select_candidate_wraps_and_reclassifies() {
+        let mut app = App::new();
+        assert!(app.load_patch(select_fixture()));
+        assert!(app.open_select_menu());
+        assert_eq!(app.select_counts(), Some((4, 0, 0)));
+        // Cycle S1.1 away from its selectat 0: the first button becomes
+        // NotSelected.
+        app.cycle_select_candidate(1);
+        assert_eq!(
+            app.select_state.as_ref().unwrap().state.get("S1.1"),
+            Some(&1.0)
+        );
+        assert_eq!(app.select_counts(), Some((3, 1, 0)));
+        // Cycle back wraps to 0.
+        app.cycle_select_candidate(-1);
+        assert_eq!(
+            app.select_state.as_ref().unwrap().state.get("S1.1"),
+            Some(&0.0)
+        );
+        assert_eq!(app.select_counts(), Some((4, 0, 0)));
+    }
+
+    #[test]
+    fn close_select_menu_clears_state_and_restores_default_graph() {
+        let mut app = App::new();
+        assert!(app.load_patch(select_fixture()));
+        assert!(app.open_select_menu());
+        assert!(app.select_state.is_some());
+        app.close_select_menu();
+        assert!(app.select_state.is_none());
+        // Default build (no assumed state) classifies nothing NotSelected.
+        let graph = app.graph.as_ref().expect("graph rebuilt on close");
+        assert!(graph.not_selected.is_empty());
+    }
+
+    #[test]
+    fn load_patch_resets_select_state() {
+        let mut app = App::new();
+        assert!(app.load_patch(select_fixture()));
+        assert!(app.open_select_menu());
+        assert!(app.select_state.is_some());
+        assert!(app.load_patch(select_fixture()));
+        assert!(app.select_state.is_none(), "select state reset on load");
+    }
+
+    #[test]
+    fn select_status_text_reports_counts() {
+        let mut app = App::new();
+        assert!(app.load_patch(select_fixture()));
+        assert!(app.open_select_menu());
+        let text = app.select_status_text().unwrap();
+        assert_eq!(text, "Select state: 4 selected / 0 unselected / 0 unknown");
+        app.cycle_select_candidate(1);
+        let text = app.select_status_text().unwrap();
+        assert_eq!(text, "Select state: 3 selected / 1 unselected / 0 unknown");
     }
 }

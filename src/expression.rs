@@ -163,12 +163,10 @@ fn try_parse_register(s: &str, pos: usize) -> Option<(String, usize)> {
     while i < len && bytes[i].is_ascii_digit() {
         i += 1;
     }
-    if i < len && bytes[i] == b'.' {
-        if i + 1 < len && bytes[i + 1].is_ascii_digit() {
+    if i < len && bytes[i] == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit() {
+        i += 1;
+        while i < len && bytes[i].is_ascii_digit() {
             i += 1;
-            while i < len && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
         }
     }
     if i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.') {
@@ -191,6 +189,7 @@ mod tests {
         (a - b).abs() < 1e-9
     }
 
+    #[allow(clippy::approx_constant)] // the parser's decimal test value
     #[test]
     fn literal_evaluation() {
         assert!(approx(evaluate_droid_expr("42", &empty()).unwrap(), 42.0));

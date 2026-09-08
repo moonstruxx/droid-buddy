@@ -328,6 +328,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
+            crossterm::event::KeyCode::Char('s') => {
+                if app.open_select_menu() {
+                    app.prefix = None;
+                    return false;
+                }
+                app.prefix = None;
+                return false;
+            }
             crossterm::event::KeyCode::Esc => {
                 app.prefix = None;
                 return false;
@@ -351,6 +359,47 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.status_message = String::from("Diff hidden");
             app.prefix = None;
             return false;
+        }
+    }
+
+    // Select-state menu (change C 4.1): when active, j/k navigate cursor,
+    // [/] cycle candidates with live rebuild, Esc clears.
+    if app.select_state.is_some() {
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                app.close_select_menu();
+                return false;
+            }
+            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+                if let Some(st) = app.select_state.as_mut() {
+                    let n = st.signals.len();
+                    if n > 0 && st.cursor + 1 < n {
+                        st.cursor += 1;
+                    }
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+                if let Some(st) = app.select_state.as_mut() {
+                    if st.cursor > 0 {
+                        st.cursor -= 1;
+                    }
+                }
+                return false;
+            }
+            crossterm::event::KeyCode::Char('[') => {
+                app.cycle_select_candidate(-1);
+                return false;
+            }
+            crossterm::event::KeyCode::Char(']') => {
+                app.cycle_select_candidate(1);
+                return false;
+            }
+            crossterm::event::KeyCode::Enter => {
+                app.cycle_select_candidate(1);
+                return false;
+            }
+            _ => {}
         }
     }
 
@@ -2760,6 +2809,103 @@ mod tests {
         assert!(app.prefix.is_none());
         // Esc while a prefix is armed must not also clear the shift group.
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
+    }
+
+    // `g s` select-state menu (change C 4.1): opens the centered signal list,
+    // j/k navigate the cursor, [/] cycle the focused signal's candidate with a
+    // live graph rebuild, Esc clears the assumed state and restores the
+    // unassumed graph.
+
+    fn app_with_select_patch() -> App {
+        let content = "\
+[p2b8]\n\
+[button]\n    select = S1.1\n    selectat = 0\n    button = B1.1\n\
+[button]\n    select = _CABLE\n    button = B1.2\n\
+[button]\n    button = B1.3\n";
+        let patch = Patch::from_ini_str(content, String::from("select_fixture")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app
+    }
+
+    #[test]
+    fn g_then_s_opens_select_menu_and_clears_prefix() {
+        let mut app = app_with_select_patch();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        assert!(app.prefix.is_some());
+        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        assert!(app.prefix.is_none());
+        assert!(app.select_state.is_some(), "g s opens the select menu");
+    }
+
+    #[test]
+    fn select_menu_jk_navigate_cursor() {
+        let mut app = app_with_select_patch();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        assert_eq!(app.select_state.as_ref().unwrap().cursor, 0);
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(app.select_state.as_ref().unwrap().cursor, 1);
+        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        assert_eq!(
+            app.select_state.as_ref().unwrap().cursor,
+            1,
+            "cursor clamps at last"
+        );
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(app.select_state.as_ref().unwrap().cursor, 0);
+        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        assert_eq!(
+            app.select_state.as_ref().unwrap().cursor,
+            0,
+            "cursor clamps at first"
+        );
+    }
+
+    #[test]
+    fn select_menu_brackets_cycle_focused_candidate() {
+        let mut app = app_with_select_patch();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        // Focused signal is the first (register S1.1); default first candidate 0.
+        assert_eq!(
+            app.select_state.as_ref().unwrap().state.get("S1.1"),
+            Some(&0.0)
+        );
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        assert_eq!(
+            app.select_state.as_ref().unwrap().state.get("S1.1"),
+            Some(&1.0),
+            "] cycles to the next candidate"
+        );
+        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        assert_eq!(
+            app.select_state.as_ref().unwrap().state.get("S1.1"),
+            Some(&0.0),
+            "[ cycles back"
+        );
+    }
+
+    #[test]
+    fn select_menu_esc_clears_state_and_restores_default_graph() {
+        let mut app = app_with_select_patch();
+        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        assert!(app.select_state.is_some());
+        // A mismatch (S1.1=1 vs selectat 0) drops bar's controller edge.
+        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        let gated = app.graph.as_ref().unwrap();
+        assert!(
+            gated.not_selected.contains(&1),
+            "bar section index 1 is NotSelected under S1.1=1"
+        );
+        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        assert!(app.select_state.is_none());
+        let restored = app.graph.as_ref().unwrap();
+        assert!(
+            restored.not_selected.is_empty(),
+            "default build gates nothing"
+        );
     }
 
     // `g w` / `g g` GPU-graph-window keys (gpu-graph-window 3.2). The handler

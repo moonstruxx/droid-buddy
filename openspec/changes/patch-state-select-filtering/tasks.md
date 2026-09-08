@@ -12,7 +12,7 @@
 
 ## 4. Select-state menu and rendering
 
-- [ ] 4.1 Add `App.select_state: Option<SelectState>` (discovered signals, assumed values map) reset on `load_patch`; `g s` opens the menu (centered list: token, kind, candidates, usage, current value), `j`/`k` navigate, `[`/`]` cycle the focused signal's candidates with live graph rebuild, Esc clears and restores the unassumed graph; status shows `Select state: N selected / M unselected / K unknown`. NotSelected nodes render with `graph_node_dim` and their controller edges are absent; the menu reuses the validation-modal border tokens. Verify: unit tests for the state transitions and a menu-rendering snapshot. <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs, src/ui.rs] -->
+- [x] 4.1 Add `App.select_state: Option<SelectState>` (discovered signals, assumed values map) reset on `load_patch`; `g s` opens the menu (centered list: token, kind, candidates, usage, current value), `j`/`k` navigate, `[`/`]` cycle the focused signal's candidates with live graph rebuild, Esc clears and restores the unassumed graph; status shows `Select state: N selected / M unselected / K unknown`. NotSelected nodes render with `graph_node_dim` and their controller edges are absent; the menu reuses the validation-modal border tokens. Verify: unit tests for the state transitions and a menu-rendering snapshot. <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs, src/ui.rs] -->
 
 ## 5. Regression and full gate
 

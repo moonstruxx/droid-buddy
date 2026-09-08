@@ -2081,6 +2081,14 @@ fn app_from_fixture(name: &str) -> App {
     app
 }
 
+/// Build an `App` from inline `.ini` content (name is used as the patch title).
+fn app_from_inline(content: &str, name: &str) -> App {
+    let patch = Patch::from_ini_str(content, String::from(name)).unwrap();
+    let mut app = App::new();
+    app.load_patch(patch);
+    app
+}
+
 #[test]
 fn visual_controller_panels_arpeggio_snapshot() {
     // 1.2: arpeggio1.ini × classic/terminal/mono × 80/120
@@ -3115,6 +3123,43 @@ fn visual_help_modal_snapshot() {
             );
             insta::with_settings!(
                 {snapshot_suffix => format!("help_modal_{theme_name}_{width}")},
+                { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
+            );
+        }
+    }
+}
+
+#[test]
+fn visual_select_state_menu_snapshot() {
+    // Change C 4.1: the `g s` select-state menu renders a centered list of
+    // discovered signals (token, kind, candidates, usage, current value) with
+    // cursor highlight, across themes and widths. It overlays the panels view
+    // like the validation modal and reuses its border token.
+    let content = "\
+[p2b8]\n\
+[button]\n    select = S1.1\n    selectat = 0\n    button = B1.1\n\
+[button]\n    select = _CABLE\n    button = B1.2\n\
+[button]\n    button = B1.3\n";
+    for &theme_name in theme::THEMES {
+        let _guard = ThemedGuard::pin(theme_name);
+        for width in [80u16, 120] {
+            let mut app = app_from_inline(content, "select_state");
+            assert!(
+                app.open_select_menu(),
+                "menu opens on a select-bearing patch"
+            );
+            let buf = buffer_for(&mut app, width, 30);
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            assert!(
+                text.contains("Select state"),
+                "{theme_name} {width}: menu title must render"
+            );
+            assert!(
+                text.contains("S1.1") && text.contains("current:"),
+                "{theme_name} {width}: a signal row with current value must render"
+            );
+            insta::with_settings!(
+                {snapshot_suffix => format!("select_state_menu_{theme_name}_{width}")},
                 { insta::assert_snapshot!(buffer_to_ansi(&buf)); }
             );
         }
