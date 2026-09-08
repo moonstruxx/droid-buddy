@@ -17,4 +17,4 @@
 ## 5. Regression and full gate
 
 - [x] 5.1 Add a graph-level regression fixture: two circuits selecting on `S7.1` with different `selectat` values, one button circuit without select, and an output jack; assert that assuming each `S7.1` value drops the losing circuit's controller edges while keeping cables/jacks, and that no assumed state changes the unassumed snapshot. Verify: `cargo test` passes. <!-- agent: horst-engineer.build, depends_on: [4.1], touches: [src/graph.rs, fixtures/] -->
-- [ ] 5.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [5.1], touches: [] -->
+- [x] 5.2 Run the full verification gate and accept any intended snapshot changes. Verify: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, and `cargo build --release --locked` all exit 0. <!-- agent: horst-engineer.fast, depends_on: [5.1], touches: [] -->
