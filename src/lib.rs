@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod diff;
 pub mod events;
+pub mod expression;
 pub mod favorites;
 pub mod gallery;
 pub mod geometry;
