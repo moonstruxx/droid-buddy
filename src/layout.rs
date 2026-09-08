@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::graph::{Graph, GraphOptions, NodeId};
+use crate::graph::{Graph, NodeId};
 
 /// Freeze when total kinetic energy (sum of |velocity|², unit mass) is below.
 const ENERGY_THRESHOLD: f32 = 0.5;
@@ -508,7 +508,7 @@ fn edge_pairs(graph: &Graph, index: &HashMap<&NodeId, usize>) -> Vec<(usize, usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Cluster, GraphEdge, GraphNode, NodeId, NodeKind};
+    use crate::graph::{Cluster, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind};
     use crate::latency::CostModel;
     use crate::patch::Patch;
     use std::path::Path;
