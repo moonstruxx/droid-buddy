@@ -47,6 +47,9 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+      - name: Perf gate (release)
+        run: cargo test --release --test perf_gate --locked
+
       - name: Upload visual gallery and pending snapshots
         if: always()
         uses: actions/upload-artifact@v4
