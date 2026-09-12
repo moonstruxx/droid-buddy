@@ -8,7 +8,7 @@ Provide an inspectable visual face for the terminal UI, compare it to spec inten
 
 ### Requirement: Snapshot generation from TestBackend
 
-The system SHALL generate a deterministic ANSI snapshot and an HTML gallery page from the same `TestBackend` buffer for every scenario in the coverage matrix, without a live terminal or pty.
+The system SHALL generate a deterministic ANSI snapshot and an HTML gallery page from the same `TestBackend` buffer for every scenario in the coverage matrix, without a live terminal or pty, and SHALL complete the full matrix within the named render budget of the performance gate.
 
 #### Scenario: ANSI snapshot produced
 
@@ -19,6 +19,11 @@ The system SHALL generate a deterministic ANSI snapshot and an HTML gallery page
 
 - **WHEN** the gallery is opened in a browser
 - **THEN** each row shows the same scenario rendered under `classic`, `terminal`, and `mono` side-by-side, with panel borders and kind colors matching `DESIGN.md` tokens
+
+#### Scenario: Matrix completes within render budget
+
+- **WHEN** the full gallery matrix runs under the performance gate
+- **THEN** every scenario and theme completes within the named render budget, and the elapsed time is reported
 
 ### Requirement: Start-small coverage matrix
 
