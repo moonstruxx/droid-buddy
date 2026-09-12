@@ -6,11 +6,8 @@
 //! rides on every command so ACK noise never reaches the single-threaded
 //! crossterm stdin.
 //!
-//! Gating: the pure payload builders below are always compiled so they
-//! unit-test in the default suite; only the terminal-write `emit` and the
-//! `detect` handshake are gated behind `#[cfg(feature = "kitty-gfx")]` — the
-//! module *is* the transport, and the escape-emitting compile requires the
-//! feature. `TestBackend`/snapshot rendering never calls into this module.
+//! Gating: the module compiles unconditionally; `TestBackend`/snapshot
+//! rendering never calls into it.
 
 use std::io::{self, Write};
 
@@ -151,7 +148,6 @@ pub fn handshake_supported(response: &[u8]) -> bool {
 // Feature-gated facade: terminal writes + capability detection.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "kitty-gfx")]
 mod emit {
     use super::*;
     use std::io::Read;
@@ -257,9 +253,8 @@ mod emit {
     }
 }
 
-#[cfg(feature = "kitty-gfx")]
 pub use emit::{cursor, delete, frame, place, supported, transmit};
-#[cfg(all(test, feature = "kitty-gfx"))]
+#[cfg(test)]
 pub use emit::{reset_for_tests, set_supported_for_tests};
 
 #[cfg(test)]
@@ -425,14 +420,14 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "kitty-gfx"))]
+#[cfg(test)]
 mod feature_tests {
     use super::*;
 
     #[test]
     fn feature_gated_emit_keeps_pure_builder_escape_shapes() {
-        // Task 3.2: with the kitty-gfx feature on, the terminal-write `emit`
-        // facade compiles; its string builders must stay byte-identical to the
+        // Task 3.2: the terminal-write `emit` facade compiles; its string
+        // builders must stay byte-identical to the
         // always-compiled path so a feature build ships the same wire bytes.
         // Only string assembly is exercised — the handshake probe
         // (`emit::supported`) needs a real TTY and is never run from tests.

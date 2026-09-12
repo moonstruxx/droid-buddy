@@ -15,13 +15,11 @@ use crate::theme;
 
 /// Kitty-graphics image-path imports: the pure scene builder and camera are
 /// unconditional dependencies (design D10); only the transport stays gated.
-#[cfg(feature = "kitty-gfx")]
 use crate::graph_render::{build_scene, EdgeTokenSpec, NodeTokenSpec, Scene};
 /// The camera fit shared by both graph render paths (design D5): the
 /// box-drawing fit maps world positions through it, and the kitty path
 /// rasterizes through it, so both publish identical hit rects.
 use crate::graph_render::{GraphCamera, WorldBounds};
-#[cfg(feature = "kitty-gfx")]
 use crate::kitty_protocol;
 
 const QUAD_WIDTH_THRESHOLD: u16 = 120;
@@ -1854,7 +1852,6 @@ const GRAPH_CELL_H_PX: f32 = 16.0;
 const GRAPH_MIN_NODE_PX: f32 = GRAPH_NODE_WIDTH as f32 * GRAPH_CELL_W_PX / 80.0;
 /// Fixed kitty image id: re-transmitting the same `i=` replaces the prior
 /// placement, so pan/zoom never exhausts ids (design D8).
-#[cfg(feature = "kitty-gfx")]
 const KITTY_GRAPH_IMAGE_ID: u32 = 0;
 
 // ---------------------------------------------------------------------------
@@ -1863,7 +1860,6 @@ const KITTY_GRAPH_IMAGE_ID: u32 = 0;
 
 /// Classification + hover state for the kitty image path, grouped like
 /// `GraphEdgeOpts` so the pixel helpers stay under clippy's 7-argument limit.
-#[cfg(feature = "kitty-gfx")]
 #[derive(Clone, Copy)]
 struct GraphKittyOpts<'a> {
     disabled: &'a HashSet<NodeId>,
@@ -1886,7 +1882,6 @@ struct GraphKittyOpts<'a> {
 /// classification helpers. Modifiers (BOLD/DIM) are not representable in
 /// pixels, so only the token color is resolved — the dim tokens already carry
 /// the dim look.
-#[cfg(feature = "kitty-gfx")]
 fn graph_edge_pixel_color(
     graph: &Graph,
     edge: &crate::graph::GraphEdge,
@@ -1956,7 +1951,6 @@ fn graph_edge_pixel_color(
 /// so the existing mouse hit-testing behaves identically. Pure: no terminal,
 /// no `App`, no IO — `None` on degenerate inputs or a broken bundled font,
 /// and the caller falls back to box drawing.
-#[cfg(feature = "kitty-gfx")]
 fn graph_kitty_frame(
     graph: &Graph,
     positions: &[(f32, f32)],
@@ -2105,7 +2099,6 @@ fn graph_kitty_frame(
 /// publish the derived hit rects. Returns `true` only when the image path
 /// fully handled the frame (scene built AND emitted); any failure falls back
 /// to the box-drawing renderer.
-#[cfg(feature = "kitty-gfx")]
 fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
     // Task 2.3: seed the persistent camera on the first frame after open — a
     // legible `fit_to_world` — and publish the canvas pixel size for the
@@ -2233,7 +2226,6 @@ fn render_graph(frame: &mut Frame, area: Rect, app: &mut App) {
     // failure (degenerate scene, emit error, unsupported terminal) we fall
     // through to the box-drawing path below, which is also the TestBackend
     // path.
-    #[cfg(feature = "kitty-gfx")]
     if kitty_protocol::supported() && render_graph_kitty(area, app) {
         return;
     }
@@ -4754,7 +4746,6 @@ mod tests {
         // TestBackend never emits kitty graphics: force the box-drawing path so
         // graph assertions are deterministic regardless of the host terminal's
         // kitty capability (design D6 dispatch).
-        #[cfg(feature = "kitty-gfx")]
         kitty_protocol::set_supported_for_tests(false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -5582,7 +5573,6 @@ mod paused_rendering_tests {
         // TestBackend never emits kitty graphics: force the box-drawing path so
         // graph assertions are deterministic regardless of the host terminal's
         // kitty capability (design D6 dispatch).
-        #[cfg(feature = "kitty-gfx")]
         kitty_protocol::set_supported_for_tests(false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -5760,7 +5750,6 @@ mod graph_view_tests {
         // TestBackend never emits kitty graphics: force the box-drawing path so
         // graph assertions are deterministic regardless of the host terminal's
         // kitty capability (design D6 dispatch).
-        #[cfg(feature = "kitty-gfx")]
         kitty_protocol::set_supported_for_tests(false);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -6419,7 +6408,6 @@ mod graph_view_tests {
         );
     }
 
-    #[cfg(feature = "kitty-gfx")]
     #[test]
     fn prod_tiled_slot_kitty_path_publishes_in_area_rects() {
         // Same production flow as above, through `render_graph_kitty`
@@ -6536,7 +6524,6 @@ mod graph_view_tests {
         }
     }
 
-    #[cfg(feature = "kitty-gfx")]
     #[test]
     fn single_node_kitty_scene_has_visible_content_at_fit_100_percent() {
         // The kitty image path skips box drawing once it returns true, so its
@@ -6587,7 +6574,6 @@ mod graph_view_tests {
         );
     }
 
-    #[cfg(feature = "kitty-gfx")]
     #[test]
     fn prod_tiled_slot_kitty_scene_has_visible_content() {
         // Bug droid_tui-0is: the kitty path skips box drawing once it
@@ -6631,7 +6617,6 @@ mod graph_view_tests {
         );
     }
 
-    #[cfg(feature = "kitty-gfx")]
     #[test]
     fn kitty_path_zoom_presets_keep_a_node_in_area_at_every_preset() {
         // The kitty image path renders through the stored camera; stepping the
@@ -6721,15 +6706,14 @@ mod graph_view_tests {
         assert!(envelope.width < area.width);
     }
 
-    #[cfg(feature = "kitty-gfx")]
     #[test]
     fn graph_renders_box_drawing_fallback_when_terminal_unsupported() {
-        // Design D6: kitty-gfx is the default feature, but dispatch is gated on
-        // the terminal actually supporting the protocol. Forcing an unsupported
-        // terminal must render the box-drawing fallback without error (spec
-        // scenario "Fallback without kitty support"); the supported branch is
-        // covered by the `kitty_frame_*` tests (the image path renders when
-        // invoked).
+        // Design D6: kitty-gfx is the default renderer, but dispatch falls
+        // back when the terminal does not support the protocol. Forcing an
+        // unsupported terminal must render the box-drawing fallback without
+        // error (spec scenario "Fallback without kitty support"); the supported
+        // branch is covered by the `kitty_frame_*` tests (the image path
+        // renders when invoked).
         kitty_protocol::set_supported_for_tests(false);
         let mut app = graph_app();
         let text = rendered_text(&mut app, 120, 40);
@@ -6760,7 +6744,7 @@ mod graph_view_tests {
 
     /// An `App` in the graph view with a hand-built graph and frozen positions,
     /// giving tests full control over node geometry.
-    #[cfg(all(test, feature = "kitty-gfx"))]
+    #[cfg(test)]
     mod kitty_graph_tests {
         use super::*;
 

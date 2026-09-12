@@ -31,17 +31,13 @@ fn main() -> Result<()> {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(stdout(), DisableMouseCapture);
-        // With the gui feature, destroy the graph window before the terminal
-        // restore hook runs so a panic leaves no orphaned desktop window.
-        #[cfg(feature = "gui")]
+        // Destroy the graph window before the terminal restore hook runs so
+        // a panic leaves no orphaned desktop window.
         droid_tui::gui::destroy_window_for_panic();
         previous_hook(info);
     }));
 
-    #[cfg(feature = "gui")]
     let result = windowed::run(terminal, &settings);
-    #[cfg(not(feature = "gui"))]
-    let result = run(terminal, &settings);
 
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -73,48 +69,9 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
 
     // [gui] graph_window: seed the GPU-window preference (gpu-graph-window D6);
     // inert without the `gui` feature, matching App::new's default.
-    #[cfg(feature = "gui")]
-    {
-        app.graph_window_enabled = settings.gui.graph_window;
-    }
+    app.graph_window_enabled = settings.gui.graph_window;
 }
 
-#[cfg(not(feature = "gui"))]
-fn run(mut terminal: ratatui::DefaultTerminal, settings: &config::Settings) -> Result<()> {
-    use crossterm::event::{self, Event};
-
-    use droid_tui::handler;
-    use droid_tui::ui::render;
-
-    let mut app = App::new();
-    seed_app(&mut app, settings);
-
-    loop {
-        terminal.draw(|frame| render(frame, &mut app))?;
-
-        match event::read()? {
-            Event::Key(key) => {
-                if handler::handle_event(key, &mut app) {
-                    break;
-                }
-                // Task 4/8: viewer routing is handled in handler::handle_event
-                // (ESC closes, j/k navigates, readonly). No unconditional close here.
-            }
-            Event::Mouse(mouse) => {
-                handler::handle_mouse_event(mouse, &mut app);
-            }
-            // No state to update: panel layout is computed fresh from
-            // frame.area() every draw() call, so the next iteration's draw
-            // already reflows against the new terminal size.
-            Event::Resize(_, _) => {}
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "gui")]
 mod windowed {
     use std::time::Duration;
 
@@ -300,9 +257,7 @@ mod windowed {
 }
 
 /// `seed_app` wires the `[gui] graph_window` preference into `App` (design D6).
-/// The module is gui-gated because `App::graph_window_enabled` only exists
-/// under the feature; plain `cargo test` (default features) compiles it out.
-#[cfg(all(test, feature = "gui"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
