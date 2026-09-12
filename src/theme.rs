@@ -492,10 +492,7 @@ impl Theme {
     /// token through the same [`Theme::rgb`] hop the kitty rasterizer uses and
     /// wrap it as an egui [`egui::Color32`]. The window chrome and any egui
     /// surface derive every color from here, so switching the theme in
-    /// `config.toml` re-themes the window and the terminal together. Gated on
-    /// the `gui` feature because `egui` types exist only under it; the default
-    /// build stays byte-identical and never links egui.
-    #[cfg(feature = "gui")]
+    /// `config.toml` re-themes the window and the terminal together.
     pub fn egui_color(&self, color: Color) -> egui::Color32 {
         let (r, g, b) = self.rgb(color);
         egui::Color32::from_rgb(r, g, b)
@@ -1312,7 +1309,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn egui_color_matches_rgb_output() {
         // gpu-graph-window D7: the egui bridge is a pure wrap of `Theme::rgb`,

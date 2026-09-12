@@ -6,7 +6,6 @@ use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[cfg(feature = "gui")]
 use crate::app::GraphWindowRequest;
 use crate::app::{
     is_entry_selectable, is_picker_parent_entry, App, FocusSlot, GraphDrag, PrefixState,
@@ -271,7 +270,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             crossterm::event::KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
-                #[cfg(feature = "gui")]
                 if app.graph_window_enabled {
                     // `[gui] graph_window = true`: open the GPU graph window
                     // instead of the terminal tile (gpu-graph-window D6); the
@@ -314,16 +312,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // `g w` toggles the GPU graph window (gpu-graph-window D6).
                 // The handler cannot reach GraphWindow (owned by the windowed
                 // loop in main.rs), so it records a request the loop consumes
-                // on its next frame; without the `gui` feature the key shows a
-                // status hint and does nothing else (keybinding spec).
-                #[cfg(feature = "gui")]
+                // on its next frame.
                 {
                     app.request_graph_window(GraphWindowRequest::Toggle);
-                }
-                #[cfg(not(feature = "gui"))]
-                {
-                    app.status_message =
-                        String::from("GPU graph window requires the `gui` feature");
                 }
                 app.prefix = None;
                 return false;
@@ -1558,7 +1549,6 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// yet (graph not fitted) means nothing is interactive. The windowed loop in
 /// `main.rs` owns both the window and the `App`, so it calls this once per
 /// painted frame (D6: the loop acts on what it owns).
-#[cfg(feature = "gui")]
 pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
     let Some(mut camera) = app.graph_camera else {
         app.hovered_graph_node = None;
@@ -2230,7 +2220,7 @@ mod tests {
         app.graph_camera = Some(GraphCamera::fit_to_world(
             WorldBounds::from_positions(&app.graph_positions),
             (960.0, 480.0),
-            2.2, // GRAPH_MIN_NODE_PX is kitty-gfx-gated; a literal suffices for camera math
+            2.2, // GRAPH_MIN_NODE_PX (a literal suffices for camera math)
         ));
         app.graph_canvas_px = Some((960.0, 480.0));
     }
@@ -2994,21 +2984,6 @@ mod tests {
     // `g w` / `g g` GPU-graph-window keys (gpu-graph-window 3.2). The handler
     // only records requests; the windowed loop in main.rs consumes them.
 
-    #[cfg(not(feature = "gui"))]
-    #[test]
-    fn g_w_without_gui_feature_shows_status_hint() {
-        let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('w')), &mut app);
-        assert!(!quit);
-        assert!(app.prefix.is_none());
-        assert_eq!(
-            app.status_message,
-            "GPU graph window requires the `gui` feature"
-        );
-    }
-
-    #[cfg(feature = "gui")]
     #[test]
     fn g_w_queues_window_toggle_request() {
         let mut app = app_with_fixture();
@@ -3021,7 +2996,6 @@ mod tests {
         assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn g_g_with_window_enabled_queues_open_without_tile() {
         let mut app = app_with_fixture();
@@ -3034,7 +3008,6 @@ mod tests {
         assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn g_g_with_window_disabled_still_opens_terminal_tile() {
         let mut app = app_with_fixture();
@@ -4028,7 +4001,6 @@ mod tests {
         assert_eq!(app.selected_circuit(), Some(&node_id));
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_frame_press_selects_circuit() {
         use crate::gui::WindowFrame;
@@ -4465,7 +4437,6 @@ mod tests {
     // with an identity camera (zoom 1, pan 0) world == pixel, so pointers can
     // be taken straight from `graph_positions`.
 
-    #[cfg(feature = "gui")]
     fn app_with_graph_window() -> App {
         let mut app = app_with_graph();
         app.graph_camera = Some(crate::graph_render::GraphCamera::new());
@@ -4475,7 +4446,6 @@ mod tests {
     /// Pointer just inside `target`'s top-left corner, accepted only when no
     /// earlier node's rect also claims it (hit-testing takes the first match),
     /// so the sample deterministically hits `target`.
-    #[cfg(feature = "gui")]
     fn clean_sample_point(app: &App, target: usize) -> Option<(f32, f32)> {
         let (px, py) = app.graph_positions[target];
         let (sx, sy) = (px + 5.0, py + 5.0);
@@ -4488,7 +4458,6 @@ mod tests {
         (claims(target) && !(0..target).any(claims)).then_some((sx, sy))
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_hover_sets_and_clears_hovered_node() {
         use crate::gui::WindowFrame;
@@ -4521,7 +4490,6 @@ mod tests {
         assert_eq!(app.hovered_graph_node, None);
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_drag_moves_node_and_auto_pins_on_release() {
         use crate::gui::WindowFrame;
@@ -4566,7 +4534,6 @@ mod tests {
         assert!(app.pinned.contains(&node_id));
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_drag_emits_node_moved_event() {
         use crate::gui::WindowFrame;
@@ -4600,7 +4567,6 @@ mod tests {
         assert!(matches!(received.borrow()[0], Event::NodeMoved(_)));
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_keys_act_on_hovered_node() {
         use crate::gui::{WindowFrame, WindowGraphKey};
@@ -4629,7 +4595,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_pin_key_toggles_pin_on_hovered_node() {
         use crate::gui::{WindowFrame, WindowGraphKey};
@@ -4661,7 +4626,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_edit_key_opens_circuit_overlay() {
         use crate::app::EditKind;
@@ -4681,7 +4645,6 @@ mod tests {
         assert_eq!(editing.kind, EditKind::Circuit { node: node.id });
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_pan_and_zoom_reach_shared_camera() {
         use crate::gui::{camera_pan, camera_zoom_about, WindowFrame};
@@ -4715,7 +4678,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn graph_window_without_camera_is_inert() {
         use crate::gui::{WindowFrame, WindowGraphKey};

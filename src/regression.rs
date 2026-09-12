@@ -89,7 +89,6 @@ fn buffer_for(app: &mut App, width: u16, height: u16) -> Buffer {
     // TestBackend never emits kitty graphics: force the box-drawing path so
     // graph assertions are deterministic regardless of the host terminal's
     // kitty capability (design D6 dispatch).
-    #[cfg(feature = "kitty-gfx")]
     crate::kitty_protocol::set_supported_for_tests(false);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();

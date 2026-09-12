@@ -432,9 +432,7 @@ pub struct GraphDrag {
 /// cell rects from fixed node cell dims. The window scene builder (task 3.2)
 /// must construct [`crate::graph_render::NodeSpec`]s at the same size so clicks
 /// line up with what is drawn.
-#[cfg(feature = "gui")]
 pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
-#[cfg(feature = "gui")]
 pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
 
 /// Which pane receives keyboard input while the embedded source pane is open.
@@ -524,7 +522,6 @@ impl TileStack {
 /// handler on `g w`/`g g`, consumed (and reset) by the windowed run-loop in
 /// `main.rs` on its next frame. Only exists with the `gui` feature; non-`gui`
 /// builds never construct it.
-#[cfg(feature = "gui")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GraphWindowRequest {
     /// Nothing pending; the windowed loop only acts on a non-default value.
@@ -606,14 +603,12 @@ pub struct App {
     /// Whether `g g` should open the GPU graph window instead of the terminal
     /// graph tile (gpu-graph-window D6). Seeded from `[gui] graph_window` at
     /// startup by `seed_app` in `main.rs` (same contract as
-    /// `physical_rack_spec`); inert without the `gui` feature.
-    #[cfg(feature = "gui")]
+    /// `physical_rack_spec`).
     pub graph_window_enabled: bool,
     /// Pending GPU-graph-window request (gpu-graph-window D6): set by the
     /// handler, consumed by the windowed run-loop in `main.rs` via
     /// [`App::take_graph_window_request`] each frame. See
     /// [`GraphWindowRequest`].
-    #[cfg(feature = "gui")]
     graph_window_request: GraphWindowRequest,
     /// Cable tension of the graph surface: the force-directed solver's spring
     /// stiffness (`layout::SPRING_K`). `[`/`]` on the graph surface step it by
@@ -849,9 +844,7 @@ impl App {
             physical_offset: (0.0, 0.0),
             physical_zoom: 1.0,
             physical_rack_spec: crate::physical::RackSpec::default(),
-            #[cfg(feature = "gui")]
             graph_window_enabled: false,
-            #[cfg(feature = "gui")]
             graph_window_request: GraphWindowRequest::default(),
             physical_rack_size: (0, 0),
             physical_viewport: None,
@@ -2407,7 +2400,6 @@ impl App {
     /// (gpu-graph-window D6). The handler cannot reach `GraphWindow` (owned by
     /// the windowed loop in `main.rs`), so it records the request here and the
     /// loop performs the matching open/close on its next frame.
-    #[cfg(feature = "gui")]
     pub fn request_graph_window(&mut self, request: GraphWindowRequest) {
         self.graph_window_request = request;
     }
@@ -2417,7 +2409,6 @@ impl App {
     /// on a non-`None` value (`Open` → `GraphWindow::open`, `Toggle` →
     /// `open`/`close` by `GraphWindow::is_open`). When `Open` cannot succeed
     /// (headless display), the loop falls back to the terminal graph tile.
-    #[cfg(feature = "gui")]
     pub fn take_graph_window_request(&mut self) -> GraphWindowRequest {
         std::mem::take(&mut self.graph_window_request)
     }
@@ -3030,7 +3021,6 @@ mod tests {
         assert!(app.graph_cluster_rects.is_empty());
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn app_init_disables_graph_window_by_default() {
         // `[gui] graph_window` is off unless configured, and `main.rs`'s
