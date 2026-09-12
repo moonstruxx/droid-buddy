@@ -14,6 +14,7 @@
 //! without touching this shell.
 
 mod graph;
+mod physical;
 
 // The camera helpers are public API (`crate::gui::camera_pan` /
 // `crate::gui::camera_zoom_about`, used by `handler.rs`); `graph` stays a
