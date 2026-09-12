@@ -2184,14 +2184,15 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
 
     // Emit beneath the surface at the area's top-left cell (1-based for the
     // kitty protocol). Any IO failure falls back to box drawing rather than
-    // leaving a stale/partial image.
+    // leaving a stale/partial image. The image spans the area's full cell
+    // size (`c`/`r` are the span, the position is the cursor moved above).
     if kitty_protocol::frame(
         KITTY_GRAPH_IMAGE_ID,
         scene.width,
         scene.height,
         &scene.rgba,
-        area.x + 1,
-        area.y + 1,
+        (area.x + 1, area.y + 1),
+        (area.width, area.height),
     )
     .is_err()
     {

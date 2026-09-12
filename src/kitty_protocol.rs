@@ -101,11 +101,15 @@ pub fn transmit_escapes(id: u32, width: u32, height: u32, rgba: &[u8]) -> io::Re
         .collect())
 }
 
-/// Place escape: scale image `id` into the cell at (col, row), `z=-1` under
-/// text, `C=1` leaves the cursor put. Re-transmitting the same `i=` replaces
-/// the prior placement, so pan/zoom never exhausts image ids.
-pub fn place_escape(id: u32, col: u16, row: u16) -> String {
-    format!("{ESC_G}a=p,i={id},c={col},r={row},z=-1,C=1,q=2{ESC_ST}")
+/// Place escape: scale image `id` to span `cols`×`rows` cells, `z=-1` under
+/// text, `C=1` leaves the cursor put. The position is the cursor, which the
+/// caller moves first (`cursor_escape`); `c`/`r` are the image's cell span
+/// (kitty control-data reference: "c is the number of columns and r the number
+/// of rows. The image will be scaled as needed to fit the specified area").
+/// Re-transmitting the same `i=` replaces the prior placement, so pan/zoom
+/// never exhausts image ids.
+pub fn place_escape(id: u32, cols: u16, rows: u16) -> String {
+    format!("{ESC_G}a=p,i={id},c={cols},r={rows},z=-1,C=1,q=2{ESC_ST}")
 }
 
 /// Delete escape: remove all placed images (cleanup on exit/fallback).
@@ -199,9 +203,10 @@ mod emit {
         Ok(())
     }
 
-    /// Place image `id` into the cell at (col, row), `z=-1`, cursor unmoved.
-    pub fn place(id: u32, col: u16, row: u16) -> io::Result<()> {
-        write_escape(&super::place_escape(id, col, row))
+    /// Place image `id` spanning `cols`×`rows` cells at the cursor, `z=-1`,
+    /// cursor unmoved. The caller moves the cursor first.
+    pub fn place(id: u32, cols: u16, rows: u16) -> io::Result<()> {
+        write_escape(&super::place_escape(id, cols, rows))
     }
 
     /// Remove all placed images (`z=-1` cleanup on exit/fallback).
@@ -215,17 +220,20 @@ mod emit {
     }
 
     /// Cursor → transmit → place: the per-frame image update for one area.
+    /// `origin` is the 1-based `(col, row)` of the graph area's top-left cell;
+    /// `span` the image's `(cols, rows)` size in cells — the image is scaled to
+    /// fill exactly that cell span.
     pub fn frame(
         id: u32,
         width: u32,
         height: u32,
         rgba: &[u8],
-        col: u16,
-        row: u16,
+        origin: (u16, u16),
+        span: (u16, u16),
     ) -> io::Result<()> {
-        cursor(row, col)?;
+        cursor(origin.1, origin.0)?;
         transmit(id, width, height, rgba)?;
-        place(id, col, row)
+        place(id, span.0, span.1)
     }
 
     fn write_escape(esc: &str) -> io::Result<()> {
@@ -354,6 +362,23 @@ mod tests {
         );
         assert_eq!(delete_escape(), "\x1b_Ga=d,q=2\x1b\\");
         assert_eq!(cursor_escape(3, 5), "\x1b[3;5H");
+    }
+
+    #[test]
+    fn place_escape_carries_cell_span_not_coordinates() {
+        // Regression: `c`/`r` are the image's *size in cells* (kitty control
+        // data: "c is the number of columns and r the number of rows. The
+        // image will be scaled as needed to fit the specified area"); the
+        // position is the cursor, moved by `cursor_escape` beforehand. Passing
+        // the area coordinates here squished the 50×22-cell graph image into an
+        // 80×5-cell sliver at the cursor — the black graph surface (bd-1zd).
+        assert_eq!(
+            place_escape(0, 50, 22),
+            "\x1b_Ga=p,i=0,c=50,r=22,z=-1,C=1,q=2\x1b\\"
+        );
+        // The graph area's pixel size (400×352 at 8×16 px/cell) maps back to
+        // the same span: width/8 × height/16 cells, never the area origin.
+        assert_eq!(place_escape(0, 400 / 8, 352 / 16), place_escape(0, 50, 22));
     }
 
     #[test]
