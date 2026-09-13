@@ -1,0 +1,112 @@
+[encoder]
+    ledfill = 0
+    encoder = E4.3
+    output = _T2_FILTER_VOLTAGE_MIN
+    startvalue = -1
+    select = _CONTROL * _T2_SELECTED
+    mode = 2
+
+[encoder]
+    ledfill = 0
+    encoder = E4.4
+    mode = 2
+    output = _T2_FILTER_VOLTAGE_MAX
+    startvalue = 1
+    select = _CONTROL * _T2_SELECTED
+
+# -------------------------------------------------
+# t2velo_output setup
+# -------------------------------------------------
+
+[encoder]
+    encoder = E4.1
+    output = _T2_VELO_VOLTAGE_MIN
+    startvalue = -1
+    select = _CONTROL * _T2_SELECTED
+    mode = 2
+    ledfill = 0
+
+[encoder]
+    encoder = E4.2
+    output = _T2_VELO_VOLTAGE_MAX
+    startvalue = 1
+    select = _CONTROL * _T2_SELECTED
+    mode = 2
+    ledfill = 0
+
+# -------------------------------------------------
+# t2 filter env
+# -------------------------------------------------
+
+# Longpress on the select button (confirmed by a blinking led on the button) switches linear vs. exponential curve
+[button]
+    select = _T2_SELECTED * _ENV_FCV_BUTTON_HOLD
+    button = B4.1
+    longpress = _T2_FILTER_ENV_SWITCH
+
+[burst]
+    trigger = _T2_FILTER_ENV_SWITCH
+    hz = 5
+    count = 5
+    output = L4.1
+
+[flipflop]
+    toggle = _T2_FILTER_ENV_SWITCH
+    output = _T2_FILTER_ENV_LIN_EXP
+
+# Pot for attack lenght
+[pot]
+    select = _T2_SELECTED * _ENV_FCV_BUTTON_HOLD
+    pot = P5.1
+    loadpreset = _T2_LOAD_PRESET
+    clear = _T2_CLEAR
+    clearall = _FACTORY_RESET
+    savepreset = _T2_SAVE_PRESET
+    righthalf = _T2_FILTER_ENV_ATTACK_HALF
+
+[compare]
+    input = _T2_FILTER_ENV_ATTACK_HALF
+    compare = 0.5
+    ifgreater = 0.5
+    else = _T2_FILTER_ENV_ATTACK_HALF
+    output = _T2_FILTER_ENV_ATTACK_POT
+
+# Pot for decay lenght
+[pot]
+    select = _T2_SELECTED * _ENV_FCV_BUTTON_HOLD
+    pot = P5.1
+    loadpreset = _T2_LOAD_PRESET
+    clear = _T2_CLEAR
+    clearall = _FACTORY_RESET
+    savepreset = _T2_SAVE_PRESET
+    ledgauge = off
+    outputscale = _DECAY_MAX
+    absbipolar = _T2_FILTER_ENV_DECAY_POT_ABSBIPOLAR
+
+[copy]
+    input = _T2_FILTER_ENV_DECAY_POT_ABSBIPOLAR * -1 + _DECAY_MIN
+    output = _T2_FILTER_ENV_DECAY_POT
+
+# Pot for CV attenuverter for level
+[pot]
+    select = _T2_SELECTED * _ENV_FCV_BUTTON_HOLD
+    pot = P5.2
+    outputscale = 2
+    loadpreset = _T2_LOAD_PRESET
+    clear = _T2_CLEAR
+    clearall = _FACTORY_RESET
+    savepreset = _T2_SAVE_PRESET
+    startvalue = 1
+    notch = 0.1
+    output = _T2_FILTER_ENV_ATTENUVERTER_POT
+
+[copy]
+    input = _T2_FILTER_CV * _T2_FILTER_ENV_ATTENUVERTER_POT
+    output = _T2_FILTER_ENV_LEVEL
+
+# [gatetool]
+#   inputgate = _T2_FINAL_GATE
+#   outputtrigger = _T2_FINAL_TRIGGER
+
+# AD envelop with CV control over level
+# pot 1: envelop shape

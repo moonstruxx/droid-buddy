@@ -16,15 +16,16 @@
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
+use crate::app::{App, FocusSlot};
 use crate::patch::ComponentKind;
 use crate::theme::Color;
 
-use super::physical::{paint_cell, CellSpec, ModuleSpec};
+use super::physical::{paint_cell, rack_cells, rack_data, rack_modules, CellSpec, ModuleSpec};
 
 /// The resolved panels-pane payload for one frame: pane chrome state plus the
 /// sub-blocks and cells to draw (pure data, like the other surface specs).
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct PanelsSpec {
+pub(crate) struct PanelsSpec {
     /// Pane title (the terminal's " Panels ").
     pub title: String,
     /// Keyboard focus state: the focused pane draws a bold `focus_border`
@@ -57,14 +58,13 @@ pub(crate) struct PanelsFrame {
 /// hover/click/scroll report for the loop to apply.
 pub(super) fn paint_panels(
     painter: &Painter,
-    canvas: Vec2,
+    pane: egui::Rect,
     ctx: &Context,
     spec: Option<&PanelsSpec>,
 ) -> PanelsFrame {
     let Some(spec) = spec else {
         return PanelsFrame::default();
     };
-    let pane = Rect::from_min_size(Pos2::ZERO, canvas);
     let t = crate::theme::active();
     let border_color = if spec.focused {
         rgb(t.focus_border)
@@ -163,6 +163,42 @@ fn hit_test(cells: &[CellSpec], pos: egui::Pos2) -> Option<usize> {
     cells.iter().rposition(|c| c.rect.contains(pos))
 }
 
+/// Build the panels-pane payload for one frame (port of the old
+/// `render_panels_pane` data extraction): the pane chrome (title, focus
+/// border) plus the same rack faceplates and component cells the physical
+/// view draws, with the active shift-group token on the cells so the pane
+/// renders the group border. `pane` offsets every resolved rect so the pane
+/// paints inside the tile it was dispatched to; without a patch the pane
+/// renders empty.
+pub(crate) fn panels_spec(app: &App, pane: egui::Rect) -> PanelsSpec {
+    let focused = app.tile_stack.focus == FocusSlot::Panels;
+    let paused = app.processing_paused;
+    let shift = pane.min;
+    let moved = |r: Rect| r.translate(egui::vec2(shift.x, shift.y));
+    let Some(data) = rack_data(app) else {
+        return PanelsSpec {
+            title: " Panels ".into(),
+            focused,
+            modules: Vec::new(),
+            cells: Vec::new(),
+            paused,
+        };
+    };
+    PanelsSpec {
+        title: " Panels ".into(),
+        focused,
+        modules: rack_modules(&data)
+            .into_iter()
+            .map(|m| ModuleSpec { rect: moved(m.rect), ..m })
+            .collect(),
+        cells: rack_cells(app, &data, true)
+            .into_iter()
+            .map(|c| CellSpec { rect: moved(c.rect), ..c })
+            .collect(),
+        paused,
+    }
+}
+
 fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
 }
@@ -245,7 +281,7 @@ mod tests {
             ..Default::default()
         };
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_panels(ui.painter(), ui.max_rect().size(), ui.ctx(), Some(spec));
+            paint_panels(ui.painter(), ui.max_rect(), ui.ctx(), Some(spec));
         });
         let mut labels = Vec::new();
         let mut rects = Vec::new();
@@ -406,7 +442,7 @@ mod tests {
         let raw_input = egui::RawInput::default();
         let mut frame = PanelsFrame::default();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            frame = paint_panels(ui.painter(), ui.max_rect().size(), ui.ctx(), None);
+            frame = paint_panels(ui.painter(), ui.max_rect(), ui.ctx(), None);
         });
         full_output.textures_delta.clear();
         assert_eq!(frame, PanelsFrame::default());

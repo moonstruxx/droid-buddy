@@ -1,0 +1,23 @@
+[midiin]
+    channel = 1
+    ccnumber1 = 5
+    running = _RUNNING
+    notegate2 = _MIDI_RESET
+    cc2 = _FADERSPEED
+    cc4 = _M4_NOTCH
+    ccnumber4 = 8
+    cc3 = _M4_TOUCH_GAIN
+    cc1 = _LED_BRIGHTNESS
+    ccnumber3 = 7
+    trs = 1
+    ccnumber2 = 6
+#   notegate1 = _MIDI_RESET
+    usb = 0
+
+[midiin]
+    channel = 7
+    voiceallocation = 0
+    ccnumber1 = 0
+    ccnumber2 = 0
+    pitch1 = _KEYBOARD_IN_PITCH
+    gate1 = _KEYBOARD_IN_GATE

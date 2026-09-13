@@ -1,0 +1,85 @@
+[button]
+    select = _T1_SELECTED * _ENV_VELO_BUTTON_HOLD
+    button = B4.1
+    longpress = _T1_VELO_ENV_SWITCH
+
+[burst]
+    trigger = _T1_VELO_ENV_SWITCH
+    hz = 5
+    count = 5
+    output = L4.1
+
+[flipflop]
+    toggle = _T1_VELO_ENV_SWITCH
+    output = _T1_VELO_ENV_LIN_EXP
+
+# [mixer]
+#   input1 = _T1_VELO_ENV_SWITCH_LED * -0.5 + _LED2
+#   input2 = _T1_VELO_ENV_LIN_EXP * _LONGPRESS_LED
+#   output = L3.2
+
+# Pot for attack lenght
+[pot]
+    select = _T1_SELECTED * _ENV_VELO_BUTTON_HOLD
+    pot = P5.1
+    righthalf = _T1_VELO_ENV_ATTACK_HALF
+    loadpreset = _T1_LOAD_PRESET
+    clear = _T1_CLEAR
+    clearall = _FACTORY_RESET
+    savepreset = _T1_SAVE_PRESET
+
+[compare]
+    input = _T1_VELO_ENV_ATTACK_HALF
+    compare = 0.5
+    ifgreater = 0.5
+    else = _T1_VELO_ENV_ATTACK_HALF
+    output = _T1_VELO_ENV_ATTACK_POT
+
+# Pot for decay lenght
+[pot]
+    select = _T1_SELECTED * _ENV_VELO_BUTTON_HOLD
+    pot = P5.1
+    ledgauge = off
+    outputscale = _DECAY_MAX
+    loadpreset = _T1_LOAD_PRESET
+    clear = _T1_CLEAR
+    clearall = _FACTORY_RESET
+    savepreset = _T1_SAVE_PRESET
+    absbipolar = _T1_VELO_ENV_DECAY_POT_ABSBIPOLAR
+
+[copy]
+    input = _T1_VELO_ENV_DECAY_POT_ABSBIPOLAR * -1 + _DECAY_MIN
+    output = _T1_VELO_ENV_DECAY_POT
+
+# Pot for CV attenuverter for level
+[pot]
+    select = _T1_SELECTED * _ENV_VELO_BUTTON_HOLD
+    pot = P5.2
+    outputscale = 2
+    startvalue = 1
+    loadpreset = _T1_LOAD_PRESET
+    clear = _T1_CLEAR
+    clearall = _FACTORY_RESET
+    savepreset = _T1_SAVE_PRESET
+    notch = 0.1
+    bipolar = _T1_VELO_ENV_ATTENUVERTER_POT
+
+[copy]
+    input = _T1_VELOCITY * _T1_VELO_ENV_ATTENUVERTER_POT
+    output = _T1_VELO_ENV_LEVEL
+
+# AD envelop with CV control over level
+# pot 1: envelop shape
+# pot 2: CV attenuverter
+[contour]
+    trigger = _T1_FINAL_GATE
+    attack = _T1_VELO_ENV_ATTACK_POT * _ATTACK_MAX
+    release = _T1_VELO_ENV_DECAY_POT
+    level = _T1_VELO_ENV_LEVEL
+    attackshape = _T1_VELO_ENV_LIN_EXP * 0.25 + 0.5
+    releaseshape = _T1_VELO_ENV_LIN_EXP * 0.5 + 0.5
+    output = O2
+
+# -------------------------------------------------
+# Track 2
+# -------------------------------------------------

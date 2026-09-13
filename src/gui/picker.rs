@@ -10,19 +10,21 @@
 //! loop applies the same semantics the terminal handler used: `j`/`k` move the
 //! cursor, `Enter` opens, `f` toggles favourite.
 //!
-//! The shell (main.rs / task 2.6) builds [`PickerSpec`] from `App` state:
-//! `picker_entries` (already ordered by `App::refresh_picker_entries`), the
-//! favourite set, and `picker_index`. Tests build specs directly.
+//! The shell (main.rs / task 2.6) builds [`PickerSpec`] from `App` state
+//! (`picker_entries`, already ordered by `App::refresh_picker_entries`, the
+//! favourite set, and `picker_index`) via [`picker_spec`]. Tests build specs
+//! directly.
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
+use crate::app::{is_picker_parent_entry, App};
 use crate::theme::Color;
 
 /// One picker row for painting: the display label (★-prefixed for favourites,
 /// `..` sentinel untouched), its favourite/dir flags, and whether it is the
 /// current cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PickerRow {
+pub(crate) struct PickerRow {
     pub label: String,
     pub is_favourite: bool,
     pub is_dir: bool,
@@ -33,7 +35,7 @@ pub(super) struct PickerRow {
 /// builds it from `App`, the tests build it directly; [`paint_picker`] only
 /// draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PickerSpec {
+pub(crate) struct PickerSpec {
     pub title: String,
     pub picker_dir: String,
     pub rows: Vec<PickerRow>,
@@ -113,6 +115,55 @@ pub(super) fn ordered_entries(
         }
     }
     rows
+}
+
+/// Build the fully-resolved picker payload for one frame (port of
+/// `ui.rs::render_picker`). The rows come from the already-ordered
+/// `app.picker_entries` (favourites pinned first by
+/// `App::refresh_picker_entries`), labelled via [`ordered_entries`] so the
+/// favourite colour/slash rules stay in one place; `fav_count` marks the
+/// separator position exactly as the terminal did. The dispatch task calls
+/// this while the picker is open and hands the spec to [`paint_picker`].
+pub(crate) fn picker_spec(app: &App) -> PickerSpec {
+    let favs: Vec<(String, bool)> = app
+        .picker_entries_with_favourites()
+        .iter()
+        .map(|p| {
+            (
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                p.metadata().is_ok_and(|m| m.is_dir()),
+            )
+        })
+        .collect();
+    let fav_count = favs.len();
+    let has_favourites = fav_count > 0 && !app.picker_entries.is_empty();
+    // Everything after the pinned favourites: the `..` sentinel plus the
+    // directory listing. `refresh_picker_entries` deduplicates favourites out
+    // of the listing, so the front `fav_count` entries are exactly `favs`.
+    let listing: Vec<(String, bool, bool)> = app
+        .picker_entries
+        .iter()
+        .skip(fav_count.min(app.picker_entries.len()))
+        .map(|p| {
+            (
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                p.metadata().is_ok_and(|m| m.is_dir()),
+                is_picker_parent_entry(p),
+            )
+        })
+        .collect();
+    PickerSpec {
+        title: " File Picker ".to_string(),
+        picker_dir: app.picker_dir.display().to_string(),
+        rows: ordered_entries(favs, listing),
+        selected: app.picker_index,
+        has_favourites,
+        fav_count,
+    }
 }
 
 /// Paint the file picker overlay. `None` draws nothing. Returns the frame's
@@ -454,5 +505,27 @@ mod tests {
         full_output.textures_delta.clear();
         assert_eq!(frame, PickerFrame::default());
         assert!(full_output.shapes.is_empty());
+    }
+
+    #[test]
+    fn picker_spec_builds_rows_from_app() {
+        use std::path::PathBuf;
+        let mut app = App::new();
+        // App::new() loads the real favourites store; empty it so the
+        // favourites section and separator are absent.
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.picker_entries = vec![PathBuf::from("/tmp/b.ini"), PathBuf::from("..")];
+        app.picker_index = 1;
+        let spec = picker_spec(&app);
+        assert_eq!(spec.title, " File Picker ");
+        assert_eq!(spec.picker_dir, app.picker_dir.display().to_string());
+        assert!(!spec.has_favourites);
+        assert_eq!(spec.fav_count, 0);
+        assert_eq!(spec.rows.len(), 2);
+        assert_eq!(spec.rows[0].label, "b.ini");
+        assert!(!spec.rows[0].is_favourite);
+        assert_eq!(spec.rows[1].label, "..");
+        assert!(spec.rows[1].is_parent);
+        assert_eq!(spec.selected, 1);
     }
 }
