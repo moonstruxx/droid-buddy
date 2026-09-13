@@ -251,9 +251,7 @@ pub(super) fn paint_viewer(
             egui::FontId::proportional(9.0),
             rgb(t.muted),
         );
-        let row_h = (mrect.height() / minimap.rows.len().max(1) as f32)
-            .min(3.0)
-            .max(1.0);
+        let row_h = (mrect.height() / minimap.rows.len().max(1) as f32).clamp(1.0, 3.0);
         for (row_idx, row) in minimap.rows.iter().enumerate() {
             let y = mrect.min.y + row_idx as f32 * row_h + row_h * 0.5;
             if row.reversed {
@@ -771,19 +769,6 @@ pub(super) fn kind_token_color(token: &str) -> Color {
         "led" => t.led,
         _ => t.accent,
     }
-}
-
-/// The color of a circuit's box: a plugin-declared `color` token wins over
-/// the name-convention match (port of `ui.rs::circuit_color`).
-pub(super) fn circuit_color(name: &str) -> Color {
-    if let Some(token) = crate::schema::load_schema()
-        .circuits
-        .get(&name.to_ascii_lowercase())
-        .and_then(|c| c.color.as_deref())
-    {
-        return kind_token_color(token);
-    }
-    kind_token_color(name)
 }
 
 /// One minimap row's kind: which markers the row's line range contains and

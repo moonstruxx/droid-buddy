@@ -11,7 +11,6 @@
 use crate::theme::Color;
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use crate::diff::DiffReport;
 use crate::validation::{Severity, ValidationIssue};
 
 // ── Validation modal ─────────────────────────────────────────────────────────
@@ -34,7 +33,7 @@ pub(crate) struct ValidationSpec {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ValidationFrame {
+pub(crate) struct ValidationFrame {
     pub hovered: Option<usize>,
 }
 
@@ -302,7 +301,7 @@ pub(super) fn paint_label_editor(
         return;
     };
     let t = crate::theme::active();
-    let hue = spec.hue.map(|c| rgb(c)).unwrap_or_else(|| rgb(t.text));
+    let hue = spec.hue.map(rgb).unwrap_or_else(|| rgb(t.text));
     let cw = (canvas.x * 0.60).clamp(40.0 * 6.0, 70.0 * 6.0);
     let rect = Rect::from_center_size(
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
@@ -427,31 +426,6 @@ pub(super) fn paint_diff_surface(
             egui::FontId::proportional(12.0),
             rgb(t.muted),
         );
-    }
-}
-
-pub(super) fn diff_spec_from_report(report: Option<&DiffReport>) -> DiffSpec {
-    let Some(report) = report else {
-        return DiffSpec {
-            title: " Diff (0) ".to_string(),
-            added: vec![],
-            removed: vec![],
-            changed: vec![],
-        };
-    };
-    let added = report.added_cables.clone();
-    let removed = report.removed_cables.clone();
-    let changed: Vec<String> = report
-        .changed_cables
-        .iter()
-        .map(|c| c.cable.clone())
-        .collect();
-    let total = added.len() + removed.len() + changed.len();
-    DiffSpec {
-        title: format!(" Diff ({total}) "),
-        added,
-        removed,
-        changed,
     }
 }
 

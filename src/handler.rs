@@ -1,8 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::app::Rect;
-use egui::Rect as EguiRect;
-use egui::{Modifiers, PointerButton, Pos2, Vec2};
+use egui::{Modifiers, PointerButton};
 use winit::event::WindowEvent;
 use winit::keyboard::NamedKey;
 
@@ -167,10 +166,6 @@ fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn egui_rect_from_u16(x: u16, y: u16, w: u16, h: u16) -> EguiRect {
-    EguiRect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(w as f32, h as f32))
-}
-
 #[cfg(test)]
 pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::App) {
     if frame.skeleton_toggle {
@@ -289,7 +284,7 @@ pub fn handle_window_key_event(
     // from_winit_parts filters release events; presses convert to the neutral
     // shape and run the same dispatch as the terminal key path.
     KeyEvent::from_winit_parts(logical_key, state, modifiers)
-        .map_or(false, |key| handle_event(key, app))
+        .is_some_and(|key| handle_event(key, app))
 }
 
 use std::collections::HashMap;

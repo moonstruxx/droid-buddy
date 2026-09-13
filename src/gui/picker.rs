@@ -177,17 +177,15 @@ pub(super) fn paint_picker(
 
     for (idx, row) in spec.rows.iter().enumerate() {
         // Separator between favourites and listing.
-        if spec.has_favourites && idx == spec.fav_count {
-            if y + row_h <= inner.max.y {
-                painter.text(
-                    Pos2::new(inner.min.x + 4.0, y),
-                    egui::Align2::LEFT_TOP,
-                    "── favourites ──",
-                    egui::FontId::proportional(10.0),
-                    rgb(t.muted),
-                );
-                y += row_h;
-            }
+        if spec.has_favourites && idx == spec.fav_count && y + row_h <= inner.max.y {
+            painter.text(
+                Pos2::new(inner.min.x + 4.0, y),
+                egui::Align2::LEFT_TOP,
+                "── favourites ──",
+                egui::FontId::proportional(10.0),
+                rgb(t.muted),
+            );
+            y += row_h;
         }
         if y + row_h > inner.max.y {
             break;
@@ -222,11 +220,7 @@ pub(super) fn paint_picker(
         };
         let fg = rgb(base_fg);
         // Selected keeps bold emphasis; favourite colour stays.
-        let font = if is_selected {
-            egui::FontId::proportional(11.0)
-        } else {
-            egui::FontId::proportional(11.0)
-        };
+        let font = egui::FontId::proportional(11.0);
         painter.text(
             Pos2::new(inner.min.x + 6.0, y),
             egui::Align2::LEFT_TOP,

@@ -14,28 +14,33 @@
 //! without touching this shell.
 
 mod graph;
+
+// Surface ports (physical, panels, viewer, picker, overlays — tasks 2.1-2.5)
+// are test-support fixtures today: nothing in the shell dispatches to them
+// yet, so headless egui shape/label tests are their only consumer. They join
+// the runtime dispatch by removing the gate when their draw routines are
+// wired into `EguiSurface::paint`.
+#[cfg(test)]
 mod overlays;
+#[cfg(test)]
 mod panels;
+#[cfg(test)]
 mod physical;
+#[cfg(test)]
 mod picker;
+#[cfg(test)]
 mod viewer;
 
 // The camera helpers are public API (`crate::gui::camera_pan` /
 // `crate::gui::camera_zoom_about`, used by `handler.rs`); `graph` stays a
 // private canvas module, so they are re-exported rather than named directly.
-pub(crate) use graph::{camera_pan, camera_zoom_about, paint_scene};
+pub(crate) use graph::{camera_pan, camera_zoom_about};
 #[cfg(test)]
 pub(crate) use graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
-#[cfg(test)]
-pub(crate) use overlays::{paint_validation_modal, validation_spec, ValidationSpec};
 #[cfg(test)]
 pub(crate) use panels::PanelsFrame;
 #[cfg(test)]
 pub(crate) use physical::PhysicalFrame;
-#[cfg(test)]
-pub(crate) use physical::{
-    cell_visuals, mm_grid_lines, rack_geometry, CellSpec, ModuleSpec, PhysicalSpec, PortMark,
-};
 #[cfg(test)]
 pub(crate) use picker::PickerFrame;
 #[cfg(test)]
