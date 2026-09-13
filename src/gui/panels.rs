@@ -17,7 +17,7 @@
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
 use crate::patch::ComponentKind;
-use ratatui::style::Color;
+use crate::theme::Color;
 
 use super::physical::{paint_cell, CellSpec, ModuleSpec};
 

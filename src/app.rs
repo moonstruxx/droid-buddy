@@ -264,15 +264,35 @@ fn labels_file_path() -> Option<PathBuf> {
     Some(dir.join(LABELS_FILE_NAME))
 }
 
-use crossterm::terminal;
-use ratatui::layout::Rect;
-
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::favorites::FavoritesStore;
 use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind};
 use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
+
+/// Cell-grid rectangle (u16 columns/rows), the geometry handoff between the
+/// renderer and the handler's hit-testing (replaces the terminal stack's `Rect` after
+/// the native teardown). The egui surfaces work in pixels via `egui::Rect`;
+/// this is the app-level cell geometry `component_rects`/`pane_rects` carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl Rect {
+    pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
 use crate::layout;
 use crate::optimize::{CandidateOrdering, OptimizeScope};
 use crate::patch::Patch;
@@ -1690,10 +1710,7 @@ impl App {
     pub fn physical_main_area(&self) -> Rect {
         match self.physical_viewport {
             Some(rect) => rect,
-            None => {
-                let (w, h) = terminal::size().unwrap_or((80, 24));
-                Rect::new(0, 3, w, h.saturating_sub(6))
-            }
+            None => Rect::new(0, 3, 80, 24),
         }
     }
 

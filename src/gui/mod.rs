@@ -14,12 +14,32 @@
 //! without touching this shell.
 
 mod graph;
+mod overlays;
+mod panels;
 mod physical;
+mod picker;
+mod viewer;
 
 // The camera helpers are public API (`crate::gui::camera_pan` /
 // `crate::gui::camera_zoom_about`, used by `handler.rs`); `graph` stays a
 // private canvas module, so they are re-exported rather than named directly.
-pub use graph::{camera_pan, camera_zoom_about};
+pub(crate) use graph::{camera_pan, camera_zoom_about, paint_scene};
+#[cfg(test)]
+pub(crate) use graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
+#[cfg(test)]
+pub(crate) use overlays::{paint_validation_modal, validation_spec, ValidationSpec};
+#[cfg(test)]
+pub(crate) use panels::PanelsFrame;
+#[cfg(test)]
+pub(crate) use physical::PhysicalFrame;
+#[cfg(test)]
+pub(crate) use physical::{
+    cell_visuals, mm_grid_lines, rack_geometry, CellSpec, ModuleSpec, PhysicalSpec, PortMark,
+};
+#[cfg(test)]
+pub(crate) use picker::PickerFrame;
+#[cfg(test)]
+pub(crate) use viewer::ViewerFrame;
 
 use std::cell::RefCell;
 use std::fmt;
