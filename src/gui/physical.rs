@@ -278,7 +278,7 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
 /// when the cell is wide enough (port of `ui.rs::render_fader_track`).
 fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
     let rect = cell.rect;
-    let track_w = rect.width().min(10.0).max(2.0);
+    let track_w = rect.width().clamp(2.0, 10.0);
     let value = cell.fader_value.clamp(0.0, 1.0);
     let fill_h = (rect.height() * value).round().clamp(0.0, rect.height());
     let track = Rect::from_min_size(rect.min, egui::vec2(track_w, rect.height()));
@@ -523,7 +523,7 @@ pub(crate) fn mm_grid_lines(
         let (px, py, pw, _) = mapping.mm_to_screen(crate::physical::RectMm {
             x_mm: 0.0,
             y_mm: y,
-            w_mm: w_mm,
+            w_mm,
             h_mm: 0.0,
         });
         lines.push((
@@ -724,7 +724,7 @@ mod tests {
                 mark,
                 highlighted: false,
                 shift_color: None,
-                kind: comp.kind.clone(),
+                kind: comp.kind,
             });
         }
         let modules = geom

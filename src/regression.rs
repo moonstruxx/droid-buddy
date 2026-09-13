@@ -14,13 +14,13 @@ use crate::handler::key_modifiers;
 use crate::handler::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::Rect;
-use crate::app::{App, FocusSlot, SourceViewMode, ViewType, ViewerFocus};
-use crate::graph::{Cluster, Graph, GraphOptions, NodeId, TopologySeverity};
+use crate::app::{App, SourceViewMode, ViewerFocus};
+use crate::graph::{Cluster, Graph, GraphOptions};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
     local_resettle, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS, LOCAL_RADIUS,
 };
-use crate::patch::{ComponentState, Patch, ShiftGroup};
+use crate::patch::{Patch, ShiftGroup};
 
 // ── helpers ──────────────────────────────────────────────────────────────
 

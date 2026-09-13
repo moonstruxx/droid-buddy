@@ -104,11 +104,6 @@ mod windowed {
                 eprintln!("[warn] graph window open failed ({err})");
             }
         }
-
-        fn fail(&mut self, event_loop: &ActiveEventLoop, err: color_eyre::Report) {
-            self.error = Some(err);
-            event_loop.exit();
-        }
     }
 
     impl ApplicationHandler for AppHandler {
