@@ -62,8 +62,8 @@ mod windowed {
     use winit::window::WindowId;
 
     use droid_tui::app::{App, GraphWindowRequest};
-    use droid_tui::gui::GraphWindow;
-    use droid_tui::{config, handler};
+    use droid_tui::gui::{self, GraphWindow};
+    use droid_tui::{config, handler, theme};
 
     use super::seed_app;
 
@@ -104,11 +104,6 @@ mod windowed {
                 eprintln!("[warn] graph window open failed ({err})");
             }
         }
-
-        fn fail(&mut self, event_loop: &ActiveEventLoop, err: color_eyre::Report) {
-            self.error = Some(err);
-            event_loop.exit();
-        }
     }
 
     impl ApplicationHandler for AppHandler {
@@ -134,6 +129,29 @@ mod windowed {
             match event {
                 WindowEvent::CloseRequested => self.window.close(),
                 WindowEvent::RedrawRequested => {
+                    // Rebuild the scene from App state and push it before
+                    // painting so the window shows the current graph (the
+                    // loop owns both; `set_scene` no-ops on an unchanged
+                    // scene, so an idle loop never re-arms the redraw).
+                    if self.app.graph_camera.is_none() {
+                        // First-frame camera fit (bug: the window opened
+                        // black, painting the layered seed plane through the
+                        // identity camera): seed `App.graph_camera` when
+                        // unset, dependency-filter aware, and reuse it after
+                        // so pan/zoom survive.
+                        let fit: Vec<(f32, f32)> = if self.app.dependency_nodes.is_empty() {
+                            self.app.graph_positions.clone()
+                        } else {
+                            self.app
+                                .dependency_nodes
+                                .iter()
+                                .map(|&i| self.app.graph_positions[i])
+                                .collect()
+                        };
+                        self.app.graph_camera = Some(gui::graph_window_fit_camera(&fit));
+                    }
+                    let scene = gui::build_scene_spec(&self.app, theme::active());
+                    self.window.set_scene(scene.as_ref());
                     // The frame reports the window's input state; the loop
                     // owns `app`, so it maps the interactions here (D6: the
                     // loop acts on what it owns).

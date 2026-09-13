@@ -1,8 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::app::Rect;
-use egui::Rect as EguiRect;
-use egui::{Modifiers, PointerButton, Pos2, Vec2};
+use egui::{Modifiers, PointerButton};
 use winit::event::WindowEvent;
 use winit::keyboard::NamedKey;
 
@@ -167,10 +166,6 @@ fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn egui_rect_from_u16(x: u16, y: u16, w: u16, h: u16) -> EguiRect {
-    EguiRect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(w as f32, h as f32))
-}
-
 #[cfg(test)]
 pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::App) {
     if frame.skeleton_toggle {
@@ -289,7 +284,7 @@ pub fn handle_window_key_event(
     // from_winit_parts filters release events; presses convert to the neutral
     // shape and run the same dispatch as the terminal key path.
     KeyEvent::from_winit_parts(logical_key, state, modifiers)
-        .map_or(false, |key| handle_event(key, app))
+        .is_some_and(|key| handle_event(key, app))
 }
 
 use std::collections::HashMap;
@@ -560,9 +555,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
                 if app.graph_window_enabled {
-                    // `[gui] graph_window = true`: open the GPU graph window
-                    // instead of the terminal tile (gpu-graph-window D6); the
-                    // windowed loop in main.rs consumes the request next frame.
+                    // `[gui] graph_window = true`: build the graph and open
+                    // the GPU graph window instead of the terminal tile
+                    // (gpu-graph-window D6); the windowed loop in main.rs
+                    // consumes the request next frame. `build_graph_state`
+                    // (not `open_graph`) keeps the embedded tile closed.
+                    app.build_graph_state();
                     app.request_graph_window(GraphWindowRequest::Open);
                     app.prefix = None;
                     return false;
@@ -3095,7 +3093,24 @@ mod tests {
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert!(app.prefix.is_none());
     }
-
+    #[test]
+    fn gg_with_graph_window_enabled_builds_the_graph() {
+        // Regression (gpu-graph-window follow-up): with `[gui] graph_window =
+        // true`, `g g` must build the graph exactly like the embedded mode
+        // before recording the window request; previously the window stayed
+        // empty because the branch skipped the build. The terminal tile stays
+        // closed: the desktop window replaces it.
+        let mut app = app_with_fixture();
+        app.graph_window_enabled = true;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        let graph = app.graph.as_ref().expect("g g builds the graph");
+        assert!(!graph.nodes.is_empty());
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
+        assert!(app.prefix.is_none());
+        assert!(!app.showing_graph, "window replaces the terminal tile");
+        assert!(app.tile_stack.slots.is_empty());
+    }
     #[test]
     fn g_then_v_initial_position_bof_when_no_selection() {
         let mut app = app_with_source_navigation();
