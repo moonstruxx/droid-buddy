@@ -127,7 +127,7 @@ mod windowed {
 
     use droid_tui::app::{App, GraphWindowRequest};
     use droid_tui::gui::GraphWindow;
-    use droid_tui::ui::render;
+    use droid_tui::ui::{build_window_scene_spec, render};
     use droid_tui::{config, handler};
 
     use super::seed_app;
@@ -253,6 +253,12 @@ mod windowed {
             match event {
                 WindowEvent::CloseRequested => self.window.close(),
                 WindowEvent::RedrawRequested => {
+                    // Feed the window the freshly-derived scene spec each frame
+                    // (task 1.1/2.1): re-derive from live App state so a graph
+                    // rebuild, pan/zoom, or theme change never leaves the
+                    // window stale.
+                    let scene = build_window_scene_spec(&mut self.app);
+                    self.window.set_scene_if_changed(scene.as_ref());
                     // Task 3.1: the frame reports the window's input state;
                     // the loop owns `app`, so it maps the interactions here
                     // (D6: the loop acts on what it owns).
