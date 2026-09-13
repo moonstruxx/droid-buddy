@@ -8,8 +8,20 @@
 //! dispatches to each frame; the camera helpers (`camera_pan`,
 //! `camera_zoom_about`) are the window's bridge to `App::graph_camera`.
 
+use std::collections::HashMap;
+
 use super::{MarqueeSelection, WindowFrame};
-use crate::graph_render::{EdgeSpec, GraphCamera, SceneSpec};
+use crate::app::{App, GRAPH_WINDOW_NODE_H, GRAPH_WINDOW_NODE_W};
+use crate::graph::NodeKind;
+use crate::graph_render::{
+    CableKind, ClusterSpec, EdgeDiffState, EdgeSpec, GraphCamera, NodeSpec, SceneSpec, WorldBounds,
+};
+use crate::theme::Theme;
+
+/// Clamps a normalized ramp axis position into 0..1.
+fn clamp01(x: f32) -> f32 {
+    x.clamp(0.0, 1.0)
+}
 
 /// Draw one scene frame into the window canvas (design D3/D5): opaque
 /// background, cluster containers, then cables with direction arrows, then
@@ -201,6 +213,35 @@ pub fn camera_zoom_about(cam: &GraphCamera, factor: f32, anchor_px: (f32, f32)) 
     next.zoom_by(factor, (wx, wy));
     next
 }
+/// Availability the window fit frames the world into: the fixed design
+/// viewport (the loop owns the window; the old kitty renderer used the same
+/// 1280×800 canvas) minus one node frame so edge nodes never clip.
+const WINDOW_FIT_VIEWPORT_W: f32 = 1280.0;
+const WINDOW_FIT_VIEWPORT_H: f32 = 800.0;
+
+/// First-frame camera fit for the desktop graph window, seeded into
+/// `App::graph_camera` when it is still unset so the scene frames the whole
+/// graph instead of painting the layered seed plane off-viewport (bug: the
+/// window opened black). Reused afterwards through the `camera_pan` /
+/// `camera_zoom_about` mappings, so user pan/zoom survives. Dependency-filter
+/// aware via the caller's positions slice. Pure and window-free.
+pub fn graph_window_fit_camera(positions: &[(f32, f32)]) -> GraphCamera {
+    let node_w = crate::app::GRAPH_WINDOW_NODE_W;
+    let node_h = crate::app::GRAPH_WINDOW_NODE_H;
+    let avail_w = (WINDOW_FIT_VIEWPORT_W - node_w).max(1.0);
+    let avail_h = (WINDOW_FIT_VIEWPORT_H - node_h).max(1.0);
+    GraphCamera::fit_to_world(
+        WorldBounds::from_positions(positions),
+        (avail_w, avail_h),
+        WINDOW_FIT_MIN_NODE_PX,
+    )
+}
+
+/// Fit-zoom floor, preserved from the old window builder's
+/// `GRAPH_NODE_WIDTH as f32 * GRAPH_CELL_W_PX / 80.0` (22 × 8 / 80): a tiny
+/// ceiling that only keeps the fit from collapsing zoom below legibility on
+/// very large graphs.
+const WINDOW_FIT_MIN_NODE_PX: f32 = 2.2;
 
 /// Index of the `scene` node whose pixel frame contains `(px, py)`, first
 /// match wins (mirrors the terminal handler's hit-testing over the spec's own
@@ -556,6 +597,317 @@ fn paint_minimap(
         egui::StrokeKind::Inside,
     );
 }
+/// Ramp stops of the latency coloring scheme: `graph_edge_latency_0` is the
+/// coldest stop, `LATENCY_STOPS-1` the hottest (back edges land there).
+/// Shared by the legend painter and this builder's ramp formula
+/// `ramp[(latency / max) × (LATENCY_STOPS - 1)]`.
+pub const LATENCY_STOPS: usize = 5;
+
+/// Padded-out cluster containers: the union of member node rects grows by
+/// `CLUSTER_PAD` on every side so containers never touch the frames inside.
+const CLUSTER_PAD: f32 = 8.0;
+
+/// Body radius of a node frame.
+const NODE_RADIUS: f32 = 10.0;
+
+/// Stroke width of a cable edge.
+pub const EDGE_WIDTH: f32 = 2.0;
+
+/// Node title: the first occurrence of a single-instance circuit is the
+/// plain name; among repeated instances the first stays plain and later
+/// occurrences carry the zero-based index (`copy`, `copy (1)`, ...).
+fn instance_title(name: &str, index: usize, repeats: Option<usize>) -> String {
+    match repeats {
+        Some(n) if n > 1 && index > 0 => format!("{name} ({index})"),
+        _ => name.to_string(),
+    }
+}
+
+/// Midpoint control of a straight-degree Bézier: the exact center between
+/// `start` and `end`. `None` for degenerate (coincident-node) edges.
+fn edge_ctrl(start: (f32, f32), end: (f32, f32)) -> Option<(f32, f32)> {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    if dx.abs() < f32::EPSILON && dy.abs() < f32::EPSILON {
+        return None;
+    }
+    Some(((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0))
+}
+/// Builds the window scene spec from the current `App` graph state (design
+/// D3): nodes map through the shared `GraphCamera` (identity fallback when
+/// `App.graph_camera` is unset), edges resolve the full color-precedence
+/// chain, clusters become padded member unions. `None` when no graph exists
+/// or the positional state is inconsistent with the graph.
+pub fn build_scene_spec(app: &App, theme: &Theme) -> Option<SceneSpec> {
+    let graph = app.graph.as_ref()?;
+    if app.graph_positions.len() != graph.nodes.len() {
+        return None;
+    }
+    let camera = app.graph_camera.unwrap_or_default();
+    let circuit_store = app.current_circuit_store();
+
+    let diff = if app.diff_showing {
+        app.filtered_report()
+    } else {
+        None
+    };
+
+    let filtered = !app.dependency_nodes.is_empty();
+    let node_visible = |idx: usize| !filtered || app.dependency_nodes.contains(&idx);
+    let edge_visible = |idx: usize| !filtered || app.dependency_edges.contains(&idx);
+
+    // Repeated circuit instances get the numbered title suffix; non-circuit
+    // nodes always render their plain name.
+    let mut circuit_counts: HashMap<String, usize> = HashMap::new();
+    for node in &graph.nodes {
+        if node.kind == NodeKind::Circuit {
+            *circuit_counts.entry(node.circuit.clone()).or_default() += 1;
+        }
+    }
+
+    let mut nodes = Vec::with_capacity(graph.nodes.len());
+    let mut kept: HashMap<usize, usize> = HashMap::new();
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if !node_visible(i) {
+            continue;
+        }
+        let (px, py) = camera.world_to_pixel(app.graph_positions[i].0, app.graph_positions[i].1);
+        let disabled = app.disabled_circuits.contains(&node.id);
+        let highlighted = app.hovered_graph_node == Some(i);
+        let selected = app.selected_circuit == Some(node.id.clone());
+        let diff_marked = diff.as_ref().map(|report| {
+            report.added_nodes.contains(&node.id)
+                || report.removed_nodes.contains(&node.id)
+                || report.changed_nodes.iter().any(|c| c.id == node.id)
+        });
+
+        let title = circuit_store
+            .get(&node.id)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if node.kind == NodeKind::Circuit {
+                    instance_title(
+                        &node.circuit,
+                        node.instance_index,
+                        circuit_counts.get(&node.circuit).copied(),
+                    )
+                } else {
+                    node.circuit.clone()
+                }
+            });
+        let title = if diff_marked == Some(true) {
+            format!("{title} *")
+        } else {
+            title
+        };
+
+        // Border/title token chain: dim beats highlight beats kind frames.
+        let dim = theme.rgb(theme.graph_node_dim);
+        let (border, label_color, border_width) = if disabled {
+            (dim, dim, 1.0)
+        } else if highlighted || selected {
+            (
+                theme.rgb(theme.graph_node_highlight),
+                theme.rgb(theme.graph_node_highlight),
+                3.0,
+            )
+        } else {
+            let (b, t) = match node.kind {
+                NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
+                NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
+                NodeKind::OutputJack => {
+                    (theme.graph_node_jack_output, theme.graph_node_jack_output)
+                }
+                NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
+            };
+            (theme.rgb(b), theme.rgb(t), 1.0)
+        };
+
+        let idx = nodes.len();
+        kept.insert(i, idx);
+        nodes.push(NodeSpec {
+            x: px,
+            y: py,
+            w: GRAPH_WINDOW_NODE_W,
+            h: GRAPH_WINDOW_NODE_H,
+            radius: NODE_RADIUS,
+            fill: theme.rgb(theme.graph_node_fill),
+            border,
+            border_width,
+            label: title,
+            label_color,
+            circuit: node.circuit.clone(),
+            instance_index: node.instance_index,
+            input_port: false,
+            output_port: false,
+        });
+    }
+
+    let latency = if app.latency_coloring {
+        graph.latency.as_ref()
+    } else {
+        None
+    };
+
+    let mut edges = Vec::with_capacity(graph.edges.len());
+    for (i, edge) in graph.edges.iter().enumerate() {
+        if !edge_visible(i) {
+            continue;
+        }
+        let Some(s) = edge.source_index(&graph.nodes) else {
+            continue;
+        };
+        let Some(t) = edge.sink_index(&graph.nodes) else {
+            continue;
+        };
+        let (Some(&si), Some(&ti)) = (kept.get(&s), kept.get(&t)) else {
+            continue;
+        };
+        let start_node = &nodes[si];
+        let end_node = &nodes[ti];
+        let start = (
+            start_node.x + start_node.w,
+            start_node.y + start_node.h / 2.0,
+        );
+        let end = (end_node.x, end_node.y + end_node.h / 2.0);
+        let Some(ctrl) = edge_ctrl(start, end) else {
+            continue;
+        };
+
+        let incident_disabled = app.disabled_circuits.contains(&graph.nodes[s].id);
+        let incident_unselected = graph.not_selected.contains(&graph.nodes[s].section_index)
+            || graph.not_selected.contains(&graph.nodes[t].section_index);
+        let has_error = graph
+            .validation
+            .iter()
+            .any(|issue| issue.cable == edge.cable);
+
+        let kind = crate::graph_render::cable_kind(graph, &edge.cable);
+        let mut diff_state = None;
+        if let Some(report) = &diff {
+            if report.added_cables.contains(&edge.cable) {
+                diff_state = Some(EdgeDiffState::Added);
+            } else if report.removed_cables.contains(&edge.cable) {
+                diff_state = Some(EdgeDiffState::Removed);
+            } else if report.changed_cables.iter().any(|c| c.cable == edge.cable) {
+                diff_state = Some(EdgeDiffState::Changed);
+            }
+        }
+
+        let mut ramp = None;
+        let mut back_edge = false;
+        if let Some(data) = latency {
+            if let Some(entry) = data.edges.iter().find(|l| l.edge_index == i) {
+                back_edge = entry.is_back_edge;
+                let stop = if entry.is_back_edge {
+                    LATENCY_STOPS - 1
+                } else {
+                    let den = data.summary.max.max(f32::EPSILON);
+                    (clamp01(entry.latency / den) * (LATENCY_STOPS - 1) as f32).round() as usize
+                };
+                ramp = Some(stop);
+            }
+        }
+
+        let color = if has_error {
+            theme.rgb(theme.graph_edge_error)
+        } else if incident_disabled || incident_unselected {
+            theme.rgb(theme.graph_edge_dim)
+        } else if let Some(state) = diff_state {
+            match state {
+                EdgeDiffState::Added | EdgeDiffState::Changed => {
+                    theme.rgb(theme.graph_edge_diff_added)
+                }
+                EdgeDiffState::Removed => theme.rgb(theme.graph_edge_diff_removed),
+            }
+        } else if let Some(stop) = ramp {
+            let stops = [
+                theme.graph_edge_latency_0,
+                theme.graph_edge_latency_1,
+                theme.graph_edge_latency_2,
+                theme.graph_edge_latency_3,
+                theme.graph_edge_latency_4,
+            ];
+            theme.rgb(stops[stop.min(LATENCY_STOPS - 1)])
+        } else if edge.cable.starts_with("_REG:") {
+            theme.rgb(theme.graph_edge_register)
+        } else {
+            match kind {
+                CableKind::Control => theme.rgb(theme.graph_edge_control),
+                CableKind::Audio => theme.rgb(theme.graph_edge_audio),
+                CableKind::Midi => theme.rgb(theme.graph_edge_midi),
+                CableKind::Unknown => theme.rgb(theme.graph_edge_unknown),
+            }
+        };
+
+        nodes[si].output_port = true;
+        nodes[ti].input_port = true;
+        edges.push(EdgeSpec {
+            start,
+            end,
+            ctrl,
+            color,
+            width: EDGE_WIDTH,
+            kind,
+            error: has_error,
+            dim: incident_disabled || incident_unselected,
+            diff: diff_state,
+            latency: ramp.map(|ramp_stop| crate::graph_render::EdgeLatency {
+                ramp_stop,
+                back_edge,
+            }),
+        });
+    }
+
+    // Cluster containers are padded unions of the kept member node rects in
+    // the un-filtered graph; dependency-subset rendering skips them because
+    // the member index mapping does not match the full-graph range.
+    let clusters = if filtered {
+        Vec::new()
+    } else {
+        graph
+            .clusters
+            .iter()
+            .filter_map(|cluster| {
+                let members: Vec<usize> = (cluster.section_range.start..cluster.section_range.end)
+                    .filter_map(|i| kept.get(&i).copied())
+                    .collect();
+                if members.is_empty() {
+                    return None;
+                }
+                let mut x0 = f32::INFINITY;
+                let mut y0 = f32::INFINITY;
+                let mut x1 = f32::NEG_INFINITY;
+                let mut y1 = f32::NEG_INFINITY;
+                for &m in &members {
+                    let n = &nodes[m];
+                    x0 = x0.min(n.x);
+                    y0 = y0.min(n.y);
+                    x1 = x1.max(n.x + n.w);
+                    y1 = y1.max(n.y + n.h);
+                }
+                Some(ClusterSpec {
+                    x: x0 - CLUSTER_PAD,
+                    y: y0 - CLUSTER_PAD,
+                    w: (x1 + CLUSTER_PAD) - (x0 - CLUSTER_PAD),
+                    h: (y1 + CLUSTER_PAD) - (y0 - CLUSTER_PAD),
+                    title: cluster.title.clone(),
+                    border: theme.rgb(theme.graph_cluster_border),
+                    title_color: theme.rgb(theme.graph_cluster_title),
+                    member_indices: members,
+                })
+            })
+            .collect()
+    };
+
+    Some(SceneSpec {
+        background: theme.rgb(theme.graph_canvas_bg),
+        nodes,
+        edges,
+        clusters,
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -812,5 +1164,480 @@ mod tests {
         };
         assert_eq!(nearest_node_at(&s, 210.0, 40.0), Some(1));
         assert_eq!(nearest_node_at(&s, 200.0, 40.0), Some(0));
+    }
+}
+
+/// Headless tests for `build_scene_spec` (task 2.4): geometry, camera
+/// mapping, styling precedence, diff/latency states, and cluster bounds.
+#[cfg(test)]
+mod scene_builder_tests {
+    use super::*;
+    use std::path::Path;
+
+    use crate::app::LabelStore;
+    use crate::diff::{ChangedCable, ChangedNode, DiffReport};
+    use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
+    use crate::latency::{EdgeLatency as ModelEdgeLatency, LatencyData, LatencySummary};
+    use crate::patch::NodeId;
+
+    fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(name, idx),
+            kind: NodeKind::Circuit,
+            circuit: name.to_string(),
+            instance_index: idx,
+            section_index: section,
+        }
+    }
+
+    fn scene_app(graph: Graph, positions: &[(f32, f32)]) -> App {
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = positions.to_vec();
+        app
+    }
+
+    /// Two chained circuits: `clocktool` sources `_CLK`, `osc` sinks it.
+    fn chain_app() -> App {
+        let graph = Graph {
+            nodes: vec![circuit_node("clocktool", 0, 0), circuit_node("osc", 0, 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            ..Graph::default()
+        };
+        scene_app(graph, &[(10.0, 20.0), (260.0, 20.0)])
+    }
+
+    fn theme() -> &'static Theme {
+        crate::theme::active()
+    }
+
+    fn spec(app: &App) -> SceneSpec {
+        build_scene_spec(app, theme()).expect("scene present")
+    }
+
+    #[test]
+    fn scene_requires_graph_and_aligned_positions() {
+        assert!(build_scene_spec(&App::new(), theme()).is_none());
+        let graph = Graph {
+            nodes: vec![circuit_node("copy", 0, 0)],
+            ..Graph::default()
+        };
+        let app = scene_app(graph, &[]);
+        assert!(build_scene_spec(&app, theme()).is_none());
+    }
+
+    #[test]
+    fn scene_maps_positions_identity_with_fallback_camera() {
+        let app = chain_app();
+        let s = spec(&app);
+        assert_eq!(s.nodes.len(), 2);
+        assert_eq!(s.nodes[0].x, 10.0);
+        assert_eq!(s.nodes[0].y, 20.0);
+        assert_eq!(s.nodes[0].w, GRAPH_WINDOW_NODE_W);
+        assert_eq!(s.nodes[0].h, GRAPH_WINDOW_NODE_H);
+    }
+
+    #[test]
+    fn scene_maps_positions_through_camera() {
+        let mut app = chain_app();
+        app.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (10.0, 20.0),
+        });
+        let s = spec(&app);
+        // world 10 -> 2*10 - 10 = 10; world 20 -> 2*20 - 20 = 20.
+        assert_eq!(s.nodes[0].x, 10.0);
+        assert_eq!(s.nodes[0].y, 20.0);
+        // world 260 -> 2*260 - 10 = 510.
+        assert_eq!(s.nodes[1].x, 510.0);
+    }
+
+    #[test]
+    fn scene_camera_zoom_scales_node_spacing() {
+        let identity = spec(&chain_app());
+        let mut zoomed = chain_app();
+        zoomed.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+        });
+        let z = spec(&zoomed);
+        assert_eq!(z.nodes[0].w, GRAPH_WINDOW_NODE_W);
+        assert_eq!(
+            z.nodes[1].x - z.nodes[0].x,
+            (identity.nodes[1].x - identity.nodes[0].x) * 2.0
+        );
+    }
+
+    #[test]
+    fn scene_node_identity_and_ports_from_incidence() {
+        let s = spec(&chain_app());
+        assert_eq!(s.nodes[0].circuit, "clocktool");
+        assert_eq!(s.nodes[0].instance_index, 0);
+        assert!(!s.nodes[0].input_port);
+        assert!(s.nodes[0].output_port);
+        assert!(s.nodes[1].input_port);
+        assert!(!s.nodes[1].output_port);
+    }
+
+    #[test]
+    fn scene_labels_number_repeated_instances() {
+        let graph = Graph {
+            nodes: vec![circuit_node("copy", 0, 0), circuit_node("copy", 1, 1)],
+            ..Graph::default()
+        };
+        let s = spec(&scene_app(graph, &[(0.0, 0.0), (260.0, 0.0)]));
+        assert_eq!(s.nodes[0].label, "copy");
+        assert_eq!(s.nodes[1].label, "copy (1)");
+    }
+
+    #[test]
+    fn scene_labels_adopt_circuit_label_override() {
+        let mut app = chain_app();
+        app.current_patch_path = Some(Path::new("fixture.ini").to_path_buf());
+        app.label_store
+            .patch_labels_mut(Path::new("fixture.ini"))
+            .circuits
+            .insert(
+                LabelStore::encode_node_id("clocktool", 0),
+                "Berlin Clock".into(),
+            );
+        let s = spec(&app);
+        assert_eq!(s.nodes[0].label, "Berlin Clock");
+    }
+
+    #[test]
+    fn scene_node_kind_frames_use_kind_tokens() {
+        let graph = Graph {
+            nodes: vec![
+                circuit_node("copy", 0, 0),
+                GraphNode {
+                    id: NodeId::Controller("b32".into(), 0),
+                    kind: NodeKind::Controller,
+                    circuit: "b32".into(),
+                    instance_index: 0,
+                    section_index: 1,
+                },
+            ],
+            ..Graph::default()
+        };
+        let app = scene_app(graph, &[(0.0, 0.0), (260.0, 0.0)]);
+        let s = spec(&app);
+        assert_eq!(
+            s.nodes[1].border,
+            theme().rgb(theme().graph_node_controller)
+        );
+        assert_eq!(s.nodes[0].border, theme().rgb(theme().graph_node_border));
+    }
+
+    #[test]
+    fn scene_hover_and_selection_highlight_nodes() {
+        let mut app = chain_app();
+        app.hovered_graph_node = Some(1);
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].border_width, 3.0);
+        assert_eq!(s.nodes[1].border, theme().rgb(theme().graph_node_highlight));
+
+        let mut app = chain_app();
+        app.selected_circuit = Some(NodeId::circuit("osc", 0));
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].border, theme().rgb(theme().graph_node_highlight));
+    }
+
+    #[test]
+    fn scene_disabled_nodes_dim_and_edges_dim_but_not_over_error() {
+        let mut app = chain_app();
+        app.disabled_circuits
+            .insert(NodeId::circuit("clocktool", 0));
+        let s = spec(&app);
+        assert_eq!(s.nodes[0].border, theme().rgb(theme().graph_node_dim));
+        assert!(s.edges[0].dim);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_dim));
+
+        // The red error highlight survives dim.
+        let mut app = chain_app();
+        app.disabled_circuits
+            .insert(NodeId::circuit("clocktool", 0));
+        if let Some(graph) = app.graph.as_mut() {
+            graph.validation.push(TopologyIssue {
+                cable: "_CLK".into(),
+                severity: TopologySeverity::Error,
+                message: "n to 1".into(),
+            });
+        }
+        let s = spec(&app);
+        assert!(s.edges[0].error);
+        assert!(s.edges[0].dim);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_error));
+    }
+
+    #[test]
+    fn scene_edge_geometry_right_center_to_left_center_midpoint_ctrl() {
+        let s = spec(&chain_app());
+        let e = &s.edges[0];
+        let (src, dst) = (&s.nodes[0], &s.nodes[1]);
+        assert_eq!(e.start, (src.x + src.w, src.y + src.h / 2.0));
+        assert_eq!(e.end, (dst.x, dst.y + dst.h / 2.0));
+        assert_eq!(
+            e.ctrl,
+            ((e.start.0 + e.end.0) / 2.0, (e.start.1 + e.end.1) / 2.0)
+        );
+    }
+
+    #[test]
+    fn scene_edges_skip_zero_length_and_unknown_endpoints() {
+        let graph = Graph {
+            nodes: vec![circuit_node("copy", 0, 0), circuit_node("copy", 1, 1)],
+            edges: vec![
+                // Coincident nodes: zero-length edge.
+                GraphEdge {
+                    cable: "_A".into(),
+                    source: NodeId::circuit("copy", 0),
+                    sink: NodeId::circuit("copy", 1),
+                },
+                // Self-loop at one node: also zero-length.
+                GraphEdge {
+                    cable: "_B".into(),
+                    source: NodeId::circuit("copy", 0),
+                    sink: NodeId::circuit("copy", 0),
+                },
+                // Unknown sink: dropped.
+                GraphEdge {
+                    cable: "_C".into(),
+                    source: NodeId::circuit("copy", 0),
+                    sink: NodeId::circuit("ghost", 0),
+                },
+            ],
+            ..Graph::default()
+        };
+        let app = scene_app(graph, &[(0.0, 0.0), (0.0, 0.0)]);
+        let s = spec(&app);
+        // The unknown-sink edge is dropped; coincident and self-loop edges
+        // keep their (rect-rim) geometry: start is the source right-rim, end
+        // the sink left-rim, distinct spans.
+        assert_eq!(s.edges.len(), 2);
+        assert_eq!(s.edges[0].start.0 - s.edges[0].end.0, GRAPH_WINDOW_NODE_W);
+        assert!(s.nodes[0].output_port);
+        assert!(s.nodes[0].input_port);
+    }
+
+    #[test]
+    fn scene_filtered_subset_drops_nodes_edges_and_containers() {
+        let graph = Graph {
+            nodes: vec![
+                circuit_node("clocktool", 0, 0),
+                circuit_node("osc", 0, 1),
+                circuit_node("vca", 0, 2),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".into(),
+                    source: NodeId::circuit("clocktool", 0),
+                    sink: NodeId::circuit("osc", 0),
+                },
+                GraphEdge {
+                    cable: "_AUD".into(),
+                    source: NodeId::circuit("osc", 0),
+                    sink: NodeId::circuit("vca", 0),
+                },
+            ],
+            clusters: vec![Cluster {
+                title: "Core".into(),
+                section_range: 0..3,
+            }],
+            ..Graph::default()
+        };
+        let mut app = scene_app(graph, &[(0.0, 0.0), (260.0, 0.0), (520.0, 0.0)]);
+        app.dependency_nodes = vec![0, 1];
+        app.dependency_edges = vec![0];
+        let s = spec(&app);
+        assert_eq!(s.nodes.len(), 2);
+        assert_eq!(s.edges.len(), 1);
+        assert!(s.clusters.is_empty());
+        assert_eq!(s.nodes[0].circuit, "clocktool");
+    }
+
+    #[test]
+    fn scene_edge_kind_classification() {
+        assert_eq!(CableKind::from_circuit("clocktool"), CableKind::Control);
+        assert_eq!(CableKind::from_circuit("osc"), CableKind::Audio);
+        assert_eq!(CableKind::from_circuit("notesequencer"), CableKind::Midi);
+
+        let s = spec(&chain_app());
+        assert_eq!(s.edges[0].kind, CableKind::Control);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_control));
+    }
+
+    #[test]
+    fn scene_edge_diff_colors_added_removed_changed() {
+        let mut app = chain_app();
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            added_cables: vec!["_CLK".into()],
+            ..Default::default()
+        });
+        let s = spec(&app);
+        assert_eq!(s.edges[0].diff, Some(EdgeDiffState::Added));
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_diff_added));
+
+        let mut app = chain_app();
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            removed_cables: vec!["_CLK".into()],
+            ..Default::default()
+        });
+        let s = spec(&app);
+        assert_eq!(s.edges[0].diff, Some(EdgeDiffState::Removed));
+        assert_eq!(
+            s.edges[0].color,
+            theme().rgb(theme().graph_edge_diff_removed)
+        );
+
+        let mut app = chain_app();
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            changed_cables: vec![ChangedCable {
+                cable: "_CLK".into(),
+                old_sources: vec![],
+                new_sources: vec!["_NEW".into()],
+                old_sinks: vec![],
+                new_sinks: vec![],
+            }],
+            ..Default::default()
+        });
+        let s = spec(&app);
+        assert_eq!(s.edges[0].diff, Some(EdgeDiffState::Changed));
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_diff_added));
+    }
+
+    #[test]
+    fn scene_edge_latency_ramp_and_hottest_back_edge() {
+        let mut app = chain_app();
+        app.latency_coloring = true;
+        if let Some(graph) = app.graph.as_mut() {
+            graph.latency = Some(LatencyData {
+                edges: vec![ModelEdgeLatency {
+                    edge_index: 0,
+                    latency: 0.5,
+                    is_back_edge: false,
+                }],
+                summary: LatencySummary {
+                    avg: 0.5,
+                    max: 1.0,
+                    back_edge_count: 0,
+                },
+            });
+        }
+        let s = spec(&app);
+        // 0.5 of max over 5 stops lands on stop 2.
+        assert_eq!(s.edges[0].latency.as_ref().unwrap().ramp_stop, 2);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_latency_2));
+
+        let mut app = chain_app();
+        app.latency_coloring = true;
+        if let Some(graph) = app.graph.as_mut() {
+            graph.latency = Some(LatencyData {
+                edges: vec![ModelEdgeLatency {
+                    edge_index: 0,
+                    latency: 0.5,
+                    is_back_edge: true,
+                }],
+                summary: LatencySummary {
+                    avg: 0.5,
+                    max: 1.0,
+                    back_edge_count: 1,
+                },
+            });
+        }
+        let s = spec(&app);
+        let l = s.edges[0].latency.as_ref().unwrap();
+        assert_eq!(l.ramp_stop, LATENCY_STOPS - 1);
+        assert!(l.back_edge);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_latency_4));
+    }
+
+    #[test]
+    fn scene_edge_register_token_beats_kind() {
+        let mut app = chain_app();
+        if let Some(graph) = app.graph.as_mut() {
+            graph.edges[0].cable = "_REG:_VAR".into();
+        }
+        let s = spec(&app);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_register));
+    }
+
+    #[test]
+    fn scene_diff_node_marker_and_no_diff_without_overlay() {
+        let mut app = chain_app();
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("osc", 0)],
+            ..Default::default()
+        });
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].label, "osc *");
+
+        // Without the overlay the same report leaves labels untouched.
+        let mut app = chain_app();
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("osc", 0)],
+            ..Default::default()
+        });
+        app.diff_showing = false;
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].label, "osc");
+    }
+
+    #[test]
+    fn scene_cluster_bounds_padded_union_with_title() {
+        let graph = Graph {
+            nodes: vec![circuit_node("copy", 0, 0), circuit_node("mixer", 0, 1)],
+            clusters: vec![Cluster {
+                title: "Core".into(),
+                section_range: 0..2,
+            }],
+            ..Graph::default()
+        };
+        let s = spec(&scene_app(graph, &[(100.0, 100.0), (260.0, 60.0)]));
+        assert_eq!(s.clusters.len(), 1);
+        let c = &s.clusters[0];
+        assert_eq!(c.title, "Core");
+        assert_eq!(c.member_indices, vec![0, 1]);
+        assert_eq!(c.x, 100.0 - CLUSTER_PAD);
+        assert_eq!(c.y, 60.0 - CLUSTER_PAD);
+        assert_eq!(c.x + c.w, 260.0 + GRAPH_WINDOW_NODE_W + CLUSTER_PAD);
+        assert_eq!(c.border, theme().rgb(theme().graph_cluster_border));
+        assert_eq!(c.title_color, theme().rgb(theme().graph_cluster_title));
+    }
+
+    #[test]
+    fn scene_background_canvas_token_and_shape_counts() {
+        let s = spec(&chain_app());
+        assert_eq!(s.background, theme().rgb(theme().graph_canvas_bg));
+        assert_eq!(s.nodes.len(), 2);
+        assert_eq!(s.edges.len(), 1);
+        assert!(s.clusters.is_empty());
+        // The painter consumes resolved RGB only (design D3): the same invariants the
+        // outer `tests` module asserts against synthetic scenes hold here for built ones.
+        let _ = ChangedNode {
+            id: NodeId::circuit("osc", 0),
+            changed_params: vec![],
+        };
+    }
+}
+#[cfg(test)]
+// Small fit test: the camera frames a spread world and carries a finite
+// zoom, so the seeded scene is visible in the window.
+mod fit_tests {
+    #[test]
+    fn graph_window_fit_camera_frames_a_spread_world() {
+        let positions = vec![(0.0, 0.0), (160.0, 0.0), (320.0, 120.0)];
+        let camera = super::graph_window_fit_camera(&positions);
+        assert!(camera.zoom.is_finite());
+        assert!(camera.zoom > 0.0);
+        assert!(camera.pan.0.is_finite() && camera.pan.1.is_finite());
     }
 }

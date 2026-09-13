@@ -2369,11 +2369,7 @@ impl App {
         }
     }
 
-    /// Build the signal-flow graph from the current patch and run a fresh full
-    /// solve, storing frozen positions, then open the graph view. With no patch
-    /// loaded the graph is empty but the view still opens so the renderer can
-    /// show the empty-patch message (design D7: `g g` works either way).
-    pub fn open_graph(&mut self) {
+    pub fn build_graph_state(&mut self) {
         let graph = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
@@ -2408,9 +2404,13 @@ impl App {
         self.graph_camera = None;
         self.graph_zoom_preset = 5;
         self.graph_canvas_px = None;
+        self.emit_graph_built();
+    }
+
+    pub fn open_graph(&mut self) {
+        self.build_graph_state();
         self.showing_graph = true;
         self.tile_stack.open(ViewType::Graph);
-        self.emit_graph_built();
     }
 
     /// Queue a GPU-graph-window action for the windowed run-loop

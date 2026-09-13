@@ -555,9 +555,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
                 if app.graph_window_enabled {
-                    // `[gui] graph_window = true`: open the GPU graph window
-                    // instead of the terminal tile (gpu-graph-window D6); the
-                    // windowed loop in main.rs consumes the request next frame.
+                    // `[gui] graph_window = true`: build the graph and open
+                    // the GPU graph window instead of the terminal tile
+                    // (gpu-graph-window D6); the windowed loop in main.rs
+                    // consumes the request next frame. `build_graph_state`
+                    // (not `open_graph`) keeps the embedded tile closed.
+                    app.build_graph_state();
                     app.request_graph_window(GraphWindowRequest::Open);
                     app.prefix = None;
                     return false;
@@ -3090,7 +3093,24 @@ mod tests {
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert!(app.prefix.is_none());
     }
-
+    #[test]
+    fn gg_with_graph_window_enabled_builds_the_graph() {
+        // Regression (gpu-graph-window follow-up): with `[gui] graph_window =
+        // true`, `g g` must build the graph exactly like the embedded mode
+        // before recording the window request; previously the window stayed
+        // empty because the branch skipped the build. The terminal tile stays
+        // closed: the desktop window replaces it.
+        let mut app = app_with_fixture();
+        app.graph_window_enabled = true;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        let graph = app.graph.as_ref().expect("g g builds the graph");
+        assert!(!graph.nodes.is_empty());
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
+        assert!(app.prefix.is_none());
+        assert!(!app.showing_graph, "window replaces the terminal tile");
+        assert!(app.tile_stack.slots.is_empty());
+    }
     #[test]
     fn g_then_v_initial_position_bof_when_no_selection() {
         let mut app = app_with_source_navigation();
