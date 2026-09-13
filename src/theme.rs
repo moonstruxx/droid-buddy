@@ -67,18 +67,24 @@ pub struct Theme {
     pub minimap_modifier_exact: Color,
     pub minimap_combined: Color,
     pub graph_node_border: Color,
+    pub graph_node_title: Color,
     pub graph_cluster_border: Color,
+    pub graph_cluster_title: Color,
     /// Background of the kitty-gfx graph canvas (design D9): the image is
     /// opaque (`f=32`, design D5), so this token paints the whole graph surface
     /// under the nodes and cables. `Black` blends with the terminal-default
     /// dark background the box-drawing path inherits, so the image reads as
     /// the same surface, not a band.
     pub graph_canvas_bg: Color,
+    /// Body fill of a graph node in the egui window path. A muted panel under
+    /// the border and title.
+    pub graph_node_fill: Color,
     /// Cable edge color by inferred kind (design D8): control, audio, midi,
-    /// plus the topology-error highlight.
+    /// unknown, plus the topology-error highlight.
     pub graph_edge_control: Color,
     pub graph_edge_audio: Color,
     pub graph_edge_midi: Color,
+    pub graph_edge_unknown: Color,
     pub graph_edge_error: Color,
     pub graph_node_highlight: Color,
     pub graph_node_dim: Color,
@@ -86,6 +92,26 @@ pub struct Theme {
     pub graph_edge_dim: Color,
     pub graph_edge_diff_added: Color,
     pub graph_edge_diff_removed: Color,
+    /// Per-kind node frame tokens: controller and jack nodes render with
+    /// distinct border/title colors so the graph surface distinguishes node
+    /// kinds at a glance.
+    pub graph_node_controller: Color,
+    pub graph_node_jack_input: Color,
+    pub graph_node_jack_output: Color,
+    /// Register-edge token: `_REG:`-prefixed cables use this color instead of
+    /// the cable-kind-based color.
+    pub graph_edge_register: Color,
+    /// Cable latency ramp (design D2): 5 cold→hot stops used to color
+    /// non-error cables by forward-loop latency when `App.latency_coloring` is
+    /// on. `graph_edge_latency_0` is the lowest-latency end, `_4` the hottest
+    /// (back-edge) end.
+    pub graph_edge_latency_0: Color,
+    pub graph_edge_latency_1: Color,
+    pub graph_edge_latency_2: Color,
+    pub graph_edge_latency_3: Color,
+    pub graph_edge_latency_4: Color,
+    /// Descriptive text color for the graph latency legend/status line.
+    pub graph_edge_latency_legend: Color,
     /// Physical skeleton reference (design D7): the module outline, drawn
     /// with its own token so the skeleton render stops borrowing graph tokens.
     pub physical_skeleton_module_outline: Color,
@@ -148,11 +174,15 @@ impl Theme {
             minimap_modifier_exact: Color::Magenta,
             minimap_combined: Color::Magenta,
             graph_node_border: Color::White,
+            graph_node_title: Color::Yellow,
             graph_cluster_border: Color::Blue,
+            graph_cluster_title: Color::Blue,
             graph_canvas_bg: Color::Black,
+            graph_node_fill: Color::DarkGray,
             graph_edge_control: Color::Cyan,
             graph_edge_audio: Color::Green,
             graph_edge_midi: Color::Magenta,
+            graph_edge_unknown: Color::DarkGray,
             graph_edge_error: Color::Red,
             graph_node_highlight: Color::Yellow,
             graph_node_dim: Color::Gray,
@@ -160,6 +190,21 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::Green,
             graph_edge_diff_removed: Color::Magenta,
+            // Per-kind node frames: controller green, jack input cyan, jack
+            // output green (same family as cv_out).
+            graph_node_controller: Color::Green,
+            graph_node_jack_input: Color::Cyan,
+            graph_node_jack_output: Color::Green,
+            // Register edges: muted dark-gray so they recede behind
+            // signal-path cables.
+            graph_edge_register: Color::DarkGray,
+            // Cold (blue) → hot (red) latency ramp through the ANSI-16 hues.
+            graph_edge_latency_0: Color::Blue,
+            graph_edge_latency_1: Color::Cyan,
+            graph_edge_latency_2: Color::Green,
+            graph_edge_latency_3: Color::Yellow,
+            graph_edge_latency_4: Color::Red,
+            graph_edge_latency_legend: Color::Blue,
             physical_skeleton_module_outline: Color::White,
             validation_error: Color::Red,
             validation_warning: Color::Yellow,
@@ -208,13 +253,17 @@ impl Theme {
             minimap_modifier_exact: Color::Reset,
             minimap_combined: Color::Reset,
             graph_node_border: Color::Reset,
+            graph_node_title: Color::Reset,
             graph_cluster_border: Color::Reset,
+            graph_cluster_title: Color::Reset,
             // `Reset` would map to white via the rgb hop, wrong for a dark
             // canvas; Black keeps the opaque image dark on any terminal.
             graph_canvas_bg: Color::Black,
+            graph_node_fill: Color::DarkGray,
             graph_edge_control: Color::Reset,
             graph_edge_audio: Color::Reset,
             graph_edge_midi: Color::Reset,
+            graph_edge_unknown: Color::Reset,
             graph_edge_error: Color::Reset,
             graph_node_highlight: Color::Reset,
             graph_node_dim: Color::Reset,
@@ -222,6 +271,20 @@ impl Theme {
             graph_edge_dim: Color::Reset,
             graph_edge_diff_added: Color::Gray,
             graph_edge_diff_removed: Color::DarkGray,
+            // Per-kind node frames: all Reset (matching existing graph tokens
+            // in the terminal palette).
+            graph_node_controller: Color::Reset,
+            graph_node_jack_input: Color::Reset,
+            graph_node_jack_output: Color::Reset,
+            // Register edges: Reset (matching the terminal palette's
+            // deferral to the user's terminal).
+            graph_edge_register: Color::Reset,
+            graph_edge_latency_0: Color::Reset,
+            graph_edge_latency_1: Color::Reset,
+            graph_edge_latency_2: Color::Reset,
+            graph_edge_latency_3: Color::Reset,
+            graph_edge_latency_4: Color::Reset,
+            graph_edge_latency_legend: Color::Reset,
             physical_skeleton_module_outline: Color::Reset,
             validation_error: Color::Reset,
             validation_warning: Color::Reset,
@@ -277,16 +340,20 @@ impl Theme {
             minimap_modifier_exact: Color::White,
             minimap_combined: Color::Gray,
             graph_node_border: Color::White,
+            graph_node_title: Color::White,
             graph_cluster_border: Color::White,
+            graph_cluster_title: Color::Gray,
             // Grayscale contrast ladder for the image path: canvas Black <
             // node fill DarkGray < border White.
             graph_canvas_bg: Color::Black,
+            graph_node_fill: Color::DarkGray,
             // The four edge kinds plus error must stay pairwise distinct in mono:
             // type/severity is carried by color alone. Only four gray shades exist,
             // so `unknown` falls back to the terminal default (Reset) as neutral.
             graph_edge_control: Color::White,
             graph_edge_audio: Color::Gray,
             graph_edge_midi: Color::DarkGray,
+            graph_edge_unknown: Color::Reset,
             graph_edge_error: Color::Black,
             graph_node_highlight: Color::White,
             graph_node_dim: Color::Black,
@@ -294,6 +361,25 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::White,
             graph_edge_diff_removed: Color::Gray,
+            // Per-kind node frames: controller white, jack input gray, jack
+            // output white (same family as graph_node_border).
+            graph_node_controller: Color::White,
+            graph_node_jack_input: Color::Gray,
+            graph_node_jack_output: Color::White,
+            // Register edges: blue so they stand out as a distinct category
+            // (all existing edge tokens are grayscale or Reset).
+            graph_edge_register: Color::Blue,
+            // Grayscale latency ramp: four ANSI grays darkening toward the hot
+            // end, with `Reset` (bright terminal default) as the hottest stop so
+            // back-edges pop against the dim mid-ramp cables. Only four gray
+            // shades exist, so Reset is the neutral fifth, mirroring
+            // `graph_edge_unknown`.
+            graph_edge_latency_0: Color::White,
+            graph_edge_latency_1: Color::Gray,
+            graph_edge_latency_2: Color::DarkGray,
+            graph_edge_latency_3: Color::Black,
+            graph_edge_latency_4: Color::Reset,
+            graph_edge_latency_legend: Color::Gray,
             physical_skeleton_module_outline: Color::White,
             validation_error: Color::White,
             validation_warning: Color::Gray,
@@ -348,6 +434,20 @@ impl Theme {
             Color::Rgb(r, g, b) => (r, g, b),
             Color::Indexed(v) => xterm256_rgb(v),
         }
+    }
+
+    /// The 5-stop cable latency ramp (design D2): `graph_edge_latency_0` is
+    /// the coldest (lowest forward-loop latency) end, `_4` the hottest
+    /// (back-edge) end. The graph scene builder resolves a cable's latency
+    /// index into this ramp when `App.latency_coloring` is on.
+    pub const fn graph_edge_latency_ramp(&self) -> [Color; 5] {
+        [
+            self.graph_edge_latency_0,
+            self.graph_edge_latency_1,
+            self.graph_edge_latency_2,
+            self.graph_edge_latency_3,
+            self.graph_edge_latency_4,
+        ]
     }
 
     /// The theme → egui bridge (gpu-graph-window design D7, task 2.7): resolve
@@ -794,11 +894,15 @@ mod tests {
             t.minimap_modifier_exact,
             t.minimap_combined,
             t.graph_node_border,
+            t.graph_node_title,
             t.graph_cluster_border,
+            t.graph_cluster_title,
             t.graph_canvas_bg,
+            t.graph_node_fill,
             t.graph_edge_control,
             t.graph_edge_audio,
             t.graph_edge_midi,
+            t.graph_edge_unknown,
             t.graph_edge_error,
             t.graph_node_highlight,
             t.graph_node_dim,
@@ -806,6 +910,17 @@ mod tests {
             t.graph_edge_dim,
             t.graph_edge_diff_added,
             t.graph_edge_diff_removed,
+            // Per-kind node frames + register edge + latency ramp.
+            t.graph_node_controller,
+            t.graph_node_jack_input,
+            t.graph_node_jack_output,
+            t.graph_edge_register,
+            t.graph_edge_latency_0,
+            t.graph_edge_latency_1,
+            t.graph_edge_latency_2,
+            t.graph_edge_latency_3,
+            t.graph_edge_latency_4,
+            t.graph_edge_latency_legend,
             t.physical_skeleton_module_outline,
             t.validation_error,
             t.validation_warning,
