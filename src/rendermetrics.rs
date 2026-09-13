@@ -46,11 +46,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ratatui::style::Color;
+use crate::theme::Color;
 
 use crate::patch::{ComponentKind, HwComponent, Patch};
 use crate::theme::Theme;
-use crate::ui::{BOX_MIN_WIDTH, COMPONENT_WIDTH, MINIMAP_WIDTH};
+
+/// Cell width of a component in the panels surface (design D5).
+const COMPONENT_WIDTH: u16 = 16;
+/// Panel width below which a boxed component degrades to unboxed text.
+const BOX_MIN_WIDTH: u16 = 8;
+/// Source-viewer minimap column width.
+const MINIMAP_WIDTH: u16 = 3;
 
 /// Panels share of the embedded main-area split (`render_embedded_main`).
 pub(crate) const PANELS_PERCENT: u16 = 60;

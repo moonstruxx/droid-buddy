@@ -1,7 +1,32 @@
 use std::cell::RefCell;
 use std::sync::Mutex;
 
-use ratatui::style::Color;
+/// The semantic color token type: a fixed palette of named ANSI colors plus
+/// `Rgb`/`Indexed` passthroughs, replacing the terminal stack's `Color` after the native
+/// teardown (task 3.1). Rendering resolves tokens through [`Theme::rgb`] so a
+/// theme swap restyles every surface at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    Reset,
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+    DarkGray,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
+    White,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
 
 /// Semantic color tokens for the whole UI; rendering reads these instead of
 /// hardcoded `Color::` literals so a theme swap restyles every panel at once.
@@ -43,8 +68,6 @@ pub struct Theme {
     pub minimap_combined: Color,
     pub graph_node_border: Color,
     pub graph_node_title: Color,
-    pub graph_port_input: Color,
-    pub graph_port_output: Color,
     pub graph_cluster_border: Color,
     pub graph_cluster_title: Color,
     /// Background of the kitty-gfx graph canvas (design D9): the image is
@@ -53,12 +76,11 @@ pub struct Theme {
     /// dark background the box-drawing path inherits, so the image reads as
     /// the same surface, not a band.
     pub graph_canvas_bg: Color,
-    /// Body fill of a graph node in the kitty-gfx image path. The box-drawing
-    /// path leaves node interiors transparent, so this token only affects the
-    /// image path — a muted panel under the border and title.
+    /// Body fill of a graph node in the egui window path. A muted panel under
+    /// the border and title.
     pub graph_node_fill: Color,
     /// Cable edge color by inferred kind (design D8): control, audio, midi,
-    /// and the unknown fallback, plus the topology-error highlight.
+    /// unknown, plus the topology-error highlight.
     pub graph_edge_control: Color,
     pub graph_edge_audio: Color,
     pub graph_edge_midi: Color,
@@ -70,14 +92,14 @@ pub struct Theme {
     pub graph_edge_dim: Color,
     pub graph_edge_diff_added: Color,
     pub graph_edge_diff_removed: Color,
-    /// Per-kind node frame tokens (task 4.1): controller and jack nodes
-    /// render with distinct border/title colors so the graph surface
-    /// distinguishes node kinds at a glance.
+    /// Per-kind node frame tokens: controller and jack nodes render with
+    /// distinct border/title colors so the graph surface distinguishes node
+    /// kinds at a glance.
     pub graph_node_controller: Color,
     pub graph_node_jack_input: Color,
     pub graph_node_jack_output: Color,
-    /// Register-edge token (task 4.1): `_REG:`-prefixed cables use this
-    /// color instead of the cable-kind-based color.
+    /// Register-edge token: `_REG:`-prefixed cables use this color instead of
+    /// the cable-kind-based color.
     pub graph_edge_register: Color,
     /// Cable latency ramp (design D2): 5 cold→hot stops used to color
     /// non-error cables by forward-loop latency when `App.latency_coloring` is
@@ -90,37 +112,19 @@ pub struct Theme {
     pub graph_edge_latency_4: Color,
     /// Descriptive text color for the graph latency legend/status line.
     pub graph_edge_latency_legend: Color,
-    /// Physical skeleton reference (design D7): module outline, element cell,
-    /// and in/out port markers. Dedicated tokens so the skeleton render stops
-    /// borrowing graph tokens (task 3.2; 4.1 swaps the renderer onto these).
+    /// Physical skeleton reference (design D7): the module outline, drawn
+    /// with its own token so the skeleton render stops borrowing graph tokens.
     pub physical_skeleton_module_outline: Color,
-    pub physical_skeleton_cell: Color,
-    pub physical_skeleton_port_in: Color,
-    pub physical_skeleton_port_out: Color,
-    /// DB8E OLED display placeholder (design DB8E): border + centered state
-    /// text for the 128×64 upper-band display. Muted neutral so the frame
-    /// reads as a display surface, not an accent or error.
-    pub display_placeholder: Color,
     pub validation_error: Color,
     pub validation_warning: Color,
     pub validation_hint: Color,
     pub validation_modal_border: Color,
     pub validation_selected_bg: Color,
-    /// Advisory render-outlier status hint (design D5): the recommendation
-    /// span for a predicted render degradation. Distinct from error surfaces —
-    /// the warning is advisory (like topology findings), never gating.
-    pub render_outlier_warning: Color,
     /// Tiled panes (tiled-window-manager D6): focused pane border vs
     /// unfocused pane border. The optimizer pane reuses the focus token
     /// instead of a modal-specific border.
     pub pane_focus_border: Color,
     pub pane_unfocused_border: Color,
-    /// Deprecated alias kept for `ui.rs` compat (`render_optimizer_modal`
-    /// still reads it until task 5.1 promotes the optimizer to a pane).
-    /// New code must use `pane_focus_border`. No `#[deprecated]` attribute
-    /// so `cargo clippy -- -D warnings` stays green until the modal path
-    /// is removed.
-    pub optimizer_modal_border: Color,
     /// Optimizer menu (`g o`, design D5): selected-row background, distinct
     /// from the validation modal since the menu is advisory (a preview/export
     /// tool), not an error surface.
@@ -130,11 +134,6 @@ pub struct Theme {
     /// weight the menu is scored on stays distinct from the muted candidate
     /// values.
     pub optimizer_weight: Color,
-    /// Help modal (`?`, design D5): border + key-column background, following
-    /// the `optimizer_modal_*` precedent (a neutral informational surface, not
-    /// an error surface).
-    pub help_modal_border: Color,
-    pub help_modal_selected_bg: Color,
 }
 
 impl Theme {
@@ -176,8 +175,6 @@ impl Theme {
             minimap_combined: Color::Magenta,
             graph_node_border: Color::White,
             graph_node_title: Color::Yellow,
-            graph_port_input: Color::Cyan,
-            graph_port_output: Color::Green,
             graph_cluster_border: Color::Blue,
             graph_cluster_title: Color::Blue,
             graph_canvas_bg: Color::Black,
@@ -193,8 +190,8 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::Green,
             graph_edge_diff_removed: Color::Magenta,
-            // Per-kind node frames (task 4.1): controller green, jack
-            // input cyan, jack output green (same family as cv_out).
+            // Per-kind node frames: controller green, jack input cyan, jack
+            // output green (same family as cv_out).
             graph_node_controller: Color::Green,
             graph_node_jack_input: Color::Cyan,
             graph_node_jack_output: Color::Green,
@@ -208,34 +205,20 @@ impl Theme {
             graph_edge_latency_3: Color::Yellow,
             graph_edge_latency_4: Color::Red,
             graph_edge_latency_legend: Color::Blue,
-            // Mirrors the graph tokens the 3.1 skeleton renderer reused, so the
-            // 4.1 swap onto these stays visually neutral in classic.
             physical_skeleton_module_outline: Color::White,
-            physical_skeleton_cell: Color::Cyan,
-            physical_skeleton_port_in: Color::Cyan,
-            physical_skeleton_port_out: Color::Green,
-            display_placeholder: Color::DarkGray,
             validation_error: Color::Red,
             validation_warning: Color::Yellow,
             validation_hint: Color::Cyan,
             validation_modal_border: Color::Red,
             validation_selected_bg: Color::DarkGray,
-            // Advisory render-outlier hint: warning yellow, same family as
-            // validation_warning but never an error surface.
-            render_outlier_warning: Color::Yellow,
             // Focused pane pops (same family as focus_border); unfocused
             // panes recede into the muted chrome.
             pane_focus_border: Color::Yellow,
             pane_unfocused_border: Color::DarkGray,
-            optimizer_modal_border: Color::Blue,
             optimizer_selected_bg: Color::DarkGray,
             // Same accent family as graph_node_title: the weight readout is an
             // accent value, not a muted statistic.
             optimizer_weight: Color::Yellow,
-            // Help modal: neutral informational surface — blue border like the
-            // optimizer, dark-gray key column so keys read as a distinct band.
-            help_modal_border: Color::Blue,
-            help_modal_selected_bg: Color::DarkGray,
         }
     }
 
@@ -271,8 +254,6 @@ impl Theme {
             minimap_combined: Color::Reset,
             graph_node_border: Color::Reset,
             graph_node_title: Color::Reset,
-            graph_port_input: Color::Reset,
-            graph_port_output: Color::Reset,
             graph_cluster_border: Color::Reset,
             graph_cluster_title: Color::Reset,
             // `Reset` would map to white via the rgb hop, wrong for a dark
@@ -305,24 +286,16 @@ impl Theme {
             graph_edge_latency_4: Color::Reset,
             graph_edge_latency_legend: Color::Reset,
             physical_skeleton_module_outline: Color::Reset,
-            physical_skeleton_cell: Color::Reset,
-            physical_skeleton_port_in: Color::Reset,
-            physical_skeleton_port_out: Color::Reset,
-            display_placeholder: Color::Reset,
             validation_error: Color::Reset,
             validation_warning: Color::Reset,
             validation_hint: Color::Reset,
             validation_modal_border: Color::Reset,
             validation_selected_bg: Color::Reset,
-            render_outlier_warning: Color::Reset,
             // Terminal defers every token to the user's terminal.
             pane_focus_border: Color::Reset,
             pane_unfocused_border: Color::Reset,
-            optimizer_modal_border: Color::Reset,
             optimizer_selected_bg: Color::Reset,
             optimizer_weight: Color::Reset,
-            help_modal_border: Color::Reset,
-            help_modal_selected_bg: Color::Reset,
         }
     }
 
@@ -368,8 +341,6 @@ impl Theme {
             minimap_combined: Color::Gray,
             graph_node_border: Color::White,
             graph_node_title: Color::White,
-            graph_port_input: Color::Gray,
-            graph_port_output: Color::White,
             graph_cluster_border: Color::White,
             graph_cluster_title: Color::Gray,
             // Grayscale contrast ladder for the image path: canvas Black <
@@ -390,8 +361,8 @@ impl Theme {
             graph_edge_dim: Color::DarkGray,
             graph_edge_diff_added: Color::White,
             graph_edge_diff_removed: Color::Gray,
-            // Per-kind node frames (task 4.1): controller white, jack input
-            // gray, jack output white (same family as graph_node_border).
+            // Per-kind node frames: controller white, jack input gray, jack
+            // output white (same family as graph_node_border).
             graph_node_controller: Color::White,
             graph_node_jack_input: Color::Gray,
             graph_node_jack_output: Color::White,
@@ -409,13 +380,7 @@ impl Theme {
             graph_edge_latency_3: Color::Black,
             graph_edge_latency_4: Color::Reset,
             graph_edge_latency_legend: Color::Gray,
-            // Skeleton outline/cell/ports co-occur on one screen and carry no
-            // other distinguishing cue, so they stay pairwise distinct in mono.
             physical_skeleton_module_outline: Color::White,
-            physical_skeleton_cell: Color::DarkGray,
-            physical_skeleton_port_in: Color::Gray,
-            physical_skeleton_port_out: Color::Black,
-            display_placeholder: Color::Gray,
             validation_error: Color::White,
             validation_warning: Color::Gray,
             validation_hint: Color::DarkGray,
@@ -423,34 +388,17 @@ impl Theme {
             validation_selected_bg: Color::Black,
             // Advisory render-outlier hint: brightest gray so the BOLD span
             // stays tellable in the grayscale palette.
-            render_outlier_warning: Color::White,
             // Brightest gray for the focused pane, muted gray for the rest
             // so focus stays tellable in the grayscale palette.
             pane_focus_border: Color::White,
             pane_unfocused_border: Color::DarkGray,
-            optimizer_modal_border: Color::White,
             optimizer_selected_bg: Color::Black,
             // Brightest gray so the weight span stays tellable against the
             // Black selected-row background in the grayscale palette.
             optimizer_weight: Color::White,
             // Brightest gray so the key column stays tellable against the
             // Black selected-row background in the grayscale palette.
-            help_modal_border: Color::White,
-            help_modal_selected_bg: Color::Black,
         }
-    }
-
-    /// The five latency-ramp stops in order (cold → hot). A cable's color is
-    /// `ramp[round(L / (N×AVG) × (stops−1))]`, clamped to `stops−1`, so the
-    /// hottest stop also covers every latency past the normalization.
-    pub const fn graph_edge_latency_ramp(&self) -> [Color; 5] {
-        [
-            self.graph_edge_latency_0,
-            self.graph_edge_latency_1,
-            self.graph_edge_latency_2,
-            self.graph_edge_latency_3,
-            self.graph_edge_latency_4,
-        ]
     }
 
     /// The `Color → RGB` hop (design D9): the single source of pixel colors
@@ -488,17 +436,43 @@ impl Theme {
         }
     }
 
-    /// The theme → egui bridge (gpu-graph-window design D7): resolve a semantic
-    /// token through the same [`Theme::rgb`] hop the kitty rasterizer uses and
-    /// wrap it as an egui [`egui::Color32`]. The window chrome and any egui
-    /// surface derive every color from here, so switching the theme in
-    /// `config.toml` re-themes the window and the terminal together. Gated on
-    /// the `gui` feature because `egui` types exist only under it; the default
-    /// build stays byte-identical and never links egui.
-    #[cfg(feature = "gui")]
+    /// The 5-stop cable latency ramp (design D2): `graph_edge_latency_0` is
+    /// the coldest (lowest forward-loop latency) end, `_4` the hottest
+    /// (back-edge) end. The graph scene builder resolves a cable's latency
+    /// index into this ramp when `App.latency_coloring` is on.
+    pub const fn graph_edge_latency_ramp(&self) -> [Color; 5] {
+        [
+            self.graph_edge_latency_0,
+            self.graph_edge_latency_1,
+            self.graph_edge_latency_2,
+            self.graph_edge_latency_3,
+            self.graph_edge_latency_4,
+        ]
+    }
+
+    /// The theme → egui bridge (gpu-graph-window design D7, task 2.7): resolve
+    /// a semantic token through the same [`Theme::rgb`] hop the kitty
+    /// rasterizer and all ported egui surfaces use, wrapping it as an
+    /// [`egui::Color32`]. Every ported surface — physical, panels, viewer,
+    /// picker, overlays (validation, select, label editor, diff, optimizer),
+    /// and the graph canvas via `SceneSpec` — derives its color from here, so
+    /// switching the theme in `config.toml` re-themes the window and the
+    /// terminal together. No GUI surface constructs a
+    /// `Color32::from_rgb` directly except this bridge (and TRANSPARENT or
+    /// alpha-dims via `gamma_multiply`/`from_rgba_unmultiplied`).
     pub fn egui_color(&self, color: Color) -> egui::Color32 {
         let (r, g, b) = self.rgb(color);
         egui::Color32::from_rgb(r, g, b)
+    }
+
+    /// RGB-triple → egui bridge for the graph `SceneSpec` (task 2.7): the spec
+    /// already carries `(r,g,b)` resolved through [`Theme::rgb`], so this is
+    /// the shared unpack the canvas helpers (`graph.rs:rgb`, `physical.rs:rgb`,
+    /// `panels.rs:rgb`, `overlays.rs:rgb`, `viewer.rs:rgb`, `picker.rs:rgb`)
+    /// funnel through instead of hardcoding `Color32::from_rgb` per surface.
+    /// Keeps the kitty and egui graph paths on the same single hop.
+    pub fn egui_from_rgb(&self, rgb: (u8, u8, u8)) -> egui::Color32 {
+        egui::Color32::from_rgb(rgb.0, rgb.1, rgb.2)
     }
 }
 
@@ -690,15 +664,10 @@ mod tests {
         assert_eq!(t.minimap_modifier_exact, Color::Magenta);
         assert_eq!(t.minimap_combined, Color::Magenta);
         assert_eq!(t.graph_node_border, Color::White);
-        assert_eq!(t.graph_node_title, Color::Yellow);
-        assert_eq!(t.graph_port_input, Color::Cyan);
-        assert_eq!(t.graph_port_output, Color::Green);
         assert_eq!(t.graph_cluster_border, Color::Blue);
-        assert_eq!(t.graph_cluster_title, Color::Blue);
         assert_eq!(t.graph_edge_control, Color::Cyan);
         assert_eq!(t.graph_edge_audio, Color::Green);
         assert_eq!(t.graph_edge_midi, Color::Magenta);
-        assert_eq!(t.graph_edge_unknown, Color::DarkGray);
         assert_eq!(t.graph_edge_error, Color::Red);
     }
 
@@ -733,36 +702,15 @@ mod tests {
             t.minimap_modifier_exact,
             t.minimap_combined,
             t.graph_node_border,
-            t.graph_node_title,
-            t.graph_port_input,
-            t.graph_port_output,
             t.graph_cluster_border,
-            t.graph_cluster_title,
             t.graph_edge_control,
             t.graph_edge_audio,
             t.graph_edge_midi,
-            t.graph_edge_unknown,
             t.graph_edge_error,
-            // Per-kind node frames + register edge: all Reset in the terminal
-            // palette (matching existing graph tokens).
-            t.graph_node_controller,
-            t.graph_node_jack_input,
-            t.graph_node_jack_output,
-            t.graph_edge_register,
             // `graph_edge_diff_added/removed` are intentionally Gray/DarkGray
             // (diff needs distinguishability even in the colorless terminal
-            // theme); latency ramp + legend are all Reset.
-            t.graph_edge_latency_0,
-            t.graph_edge_latency_1,
-            t.graph_edge_latency_2,
-            t.graph_edge_latency_3,
-            t.graph_edge_latency_4,
-            t.graph_edge_latency_legend,
+            // theme).
             t.physical_skeleton_module_outline,
-            t.physical_skeleton_cell,
-            t.physical_skeleton_port_in,
-            t.physical_skeleton_port_out,
-            t.display_placeholder,
             t.pane_focus_border,
             t.pane_unfocused_border,
         ] {
@@ -773,49 +721,6 @@ mod tests {
         // default palette.
         assert_eq!(t.graph_edge_diff_added, Color::Gray);
         assert_eq!(t.graph_edge_diff_removed, Color::DarkGray);
-    }
-
-    #[test]
-    fn every_palette_exposes_five_ramp_stops_and_a_legend_token() {
-        for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
-            assert_eq!(theme.graph_edge_latency_ramp().len(), 5);
-        }
-        // Legend token present per palette.
-        assert_eq!(Theme::classic().graph_edge_latency_legend, Color::Blue);
-        assert_eq!(Theme::terminal().graph_edge_latency_legend, Color::Reset);
-        assert_eq!(Theme::mono().graph_edge_latency_legend, Color::Gray);
-    }
-
-    #[test]
-    fn classic_latency_ramp_orders_blue_to_red_by_hue() {
-        let ramp = Theme::classic().graph_edge_latency_ramp();
-        assert_eq!(ramp[0], Color::Blue, "cold end must be blue");
-        assert_eq!(ramp[4], Color::Red, "hot end must be red");
-        // Monotonic cold→hot progression: each stop steps toward red through
-        // cyan → green → yellow.
-        assert_eq!(ramp[1], Color::Cyan);
-        assert_eq!(ramp[2], Color::Green);
-        assert_eq!(ramp[3], Color::Yellow);
-    }
-
-    #[test]
-    fn mono_latency_ramp_stops_are_pairwise_distinct_and_colorless() {
-        let ramp = Theme::mono().graph_edge_latency_ramp();
-        for (i, a) in ramp.iter().enumerate() {
-            for b in &ramp[i + 1..] {
-                assert_ne!(a, b, "latency ramp stops must be pairwise distinct");
-            }
-        }
-        // All stops are grayscale (or the neutral Reset fallback), never a hue.
-        for stop in ramp {
-            assert!(
-                matches!(
-                    stop,
-                    Color::Black | Color::DarkGray | Color::Gray | Color::White | Color::Reset
-                ),
-                "mono latency stop {stop:?} must be grayscale/neutral"
-            );
-        }
     }
 
     #[test]
@@ -874,7 +779,6 @@ mod tests {
             t.graph_edge_control,
             t.graph_edge_audio,
             t.graph_edge_midi,
-            t.graph_edge_unknown,
             t.graph_edge_error,
         ];
         for (i, a) in edges.iter().enumerate() {
@@ -921,105 +825,18 @@ mod tests {
     }
 
     #[test]
-    fn all_palettes_define_render_outlier_warning() {
-        // Task 3.1: the advisory render-outlier status-hint token exists in
-        // every palette (classic yellow / terminal reset / mono white).
-        assert_eq!(Theme::classic().render_outlier_warning, Color::Yellow);
-        assert_eq!(Theme::terminal().render_outlier_warning, Color::Reset);
-        assert_eq!(Theme::mono().render_outlier_warning, Color::White);
-    }
-
-    #[test]
-    fn all_palettes_define_skeleton_tokens() {
-        // Task 3.2: physical skeleton tokens (design D7) exist in every
-        // palette — classic mirrors the graph tokens 3.1 reused so the 4.1
-        // swap is neutral, terminal defers to the terminal, mono keeps the
-        // co-occurring outline/cell/ports pairwise distinct.
-        let classic = Theme::classic();
-        let terminal = Theme::terminal();
-        let mono = Theme::mono();
-        assert_eq!(classic.physical_skeleton_module_outline, Color::White);
-        assert_eq!(classic.physical_skeleton_cell, Color::Cyan);
-        assert_eq!(classic.physical_skeleton_port_in, Color::Cyan);
-        assert_eq!(classic.physical_skeleton_port_out, Color::Green);
-        for color in [
-            terminal.physical_skeleton_module_outline,
-            terminal.physical_skeleton_cell,
-            terminal.physical_skeleton_port_in,
-            terminal.physical_skeleton_port_out,
-        ] {
-            assert_eq!(color, Color::Reset);
-        }
-        let skeleton = [
-            mono.physical_skeleton_module_outline,
-            mono.physical_skeleton_cell,
-            mono.physical_skeleton_port_in,
-            mono.physical_skeleton_port_out,
-        ];
-        for (i, a) in skeleton.iter().enumerate() {
-            for b in &skeleton[i + 1..] {
-                assert_ne!(a, b, "skeleton tokens must be pairwise distinct in mono");
-            }
-        }
-    }
-
-    #[test]
-    fn all_palettes_define_per_kind_node_tokens() {
-        // Task 4.1: per-kind node frame + register edge tokens exist in every
-        // palette — classic green/cyan/green/dark-gray, terminal Reset,
-        // mono white/gray/white/dark-gray (pairwise distinct within each
-        // category).
-        let classic = Theme::classic();
-        let terminal = Theme::terminal();
-        let mono = Theme::mono();
-        // Classic: controller green, jack input cyan, jack output green.
-        assert_eq!(classic.graph_node_controller, Color::Green);
-        assert_eq!(classic.graph_node_jack_input, Color::Cyan);
-        assert_eq!(classic.graph_node_jack_output, Color::Green);
-        assert_eq!(classic.graph_edge_register, Color::DarkGray);
-        // Terminal: all Reset.
-        assert_eq!(terminal.graph_node_controller, Color::Reset);
-        assert_eq!(terminal.graph_node_jack_input, Color::Reset);
-        assert_eq!(terminal.graph_node_jack_output, Color::Reset);
-        assert_eq!(terminal.graph_edge_register, Color::Reset);
-        // Mono: controller white, jack input gray, jack output white,
-        // register blue.
-        assert_eq!(mono.graph_node_controller, Color::White);
-        assert_eq!(mono.graph_node_jack_input, Color::Gray);
-        assert_eq!(mono.graph_node_jack_output, Color::White);
-        assert_eq!(mono.graph_edge_register, Color::Blue);
-        // Register edge must be distinct from the four edge-kind + error
-        // tokens in mono (type/severity carried by color alone).
-        assert_ne!(mono.graph_edge_register, mono.graph_edge_control);
-        assert_ne!(mono.graph_edge_register, mono.graph_edge_audio);
-        assert_ne!(mono.graph_edge_register, mono.graph_edge_midi);
-        assert_ne!(mono.graph_edge_register, mono.graph_edge_unknown);
-        assert_ne!(mono.graph_edge_register, mono.graph_edge_error);
-    }
-
-    #[test]
-    fn all_palettes_define_display_placeholder() {
-        // Task 1.1 (db8e-oled-display-placeholder): display_placeholder exists in
-        // every palette — classic muted neutral, terminal Reset, mono mid-gray
-        // distinct from muted/text so the OLED frame stays tellable in grayscale.
-        assert_eq!(Theme::classic().display_placeholder, Color::DarkGray);
-        assert_eq!(Theme::terminal().display_placeholder, Color::Reset);
-        assert_eq!(Theme::mono().display_placeholder, Color::Gray);
-        assert_ne!(
-            Theme::mono().display_placeholder,
-            Theme::mono().muted,
-            "mono placeholder must be distinct from muted"
+    fn all_palettes_define_skeleton_outline() {
+        // Task 3.2 (design D7): the physical skeleton outline token exists in
+        // every palette — classic white, terminal defers, mono white.
+        assert_eq!(
+            Theme::classic().physical_skeleton_module_outline,
+            Color::White
         );
-        assert_ne!(
-            Theme::mono().display_placeholder,
-            Theme::mono().text,
-            "mono placeholder must be distinct from text"
+        assert_eq!(
+            Theme::terminal().physical_skeleton_module_outline,
+            Color::Reset
         );
-        assert_ne!(
-            Theme::mono().display_placeholder,
-            Theme::mono().physical_skeleton_cell,
-            "mono placeholder must be distinct from skeleton cell"
-        );
+        assert_eq!(Theme::mono().physical_skeleton_module_outline, Color::White);
     }
 
     #[test]
@@ -1045,89 +862,90 @@ mod tests {
         );
     }
 
+    /// Every semantic token still in the palette, in struct order. The single
+    /// enumeration the totality tests share: the rgb() determinism test and the
+    /// egui-bridge opacity test (task 2.7).
+    fn every_token(t: &Theme) -> Vec<Color> {
+        vec![
+            t.button,
+            t.switch,
+            t.knob,
+            t.cv_in,
+            t.cv_out,
+            t.led,
+            t.fader_led_bar,
+            t.shift1,
+            t.shift2,
+            t.shift3,
+            t.shift4,
+            t.accent,
+            t.muted,
+            t.text,
+            t.picker_fav_file,
+            t.picker_fav_dir,
+            t.viewer_key,
+            t.status_bg,
+            t.focus_border,
+            t.occurrence_highlight,
+            t.modifier_boolean,
+            t.modifier_exact,
+            t.minimap_occurrence,
+            t.minimap_modifier_boolean,
+            t.minimap_modifier_exact,
+            t.minimap_combined,
+            t.graph_node_border,
+            t.graph_node_title,
+            t.graph_cluster_border,
+            t.graph_cluster_title,
+            t.graph_canvas_bg,
+            t.graph_node_fill,
+            t.graph_edge_control,
+            t.graph_edge_audio,
+            t.graph_edge_midi,
+            t.graph_edge_unknown,
+            t.graph_edge_error,
+            t.graph_node_highlight,
+            t.graph_node_dim,
+            t.graph_edge_highlight,
+            t.graph_edge_dim,
+            t.graph_edge_diff_added,
+            t.graph_edge_diff_removed,
+            // Per-kind node frames + register edge + latency ramp.
+            t.graph_node_controller,
+            t.graph_node_jack_input,
+            t.graph_node_jack_output,
+            t.graph_edge_register,
+            t.graph_edge_latency_0,
+            t.graph_edge_latency_1,
+            t.graph_edge_latency_2,
+            t.graph_edge_latency_3,
+            t.graph_edge_latency_4,
+            t.graph_edge_latency_legend,
+            t.physical_skeleton_module_outline,
+            t.validation_error,
+            t.validation_warning,
+            t.validation_hint,
+            t.validation_modal_border,
+            t.validation_selected_bg,
+            t.pane_focus_border,
+            t.pane_unfocused_border,
+            t.optimizer_selected_bg,
+            t.optimizer_weight,
+        ]
+    }
+
     #[test]
     fn every_token_in_every_palette_maps_to_a_deterministic_rgb_triple() {
-        // Task 2.2 + 3.2 verification: every semantic token the UI/graph
+        // Task 2.2 + 3.2 + 2.7 verification: every semantic token the UI/graph
         // surface and the rasterizer consume (component kinds, shift groups,
-        // graph chrome + canvas + edges, skeleton, validation, optimizer) must
-        // resolve through the `Color → RGB` hop without panicking and
-        // deterministically (same token → same triple every call), in every
-        // palette.
+        // picker favourites, graph chrome + canvas + edges, skeleton,
+        // validation, optimizer) must resolve through the `Color → RGB` hop
+        // without panicking and deterministically (same token → same triple
+        // every call), in every palette. Covers all ported egui surfaces:
+        // physical, panels, viewer, picker, overlays, graph.
         for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
-            let tokens = [
-                theme.button,
-                theme.switch,
-                theme.knob,
-                theme.cv_in,
-                theme.cv_out,
-                theme.led,
-                theme.fader_led_bar,
-                theme.shift1,
-                theme.shift2,
-                theme.shift3,
-                theme.shift4,
-                theme.accent,
-                theme.muted,
-                theme.text,
-                theme.viewer_key,
-                theme.status_bg,
-                theme.focus_border,
-                theme.occurrence_highlight,
-                theme.modifier_boolean,
-                theme.modifier_exact,
-                theme.minimap_occurrence,
-                theme.minimap_modifier_boolean,
-                theme.minimap_modifier_exact,
-                theme.minimap_combined,
-                theme.graph_node_border,
-                theme.graph_node_title,
-                theme.graph_port_input,
-                theme.graph_port_output,
-                theme.graph_cluster_border,
-                theme.graph_cluster_title,
-                theme.graph_canvas_bg,
-                theme.graph_node_fill,
-                theme.graph_edge_control,
-                theme.graph_edge_audio,
-                theme.graph_edge_midi,
-                theme.graph_edge_unknown,
-                theme.graph_edge_error,
-                theme.graph_node_highlight,
-                theme.graph_node_dim,
-                theme.graph_edge_highlight,
-                theme.graph_edge_dim,
-                theme.graph_edge_diff_added,
-                theme.graph_edge_diff_removed,
-                // Per-kind node frames + register edge (task 4.1).
-                theme.graph_node_controller,
-                theme.graph_node_jack_input,
-                theme.graph_node_jack_output,
-                theme.graph_edge_register,
-                theme.graph_edge_latency_0,
-                theme.graph_edge_latency_1,
-                theme.graph_edge_latency_2,
-                theme.graph_edge_latency_3,
-                theme.graph_edge_latency_4,
-                theme.graph_edge_latency_legend,
-                theme.physical_skeleton_module_outline,
-                theme.physical_skeleton_cell,
-                theme.physical_skeleton_port_in,
-                theme.physical_skeleton_port_out,
-                theme.display_placeholder,
-                theme.validation_error,
-                theme.validation_warning,
-                theme.validation_hint,
-                theme.validation_modal_border,
-                theme.validation_selected_bg,
-                theme.render_outlier_warning,
-                theme.pane_focus_border,
-                theme.pane_unfocused_border,
-                theme.optimizer_modal_border,
-                theme.optimizer_selected_bg,
-                theme.optimizer_weight,
-                theme.help_modal_border,
-                theme.help_modal_selected_bg,
-            ];
+            let tokens = every_token(&theme);
+
             for token in tokens {
                 let rgb = theme.rgb(token);
                 assert_eq!(
@@ -1143,7 +961,7 @@ mod tests {
     fn classic_graph_tokens_resolve_to_expected_rgb() {
         // Task 2.2 verification: a token → expected-RGB table for the classic
         // palette, anchoring the hop's mapping (error red, cable kinds,
-        // latency ramp cold→hot, node/cluster chrome).
+        // node/cluster chrome).
         let t = Theme::classic();
         assert_eq!(t.rgb(t.graph_edge_error), (0xff, 0x00, 0x00), "error red");
         assert_eq!(t.rgb(t.graph_edge_audio), (0x00, 0xff, 0x00), "audio green");
@@ -1153,37 +971,21 @@ mod tests {
             "control cyan"
         );
         assert_eq!(t.rgb(t.graph_edge_midi), (0xff, 0x00, 0xff), "midi magenta");
-        assert_eq!(
-            t.rgb(t.graph_edge_unknown),
-            (0x40, 0x40, 0x40),
-            "unknown dark-gray"
-        );
         assert_eq!(t.rgb(t.graph_edge_diff_added), (0x00, 0xff, 0x00));
         assert_eq!(t.rgb(t.graph_edge_diff_removed), (0xff, 0x00, 0xff));
         assert_eq!(t.rgb(t.graph_node_border), (0xff, 0xff, 0xff));
-        assert_eq!(t.rgb(t.graph_node_title), (0xff, 0xff, 0x00));
-        assert_eq!(t.rgb(t.graph_port_input), (0x00, 0xff, 0xff));
-        assert_eq!(t.rgb(t.graph_port_output), (0x00, 0xff, 0x00));
         assert_eq!(t.rgb(t.graph_cluster_border), (0x00, 0x00, 0xff));
-        assert_eq!(t.rgb(t.graph_cluster_title), (0x00, 0x00, 0xff));
         assert_eq!(t.rgb(t.graph_node_dim), (0x80, 0x80, 0x80));
         assert_eq!(t.rgb(t.graph_edge_dim), (0x40, 0x40, 0x40));
         assert_eq!(t.rgb(t.graph_edge_highlight), (0xff, 0xff, 0xff));
         assert_eq!(t.rgb(t.graph_node_highlight), (0xff, 0xff, 0x00));
-        // Latency ramp cold → hot: blue → cyan → green → yellow → red.
-        assert_eq!(t.rgb(t.graph_edge_latency_0), (0x00, 0x00, 0xff));
-        assert_eq!(t.rgb(t.graph_edge_latency_1), (0x00, 0xff, 0xff));
-        assert_eq!(t.rgb(t.graph_edge_latency_2), (0x00, 0xff, 0x00));
-        assert_eq!(t.rgb(t.graph_edge_latency_3), (0xff, 0xff, 0x00));
-        assert_eq!(t.rgb(t.graph_edge_latency_4), (0xff, 0x00, 0x00));
-        assert_eq!(t.rgb(t.graph_edge_latency_legend), (0x00, 0x00, 0xff));
     }
 
     #[test]
     fn every_color_variant_maps_without_panic() {
-        // Task 2.2 verification: every `Color` variant ratatui 0.29 can emit
+        // Task 2.2 verification: every `Color` variant the theme hop can emit
         // for these tokens is handled — the 17 ANSI-16 named variants, the
-        // `Rgb` passthrough, `Indexed` (0.29's 256-color variant), and `Reset`.
+        // `Rgb` passthrough, `Indexed` (the 256-color variant), and `Reset`.
         let t = Theme::classic();
         for variant in [
             Color::Reset,
@@ -1312,7 +1114,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn egui_color_matches_rgb_output() {
         // gpu-graph-window D7: the egui bridge is a pure wrap of `Theme::rgb`,
@@ -1328,7 +1129,7 @@ mod tests {
                 theme.pane_focus_border,
                 theme.graph_node_border,
                 theme.graph_edge_error,
-                theme.graph_edge_latency_4,
+                theme.graph_edge_audio,
             ] {
                 let rgb = theme.rgb(token);
                 assert_eq!(
@@ -1338,6 +1139,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn egui_bridge_resolves_every_token_opaque_for_all_themes() {
+        // Task 2.7: the egui window derives every color through
+        // `Theme::egui_color`, so each remaining token must resolve to a
+        // concrete, opaque Color32 in every palette (the terminal palette
+        // defers to Reset, which the hop maps to the bright-white fallback).
+        for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
+            for token in every_token(&theme) {
+                let c = theme.egui_color(token);
+                assert_eq!(c.a(), 255, "egui bridge must stay opaque for {token:?}");
+            }
+        }
+        // Spot-check the documented mappings through the bridge: classic
+        // accent blue, and the terminal palette's Reset fallback.
+        assert_eq!(
+            Theme::classic().egui_color(Theme::classic().accent),
+            egui::Color32::from_rgb(0x00, 0x00, 0xff)
+        );
+        assert_eq!(
+            Theme::terminal().egui_color(Theme::terminal().text),
+            egui::Color32::from_rgb(0xff, 0xff, 0xff)
+        );
     }
 
     #[test]
@@ -1401,19 +1226,12 @@ mod tests {
             terminal.graph_edge_audio,
             terminal.graph_edge_error,
             terminal.graph_node_border,
-            terminal.graph_node_title,
-            terminal.graph_edge_latency_4,
         ] {
             assert_eq!(terminal.rgb(token), (0xff, 0xff, 0xff));
         }
-        // mono's neutral `unknown` and hottest latency stop are Reset too —
-        // they resolve bright so they stay visible against the dark canvas.
         let mono = Theme::mono();
-        assert_eq!(mono.rgb(mono.graph_edge_unknown), (0xff, 0xff, 0xff));
-        assert_eq!(mono.rgb(mono.graph_edge_latency_4), (0xff, 0xff, 0xff));
         // The four ANSI grays mono uses for edge kinds stay distinct in pixel
-        // space (Reset doubles as the fifth shade, colliding with White — the
-        // canvas has no terminal-default fg to defer to).
+        // space.
         let grays = [
             mono.rgb(mono.graph_edge_control), // White
             mono.rgb(mono.graph_edge_audio),   // Gray

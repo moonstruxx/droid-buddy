@@ -4,15 +4,12 @@ pub mod diff;
 pub mod events;
 pub mod expression;
 pub mod favorites;
-pub mod gallery;
 pub mod geometry;
 pub mod graph;
 pub mod graph_render;
-#[cfg(feature = "gui")]
 pub mod gui;
 pub mod handler;
 pub mod help;
-pub mod kitty_protocol;
 pub mod latency;
 pub mod layout;
 pub mod optimize;
@@ -22,7 +19,6 @@ pub mod plugin;
 pub mod rendermetrics;
 pub mod schema;
 pub mod theme;
-pub mod ui;
 pub mod validation;
 
 #[cfg(test)]
