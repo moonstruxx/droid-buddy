@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
 use crate::patch::{ModifierAffect, Span};
-use ratatui::style::Color;
+use crate::theme::Color;
 
 /// The per-column highlight kind of a raw source line (port of
 /// `ui.rs::HighlightKind`).
@@ -407,16 +407,12 @@ pub(super) fn pane_split(
     } else {
         0.0
     };
-    if sidebar_w >= inner_w {
-        sidebar_w = 0.0;
-    }
     let minimap_w = if want_minimap { 26.0 } else { 0.0 };
     let mut content_w = inner_w - sidebar_w - minimap_w;
     if want_minimap && content_w < min_content {
         content_w += minimap_w;
         if content_w < min_content && want_sidebar {
             content_w += sidebar_w;
-            sidebar_w = 0.0;
             if content_w < min_content {
                 return None;
             }

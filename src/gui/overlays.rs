@@ -8,8 +8,8 @@
 //! payload built each frame, a draw routine that only paints it, and pure
 //! helpers that keep the status/row logic testable headless.
 
+use crate::theme::Color;
 use egui::{Context, Painter, Pos2, Rect, Vec2};
-use ratatui::style::Color;
 
 use crate::diff::DiffReport;
 use crate::validation::{Severity, ValidationIssue};
@@ -17,7 +17,7 @@ use crate::validation::{Severity, ValidationIssue};
 // ── Validation modal ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ValidationRow {
+pub(crate) struct ValidationRow {
     pub location: String,
     pub severity: Severity,
     pub code: String,
@@ -26,7 +26,7 @@ pub(super) struct ValidationRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ValidationSpec {
+pub(crate) struct ValidationSpec {
     pub title: String,
     pub hint: String,
     pub rows: Vec<ValidationRow>,
@@ -38,7 +38,7 @@ pub(super) struct ValidationFrame {
     pub hovered: Option<usize>,
 }
 
-pub(super) fn validation_spec(issues: &[ValidationIssue], cursor: usize) -> ValidationSpec {
+pub(crate) fn validation_spec(issues: &[ValidationIssue], cursor: usize) -> ValidationSpec {
     let count = issues.len();
     let err = issues
         .iter()
@@ -83,7 +83,7 @@ pub(super) fn validation_spec(issues: &[ValidationIssue], cursor: usize) -> Vali
     }
 }
 
-pub(super) fn paint_validation_modal(
+pub(crate) fn paint_validation_modal(
     painter: &Painter,
     canvas: Vec2,
     _ctx: &Context,

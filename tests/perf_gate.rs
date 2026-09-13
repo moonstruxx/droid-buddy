@@ -8,7 +8,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use droid_tui::app::App;
-use droid_tui::gallery;
 use droid_tui::graph::{self, Cluster};
 use droid_tui::latency::CostModel;
 use droid_tui::layout;
@@ -17,8 +16,9 @@ use droid_tui::patch::Patch;
 use droid_tui::schema::load_schema;
 use droid_tui::validation::validate_patch;
 
-// Measured release baseline 2026-09-12: melody2 parse + validate + first render
-// (532 sections / 457 cables / 115 hw tokens) well under 1 s.
+// Measured release baseline 2026-09-12: melody2 parse + validate well under 1 s.
+// (The terminal render phase was removed with the native-egui teardown; the
+// egui paint path is covered by the gui-module shape/label tests.)
 pub const PARSE_RENDER_BUDGET: Duration = Duration::from_secs(10);
 
 // Measured release baseline 2026-09-12: melody2 graph build + full solve
@@ -32,9 +32,6 @@ pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(200);
 
 // Measured release baseline 2026-09-12: melody2 optimizer candidate generation sub-second.
 pub const OPTIMIZER_BUDGET: Duration = Duration::from_secs(10);
-
-// Measured release baseline 2026-09-12: full gallery matrix ~0.32 s CPU.
-pub const GALLERY_BUDGET: Duration = Duration::from_secs(30);
 
 /// Run `f` on a worker thread under a wall-clock ceiling. If `f` returns within
 /// `budget`, return its result. If it runs past the ceiling, panic with the phase
@@ -89,7 +86,6 @@ fn phase_parse_render() {
         let _issues = validate_patch(&patch, load_schema());
         let mut app = App::new();
         app.load_patch(patch);
-        gallery::buffer_for(&mut app, 120, 40);
         start.elapsed()
     });
     eprintln!("phase_parse_render elapsed: {elapsed:.3?}");
@@ -143,26 +139,5 @@ fn phase_optimizer() {
     assert!(
         elapsed <= OPTIMIZER_BUDGET,
         "phase_optimizer took {elapsed:?}, budget {OPTIMIZER_BUDGET:?}"
-    );
-}
-
-#[test]
-fn phase_gallery() {
-    let elapsed = budgeted("phase_gallery", GALLERY_BUDGET, || {
-        let start = Instant::now();
-        // Reuses the in-suite harness: every scenario x theme, writing the
-        // ephemeral, gitignored evidence/gallery/ outputs.
-        let index = gallery::generate_gallery().unwrap();
-        assert!(
-            index.is_file(),
-            "gallery index missing: {}",
-            index.display()
-        );
-        start.elapsed()
-    });
-    eprintln!("phase_gallery elapsed: {elapsed:.3?}");
-    assert!(
-        elapsed <= GALLERY_BUDGET,
-        "phase_gallery took {elapsed:?}, budget {GALLERY_BUDGET:?}"
     );
 }

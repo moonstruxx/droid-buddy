@@ -17,7 +17,7 @@ use crate::graph_render::{EdgeSpec, GraphCamera, SceneSpec};
 /// shared `GraphCamera`, painted 1:1 (one spec pixel = one egui point), so
 /// both surfaces show the same view. Colors come only from the resolved spec
 /// RGB — never theme tokens below the spec.
-pub(super) fn paint_scene(
+pub(crate) fn paint_scene(
     painter: &egui::Painter,
     canvas: egui::Vec2,
     scene: Option<&SceneSpec>,
@@ -127,8 +127,8 @@ pub(super) fn paint_scene(
     paint_polish(painter, canvas, scene, ctx, selected);
 }
 
-/// Fill the direction arrow at an edge's `end`, mirroring the tiny-skia
-/// painter: tangent `B'(1) = 2·(end − ctrl)`, triangle sized from the width.
+/// Fill the direction arrow at an edge's `end`, following the scene spec's
+/// curve: tangent `B'(1) = 2·(end − ctrl)`, triangle sized from the width.
 fn paint_arrow(painter: &egui::Painter, edge: &EdgeSpec) {
     let (tx, ty) = (
         2.0 * (edge.end.0 - edge.ctrl.0),
@@ -155,7 +155,10 @@ fn paint_arrow(painter: &egui::Painter, edge: &EdgeSpec) {
 }
 
 fn rgb((r, g, b): (u8, u8, u8)) -> egui::Color32 {
-    egui::Color32::from_rgb(r, g, b)
+    // The scene spec carries theme tokens already resolved to RGB triples;
+    // this is the shared unpack the bridge documents (theme.rs:egui_from_rgb)
+    // so the graph canvas and the kitty path stay on the same single hop.
+    crate::theme::active().egui_from_rgb((r, g, b))
 }
 
 fn rgba((r, g, b): (u8, u8, u8), a: u8) -> egui::Color32 {
@@ -164,10 +167,10 @@ fn rgba((r, g, b): (u8, u8, u8), a: u8) -> egui::Color32 {
 
 /// Wheel-zoom sensitivity: exponent multiplier on the scroll delta so a
 /// typical wheel tick reads as a gentle zoom step.
-pub(super) const ZOOM_SENSITIVITY: f32 = 0.01;
+pub(crate) const ZOOM_SENSITIVITY: f32 = 0.01;
 /// Largest factor a single scroll event may apply; bounds wheel zoom so a
 /// fast spin cannot blow the camera off the scene.
-pub(super) const MAX_ZOOM_STEP: f32 = 1.5;
+pub(crate) const MAX_ZOOM_STEP: f32 = 1.5;
 /// Fixed minimap size `(w, h)` in egui points, bottom-left corner.
 const MINIMAP_SIZE: (f32, f32) = (180.0, 120.0);
 /// Margin between the minimap panel and the canvas edge.

@@ -16,7 +16,7 @@
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use ratatui::style::Color;
+use crate::theme::Color;
 
 /// One picker row for painting: the display label (★-prefixed for favourites,
 /// `..` sentinel untouched), its favourite/dir flags, and whether it is the

@@ -10,7 +10,7 @@ Single-crate Rust monolith. The pure modules (patch, graph, layout, physical, sc
 - The rendering and rendering-test machinery shrinks, not grows. Delete the terminal stack and the `TestBackend` gallery.
 
 **Non-Goals:**
-- No `Spec` abstraction layer between surfaces and the painter. Each surface draws straight onto egui from the pure model, and tests assert on egui output directly.
+- No universal `Spec` abstraction layer between surfaces and the painter. Each surface follows the graph canvas precedent (1.2): a resolved pure-data payload built per frame from the pure model, drawn straight onto egui by its own paint routine, with tests asserting on egui output directly.
 - No dual-render path. The terminal is deleted, not kept alive.
 - No redesign of the pure modules or the DROID domain model.
 

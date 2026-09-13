@@ -20,7 +20,7 @@ use egui::{Context, Painter, Pos2, Rect, Vec2};
 
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::physical::{PhysicalLayout, RackLayout, ScreenMapping};
-use ratatui::style::Color;
+use crate::theme::Color;
 
 use super::graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 
@@ -28,7 +28,7 @@ use super::graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 /// in/out port marker (CV jacks on the master faceplate), mirroring
 /// `ui.rs::PortMark`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PortMark {
+pub(crate) enum PortMark {
     /// Plain cell dot.
     Cell,
     /// Input port marker (◀).
@@ -39,7 +39,7 @@ pub(super) enum PortMark {
 
 /// A resolved module outline for painting.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ModuleSpec {
+pub(crate) struct ModuleSpec {
     pub rect: Rect,
     pub title: String,
 }
@@ -50,7 +50,7 @@ pub(super) struct ModuleSpec {
 /// component's index into `patch.hw_components`, so the window can hit-test
 /// exactly like the terminal did.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct CellSpec {
+pub(crate) struct CellSpec {
     pub rect: Rect,
     pub glyph: String,
     pub label: String,
@@ -71,7 +71,7 @@ pub(super) struct CellSpec {
 /// shell builds it from `App` (mapping, labels, hover, pause state), the
 /// tests build it directly; [`paint_physical`] only draws it.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct PhysicalSpec {
+pub(crate) struct PhysicalSpec {
     pub background: Color,
     pub case_rect: Rect,
     pub mounts: Vec<Rect>,
@@ -94,7 +94,7 @@ pub(super) struct PhysicalSpec {
 /// `App` (mirrors `WindowFrame`): middle-drag pan in screen cells, wheel
 /// zoom about the cursor, and a plain `s` skeleton toggle.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct PhysicalFrame {
+pub(crate) struct PhysicalFrame {
     /// Pan delta in screen cells (`physical_offset` units).
     pub pan_delta: (f32, f32),
     /// Wheel zoom: factor plus the cursor anchor in points.
@@ -105,7 +105,7 @@ pub(super) struct PhysicalFrame {
 
 /// Paint the physical 1:1 view into the window canvas. `None` draws nothing.
 /// Returns the frame's pan/zoom/skeleton input report for the loop to apply.
-pub(super) fn paint_physical(
+pub(crate) fn paint_physical(
     painter: &Painter,
     canvas: Vec2,
     ctx: &Context,
@@ -333,7 +333,7 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
 /// color (port of `ui.rs::physical_visuals`). Buttons pick the shift-group
 /// token when the group is active; fader-marked knobs/encoders render the
 /// amber LED strip instead of a disc.
-pub(super) fn cell_visuals(
+pub(crate) fn cell_visuals(
     comp: &crate::patch::HwComponent,
     is_shift_active: bool,
     fader: bool,
@@ -397,7 +397,7 @@ pub(super) fn cell_visuals(
 /// `ui.rs::physical_skeleton_geometry`): the case outline, mounts, labeled
 /// fold bars, module outlines, and element-cell rects with their port
 /// markers. Pure so tests assert the mm→point mapping without a window.
-pub(super) fn rack_geometry(
+pub(crate) fn rack_geometry(
     rack: &RackLayout,
     chain: &PhysicalLayout,
     mapping: &ScreenMapping,
@@ -481,7 +481,7 @@ pub(super) fn rack_geometry(
 
 /// Pure rack skeleton geometry in points (see [`rack_geometry`]).
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct RackGeometry {
+pub(crate) struct RackGeometry {
     pub case_rect: Rect,
     pub mounts: Vec<Rect>,
     pub fold_bars: Vec<(Rect, String)>,
@@ -492,7 +492,7 @@ pub(super) struct RackGeometry {
 
 /// Vertical + horizontal mm grid lines mapped to points, one line every
 /// `step_mm` across the rack bounds (`w_mm` × `h_mm` at the origin).
-pub(super) fn mm_grid_lines(
+pub(crate) fn mm_grid_lines(
     mapping: &ScreenMapping,
     cell_scale: f32,
     w_mm: f64,

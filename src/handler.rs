@@ -1,7 +1,296 @@
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
+use crate::app::Rect;
+use egui::Rect as EguiRect;
+use egui::{Modifiers, PointerButton, Pos2, Vec2};
+use winit::event::WindowEvent;
+use winit::keyboard::NamedKey;
+
+#[cfg(test)]
+use crate::gui::{camera_zoom_about, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
+#[cfg(test)]
+use crate::gui::{PanelsFrame, PhysicalFrame, PickerFrame, ViewerFrame};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCode {
+    Char(char),
+    Enter,
+    Esc,
+    Backspace,
+    Tab,
+    BackTab,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyEvent {
+    pub code: KeyCode,
+    pub modifiers: Modifiers,
+}
+
+impl KeyEvent {
+    pub fn new(code: KeyCode, modifiers: Modifiers) -> Self {
+        Self { code, modifiers }
+    }
+
+    /// Convert a winit key event into the neutral shape the handler binds.
+    /// Convert the parts of a winit keyboard event into the neutral shape the
+    /// handler binds. Produced characters become `Char` (shifted glyphs arrive
+    /// as their symbol, e.g. `?` for Shift+/), named keys map to the matching
+    /// code, and Shift+Tab becomes `BackTab`.
+    /// Control maps to ctrl+command (the handler treats the pair as one), Super
+    /// to mac_cmd only. Multi-character composition and unbound keys map to
+    /// `None`, as do release events. winit reports modifiers via
+    /// `ModifiersChanged` rather than on the key event, so the loop tracks the
+    /// current state and passes it in. The parts API exists because
+    /// `winit::event::KeyEvent` carries a private field and cannot be
+    /// constructed outside winit.
+    pub fn from_winit_parts(
+        logical_key: &winit::keyboard::Key,
+        state: winit::event::ElementState,
+        winit_mods: winit::keyboard::ModifiersState,
+    ) -> Option<Self> {
+        if state != winit::event::ElementState::Pressed {
+            return None;
+        }
+        let code = match logical_key {
+            winit::keyboard::Key::Character(ch) => {
+                let mut chars = ch.chars();
+                let c = chars.next()?;
+                if chars.next().is_some() {
+                    return None;
+                }
+                KeyCode::Char(c)
+            }
+            winit::keyboard::Key::Named(named) => match named {
+                NamedKey::Enter => KeyCode::Enter,
+                NamedKey::Escape => KeyCode::Esc,
+                NamedKey::Backspace => KeyCode::Backspace,
+                NamedKey::Tab if winit_mods.shift_key() => KeyCode::BackTab,
+                NamedKey::Tab => KeyCode::Tab,
+                NamedKey::Space => KeyCode::Char(' '),
+                NamedKey::ArrowUp => KeyCode::Up,
+                NamedKey::ArrowDown => KeyCode::Down,
+                NamedKey::ArrowLeft => KeyCode::Left,
+                NamedKey::ArrowRight => KeyCode::Right,
+                NamedKey::Home => KeyCode::Home,
+                NamedKey::End => KeyCode::End,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let mut modifiers = Modifiers::NONE;
+        if winit_mods.shift_key() {
+            modifiers.shift = true;
+        }
+        if winit_mods.control_key() {
+            modifiers.ctrl = true;
+            modifiers.command = true;
+        }
+        if winit_mods.alt_key() {
+            modifiers.alt = true;
+        }
+        if winit_mods.super_key() {
+            modifiers.mac_cmd = true;
+        }
+        Some(Self::new(code, modifiers))
+    }
+}
+
+pub mod key_modifiers {
+    use egui::Modifiers;
+    pub const NONE: Modifiers = Modifiers::NONE;
+    pub const CONTROL: Modifiers = Modifiers {
+        ctrl: true,
+        alt: false,
+        shift: false,
+        mac_cmd: false,
+        command: true,
+    };
+    pub const SHIFT: Modifiers = Modifiers {
+        shift: true,
+        alt: false,
+        ctrl: false,
+        mac_cmd: false,
+        command: false,
+    };
+    pub const ALT: Modifiers = Modifiers {
+        alt: true,
+        ctrl: false,
+        shift: false,
+        mac_cmd: false,
+        command: false,
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+impl From<MouseButton> for PointerButton {
+    fn from(b: MouseButton) -> Self {
+        match b {
+            MouseButton::Left => PointerButton::Primary,
+            MouseButton::Right => PointerButton::Secondary,
+            MouseButton::Middle => PointerButton::Middle,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEventKind {
+    Moved,
+    Down(MouseButton),
+    Up(MouseButton),
+    Drag(MouseButton),
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MouseEvent {
+    pub kind: MouseEventKind,
+    pub column: u16,
+    pub row: u16,
+    pub modifiers: Modifiers,
+}
+
+fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
+fn egui_rect_from_u16(x: u16, y: u16, w: u16, h: u16) -> EguiRect {
+    EguiRect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(w as f32, h as f32))
+}
+
+#[cfg(test)]
+pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::App) {
+    if frame.skeleton_toggle {
+        app.physical_show_skeleton = !app.physical_show_skeleton;
+        app.status_message = if app.physical_show_skeleton {
+            String::from("Skeleton: on")
+        } else {
+            String::from("Skeleton: off")
+        };
+    }
+    if frame.pan_delta != (0.0, 0.0) {
+        app.physical_offset.0 += frame.pan_delta.0;
+        app.physical_offset.1 += frame.pan_delta.1;
+    }
+    if let Some((factor, anchor)) = frame.zoom {
+        let clamped = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
+        if let Some(cam) = app.graph_camera.as_mut() {
+            let next = camera_zoom_about(cam, clamped, anchor);
+            *cam = next;
+        } else {
+            app.physical_zoom = (app.physical_zoom * clamped).clamp(0.5, 3.0);
+            app.scale_factor = app.physical_zoom;
+        }
+        let _ = ZOOM_SENSITIVITY;
+    }
+    let _ = WindowEvent::RedrawRequested;
+}
+
+#[cfg(test)]
+pub(crate) fn handle_panels_frame(frame: PanelsFrame, app: &mut crate::app::App) {
+    app.hovered_component = frame.hovered;
+    if let Some(idx) = frame.clicked {
+        let token = app
+            .patch
+            .as_ref()
+            .and_then(|p| p.hw_components.get(idx))
+            .map(|c| c.id.clone());
+        if let Some(token) = token {
+            if !app.processing_paused {
+                if let Some(patch) = &mut app.patch {
+                    if let Some(comp) = patch.hw_components.get_mut(idx) {
+                        toggle_component(comp);
+                        app.status_message = format!("Toggled: {}", comp.label);
+                    }
+                }
+            }
+            app.select_component(token);
+        }
+        app.tile_stack.focus = crate::app::FocusSlot::Panels;
+    }
+    if let Some(delta) = frame.scroll {
+        if let Some(idx) = frame.hovered {
+            if !app.processing_paused {
+                if let Some(patch) = &mut app.patch {
+                    if let Some(comp) = patch.hw_components.get_mut(idx) {
+                        let delta_val = delta * ZOOM_SENSITIVITY * 10.0;
+                        if let crate::patch::ComponentState::Value(v) = comp.state {
+                            comp.state = crate::patch::ComponentState::Value(
+                                (v + delta_val).clamp(0.0, 1.0),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn handle_viewer_frame(frame: ViewerFrame, app: &mut crate::app::App) {
+    if frame.scroll_delta != 0.0 {
+        let delta = frame.scroll_delta as isize;
+        if delta > 0 {
+            app.source_scroll = app.source_scroll.saturating_add(delta as usize);
+        } else {
+            app.source_scroll = app.source_scroll.saturating_sub((-delta) as usize);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn handle_picker_frame(frame: PickerFrame, app: &mut crate::app::App) {
+    if let Some(hovered) = frame.hovered {
+        app.picker_index = hovered;
+    }
+    if let Some(clicked) = frame.clicked {
+        if let Some(path) = app.picker_entries.get(clicked).cloned() {
+            open_picker_entry(app, path);
+        }
+    }
+}
+
+pub fn handle_window_event(
+    event: &WindowEvent,
+    modifiers: winit::keyboard::ModifiersState,
+    app: &mut crate::app::App,
+) -> bool {
+    match event {
+        WindowEvent::KeyboardInput { event, .. } => {
+            handle_window_key_event(&event.logical_key, event.state, modifiers, app)
+        }
+        _ => false,
+    }
+}
+
+/// Convert one winit keyboard event and run the shared dispatch. Returns
+/// whether the handler asked to quit. Takes the event's parts so tests can
+/// drive the conversion without constructing a winit `DeviceId` or `KeyEvent`
+/// (the latter has a private field).
+pub fn handle_window_key_event(
+    logical_key: &winit::keyboard::Key,
+    state: winit::event::ElementState,
+    modifiers: winit::keyboard::ModifiersState,
+    app: &mut crate::app::App,
+) -> bool {
+    // from_winit_parts filters release events; presses convert to the neutral
+    // shape and run the same dispatch as the terminal key path.
+    KeyEvent::from_winit_parts(logical_key, state, modifiers)
+        .map_or(false, |key| handle_event(key, app))
+}
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -110,26 +399,26 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // Inline label-edit overlay eats all keys (highest priority: overlay > picker > prefix > graph > source > panels).
     if app.editing.is_some() {
         match key.code {
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 app.cancel_edit();
                 app.status_message = String::from("Edit cancelled");
                 return false;
             }
-            crossterm::event::KeyCode::Enter => {
+            KeyCode::Enter => {
                 match app.commit_edit() {
                     Ok(()) => app.status_message = String::from("Label saved"),
                     Err(e) => app.status_message = format!("Save failed: {e}"),
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Backspace => {
+            KeyCode::Backspace => {
                 if let Some(state) = app.editing.as_mut() {
                     state.draft.pop();
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char(c)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            KeyCode::Char(c)
+                if key.modifiers.is_none() || key.modifiers == key_modifiers::SHIFT =>
             {
                 if c.is_ascii_digit() && c != '0' {
                     let settings = crate::config::load(
@@ -167,7 +456,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // modal's lifetime.
     if app.showing_help {
         match key.code {
-            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('q') => {
                 app.close_help();
                 return false;
             }
@@ -177,7 +466,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // `?` opens the help modal from any view (design D2). Matched without a
     // modifier guard because the key arrives with SHIFT (Shift+/), the same
     // convention as `+` (Shift+=). The edit overlay above already eats it.
-    if matches!(key.code, crossterm::event::KeyCode::Char('?')) {
+    if matches!(key.code, KeyCode::Char('?')) {
         app.open_help();
         return false;
     }
@@ -190,27 +479,27 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // When open it eats all keys; j/k navigate, Esc/e close, Enter jumps to source.
     if app.showing_validation {
         match key.code {
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 app.showing_validation = false;
                 return false;
             }
-            crossterm::event::KeyCode::Char('e') if key.modifiers.is_empty() => {
+            KeyCode::Char('e') if key.modifiers.is_none() => {
                 app.showing_validation = false;
                 return false;
             }
-            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Down => {
                 if app.validation_cursor + 1 < app.validation_issues.len() {
                     app.validation_cursor += 1;
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+            KeyCode::Char('k') | KeyCode::Up => {
                 if app.validation_cursor > 0 {
                     app.validation_cursor -= 1;
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Enter => {
+            KeyCode::Enter => {
                 if let Some(issue) = app.validation_issues.get(app.validation_cursor).cloned() {
                     app.source_scroll = issue.span.line;
                     // Open source viewer and focus it so the jumped span is visible.
@@ -228,8 +517,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // `e` toggles validation modal open when not already showing and issues exist.
     // Respects label-edit priority: if a hovered node/component or source header
     // would consume `e` for label editing, let that handler run instead.
-    if matches!(key.code, crossterm::event::KeyCode::Char('e'))
-        && key.modifiers.is_empty()
+    if matches!(key.code, KeyCode::Char('e'))
+        && key.modifiers.is_none()
         && !app.validation_issues.is_empty()
         && !app.showing_validation
     {
@@ -260,7 +549,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // (so a second `g` simply re-arms with a fresh timeout).
     if app.prefix.is_some() {
         match key.code {
-            crossterm::event::KeyCode::Char('v') => {
+            KeyCode::Char('v') => {
                 open_embedded_viewer(app);
                 // Tiled open path (change `tiled-window-manager`, D7): the
                 // viewer takes a right-column slot and focus with it.
@@ -268,7 +557,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 focus_tile_slot(app, ViewType::SourceViewer);
                 return false;
             }
-            crossterm::event::KeyCode::Char('g') => {
+            KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
                 if app.graph_window_enabled {
                     // `[gui] graph_window = true`: open the GPU graph window
@@ -286,7 +575,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Char('d') => {
+            KeyCode::Char('d') => {
                 // `g d` opens picker for B patch (patch-diff-viewer).
                 app.diff_picker_active = true;
                 app.showing_picker = true;
@@ -298,7 +587,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Char('o') => {
+            KeyCode::Char('o') => {
                 // `g o` opens the optimizer as a right-column pane (change
                 // `tiled-window-manager`, 5.1): `open_view` handles the
                 // already-open focus case and the slot cap, and lands focus
@@ -308,7 +597,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Char('w') => {
+            KeyCode::Char('w') => {
                 // `g w` toggles the GPU graph window (gpu-graph-window D6).
                 // The handler cannot reach GraphWindow (owned by the windowed
                 // loop in main.rs), so it records a request the loop consumes
@@ -319,7 +608,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Char('s') => {
+            KeyCode::Char('s') => {
                 if app.open_select_menu() {
                     app.prefix = None;
                     return false;
@@ -327,7 +616,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 app.prefix = None;
                 return false;
             }
@@ -338,7 +627,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     }
 
     // Diff overlay Esc handling: clear scope first, then overlay (before viewer/graph Esc).
-    if matches!(key.code, crossterm::event::KeyCode::Esc) {
+    if matches!(key.code, KeyCode::Esc) {
         if app.diff_scope.is_some() {
             app.diff_scope = None;
             app.status_message = String::from("Diff scope cleared");
@@ -357,11 +646,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // [/] cycle candidates with live rebuild, Esc clears.
     if app.select_state.is_some() {
         match key.code {
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 app.close_select_menu();
                 return false;
             }
-            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(st) = app.select_state.as_mut() {
                     let n = st.signals.len();
                     if n > 0 && st.cursor + 1 < n {
@@ -370,7 +659,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+            KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(st) = app.select_state.as_mut() {
                     if st.cursor > 0 {
                         st.cursor -= 1;
@@ -378,15 +667,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('[') => {
+            KeyCode::Char('[') => {
                 app.cycle_select_candidate(-1);
                 return false;
             }
-            crossterm::event::KeyCode::Char(']') => {
+            KeyCode::Char(']') => {
                 app.cycle_select_candidate(1);
                 return false;
             }
-            crossterm::event::KeyCode::Enter => {
+            KeyCode::Enter => {
                 app.cycle_select_candidate(1);
                 return false;
             }
@@ -396,7 +685,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
 
     // Dependency-filter Esc handling (change D task 2.1): Esc clears the
     // filter before the tiled Esc that would close the focused view.
-    if matches!(key.code, crossterm::event::KeyCode::Esc) && app.dependency_root.is_some() {
+    if matches!(key.code, KeyCode::Esc) && app.dependency_root.is_some() {
         app.clear_dependency_filter();
         app.prefix = None;
         return false;
@@ -408,19 +697,19 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // view (or clears the modifier selection on panels). Empty-stack states
     // fall through to the legacy per-view branches below.
     if !app.tile_stack.slots.is_empty() {
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let shift = key.modifiers.shift;
         match key.code {
-            crossterm::event::KeyCode::Tab if !shift => {
+            KeyCode::Tab if !shift => {
                 app.cycle_focus(true);
                 sync_viewer_focus_from_tiles(app);
                 return false;
             }
-            crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::BackTab => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 app.cycle_focus(false);
                 sync_viewer_focus_from_tiles(app);
                 return false;
             }
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 let closed_viewer = matches!(
                     app.tile_stack.focus,
                     FocusSlot::Slot(i)
@@ -446,7 +735,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // through so q/Ctrl+C quit and `l` still opens the picker.
     if optimizer_slot_focused(app) {
         match key.code {
-            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Down => {
                 let len = app
                     .optimizer
                     .as_ref()
@@ -459,7 +748,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+            KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(state) = app.optimizer.as_mut() {
                     if state.cursor > 0 {
                         state.cursor -= 1;
@@ -467,16 +756,16 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Enter => {
+            KeyCode::Enter => {
                 let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
                 app.optimizer_preview(idx);
                 return false;
             }
-            crossterm::event::KeyCode::Char('r') => {
+            KeyCode::Char('r') => {
                 app.optimizer_restore();
                 return false;
             }
-            crossterm::event::KeyCode::Char('s') => {
+            KeyCode::Char('s') => {
                 let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
                 app.optimizer_export(idx);
                 return false;
@@ -484,23 +773,23 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             // Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1`
             // snap to the endpoints. Returned here so the split-ratio
             // handlers never see them while the optimizer pane is focused.
-            crossterm::event::KeyCode::Char('[') => {
+            KeyCode::Char('[') => {
                 if let Some(state) = app.optimizer.as_ref() {
                     app.optimizer_set_weight(state.weight - 0.1);
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char(']') => {
+            KeyCode::Char(']') => {
                 if let Some(state) = app.optimizer.as_ref() {
                     app.optimizer_set_weight(state.weight + 0.1);
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('0') => {
+            KeyCode::Char('0') => {
                 app.optimizer_set_weight(0.0);
                 return false;
             }
-            crossterm::event::KeyCode::Char('1') => {
+            KeyCode::Char('1') => {
                 app.optimizer_set_weight(1.0);
                 return false;
             }
@@ -509,10 +798,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     }
 
     // Label edit overlay entry: `e` (lowercase, no mods) with priority graph hover > source header > panel hover.
-    if matches!(key.code, crossterm::event::KeyCode::Char('e'))
-        && key.modifiers.is_empty()
-        && app.patch.is_some()
-    {
+    if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.patch.is_some() {
         // 1) Graph hovered node -> Circuit
         if let Some(idx) = app.hovered_graph_node {
             if begin_graph_node_edit(app, idx) {
@@ -617,27 +903,25 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // else is routed here.
     if app.showing_graph {
         match key.code {
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 app.close_graph();
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Char('q') => {
+            KeyCode::Char('q') => {
                 return true;
             }
-            crossterm::event::KeyCode::Char('c')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('c') if key.modifiers.ctrl => {
                 return true;
             }
-            crossterm::event::KeyCode::Char('l') => {
+            KeyCode::Char('l') => {
                 app.showing_picker = true;
                 app.picker_dir = std::env::current_dir().unwrap_or_default();
                 app.picker_index = 0;
                 app.refresh_picker_entries();
                 return false;
             }
-            crossterm::event::KeyCode::Char('p') => {
+            KeyCode::Char('p') => {
                 // Task 3.1 (design D7): `p` toggles pin/unpin on the hovered
                 // graph node, mirroring the `x` processing toggle. Silent
                 // no-op without hover; the rebuild + re-solve re-anchors the
@@ -648,49 +932,49 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('c') => {
+            KeyCode::Char('c') => {
                 // Bare `c` toggles cable latency coloring on the graph surface;
                 // Ctrl+C (quit) is matched above with its modifier guard.
                 app.toggle_latency_coloring();
                 return false;
             }
-            crossterm::event::KeyCode::Char('x') => {
+            KeyCode::Char('x') => {
                 if let Some(idx) = app.hovered_graph_node {
                     graph_node_processing_toggle(app, idx);
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('f') => {
+            KeyCode::Char('f') => {
                 // Change D task 2.1: `f` toggles the upstream dependency
                 // filter rooted at the hovered node (fallback: the shared
                 // circuit selection); a second `f` restores the full graph.
                 app.toggle_dependency_filter();
                 return false;
             }
-            crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
+            KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph
                 // slot is focused), `Shift` scales the other pane. The
                 // camera re-seeds a fit on open; pan/zoom both re-emit the
                 // image on the next draw (drag/hover/x/e are unchanged).
-                let plus = matches!(key.code, crossterm::event::KeyCode::Char('+'));
+                let plus = matches!(key.code, KeyCode::Char('+'));
                 let step = if plus { 1 } else { -1 };
-                if key.modifiers.contains(KeyModifiers::SHIFT) == graph_slot_focused(app) {
+                if key.modifiers.shift == graph_slot_focused(app) {
                     cycle_panel_scale(app, plus);
                 } else {
                     app.graph_zoom_preset_step(step);
                 }
                 return false;
             }
-            crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']') => {
+            KeyCode::Char('[') | KeyCode::Char(']') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): `Alt`
                 // adjusts cable tension on the focused graph pane (design D9
                 // determinism holds per tension value); plain brackets adjust
                 // the tiled left/right split. The optimizer menu's weight
                 // slider returns before this branch.
-                if key.modifiers.contains(KeyModifiers::ALT) {
+                if key.modifiers.alt {
                     if graph_slot_focused(app) {
-                        let dir = if matches!(key.code, crossterm::event::KeyCode::Char(']')) {
+                        let dir = if matches!(key.code, KeyCode::Char(']')) {
                             1
                         } else {
                             -1
@@ -699,7 +983,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     }
                     return false;
                 }
-                let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
+                let delta = if matches!(key.code, KeyCode::Char('[')) {
                     -0.1
                 } else {
                     0.1
@@ -713,20 +997,17 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     format!("Panels/Source split: {:.0}%/{:.0}%", pct_panels, pct_source);
                 return false;
             }
-            crossterm::event::KeyCode::Left
-            | crossterm::event::KeyCode::Right
-            | crossterm::event::KeyCode::Up
-            | crossterm::event::KeyCode::Down => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 // Task 2.3: arrows pan the graph camera on the graph surface
                 // (mirrors the physical pan-on-overflow model, but gated to the
                 // graph's own camera). When the camera has not been seeded yet
                 // (the box-drawing path), this is a no-op so navigation is
                 // unchanged.
                 let (dx, dy) = match key.code {
-                    crossterm::event::KeyCode::Left => (-1, 0),
-                    crossterm::event::KeyCode::Right => (1, 0),
-                    crossterm::event::KeyCode::Up => (0, -1),
-                    crossterm::event::KeyCode::Down => (0, 1),
+                    KeyCode::Left => (-1, 0),
+                    KeyCode::Right => (1, 0),
+                    KeyCode::Up => (0, -1),
+                    KeyCode::Down => (0, 1),
                     _ => (0, 0),
                 };
                 app.graph_pan_if_overflow(dx, dy);
@@ -740,7 +1021,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if app.showing_viewer {
         // Global viewer keys: Esc, Tab, t work from either focus.
         match key.code {
-            crossterm::event::KeyCode::Esc => {
+            KeyCode::Esc => {
                 app.showing_viewer = false;
                 // Defensive tile sync for pre-tiling open paths; the dispatch
                 // above already removed the slot when one was open.
@@ -749,25 +1030,25 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
-            crossterm::event::KeyCode::Tab => {
+            KeyCode::Tab => {
                 app.viewer_focus = match app.viewer_focus {
                     ViewerFocus::Source => ViewerFocus::Panels,
                     ViewerFocus::Panels => ViewerFocus::Source,
                 };
                 return false;
             }
-            crossterm::event::KeyCode::Char('t') => {
+            KeyCode::Char('t') => {
                 app.source_view_mode = match app.source_view_mode {
                     SourceViewMode::Raw => SourceViewMode::Prettified,
                     SourceViewMode::Prettified => SourceViewMode::Raw,
                 };
                 return false;
             }
-            crossterm::event::KeyCode::Char('[') | crossterm::event::KeyCode::Char(']') => {
+            KeyCode::Char('[') | KeyCode::Char(']') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): brackets
                 // adjust the tiled left/right split for any right-column
                 // view (both ratios stay synced by the method).
-                let delta = if matches!(key.code, crossterm::event::KeyCode::Char('[')) {
+                let delta = if matches!(key.code, KeyCode::Char('[')) {
                     -0.1
                 } else {
                     0.1
@@ -787,16 +1068,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
 
         if app.viewer_focus == ViewerFocus::Source {
             // Quit still works even when source is focused.
-            if matches!(key.code, crossterm::event::KeyCode::Char('q')) {
+            if matches!(key.code, KeyCode::Char('q')) {
                 return true;
             }
-            if matches!(key.code, crossterm::event::KeyCode::Char('c'))
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
+            if matches!(key.code, KeyCode::Char('c')) && key.modifiers.ctrl {
                 return true;
             }
             // Allow picker open even when source focused (picker precedence).
-            if matches!(key.code, crossterm::event::KeyCode::Char('l')) {
+            if matches!(key.code, KeyCode::Char('l')) {
                 app.showing_picker = true;
                 app.picker_dir = std::env::current_dir().unwrap_or_default();
                 app.picker_index = 0;
@@ -804,40 +1083,40 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             // Pause toggle stays live when source focused (global q/l level).
-            if matches!(key.code, crossterm::event::KeyCode::Char('p')) {
+            if matches!(key.code, KeyCode::Char('p')) {
                 app.toggle_processing_pause();
                 return false;
             }
             match key.code {
-                crossterm::event::KeyCode::Char('j') => {
+                KeyCode::Char('j') => {
                     app.source_scroll = app.source_scroll.saturating_add(1);
                     return false;
                 }
-                crossterm::event::KeyCode::Char('k') => {
+                KeyCode::Char('k') => {
                     app.source_scroll = app.source_scroll.saturating_sub(1);
                     return false;
                 }
-                crossterm::event::KeyCode::Down => {
+                KeyCode::Down => {
                     if app.selected_component.is_some() {
                         let next = app.occurrence_cursor.saturating_add(1);
                         app.jump_to_occurrence(next);
                     }
                     return false;
                 }
-                crossterm::event::KeyCode::Up => {
+                KeyCode::Up => {
                     if app.selected_component.is_some() {
                         let prev = app.occurrence_cursor.saturating_sub(1);
                         app.jump_to_occurrence(prev);
                     }
                     return false;
                 }
-                crossterm::event::KeyCode::Home => {
+                KeyCode::Home => {
                     if app.selected_component.is_some() {
                         app.jump_to_occurrence(0);
                     }
                     return false;
                 }
-                crossterm::event::KeyCode::End => {
+                KeyCode::End => {
                     if let Some(token) = app.selected_component.clone() {
                         if let Some(patch) = app.patch.as_ref() {
                             if let Some(spans) = patch.occurrence_index.get(&token) {
@@ -863,10 +1142,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
 
     // Label edit overlay entry (`e` on focused datum): overlay > picker > prefix > graph > source > panels.
     // Priority: graph hovered node -> viewer source header -> panel hovered token.
-    if matches!(key.code, crossterm::event::KeyCode::Char('e'))
-        && key.modifiers.is_empty()
-        && app.editing.is_none()
-    {
+    if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.editing.is_none() {
         // Graph surface takes precedence when open.
         if app.showing_graph {
             if let Some(idx) = app.hovered_graph_node {
@@ -981,11 +1257,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     }
 
     match key.code {
-        crossterm::event::KeyCode::Char('q') => true,
-        crossterm::event::KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            true
-        }
-        crossterm::event::KeyCode::Char('l') => {
+        KeyCode::Char('q') => true,
+        KeyCode::Char('c') if key.modifiers.ctrl => true,
+        KeyCode::Char('l') => {
             // Opens the picker whether or not a patch is already loaded,
             // so a loaded patch can be swapped for a different one.
             app.showing_picker = true;
@@ -994,11 +1268,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.refresh_picker_entries();
             false
         }
-        crossterm::event::KeyCode::Char('p') => {
+        KeyCode::Char('p') => {
             app.toggle_processing_pause();
             false
         }
-        crossterm::event::KeyCode::Char('s') => {
+        KeyCode::Char('s') => {
             // Skeleton toggle (`s`): presentation switch of the main view
             // (task 3.1, design D7). Free in the normal-key path — the
             // optimizer overlay's `s` (export) returns earlier.
@@ -1010,7 +1284,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             };
             false
         }
-        crossterm::event::KeyCode::Char('g') => {
+        KeyCode::Char('g') => {
             // Enter prefix mode; a repeated `g` re-arms the timer via the
             // cancel-and-fall-through path above.
             app.prefix = Some(PrefixState {
@@ -1018,7 +1292,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             });
             false
         }
-        crossterm::event::KeyCode::Char('d') if key.modifiers.is_empty() => {
+        KeyCode::Char('d') if key.modifiers.is_none() => {
             if app.diff_report.is_some() {
                 app.toggle_diff_showing();
                 if app.diff_showing {
@@ -1044,27 +1318,27 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        crossterm::event::KeyCode::Char('1') => {
+        KeyCode::Char('1') => {
             app.active_shift = Some(ShiftGroup::Group1);
             app.status_message = String::from("Shift 1 active");
             false
         }
-        crossterm::event::KeyCode::Char('2') => {
+        KeyCode::Char('2') => {
             app.active_shift = Some(ShiftGroup::Group2);
             app.status_message = String::from("Shift 2 active");
             false
         }
-        crossterm::event::KeyCode::Char('3') => {
+        KeyCode::Char('3') => {
             app.active_shift = Some(ShiftGroup::Group3);
             app.status_message = String::from("Shift 3 active");
             false
         }
-        crossterm::event::KeyCode::Char('4') => {
+        KeyCode::Char('4') => {
             app.active_shift = Some(ShiftGroup::Group4);
             app.status_message = String::from("Shift 4 active");
             false
         }
-        crossterm::event::KeyCode::Esc => {
+        KeyCode::Esc => {
             // When viewer is closed, Esc clears shift (and prefix already
             // handled above). When viewer was open, this branch is unreachable
             // because the viewer Esc handler returned early.
@@ -1073,7 +1347,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.prefix = None;
             false
         }
-        crossterm::event::KeyCode::Char('o') => {
+        KeyCode::Char('o') => {
             app.orientation = match app.orientation {
                 crate::app::Orientation::Portrait => crate::app::Orientation::Landscape,
                 crate::app::Orientation::Landscape => crate::app::Orientation::Portrait,
@@ -1084,20 +1358,17 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             );
             false
         }
-        crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('-') => {
+        KeyCode::Char('+') | KeyCode::Char('-') => {
             // Zoom family (change `tiled-window-manager`, 4.2): plain scales
             // the panels pane; `Shift` would scale the other pane, which the
             // graph arm above already owns while the graph is open.
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
+            if key.modifiers.shift {
                 return false;
             }
-            cycle_panel_scale(
-                app,
-                matches!(key.code, crossterm::event::KeyCode::Char('+')),
-            );
+            cycle_panel_scale(app, matches!(key.code, KeyCode::Char('+')));
             false
         }
-        crossterm::event::KeyCode::Char('\\') => {
+        KeyCode::Char('\\') => {
             // Left-pane vertical split toggle (D3).
             app.toggle_left_split();
             app.status_message = if app.left_split_active {
@@ -1107,7 +1378,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             };
             false
         }
-        crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
+        KeyCode::Enter | KeyCode::Char(' ') => {
             if let Some(idx) = app.hovered_component {
                 // Capture token id before mutating patch to avoid borrow conflict.
                 let token_id = app
@@ -1134,7 +1405,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        crossterm::event::KeyCode::Up => {
+        KeyCode::Up => {
             // Physical-view pan (4.3): arrows pan the rack toward the
             // pressed direction when it overflows the main area; otherwise
             // they keep their panel-navigation meaning. j/k always navigate.
@@ -1143,25 +1414,25 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        crossterm::event::KeyCode::Down => {
+        KeyCode::Down => {
             if !app.physical_pan_if_overflow(0, 1) {
                 navigate(app, 1);
             }
             false
         }
-        crossterm::event::KeyCode::Left => {
+        KeyCode::Left => {
             app.physical_pan_if_overflow(-1, 0);
             false
         }
-        crossterm::event::KeyCode::Right => {
+        KeyCode::Right => {
             app.physical_pan_if_overflow(1, 0);
             false
         }
-        crossterm::event::KeyCode::Char('k') => {
+        KeyCode::Char('k') => {
             navigate(app, -1);
             false
         }
-        crossterm::event::KeyCode::Char('j') => {
+        KeyCode::Char('j') => {
             navigate(app, 1);
             false
         }
@@ -1672,10 +1943,6 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     }
 }
 
-fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
-    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
-}
-
 fn adjust_value(comp: &mut HwComponent, delta: f32) {
     if let ComponentState::Value(v) = comp.state {
         comp.state = ComponentState::Value((v + delta).clamp(0.0, 1.0));
@@ -1715,30 +1982,28 @@ fn navigate(app: &mut App, delta: i32) {
 
 fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
     match key.code {
-        crossterm::event::KeyCode::Esc => {
+        KeyCode::Esc => {
             app.showing_picker = false;
             app.diff_picker_active = false;
             false
         }
-        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+        KeyCode::Up | KeyCode::Char('k') => {
             if app.picker_index > 0 {
                 app.picker_index -= 1;
             }
             false
         }
-        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+        KeyCode::Down | KeyCode::Char('j') => {
             if app.picker_index < app.picker_entries.len().saturating_sub(1) {
                 app.picker_index += 1;
             }
             false
         }
-        crossterm::event::KeyCode::Char('f') | crossterm::event::KeyCode::Char('F') => {
+        KeyCode::Char('f') | KeyCode::Char('F') => {
             // Favourites toggle for the highlighted picker entry (file-picker-favourites 3.1).
             // Directories toggle like files; the pinned section shows both. Only the
             // parent sentinel is excluded.
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::ALT)
-            {
+            if key.modifiers.ctrl || key.modifiers.alt {
                 return false;
             }
             if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
@@ -1770,13 +2035,11 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        crossterm::event::KeyCode::Char(d @ '0'..='9') => {
+        KeyCode::Char(d @ '0'..='9') => {
             // Digit keys fast-select a pinned favourite slot (0-based in the
             // sorted favourites list). Directories navigate in, files open like
             // Enter; out-of-range digits are silent.
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::ALT)
-            {
+            if key.modifiers.ctrl || key.modifiers.alt {
                 return false;
             }
             let slot = d.to_digit(10).unwrap_or(0) as usize;
@@ -1786,7 +2049,7 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        crossterm::event::KeyCode::Enter => {
+        KeyCode::Enter => {
             if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
                 if !is_entry_selectable(&selected_path) {
                     return false;
@@ -1870,9 +2133,9 @@ fn open_picker_entry(app: &mut App, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Rect;
     use crate::events::Event;
     use crate::patch::Patch;
-    use ratatui::layout::Rect;
     use std::sync::{Mutex, OnceLock};
 
     fn fav_lock() -> &'static Mutex<()> {
@@ -1904,7 +2167,7 @@ mod tests {
             kind,
             column,
             row,
-            modifiers: KeyModifiers::NONE,
+            modifiers: key_modifiers::NONE,
         }
     }
 
@@ -1973,14 +2236,14 @@ mod tests {
         let mut app = app_with_overflowing_rack();
         // Right/Down pan positive (screen content shifts opposite, D5);
         // Left/Up reverse. Panning must not move the keyboard cursor.
-        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        handle_event(key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (8.0, 0.0));
         assert_eq!(app.hovered_component, None, "pan must not navigate");
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.physical_offset, (8.0, 8.0));
-        handle_event(key(crossterm::event::KeyCode::Left), &mut app);
+        handle_event(key(KeyCode::Left), &mut app);
         assert_eq!(app.physical_offset, (0.0, 8.0));
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
         assert_eq!(
             app.status_message,
@@ -1994,12 +2257,12 @@ mod tests {
         app.physical_rack_size = (40, 10);
         app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
         // Rack fits the viewport: Down/Up navigate, Left/Right stay no-ops.
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.hovered_component, Some(1));
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert_eq!(app.hovered_component, Some(0));
-        handle_event(key(crossterm::event::KeyCode::Left), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        handle_event(key(KeyCode::Left), &mut app);
+        handle_event(key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
     }
 
@@ -2008,15 +2271,15 @@ mod tests {
         let mut app = app_with_overflowing_rack();
         // Viewer open (Panels focus): arrows keep panel navigation.
         app.showing_viewer = true;
-        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        handle_event(key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.hovered_component, Some(1));
 
         // Graph surface: arrows do not pan the (hidden) physical view.
         app.showing_viewer = false;
         app.showing_graph = true;
-        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        handle_event(key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
     }
 
@@ -2055,7 +2318,7 @@ mod tests {
         let mut app = app_with_fixture();
         // `+` climbs one preset (100% → 150%) and folds the zoom into the
         // physical segment instead of the legacy "Scaling: N%" message.
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.5);
         assert_eq!(app.physical_zoom, 1.5);
         assert_eq!(
@@ -2072,8 +2335,8 @@ mod tests {
         assert_eq!(app.hovered_component, None);
     }
 
-    fn key(code: crossterm::event::KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, key_modifiers::NONE)
     }
 
     // Task 3.1: help modal (`?`).
@@ -2087,7 +2350,7 @@ mod tests {
     fn question_mark_opens_help_from_panels() {
         let mut app = App::new();
         assert!(!app.showing_help);
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(!quit);
         assert!(app.showing_help);
     }
@@ -2097,17 +2360,17 @@ mod tests {
         // Panels (default) is covered above; exercise the other surfaces.
         let mut app = App::new();
         app.showing_viewer = true;
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the viewer");
 
         let mut app = App::new();
         app.showing_graph = true;
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the graph");
 
         let mut app = App::new();
         app.showing_validation = true;
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the validation modal");
 
         let mut app = App::new();
@@ -2116,21 +2379,21 @@ mod tests {
                 .unwrap(),
         );
         assert!(app.open_optimizer());
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the optimizer");
 
         let mut app = App::new();
         app.showing_picker = true;
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the picker");
     }
 
     #[test]
     fn esc_closes_help_and_returns_false() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
-        let quit = handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        let quit = handle_event(key(KeyCode::Esc), &mut app);
         assert!(!quit);
         assert!(!app.showing_help);
     }
@@ -2138,10 +2401,10 @@ mod tests {
     #[test]
     fn q_closes_help_without_quitting() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         // q while help is open closes help and does NOT quit.
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('q')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
         assert!(!quit, "q must not quit while help is open");
         assert!(!app.showing_help);
     }
@@ -2149,10 +2412,10 @@ mod tests {
     #[test]
     fn help_eats_other_keys() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         // A random key while help is open is swallowed (returns false, no quit).
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('l')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('l')), &mut app);
         assert!(!quit);
         assert!(app.showing_help, "help stays open on unrelated keys");
     }
@@ -2160,7 +2423,7 @@ mod tests {
     #[test]
     fn click_outside_closes_help() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         // Publish a modal rect, then click well outside it.
         app.help_modal_rect = Some(Rect::new(10, 10, 40, 20));
@@ -2174,7 +2437,7 @@ mod tests {
     #[test]
     fn click_inside_keeps_help_open() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('?')), &mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         app.help_modal_rect = Some(Rect::new(10, 10, 40, 20));
         handle_mouse_event(
@@ -2191,21 +2454,21 @@ mod tests {
     fn plus_and_minus_cycle_scale_presets_with_status() {
         let mut app = App::new();
         // From the 100% default, '-' steps down one preset to 75%.
-        handle_event(key(crossterm::event::KeyCode::Char('-')), &mut app);
+        handle_event(key(KeyCode::Char('-')), &mut app);
         assert_eq!(app.scale_factor, 0.75);
         assert_eq!(app.status_message, "Scaling: 75%");
 
         // '+' climbs back through the presets.
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.0);
         assert_eq!(app.status_message, "Scaling: 100%");
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.5);
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 2.0);
 
         // At the top preset, '+' wraps around to the bottom.
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 0.75);
     }
 
@@ -2225,12 +2488,12 @@ mod tests {
         app.graph_canvas_px = Some((960.0, 480.0));
     }
 
-    fn alt_key(code: crossterm::event::KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::ALT)
+    fn alt_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, key_modifiers::ALT)
     }
 
-    fn shift_key(code: crossterm::event::KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::SHIFT)
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, key_modifiers::SHIFT)
     }
 
     #[test]
@@ -2243,7 +2506,7 @@ mod tests {
         seed_graph_camera(&mut app);
 
         let z0 = app.graph_camera.unwrap().zoom;
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         let z1 = app.graph_camera.unwrap().zoom;
         assert!(
             (z1 - z0 * 1.5).abs() < 1e-2,
@@ -2257,10 +2520,10 @@ mod tests {
         // Wrap at the top preset (200%) back to the bottom (6.25%): the
         // deep zoom-out steps exist so a fitted camera can reach the true
         // fit of a large patch (bug droid_tui-ttz).
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         let z2 = app.graph_camera.unwrap().zoom;
         assert!((z2 - z1 * (2.0 / 1.5)).abs() < 1e-2);
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         let z3 = app.graph_camera.unwrap().zoom;
         assert!(
             (z3 - z2 * (0.0625 / 2.0)).abs() < 1e-2,
@@ -2280,7 +2543,7 @@ mod tests {
         // width at the fitted zoom is small).
         let before = app.graph_camera.unwrap().pan;
         app.graph_canvas_px = Some((20.0, 20.0));
-        handle_event(key(crossterm::event::KeyCode::Right), &mut app);
+        handle_event(key(KeyCode::Right), &mut app);
         let after = app.graph_camera.unwrap().pan;
         assert!(
             (after.0 - before.0).abs() > 1.0,
@@ -2296,8 +2559,8 @@ mod tests {
         app.open_graph();
         app.tile_stack.focus = FocusSlot::Slot(0);
         assert!(app.graph_camera.is_none());
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert!(app.graph_camera.is_none());
         assert!(app.showing_graph);
     }
@@ -2318,8 +2581,8 @@ mod tests {
 
     /// Open the graph slot via `g` then `g`.
     fn open_graph_slot(app: &mut App) {
-        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
+        handle_event(key(KeyCode::Char('g')), app);
+        handle_event(key(KeyCode::Char('g')), app);
         assert!(app.showing_graph);
     }
 
@@ -2329,7 +2592,7 @@ mod tests {
         open_graph_slot(&mut app);
         let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
         app.hovered_graph_node = Some(0);
-        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_event(key(KeyCode::Char('f')), &mut app);
         assert_eq!(app.dependency_root, Some(root));
         assert!(!app.dependency_nodes.is_empty());
         assert!(
@@ -2351,7 +2614,7 @@ mod tests {
         open_graph_slot(&mut app);
         let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
         app.selected_circuit = Some(root.clone());
-        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_event(key(KeyCode::Char('f')), &mut app);
         assert_eq!(app.dependency_root, Some(root));
     }
 
@@ -2359,7 +2622,7 @@ mod tests {
     fn f_without_hover_or_selection_hints_and_keeps_full_graph() {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_event(key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_none());
         assert_eq!(app.status_message, "No graph node selected");
     }
@@ -2369,17 +2632,17 @@ mod tests {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
         app.hovered_graph_node = Some(0);
-        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_event(key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_some());
         // A second `f` restores the full graph.
-        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_event(key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_none());
         assert!(app.dependency_nodes.is_empty());
         // Re-engage, then Esc clears without closing the graph slot.
         app.hovered_graph_node = Some(0);
-        handle_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_event(key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_some());
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.dependency_root.is_none());
         assert!(app.showing_graph, "Esc clears the filter, not the graph");
     }
@@ -2392,7 +2655,7 @@ mod tests {
             "parent entry is the '..' sentinel"
         );
         app.picker_index = 0;
-        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_picker_event(key(KeyCode::Enter), &mut app);
         assert!(app.showing_picker, "picker stays open when navigating up");
         assert_eq!(app.picker_dir, std::path::PathBuf::from("fixtures"));
         assert!(app.patch.is_none());
@@ -2400,17 +2663,17 @@ mod tests {
 
     /// Open the embedded source viewer via `g` then `v`.
     fn open_viewer(app: &mut App) {
-        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), app);
+        handle_event(key(KeyCode::Char('g')), app);
+        handle_event(key(KeyCode::Char('v')), app);
         assert!(app.showing_viewer);
     }
 
     #[test]
     fn bracket_split_keys_noop_when_viewer_closed() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.6);
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.6);
         assert_eq!(
             app.status_message,
@@ -2422,11 +2685,11 @@ mod tests {
     fn close_bracket_increases_split_ratio_by_0_1_and_clamps_at_0_7() {
         let mut app = App::new();
         open_viewer(&mut app);
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.7);
         assert_eq!(app.status_message, "Panels/Source split: 70%/30%");
         // Further presses clamp at the upper bound.
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.7);
     }
 
@@ -2435,22 +2698,22 @@ mod tests {
         let mut app = App::new();
         open_viewer(&mut app);
         // Steps 0.6 -> 0.5 -> 0.4 -> 0.3.
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.5);
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.4);
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.3);
         assert_eq!(app.status_message, "Panels/Source split: 30%/70%");
         // Further presses clamp at the lower bound.
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.3);
     }
 
     /// Open the optimizer menu via `g` then `o`.
     fn open_optimizer(app: &mut App) {
-        handle_event(key(crossterm::event::KeyCode::Char('g')), app);
-        handle_event(key(crossterm::event::KeyCode::Char('o')), app);
+        handle_event(key(KeyCode::Char('g')), app);
+        handle_event(key(KeyCode::Char('o')), app);
         assert!(app.optimizer.is_some());
     }
 
@@ -2471,8 +2734,8 @@ mod tests {
     #[test]
     fn g_o_without_patch_shows_hint_and_keeps_menu_closed() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('o')), &mut app);
         assert!(app.optimizer.is_none());
         assert!(
             app.status_message.contains("No patch loaded"),
@@ -2490,9 +2753,9 @@ mod tests {
             return;
         }
         // j moves down (wraps at the end), k moves up.
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().cursor, 1);
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().cursor, 0);
 
         // Enter previews candidate 0: sections reordered, graph rebuilt.
@@ -2504,7 +2767,7 @@ mod tests {
             .iter()
             .map(|s| s.name.clone())
             .collect();
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         let previewed = app.optimizer.as_ref().unwrap().previewing;
         assert_eq!(previewed, Some(0));
         assert!(app.graph.is_some());
@@ -2515,7 +2778,7 @@ mod tests {
         );
 
         // r restores the original order.
-        handle_event(key(crossterm::event::KeyCode::Char('r')), &mut app);
+        handle_event(key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().previewing, None);
         let restored: Vec<String> = app
             .patch
@@ -2540,9 +2803,9 @@ mod tests {
             .iter()
             .map(|s| s.name.clone())
             .collect();
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert!(app.optimizer.as_ref().unwrap().previewing.is_some());
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.optimizer.is_none());
         let after: Vec<String> = app
             .patch
@@ -2567,7 +2830,7 @@ mod tests {
         let candidates_at_0 = app.optimizer.as_ref().unwrap().candidates.clone();
 
         // `]` steps +0.1; the status line reports the new weight.
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.1);
         assert!(
             app.status_message.contains("w = 0.1"),
@@ -2583,29 +2846,29 @@ mod tests {
         );
 
         // `[` steps back down to the MinSum endpoint.
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
 
         // `0`/`1` snap straight to the endpoints.
-        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        handle_event(key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
-        handle_event(key(crossterm::event::KeyCode::Char('0')), &mut app);
+        handle_event(key(KeyCode::Char('0')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
 
         // `]` past the top clamps at 1.0; `[` past the bottom clamps at 0.0.
-        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        handle_event(key(KeyCode::Char('1')), &mut app);
         for _ in 0..5 {
-            handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+            handle_event(key(KeyCode::Char(']')), &mut app);
         }
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
         // Ten steps down from 1.0 reach 0.0; an eleventh `[` must stay at the floor.
         for _ in 0..11 {
-            handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+            handle_event(key(KeyCode::Char('[')), &mut app);
         }
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
 
         // Esc still closes the menu; `g o` still reopens it.
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.optimizer.is_none());
         open_optimizer(&mut app);
         assert!(app.optimizer.is_some());
@@ -2617,16 +2880,16 @@ mod tests {
         // viewer-split branch); closing the menu must hand them back.
         let mut app = app_with_fixture();
         open_optimizer(&mut app);
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(
             app.viewer_split_ratio, 0.6,
             "optimizer `]` must not adjust the viewer split"
         );
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.1);
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         // With the menu closed `[`/`]` go back to the viewer split (no-op
         // without the viewer open).
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.viewer_split_ratio, 0.6);
     }
 
@@ -2646,7 +2909,7 @@ mod tests {
         if n == 0 {
             return;
         }
-        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
         let dest = dir.path().join("patch-latopt.ini");
         assert!(
             dest.exists(),
@@ -2665,7 +2928,7 @@ mod tests {
     fn ctrl_c_quits() {
         let mut app = App::new();
         let quit = handle_event(
-            KeyEvent::new(crossterm::event::KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('c'), key_modifiers::CONTROL),
             &mut app,
         );
         assert!(quit);
@@ -2679,7 +2942,7 @@ mod tests {
         handle_mouse_event(mouse(MouseEventKind::Moved, 20, 1), &mut app);
         assert_eq!(app.hovered_component, Some(1));
 
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.hovered_component, Some(2));
     }
 
@@ -2690,7 +2953,7 @@ mod tests {
         assert_eq!(app.hovered_component, Some(0));
 
         // Enter (keyboard) toggles whatever is currently hovered, same as a click would.
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert!(matches!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             ComponentState::On
@@ -2706,10 +2969,10 @@ mod tests {
             ('3', ShiftGroup::Group3),
             ('4', ShiftGroup::Group4),
         ] {
-            handle_event(key(crossterm::event::KeyCode::Char(ch)), &mut app);
+            handle_event(key(KeyCode::Char(ch)), &mut app);
             assert_eq!(app.active_shift, Some(expected));
         }
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert_eq!(app.active_shift, None);
     }
 
@@ -2732,7 +2995,7 @@ mod tests {
     #[test]
     fn picker_esc_cancels() {
         let mut app = picker_app_at("fixtures/picker_test");
-        let quit = handle_picker_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        let quit = handle_picker_event(key(KeyCode::Esc), &mut app);
         assert!(!quit);
         assert!(!app.showing_picker);
     }
@@ -2741,7 +3004,7 @@ mod tests {
     fn picker_enter_on_ini_loads_and_closes() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "patch_a.ini");
-        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_picker_event(key(KeyCode::Enter), &mut app);
         assert!(!app.showing_picker);
         assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
     }
@@ -2750,7 +3013,7 @@ mod tests {
     fn picker_enter_keys_label_store_path() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "patch_a.ini");
-        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_picker_event(key(KeyCode::Enter), &mut app);
         assert!(!app.showing_picker);
         assert!(app.patch.is_some());
         let path = app
@@ -2769,7 +3032,7 @@ mod tests {
         app.showing_picker = true;
         app.refresh_picker_entries();
         app.picker_index = picker_index_of(&app, "ram_overflow.ini");
-        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_picker_event(key(KeyCode::Enter), &mut app);
         // The picker closes on a gated load so the validation modal is reachable.
         assert!(!app.showing_picker);
         // Gate keeps the previously loaded patch.
@@ -2784,7 +3047,7 @@ mod tests {
     fn picker_enter_on_directory_navigates_in_without_closing() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "subdir");
-        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_picker_event(key(KeyCode::Enter), &mut app);
         assert!(app.showing_picker);
         assert!(app.picker_dir.ends_with("subdir"));
         assert!(app
@@ -2797,7 +3060,7 @@ mod tests {
     fn picker_enter_on_non_ini_file_is_ignored() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "readme.txt");
-        handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_picker_event(key(KeyCode::Enter), &mut app);
         assert!(app.showing_picker);
         assert!(app.patch.is_none());
     }
@@ -2807,11 +3070,11 @@ mod tests {
         let mut app = picker_app_at("fixtures/picker_test");
         let len = app.picker_entries.len();
         app.picker_index = 0;
-        handle_picker_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_picker_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.picker_index, 0); // clamped, doesn't go negative
 
         for _ in 0..len + 2 {
-            handle_picker_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+            handle_picker_event(key(KeyCode::Char('j')), &mut app);
         }
         assert_eq!(app.picker_index, len - 1); // clamped at the end
     }
@@ -2819,15 +3082,15 @@ mod tests {
     #[test]
     fn g_enters_prefix_mode() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
     }
 
     #[test]
     fn g_then_v_opens_viewer_and_clears_prefix() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert!(app.prefix.is_none());
@@ -2838,8 +3101,8 @@ mod tests {
         let mut app = app_with_source_navigation();
         // No selection -> BOF
         app.source_scroll = 99;
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
@@ -2855,8 +3118,8 @@ mod tests {
         // Move scroll away to prove jump
         app.source_scroll = 999;
         app.showing_viewer = false;
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert_eq!(app.source_scroll, first);
@@ -2867,8 +3130,8 @@ mod tests {
     #[test]
     fn g_then_other_key_cancels_prefix_and_processes_key_normally() {
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert!(app.prefix.is_none());
         assert_eq!(app.hovered_component, Some(1));
     }
@@ -2877,8 +3140,8 @@ mod tests {
     fn g_then_esc_cancels_prefix_without_other_action() {
         let mut app = App::new();
         app.active_shift = Some(ShiftGroup::Group1);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.prefix.is_none());
         // Esc while a prefix is armed must not also clear the shift group.
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
@@ -2904,9 +3167,9 @@ mod tests {
     #[test]
     fn g_then_s_opens_select_menu_and_clears_prefix() {
         let mut app = app_with_select_patch();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
-        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
         assert!(app.prefix.is_none());
         assert!(app.select_state.is_some(), "g s opens the select menu");
     }
@@ -2914,20 +3177,20 @@ mod tests {
     #[test]
     fn select_menu_jk_navigate_cursor() {
         let mut app = app_with_select_patch();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.select_state.as_ref().unwrap().cursor, 0);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.select_state.as_ref().unwrap().cursor, 1);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().cursor,
             1,
             "cursor clamps at last"
         );
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.select_state.as_ref().unwrap().cursor, 0);
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().cursor,
             0,
@@ -2938,20 +3201,20 @@ mod tests {
     #[test]
     fn select_menu_brackets_cycle_focused_candidate() {
         let mut app = app_with_select_patch();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
         // Focused signal is the first (register S1.1); default first candidate 0.
         assert_eq!(
             app.select_state.as_ref().unwrap().state.get("S1.1"),
             Some(&0.0)
         );
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().state.get("S1.1"),
             Some(&1.0),
             "] cycles to the next candidate"
         );
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().state.get("S1.1"),
             Some(&0.0),
@@ -2962,17 +3225,17 @@ mod tests {
     #[test]
     fn select_menu_esc_clears_state_and_restores_default_graph() {
         let mut app = app_with_select_patch();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('s')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
         assert!(app.select_state.is_some());
         // A mismatch (S1.1=1 vs selectat 0) drops bar's controller edge.
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         let gated = app.graph.as_ref().unwrap();
         assert!(
             gated.not_selected.contains(&1),
             "bar section index 1 is NotSelected under S1.1=1"
         );
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.select_state.is_none());
         let restored = app.graph.as_ref().unwrap();
         assert!(
@@ -2987,8 +3250,8 @@ mod tests {
     #[test]
     fn g_w_queues_window_toggle_request() {
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('w')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('w')), &mut app);
         assert!(!quit);
         assert!(app.prefix.is_none());
         assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
@@ -3000,8 +3263,8 @@ mod tests {
     fn g_g_with_window_enabled_queues_open_without_tile() {
         let mut app = app_with_fixture();
         app.graph_window_enabled = true;
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(!quit);
         assert!(!app.showing_graph, "window replaces the terminal tile");
         assert!(app.tile_stack.slots.is_empty());
@@ -3011,8 +3274,8 @@ mod tests {
     #[test]
     fn g_g_with_window_disabled_still_opens_terminal_tile() {
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(!quit);
         assert!(app.showing_graph, "default: `g g` opens the terminal tile");
         assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
@@ -3021,13 +3284,13 @@ mod tests {
     #[test]
     fn g_prefix_times_out_and_next_key_processed_normally() {
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         // Simulate an expired timeout window, then a key that should run
         // normally (navigation) instead of acting as a prefix follow-up.
         app.prefix = Some(PrefixState {
             started: Instant::now() - Duration::from_secs(2),
         });
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert!(app.prefix.is_none());
         assert_eq!(app.hovered_component, Some(1));
     }
@@ -3038,11 +3301,11 @@ mod tests {
         // clears the stale prefix and re-arms a fresh one rather than acting
         // as a follow-up key.
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         app.prefix = Some(PrefixState {
             started: Instant::now() - Duration::from_secs(2),
         });
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
         assert!(app.prefix.as_ref().unwrap().started.elapsed() < Duration::from_secs(1));
         assert!(
@@ -3056,9 +3319,9 @@ mod tests {
         // Task 4.3: a second `g` while the prefix is armed opens the graph and
         // runs a full solve, mirroring `g v` (design D7).
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some(), "first g arms the prefix");
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.showing_graph);
         assert!(app.prefix.is_none(), "prefix cleared on open");
         let graph = app.graph.as_ref().unwrap();
@@ -3075,14 +3338,14 @@ mod tests {
         // and re-solve the layout live; the status reports the current value.
         // Plain brackets now adjust the tiled split instead (task 4.2).
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.showing_graph);
         let default = crate::layout::DEFAULT_TENSION;
         assert_eq!(app.tension, default);
         let before = app.graph_positions.clone();
 
-        handle_event(alt_key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(alt_key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.tension, default + crate::layout::TENSION_STEP);
         assert_eq!(
             app.status_message,
@@ -3090,7 +3353,7 @@ mod tests {
         );
         assert_ne!(app.graph_positions, before, "tension change re-solves");
 
-        handle_event(alt_key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(alt_key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.tension, default);
         assert_eq!(
             app.graph_positions, before,
@@ -3103,21 +3366,21 @@ mod tests {
         // Graph slot focused: plain `+` zooms the camera, `Shift+`+`` scales
         // the panels pane instead.
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         seed_graph_camera(&mut app);
         let z0 = app.graph_camera.unwrap().zoom;
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert!((app.graph_camera.unwrap().zoom - z0 * 1.5).abs() < 1e-2);
         let scale_before = app.scale_factor;
-        handle_event(shift_key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(shift_key(KeyCode::Char('+')), &mut app);
         assert_ne!(app.scale_factor, scale_before, "other pane scales");
         assert!((app.graph_camera.unwrap().zoom - z0 * 1.5).abs() < 1e-2);
         // Panels focused: plain `+` scales panels, camera untouched.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
         let z1 = app.graph_camera.unwrap().zoom;
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert!((app.graph_camera.unwrap().zoom - z1).abs() < 1e-9);
     }
 
@@ -3125,12 +3388,12 @@ mod tests {
     fn brackets_adjust_main_split_ratio() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        handle_event(key(crossterm::event::KeyCode::Char(']')), &mut app);
+        handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.main_split_ratio, 0.7);
         assert_eq!(app.viewer_split_ratio, 0.7, "ratios stay synced");
         assert_eq!(app.status_message, "Panels/Source split: 70%/30%");
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.main_split_ratio, 0.5);
     }
 
@@ -3138,10 +3401,10 @@ mod tests {
     fn backslash_toggles_left_split() {
         let mut app = App::new();
         assert!(!app.left_split_active);
-        handle_event(key(crossterm::event::KeyCode::Char('\\')), &mut app);
+        handle_event(key(KeyCode::Char('\\')), &mut app);
         assert!(app.left_split_active);
         assert_eq!(app.status_message, "Left split on");
-        handle_event(key(crossterm::event::KeyCode::Char('\\')), &mut app);
+        handle_event(key(KeyCode::Char('\\')), &mut app);
         assert!(!app.left_split_active);
         assert_eq!(app.status_message, "Left split off");
     }
@@ -3150,12 +3413,12 @@ mod tests {
     fn viewer_esc_closes_keeping_selection_and_scroll() {
         let mut app = app_with_source_navigation();
         app.select_component(String::from("B1.1"));
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         let scroll = app.source_scroll;
         let sel = app.selected_component.clone();
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(!app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
         assert_eq!(app.selected_component, sel, "selection kept on close");
@@ -3166,33 +3429,33 @@ mod tests {
     #[test]
     fn viewer_j_k_scroll_when_source_focused() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 1);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 3);
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 2);
         // Saturate at 0
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 0);
     }
 
     #[test]
     fn t_toggles_view_mode_when_viewer_open() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
-        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        handle_event(key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Prettified);
-        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        handle_event(key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
     }
 
@@ -3200,19 +3463,19 @@ mod tests {
     fn t_noop_when_viewer_closed() {
         let mut app = App::new();
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
-        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        handle_event(key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
     }
 
     #[test]
     fn tab_switches_focus_when_viewer_open() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
     }
 
@@ -3220,7 +3483,7 @@ mod tests {
     fn tab_noop_when_viewer_closed() {
         let mut app = App::new();
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
         assert!(!app.showing_viewer);
     }
@@ -3228,7 +3491,7 @@ mod tests {
     // ── Task 4.1: focused-pane dispatch (`tiled-window-manager`, D7) ──
 
     fn shift_tab() -> KeyEvent {
-        KeyEvent::new(crossterm::event::KeyCode::BackTab, KeyModifiers::SHIFT)
+        KeyEvent::new(KeyCode::BackTab, key_modifiers::SHIFT)
     }
 
     #[test]
@@ -3236,18 +3499,18 @@ mod tests {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.showing_graph);
         assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
         // Forward: graph slot -> panels -> viewer slot -> graph slot.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
         // Backward from the graph slot lands on the viewer slot.
@@ -3260,11 +3523,11 @@ mod tests {
     fn tiled_esc_closes_focused_view_keeps_others() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert_eq!(app.tile_stack.slots.len(), 2);
         // Graph slot focused: Esc closes it, viewer survives.
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(!app.showing_graph);
         assert!(app.showing_viewer);
         assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
@@ -3276,9 +3539,9 @@ mod tests {
         app.select_component(String::from("B1.1"));
         open_viewer(&mut app);
         // Back to panels: Esc clears the selection, viewer stays open.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.showing_viewer);
         assert!(app.selected_component.is_none());
     }
@@ -3290,13 +3553,13 @@ mod tests {
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
 
         // Shift keys work live while source is focused.
-        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        handle_event(key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
         assert_eq!(app.status_message, "Shift 1 active");
 
         // Scale preset cycling works live.
         let scale_before = app.scale_factor;
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_ne!(
             app.scale_factor, scale_before,
             "scale live when source focused"
@@ -3304,7 +3567,7 @@ mod tests {
 
         // Orientation toggle works live.
         let orient_before = app.orientation.clone();
-        handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
+        handle_event(key(KeyCode::Char('o')), &mut app);
         assert_ne!(
             app.orientation, orient_before,
             "orientation live when source focused"
@@ -3326,7 +3589,7 @@ mod tests {
         let state_before = app.patch.as_ref().unwrap().hw_components[b11_idx]
             .state
             .clone();
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert_ne!(
             app.patch.as_ref().unwrap().hw_components[b11_idx].state,
             state_before,
@@ -3336,7 +3599,7 @@ mod tests {
         assert_eq!(app.source_scroll, first_b11);
         assert_eq!(app.occurrence_cursor, 0);
         // Space toggles back, still live.
-        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        handle_event(key(KeyCode::Char(' ')), &mut app);
         assert_eq!(
             app.patch.as_ref().unwrap().hw_components[b11_idx].state,
             state_before,
@@ -3346,37 +3609,37 @@ mod tests {
         // j/k and Up/Down/Home/End remain routed by focus (they would
         // otherwise conflict with panel navigation).
         let scroll = app.source_scroll;
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(
             app.source_scroll,
             scroll + 1,
             "j scrolls source when focused"
         );
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, 1, "Down navigates occurrences");
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert_eq!(app.occurrence_cursor, 0, "Up navigates occurrences");
     }
 
     #[test]
     fn viewer_focus_panels_allows_panel_keys() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         // Switch to panels
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        handle_event(key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
         let scale_before = app.scale_factor;
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_ne!(app.scale_factor, scale_before);
         let orient_before = app.orientation.clone();
-        handle_event(key(crossterm::event::KeyCode::Char('o')), &mut app);
+        handle_event(key(KeyCode::Char('o')), &mut app);
         assert_ne!(app.orientation, orient_before);
         app.hovered_component = Some(0);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert_ne!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before
@@ -3392,31 +3655,31 @@ mod tests {
             "fixture needs at least 3 occurrences"
         );
         app.select_component(String::from("B1.1"));
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // Down -> 1
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, 1);
         assert_eq!(app.source_scroll, occurrences[1].line);
         // Down -> 2
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, 2);
         // saturate at bounds: press Down many times, should end at last
         for _ in 0..10 {
-            handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+            handle_event(key(KeyCode::Down), &mut app);
         }
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         // Up -> back one
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 2);
         // Home -> 0
-        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        handle_event(key(KeyCode::Home), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // End -> last
-        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        handle_event(key(KeyCode::End), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
     }
@@ -3450,7 +3713,7 @@ mod tests {
         app.select_component(String::from("B1.1"));
         open_viewer(&mut app);
         // Start from panels focus to prove a bare source-pane click switches it.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
         app.source_pane_rect = Some(Rect::new(60, 3, 40, 20));
         app.minimap_rect = None;
@@ -3506,7 +3769,7 @@ mod tests {
         open_viewer(&mut app);
         // Start from panels focus to prove a bare source-pane click switches
         // the tiled focus back to the source slot.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
         app.source_pane_rect = Some(Rect::new(60, 3, 40, 20));
         app.minimap_rect = None;
@@ -3592,7 +3855,7 @@ mod tests {
         app.hovered_component = Some(idx);
         app.source_scroll = 999;
         // Panel focus (viewer closed) -> Enter should toggle + select + jump
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert_eq!(app.selected_component, Some(String::from(token)));
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, first);
@@ -3610,7 +3873,7 @@ mod tests {
         let first = app.patch.as_ref().unwrap().occurrences_for(token)[0].line;
         let idx = idx_for(&app, token);
         app.hovered_component = Some(idx);
-        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        handle_event(key(KeyCode::Char(' ')), &mut app);
         assert_eq!(app.selected_component, Some(String::from(token)));
         assert_eq!(app.source_scroll, first);
         assert_eq!(app.occurrence_cursor, 0);
@@ -3642,7 +3905,7 @@ mod tests {
         // First selection via Enter on B1.1
         let b_idx = idx_for(&app, "B1.1");
         app.hovered_component = Some(b_idx);
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert_eq!(app.source_scroll, b11_first);
         // Replacement via click on P1.1
         let p_idx = idx_for(&app, "P1.1");
@@ -3659,7 +3922,7 @@ mod tests {
         assert_eq!(app.occurrence_cursor, 0);
         // And back to B1.1 via Space
         app.hovered_component = Some(b_idx);
-        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        handle_event(key(KeyCode::Char(' ')), &mut app);
         assert_eq!(app.selected_component, Some(String::from("B1.1")));
         assert_eq!(app.source_scroll, b11_first);
     }
@@ -3718,19 +3981,19 @@ mod tests {
         let mut app = app_with_source_navigation();
         // Ensure no selection, viewer open and source focused
         assert!(app.selected_component.is_none());
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         app.source_scroll = 5;
         app.occurrence_cursor = 0;
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert_eq!(app.source_scroll, 5);
         assert_eq!(app.occurrence_cursor, 0);
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.source_scroll, 5);
-        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        handle_event(key(KeyCode::Home), &mut app);
         assert_eq!(app.source_scroll, 5);
-        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        handle_event(key(KeyCode::End), &mut app);
         assert_eq!(app.source_scroll, 5);
     }
 
@@ -3740,82 +4003,82 @@ mod tests {
         app.select_component(String::from("B1.1"));
         let occurrences = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
         assert!(occurrences.len() >= 2);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         // Already at first occurrence after select
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // Up at first saturates
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
+        handle_event(key(KeyCode::Up), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // Down to last saturates
         for _ in 0..occurrences.len() + 5 {
-            handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+            handle_event(key(KeyCode::Down), &mut app);
         }
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
         // Down while at last stays
-        handle_event(key(crossterm::event::KeyCode::Down), &mut app);
+        handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         // Home -> first, End -> last
-        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
+        handle_event(key(KeyCode::Home), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
-        handle_event(key(crossterm::event::KeyCode::End), &mut app);
+        handle_event(key(KeyCode::End), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
     }
 
     #[test]
     fn j_k_scroll_remains_when_viewer_open() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
-        handle_event(key(crossterm::event::KeyCode::Char('j')), &mut app);
+        handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 1);
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 0);
         // j/k saturate at 0
-        handle_event(key(crossterm::event::KeyCode::Char('k')), &mut app);
+        handle_event(key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 0);
     }
 
     #[test]
     fn esc_clears_prefix_when_viewer_closed() {
         let mut app = App::new();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.prefix.is_none());
         // When viewer open and source focused, g is live too and arms the prefix.
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some(), "g arms even when source focused");
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         // Esc first clears the prefix, viewer stays open
         assert!(app.showing_viewer);
         assert!(app.prefix.is_none());
         // After Tab to panels, g arms again.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         // Esc first clears the prefix, viewer stays open
         assert!(app.showing_viewer);
         assert!(app.prefix.is_none());
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         // Panels focused: Esc clears the selection, the viewer slot stays.
         assert!(app.showing_viewer);
         assert!(app.selected_component.is_none());
         // Tab back to the viewer slot, Esc closes the focused view.
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(!app.showing_viewer);
     }
 
@@ -3860,7 +4123,7 @@ mod tests {
         assert!(app.showing_graph);
         // `g g` focuses the graph slot; mirror that here so Esc acts on it.
         app.tile_stack.focus = FocusSlot::Slot(0);
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(!app.showing_graph, "Esc closes the graph");
         assert_eq!(app.selected_component, before.0, "selection kept on close");
         assert_eq!(app.viewer_focus, before.1, "viewer focus kept");
@@ -3874,7 +4137,7 @@ mod tests {
     fn q_quits_while_graph_open() {
         let mut app = app_with_fixture();
         app.open_graph();
-        let quit = handle_event(key(crossterm::event::KeyCode::Char('q')), &mut app);
+        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
         assert!(quit, "q quits even with the graph open");
     }
 
@@ -3882,7 +4145,7 @@ mod tests {
     fn l_opens_picker_while_graph_open() {
         let mut app = app_with_fixture();
         app.open_graph();
-        handle_event(key(crossterm::event::KeyCode::Char('l')), &mut app);
+        handle_event(key(KeyCode::Char('l')), &mut app);
         assert!(app.showing_picker, "l opens the picker over the graph");
     }
 
@@ -4033,8 +4296,8 @@ mod tests {
     fn regression_handler_e2e_initial_bof_and_selected_open() {
         let mut app = app_with_source_navigation();
         app.source_scroll = 77;
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert!(app.showing_viewer);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0, "BOF when no selection");
@@ -4044,8 +4307,8 @@ mod tests {
         app2.select_component(String::from("B1.1"));
         app2.source_scroll = 999;
         app2.showing_viewer = false;
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app2);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app2);
+        handle_event(key(KeyCode::Char('g')), &mut app2);
+        handle_event(key(KeyCode::Char('v')), &mut app2);
         assert_eq!(app2.source_scroll, first);
         assert_eq!(app2.occurrence_cursor, 0);
     }
@@ -4053,42 +4316,42 @@ mod tests {
     #[test]
     fn regression_handler_e2e_t_and_tab_and_picker_and_isolation() {
         let mut app = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         // t preserves usable content: toggles but stays in bounds
         let scroll_before = app.source_scroll;
-        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        handle_event(key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Prettified);
         assert_eq!(app.source_scroll, scroll_before);
-        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        handle_event(key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Raw);
         // Tab round-trip Source->Panels->Source
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Panels);
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+        handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
         // picker precedence: l opens picker even when source focused
-        handle_event(key(crossterm::event::KeyCode::Char('l')), &mut app);
+        handle_event(key(KeyCode::Char('l')), &mut app);
         assert!(app.showing_picker, "picker overlays viewer");
         // while picker open, t is inert
         let mode_before = app.source_view_mode.clone();
-        handle_event(key(crossterm::event::KeyCode::Char('t')), &mut app);
+        handle_event(key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, mode_before);
-        handle_event(key(crossterm::event::KeyCode::Esc), &mut app);
+        handle_event(key(KeyCode::Esc), &mut app);
         assert!(!app.showing_picker);
         assert!(app.showing_viewer);
         // live interaction: panel keys work even when Source focused
         if app.viewer_focus != ViewerFocus::Source {
-            handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
+            handle_event(key(KeyCode::Tab), &mut app);
         }
         let scale_before = app.scale_factor;
-        handle_event(key(crossterm::event::KeyCode::Char('+')), &mut app);
+        handle_event(key(KeyCode::Char('+')), &mut app);
         assert_ne!(
             app.scale_factor, scale_before,
             "scale live when Source focused"
         );
-        handle_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        handle_event(key(KeyCode::Char('1')), &mut app);
         assert_eq!(
             app.active_shift,
             Some(ShiftGroup::Group1),
@@ -4096,89 +4359,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn regression_handler_e2e_minimap_and_deselect_and_bounds() {
-        use crate::ui::render;
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-        let mut app = app_with_source_navigation();
-        app.select_component(String::from("B1.1"));
-        let occ = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app);
-        // occurrence bounds: Up saturates at 0, End/Down saturate at last
-        handle_event(key(crossterm::event::KeyCode::Up), &mut app);
-        assert_eq!(app.occurrence_cursor, 0);
-        for _ in 0..occ.len() + 3 {
-            handle_event(key(crossterm::event::KeyCode::Down), &mut app);
-        }
-        assert_eq!(app.occurrence_cursor, occ.len() - 1);
-        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
-        assert_eq!(app.occurrence_cursor, 0);
-        handle_event(key(crossterm::event::KeyCode::End), &mut app);
-        assert_eq!(app.occurrence_cursor, occ.len() - 1);
-        // deselect keeps position
-        handle_event(key(crossterm::event::KeyCode::Home), &mut app);
-        let pos = app.source_scroll;
-        handle_event(key(crossterm::event::KeyCode::Tab), &mut app);
-        let idx = app
-            .patch
-            .as_ref()
-            .unwrap()
-            .hw_components
-            .iter()
-            .position(|c| c.id == "B1.1")
-            .unwrap();
-        app.component_rects = vec![(idx, Rect::new(0, 0, 16, 2))];
-        app.minimap_rect = None;
-        {
-            let backend = TestBackend::new(120, 40);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        }
-        app.minimap_rect = None;
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), 100, 50),
-            &mut app,
-        );
-        assert!(app.selected_component.is_none());
-        assert_eq!(app.source_scroll, pos, "deselect must not move scroll");
-        // minimap click maps correctly
-        let mut app2 = app_with_source_navigation();
-        handle_event(key(crossterm::event::KeyCode::Char('g')), &mut app2);
-        handle_event(key(crossterm::event::KeyCode::Char('v')), &mut app2);
-        {
-            let backend = TestBackend::new(120, 40);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|frame| render(frame, &mut app2)).unwrap();
-        }
-        let rect = app2.minimap_rect.expect("minimap visible");
-        let x = rect.x + 1;
-        let top_y = rect.y + 1;
-        let bot_y = rect.y + rect.height.saturating_sub(2);
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), x, top_y),
-            &mut app2,
-        );
-        let top = app2.source_scroll;
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), x, bot_y),
-            &mut app2,
-        );
-        let bot = app2.source_scroll;
-        assert!(top <= bot, "minimap top <= bottom");
-        assert!(top <= 5, "top near BOF");
-    }
-
     // ── Task 2.1: global processing pause (`p`) ──
 
     #[test]
     fn p_toggles_processing_pause_with_status() {
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused);
         assert_eq!(app.status_message, "Processing paused (p to resume)");
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(!app.processing_paused);
         assert_eq!(app.status_message, "Processing enabled (p to pause)");
     }
@@ -4196,7 +4385,7 @@ mod tests {
             !app.pinned.contains(&node.id),
             "non-tip node starts unpinned"
         );
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.pinned.contains(&node.id), "p pins the hovered node");
         assert!(app.showing_graph, "p must not close the graph");
         assert!(
@@ -4207,7 +4396,7 @@ mod tests {
             app.status_message,
             format!("Pinned: {} {}", node.circuit, node.instance_index)
         );
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(!app.pinned.contains(&node.id), "second p unpins");
         assert_eq!(
             app.status_message,
@@ -4218,7 +4407,7 @@ mod tests {
     #[test]
     fn p_noop_while_picker_open() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(!app.processing_paused, "picker swallows p");
     }
 
@@ -4226,15 +4415,15 @@ mod tests {
     fn enter_and_space_do_not_mutate_while_paused() {
         let mut app = app_with_fixture();
         app.hovered_component = Some(0);
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
-        handle_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        handle_event(key(KeyCode::Enter), &mut app);
         assert_eq!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before,
             "Enter must not toggle while paused"
         );
-        handle_event(key(crossterm::event::KeyCode::Char(' ')), &mut app);
+        handle_event(key(KeyCode::Char(' ')), &mut app);
         assert_eq!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before,
@@ -4247,7 +4436,7 @@ mod tests {
     #[test]
     fn mouse_click_toggle_blocked_while_paused() {
         let mut app = app_with_fixture();
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_mouse_event(
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
@@ -4271,11 +4460,11 @@ mod tests {
         assert!(app.latency_coloring, "on by default");
         app.open_graph();
 
-        handle_event(key(crossterm::event::KeyCode::Char('c')), &mut app);
+        handle_event(key(KeyCode::Char('c')), &mut app);
         assert!(!app.latency_coloring);
         assert_eq!(app.status_message, "Latency coloring off (c to toggle)");
 
-        handle_event(key(crossterm::event::KeyCode::Char('c')), &mut app);
+        handle_event(key(KeyCode::Char('c')), &mut app);
         assert!(app.latency_coloring);
         assert_eq!(app.status_message, "Latency coloring on (c to toggle)");
     }
@@ -4287,7 +4476,7 @@ mod tests {
         let mut app = App::new();
         app.patch = Some(patch);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
             ComponentState::Value(v) => assert!(v.abs() < 1e-6, "scroll blocked while paused"),
@@ -4305,7 +4494,7 @@ mod tests {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused, "p live in the source pane");
         assert_eq!(app.status_message, "Processing paused (p to resume)");
     }
@@ -4339,7 +4528,7 @@ mod tests {
         let node = app.graph.as_ref().unwrap().nodes[0].clone();
         app.hovered_graph_node = Some(0);
         let before_positions = app.graph_positions.clone();
-        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        handle_event(key(KeyCode::Char('x')), &mut app);
         assert!(app.showing_graph, "x must not close the graph surface");
         assert!(
             app.disabled_circuits
@@ -4366,12 +4555,12 @@ mod tests {
         let mut app = app_with_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].clone();
         app.hovered_graph_node = Some(0);
-        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        handle_event(key(KeyCode::Char('x')), &mut app);
         assert!(app
             .disabled_circuits
             .contains(&NodeId::circuit(&node.circuit, node.instance_index)));
         // Second x on same hovered node re-enables.
-        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        handle_event(key(KeyCode::Char('x')), &mut app);
         assert!(
             !app.disabled_circuits
                 .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
@@ -4394,7 +4583,7 @@ mod tests {
         let status_before = app.status_message.clone();
         let disabled_before = app.disabled_circuits.clone();
         let positions_before = app.graph_positions.clone();
-        handle_event(key(crossterm::event::KeyCode::Char('x')), &mut app);
+        handle_event(key(KeyCode::Char('x')), &mut app);
         assert_eq!(
             app.status_message, status_before,
             "no status change when nothing hovered"
@@ -4416,7 +4605,7 @@ mod tests {
         let idx = node_count - 1; // non-tip node
         app.hovered_graph_node = Some(idx);
         let node = app.graph.as_ref().unwrap().nodes[idx].clone();
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.pinned.contains(&node.id), "p pins the hovered node");
         assert_eq!(
             app.status_message,
@@ -4427,7 +4616,7 @@ mod tests {
             !app.processing_paused,
             "p no longer toggles pause on the graph surface"
         );
-        handle_event(key(crossterm::event::KeyCode::Char('p')), &mut app);
+        handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(!app.pinned.contains(&node.id), "second p unpins");
         assert!(!app.processing_paused, "pause untouched throughout");
     }
@@ -4816,7 +5005,7 @@ mod tests {
 
         // First press f -> mark favourite.
         let target_key = crate::favorites::FavoritesStore::canonical_key(&dummy);
-        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_picker_event(key(KeyCode::Char('f')), &mut app);
         assert!(
             app.favorites.is_favourite(&dummy),
             "f should mark favourite"
@@ -4843,7 +5032,7 @@ mod tests {
         assert!(body.contains("my_patch.ini"), "body: {body}");
 
         // Second press f -> unmark favourite (toggle back).
-        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_picker_event(key(KeyCode::Char('f')), &mut app);
         assert!(
             !app.favorites.is_favourite(&dummy),
             "second f should unmark favourite"
@@ -4864,12 +5053,12 @@ mod tests {
         );
 
         // Uppercase F behaves identically (case-insensitive toggle key).
-        handle_picker_event(key(crossterm::event::KeyCode::Char('F')), &mut app);
+        handle_picker_event(key(KeyCode::Char('F')), &mut app);
         assert!(
             app.favorites.is_favourite(&dummy),
             "F should also mark favourite"
         );
-        handle_picker_event(key(crossterm::event::KeyCode::Char('F')), &mut app);
+        handle_picker_event(key(KeyCode::Char('F')), &mut app);
         assert!(
             !app.favorites.is_favourite(&dummy),
             "second F should unmark"
@@ -4906,7 +5095,7 @@ mod tests {
             "first entry should be .."
         );
         app.picker_index = 0;
-        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_picker_event(key(KeyCode::Char('f')), &mut app);
         assert!(
             app.favorites.favourites.is_empty(),
             "f on parent must not toggle"
@@ -4922,7 +5111,7 @@ mod tests {
             })
             .unwrap();
         app.picker_index = file_idx;
-        let ctrl_f = KeyEvent::new(crossterm::event::KeyCode::Char('f'), KeyModifiers::CONTROL);
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), key_modifiers::CONTROL);
         handle_picker_event(ctrl_f, &mut app);
         assert!(
             app.favorites.favourites.is_empty(),
@@ -5011,7 +5200,7 @@ mod tests {
 
         // Simulate Enter on the favourited entry to load the patch.
         app.picker_index = 0;
-        let quit = handle_picker_event(key(crossterm::event::KeyCode::Enter), &mut app);
+        let quit = handle_picker_event(key(KeyCode::Enter), &mut app);
         assert!(!quit, "Enter should not quit");
         assert!(
             !app.showing_picker,
@@ -5068,7 +5257,7 @@ mod tests {
         assert!(!app.favorites.is_favourite(&subdir));
 
         // First press f -> mark directory favourite.
-        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_picker_event(key(KeyCode::Char('f')), &mut app);
         assert!(
             app.favorites.is_favourite(&subdir),
             "f should favourite a directory"
@@ -5088,7 +5277,7 @@ mod tests {
         assert_eq!(app.picker_index, pos, "highlight follows the pinned entry");
 
         // Second press f -> unmark.
-        handle_picker_event(key(crossterm::event::KeyCode::Char('f')), &mut app);
+        handle_picker_event(key(KeyCode::Char('f')), &mut app);
         assert!(
             !app.favorites.is_favourite(&subdir),
             "second f should unfavourite a directory"
@@ -5135,7 +5324,7 @@ mod tests {
 
         // '1' opens favourite slot 1: patch loads, picker closes.
         app.picker_index = 0;
-        handle_picker_event(key(crossterm::event::KeyCode::Char('1')), &mut app);
+        handle_picker_event(key(KeyCode::Char('1')), &mut app);
         assert!(!app.showing_picker, "digit on file favourite closes picker");
         assert!(app.patch.is_some(), "digit loads the favourite patch");
         assert!(
@@ -5173,7 +5362,7 @@ mod tests {
         app.refresh_picker_entries();
 
         // '0' on slot 0 (the directory favourite) navigates into it.
-        handle_picker_event(key(crossterm::event::KeyCode::Char('0')), &mut app);
+        handle_picker_event(key(KeyCode::Char('0')), &mut app);
         assert!(app.showing_picker, "digit on directory keeps picker open");
         assert!(app.picker_dir.ends_with("subdir"));
         assert!(app.patch.is_none());
@@ -5204,17 +5393,17 @@ mod tests {
         app.refresh_picker_entries();
 
         // '9' has no slot: silent no-op, picker stays open.
-        handle_picker_event(key(crossterm::event::KeyCode::Char('9')), &mut app);
+        handle_picker_event(key(KeyCode::Char('9')), &mut app);
         assert!(app.showing_picker);
         assert!(app.patch.is_none());
         assert!(app.selected_file.is_none());
 
         // Ctrl/Alt-held digits never fire (mirrors the f-handler guard).
-        let ctrl_zero = KeyEvent::new(crossterm::event::KeyCode::Char('0'), KeyModifiers::CONTROL);
+        let ctrl_zero = KeyEvent::new(KeyCode::Char('0'), key_modifiers::CONTROL);
         handle_picker_event(ctrl_zero, &mut app);
         assert!(app.showing_picker, "Ctrl+digit must not open a favourite");
         assert!(app.patch.is_none());
-        let alt_zero = KeyEvent::new(crossterm::event::KeyCode::Char('0'), KeyModifiers::ALT);
+        let alt_zero = KeyEvent::new(KeyCode::Char('0'), key_modifiers::ALT);
         handle_picker_event(alt_zero, &mut app);
         assert!(app.showing_picker, "Alt+digit must not open a favourite");
         assert!(app.patch.is_none());
@@ -5225,40 +5414,445 @@ mod tests {
         }
     }
 
+    // ==== Window keyboard path (task 2.6) ====
+    //
+    // winit key events convert to the neutral shape and run the same dispatch
+    // as the terminal key path. These mirror the terminal tests through
+    // `handle_window_key_event` so every binding keeps its meaning in the
+    // window: shift groups, g-prefix, p/x, scale/split, s/o, Tab focus, Esc.
+
+    use winit::event::ElementState;
+    use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
+
+    fn winit_key(named: NamedKey) -> WinitKey {
+        WinitKey::Named(named)
+    }
+
+    fn winit_char(ch: &str) -> WinitKey {
+        WinitKey::Character(ch.into())
+    }
+
+    fn window_press(key: &WinitKey, modifiers: ModifiersState, app: &mut App) -> bool {
+        handle_window_key_event(key, ElementState::Pressed, modifiers, app)
+    }
+
     #[test]
-    fn render_outlier_hint_never_blocks_input_or_loading() {
-        use crate::ui::render;
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
+    fn from_winit_maps_character_and_named_keys() {
+        let mapped = |k: &WinitKey, m: ModifiersState| {
+            KeyEvent::from_winit_parts(k, ElementState::Pressed, m)
+        };
+        // Produced characters: shifted glyphs arrive as their symbol.
+        assert_eq!(
+            mapped(&winit_char("g"), ModifiersState::empty())
+                .unwrap()
+                .code,
+            KeyCode::Char('g')
+        );
+        assert_eq!(
+            mapped(&winit_char("G"), ModifiersState::SHIFT)
+                .unwrap()
+                .code,
+            KeyCode::Char('G')
+        );
+        assert_eq!(
+            mapped(&winit_char("?"), ModifiersState::SHIFT)
+                .unwrap()
+                .code,
+            KeyCode::Char('?')
+        );
+        assert_eq!(
+            mapped(&winit_char("+"), ModifiersState::SHIFT)
+                .unwrap()
+                .code,
+            KeyCode::Char('+')
+        );
+        // Named keys map to the matching code; Shift+Tab becomes BackTab.
+        for (named, code) in [
+            (NamedKey::Enter, KeyCode::Enter),
+            (NamedKey::Escape, KeyCode::Esc),
+            (NamedKey::Backspace, KeyCode::Backspace),
+            (NamedKey::Tab, KeyCode::Tab),
+            (NamedKey::Space, KeyCode::Char(' ')),
+            (NamedKey::ArrowUp, KeyCode::Up),
+            (NamedKey::ArrowDown, KeyCode::Down),
+            (NamedKey::ArrowLeft, KeyCode::Left),
+            (NamedKey::ArrowRight, KeyCode::Right),
+            (NamedKey::Home, KeyCode::Home),
+            (NamedKey::End, KeyCode::End),
+        ] {
+            assert_eq!(
+                mapped(&winit_key(named), ModifiersState::empty())
+                    .unwrap()
+                    .code,
+                code
+            );
+        }
+        assert_eq!(
+            mapped(&winit_key(NamedKey::Tab), ModifiersState::SHIFT)
+                .unwrap()
+                .code,
+            KeyCode::BackTab
+        );
+        // Control maps to ctrl+command (the handler treats the pair as one).
+        let ctrl = mapped(&winit_char("c"), ModifiersState::CONTROL).unwrap();
+        assert_eq!(ctrl.code, KeyCode::Char('c'));
+        assert!(ctrl.modifiers.ctrl && ctrl.modifiers.command);
+    }
 
-        // Degraded render (arpeggio1 wants 228 cols; frame is 80) must not
-        // block load_patch, must show the advisory hint in the status bar,
-        // and must never intercept keyboard input.
+    #[test]
+    fn from_winit_filters_release_multi_char_and_unbound() {
+        assert!(KeyEvent::from_winit_parts(
+            &winit_char("g"),
+            ElementState::Released,
+            ModifiersState::empty()
+        )
+        .is_none());
+        // Multi-character composition (IME/dead key) is not a binding.
+        assert!(KeyEvent::from_winit_parts(
+            &winit_char("ab"),
+            ElementState::Pressed,
+            ModifiersState::empty()
+        )
+        .is_none());
+        // Unbound named keys and unidentified keys map to None.
+        assert!(KeyEvent::from_winit_parts(
+            &winit_key(NamedKey::PageDown),
+            ElementState::Pressed,
+            ModifiersState::empty()
+        )
+        .is_none());
+        assert!(KeyEvent::from_winit_parts(
+            &winit_key(NamedKey::Delete),
+            ElementState::Pressed,
+            ModifiersState::empty()
+        )
+        .is_none());
+        assert!(KeyEvent::from_winit_parts(
+            &WinitKey::Unidentified(winit::keyboard::NativeKey::Unidentified),
+            ElementState::Pressed,
+            ModifiersState::empty()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn window_shift_groups_1_through_4() {
         let mut app = App::new();
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        assert!(
-            app.load_patch(patch),
-            "degraded render must not block load_patch"
-        );
+        for (ch, expected) in [
+            ('1', ShiftGroup::Group1),
+            ('2', ShiftGroup::Group2),
+            ('3', ShiftGroup::Group3),
+            ('4', ShiftGroup::Group4),
+        ] {
+            assert!(!window_press(
+                &winit_char(&ch.to_string()),
+                ModifiersState::empty(),
+                &mut app
+            ));
+            assert_eq!(app.active_shift, Some(expected));
+        }
+        assert!(!window_press(
+            &winit_key(NamedKey::Escape),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert_eq!(app.active_shift, None);
+    }
 
-        let backend = TestBackend::new(80, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(
-            text.contains("Renders degraded at 80 cols"),
-            "hint must render while the degraded patch is loaded"
-        );
+    #[test]
+    fn window_g_prefix_opens_graph_tile() {
+        let mut app = app_with_fixture();
+        assert!(!window_press(
+            &winit_char("g"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.prefix.is_some(), "first g arms the prefix");
+        assert!(!window_press(
+            &winit_char("g"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.showing_graph);
+        assert!(app.prefix.is_none(), "prefix cleared on open");
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.nodes.is_empty(), "graph holds the patch's circuits");
+        assert_eq!(app.graph_positions.len(), graph.nodes.len());
+    }
 
-        // Keyboard input keeps flowing while the hint is visible.
-        handle_event(key(crossterm::event::KeyCode::Char('-')), &mut app);
-        assert_eq!(app.scale_factor, 0.75, "keyboard input not intercepted");
+    #[test]
+    fn window_question_mark_opens_help() {
+        let mut app = App::new();
+        assert!(!window_press(
+            &winit_char("?"),
+            ModifiersState::SHIFT,
+            &mut app
+        ));
+        assert!(app.showing_help);
+    }
+
+    #[test]
+    fn window_plus_minus_cycle_scale() {
+        let mut app = App::new();
+        assert!(!window_press(
+            &winit_char("-"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert_eq!(app.scale_factor, 0.75);
+        assert_eq!(app.status_message, "Scaling: 75%");
+        assert!(!window_press(
+            &winit_char("+"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert_eq!(app.scale_factor, 1.0);
+        assert_eq!(app.status_message, "Scaling: 100%");
+        // Shift+plus is the other-pane route (no-op on the panels surface),
+        // mirroring the terminal `+`/`-` handler.
+        assert!(!window_press(
+            &winit_char("+"),
+            ModifiersState::SHIFT,
+            &mut app
+        ));
+        assert_eq!(app.scale_factor, 1.0);
+    }
+
+    #[test]
+    fn window_p_x_toggle_hovered_graph_node() {
+        // `x` disables processing on the hovered node (mirrors the terminal
+        // graph-surface test, on a fresh app because the rebuild reindexes).
+        let mut app = app_with_graph();
+        let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        app.hovered_graph_node = Some(0);
+        assert!(!window_press(
+            &winit_char("x"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(
+            app.disabled_circuits
+                .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
+            "hovered circuit should be disabled"
+        );
+        // `p` pins the hovered node (mirrors `graph_p_toggles_pin_not_pause`,
+        // using the non-tip node so the pin is a real anchor).
+        let mut app = app_with_graph();
+        let node_count = app.graph.as_ref().unwrap().nodes.len();
+        assert!(node_count >= 2, "fixture needs a non-tip node to toggle");
+        let idx = node_count - 1;
+        app.hovered_graph_node = Some(idx);
+        let node = app.graph.as_ref().unwrap().nodes[idx].clone();
+        assert!(!window_press(
+            &winit_char("p"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(
+            app.pinned.contains(&node.id),
+            "hovered node should be pinned"
+        );
+        assert!(
+            !app.processing_paused,
+            "p must not pause on the graph surface"
+        );
+    }
+
+    #[test]
+    fn window_ctrl_c_quits() {
+        let mut app = App::new();
+        assert!(window_press(
+            &winit_char("c"),
+            ModifiersState::CONTROL,
+            &mut app
+        ));
+    }
+
+    #[test]
+    fn window_shift_tab_cycles_focus_backward() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        assert!(!window_press(
+            &winit_char("g"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(!window_press(
+            &winit_char("g"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.showing_graph);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
+        // Shift+Tab cycles backward to the viewer slot.
+        assert!(!window_press(
+            &winit_key(NamedKey::Tab),
+            ModifiersState::SHIFT,
+            &mut app
+        ));
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    }
+
+    #[test]
+    fn window_esc_closes_help() {
+        let mut app = App::new();
+        window_press(&winit_char("?"), ModifiersState::SHIFT, &mut app);
+        assert!(app.showing_help);
+        let quit = window_press(
+            &winit_key(NamedKey::Escape),
+            ModifiersState::empty(),
+            &mut app,
+        );
+        assert!(!quit);
+        assert!(!app.showing_help);
+    }
+
+    #[test]
+    fn window_unbound_keys_are_ignored() {
+        let mut app = App::new();
+        let before = (app.scale_factor, app.active_shift, app.showing_picker);
+        assert!(!window_press(
+            &winit_key(NamedKey::PageDown),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert_eq!(
+            (app.scale_factor, app.active_shift, app.showing_picker),
+            before,
+            "unbound key must not mutate app state"
+        );
+    }
+    #[test]
+    fn panels_frame_hover_sets_hovered_component() {
+        let mut app = app_with_fixture();
+        handle_panels_frame(
+            PanelsFrame {
+                hovered: Some(1),
+                ..PanelsFrame::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_component, Some(1));
+    }
+
+    #[test]
+    fn panels_frame_click_toggles_and_selects() {
+        let mut app = app_with_fixture();
+        assert!(matches!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            ComponentState::Off
+        ));
+        handle_panels_frame(
+            PanelsFrame {
+                clicked: Some(0),
+                ..PanelsFrame::default()
+            },
+            &mut app,
+        );
+        assert!(matches!(
+            app.patch.as_ref().unwrap().hw_components[0].state,
+            ComponentState::On
+        ));
+        assert_eq!(
+            app.status_message,
+            format!(
+                "Toggled: {}",
+                app.patch.as_ref().unwrap().hw_components[0].label
+            )
+        );
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn panels_frame_scroll_adjusts_knob_value() {
+        let content = "[pot]\n    pot = P1.1\n    output = _X\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+
+        let expected_delta = 1.0 * ZOOM_SENSITIVITY * 10.0;
+        handle_panels_frame(
+            PanelsFrame {
+                hovered: Some(0),
+                scroll: Some(1.0),
+                ..PanelsFrame::default()
+            },
+            &mut app,
+        );
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => assert!((v - expected_delta).abs() < 1e-6),
+            _ => panic!("expected Value state"),
+        }
+    }
+
+    #[test]
+    fn physical_frame_toggles_skeleton_and_applies_pan_zoom() {
+        let mut app = App::new();
+        handle_physical_frame(
+            PhysicalFrame {
+                skeleton_toggle: true,
+                ..PhysicalFrame::default()
+            },
+            &mut app,
+        );
+        assert!(app.physical_show_skeleton);
+        assert_eq!(app.status_message, "Skeleton: on");
+
+        handle_physical_frame(
+            PhysicalFrame {
+                pan_delta: (2.0, -3.0),
+                ..PhysicalFrame::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.physical_offset, (2.0, -3.0));
+
+        let before = app.physical_zoom;
+        handle_physical_frame(
+            PhysicalFrame {
+                zoom: Some((2.0, (5.0, 5.0))),
+                ..PhysicalFrame::default()
+            },
+            &mut app,
+        );
+        // The frame clamps the factor by MAX_ZOOM_STEP before applying it.
+        let factor = 2.0_f32.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
+        assert!((app.physical_zoom - (before * factor).clamp(0.5, 3.0)).abs() < 1e-6);
+        assert_eq!(app.scale_factor, app.physical_zoom);
+    }
+
+    #[test]
+    fn viewer_frame_scroll_moves_source_scroll() {
+        let mut app = app_with_source_navigation();
+        handle_viewer_frame(ViewerFrame { scroll_delta: 3.0 }, &mut app);
+        assert_eq!(app.source_scroll, 3);
+        handle_viewer_frame(ViewerFrame { scroll_delta: -2.0 }, &mut app);
+        assert_eq!(app.source_scroll, 1);
+    }
+
+    #[test]
+    fn picker_frame_hover_and_click_map_to_app() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_frame(
+            PickerFrame {
+                hovered: Some(1),
+                clicked: None,
+            },
+            &mut app,
+        );
+        assert_eq!(app.picker_index, 1);
+        // Clicking the patch_a.ini entry loads it and closes the picker.
+        let idx = picker_index_of(&app, "patch_a.ini");
+        handle_picker_frame(
+            PickerFrame {
+                hovered: None,
+                clicked: Some(idx),
+            },
+            &mut app,
+        );
+        assert!(!app.showing_picker);
+        assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
     }
 }
