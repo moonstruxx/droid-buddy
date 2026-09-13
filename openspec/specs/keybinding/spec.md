@@ -46,7 +46,7 @@ When user presses `g` then `v`
 Then the source pane opens showing the empty-patch message
 
 ### Requirement: Signal-flow graph shortcut
-The system SHALL open the signal-flow graph view via `g` + `g`: while the prefix is armed, pressing `g` clears the prefix and opens the graph view over the current patch (building the graph model, running the layout solver to convergence, and rendering nodes/edges/clusters). With the `gui` feature enabled and `[gui] graph_window = true`, `g g` SHALL open the GPU graph window instead of the terminal tile; otherwise it SHALL open the graph as a slot in the right column of the tiled layout. The sequence reuses the existing prefix mechanism (lazy 1 s timeout, `Esc` cancels the armed prefix unchanged). The graph view replaces the panel/source layout while open; `Esc` closes it and returns to the previous view state (controller panels, with any source-pane state preserved).
+The system SHALL open the signal-flow graph view via `g` + `g`: while the prefix is armed, pressing `g` clears the prefix and opens the graph view over the current patch (building the graph model, running the layout solver to convergence, and rendering nodes, edges, and clusters). The graph view renders in the native window.
 
 #### Scenario: Open graph with g g
 Given no prefix is armed
@@ -65,8 +65,7 @@ Then the graph view opens showing the empty-patch message
 Given the graph view is open
 When user presses `Esc`
 Then the graph view closes
-And focus returns to the controller panels
-And any selected component and source-pane scroll state stay unchanged
+And any selected component state stays unchanged
 
 #### Scenario: Prefix keys remain distinct
 Given prefix is armed
@@ -79,21 +78,9 @@ Then the graph view opens (not the source viewer)
 All existing keybindings SHALL remain functional and unchanged while the graph view is closed; opening the graph view SHALL NOT alter shift group, scale, orientation, or picker state.
 
 #### Scenario: g g opens the window when configured
-Given the `gui` feature is enabled
-And `[gui] graph_window = true` is set
+Given the `gui` feature is always enabled and the `[gui] graph_window` toggle is removed
 When user presses `g` then `g`
-Then the GPU graph window opens instead of the terminal tile
-
-### Requirement: GPU window shortcut
-The system SHALL open the GPU graph window via `g` + `w`: while the prefix is armed, pressing `w` opens the window (feature-gated). `Esc` or `g w` again closes it. Without the `gui` feature, the key SHALL show a status hint and do nothing.
-
-#### Scenario: Open window with g w
-- **WHEN** no prefix is armed, the `gui` feature is enabled, and the user presses `g` then `w`
-- **THEN** the GPU graph window opens
-
-#### Scenario: Feature missing
-- **WHEN** the `gui` feature is not enabled and the user presses `g` then `w`
-- **THEN** no window opens and the status shows a hint
+Then the graph surface opens in the native window, since the window is always present and there is no terminal tile
 
 ### Requirement: Viewer scroll controls
 While the source pane is open, `j` SHALL scroll the source area down one line and `k` SHALL scroll up one line, with saturating arithmetic at 0 and clamping at the bottom of the content.
@@ -301,14 +288,6 @@ The `\` key SHALL toggle an optional vertical split inside the left panel pane, 
 - **WHEN** the user presses `\`
 - **THEN** the left pane splits vertically into panels (top) and a secondary view (bottom)
 
-### Requirement: Narrow-terminal carousel
-
-When the terminal width is below 120 columns and the right column is collapsed, `Tab` SHALL temporarily replace the left panel pane with the next view in the carousel, and `Esc` SHALL return to panels.
-
-#### Scenario: Inspect hidden view
-- **WHEN** the terminal is narrow and the user presses `Tab`
-- **THEN** the left pane temporarily shows the next view type, and `Esc` returns to panels
-
 ### Requirement: Zoom family keys
 
 The system SHALL consolidate zoom-like actions onto `+`/`-` with modifier variants:
@@ -323,13 +302,6 @@ The system SHALL consolidate zoom-like actions onto `+`/`-` with modifier varian
 #### Scenario: Scale other pane
 - **WHEN** the graph pane is focused and the user presses `Shift++`
 - **THEN** the panel pane scale increases
-
-## Design Decisions
-
-- Decision 1: Lazy timeout check (no background timer). Rationale: the app is event-driven; checking expiry on the next keypress avoids threading complexity and keeps the event loop simple. A stale prefix that nobody presses is harmless.
-- Decision 2: `Esc` cancels prefix without clearing shift group. Rationale: shift group activation is an independent concern from prefix mode. Cancelling a mistaken `g` press should not disturb an active shift view.
-- Decision 3: `g` + `v` chosen for viewer (not `g` + `s` or `g` + `p`). Rationale: `v` is mnemonic for "viewer" and avoids collision with potential future `g` + `s` (save/search) bindings.
-- Decision 4: Scroll uses `u16` saturating arithmetic. Rationale: prevents underflow on decrement at 0, avoids panic on overflow at max.
 
 ### Requirement: Help modal keybinding
 
@@ -358,3 +330,10 @@ The system SHALL open a floating help modal on `?` showing the keybindings for t
 #### Scenario: Click inside keeps help open
 - **WHEN** the help modal is open and the user clicks inside the modal
 - **THEN** the modal stays open
+
+## Design Decisions
+
+- Decision 1: Lazy timeout check (no background timer). Rationale: the app is event-driven; checking expiry on the next keypress avoids threading complexity and keeps the event loop simple. A stale prefix that nobody presses is harmless.
+- Decision 2: `Esc` cancels prefix without clearing shift group. Rationale: shift group activation is an independent concern from prefix mode. Cancelling a mistaken `g` press should not disturb an active shift view.
+- Decision 3: `g` + `v` chosen for viewer (not `g` + `s` or `g` + `p`). Rationale: `v` is mnemonic for "viewer" and avoids collision with potential future `g` + `s` (save/search) bindings.
+- Decision 4: Scroll uses `u16` saturating arithmetic. Rationale: prevents underflow on decrement at 0, avoids panic on overflow at max.

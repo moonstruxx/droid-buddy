@@ -6,65 +6,16 @@ A GPU-accelerated, Comfy-quality graph window for the signal-flow graph, bound t
 
 ## Requirements
 
-### Requirement: Window lifecycle
-
-The `gui` Cargo feature SHALL gate the GPU window. With the feature enabled, `g w` SHALL open and close the GPU graph window, and `Esc` SHALL close it. The window SHALL be a normal desktop window owned by the droid_tui process. Quitting the app SHALL tear down both the window and the raw terminal state. The window SHALL never open during `cargo test` or in headless environments; the terminal graph tile remains the fallback.
-
-#### Scenario: Open and close via g w
-
-- **WHEN** the app runs with the `gui` feature and the user presses `g` then `w`
-- **THEN** the GPU window opens showing the signal-flow graph, and pressing `g w` again (or `Esc`) closes it
-
-#### Scenario: No window in tests
-
-- **WHEN** `cargo test` runs with the `gui` feature enabled
-- **THEN** no window is created and all graph tests exercise the scene pipeline directly
-
-### Requirement: Multiplexed event loop
-
-The app SHALL run a single-threaded event loop that polls both window events (winit) and terminal events (crossterm) each frame, with both event sources mutating the same `App` state. No IPC, no second process, no async runtime.
-
-#### Scenario: One thread owns all state
-
-- **WHEN** the user drags a node in the window and presses a key in the terminal in the same frame
-- **THEN** both inputs mutate the same `App` state without locking, and the next frame of both surfaces reflects both changes
-
-### Requirement: Shared scene pipeline
-
-The graph scene builder SHALL produce a backend-neutral description (nodes, ports, edges with per-cable colors, cluster containers, labels) consumed by both the tiny-skia terminal rasterizer and the egui window painter. The terminal rendering path SHALL remain byte-identical.
-
-#### Scenario: Identical scene, two backends
-
-- **WHEN** a patch's graph is rendered in both the terminal tile and the GPU window
-- **THEN** both consume the same scene description and camera, so node positions, edges, and colors match
-
-### Requirement: Two-way live sync
-
-Window interactions SHALL map onto the existing application mutations: dragging a node SHALL re-settle locally and emit `NodeMoved`; `x`, `p`, and `e` in the window SHALL toggle processing, pin/unpin, and edit labels exactly as in the terminal. State changes made in the window SHALL appear in the terminal the same frame, and vice versa.
-
-#### Scenario: Drag in window moves terminal state
-
-- **WHEN** the user drags a node in the GPU window
-- **THEN** the node's position updates in shared state, the local neighborhood re-settles, and the terminal tile shows the node at the new position
-
-#### Scenario: Disable circuit from window
-
-- **WHEN** the user presses `x` on a hovered node in the window
-- **THEN** that circuit instance is disabled, the graph rebuilds, and both surfaces render the node and its edges dimmed
-
 ### Requirement: Circuit selection propagates across views
-
-Selecting a circuit node in the GPU window SHALL set the shared selection state that the other surfaces reflect: the source viewer SHALL jump to that circuit's section, the panels SHALL highlight the associated hardware, and an open terminal graph tile SHALL highlight the same node. The selection SHALL survive switching between surfaces.
+Selecting a circuit node in the window SHALL set the shared selection state that the other surfaces reflect: the source viewer SHALL jump to that circuit's section and the panels SHALL highlight the associated hardware. The selection SHALL survive switching between surfaces.
 
 #### Scenario: Select a circuit in the window
-
-- **WHEN** the user clicks a circuit node in the GPU window
-- **THEN** the source viewer scrolls to that circuit's section, the panels highlight the associated hardware components, and a terminal graph tile highlights the same node
+- **WHEN** the user clicks a circuit node in the window
+- **THEN** the source viewer scrolls to that circuit's section and the panels highlight the associated hardware components
 
 #### Scenario: Selection survives surface switch
-
-- **WHEN** a circuit is selected in the window and the user closes the window
-- **THEN** the selection remains active in the terminal views
+- **WHEN** a circuit is selected and the user switches to another surface
+- **THEN** the selection remains active in the other views
 
 ### Requirement: Canvas polish
 
