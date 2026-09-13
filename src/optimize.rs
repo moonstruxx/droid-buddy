@@ -1308,6 +1308,28 @@ mod tests {
         Patch::from_ini_str(content, String::from("optimize-test")).expect("fixture parses")
     }
 
+    /// Pins the calling thread's schema view to the current `load_schema()`
+    /// instance for the test's duration (regression.rs `SchemaGuard` idiom). A
+    /// parallel schema test that swaps the process-global `SCHEMA_CACHE` (e.g.
+    /// `schema::init` with plugin fixtures that change embedded ramsizes) must
+    /// not change the `AVG` values between a test-built `eval`'s `load_schema()`
+    /// and the engine's internal one — the race behind
+    /// `weighted_brute_force_equivalence_n8`'s intermittent ~1e-5 `avg` delta.
+    struct SchemaPin;
+
+    impl SchemaPin {
+        fn new() -> Self {
+            crate::schema::set_test_schema(Some(load_schema()));
+            Self
+        }
+    }
+
+    impl Drop for SchemaPin {
+        fn drop(&mut self) {
+            crate::schema::set_test_schema(None);
+        }
+    }
+
     /// File order: d, b, a, c. Cables a→c, c→b, b→d (a chain).
     /// Identity latency: avg 7/3, max 3, 2 back edges. The unique optimum is
     /// the chain order `[a, c, b, d]` = section indices `[2, 3, 0, 1]`:
@@ -1378,6 +1400,7 @@ mod tests {
 
     #[test]
     fn best_candidate_matches_brute_force_for_small_n() {
+        let _schema_pin = SchemaPin::new();
         let patch = chain_patch();
         let cost = CostModel::default();
         let candidates = generate_candidates(&patch, &cost, OptimizeScope::Global);
@@ -2211,6 +2234,7 @@ mod tests {
     #[test]
     #[allow(clippy::single_range_in_vec_init)]
     fn weighted_generate_candidates_boundaries_match_pure() {
+        let _schema_pin = SchemaPin::new();
         // Generate candidates with the weighted engine at the boundaries and
         // compare ordering outcomes to the pure objectives on a shared fixture.
         // For small N the exact path is taken, so the optimum under Weighted(0)
@@ -2291,6 +2315,7 @@ mod tests {
     #[test]
     #[allow(clippy::single_range_in_vec_init)]
     fn weighted_brute_force_equivalence_n8() {
+        let _schema_pin = SchemaPin::new();
         let patch = chain8_patch();
         let cost = CostModel::default();
         let derived = derive(&patch);

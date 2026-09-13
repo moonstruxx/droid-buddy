@@ -101,20 +101,6 @@ The `\` key SHALL toggle an optional vertical split inside the left panel pane. 
 - **WHEN** the left pane is split vertically and the user presses `Alt+]`
 - **THEN** the bottom sub-pane widens by 10% within the left pane
 
-### Requirement: Narrow-terminal fallback
-
-When the terminal width is below 120 columns, the right column SHALL collapse and only the left panel pane remains visible. A status hint indicates the number of hidden views ("+N views hidden"). The carousel still cycles through hidden views: `Tab` temporarily replaces the left pane with the next view type in the carousel, and `Esc` returns to panels. The split ratio keys (`[`/`]`) have no effect while collapsed.
-
-#### Scenario: Collapse at narrow width
-
-- **WHEN** the terminal is 80 columns wide and two views are open
-- **THEN** only the panel pane is visible, and the status bar shows "+2 views hidden"
-
-#### Scenario: Carousel inspects hidden views
-
-- **WHEN** the terminal is narrow and the user presses `Tab`
-- **THEN** the left pane temporarily shows the next view type (e.g., graph), and `Esc` returns to panels
-
 ### Requirement: Esc closes focused view
 
 `Esc` while a view in the right column is focused SHALL close that view and remove its slot. If the closed view was the only one in the right column, the right column disappears and the left pane takes the full width. If the left panel pane is focused, `Esc` clears any active modifier selection (same as before).

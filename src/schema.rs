@@ -523,8 +523,8 @@ pub fn reset_test_schema() {
 }
 
 /// Install the process-wide schema, merging plugin circuits per the
-/// `[plugins]` settings. Called once from `main()` before `ratatui::init()`
-/// so plugin shadow/skip warnings land on a clean terminal (ADR 14).
+/// `[plugins]` settings. Called once from `main()` before the window opens so
+/// plugin shadow/skip warnings land on stderr (ADR 14).
 ///
 /// `plugins.enabled == false` installs the pure embedded schema and returns
 /// without touching any plugin directory. Otherwise the configured

@@ -179,9 +179,7 @@ impl Plugins {
 /// GPU-window preference under `[gui]` (gpu-graph-window D6).
 ///
 /// `graph_window = true` makes `g g` open the native graph window instead of
-/// the terminal graph tile. Only meaningful with the non-default `gui`
-/// feature; the value is inert otherwise (the handler keys are equally
-/// feature-gated, and the windowed loop lives in `main.rs`).
+/// the terminal graph tile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gui {
     #[serde(default = "default_graph_window")]
