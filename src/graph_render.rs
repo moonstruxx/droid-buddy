@@ -1,6 +1,6 @@
 //! Pixel-space camera and backend-neutral scene spec for the graph surface.
 //!
-//! This module is intentionally pure: no terminal, no `App` — only `f32` math
+//! This module is intentionally pure: no window, no `App` — only `f32` math
 //! over the layout solver's world plane and the pixel plane, plus the neutral
 //! [`SceneSpec`] (design D3) the egui window painter consumes under the same
 //! [`GraphCamera`]: node frames with circuit identity and port markers,
@@ -59,7 +59,7 @@ impl WorldBounds {
 /// The pure world→pixel camera of the graph surface (design D7), mirroring the
 /// physical view's `ScreenMapping` idiom at pixel resolution. World coordinates
 /// are the layout solver's unbounded `f32` plane (`graph_positions`); pixels
-/// are the kitty image's RGBA space.
+/// are the graph window's egui points.
 ///
 /// Transform: `pixel = world × zoom − pan` — `zoom` is pixels per world unit
 /// and `pan` is the pixel-space offset of the world origin. The inverse
@@ -547,11 +547,10 @@ mod tests {
 /// D9) resolves theme tokens before any painter touches the spec.
 pub type Rgb = (u8, u8, u8);
 
-/// Cable-kind classification carried on the spec (design D5): mirrors the
-/// four-way inference ui.rs applies per cable so the window painter can
-/// reproduce kind-colored cables and legends. ui.rs's own `CableKind` is
-/// renderer-private, so importing it would invert the dependency — the spec
-/// carries the classification instead.
+/// Cable-kind classification carried on the spec (design D5): produced by
+/// [`CableKind::from_circuit`]'s inference over the leading circuit so the
+/// window painter can reproduce kind-colored cables and legends. Both the
+/// scene builder and the painter consume this enum directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CableKind {
     Control,
@@ -582,8 +581,8 @@ pub struct EdgeLatency {
 /// Pixel-space appearance of one graph node: an anti-aliased rounded rect with
 /// an optional centered title, plus the circuit identity and port presence the
 /// window painter needs for selection propagation (`x`/`p`/`e`, task 3.1/3.3)
-/// and port markers. The identity fields are neutral (`""`/0/false) on the
-/// terminal path, which classifies these in ui.rs before the token hop.
+/// and port markers. The scene builder (`crate::gui::build_scene_spec`)
+/// fills the identity fields per node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeSpec {
     pub x: f32,
@@ -611,9 +610,8 @@ pub struct NodeSpec {
 /// D5). `color` is the final winner of the precedence chain (error red, then
 /// diff, then latency ramp, then cable kind, then dim) resolved to RGB; the
 /// state fields let the window painter reproduce legends, tooltips, and
-/// per-state styling without consulting graph.rs. The state is neutral on the
-/// terminal path — ui.rs classifies edges before the token hop and the spec
-/// carries the color.
+/// per-state styling without consulting graph.rs. The scene builder resolves
+/// the precedence chain; the resolved color travels in `color`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeSpec {
     pub start: (f32, f32),
@@ -634,8 +632,8 @@ pub struct EdgeSpec {
 }
 
 /// Pixel-space cluster container (design D5): a titled bordered box enclosing
-/// its member node rects, mirroring the terminal tile's plain-border union of
-/// member frames. `member_indices` index into [`SceneSpec::nodes`] so the
+/// its member node rects, a padded union the scene builder computes.
+/// `member_indices` index into [`SceneSpec::nodes`] so the
 /// window painter can map the container back to node identity for diff tinting
 /// (all-added/all-removed members) and hit-testing.
 #[derive(Debug, Clone, PartialEq)]
@@ -659,4 +657,63 @@ pub struct SceneSpec {
     pub nodes: Vec<NodeSpec>,
     pub edges: Vec<EdgeSpec>,
     pub clusters: Vec<ClusterSpec>,
+}
+
+/// How `CableKind::from_circuit` maps tokens and schema designations to
+impl CableKind {
+    /// Classify a producing circuit's output: the schema's declared
+    /// `cable_kind` designation wins (plugin-added circuits may opt out of
+    /// inference), then clock/gate/trigger/pulsar/div emit control signals;
+    /// midi/note/seq/pitch emit musical/midi signals; anything else is
+    /// treated as audio/CV.
+    pub fn from_circuit(circuit: &str) -> CableKind {
+        match crate::schema::load_schema()
+            .circuits
+            .get(&circuit.to_ascii_lowercase())
+            .and_then(|def| def.cable_kind.as_deref())
+        {
+            Some("control") => return Self::Control,
+            Some("midi") => return Self::Midi,
+            _ => {}
+        }
+        let name = circuit.to_ascii_lowercase();
+        if ["clock", "gate", "trigger", "pulsar", "div"]
+            .iter()
+            .any(|k| name.contains(k))
+        {
+            Self::Control
+        } else if ["midi", "note", "seq", "pitch"]
+            .iter()
+            .any(|k| name.contains(k))
+        {
+            Self::Midi
+        } else {
+            Self::Audio
+        }
+    }
+}
+
+/// The producing circuit of a cable: the source end of the first edge carrying
+/// it, resolved to a node's circuit name.
+pub fn cable_source_circuit<'a>(graph: &'a crate::graph::Graph, cable: &str) -> Option<&'a str> {
+    let source = graph
+        .edges
+        .iter()
+        .find(|e| e.cable == cable)?
+        .source
+        .clone();
+    graph
+        .nodes
+        .iter()
+        .find(|n| n.id == source)
+        .map(|n| n.circuit.as_str())
+}
+
+/// Cable kind inferred from its producing circuit; `Unknown` when no edge
+/// produces it.
+pub fn cable_kind(graph: &crate::graph::Graph, cable: &str) -> CableKind {
+    match cable_source_circuit(graph, cable) {
+        Some(circuit) => CableKind::from_circuit(circuit),
+        None => CableKind::Unknown,
+    }
 }
