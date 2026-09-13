@@ -264,6 +264,15 @@ impl GraphWindow {
         self.request_redraw();
     }
 
+    /// Sets the scene only when it differs from the window's current one, so
+    /// the loop can call this every `RedrawRequested` without a self-sustaining
+    /// repaint (an unchanged scene must not request another redraw).
+    pub fn set_scene_if_changed(&mut self, scene: Option<&SceneSpec>) {
+        if self.scene.as_ref() != scene {
+            self.set_scene(scene);
+        }
+    }
+
     /// Paints one frame into the window (task 2.2: the egui painter backend)
     /// and reports the frame's input state for the loop to map onto `App`
     /// mutations (task 3.1).

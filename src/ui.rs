@@ -17,6 +17,14 @@ use crate::theme;
 /// unconditional dependencies (design D10); only the transport stays gated.
 #[cfg(feature = "kitty-gfx")]
 use crate::graph_render::{build_scene, EdgeTokenSpec, NodeTokenSpec, Scene};
+/// The GPU graph window builds its scene spec from the same classified tokens
+/// (design D9 / gpu-graph-window): these spec types and the shared cluster-geometry
+/// helper are the `ui → graph_render` handoff for the egui painter.
+#[cfg(feature = "gui")]
+use crate::graph_render::{
+    cluster_rect_from_members, ClusterSpec, EdgeDiffState, EdgeLatency, EdgeSpec, NodeSpec,
+    SceneSpec,
+};
 /// The camera fit shared by both graph render paths (design D5): the
 /// box-drawing fit maps world positions through it, and the kitty path
 /// rasterizes through it, so both publish identical hit rects.
@@ -1863,7 +1871,7 @@ const KITTY_GRAPH_IMAGE_ID: u32 = 0;
 
 /// Classification + hover state for the kitty image path, grouped like
 /// `GraphEdgeOpts` so the pixel helpers stay under clippy's 7-argument limit.
-#[cfg(feature = "kitty-gfx")]
+#[cfg(any(feature = "kitty-gfx", feature = "gui"))]
 #[derive(Clone, Copy)]
 struct GraphKittyOpts<'a> {
     disabled: &'a HashSet<NodeId>,
@@ -1886,7 +1894,7 @@ struct GraphKittyOpts<'a> {
 /// classification helpers. Modifiers (BOLD/DIM) are not representable in
 /// pixels, so only the token color is resolved — the dim tokens already carry
 /// the dim look.
-#[cfg(feature = "kitty-gfx")]
+#[cfg(any(feature = "kitty-gfx", feature = "gui"))]
 fn graph_edge_pixel_color(
     graph: &Graph,
     edge: &crate::graph::GraphEdge,
@@ -1949,6 +1957,46 @@ fn graph_edge_pixel_color(
     cable_color_with_diff(graph, &edge.cable, opts.diff_report, opts.diff_showing)
 }
 
+/// Resolve one node's pixel border/title colors and display label (the kitty
+/// path's inline selection, factored out so the window path applies the same
+/// classification): disabled/not-selected dim, then selected/hover highlight,
+/// then per-kind frames, plus the `circuit_display_label` title and the
+/// diff-`*` suffix. Returns `(border_color, title_color, label)`.
+#[cfg(any(feature = "kitty-gfx", feature = "gui"))]
+fn graph_node_pixel_style(
+    graph: &Graph,
+    node: &GraphNode,
+    i: usize,
+    opts: GraphKittyOpts<'_>,
+    theme: &theme::Theme,
+) -> (Color, Color, String) {
+    let is_disabled = circuit_disabled(opts.disabled, &node.circuit, node.instance_index);
+    let is_not_selected = graph.not_selected.contains(&node.section_index);
+    let (border, title_color) = if is_disabled || is_not_selected {
+        (theme.graph_node_dim, theme.graph_node_dim)
+    } else if opts.selected == Some(&node.id) || opts.hovered == Some(i) {
+        (theme.graph_node_highlight, theme.graph_node_highlight)
+    } else {
+        match node.kind {
+            NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
+            NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
+            NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
+            NodeKind::OutputJack => (theme.graph_node_jack_output, theme.graph_node_jack_output),
+        }
+    };
+    let mut label = graph_node_display_title(node, opts.patch, Some(opts.circuit_store));
+    if opts.diff_showing
+        && opts.diff_report.is_some_and(|r| {
+            r.changed_nodes.iter().any(|n| n.id == node.id)
+                || r.added_nodes.contains(&node.id)
+                || r.removed_nodes.contains(&node.id)
+        })
+    {
+        label.push('*');
+    }
+    (border, title_color, label)
+}
+
 /// Build one kitty-gfx frame for the graph surface: fit the camera to the
 /// world bounds, rasterize nodes/edges/labels into an opaque RGBA scene (the
 /// design D9 token→RGB hop runs inside `build_scene`), and derive the
@@ -1991,40 +2039,7 @@ fn graph_kitty_frame(
             continue; // outside the dependency subset (change D task 3.1)
         }
 
-        let is_disabled = circuit_disabled(opts.disabled, &node.circuit, node.instance_index);
-        let is_not_selected = graph.not_selected.contains(&node.section_index);
-        // Hover emphasis uses the highlight token (the box path's REVERSED
-        // background has no pixel equivalent); disabled dim outranks hover.
-        let (border, title_color) = if is_disabled || is_not_selected {
-            (theme.graph_node_dim, theme.graph_node_dim)
-        } else if opts.selected == Some(&node.id) {
-            // Selected circuit (design D4): same highlight token as hover so
-            // the window and terminal surfaces agree on the emphasized node.
-            (theme.graph_node_highlight, theme.graph_node_highlight)
-        } else if opts.hovered == Some(i) {
-            (theme.graph_node_highlight, theme.graph_node_highlight)
-        } else {
-            // Per-kind node frame (task 4.1): controller and jack nodes use
-            // their kind tokens on the kitty path too, mirroring the box path.
-            match node.kind {
-                NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
-                NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
-                NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
-                NodeKind::OutputJack => {
-                    (theme.graph_node_jack_output, theme.graph_node_jack_output)
-                }
-            }
-        };
-        let mut label = graph_node_display_title(node, opts.patch, Some(opts.circuit_store));
-        if opts.diff_showing
-            && opts.diff_report.is_some_and(|r| {
-                r.changed_nodes.iter().any(|n| n.id == node.id)
-                    || r.added_nodes.contains(&node.id)
-                    || r.removed_nodes.contains(&node.id)
-            })
-        {
-            label.push('*');
-        }
+        let (border, title_color, label) = graph_node_pixel_style(graph, node, i, opts, theme);
         node_specs.push(NodeTokenSpec {
             x: px,
             y: py,
@@ -2201,6 +2216,296 @@ fn render_graph_kitty(area: Rect, app: &mut App) -> bool {
     node_rect_field.clear();
     node_rect_field.extend(rects);
     true
+}
+
+/// Pixel margin around a cluster's member-node union in the window (design
+/// D5): the egui painter draws the container as a plain border, so the margin
+/// only keeps the frame clear of the member node edges, mirroring the box
+/// path's `GRAPH_CLUSTER_PADDING` cells.
+#[cfg(feature = "gui")]
+const WINDOW_CLUSTER_PADDING: f32 = 12.0;
+
+/// Camera fit for the graph window (design D5): frames the whole node set with
+/// one node margin, like `graph_fit_camera` in cell space, but against the
+/// window's initial 1280×800 logical size. Seeded once; later frames reuse the
+/// pan/zoomed camera (`handle_graph_window_frame` mutates `App::graph_camera`).
+#[cfg(feature = "gui")]
+fn graph_window_fit_camera(positions: &[(f32, f32)]) -> GraphCamera {
+    let node_w = crate::app::GRAPH_WINDOW_NODE_W;
+    let node_h = crate::app::GRAPH_WINDOW_NODE_H;
+    let avail_w = (1280.0 - node_w).max(1.0);
+    let avail_h = (800.0 - node_h).max(1.0);
+    GraphCamera::fit_to_world(
+        WorldBounds::from_positions(positions),
+        (avail_w, avail_h),
+        GRAPH_MIN_NODE_PX,
+    )
+}
+
+/// Build the window's `SceneSpec` for one frame (design D9 / gpu-graph-window):
+/// the same node/edge/cluster classification the terminal kitty image path
+/// performs, but resolved into the identity-carrying [`SceneSpec`] the egui
+/// painter consumes (nodes carry circuit identity and port presence; edges
+/// carry kind/diff/latency state). Positions map through the shared
+/// [`GraphCamera`], seeded on the first frame with [`graph_window_fit_camera`]
+/// and reused after (pan/zoom). `None` while no graph is loaded or the
+/// positions/node count disagree, so the window paints an empty canvas.
+#[cfg(feature = "gui")]
+pub fn build_window_scene_spec(app: &mut App) -> Option<SceneSpec> {
+    let graph = app.graph.as_ref()?;
+    if app.graph_positions.len() != graph.nodes.len() {
+        return None;
+    }
+
+    if app.graph_camera.is_none() {
+        let fit_src: Vec<(f32, f32)> = if app.dependency_nodes.is_empty() {
+            app.graph_positions.clone()
+        } else {
+            app.dependency_nodes
+                .iter()
+                .map(|&i| app.graph_positions[i])
+                .collect()
+        };
+        app.graph_camera = Some(graph_window_fit_camera(&fit_src));
+    }
+    let cam = app.graph_camera?;
+    let theme = theme::active();
+
+    // Copyable state + owned report captured before the field destructure.
+    let circuit_store = app.current_circuit_store();
+    let patch_for_title = app.patch.clone();
+    let diff_report_owned = app.filtered_report();
+    let selected_circuit = app.selected_circuit.clone();
+    let dependency_nodes = app.dependency_nodes.clone();
+    let dependency_edges = app.dependency_edges.clone();
+    let diff_showing = app.diff_showing;
+    let latency_coloring = app.latency_coloring;
+    let hovered = app.hovered_graph_node;
+    let filtered = !dependency_nodes.is_empty();
+
+    let App {
+        graph,
+        graph_positions,
+        disabled_circuits,
+        ..
+    } = app;
+    let graph = graph.as_ref()?;
+
+    let node_w = crate::app::GRAPH_WINDOW_NODE_W;
+    let node_h = crate::app::GRAPH_WINDOW_NODE_H;
+    let opts = GraphKittyOpts {
+        disabled: disabled_circuits,
+        diff_report: diff_report_owned.as_ref(),
+        diff_showing,
+        latency_coloring,
+        hovered,
+        selected: selected_circuit.as_ref(),
+        patch: patch_for_title.as_ref(),
+        circuit_store: &circuit_store,
+        dep_nodes: &dependency_nodes,
+        dep_edges: &dependency_edges,
+    };
+
+    // Nodes: `node_topleft` stays index-aligned (skipped nodes get (0,0)) so
+    // the edge pass resolves source/sink positions; `nodes` only carries the
+    // visible subset, matching the kitty path's dependency filter.
+    let mut node_topleft: Vec<(f32, f32)> = Vec::with_capacity(graph.nodes.len());
+    let mut nodes: Vec<NodeSpec> = Vec::with_capacity(graph.nodes.len());
+    for (i, node) in graph.nodes.iter().enumerate() {
+        let in_subset = !filtered || dependency_nodes.contains(&i);
+        let (px, py) = if in_subset {
+            let (wx, wy) = graph_positions[i];
+            cam.world_to_pixel(wx, wy)
+        } else {
+            (0.0, 0.0)
+        };
+        node_topleft.push((px, py));
+        if !in_subset {
+            continue;
+        }
+        let (border, label_color, label) = graph_node_pixel_style(graph, node, i, opts, theme);
+        let input_port = graph.edges.iter().any(|e| e.sink == node.id);
+        let output_port = graph.edges.iter().any(|e| e.source == node.id);
+        nodes.push(NodeSpec {
+            x: px,
+            y: py,
+            w: node_w,
+            h: node_h,
+            radius: 8.0,
+            fill: theme.rgb(theme.graph_node_fill),
+            border: theme.rgb(border),
+            border_width: 3.0,
+            label,
+            label_color: theme.rgb(label_color),
+            circuit: node.circuit.clone(),
+            instance_index: node.instance_index,
+            input_port,
+            output_port,
+        });
+    }
+
+    // Edges: quadratic from the source's right-center to the sink's
+    // left-center, mirroring the kitty path's geometry, plus the semantic state
+    // the window painter needs for legends/tooltips.
+    let mut edges: Vec<EdgeSpec> = Vec::with_capacity(graph.edges.len());
+    for (edge_index, edge) in graph.edges.iter().enumerate() {
+        if filtered && !dependency_edges.is_empty() && !dependency_edges.contains(&edge_index) {
+            continue;
+        }
+        let Some(src) = graph.nodes.iter().position(|n| n.id == edge.source) else {
+            continue;
+        };
+        let Some(sink) = graph.nodes.iter().position(|n| n.id == edge.sink) else {
+            continue;
+        };
+        let (sx, sy) = node_topleft[src];
+        let (tx, ty) = node_topleft[sink];
+        let start = (sx + node_w, sy + node_h / 2.0);
+        let end = (tx, ty + node_h / 2.0);
+        if start == end {
+            continue; // coincident nodes: zero-length edge
+        }
+        let ctrl = ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0);
+        let color = graph_edge_pixel_color(
+            graph,
+            edge,
+            &graph.nodes[src],
+            &graph.nodes[sink],
+            edge_index,
+            opts,
+        );
+        let has_error = graph
+            .validation
+            .iter()
+            .any(|issue| issue.cable == edge.cable);
+        let incident_disabled = circuit_disabled(
+            opts.disabled,
+            &graph.nodes[src].circuit,
+            graph.nodes[src].instance_index,
+        ) || circuit_disabled(
+            opts.disabled,
+            &graph.nodes[sink].circuit,
+            graph.nodes[sink].instance_index,
+        );
+        let kind = match cable_kind(graph, &edge.cable) {
+            CableKind::Control => crate::graph_render::CableKind::Control,
+            CableKind::Audio => crate::graph_render::CableKind::Audio,
+            CableKind::Midi => crate::graph_render::CableKind::Midi,
+            CableKind::Unknown => crate::graph_render::CableKind::Unknown,
+        };
+        let diff = if diff_showing {
+            opts.diff_report.and_then(|report| {
+                if report.added_cables.contains(&edge.cable) {
+                    Some(EdgeDiffState::Added)
+                } else if report.removed_cables.contains(&edge.cable) {
+                    Some(EdgeDiffState::Removed)
+                } else if report.changed_cables.iter().any(|c| c.cable == edge.cable) {
+                    Some(EdgeDiffState::Changed)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        let latency = if latency_coloring {
+            graph.latency.as_ref().and_then(|data| {
+                data.edges.get(edge_index).map(|entry| {
+                    let ramp = theme.graph_edge_latency_ramp();
+                    let ramp_stop = if entry.is_back_edge {
+                        ramp.len() - 1
+                    } else {
+                        latency_ramp_index(
+                            entry.latency,
+                            data.edges.len(),
+                            data.summary.avg,
+                            ramp.len(),
+                        )
+                    };
+                    EdgeLatency {
+                        ramp_stop,
+                        back_edge: entry.is_back_edge,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        edges.push(EdgeSpec {
+            start,
+            end,
+            ctrl,
+            color: theme.rgb(color),
+            width: 3.0,
+            kind,
+            error: has_error,
+            dim: incident_disabled,
+            diff,
+            latency,
+        });
+    }
+
+    // Clusters: banner-group containers, skipped while the dependency filter is
+    // active (mirrors the box path). Member indices are original node indices;
+    // unfiltered, `nodes` carries every node in order, so they index `nodes`.
+    let mut clusters: Vec<ClusterSpec> = Vec::new();
+    if !filtered {
+        for cluster in &graph.clusters {
+            let member_indices: Vec<usize> = graph
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| cluster.section_range.contains(&n.section_index))
+                .map(|(i, _)| i)
+                .collect();
+            let (border, title_color) = {
+                let mut b = theme.graph_cluster_border;
+                let mut t = theme.graph_cluster_title;
+                if diff_showing {
+                    if let Some(report) = opts.diff_report {
+                        let all_added = !member_indices.is_empty()
+                            && member_indices
+                                .iter()
+                                .all(|&i| report.added_nodes.contains(&graph.nodes[i].id));
+                        let all_removed = !member_indices.is_empty()
+                            && member_indices
+                                .iter()
+                                .all(|&i| report.removed_nodes.contains(&graph.nodes[i].id));
+                        if all_added {
+                            b = theme.graph_edge_diff_added;
+                            t = theme.graph_edge_diff_added;
+                        } else if all_removed {
+                            b = theme.graph_edge_diff_removed;
+                            t = theme.graph_edge_diff_removed;
+                        }
+                    }
+                }
+                (b, t)
+            };
+            let Some((x, y, w, h)) =
+                cluster_rect_from_members(&member_indices, &nodes, WINDOW_CLUSTER_PADDING)
+            else {
+                continue;
+            };
+            clusters.push(ClusterSpec {
+                x,
+                y,
+                w,
+                h,
+                title: cluster.title.clone(),
+                border: theme.rgb(border),
+                title_color: theme.rgb(title_color),
+                member_indices,
+            });
+        }
+    }
+
+    Some(SceneSpec {
+        background: theme.rgb(theme.graph_canvas_bg),
+        nodes,
+        edges,
+        clusters,
+    })
 }
 
 /// Render the full-screen signal-flow graph surface (design D8): cluster
@@ -5755,6 +6060,41 @@ mod graph_view_tests {
         app
     }
 
+    /// The window scene spec (task 1.1/2.1) carries node identity + ports for
+    /// the painter and re-derives fresh from App state: panning the shared
+    /// camera moves the pixel positions on the next frame.
+    #[cfg(feature = "gui")]
+    #[test]
+    fn build_window_scene_spec_carries_identity_and_tracks_camera() {
+        let mut app = graph_app();
+        let spec = build_window_scene_spec(&mut app).expect("scene builds for a loaded graph");
+        let graph = app.graph.as_ref().unwrap();
+        assert_eq!(spec.nodes.len(), graph.nodes.len());
+        assert_eq!(spec.edges.len(), graph.edges.len());
+        assert_eq!(spec.clusters.len(), graph.clusters.len());
+        // Identity is carried for selection/disable targeting: node circuits
+        // line up with the graph model, ports reflect connectivity.
+        for (spec_node, graph_node) in spec.nodes.iter().zip(graph.nodes.iter()) {
+            assert_eq!(spec_node.circuit, graph_node.circuit);
+            assert!(spec_node.x.is_finite() && spec_node.y.is_finite());
+            assert!(spec_node.w > 0.0 && spec_node.h > 0.0);
+            assert_eq!(
+                spec_node.input_port,
+                graph.edges.iter().any(|e| e.sink == graph_node.id)
+            );
+        }
+        // The camera is seeded once and reused; pan shifts pixel positions on
+        // the next call, proving the spec is re-derived from live state.
+        let before = spec.nodes[0].x;
+        app.graph_camera.as_mut().unwrap().pan_by(120.0, 0.0);
+        let rederived = build_window_scene_spec(&mut app).expect("scene re-derives after pan");
+        assert!(
+            (rederived.nodes[0].x - (before - 120.0)).abs() < 0.01,
+            "pan must shift the node's pixel x by -120 ({before} -> {})",
+            rederived.nodes[0].x
+        );
+    }
+
     fn buffer_for(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         // TestBackend never emits kitty graphics: force the box-drawing path so
         // graph assertions are deterministic regardless of the host terminal's
@@ -7707,5 +8047,55 @@ mod graph_view_tests {
         // Degenerate maxima never panic and stay within the budget.
         assert_eq!(truncate_with_ellipsis("x", 0), "");
         assert_eq!(truncate_with_ellipsis("xy", 1), "…");
+    }
+}
+#[cfg(all(test, feature = "gui"))]
+mod window_scene_spec_tests {
+    use crate::app::App;
+    use crate::graph::{Graph, GraphEdge, GraphNode, NodeId, NodeKind};
+
+    fn circuit(name: &str, instance: usize, section: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(name, instance),
+            kind: NodeKind::Circuit,
+            circuit: name.to_string(),
+            instance_index: instance,
+            section_index: section,
+        }
+    }
+
+    #[test]
+    fn scene_carries_identity_ports_and_edges() {
+        let graph = Graph {
+            nodes: vec![circuit("clocktool", 0, 0), circuit("osc", 0, 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".to_string(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = vec![(0.0, 0.0), (400.0, 0.0)];
+
+        let spec = super::build_window_scene_spec(&mut app).expect("scene builds");
+        assert_eq!(spec.nodes.len(), 2);
+        assert_eq!(spec.edges.len(), 1);
+
+        let src = spec
+            .nodes
+            .iter()
+            .find(|n| n.circuit == "clocktool")
+            .expect("clocktool node present");
+        assert!(src.output_port && !src.input_port);
+        assert_eq!(src.instance_index, 0);
+
+        let sink = spec
+            .nodes
+            .iter()
+            .find(|n| n.circuit == "osc")
+            .expect("osc node present");
+        assert!(sink.input_port && !sink.output_port);
     }
 }
