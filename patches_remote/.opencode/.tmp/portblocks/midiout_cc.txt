@@ -1,0 +1,89 @@
+[midiout]
+    ccnumber1 = 0
+    ccnumber2 = 1
+    ccnumber3 = 2
+    ccnumber4 = 3
+    ccnumber5 = 4
+    ccnumber6 = 5
+    ccnumber7 = 6
+    ccnumber8 = 7
+    cc5 = _T2_SFV_RESO
+    cc6 = _T2_SFV_SWEEP
+    cc7 = _T2_SFV_BLEND
+    channel = 2
+    trs = 2
+    usb = 0
+
+[midiout]
+    ccnumber1 = 8
+    ccnumber2 = 9
+    ccnumber3 = 10
+    ccnumber4 = 11
+    ccnumber5 = 12
+    ccnumber6 = 13
+    ccnumber7 = 14
+    ccnumber8 = 15
+    cc1 = _T2_VCA_SENDL1
+    cc2 = _T2_VCA_SENDL2
+    cc3 = _T2_VCA_SENDL3
+    cc4 = _T2_VCA_SENDL4
+    cc5 = _T2_VCA_SENDR1
+    cc6 = _T2_VCA_SENDR2
+    cc7 = _T2_VCA_SENDR3
+    cc8 = _T2_VCA_SENDR4
+    channel = 2
+    trs = 2
+    usb = 0
+    notegate1 = _T2_VCA_SENDL1_MUTED
+    notegate2 = _T2_VCA_SENDL2_MUTED
+    notegate3 = _T2_VCA_SENDL3_MUTED
+    notegate4 = _T2_VCA_SENDL4_MUTED
+    notegate5 = _T2_VCA_SENDR1_MUTED
+    notegate6 = _T2_VCA_SENDR2_MUTED
+    notegate7 = _T2_VCA_SENDR3_MUTED
+    notegate8 = _T2_VCA_SENDR4_MUTED
+
+# Send MIDI clock and running state to MIDI port usb
+[midiout]
+    ccnumber1 = 71
+    ccnumber2 = 13
+    ccnumber3 = 12
+    ccnumber4 = 74
+    ccnumber5 = 1
+    ccnumber6 = 8
+    ccnumber7 = 9
+    ccnumber8 = 10
+    cc1 = _T1_HEAT_RESO
+    cc2 = _T1_HEAT_DIRT
+    cc3 = _T1_HEAT_DRIVE
+    cc4 = _T1_HEAT_FREQ
+    cc5 = _T1_DECAY
+    cc6 = _T1_HEAT_DRY_WET
+    cc7 = _T1_HEAT_EQ_HI
+    cc8 = _T1_HEAT_EQ_LO
+    channel = 3
+    gate1 = _T1_FINAL_GATE
+    pitch1 = _T1_FINAL_PITCH_OUT
+    running = _RUNNING
+    trs = 0
+    usb = 1
+
+# Send MIDI clock and running state to MIDI port usb
+[midiout]
+    ccnumber1 = 1
+    ccnumber2 = 30
+    ccnumber3 = 31
+    ccnumber4 = 32
+    ccnumber5 = 33
+    ccnumber6 = 34
+    ccnumber7 = 35
+    ccnumber8 = 36
+#   cc2 = _T1_PWM_MORPH
+    cc6 = _T1_PWM_GAIN
+    cc7 = _T1_PWM_ATT
+    cc8 = _T1_PWM_REL
+    channel = 3
+#   clock = _CLOCK
+    running = _RUNNING
+    trs = 2
+    usb = 0

@@ -1,0 +1,24 @@
+[superjust]
+    bypass = 1
+    input1 = _T1_FINAL_GATE
+    input2 = _T1_EXTRAGATE
+    input3 = _T2_FINAL_GATE
+    input4 = _T2_ACC_GATE
+    input5 = _T2_FINAL_PITCH_OUT
+    input6 = _T1_FINAL_PITCH_OUT
+    tuningmode = 0
+    tuningpitch = 0
+    output1 = G1.1
+    output2 = G1.2
+    output3 = G2.1
+    output4 = G2.3
+    output5 = O4
+    output6 = O1
+
+# -------------------------------------------------
+# softpop
+# -------------------------------------------------
+
+# -------------------------------------------------
+# MIDI Output
+# -------------------------------------------------

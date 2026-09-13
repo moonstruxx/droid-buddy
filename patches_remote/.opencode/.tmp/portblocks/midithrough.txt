@@ -1,0 +1,5 @@
+[midithrough]
+    totrs = 2
+    fromusb = 0
+    fromtrs = 1
+

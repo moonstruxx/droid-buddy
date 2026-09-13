@@ -1,0 +1,71 @@
+[encoder]
+    selectat = 1
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.1
+    output = _T1_HEAT_FREQ
+
+[encoder]
+    selectat = 1
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.2
+    output = _T1_HEAT_RESO
+
+[encoder]
+    selectat = 1
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.3
+    output = _T1_HEAT_DRIVE
+
+[encoder]
+    selectat = 1
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.4
+    output = _T1_HEAT_DRY_WET
+
+[encoder]
+    selectat = 2
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.1
+    output = _T1_PWM_GAIN
+
+[encoder]
+    selectat = 2
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.2
+    output = _T1_PWM_ATT
+
+[encoder]
+    selectat = 2
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.3
+    output = _T1_PWM_REL
+
+[encoder]
+    selectat = 2
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.4
+    output = _T1_DECAY
+
+[encoder]
+    selectat = 3
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.1
+    output = _T1_HEAT_DIRT
+
+[encoder]
+    selectat = 3
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.2
+#   output = _T1_HEAT_FILTER_PAN
+
+[encoder]
+    selectat = 3
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.3
+    output = _T1_HEAT_EQ_HI
+
+[encoder]
+    selectat = 3
+    select = _PERF_MENU_SELECT * _T1_PERF_MENU_ACT
+    encoder = E4.4
+    output = _T1_HEAT_EQ_LO

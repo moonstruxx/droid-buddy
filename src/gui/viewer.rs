@@ -14,11 +14,12 @@
 //! [`ViewerSpec`] from `App` state (patch lines, `occurrence_cursor`,
 //! `source_scroll`, selection); tests build it directly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use crate::patch::{ModifierAffect, Span};
+use crate::app::{App, FocusSlot, SourceViewMode, ViewType};
+use crate::patch::{ModifierAffect, NodeId, Patch, Span};
 use crate::theme::Color;
 
 /// The per-column highlight kind of a raw source line (port of
@@ -34,7 +35,7 @@ pub(super) enum HighlightKind {
 
 /// One styled run of a source line, in byte offsets.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct Fragment {
+pub(crate) struct Fragment {
     /// Byte range `(start, end)` into the line text.
     pub range: (usize, usize),
     pub color: Color,
@@ -46,14 +47,14 @@ pub(super) struct Fragment {
 /// One rendered source line: the full text plus styled fragments (the
 /// un-fragmented spans read as plain theme-text runs).
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct LineSpec {
+pub(crate) struct LineSpec {
     pub text: String,
     pub fragments: Vec<Fragment>,
 }
 
 /// The circuits sidebar column.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct SidebarSpec {
+pub(crate) struct SidebarSpec {
     /// Display names (disambiguated), in section order.
     pub names: Vec<String>,
     /// Index of the selected circuit entry.
@@ -63,7 +64,7 @@ pub(super) struct SidebarSpec {
 /// One minimap row: its glyph, color, and whether the viewport indicator
 /// reverses it.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct MinimapRow {
+pub(crate) struct MinimapRow {
     pub ch: char,
     pub color: Color,
     pub reversed: bool,
@@ -71,13 +72,13 @@ pub(super) struct MinimapRow {
 
 /// The minimap column.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct MinimapSpec {
+pub(crate) struct MinimapSpec {
     pub rows: Vec<MinimapRow>,
 }
 
 /// One status-bar fragment (hint text or the transient message).
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct StatusFragment {
+pub(crate) struct StatusFragment {
     pub text: String,
     pub color: Color,
     pub bold: bool,
@@ -85,7 +86,7 @@ pub(super) struct StatusFragment {
 
 /// The fully-resolved viewer payload for one frame.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ViewerSpec {
+pub(crate) struct ViewerSpec {
     /// Pane title: " Source [raw] " / " Source [prettified] ".
     pub title: String,
     pub focused: bool,
@@ -864,6 +865,367 @@ pub(super) fn minimap_rows(
     rows
 }
 
+/// Nominal minimap height (rows) for the spec builder. The paint stretches
+/// the rows across the real minimap column, so a fixed nominal keeps the
+/// glyphs and the viewport band proportionally correct at any window size;
+/// the terminal derived this from the pane height, which the spec builder
+/// does not know (the dispatch task owns the published rects).
+const MINIMAP_ROWS: usize = 256;
+
+/// Build the fully-resolved viewer payload for one frame (port of
+/// `ui.rs::render_source_pane` + `render_source_content` +
+/// `render_source_sidebar` + `render_minimap` + `render_viewer_status`).
+/// The dispatch task calls this with `&App` each frame and hands the spec to
+/// [`paint_viewer`]; tests build specs directly.
+pub(crate) fn viewer_spec(app: &App) -> ViewerSpec {
+    let status = viewer_status(app);
+    let title = match app.source_view_mode {
+        SourceViewMode::Raw => " Source [raw] ".to_string(),
+        SourceViewMode::Prettified => " Source [prettified] ".to_string(),
+    };
+    // Focus mirrors the handler's `sync_viewer_focus_from_tiles`: the viewer
+    // slot holds tile focus.
+    let focused = match app.tile_stack.focus {
+        FocusSlot::Slot(i) => app.tile_stack.slots.get(i) == Some(&ViewType::SourceViewer),
+        FocusSlot::Panels => false,
+    };
+    let Some(patch) = app.patch.as_ref() else {
+        return ViewerSpec {
+            title,
+            focused,
+            lines: vec![],
+            scroll: 0,
+            empty_message: Some("No patch loaded".to_string()),
+            sidebar: None,
+            minimap: None,
+            status,
+        };
+    };
+    let (lines, empty_message) = match app.source_view_mode {
+        SourceViewMode::Raw => {
+            if patch.raw_lines.is_empty() {
+                (Vec::new(), Some("No patch loaded".to_string()))
+            } else {
+                (raw_highlighted_lines(patch, app), None)
+            }
+        }
+        SourceViewMode::Prettified => {
+            if patch.viewer_circuits().is_empty() {
+                (Vec::new(), Some("No circuits in patch".to_string()))
+            } else {
+                (prettified_highlighted_lines(patch, app), None)
+            }
+        }
+    };
+    // A patch with neither sections nor raw lines showed the circuits message
+    // before the per-mode empty checks, so it wins over raw mode's message.
+    let (lines, empty_message) = if patch.sections.is_empty() && patch.raw_lines.is_empty() {
+        (Vec::new(), Some("No circuits in patch".to_string()))
+    } else {
+        (lines, empty_message)
+    };
+    let sidebar = if patch.sections.is_empty() {
+        None
+    } else {
+        Some(sidebar_spec(patch, app))
+    };
+    let minimap = if patch.raw_lines.is_empty() && patch.sections.is_empty() {
+        None
+    } else {
+        Some(minimap_spec(patch, app))
+    };
+    ViewerSpec {
+        title,
+        focused,
+        lines,
+        scroll: app.source_scroll,
+        empty_message,
+        sidebar,
+        minimap,
+        status,
+    }
+}
+
+/// Raw content lines with occurrence/modifier highlighting (port of
+/// `ui.rs::build_raw_highlighted_lines`), reusing the per-line kind fill and
+/// fragment helpers. Without a selected token the raw lines pass through
+/// unhighlighted.
+fn raw_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
+    let Some(token) = app.selected_component.as_deref() else {
+        return patch
+            .raw_lines
+            .iter()
+            .map(|text| LineSpec {
+                text: text.clone(),
+                fragments: vec![],
+            })
+            .collect();
+    };
+    let occ_spans = patch.occurrences_for(token);
+    let mod_affects = patch.modifier_entries_for(token);
+    let current = occ_spans.get(app.occurrence_cursor).copied();
+    patch
+        .raw_lines
+        .iter()
+        .enumerate()
+        .map(|(line_idx, raw)| {
+            // The helpers fill byte kinds from spans without line checks, so
+            // filter each line's spans here (the terminal did the same in its
+            // per-line loop).
+            let occ: Vec<Span> = occ_spans
+                .iter()
+                .filter(|s| s.line == line_idx)
+                .copied()
+                .collect();
+            let mods: Vec<ModifierAffect> = mod_affects
+                .iter()
+                .filter(|m| m.span.line == line_idx)
+                .cloned()
+                .collect();
+            let kinds = raw_line_kinds(raw, &occ, &mods, current);
+            line_fragments(raw, &kinds)
+        })
+        .collect()
+}
+
+/// Prettified circuit boxes with value highlighting (port of
+/// `ui.rs::build_prettified_highlighted_lines`): one framed box per circuit,
+/// blank line between.
+fn prettified_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
+    let circuits = patch.viewer_circuits();
+    let selected = app.selected_component.as_deref();
+    let mods: &[ModifierAffect] = match selected {
+        Some(tok) => patch.modifier_entries_for(tok),
+        None => &[],
+    };
+    let circuit_store = app.current_circuit_store();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut lines = Vec::new();
+    for circuit in &circuits {
+        let idx = *counts.get(&circuit.name).unwrap_or(&0);
+        let node_id = NodeId::circuit(&circuit.name, idx);
+        let display_name = patch.circuit_display_label(&node_id, &circuit_store);
+        counts.insert(circuit.name.clone(), idx + 1);
+        let color = circuit_color(&circuit.name);
+        let entries: Vec<EntrySpec> = circuit
+            .entries
+            .iter()
+            .map(|(key, value)| EntrySpec {
+                key: key.clone(),
+                value: value.clone(),
+                fragments: entry_value_fragments(value, selected, mods),
+            })
+            .collect();
+        lines.extend(prettified_box_lines(&display_name, color, &entries));
+        lines.push(LineSpec {
+            text: String::new(),
+            fragments: vec![],
+        });
+    }
+    lines
+}
+
+/// The circuits sidebar (port of `ui.rs::render_source_sidebar` +
+/// `sidebar_selected_index`): disambiguated display labels and the entry the
+/// cursor or scroll currently sits in.
+fn sidebar_spec(patch: &Patch, app: &App) -> SidebarSpec {
+    let circuit_store = app.current_circuit_store();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let names: Vec<String> = patch
+        .sections
+        .iter()
+        .map(|s| {
+            let idx = *counts.get(&s.name).unwrap_or(&0);
+            let node_id = NodeId::circuit(&s.name, idx);
+            counts.insert(s.name.clone(), idx + 1);
+            patch.circuit_display_label(&node_id, &circuit_store)
+        })
+        .collect();
+    SidebarSpec {
+        names: disambiguate_names(&names),
+        selected: sidebar_selected_index(patch, app),
+    }
+}
+
+/// The sidebar entry containing the current position: the section holding the
+/// cursor's selected occurrence, else the one holding the scroll line.
+fn sidebar_selected_index(patch: &Patch, app: &App) -> Option<usize> {
+    if patch.sections.is_empty() {
+        return None;
+    }
+    let target_line = if let Some(tok) = app.selected_component.as_ref() {
+        patch
+            .occurrences_for(tok)
+            .get(app.occurrence_cursor)
+            .map(|s| s.line)
+    } else {
+        None
+    }
+    .unwrap_or(app.source_scroll);
+    let mut idx: Option<usize> = None;
+    for (i, sec) in patch.sections.iter().enumerate() {
+        if sec.header_span.line <= target_line {
+            idx = Some(i);
+        } else {
+            break;
+        }
+    }
+    idx.or(Some(0))
+}
+
+/// Disambiguate repeated circuit labels with a ` (n)` suffix (port of
+/// `ui.rs::disambiguate_names`).
+fn disambiguate_names(names: &[String]) -> Vec<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut result = Vec::new();
+    for name in names {
+        let count = counts.entry(name.clone()).or_insert(0);
+        if *count == 0 {
+            result.push(name.clone());
+        } else {
+            result.push(format!("{} ({})", name, count));
+        }
+        *count += 1;
+    }
+    result
+}
+
+/// The minimap column (port of `ui.rs::render_minimap`'s data side): marker
+/// rows for occurrence and modifier lines with the viewport band.
+fn minimap_spec(patch: &Patch, app: &App) -> MinimapSpec {
+    let total_lines = if !patch.raw_lines.is_empty() {
+        patch.raw_lines.len()
+    } else {
+        patch.sections.len().max(1)
+    };
+    let mut occ = HashSet::new();
+    let mut exact = HashSet::new();
+    let mut boolean = HashSet::new();
+    if let Some(tok) = app.selected_component.as_deref() {
+        occ = patch.occurrences_for(tok).iter().map(|s| s.line).collect();
+        for affect in patch.modifier_entries_for(tok) {
+            if affect.selectat.is_some() {
+                exact.insert(affect.span.line);
+            } else {
+                boolean.insert(affect.span.line);
+            }
+        }
+    }
+    MinimapSpec {
+        rows: minimap_rows(
+            total_lines,
+            MINIMAP_ROWS,
+            &occ,
+            &exact,
+            &boolean,
+            app.source_scroll,
+        ),
+    }
+}
+
+/// The status-bar fragments (port of `ui.rs::render_viewer_status`): the bold
+/// "Source Viewer" title, the hint keys, and the trailing transient message.
+/// The paint maps bold fragments to the text token and plain ones to the
+/// viewer-key token, so keys stay un-bolded and the title/message bold.
+fn viewer_status(app: &App) -> Vec<StatusFragment> {
+    let t = crate::theme::active();
+    let mut fragments = vec![
+        StatusFragment {
+            text: "Source Viewer".into(),
+            color: t.text,
+            bold: true,
+        },
+        StatusFragment {
+            text: " | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "ESC".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " close | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "j/k".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " scroll | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "Up/Down".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " occur | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "Home/End".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " jump | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "t".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " toggle | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "Tab".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " focus | ".into(),
+            color: t.text,
+            bold: false,
+        },
+        StatusFragment {
+            text: "[ / ]".into(),
+            color: t.viewer_key,
+            bold: false,
+        },
+        StatusFragment {
+            text: " split".into(),
+            color: t.text,
+            bold: false,
+        },
+    ];
+    if !app.status_message.is_empty() {
+        fragments.push(StatusFragment {
+            text: " | ".into(),
+            color: t.text,
+            bold: false,
+        });
+        fragments.push(StatusFragment {
+            text: app.status_message.clone(),
+            color: t.text,
+            bold: true,
+        });
+    }
+    fragments
+}
+
 fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
 }
@@ -1193,5 +1555,81 @@ mod tests {
         });
         full_output.textures_delta.clear();
         assert_eq!(frame.scroll_delta, 0.0);
+    }
+
+    #[test]
+    fn viewer_spec_no_patch_shows_empty_message() {
+        let app = App::new();
+        let spec = viewer_spec(&app);
+        assert_eq!(spec.title, " Source [raw] ");
+        assert!(!spec.focused);
+        assert!(spec.lines.is_empty());
+        assert_eq!(spec.empty_message.as_deref(), Some("No patch loaded"));
+        assert!(spec.sidebar.is_none());
+        assert!(spec.minimap.is_none());
+        assert!(spec.status.iter().any(|f| f.text == "Source Viewer"));
+    }
+
+    #[test]
+    fn viewer_spec_raw_builds_lines_sidebar_and_minimap() {
+        let content = "[seq]\noutput = P1.1\ninput = P2.2\n";
+        let patch = Patch::from_ini_str(content, "test".to_string()).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.selected_component = Some("P1.1".to_string());
+        app.occurrence_cursor = 0;
+        let spec = viewer_spec(&app);
+        assert_eq!(spec.lines.len(), 3);
+        assert!(
+            spec.lines[1].fragments.iter().any(|f| f.range == (9, 13)),
+            "P1.1 highlighted: {:?}",
+            spec.lines[1]
+        );
+        assert!(spec.lines[1].fragments.iter().any(|f| f.reversed));
+        let sidebar = spec.sidebar.as_ref().unwrap();
+        assert_eq!(sidebar.names, vec!["seq".to_string()]);
+        assert_eq!(sidebar.selected, Some(0));
+        assert!(spec.minimap.is_some());
+        assert_eq!(spec.empty_message, None);
+    }
+
+    #[test]
+    fn viewer_spec_prettified_builds_boxes() {
+        let content = "[seq]\noutput = P1.1\n";
+        let patch = Patch::from_ini_str(content, "test".to_string()).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.source_view_mode = SourceViewMode::Prettified;
+        let spec = viewer_spec(&app);
+        assert!(spec.lines.len() >= 3);
+        assert!(spec.lines[0].text.starts_with('\u{250C}'));
+        assert_eq!(spec.empty_message, None);
+        assert!(spec.sidebar.is_some());
+    }
+
+    #[test]
+    fn viewer_spec_prettified_empty_circuits_message() {
+        // The parser rejects section-less patches, so empty the sections of a
+        // valid one: the raw lines stay, mirroring a preamble-only patch.
+        let content = "[seq]\noutput = P1.1\n";
+        let mut patch = Patch::from_ini_str(content, "test".to_string()).unwrap();
+        patch.sections = vec![];
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.source_view_mode = SourceViewMode::Prettified;
+        let spec = viewer_spec(&app);
+        assert_eq!(spec.empty_message.as_deref(), Some("No circuits in patch"));
+        assert!(spec.lines.is_empty());
+        assert!(spec.sidebar.is_none());
+    }
+
+    #[test]
+    fn viewer_spec_focus_follows_tile_stack() {
+        let mut app = App::new();
+        app.tile_stack.slots = vec![ViewType::SourceViewer];
+        app.tile_stack.focus = FocusSlot::Slot(0);
+        assert!(viewer_spec(&app).focused);
+        app.tile_stack.focus = FocusSlot::Panels;
+        assert!(!viewer_spec(&app).focused);
     }
 }

@@ -1,0 +1,83 @@
+[logic]
+    input1 = _NOTE_BUTTON_HOLD
+    input2 = _T2_SELECTED
+    input3 = _NO_CONTROL
+    and = _T2_NOTE_BUTTON_HOLD
+
+[encoder]
+    selectat = 1
+    encoder = E4.1
+    button = _T2_VCA_SENDL1_TOGGLE
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDL1
+
+[encoder]
+    selectat = 1
+    button = _T2_VCA_SENDL2_TOGGLE
+    encoder = E4.2
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDL2
+
+[encoder]
+    selectat = 1
+    button = _T2_VCA_SENDL3_TOGGLE
+    encoder = E4.3
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDL3
+
+[encoder]
+    selectat = 1
+    button = _T2_VCA_SENDL4_TOGGLE
+    encoder = E4.4
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDL4
+
+[encoder]
+    selectat = 2
+    encoder = E4.1
+    button = _T2_VCA_SENDR1_TOGGLE
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDR1
+
+[encoder]
+    selectat = 2
+    encoder = E4.2
+    button = _T2_VCA_SENDR2_TOGGLE
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDR2
+
+[encoder]
+    selectat = 2
+    encoder = E4.3
+    button = _T2_VCA_SENDR3_TOGGLE
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDR3
+
+[encoder]
+    selectat = 2
+    encoder = E4.4
+    button = _T2_VCA_SENDR4_TOGGLE
+    select = _PERF_MENU_SELECT * _T2_NOTE_BUTTON_HOLD
+    output = _T2_VCA_SENDR4
+
+[encoder]
+    selectat = 1
+    encoder = E4.1
+    select = _PERF_MENU_SELECT * _T2_PERF_MENU_ACT
+    output = _T2_SFV_RESO
+
+[encoder]
+    selectat = 1
+    encoder = E4.2
+    select = _PERF_MENU_SELECT * _T2_PERF_MENU_ACT
+    output = _T2_SFV_SWEEP
+
+[encoder]
+    selectat = 1
+    encoder = E4.3
+    select = _PERF_MENU_SELECT * _T2_PERF_MENU_ACT
+    output = _T2_SFV_BLEND
+
+[flipflop]
+    toggle = _T2_VCA_SENDL1_TOGGLE
+    output = _T2_VCA_SENDL1_MUTED

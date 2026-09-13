@@ -650,6 +650,44 @@ pub struct ClusterSpec {
     pub member_indices: Vec<usize>,
 }
 
+/// Pixel rect enclosing the member node rects of a cluster, inflated by
+/// `padding` on each side. `None` when no member node applies (empty,
+/// out-of-range, or filtered indices — defensive; banner groups always cover
+/// sections, but the node list may be a filtered subset). Not clamped to a
+/// canvas: the painters clip at draw time, and the spec must not know its
+/// viewport. Shared by the window scene builder so the container geometry has
+/// one definition.
+pub fn cluster_rect_from_members(
+    member_indices: &[usize],
+    nodes: &[NodeSpec],
+    padding: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let member_rects = member_indices
+        .iter()
+        .filter_map(|&i| nodes.get(i))
+        .map(|n| (n.x, n.y, n.x + n.w, n.y + n.h));
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut any = false;
+    for (x, y, x2, y2) in member_rects {
+        any = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x2);
+        max_y = max_y.max(y2);
+    }
+    if !any {
+        return None;
+    }
+    Some((
+        min_x - padding,
+        min_y - padding,
+        (max_x - min_x) + 2.0 * padding,
+        (max_y - min_y) + 2.0 * padding,
+    ))
+}
 /// A fully resolved, backend-neutral graph frame: opaque background plus node,
 /// cable, and cluster-container appearance in RGB space. The egui window
 /// painter (task 2.2) draws this spec under the same [`GraphCamera`].

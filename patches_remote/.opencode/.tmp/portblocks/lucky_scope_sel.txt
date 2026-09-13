@@ -1,0 +1,17 @@
+[buttongroup]
+    button1 = B3.5
+    button2 = B3.6
+    button3 = B3.7
+    button4 = B3.8
+    value1 = 0
+    value2 = 1
+    value3 = 2
+    value4 = 3
+    led1 = L3.5
+    led2 = L3.6
+    led3 = L3.7
+    led4 = L3.8
+    output = _LUCKY_SCOPE
+    select = _LUCKY_MODE
+
+# A long press on the clear button resets all settings of the sequencer to its default state

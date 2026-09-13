@@ -190,7 +190,7 @@ pub(crate) fn paint_validation_modal(
 // ── Select-state menu ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct SelectRow {
+pub(crate) struct SelectRow {
     pub signal: String,
     pub kind_label: String,
     pub usage: usize,
@@ -200,7 +200,7 @@ pub(super) struct SelectRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct SelectMenuSpec {
+pub(crate) struct SelectMenuSpec {
     pub title: String,
     pub hint: String,
     pub rows: Vec<SelectRow>,
@@ -286,7 +286,7 @@ pub(super) fn paint_select_menu(
 // ── Label editor ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct LabelEditSpec {
+pub(crate) struct LabelEditSpec {
     pub draft: String,
     pub hint: String,
     pub hue: Option<Color>,
@@ -343,7 +343,7 @@ pub(super) fn paint_label_editor(
 // ── Diff surface ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct DiffSpec {
+pub(crate) struct DiffSpec {
     pub title: String,
     pub added: Vec<String>,
     pub removed: Vec<String>,
@@ -458,7 +458,7 @@ pub(super) fn diff_spec_from_report(report: Option<&DiffReport>) -> DiffSpec {
 // ── Latency optimizer ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct OptimizerRow {
+pub(crate) struct OptimizerRow {
     pub label: String,
     pub weighted_obj: f32,
     pub avg_before: f32,
@@ -469,7 +469,7 @@ pub(super) struct OptimizerRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct OptimizerSpec {
+pub(crate) struct OptimizerSpec {
     pub header: String,
     pub hint: String,
     pub rows: Vec<OptimizerRow>,
@@ -547,6 +547,166 @@ pub(super) fn paint_optimizer(
 
 fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
+}
+
+// ── App → Spec builders (window-shell dispatch contract) ─────────────────────
+//
+// These resolve live `App` state into the same fully-formed payloads the
+// `paint_*` routines above draw. The window shell's overlay dispatch consumes
+// them (follow-up task); until a caller lands, unused warnings are expected.
+
+/// Select-state menu payload, or `None` while the select overlay is closed.
+pub(crate) fn select_menu_spec(app: &crate::app::App) -> Option<SelectMenuSpec> {
+    let state = app.select_state.as_ref()?;
+    let count = state.signals.len();
+    let title = format!(" Select state ({count}) ");
+    let hint = " j/k:navigate [/]:cycle Esc:clear ".to_string();
+    if count == 0 {
+        return Some(SelectMenuSpec {
+            title,
+            hint,
+            rows: vec![],
+            empty_message: Some("No select signals".to_string()),
+        });
+    }
+    let cursor = state.cursor.min(count.saturating_sub(1));
+    let rows = state
+        .signals
+        .iter()
+        .enumerate()
+        .map(|(idx, signal)| {
+            let kind_label = match signal.kind {
+                crate::patch::SelectSignalKind::Register => "register",
+                crate::patch::SelectSignalKind::Cable => "cable",
+            };
+            let candidates = signal
+                .candidates
+                .iter()
+                .map(|c| format!("{}", c.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let current = state
+                .state
+                .get(&signal.signal)
+                .copied()
+                .map(|v| format!("{v}"))
+                .unwrap_or_else(|| "-".to_string());
+            SelectRow {
+                signal: signal.signal.clone(),
+                kind_label: kind_label.to_string(),
+                usage: signal.usage,
+                candidates,
+                current,
+                selected: idx == cursor,
+            }
+        })
+        .collect();
+    Some(SelectMenuSpec {
+        title,
+        hint,
+        rows,
+        empty_message: None,
+    })
+}
+
+/// Label-editor payload, or `None` while no inline edit is open.
+pub(crate) fn label_edit_spec(app: &crate::app::App) -> Option<LabelEditSpec> {
+    let editing = app.editing.as_ref()?;
+    // The window is always wide, so the full status line always fits; the
+    // terminal's narrow fallback has no equivalent here.
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    let layers_enabled = settings.labels.layers_enabled;
+    let max_shift_layer = settings.labels.max_shift_layer;
+    let status = app
+        .editing_status_line(layers_enabled, max_shift_layer)
+        .unwrap_or_default();
+    let max = max_shift_layer.clamp(1, 8);
+    let suffix = match &editing.kind {
+        crate::app::EditKind::Hw { .. } if layers_enabled => {
+            format!(" | 1..{max} layer")
+        }
+        _ => String::new(),
+    };
+    let hint = format!("{status} | Enter save | Esc cancel{suffix}");
+    let hue = app
+        .editing_hue_token()
+        .as_deref()
+        .map(crate::theme::modifier_hue);
+    Some(LabelEditSpec {
+        draft: editing.draft.clone(),
+        hint,
+        hue,
+    })
+}
+
+/// Latency-optimizer payload, or `None` while the optimizer pane is closed.
+pub(crate) fn optimizer_spec(app: &crate::app::App) -> Option<OptimizerSpec> {
+    let state = app.optimizer.as_ref()?;
+    let count = state.candidates.len();
+    let weight_label = if state.weight == 0.0 {
+        "w = 0.0 (min-sum)".to_string()
+    } else if state.weight == 1.0 {
+        "w = 1.0 (min-max)".to_string()
+    } else {
+        format!("w = {:.1}", state.weight)
+    };
+    let header = format!(" Optimizer ({count}) · {weight_label} ");
+    let hint = " j/k select · Enter preview · r restore · s export · Esc close ".to_string();
+    if count == 0 {
+        return Some(OptimizerSpec {
+            header,
+            hint,
+            rows: vec![],
+            empty_message: Some("No candidate orderings".to_string()),
+        });
+    }
+    let cursor = state.cursor.min(count.saturating_sub(1));
+    let rows = state
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, candidate)| {
+            let marker = if idx == cursor { "▶ " } else { "   " };
+            // Weighted objective `(1-w)*avg + w*max` on the after summary,
+            // the same formula `Weighted(w)` sorted the candidates by.
+            let weighted_obj =
+                (1.0 - state.weight) * candidate.after.avg + state.weight * candidate.after.max;
+            OptimizerRow {
+                label: format!("{marker}{}", candidate.label),
+                weighted_obj,
+                avg_before: candidate.before.avg,
+                avg_after: candidate.after.avg,
+                max_before: candidate.before.max,
+                max_after: candidate.after.max,
+                selected: idx == cursor,
+            }
+        })
+        .collect();
+    Some(OptimizerSpec {
+        header,
+        hint,
+        rows,
+        empty_message: None,
+    })
+}
+
+/// Validation-modal payload, `None` while the modal is hidden or has no issues.
+pub(crate) fn validation_spec_for(app: &crate::app::App) -> Option<ValidationSpec> {
+    if !app.showing_validation || app.validation_issues.is_empty() {
+        return None;
+    }
+    Some(validation_spec(
+        &app.validation_issues,
+        app.validation_cursor,
+    ))
+}
+
+/// Diff-surface payload, `None` while the diff overlay is hidden.
+pub(crate) fn diff_spec_for(app: &crate::app::App) -> Option<DiffSpec> {
+    if !app.diff_showing {
+        return None;
+    }
+    Some(diff_spec_from_report(app.filtered_report().as_ref()))
 }
 
 #[cfg(test)]
@@ -751,5 +911,180 @@ mod tests {
         });
         full_output.textures_delta.clear();
         assert!(full_output.shapes.is_empty());
+    }
+
+    #[test]
+    fn select_menu_spec_builds_rows_and_marks_cursor() {
+        let mut app = crate::app::App::new();
+        app.select_state = Some(crate::app::SelectState {
+            signals: vec![crate::patch::SelectSignal {
+                signal: "sel".into(),
+                kind: crate::patch::SelectSignalKind::Register,
+                usage: 2,
+                candidates: vec![
+                    crate::patch::SelectCandidate {
+                        value: 0.0,
+                        count: 1,
+                    },
+                    crate::patch::SelectCandidate {
+                        value: 1.0,
+                        count: 3,
+                    },
+                ],
+            }],
+            state: [("sel".to_string(), 1.0)].into_iter().collect(),
+            cursor: 0,
+            hide_unselected: false,
+        });
+        let spec = select_menu_spec(&app).expect("menu open");
+        assert_eq!(spec.title, " Select state (1) ");
+        let row = &spec.rows[0];
+        assert!(row.selected);
+        assert_eq!(row.signal, "sel");
+        assert_eq!(row.kind_label, "register");
+        assert_eq!(row.usage, 2);
+        assert_eq!(row.candidates, "0, 1");
+        assert_eq!(row.current, "1");
+    }
+
+    #[test]
+    fn select_menu_spec_none_when_closed() {
+        let app = crate::app::App::new();
+        assert!(select_menu_spec(&app).is_none());
+    }
+
+    #[test]
+    fn select_menu_spec_empty_state_message() {
+        let mut app = crate::app::App::new();
+        app.select_state = Some(crate::app::SelectState {
+            signals: vec![],
+            state: Default::default(),
+            cursor: 0,
+            hide_unselected: false,
+        });
+        let spec = select_menu_spec(&app).expect("menu open");
+        assert_eq!(spec.empty_message.as_deref(), Some("No select signals"));
+    }
+
+    #[test]
+    fn label_edit_spec_builds_draft_status_and_hue() {
+        let mut app = crate::app::App::new();
+        app.editing = Some(crate::app::EditState::new_hw(
+            "B3.17".into(),
+            1,
+            "MyLabel".into(),
+        ));
+        let spec = label_edit_spec(&app).expect("editing");
+        assert_eq!(spec.draft, "MyLabel");
+        assert!(
+            spec.hint.contains("Editing B3.17 / Group1"),
+            "{}",
+            spec.hint
+        );
+        assert!(
+            spec.hint.contains("Enter save | Esc cancel"),
+            "{}",
+            spec.hint
+        );
+        assert_eq!(spec.hue, Some(crate::theme::modifier_hue("B3.17")));
+    }
+
+    #[test]
+    fn label_edit_spec_none_when_not_editing() {
+        let app = crate::app::App::new();
+        assert!(label_edit_spec(&app).is_none());
+    }
+
+    #[test]
+    fn optimizer_spec_builds_weighted_rows() {
+        let mut app = crate::app::App::new();
+        let summary = |avg: f32, max: f32| crate::latency::LatencySummary {
+            avg,
+            max,
+            back_edge_count: 0,
+        };
+        app.optimizer = Some(crate::app::OptimizerState {
+            candidates: vec![crate::optimize::CandidateOrdering {
+                label: "banner (default)".into(),
+                order: vec![0],
+                before: summary(2.0, 5.0),
+                after: summary(1.5, 3.0),
+            }],
+            cursor: 0,
+            previewing: None,
+            original_order: vec![0],
+            weight: 0.5,
+        });
+        let spec = optimizer_spec(&app).expect("optimizer open");
+        assert_eq!(spec.header, " Optimizer (1) · w = 0.5 ");
+        let row = &spec.rows[0];
+        assert!(row.selected);
+        assert!(row.label.starts_with('▶'));
+        assert!((row.weighted_obj - 2.25).abs() < 1e-6); // 0.5*1.5 + 0.5*3.0
+        assert_eq!(row.avg_before, 2.0);
+        assert_eq!(row.avg_after, 1.5);
+        assert_eq!(row.max_before, 5.0);
+        assert_eq!(row.max_after, 3.0);
+    }
+
+    #[test]
+    fn optimizer_spec_weight_labels_endpoints() {
+        let mut app = crate::app::App::new();
+        app.optimizer = Some(crate::app::OptimizerState {
+            candidates: vec![],
+            cursor: 0,
+            previewing: None,
+            original_order: vec![],
+            weight: 0.0,
+        });
+        assert!(optimizer_spec(&app)
+            .unwrap()
+            .header
+            .contains("w = 0.0 (min-sum)"));
+        app.optimizer.as_mut().unwrap().weight = 1.0;
+        assert!(optimizer_spec(&app)
+            .unwrap()
+            .header
+            .contains("w = 1.0 (min-max)"));
+    }
+
+    #[test]
+    fn validation_spec_for_gates_on_showing_and_issues() {
+        let mut app = crate::app::App::new();
+        assert!(validation_spec_for(&app).is_none());
+        app.showing_validation = true;
+        assert!(validation_spec_for(&app).is_none());
+        app.validation_issues = vec![ValidationIssue {
+            span: crate::patch::Span {
+                line: 0,
+                col_start: 0,
+                col_end: 4,
+            },
+            severity: Severity::Error,
+            code: "unknown_circuit".into(),
+            message: "unknown circuit foo".into(),
+        }];
+        assert_eq!(
+            validation_spec_for(&app).expect("modal shown").rows.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn diff_spec_for_gates_on_diff_showing() {
+        let mut app = crate::app::App::new();
+        assert!(diff_spec_for(&app).is_none());
+        app.diff_showing = true;
+        app.diff_report = Some(crate::diff::DiffReport {
+            added_cables: vec!["_CABLE_A".into()],
+            removed_cables: vec![],
+            changed_cables: vec![],
+            added_nodes: vec![],
+            removed_nodes: vec![],
+            changed_nodes: vec![],
+        });
+        let spec = diff_spec_for(&app).expect("diff shown");
+        assert_eq!(spec.title, " Diff (1) ");
+        assert_eq!(spec.added, vec!["_CABLE_A".to_string()]);
     }
 }

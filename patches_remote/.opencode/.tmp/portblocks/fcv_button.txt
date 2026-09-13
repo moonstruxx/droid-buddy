@@ -1,0 +1,5 @@
+[button]
+    output = _ENV_FCV_BUTTON_HOLD
+    button = B3.28
+    states = 1
+    onvalue = 1

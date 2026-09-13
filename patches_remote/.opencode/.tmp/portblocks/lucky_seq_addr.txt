@@ -1,0 +1,46 @@
+[multicompare]
+    input = _FADERMODE
+    compare1 = 10
+    ifequal1 = 1
+    compare2 = 20
+    ifequal2 = 2
+    else = 0
+    output = _LUCKY_SEQ_ADDRESS
+    compare3 = 30
+    ifequal3 = 3
+    compare4 = 40
+    ifequal4 = 4
+
+# [button]
+#   button = B5.8
+#   onvalue = 1
+#   offvalue = 0
+#   output = _LUCKY_TIES
+#   states = 1
+
+[switch]
+    input1 = _LUCKY_CVS
+    input2 = _LUCKY_DRIFT
+    input3 = _LUCKY_SPREAD
+    input4 = _LUCKY_RAND
+    offset = _LUCKY_SEQ_ADDRESS * -4
+    output1 = _LUCKY_CVS_S1
+    output2 = _LUCKY_DRIFT_S1
+    output3 = _LUCKY_SPREAD_S1
+    output4 = _LUCKY_RAND_S1
+    output5 = _LUCKY_CVS_S2
+    output6 = _LUCKY_DRIFT_S2
+    output7 = _LUCKY_SPREAD_S2
+    output8 = _LUCKY_RAND_S2
+    output9 = _LUCKY_CVS_S3
+    output10 = _LUCKY_DRIFT_S3
+    output11 = _LUCKY_SPREAD_S3
+    output12 = _LUCKY_RAND_S3
+    output13 = _LUCKY_CVS_S4
+    output14 = _LUCKY_DRIFT_S4
+    output15 = _LUCKY_SPREAD_S4
+    output16 = _LUCKY_RAND_S4
+
+[switch]
+    input1 = _LUCKY_RATC
+    input2 = _LUCKY_REPEAT

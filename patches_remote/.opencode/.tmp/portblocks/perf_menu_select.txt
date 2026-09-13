@@ -1,0 +1,27 @@
+[switch]
+    input1 = 1
+    input2 = 2
+    input3 = 3
+    input4 = 4
+    input5 = 5
+    input6 = 6
+    input7 = 7
+    input8 = 8
+    offset = S6.1
+    output1 = _PERF_MENU_SELECT
+
+[logic]
+    nor = _NO_PERFORMANCE_OVERLAY_ACT
+    input1 = _NOTE_BUTTON_HOLD
+    input2 = _ENV_VELO_BUTTON_HOLD
+    input3 = _ENV_FCV_BUTTON_HOLD
+
+# -------------------------------------------------
+# t1_perf_menu
+# -------------------------------------------------
+
+[logic]
+    input3 = _NO_CONTROL
+    input1 = _NO_PERFORMANCE_OVERLAY_ACT
+    input2 = _T1_SELECTED
+    and = _T1_PERF_MENU_ACT

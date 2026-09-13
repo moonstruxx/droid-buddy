@@ -1,0 +1,51 @@
+[copy]
+    input = 0.75
+    output = _DECAY_MAX
+
+# Sets the max length of the decay on all four envelops in the patch
+[copy]
+    input = 0.75
+    output = _DECAY_MAX2
+
+# Sets the min length of the decay on all four envelops in the patch
+[copy]
+    input = 0.03 + _DECAY_MAX2
+    output = _DECAY_MIN
+
+# Sets the max length of the attack on all four envelops in the patch (attack parameter is 1/20 shorter than that of decay, see manual)
+[copy]
+    input = 15
+    output = _ATTACK_MAX
+
+# [lfo]
+#   level = 0.2
+#   square = _LONGPRESS_BLINK
+#   pulsewidth = 0.2
+#   hz = 2
+
+# Amount of dimmed LED when buttons are long pressed
+# [copy]
+#   input = 0.2
+#   output = _LONGPRESS_LED
+
+# -------------------------------------------------
+# rec
+# -------------------------------------------------
+
+# [switch]
+#   input1 = I5
+#   input2 = I6
+#   input3 = 0
+#   output5 = _T3_REC_V
+#   output6 = _T3_REC_G
+#   output4 = _T2_REC_G
+#   input4 = 0
+#   output2 = _T1_REC_G
+#   output3 = _T2_REC_V
+#   offset = S4.2
+#   output1 = _T1_REC_V
+
+# -------------------------------------------------
+# Tonality
+# -------------------------------------------------
+

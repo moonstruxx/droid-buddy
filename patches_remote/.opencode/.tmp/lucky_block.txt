@@ -1,0 +1,113 @@
+# -------------------------------------------------
+# Extended lucky system
+# -------------------------------------------------
+
+# Lucky mode toggle: when on, B5.1-5.7 select the lucky parameter type
+# and the lucky scope switches pick which page (S1-S4) of lucky params is edited.
+# Re-homed from mpfs5's B4.3 (which referenced a non-existent B4 controller).
+[button]
+    button = S6.2
+    states = 1
+    onvalue = 1
+    offvalue = 0
+    output = _LUCKY_MODE
+    negated = _NO_LUCKY
+
+# Select which lucky parameter the faders edit (B5.1-5.7, dual-use with note selection)
+[buttongroup]
+    button1 = B5.1
+    button2 = B5.2
+    button3 = B5.3
+    button4 = B5.4
+    button5 = B5.5
+    button6 = B5.6
+    button7 = B5.7
+    minactive = 0
+    maxactive = 1
+    select = _LUCKY_MODE
+    led1 = _LUCKY_CVS
+    led2 = _LUCKY_SPREAD
+    led3 = _LUCKY_DRIFT
+    led4 = _LUCKY_RAND
+    led5 = _LUCKY_RATC
+    led6 = _LUCKY_REPEAT
+    led7 = _LUCKY_GATES
+
+# Lucky scope: which page (S1-S4) of lucky parameters is currently edited
+[buttongroup]
+    button1 = S6.3
+    button2 = S6.4
+    button3 = S6.5
+    button4 = S6.7
+    value1 = 0
+    value2 = 1
+    value3 = 2
+    value4 = 3
+    led1 = L6.3
+    led2 = L6.4
+    led3 = L6.5
+    led4 = L6.7
+    output = _LUCKY_SCOPE
+    select = _LUCKY_MODE
+
+# Map the current fader mode to the lucky sequence address (which motoquencer page)
+[multicompare]
+    input = _FADERMODE
+    compare1 = 10
+    ifequal1 = 1
+    compare2 = 20
+    ifequal2 = 2
+    else = 0
+    output = _LUCKY_SEQ_ADDRESS
+    compare3 = 30
+    ifequal3 = 3
+    compare4 = 40
+    ifequal4 = 4
+
+# Fan out the lucky CV type (CVS/DRIFT/SPREAD/RAND) to the four sequence pages
+[switch]
+    input1 = _LUCKY_CVS
+    input2 = _LUCKY_DRIFT
+    input3 = _LUCKY_SPREAD
+    input4 = _LUCKY_RAND
+    offset = _LUCKY_SEQ_ADDRESS * -4
+    output1 = _LUCKY_CVS_S1
+    output2 = _LUCKY_DRIFT_S1
+    output3 = _LUCKY_SPREAD_S1
+    output4 = _LUCKY_RAND_S1
+    output5 = _LUCKY_CVS_S2
+    output6 = _LUCKY_DRIFT_S2
+    output7 = _LUCKY_SPREAD_S2
+    output8 = _LUCKY_RAND_S2
+    output9 = _LUCKY_CVS_S3
+    output10 = _LUCKY_DRIFT_S3
+    output11 = _LUCKY_SPREAD_S3
+    output12 = _LUCKY_RAND_S3
+    output13 = _LUCKY_CVS_S4
+    output14 = _LUCKY_DRIFT_S4
+    output15 = _LUCKY_SPREAD_S4
+    output16 = _LUCKY_RAND_S4
+
+# Fan out the lucky gate type (RATC/REPEAT/GATES/TIES) to the four sequence pages
+[switch]
+    input1 = _LUCKY_RATC
+    input2 = _LUCKY_REPEAT
+    input3 = _LUCKY_GATES
+    offset = _LUCKY_SEQ_ADDRESS * -4
+    output1 = _LUCKY_RATC_S1
+    output2 = _LUCKY_REPEAT_S1
+    output3 = _LUCKY_GATES_S1
+    output4 = _LUCKY_TIES_S1
+    output5 = _LUCKY_RATC_S2
+    output6 = _LUCKY_REPEAT_S2
+    output7 = _LUCKY_GATES_S2
+    output8 = _LUCKY_TIES_S2
+    output9 = _LUCKY_RATC_S3
+    output10 = _LUCKY_REPEAT_S3
+    output11 = _LUCKY_GATES_S3
+    output12 = _LUCKY_TIES_S3
+    output13 = _LUCKY_RATC_S4
+    output14 = _LUCKY_REPEAT_S4
+    output15 = _LUCKY_GATES_S4
+    output16 = _LUCKY_TIES_S4
+

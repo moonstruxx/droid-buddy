@@ -1,0 +1,9 @@
+[button]
+    select = _PAGE_MENU_SHIFT
+    button = B4.3
+    onvalue = 1
+    states = 1
+    offvalue = 0
+    output = _LUCKY_MODE
+    negated = _NO_LUCKY
+
