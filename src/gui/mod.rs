@@ -14,28 +14,37 @@
 //! without touching this shell.
 
 mod graph;
+
+pub use graph::build_scene_spec;
+
+// Surface ports (physical, panels, viewer, picker, overlays — tasks 2.1-2.5)
+// are test-support fixtures today: nothing in the shell dispatches to them
+// yet, so headless egui shape/label tests are their only consumer. They join
+// the runtime dispatch by removing the gate when their draw routines are
+// wired into `EguiSurface::paint`.
+#[cfg(test)]
 mod overlays;
+#[cfg(test)]
 mod panels;
+#[cfg(test)]
 mod physical;
+#[cfg(test)]
 mod picker;
+#[cfg(test)]
 mod viewer;
 
-// The camera helpers are public API (`crate::gui::camera_pan` /
-// `crate::gui::camera_zoom_about`, used by `handler.rs`); `graph` stays a
-// private canvas module, so they are re-exported rather than named directly.
-pub(crate) use graph::{camera_pan, camera_zoom_about, paint_scene};
+// The camera helpers stay crate API (`crate::gui::camera_pan`, used by
+// `handler.rs` inside the lib), while `graph_window_fit_camera` is also
+// consumed by the windowed loop in the `droid_tui` bin (a separate crate), so
+// it re-exports at full visibility. `graph` stays a private canvas module.
+pub use graph::graph_window_fit_camera;
+pub(crate) use graph::{camera_pan, camera_zoom_about};
 #[cfg(test)]
 pub(crate) use graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
-#[cfg(test)]
-pub(crate) use overlays::{paint_validation_modal, validation_spec, ValidationSpec};
 #[cfg(test)]
 pub(crate) use panels::PanelsFrame;
 #[cfg(test)]
 pub(crate) use physical::PhysicalFrame;
-#[cfg(test)]
-pub(crate) use physical::{
-    cell_visuals, mm_grid_lines, rack_geometry, CellSpec, ModuleSpec, PhysicalSpec, PortMark,
-};
 #[cfg(test)]
 pub(crate) use picker::PickerFrame;
 #[cfg(test)]
@@ -283,11 +292,20 @@ impl GraphWindow {
     /// theme each frame, so both surfaces show the same graph. A scene with a
     /// different node count replaces the previous one (graph rebuilt), so the
     /// window-local marquee selection is dropped rather than left stale.
+    /// Identical re-pushes (same frame, no state change) are no-ops: they
+    /// neither re-clone the spec nor re-arm the redraw loop.
     pub fn set_scene(&mut self, scene: Option<&SceneSpec>) {
+        let unchanged = match (&self.scene, scene) {
+            (Some(prev), Some(next)) => prev == next,
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
         let replaced = match (&self.scene, scene) {
             (Some(prev), Some(next)) => prev.nodes.len() != next.nodes.len(),
-            (None, Some(_)) | (Some(_), None) => true,
-            (None, None) => false,
+            _ => true,
         };
         if replaced {
             self.selected_nodes.clear();
