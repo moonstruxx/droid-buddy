@@ -455,6 +455,23 @@ pub struct GraphDrag {
 pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
 pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
 
+/// Minimum window width (egui points) for the quad 4-pane layout; below it
+/// the window falls back to the single-pane graph view so narrow windows stay
+/// readable (quad-view change, `EguiSurface::paint`).
+pub const QUAD_WIDTH_THRESHOLD: f32 = 120.0;
+
+/// Cached influence-induced subgraph solve (quad-view FILTERED pane): the
+/// influenced nodes and their internal edges solved as their own compact
+/// layout, recomputed whenever influence recomputes so the pane never
+/// re-solves per frame. `nodes`/`edges` are full-graph indices (subset order),
+/// `positions` the subset-space `layout::solve` output parallel to `nodes`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InfluenceSubset {
+    pub nodes: Vec<usize>,
+    pub edges: Vec<usize>,
+    pub positions: Vec<(f32, f32)>,
+}
+
 /// Which pane receives keyboard input while the embedded source pane is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ViewerFocus {
@@ -767,6 +784,10 @@ pub struct App {
     pub active_modifier_var: Option<String>,
     /// Forward influence result for the active modifier, if any.
     pub influence: Option<crate::patch::InfluenceSubtree>,
+    /// Cached induced-subgraph solve of the influence set (quad-view FILTERED
+    /// pane). `None` with no influence or no graph; recomputed by
+    /// `recompute_influence`, cleared with the influence state.
+    pub influence_subset: Option<InfluenceSubset>,
     /// Circuits whose processing is disabled, keyed by `(circuit name,
     /// instance index)`. Disabled circuits stay influenced but act as a dead
     /// end in the influence walk: nothing downstream of them is reached.
@@ -904,6 +925,7 @@ impl App {
             physical_viewport: None,
             active_modifier_var: None,
             influence: None,
+            influence_subset: None,
             disabled_circuits: HashSet::new(),
             pinned: HashSet::new(),
             dependency_root: None,
@@ -2651,6 +2673,13 @@ impl App {
                 graph.highlighted_edges = sub.influenced_edges.clone();
             }
         }
+        // A rebuild keeps the quad FILTERED-pane subset in sync with the
+        // fresh graph; no influence means no subset.
+        if self.influence.is_some() {
+            self.recompute_influence_subset();
+        } else {
+            self.influence_subset = None;
+        }
         // A rebuild (tension, select-state cycle) keeps an active dependency
         // filter applied: recompute the subset over the fresh graph and solve
         // it as its own layout. If the frozen root no longer exists (e.g. a
@@ -2914,12 +2943,66 @@ impl App {
             graph.highlighted_nodes = subtree.influenced_nodes.clone();
             graph.highlighted_edges = subtree.influenced_edges.clone();
         }
+        self.recompute_influence_subset();
         self.events.dispatch(&Event::InfluenceRecomputed(subtree));
+    }
+
+    /// Recompute the influence-induced subgraph solve for the FILTERED pane
+    /// (quad-view): the influenced nodes plus their internal edges, solved as
+    /// their own compact layout with subset-relative pins (mirrors
+    /// `apply_dependency_subset`). `None` with no influence or no graph.
+    /// Deterministic: node indices sorted, edge indices in graph order.
+    fn recompute_influence_subset(&mut self) {
+        let Some(influence) = self.influence.as_ref() else {
+            self.influence_subset = None;
+            return;
+        };
+        let Some(graph) = self.graph.as_ref() else {
+            self.influence_subset = None;
+            return;
+        };
+        let mut members: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| influence.influenced_nodes.contains(&n.id))
+            .map(|(i, _)| i)
+            .collect();
+        members.sort_unstable();
+        if members.is_empty() {
+            self.influence_subset = None;
+            return;
+        }
+        let member_set: HashSet<usize> = members.iter().copied().collect();
+        let edges = graph.internal_edges(&member_set);
+        let subset = Graph {
+            nodes: members.iter().map(|&i| graph.nodes[i].clone()).collect(),
+            edges: edges.iter().map(|&i| graph.edges[i].clone()).collect(),
+            clusters: Vec::new(),
+            validation: Vec::new(),
+            latency: None,
+            highlighted_nodes: HashSet::new(),
+            highlighted_edges: HashSet::new(),
+            not_selected: HashSet::new(),
+        };
+        let pins: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
+            .map(|(pi, _)| pi)
+            .collect();
+        let positions = crate::layout::solve(&subset, &pins, self.tension);
+        self.influence_subset = Some(InfluenceSubset {
+            nodes: members,
+            edges,
+            positions,
+        });
     }
 
     fn clear_influence_state(&mut self) {
         self.active_modifier_var = None;
         self.influence = None;
+        self.influence_subset = None;
         if let Some(graph) = self.graph.as_mut() {
             graph.highlighted_nodes.clear();
             graph.highlighted_edges.clear();
@@ -4929,6 +5012,81 @@ mod tests {
         assert!(app.load_patch(second));
         assert!(!app.is_quad());
         assert!(!app.left_split_active);
+    }
+
+    #[test]
+    fn influence_subset_solved_compactly_with_internal_edges() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        let subset = app.influence_subset.as_ref().expect("subset after quad");
+        assert!(!subset.nodes.is_empty());
+        assert_eq!(subset.nodes.len(), subset.positions.len());
+        assert!(
+            subset
+                .positions
+                .iter()
+                .all(|(x, y)| x.is_finite() && y.is_finite()),
+            "subset solve must place every node"
+        );
+        let graph = app.graph.as_ref().unwrap();
+        let member: HashSet<usize> = subset.nodes.iter().copied().collect();
+        for &e in &subset.edges {
+            let edge = &graph.edges[e];
+            let s = edge.source_index(&graph.nodes).unwrap();
+            let t = edge.sink_index(&graph.nodes).unwrap();
+            assert!(member.contains(&s), "subset edge source outside subset");
+            assert!(member.contains(&t), "subset edge sink outside subset");
+        }
+    }
+
+    #[test]
+    fn influence_subset_stays_none_without_graph() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        // Selection drives influence, but with no graph open the subset cannot
+        // be solved (quad opens the graph; this mirrors that gate).
+        app.select_component(String::from("B1.1"));
+        assert!(app.influence.is_some());
+        assert!(app.influence_subset.is_none());
+    }
+
+    #[test]
+    fn influence_subset_cleared_when_influence_cleared() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        assert!(app.influence_subset.is_some());
+        app.toggle_processing_pause();
+        assert!(app.influence.is_none());
+        assert!(app.influence_subset.is_none());
+    }
+
+    #[test]
+    fn rebuild_graph_recomputes_influence_subset() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        assert!(app.influence_subset.is_some());
+        app.rebuild_graph();
+        let after = app
+            .influence_subset
+            .as_ref()
+            .expect("subset survives rebuild");
+        assert!(!after.nodes.is_empty());
+        let graph = app.graph.as_ref().unwrap();
+        assert!(
+            after.nodes.iter().all(|&i| i < graph.nodes.len()),
+            "subset indices must stay parallel to the fresh graph"
+        );
+        assert!(after.edges.iter().all(|&i| i < graph.edges.len()));
     }
 
     #[test]
