@@ -195,8 +195,10 @@ mod windowed {
                     self.window.set_scene(scene.as_ref());
                     // The frame reports the window's input state; the loop
                     // owns `app`, so it maps the interactions here (D6: the
-                    // loop acts on what it owns).
-                    if let Some(frame) = self.window.fill_placeholder() {
+                    // loop acts on what it owns). `app` flows into the paint
+                    // so the quad dispatch builds real per-pane specs and
+                    // publishes `pane_rects`.
+                    if let Some(frame) = self.window.fill_placeholder(&mut self.app) {
                         handler::handle_graph_window_frame(&frame, &mut self.app);
                     }
                 }
