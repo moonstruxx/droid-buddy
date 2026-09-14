@@ -2042,12 +2042,19 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             // Directories toggle like files; the pinned section shows both. Only the
             // parent sentinel is excluded.
             if key.modifiers.ctrl {
-                // Ctrl+F latches the file filter on and (re)starts it with an
-                // empty string. Not a toggle: latching stays on until Esc/
-                // q/selection resets it (bead t9g).
-                app.picker_filter_active = true;
-                app.picker_filter.clear();
-                app.status_message = String::from("Filter: on (type to filter)");
+                // Ctrl+F toggles the latching filter (spec scenario: Toggle
+                // filter with Ctrl+f). Second press while active turns it off
+                // and clears the string.
+                if app.picker_filter_active {
+                    app.picker_filter_active = false;
+                    app.picker_filter.clear();
+                    app.status_message = String::from("Filter: off");
+                    app.refresh_picker_entries();
+                } else {
+                    app.picker_filter_active = true;
+                    app.picker_filter.clear();
+                    app.status_message = String::from("Filter: on (type to filter)");
+                }
                 return false;
             }
             if key.modifiers.alt {
@@ -3171,7 +3178,11 @@ mod tests {
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
-        assert!(names.iter().any(|n| n.ends_with("patch_b.ini")));
+        // After q resets the filter the full root listing is restored; the
+        // fixture root contains patch_a.ini and subdir/patch_b is not in the
+        // root listing, so check for a root entry that was filtered away.
+        assert!(names.iter().any(|n| n.ends_with("patch_a.ini")));
+        assert!(names.iter().any(|n| n.ends_with("subdir")));
     }
 
     #[test]
@@ -3225,9 +3236,11 @@ mod tests {
         let mut app = picker_app_at("fixtures/picker_test");
         handle_picker_event(ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "abba");
+        // Second Ctrl+f toggles off per spec (filter latching toggles on/off).
         handle_picker_event(ctrl_f_key(), &mut app);
-        assert!(app.picker_filter_active);
+        assert!(!app.picker_filter_active);
         assert!(app.picker_filter.is_empty());
+        assert_eq!(app.status_message, "Filter: off");
     }
 
     #[test]
