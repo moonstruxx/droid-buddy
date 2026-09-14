@@ -58,6 +58,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::app::App;
 use crate::graph_render::SceneSpec;
 
 /// Lifecycle state of the graph window.
@@ -320,7 +321,7 @@ impl GraphWindow {
     /// async and can fail on headless or software setups, and in that case
     /// the window simply stays unpainted while the terminal loop continues
     /// (no panic, matching the existing [`WindowError`] fallback).
-    pub fn fill_placeholder(&mut self) -> Option<WindowFrame> {
+    pub fn fill_placeholder(&mut self, app: &mut App) -> Option<WindowFrame> {
         self.with_window(|window| {
             if EGUI.with(|slot| slot.borrow().is_none()) {
                 if let Err(err) = init_surface(window) {
@@ -336,7 +337,7 @@ impl GraphWindow {
             EGUI.with(|slot| {
                 slot.borrow_mut()
                     .as_mut()
-                    .map(|surface| surface.paint(window, scene, selected))
+                    .map(|surface| surface.paint(window, app, scene, selected))
             })
         })
         .flatten()
@@ -493,19 +494,143 @@ fn theme_clear_color() -> wgpu::Color {
     }
 }
 
+/// The four quad pane rects partitioning `window` (quad-view paint dispatch):
+/// a vertical divider at `main_ratio` (left/right split) and a horizontal
+/// divider at `left_ratio` (the `\` split). `left_split_active` gates the
+/// FILTERED pane; off, the bottom row is the FULL graph alone. Pure geometry
+/// so the layout tests headless.
+struct QuadRects {
+    panels: egui::Rect,
+    source: egui::Rect,
+    full: egui::Rect,
+    filtered: Option<egui::Rect>,
+}
+
+fn quad_rects(
+    window: egui::Rect,
+    main_ratio: f32,
+    left_ratio: f32,
+    left_split_active: bool,
+) -> QuadRects {
+    let x = window.min.x + window.width() * main_ratio.clamp(0.3, 0.7);
+    let y = window.min.y + window.height() * left_ratio.clamp(0.2, 0.8);
+    let panels = egui::Rect::from_min_max(window.min, egui::pos2(x, y));
+    let source = egui::Rect::from_min_max(egui::pos2(x, window.min.y), egui::pos2(window.max.x, y));
+    let full = if left_split_active {
+        egui::Rect::from_min_max(egui::pos2(window.min.x, y), egui::pos2(x, window.max.y))
+    } else {
+        egui::Rect::from_min_max(egui::pos2(window.min.x, y), window.max)
+    };
+    let filtered =
+        left_split_active.then_some(egui::Rect::from_min_max(egui::pos2(x, y), window.max));
+    QuadRects {
+        panels,
+        source,
+        full,
+        filtered,
+    }
+}
+
+/// Round an egui-point rect into the app's cell-grid `Rect` domain (the
+/// renderer→handler geometry handoff). The quad panes publish their layout
+/// here so focus hit-testing sees the same four regions as the paint.
+fn to_cell_rect(r: egui::Rect) -> crate::app::Rect {
+    crate::app::Rect::new(
+        r.min.x.round().max(0.0) as u16,
+        r.min.y.round().max(0.0) as u16,
+        r.width().round().max(0.0) as u16,
+        r.height().round().max(0.0) as u16,
+    )
+}
+
+/// The quad panes as `(FocusSlot, cell Rect)` for focus hit-testing: the
+/// Panels pane on `FocusSlot::Panels`, the Source pane on the viewer slot,
+/// and both graph panes on the graph slot (the FILTERED pane shares the FULL
+/// pane's focus, mirroring `App::cycle_quad_focus`).
+fn quad_pane_rects(app: &App, q: &QuadRects) -> Vec<(crate::app::FocusSlot, crate::app::Rect)> {
+    let viewer_slot = app
+        .tile_stack
+        .slots
+        .iter()
+        .position(|v| *v == crate::app::ViewType::SourceViewer);
+    let graph_slot = app
+        .tile_stack
+        .slots
+        .iter()
+        .position(|v| *v == crate::app::ViewType::Graph);
+    let mut out = vec![(crate::app::FocusSlot::Panels, to_cell_rect(q.panels))];
+    if let Some(i) = viewer_slot {
+        out.push((crate::app::FocusSlot::Slot(i), to_cell_rect(q.source)));
+    }
+    if let Some(i) = graph_slot {
+        out.push((crate::app::FocusSlot::Slot(i), to_cell_rect(q.full)));
+        if let Some(f) = q.filtered {
+            out.push((crate::app::FocusSlot::Slot(i), to_cell_rect(f)));
+        }
+    }
+    out
+}
+
+/// Paint the quad 2x2 layout into the window: top row Panels | Source, bottom
+/// row Graph FULL | Graph FILTERED (`left_split_active` gates the FILTERED
+/// pane). Publishes `pane_rects` for focus hit-testing. The caller falls
+/// back to the single-pane path when quad is inactive or the window is too
+/// narrow.
+fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
+    let t = crate::theme::active();
+    let window_rect = ui.max_rect();
+    let q = quad_rects(
+        window_rect,
+        app.main_split_ratio,
+        app.left_split_ratio,
+        app.left_split_active,
+    );
+    app.pane_rects = quad_pane_rects(app, &q);
+    let ctx = ui.ctx();
+    let bg = t.egui_color(t.graph_canvas_bg);
+
+    // Panels (top-left): real hw components grouped by controller.
+    let painter = ui.painter().with_clip_rect(q.panels);
+    painter.rect_filled(q.panels, 0.0, bg);
+    let focused = app.quad_focus == crate::app::QuadFocus::Panels;
+    let spec = panels::panels_spec(app, focused, q.panels);
+    let _ = panels::paint_panels(&painter, q.panels, ctx, Some(&spec));
+
+    // Source (top-right): the raw/prettified viewer.
+    let painter = ui.painter().with_clip_rect(q.source);
+    painter.rect_filled(q.source, 0.0, bg);
+    let spec = viewer::viewer_spec(app);
+    let _ = viewer::paint_viewer(&painter, q.source, ctx, Some(&spec));
+
+    // Graph FULL (bottom-left): the shared full-graph scene (influence
+    // highlight/dim), clipped to the pane.
+    graph::paint_scene_in(ui.painter(), q.full, scene, ctx, selected);
+
+    // Graph FILTERED (bottom-right): the influence-induced subgraph freshly
+    // fit into its pane with its own compact camera.
+    if let Some(f) = q.filtered {
+        let subset = graph::build_subset_scene(app, t, f);
+        graph::paint_scene_in(ui.painter(), f, subset.as_ref(), ctx, selected);
+    }
+}
+
 impl EguiSurface {
     /// Paint one egui frame into the window and present it, reporting the
     /// frame's input state (task 3.1) for the loop to map onto `App`
     /// mutations. Pointer positions are egui points; the scene is painted 1:1
     /// (one spec pixel = one egui point), so they double as spec-pixel coords.
     /// `selected` is the window-local marquee selection driving the highlight.
+    /// `app` flows through so the quad dispatch builds real per-pane specs and
+    /// publishes `pane_rects` (renderer-owns-geometry contract).
     ///
-    /// Surface dispatch: this frame paints the graph canvas via
-    /// [`graph::paint_scene`]; the physical/panels/viewer/picker/overlay
-    /// surfaces (tasks 2.1-2.5) join here as their own draw routines.
+    /// Surface dispatch: in quad mode (wide enough window) this frame paints
+    /// the four panes (Panels | Source / Graph FULL | Graph FILTERED);
+    /// otherwise it paints the single graph canvas via
+    /// [`graph::paint_scene`] with the surface dummy specs (tasks 2.1-2.5).
     fn paint(
         &mut self,
         window: &Window,
+        app: &mut App,
         scene: Option<&SceneSpec>,
         selected: &[usize],
     ) -> WindowFrame {
@@ -538,13 +663,18 @@ impl EguiSurface {
             .native_pixels_per_point = Some(scale);
 
         let mut full_output = self.context.run_ui(raw_input, |ui| {
-            graph::paint_scene(
-                ui.painter(),
-                ui.max_rect().size(),
-                scene,
-                &self.context,
-                selected,
-            );
+            let window_rect = ui.max_rect();
+            if app.is_quad() && window_rect.width() >= crate::app::QUAD_WIDTH_THRESHOLD {
+                paint_quad(app, ui, scene, selected);
+            } else {
+                app.pane_rects.clear();
+                graph::paint_scene(
+                    ui.painter(),
+                    window_rect.size(),
+                    scene,
+                    &self.context,
+                    selected,
+                );
             // Runtime dispatch for the remaining surfaces (native-rendering wiring):
             // physical + panels are always visible (main view); viewer/picker/overlays
             // use minimal dummy specs so headless tests and the runtime both see
@@ -651,7 +781,7 @@ impl EguiSurface {
                         bold: true,
                     }],
                 };
-                let _ = viewer::paint_viewer(ui.painter(), canvas, ctx, Some(&dummy_viewer));
+                let _ = viewer::paint_viewer(ui.painter(), pane, ctx, Some(&dummy_viewer));
             }
             // Picker: one favourite row + one listing row.
             {
@@ -743,6 +873,7 @@ impl EguiSurface {
                     empty_message: None,
                 };
                 overlays::paint_optimizer(ui.painter(), canvas, ctx, Some(&dummy_optimizer));
+            }
             }
         });
 
@@ -932,6 +1063,7 @@ pub fn destroy_window_for_panic() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn clean_window_frame_defaults_to_no_gesture() {
@@ -957,5 +1089,150 @@ mod tests {
         assert!(!window.is_open());
         assert_eq!(window.window_id(), None);
         assert!(window.with_window(|_| true).is_none());
+    }
+
+    #[test]
+    fn quad_rects_partition_the_window_without_overlap() {
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let q = quad_rects(window, 0.6, 0.5, true);
+        // The vertical divider lands at 0.6 and the horizontal at 0.5
+        // (f32 arithmetic: assert with tolerance).
+        assert!((q.panels.max.x - 480.0).abs() < 0.01);
+        assert!((q.panels.max.y - 300.0).abs() < 0.01);
+        assert!((q.source.min.x - 480.0).abs() < 0.01);
+        assert!((q.full.min.y - 300.0).abs() < 0.01);
+        // With the split active the FULL graph is the bottom-left quadrant.
+        assert!((q.full.max.x - 480.0).abs() < 0.01);
+        assert_eq!(q.full.max.y, window.max.y);
+        let f = q.filtered.expect("split active -> filtered pane");
+        assert!((f.min.x - 480.0).abs() < 0.01);
+        assert!((f.min.y - 300.0).abs() < 0.01);
+        assert_eq!(f.max, window.max);
+        // The four panes tile the window exactly, with no gaps or overlap.
+        let mut area = 0.0;
+        for r in [q.panels, q.source, q.full, f] {
+            assert!(window.contains_rect(r));
+            area += r.width() * r.height();
+        }
+        assert!((area - window.width() * window.height()).abs() < 0.5);
+    }
+
+    #[test]
+    fn quad_rects_hide_filtered_pane_when_split_off() {
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let q = quad_rects(window, 0.6, 0.5, false);
+        assert!(q.filtered.is_none());
+        // The FULL graph spans the whole bottom row.
+        assert_eq!(q.full.min.y, 300.0);
+        assert_eq!(q.full.max, window.max);
+    }
+
+    #[test]
+    fn quad_rects_clamp_ratios() {
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0));
+        let q = quad_rects(window, 0.9, 0.1, true);
+        // Out-of-range ratios clamp so panes never collapse to zero width:
+        // 0.9 -> 0.7, 0.1 -> 0.2.
+        assert_eq!(q.panels.max.x, 700.0);
+        assert_eq!(q.panels.max.y, 200.0);
+    }
+
+    #[test]
+    fn quad_pane_rects_map_slots_and_both_graph_panes() {
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        assert!(app.enter_quad());
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let q = quad_rects(
+            window,
+            app.main_split_ratio,
+            app.left_split_ratio,
+            app.left_split_active,
+        );
+        let rects = quad_pane_rects(&app, &q);
+        assert_eq!(rects.len(), 4);
+        assert_eq!(
+            rects[0],
+            (crate::app::FocusSlot::Panels, to_cell_rect(q.panels))
+        );
+        let viewer_slot = app
+            .tile_stack
+            .slots
+            .iter()
+            .position(|v| *v == crate::app::ViewType::SourceViewer)
+            .unwrap();
+        let graph_slot = app
+            .tile_stack
+            .slots
+            .iter()
+            .position(|v| *v == crate::app::ViewType::Graph)
+            .unwrap();
+        assert_eq!(
+            rects[1],
+            (
+                crate::app::FocusSlot::Slot(viewer_slot),
+                to_cell_rect(q.source)
+            )
+        );
+        assert_eq!(
+            rects[2],
+            (
+                crate::app::FocusSlot::Slot(graph_slot),
+                to_cell_rect(q.full)
+            )
+        );
+        assert_eq!(
+            rects[3],
+            (
+                crate::app::FocusSlot::Slot(graph_slot),
+                to_cell_rect(q.filtered.unwrap())
+            )
+        );
+    }
+
+    #[test]
+    fn paint_quad_draws_four_panes_headless() {
+        // The quad dispatch runs inside a real egui frame headless: shapes
+        // land for every pane (Panels + Source top, FULL + FILTERED bottom)
+        // and the four pane rects publish for focus hit-testing.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        assert!(app.influence_subset.is_some());
+        let ctx = egui::Context::default();
+        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_quad(&mut app, ui, scene.as_ref(), &[]);
+        });
+        assert!(
+            !full_output.shapes.is_empty(),
+            "quad paint must emit shapes for all four panes"
+        );
+        let labels: Vec<String> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("Panels")),
+            "panels title missing: {labels:?}"
+        );
+        assert_eq!(app.pane_rects.len(), 4, "quad publishes four pane rects");
+        full_output.textures_delta.clear();
     }
 }
