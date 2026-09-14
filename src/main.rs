@@ -225,10 +225,6 @@ mod windowed {
         let mut app = App::new();
         seed_app(&mut app, settings);
         load_initial_patch(&mut app, initial_patch.as_deref());
-        // Build the graph before the window's first frame so `build_scene_spec`
-        // has a non-empty scene to paint; otherwise the window opens on its
-        // clear color.
-        app.open_graph();
         let mut handler = AppHandler {
             app,
             window: GraphWindow::new(),
@@ -297,18 +293,21 @@ mod tests {
     }
 
     #[test]
-    fn startup_seeding_produces_a_nonempty_scene() {
-        // Mirrors the windowed run-loop startup: load a patch, build the graph,
-        // and assert the scene the window paints is non-empty — the black-screen
-        // regression was an empty scene (no patch → no graph → `None` scene).
+    fn startup_seeding_produces_no_graph_until_requested() {
+        // Mirrors the fixed startup: load a patch but do NOT auto-open the graph.
+        // The window must open on the physical/panels view, so the startup scene
+        // is None/empty until `g g` explicitly builds the graph.
         let mut app = App::new();
         load_initial_patch(&mut app, None);
+        let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
+        assert!(
+            scene.is_none() || scene.is_some_and(|s| s.nodes.is_empty()),
+            "startup must not produce a graph scene before g g"
+        );
+        // Explicit `g g` still produces a non-empty graph.
         app.open_graph();
         let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
-        let spec = scene.expect("startup must produce a scene to paint");
-        assert!(
-            !spec.nodes.is_empty(),
-            "the window must paint nodes, not the clear color"
-        );
+        let spec = scene.expect("g g must produce a scene to paint");
+        assert!(!spec.nodes.is_empty(), "g g must paint nodes");
     }
 }
