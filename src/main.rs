@@ -24,7 +24,12 @@ fn main() -> Result<()> {
         previous_hook(info);
     }));
 
-    windowed::run(&settings)
+    // The optional `argv[1]` path is the patch the window opens with; without
+    // one the bundled sample loads. A patch is always installed so the graph
+    // can be built and the window paints content instead of its clear color.
+    let initial_patch = std::env::args().nth(1).map(std::path::PathBuf::from);
+
+    windowed::run(&settings, initial_patch)
 }
 
 /// App state seeded from `settings`, shared by the windowed event loop.
@@ -54,6 +59,42 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     app.graph_window_enabled = settings.gui.graph_window;
 }
 
+/// Bundled demo patch shown when no `argv[1]` path is given. `Patch::sample()`
+/// has no circuit sections, so its signal-flow graph is empty and the window
+/// would paint only its clear color; this fixture is a real patch with circuits.
+const DEMO_PATCH: &str = include_str!("../fixtures/arpeggio1.ini");
+
+/// Load the patch the window opens with: the `argv[1]` path when one is given,
+/// else the bundled demo. A real patch is always installed so `open_graph` can
+/// build a non-empty graph and the window paints content on its first frame
+/// instead of its clear color.
+fn load_initial_patch(app: &mut App, path: Option<&std::path::Path>) {
+    if let Some(path) = path.filter(|p| !p.as_os_str().is_empty()) {
+        if try_load_file(app, path) {
+            return;
+        }
+    }
+    match droid_tui::patch::Patch::from_ini_str(DEMO_PATCH, String::from("demo")) {
+        Ok(patch) => {
+            app.load_patch(patch);
+        }
+        Err(err) => eprintln!("[warn] could not parse the bundled demo patch: {err}"),
+    }
+}
+
+fn try_load_file(app: &mut App, path: &std::path::Path) -> bool {
+    match droid_tui::patch::Patch::from_ini_file(path) {
+        Ok(patch) => {
+            app.load_patch_at(path, patch);
+            true
+        }
+        Err(err) => {
+            eprintln!("[warn] could not load {}: {err}", path.display());
+            false
+        }
+    }
+}
+
 mod windowed {
     use color_eyre::Result;
     use winit::application::ApplicationHandler;
@@ -65,7 +106,7 @@ mod windowed {
     use droid_tui::gui::{self, GraphWindow};
     use droid_tui::{config, handler, theme};
 
-    use super::seed_app;
+    use super::{load_initial_patch, seed_app};
 
     /// The native application: owns the single `App` and the graph window,
     /// driven by winit's event loop (gpu-graph-window design D1).
@@ -172,7 +213,10 @@ mod windowed {
 
     /// The native main loop (design D1): winit's event loop owns the thread
     /// and drives the graph window.
-    pub(super) fn run(settings: &config::Settings) -> Result<()> {
+    pub(super) fn run(
+        settings: &config::Settings,
+        initial_patch: Option<std::path::PathBuf>,
+    ) -> Result<()> {
         // winit allows exactly one EventLoop per process, so it is created
         // here once; GraphWindow::open later creates windows on it.
         let event_loop = EventLoop::new().map_err(|err| {
@@ -180,6 +224,11 @@ mod windowed {
         })?;
         let mut app = App::new();
         seed_app(&mut app, settings);
+        load_initial_patch(&mut app, initial_patch.as_deref());
+        // Build the graph before the window's first frame so `build_scene_spec`
+        // has a non-empty scene to paint; otherwise the window opens on its
+        // clear color.
+        app.open_graph();
         let mut handler = AppHandler {
             app,
             window: GraphWindow::new(),
@@ -212,5 +261,54 @@ mod tests {
         let mut app = App::new();
         seed_app(&mut app, &settings);
         assert!(!app.graph_window_enabled);
+    }
+
+    #[test]
+    fn load_initial_patch_without_path_loads_demo() {
+        let mut app = App::new();
+        load_initial_patch(&mut app, None);
+        assert!(app.patch.is_some());
+        assert_eq!(app.patch.as_ref().map(|p| p.name.as_str()), Some("demo"));
+    }
+
+    #[test]
+    fn load_initial_patch_with_missing_path_loads_demo() {
+        let mut app = App::new();
+        load_initial_patch(
+            &mut app,
+            Some(std::path::Path::new("/nonexistent/nope.ini")),
+        );
+        assert!(app.patch.is_some());
+        assert_eq!(app.patch.as_ref().map(|p| p.name.as_str()), Some("demo"));
+    }
+
+    #[test]
+    fn load_initial_patch_with_fixture_loads_it() {
+        let mut app = App::new();
+        load_initial_patch(
+            &mut app,
+            Some(std::path::Path::new("fixtures/arpeggio1.ini")),
+        );
+        assert!(app.patch.is_some());
+        assert_eq!(
+            app.patch.as_ref().map(|p| p.name.as_str()),
+            Some("arpeggio1")
+        );
+    }
+
+    #[test]
+    fn startup_seeding_produces_a_nonempty_scene() {
+        // Mirrors the windowed run-loop startup: load a patch, build the graph,
+        // and assert the scene the window paints is non-empty — the black-screen
+        // regression was an empty scene (no patch → no graph → `None` scene).
+        let mut app = App::new();
+        load_initial_patch(&mut app, None);
+        app.open_graph();
+        let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
+        let spec = scene.expect("startup must produce a scene to paint");
+        assert!(
+            !spec.nodes.is_empty(),
+            "the window must paint nodes, not the clear color"
+        );
     }
 }

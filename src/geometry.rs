@@ -322,6 +322,70 @@ impl BindingFeatures {
     ) -> Option<Self> {
         let src_xy = geometry.resolve(src_token)?;
         let sink_xy = geometry.resolve(sink_token)?;
+        let (same_controller, same_rack) = controller_rack_flags(src_token, sink_token, geometry);
+        let cable_hops = compute_cable_hops(patch, src_token, sink_token);
+        Some(Self::from_parts(
+            token_kind_u8(src_token),
+            token_kind_u8(sink_token),
+            param_key,
+            src_xy,
+            sink_xy,
+            same_controller,
+            same_rack,
+            cable_hops,
+        ))
+    }
+
+    /// Same result as `from_tokens_with_param`, but geometry resolution,
+    /// controller flags and section containment come from a precomputed
+    /// `WiringContext` shared by every pair in the same scan (O(1) per pair
+    /// instead of two full section passes).
+    pub(crate) fn from_tokens_with_context(
+        src_token: &str,
+        sink_token: &str,
+        param_key: u8,
+        ctx: &WiringContext,
+    ) -> Option<Self> {
+        let src_xy = ctx.resolved.get(src_token).copied()?;
+        let sink_xy = ctx.resolved.get(sink_token).copied()?;
+        let (same_controller, same_rack) = match (
+            ctx.controller.get(src_token),
+            ctx.controller.get(sink_token),
+        ) {
+            (Some((sr, ss, sx, sg)), Some((kr, ks, kx, kg))) => {
+                let same_rack = sr == kr;
+                let same_controller =
+                    same_rack && ss == ks && sx == kx && sg.eq_ignore_ascii_case(kg);
+                (same_controller, same_rack)
+            }
+            _ => (false, false),
+        };
+        let cable_hops = ctx.cable_hops(src_token, sink_token);
+        Some(Self::from_parts(
+            token_kind_u8(src_token),
+            token_kind_u8(sink_token),
+            param_key,
+            src_xy,
+            sink_xy,
+            same_controller,
+            same_rack,
+            cable_hops,
+        ))
+    }
+
+    /// Shared feature math so the direct and context-backed paths cannot
+    /// drift: distances and adjacency derive from the resolved cells.
+    #[allow(clippy::too_many_arguments)] // one arg per BindingFeatures field
+    fn from_parts(
+        src_kind: u8,
+        sink_kind: u8,
+        param_key: u8,
+        src_xy: (u8, u8),
+        sink_xy: (u8, u8),
+        same_controller: bool,
+        same_rack: bool,
+        cable_hops: u8,
+    ) -> Self {
         let euclidean = RackGeometry::distance(src_xy, sink_xy);
         let manhattan = {
             let dx = (src_xy.0 as i16 - sink_xy.0 as i16).unsigned_abs();
@@ -329,11 +393,9 @@ impl BindingFeatures {
             (dx + dy).min(255) as u8
         };
         let adjacent = RackGeometry::is_adjacent(src_xy, sink_xy);
-        let (same_controller, same_rack) = controller_rack_flags(src_token, sink_token, geometry);
-        let cable_hops = compute_cable_hops(patch, src_token, sink_token);
-        Some(Self {
-            src_kind: token_kind_u8(src_token),
-            sink_kind: token_kind_u8(sink_token),
+        Self {
+            src_kind,
+            sink_kind,
             param_key,
             src_xy,
             sink_xy,
@@ -343,7 +405,7 @@ impl BindingFeatures {
             same_rack,
             adjacent,
             cable_hops,
-        })
+        }
     }
 }
 
@@ -746,6 +808,130 @@ fn compute_cable_hops(patch: &Patch, src_token: &str, sink_token: &str) -> u8 {
     0
 }
 
+/// Precomputed per-token lookups shared by every pair in one wiring-outlier
+/// scan. The naive path (`BindingFeatures::from_tokens`) rescans every
+/// section twice and re-resolves geometry per pair, which is quadratic on
+/// controller sections (a [b32] section alone contributes 496 pairs from its
+/// 32 button tokens) and dominated graph build on melody2 (~24 s release).
+/// The scan builds this context once; every pair then costs O(1) lookups with
+/// results identical to the naive path.
+pub(crate) struct WiringContext {
+    /// token -> section indices containing it (ascending, deduped); mirrors
+    /// the per-pair collection in `compute_cable_hops`.
+    token_sections: HashMap<String, Vec<usize>>,
+    /// producer section -> consumer sections for every produced cable; built
+    /// once instead of per pair.
+    adjacency: HashMap<usize, Vec<usize>>,
+    /// token -> resolved grid cell (only tokens the geometry can place).
+    resolved: HashMap<String, (u8, u8)>,
+    /// token -> (rack id, slot name, slot x, grid) for controller flags.
+    controller: HashMap<String, (String, String, i32, String)>,
+}
+
+impl WiringContext {
+    /// One pass over sections for containment and cable adjacency, then
+    /// resolve/controller lookups per distinct token. `token_sections` uses
+    /// `scan_hw_tokens_local` so membership matches `section_contains_token`.
+    pub(crate) fn new(patch: &Patch, geometry: &RackGeometry) -> Self {
+        let mut token_sections: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, section) in patch.sections.iter().enumerate() {
+            let mut section_seen: HashSet<String> = HashSet::new();
+            for (_, value) in &section.entries {
+                for tok in scan_hw_tokens_local(value) {
+                    if section_seen.insert(tok.clone()) {
+                        token_sections.entry(tok).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let mut adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (prod_idx, outputs) in patch.circuit_outputs.iter().enumerate() {
+            if outputs.is_empty() {
+                continue;
+            }
+            for cable in outputs {
+                for (cons_idx, section) in patch.sections.iter().enumerate() {
+                    if cons_idx == prod_idx {
+                        continue;
+                    }
+                    if section_consumes_cable(section, cable) {
+                        adjacency.entry(prod_idx).or_default().push(cons_idx);
+                    }
+                }
+            }
+        }
+        for v in adjacency.values_mut() {
+            v.sort_unstable();
+            v.dedup();
+        }
+
+        let mut resolved: HashMap<String, (u8, u8)> = HashMap::new();
+        let mut controller: HashMap<String, (String, String, i32, String)> = HashMap::new();
+        for token in token_sections.keys() {
+            if let Some(xy) = geometry.resolve(token) {
+                resolved.insert(token.clone(), xy);
+            }
+            if let Some((rack, slot)) = controller_for_token(token, geometry) {
+                controller.insert(
+                    token.clone(),
+                    (
+                        rack.id.clone(),
+                        slot.name.clone(),
+                        slot.x,
+                        slot.grid.clone(),
+                    ),
+                );
+            }
+        }
+
+        Self {
+            token_sections,
+            adjacency,
+            resolved,
+            controller,
+        }
+    }
+
+    /// Hop count identical to `compute_cable_hops` for the same pair.
+    fn cable_hops(&self, src_token: &str, sink_token: &str) -> u8 {
+        let (Some(src_indices), Some(sink_indices)) = (
+            self.token_sections.get(src_token),
+            self.token_sections.get(sink_token),
+        ) else {
+            return 0;
+        };
+        if src_indices.is_empty() || sink_indices.is_empty() {
+            return 0;
+        }
+        if src_indices.iter().any(|i| sink_indices.contains(i)) {
+            return 0;
+        }
+        let mut queue: VecDeque<(usize, u8)> = VecDeque::new();
+        let mut visited: HashSet<usize> = HashSet::new();
+        for &s in src_indices {
+            queue.push_back((s, 0));
+            visited.insert(s);
+        }
+        while let Some((node, dist)) = queue.pop_front() {
+            if let Some(neigh) = self.adjacency.get(&node) {
+                for &n in neigh {
+                    if visited.contains(&n) {
+                        continue;
+                    }
+                    let next_dist = dist.saturating_add(1);
+                    if sink_indices.contains(&n) {
+                        return next_dist;
+                    }
+                    visited.insert(n);
+                    queue.push_back((n, next_dist));
+                }
+            }
+        }
+        0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests — three scenarios from the spec
 // ---------------------------------------------------------------------------
@@ -1055,6 +1241,42 @@ mod tests {
         let patch = crate::patch::Patch::from_ini_str(content, String::from("t")).unwrap();
         assert!(BindingFeatures::from_tokens("B1.1", "ZZ99", &geo, &patch).is_none());
         assert!(BindingFeatures::from_tokens("ZZ99", "B1.1", &geo, &patch).is_none());
+    }
+
+    #[test]
+    fn wiring_context_matches_naive_path() {
+        // The precomputed WiringContext must never drift from the naive
+        // per-pair path: same features for direct, adjacent, via-cable and
+        // unresolvable pairs.
+        let geo = test_geometry();
+        let content = "[p2b8]\n\
+             [copy]\n    src = E4.4\n    dst = M4.2\n\
+             [mid]\n    input = _A\n    output = _B\n\
+             [src]\n    output = _A\n    src = B1.1\n\
+             [sink]\n    input = _B\n    dst = M4.2\n\
+             [b32]\n    a = B1.17\n    b = B1.18\n";
+        let patch = crate::patch::Patch::from_ini_str(content, String::from("ctx_match"))
+            .expect("patch parses");
+        let ctx = WiringContext::new(&patch, &geo);
+        let pairs = [
+            ("E4.4", "M4.2"),   // far direct wire, co-located in [copy]
+            ("B1.17", "B1.18"), // adjacent, same controller
+            ("B1.1", "M4.2"),   // via cable, different sections (BFS path)
+            ("B1.1", "B1.1"),   // identical token
+            ("ZZ99", "B1.1"),   // unresolvable -> both None
+            ("B1.1", "ZZ99"),
+        ];
+        for (a, b) in pairs {
+            let naive = BindingFeatures::from_tokens(a, b, &geo, &patch);
+            let context = BindingFeatures::from_tokens_with_context(a, b, 0, &ctx);
+            assert_eq!(
+                context, naive,
+                "context path diverges from naive path for {a} -> {b}"
+            );
+        }
+        // The via-cable pair must actually exercise the BFS (hops > 0).
+        let via = BindingFeatures::from_tokens("B1.1", "M4.2", &geo, &patch).unwrap();
+        assert!(via.cable_hops > 0, "B1.1 -> M4.2 should route via cable");
     }
 
     #[test]

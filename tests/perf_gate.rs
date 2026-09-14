@@ -21,14 +21,14 @@ use droid_tui::validation::validate_patch;
 // egui paint path is covered by the gui-module shape/label tests.)
 pub const PARSE_RENDER_BUDGET: Duration = Duration::from_secs(10);
 
-// Measured release baseline 2026-09-12: melody2 graph build + full solve
-// ~19 s (build 13 ms; the solve runs the full 60-iteration budget because the
-// energy threshold is not reached on this machine, so the design's sub-second
-// baseline, which reflected an early freeze, does not reproduce here). Debug
-// measures 84-96 s. Budget = ~10x the release worst case: an order-of-magnitude
-// regression (~190 s) still trips it (design D2) while a slow CI runner and
-// debug overhead stay green.
-pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(200);
+// Measured release baseline 2026-09-14: melody2 graph build + full solve
+// ~0.4 s (phase_graph_solve 28.35 s before the topology precompute fix:
+// validate_topology's per-token influence walk rescanned every section per
+// popped cable; it now walks a precomputed cable-sink index, and the wiring
+// scan shares one precomputed token context; layout::solve itself is ~13 ms).
+// Budget = ~25x the release worst case: the old ~28 s quadratic scan trips
+// it while a slow CI runner and debug overhead stay green.
+pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(10);
 
 // Measured release baseline 2026-09-12: melody2 optimizer candidate generation sub-second.
 pub const OPTIMIZER_BUDGET: Duration = Duration::from_secs(10);
