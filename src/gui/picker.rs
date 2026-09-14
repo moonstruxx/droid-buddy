@@ -38,6 +38,10 @@ pub(crate) struct PickerRow {
 pub(crate) struct PickerSpec {
     pub title: String,
     pub picker_dir: String,
+    /// Latching file filter string (bead t9g). `None` renders nothing and
+    /// leaves the layout identical to the pre-filter picker; `Some(s)` draws
+    /// the `filter: <string>` subtitle line under the dir line.
+    pub filter: Option<String>,
     pub rows: Vec<PickerRow>,
     pub selected: usize,
     pub has_favourites: bool,
@@ -159,6 +163,11 @@ pub(crate) fn picker_spec(app: &App) -> PickerSpec {
     PickerSpec {
         title: " File Picker ".to_string(),
         picker_dir: app.picker_dir.display().to_string(),
+        filter: if app.picker_filter_active {
+            Some(app.picker_filter.clone())
+        } else {
+            None
+        },
         rows: ordered_entries(favs, listing),
         selected: app.picker_index,
         has_favourites,
@@ -217,7 +226,24 @@ pub(super) fn paint_picker(
     }
 
     let inner = picker_rect.shrink(4.0);
-    let content_top = if spec.picker_dir.is_empty() {
+    let content_top = if let Some(filter) = &spec.filter {
+        // Filter line under the dir subtitle (or in its slot when there is
+        // no dir line). Row content starts below it only in this branch, so
+        // `filter: None` keeps the pre-filter layout byte-identical.
+        let filter_y = if spec.picker_dir.is_empty() {
+            18.0
+        } else {
+            31.0
+        };
+        painter.text(
+            picker_rect.min + egui::vec2(6.0, filter_y),
+            egui::Align2::LEFT_TOP,
+            format!("filter: {filter}"),
+            egui::FontId::proportional(10.0),
+            rgb(t.muted),
+        );
+        inner.min.y + (filter_y - 4.0) + 16.0
+    } else if spec.picker_dir.is_empty() {
         inner.min.y + 16.0
     } else {
         inner.min.y + 30.0
@@ -328,6 +354,7 @@ mod tests {
         PickerSpec {
             title: " File Picker ".into(),
             picker_dir: "/tmp".into(),
+            filter: None,
             rows,
             selected: 0,
             has_favourites: true,
@@ -436,6 +463,7 @@ mod tests {
         let spec = PickerSpec {
             title: " File Picker ".into(),
             picker_dir: "".into(),
+            filter: None,
             rows,
             selected: 1,
             has_favourites: false,
@@ -499,6 +527,51 @@ mod tests {
         full_output.textures_delta.clear();
         assert_eq!(frame, PickerFrame::default());
         assert!(full_output.shapes.is_empty());
+    }
+
+    #[test]
+    fn paint_picker_draws_filter_line_when_set() {
+        let mut spec = spec_with_favourites();
+        spec.filter = Some("abba".to_string());
+        let labels = painted_labels(&spec);
+        assert!(
+            labels.iter().any(|l| l == "filter: abba"),
+            "filter line: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn paint_picker_filter_none_renders_no_filter_label() {
+        let spec = spec_with_favourites();
+        let labels = painted_labels(&spec);
+        assert!(
+            !labels.iter().any(|l| l.starts_with("filter:")),
+            "no filter line when None: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn paint_picker_active_empty_filter_still_shows_latch() {
+        let mut spec = spec_with_favourites();
+        spec.filter = Some(String::new());
+        let labels = painted_labels(&spec);
+        assert!(
+            labels.iter().any(|l| l == "filter: "),
+            "empty active filter renders `filter: `: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn picker_spec_carries_app_filter_state() {
+        use std::path::PathBuf;
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.picker_entries = vec![PathBuf::from("/tmp/b.ini"), PathBuf::from("..")];
+        app.picker_index = 1;
+        assert_eq!(picker_spec(&app).filter, None);
+        app.picker_filter_active = true;
+        app.picker_filter = "abba".to_string();
+        assert_eq!(picker_spec(&app).filter, Some("abba".to_string()));
     }
 
     #[test]
