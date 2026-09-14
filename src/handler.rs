@@ -2020,6 +2020,7 @@ fn navigate(app: &mut App, delta: i32) {
 fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
     match key.code {
         KeyCode::Esc => {
+            app.reset_picker_filter();
             app.showing_picker = false;
             app.diff_picker_active = false;
             false
@@ -2040,7 +2041,16 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             // Favourites toggle for the highlighted picker entry (file-picker-favourites 3.1).
             // Directories toggle like files; the pinned section shows both. Only the
             // parent sentinel is excluded.
-            if key.modifiers.ctrl || key.modifiers.alt {
+            if key.modifiers.ctrl {
+                // Ctrl+F latches the file filter on and (re)starts it with an
+                // empty string. Not a toggle: latching stays on until Esc/
+                // q/selection resets it (bead t9g).
+                app.picker_filter_active = true;
+                app.picker_filter.clear();
+                app.status_message = String::from("Filter: on (type to filter)");
+                return false;
+            }
+            if key.modifiers.alt {
                 return false;
             }
             if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
@@ -2083,6 +2093,33 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             let favs = app.picker_entries_with_favourites();
             if let Some(fav) = favs.get(slot) {
                 open_picker_entry(app, fav.clone());
+            }
+            false
+        }
+        KeyCode::Char('q') if app.picker_filter_active => {
+            // q ends the latching filter without quitting: the picker owns
+            // keys while open, so this arm is the only q route and must not
+            // fall through to the quit path.
+            app.reset_picker_filter();
+            app.refresh_picker_entries();
+            false
+        }
+        KeyCode::Backspace if app.picker_filter_active => {
+            app.picker_filter.pop();
+            app.refresh_picker_entries();
+            false
+        }
+        KeyCode::Char(c) if app.picker_filter_active && !c.is_ascii_digit() => {
+            // Digits never land here: 0-9 must keep routing to the
+            // favourite-slot fast-select above while the filter is latched.
+            let previous = app.picker_index;
+            app.picker_filter.push(c);
+            app.refresh_picker_entries();
+            // The narrowing list may have dropped the previously selected
+            // entry; refresh clamps to the tail, so re-anchor at the top
+            // instead of leaving a stale position.
+            if previous >= app.picker_entries.len() {
+                app.picker_index = 0;
             }
             false
         }
@@ -2141,6 +2178,7 @@ fn open_picker_entry(app: &mut App, path: PathBuf) {
                 app.selected_file = Some(path);
                 app.showing_picker = false;
                 app.diff_picker_active = false;
+                app.reset_picker_filter();
             }
             Err(e) => {
                 app.status_message = format!("Failed to load diff patch: {}", e);
@@ -2159,6 +2197,7 @@ fn open_picker_entry(app: &mut App, path: PathBuf) {
                 app.selected_file = Some(path);
                 app.showing_picker = false;
                 app.diff_picker_active = false;
+                app.reset_picker_filter();
             }
             Err(e) => {
                 app.status_message = format!("Failed to load patch: {}", e);
@@ -3027,6 +3066,168 @@ mod tests {
             .iter()
             .position(|p| p.file_name().map(|n| n == file_name).unwrap_or(false))
             .unwrap_or_else(|| panic!("no picker entry named {}", file_name))
+    }
+
+    fn ctrl_f_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('f'), key_modifiers::CONTROL)
+    }
+
+    fn type_picker_chars(app: &mut App, chars: &str) {
+        for c in chars.chars() {
+            handle_picker_event(KeyEvent::new(KeyCode::Char(c), key_modifiers::NONE), app);
+        }
+    }
+
+    #[test]
+    fn picker_ctrl_f_latches_filter_with_empty_string() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        assert!(!app.picker_filter_active);
+        let quit = handle_picker_event(ctrl_f_key(), &mut app);
+        assert!(!quit);
+        assert!(app.picker_filter_active);
+        assert!(app.picker_filter.is_empty());
+        assert_eq!(app.status_message, "Filter: on (type to filter)");
+        // Latching: the picker stays open with the full listing unchanged.
+        assert!(app.showing_picker);
+    }
+
+    #[test]
+    fn picker_filter_chars_append_and_narrow_listing() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "patch_a");
+        assert_eq!(app.picker_filter, "patch_a");
+        let names: Vec<String> = app
+            .picker_entries
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("patch_a.ini")));
+        assert!(!names.iter().any(|n| n.ends_with("patch_b.ini")));
+        assert!(!names.iter().any(|n| n.ends_with("readme.txt")));
+        assert!(!names.iter().any(|n| n.ends_with("subdir")));
+        // The `..` sentinel stays visible for up-navigation.
+        assert!(app.picker_entries.iter().any(|p| is_picker_parent_entry(p)));
+    }
+
+    #[test]
+    fn picker_backspace_pops_last_filter_char() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "abba");
+        assert_eq!(app.picker_filter, "abba");
+        handle_picker_event(key(KeyCode::Backspace), &mut app);
+        assert_eq!(app.picker_filter, "abb");
+        // Backspacing down to the empty string restores the full listing.
+        for _ in 0..3 {
+            handle_picker_event(key(KeyCode::Backspace), &mut app);
+        }
+        assert!(app.picker_filter.is_empty());
+        assert!(app.picker_filter_active, "backspace keeps the latch on");
+        let names: Vec<String> = app
+            .picker_entries
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("readme.txt")));
+    }
+
+    #[test]
+    fn picker_digits_still_fast_select_favourites_while_filter_active() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.favorites = crate::favorites::FavoritesStore {
+            favourites: vec![
+                String::from("fixtures/picker_test/patch_a.ini"),
+                String::from("fixtures/picker_test/patch_b.ini"),
+            ],
+        };
+        app.refresh_picker_entries();
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "p");
+        // Out-of-range digit: silent, and NOT appended to the filter string.
+        handle_picker_event(key(KeyCode::Char('9')), &mut app);
+        assert_eq!(app.picker_filter, "p");
+        assert!(app.showing_picker);
+        // Slot 0 fast-selects the first sorted favourite (patch_a.ini).
+        handle_picker_event(key(KeyCode::Char('0')), &mut app);
+        assert!(!app.showing_picker);
+        assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
+        assert!(!app.picker_filter_active);
+    }
+
+    #[test]
+    fn picker_q_resets_filter_without_quitting() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "patch_a");
+        assert!(app.picker_filter_active);
+        let quit = handle_picker_event(key(KeyCode::Char('q')), &mut app);
+        assert!(!quit, "q must not quit while the picker is open");
+        assert!(app.showing_picker);
+        assert!(!app.picker_filter_active);
+        assert!(app.picker_filter.is_empty());
+        let names: Vec<String> = app
+            .picker_entries
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("patch_b.ini")));
+    }
+
+    #[test]
+    fn picker_esc_resets_filter_and_closes() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "abba");
+        assert!(app.picker_filter_active);
+        let quit = handle_picker_event(key(KeyCode::Esc), &mut app);
+        assert!(!quit);
+        assert!(!app.showing_picker);
+        assert!(!app.picker_filter_active);
+        assert!(app.picker_filter.is_empty());
+    }
+
+    #[test]
+    fn picker_enter_resets_filter_on_patch_load() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "patch_a");
+        app.picker_index = picker_index_of(&app, "patch_a.ini");
+        handle_picker_event(key(KeyCode::Enter), &mut app);
+        assert!(!app.showing_picker);
+        assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
+        assert!(!app.picker_filter_active);
+        assert!(app.picker_filter.is_empty());
+    }
+
+    #[test]
+    fn picker_jk_bounds_hold_on_filtered_list() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "subdir");
+        let len = app.picker_entries.len();
+        assert_eq!(
+            len, 2,
+            "sentinel + matching dir only: {:?}",
+            app.picker_entries
+        );
+        // j stops at the bottom bound; k stops at the top bound.
+        handle_picker_event(key(KeyCode::Char('j')), &mut app);
+        handle_picker_event(key(KeyCode::Char('j')), &mut app);
+        assert_eq!(app.picker_index, len - 1);
+        handle_picker_event(key(KeyCode::Char('k')), &mut app);
+        handle_picker_event(key(KeyCode::Char('k')), &mut app);
+        assert_eq!(app.picker_index, 0);
+    }
+
+    #[test]
+    fn picker_ctrl_f_re_latch_clears_the_string() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "abba");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        assert!(app.picker_filter_active);
+        assert!(app.picker_filter.is_empty());
     }
 
     #[test]

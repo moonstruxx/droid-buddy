@@ -580,6 +580,12 @@ pub struct App {
     pub selected_file: Option<PathBuf>,
     pub picker_entries: Vec<PathBuf>,
     pub picker_index: usize,
+    /// Latching file filter (bead t9g): Ctrl+F latches it on, typed
+    /// characters accumulate in `picker_filter`, and the directory listing
+    /// narrows. Favourites and the `..` sentinel stay unfiltered so 0-9
+    /// fast-select and up-navigation survive while the filter is latched.
+    pub picker_filter_active: bool,
+    pub picker_filter: String,
     /// Screen rects the last render pass drew each component into, keyed by
     /// its index into `patch.hw_components`. Rebuilt every frame (layout is
     /// recomputed fresh each draw), and used for mouse hit-testing since the
@@ -850,6 +856,8 @@ impl App {
             selected_file: None,
             picker_entries: Vec::new(),
             picker_index: 0,
+            picker_filter_active: false,
+            picker_filter: String::new(),
             component_rects: Vec::new(),
             tile_stack: TileStack::default(),
             quad_active: false,
@@ -968,6 +976,13 @@ impl App {
         }
     }
 
+    /// Clear the latching picker filter. Callers that keep the picker open
+    /// re-run `refresh_picker_entries` afterwards to restore the full listing.
+    pub fn reset_picker_filter(&mut self) {
+        self.picker_filter_active = false;
+        self.picker_filter.clear();
+    }
+
     pub fn refresh_picker_entries(&mut self) {
         self.picker_entries.clear();
         // Pinned favourites section at the top. Favourited `.ini` files and
@@ -1023,6 +1038,19 @@ impl App {
             dirs.sort();
             inis.sort();
             others.sort();
+            // The latching filter narrows only the directory listing; pinned
+            // favourites and the `..` sentinel stay visible so digit slots and
+            // up-navigation keep working while the filter is on.
+            if self.picker_filter_active && !self.picker_filter.is_empty() {
+                let keep = |p: &Path| {
+                    p.file_name().is_some_and(|n| {
+                        picker_filter_matches(&self.picker_filter, &n.to_string_lossy())
+                    })
+                };
+                dirs.retain(|p| keep(p));
+                inis.retain(|p| keep(p));
+                others.retain(|p| keep(p));
+            }
             self.picker_entries.extend(dirs);
             self.picker_entries.extend(inis);
             self.picker_entries.extend(others);
@@ -3126,6 +3154,34 @@ fn clusters_from_patch(patch: &Patch) -> Vec<Cluster> {
         .collect()
 }
 
+/// Case-aware picker filter match (bead t9g): a lowercase filter character
+/// matches the name character in any case, an uppercase filter character
+/// matches only that exact character. Matching is substring-style over the
+/// leaf file or directory name: "abba" matches "ABBA.ini" and "abba.ini",
+/// while "ABBA" matches only "ABBA.ini".
+pub fn picker_filter_matches(filter: &str, name: &str) -> bool {
+    let filter_chars: Vec<char> = filter.chars().collect();
+    if filter_chars.is_empty() {
+        return true;
+    }
+    let name_chars: Vec<char> = name.chars().collect();
+    if name_chars.len() < filter_chars.len() {
+        return false;
+    }
+    for start in 0..=(name_chars.len() - filter_chars.len()) {
+        if filter_chars.iter().zip(&name_chars[start..]).all(|(f, n)| {
+            if (*f).is_uppercase() {
+                *f == *n
+            } else {
+                f.eq_ignore_ascii_case(n)
+            }
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 /// True when `path` is the picker's parent-directory sentinel (a bare `..`
 /// component). `Path::file_name()` returns `None` for such paths, so this
 /// component check is the single detector used by the picker renderer, the
@@ -5041,5 +5097,26 @@ mod tests {
         app.cycle_select_candidate(1);
         let text = app.select_status_text().unwrap();
         assert_eq!(text, "Select state: 3 selected / 1 unselected / 0 unknown");
+    }
+
+    #[test]
+    fn picker_filter_matches_case_rules() {
+        use super::picker_filter_matches;
+        // Lowercase filter characters match both cases.
+        assert!(picker_filter_matches("abba", "ABBA.ini"));
+        assert!(picker_filter_matches("abba", "abba.ini"));
+        // Uppercase filter characters match only their uppercase version.
+        assert!(picker_filter_matches("ABBA", "ABBA.ini"));
+        assert!(!picker_filter_matches("ABBA", "abba.ini"));
+        // Mixed case matches the exact mixed-case sequence only.
+        assert!(picker_filter_matches("aB", "aB_c.ini"));
+        assert!(!picker_filter_matches("aB", "ab_c.ini"));
+        assert!(!picker_filter_matches("aB", "Ab_c.ini"));
+        // Substring semantics over the leaf name.
+        assert!(picker_filter_matches("bb", "ABBA.ini"));
+        assert!(!picker_filter_matches("xyz", "patch_a.ini"));
+        // Non-letter characters match themselves; empty filter matches all.
+        assert!(picker_filter_matches("-a_", "sub-a_.ini"));
+        assert!(picker_filter_matches("", "anything.ini"));
     }
 }
