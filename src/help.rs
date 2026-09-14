@@ -66,6 +66,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g g", "open signal-flow graph"),
             ("g d", "diff against another patch"),
             ("g o", "open latency optimizer"),
+            ("g q", "quad Panels/Source/Graph FULL/FILTERED"),
             ("?", "show this help"),
             ("1-4", "shift groups"),
             ("+/-", "scale presets"),

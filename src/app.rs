@@ -498,6 +498,20 @@ pub enum FocusSlot {
     Slot(usize),
 }
 
+/// Quad focus targets (change `quad-view`, App-state lane): the four
+/// co-visible panes. `GraphFull` is the full topology with influence
+/// highlight/dim; `GraphFiltered` is the dependency subset compact re-solve
+/// (`dependency_nodes`/`dependency_edges` via `f`). Both map to the single
+/// `ViewType::Graph` slot until the paint lane renders them side by side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuadFocus {
+    #[default]
+    Panels,
+    Source,
+    GraphFull,
+    GraphFiltered,
+}
+
 /// Max right-column slots (spec: 3; a fourth view replaces the oldest
 /// non-focused slot in place).
 const MAX_TILE_SLOTS: usize = 3;
@@ -575,6 +589,16 @@ pub struct App {
     /// Right-column view stack (change `tiled-window-manager`, D1). Open-view
     /// state lives here; the `showing_*` bools mirror it transitionally.
     pub tile_stack: TileStack,
+    /// Quad configuration on top of `tile_stack` (change `quad-view`,
+    /// App-state lane only): when true the layout shows Panels + Source +
+    /// Graph FULL + Graph FILTERED concurrently. Not a separate surface;
+    /// `left_split_active` carries the FULL vs FILTERED split and the two
+    /// graph panes share the single `ViewType::Graph` slot until paint lands.
+    pub quad_active: bool,
+    /// Focused quad pane while `quad_active` (Tab order Panels -> Source ->
+    /// GraphFull -> GraphFiltered). Independent of `tile_stack.focus`, which
+    /// still tracks the underlying slot for non-quad routing.
+    pub quad_focus: QuadFocus,
     /// Tiled-pane rects published by `render_tiled_main` each frame, keyed by
     /// focused-pane identity (`Panels` = left pane). Hit-testing input for
     /// focus routing; rebuilt every frame like `component_rects`.
@@ -828,6 +852,8 @@ impl App {
             picker_index: 0,
             component_rects: Vec::new(),
             tile_stack: TileStack::default(),
+            quad_active: false,
+            quad_focus: QuadFocus::Panels,
             pane_rects: Vec::new(),
             showing_graph: false,
             graph: None,
@@ -1386,6 +1412,7 @@ impl App {
             ViewType::SourceViewer => {
                 self.showing_viewer = false;
                 self.tile_stack.close(ViewType::SourceViewer);
+                self.quad_note_view_closed(ViewType::SourceViewer);
             }
             ViewType::Physical => self.tile_stack.close(ViewType::Physical),
         }
@@ -1463,6 +1490,104 @@ impl App {
         self.left_split_active = !self.left_split_active;
     }
 
+    /// Quad configuration active (App-state lane): Panels + Source + Graph
+    /// FULL + Graph FILTERED concurrently on top of `tile_stack`.
+    pub fn is_quad(&self) -> bool {
+        self.quad_active
+    }
+
+    /// Enter the quad configuration: open SourceViewer + Graph slots (capped
+    /// by `MAX_TILE_SLOTS` via `open_view`), enable `left_split_active` for
+    /// the FULL (influence highlight) vs FILTERED (dependency subset compact
+    /// re-solve via `f`) split, and recompute influence. Preserves the
+    /// hardware selection and source scroll; focus starts on Panels.
+    pub fn enter_quad(&mut self) -> bool {
+        let Some(_) = self.patch.as_ref() else {
+            self.status_message = String::from("No patch loaded. Press 'l' to load.");
+            return false;
+        };
+        self.open_view(ViewType::SourceViewer);
+        self.open_view(ViewType::Graph);
+        self.left_split_active = true;
+        self.recompute_influence();
+        self.quad_active = true;
+        self.quad_focus = QuadFocus::Panels;
+        self.tile_stack.focus = FocusSlot::Panels;
+        self.viewer_focus = ViewerFocus::Panels;
+        self.status_message =
+            String::from("Quad: Panels/Source/Graph FULL/FILTERED (Tab cycle, Esc exit)");
+        true
+    }
+
+    /// Exit the quad configuration, preserving selection, scroll, and the
+    /// open slots. Clears the dependency filter presentation but keeps
+    /// `selected_component` and influence intact.
+    pub fn exit_quad(&mut self) {
+        if !self.quad_active {
+            return;
+        }
+        self.quad_active = false;
+        self.quad_focus = QuadFocus::Panels;
+        self.left_split_active = false;
+        if self.dependency_root.is_some() {
+            self.clear_dependency_filter();
+        }
+        self.tile_stack.focus = FocusSlot::Panels;
+        self.viewer_focus = ViewerFocus::Panels;
+        self.status_message = String::from("Quad closed (selection kept)");
+    }
+
+    /// Cycle quad focus Panels -> Source -> GraphFull -> GraphFiltered.
+    /// Maps onto the underlying tile focus so non-quad routing keeps working:
+    /// Source targets the viewer slot, both graph panes target the graph slot.
+    pub fn cycle_quad_focus(&mut self, forward: bool) {
+        if !self.quad_active {
+            return;
+        }
+        const ORDER: [QuadFocus; 4] = [
+            QuadFocus::Panels,
+            QuadFocus::Source,
+            QuadFocus::GraphFull,
+            QuadFocus::GraphFiltered,
+        ];
+        let pos = ORDER
+            .iter()
+            .position(|f| *f == self.quad_focus)
+            .unwrap_or(0);
+        let next = if forward {
+            ORDER[(pos + 1) % ORDER.len()]
+        } else {
+            ORDER[(pos + ORDER.len() - 1) % ORDER.len()]
+        };
+        self.quad_focus = next;
+        match next {
+            QuadFocus::Panels => {
+                self.tile_stack.focus = FocusSlot::Panels;
+                self.viewer_focus = ViewerFocus::Panels;
+            }
+            QuadFocus::Source => {
+                self.focus_slot_with(ViewType::SourceViewer);
+                self.viewer_focus = ViewerFocus::Source;
+            }
+            QuadFocus::GraphFull | QuadFocus::GraphFiltered => {
+                self.focus_slot_with(ViewType::Graph);
+                self.viewer_focus = ViewerFocus::Panels;
+            }
+        }
+    }
+
+    /// Deactivate quad when a required slot goes away. Keeps selection.
+    fn quad_note_view_closed(&mut self, view: ViewType) {
+        if !self.quad_active {
+            return;
+        }
+        if matches!(view, ViewType::Graph | ViewType::SourceViewer) {
+            self.quad_active = false;
+            self.quad_focus = QuadFocus::Panels;
+            self.left_split_active = false;
+        }
+    }
+
     /// Focus the slot holding `view`. No-op when it is not open.
     fn focus_slot_with(&mut self, view: ViewType) {
         if let Some(i) = self.tile_stack.slots.iter().position(|v| *v == view) {
@@ -1504,6 +1629,7 @@ impl App {
             ViewType::Physical => {}
             ViewType::Optimizer => self.drop_optimizer_state(),
         }
+        self.quad_note_view_closed(view);
     }
 
     /// Open the `?` help modal. Works from any view; the modal is a top-level
@@ -2452,6 +2578,7 @@ impl App {
         self.showing_graph = false;
         self.tile_stack.close(ViewType::Graph);
         self.hovered_graph_node = None;
+        self.quad_note_view_closed(ViewType::Graph);
     }
 
     /// Rebuild the graph from the current patch without toggling
@@ -2696,6 +2823,11 @@ impl App {
         self.dependency_root = None;
         self.dependency_nodes.clear();
         self.dependency_edges.clear();
+        // Quad is per-patch configuration on top of the slots: a new patch
+        // reverts to the plain tiled layout (change `quad-view`, App-state).
+        self.quad_active = false;
+        self.quad_focus = QuadFocus::Panels;
+        self.left_split_active = false;
     }
 
     /// Recompute the influence subtree for the currently selected hardware token.
@@ -4641,6 +4773,106 @@ mod tests {
         app.cycle_focus(true);
         app.cycle_focus(false);
         assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn quad_enter_opens_slots_enables_split_keeps_selection() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        assert!(app.is_quad());
+        assert_eq!(app.quad_focus, QuadFocus::Panels);
+        assert!(app.tile_stack.is_open(ViewType::SourceViewer));
+        assert!(app.tile_stack.is_open(ViewType::Graph));
+        assert!(app.tile_stack.slots.len() <= 3);
+        assert!(app.left_split_active);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+    }
+
+    #[test]
+    fn quad_enter_without_patch_fails_closed() {
+        let mut app = App::new();
+        assert!(!app.enter_quad());
+        assert!(!app.is_quad());
+        assert!(app.tile_stack.slots.is_empty());
+    }
+
+    #[test]
+    fn quad_focus_cycle_walks_four_panes_and_back() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        assert!(app.enter_quad());
+        let viewer_slot = app
+            .tile_stack
+            .slots
+            .iter()
+            .position(|v| *v == ViewType::SourceViewer)
+            .unwrap();
+        let graph_slot = app
+            .tile_stack
+            .slots
+            .iter()
+            .position(|v| *v == ViewType::Graph)
+            .unwrap();
+        app.cycle_quad_focus(true);
+        assert_eq!(app.quad_focus, QuadFocus::Source);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(viewer_slot));
+        app.cycle_quad_focus(true);
+        assert_eq!(app.quad_focus, QuadFocus::GraphFull);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(graph_slot));
+        app.cycle_quad_focus(true);
+        assert_eq!(app.quad_focus, QuadFocus::GraphFiltered);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(graph_slot));
+        app.cycle_quad_focus(true);
+        assert_eq!(app.quad_focus, QuadFocus::Panels);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        app.cycle_quad_focus(false);
+        assert_eq!(app.quad_focus, QuadFocus::GraphFiltered);
+    }
+
+    #[test]
+    fn quad_exit_keeps_selection_slots_and_clears_split() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        app.cycle_quad_focus(true);
+        app.exit_quad();
+        assert!(!app.is_quad());
+        assert_eq!(app.quad_focus, QuadFocus::Panels);
+        assert!(!app.left_split_active);
+        assert!(app.tile_stack.is_open(ViewType::SourceViewer));
+        assert!(app.tile_stack.is_open(ViewType::Graph));
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+    }
+
+    #[test]
+    fn quad_deactivates_when_graph_closes() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        assert!(app.enter_quad());
+        app.close_graph();
+        assert!(!app.is_quad());
+        assert!(!app.left_split_active);
+    }
+
+    #[test]
+    fn quad_resets_on_patch_load() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        assert!(app.enter_quad());
+        let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
+        assert!(app.load_patch(second));
+        assert!(!app.is_quad());
+        assert!(!app.left_split_active);
     }
 
     #[test]
