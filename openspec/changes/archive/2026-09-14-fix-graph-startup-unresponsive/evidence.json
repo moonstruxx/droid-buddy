@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "changeId": "fix-graph-startup-unresponsive",
+  "required": false,
+  "status": "skipped",
+  "assets": [],
+  "reason": "Native Rust TUI (winit/egui) — no web stack or pnpm run dev. Change removes unconditional startup open_graph() so app opens on physical/panels view; graph opens only on g g. Verified by full gate (fmt, clippy, test, build) and startup test startup_seeding_produces_no_graph_until_requested. Live visual check per project rule remains manual.",
+  "prMarkdown": "## Evidence\n\nSkipped: native desktop app, no web routes. Verified by unit test and full verification gate."
+}
