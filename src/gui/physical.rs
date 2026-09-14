@@ -11,15 +11,12 @@
 //! semantics the terminal handler used: `+`/`-` zoom presets, arrow/wheel
 //! panning, and `s` skeleton toggle.
 //!
-//! The shell (main.rs / task 2.6) builds [`PhysicalSpec`] from `App` state:
-//! `PhysicalLayout::build` + `RackLayout::pack` (pure, `src/physical.rs`),
-//! the shared [`ScreenMapping`] (mm↔screen cells, also pure), and the display
-//! labels from `Patch::display_label`. Tests construct specs directly.
+//! Tests build [`PhysicalSpec`] directly via the shared [`rack_geometry`],
+//! the [`ScreenMapping`] (mm↔screen cells, also pure), and the display
+//! labels from `Patch::display_label` semantics.
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
-use std::collections::HashMap;
 
-use crate::app::App;
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
 use crate::physical::{PhysicalLayout, RackLayout, ScreenMapping};
 use crate::theme::Color;
@@ -69,8 +66,7 @@ pub(crate) struct CellSpec {
     pub kind: crate::patch::ComponentKind,
 }
 
-/// The fully-resolved physical-view payload for one frame. Pure data: the
-/// shell builds it from `App` (mapping, labels, hover, pause state), the
+/// The fully-resolved physical-view payload for one frame. Pure data:
 /// tests build it directly; [`paint_physical`] only draws it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysicalSpec {
@@ -391,13 +387,6 @@ pub(crate) fn cell_visuals(
     }
 }
 
-/// Modules whose geometry key marks slider cells as faders: their P
-/// registers parse as `Knob`, and the fader face rendering depends on this
-/// flag (port of `ui.rs::module_is_fader`).
-pub(super) fn module_is_fader(geometry_key: &str) -> bool {
-    matches!(geometry_key, "p8s8" | "m4")
-}
-
 /// The rack skeleton's screen geometry in egui points (port of
 /// `ui.rs::physical_skeleton_geometry`): the case outline, mounts, labeled
 /// fold bars, module outlines, and element-cell rects with their port
@@ -546,7 +535,11 @@ pub(crate) fn mm_grid_lines(
 /// toggle. `pane` maps the absolute pointer (wheel zoom anchor) into the
 /// pane-local space the spec's cells live in. Pure so input tests run
 /// without a window.
-pub(super) fn physical_frame(i: &egui::InputState, cell_scale: f32, pane: egui::Rect) -> PhysicalFrame {
+pub(super) fn physical_frame(
+    i: &egui::InputState,
+    cell_scale: f32,
+    pane: egui::Rect,
+) -> PhysicalFrame {
     let mut frame = PhysicalFrame::default();
     if i.pointer.middle_down() {
         let d = i.pointer.delta();
@@ -597,220 +590,6 @@ fn clip_label(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(keep).collect();
     out.push('\u{2026}');
     out
-}
-
-/// Points per screen cell in the native window: the egui-layer scale over
-/// the shared mm→cell [`ScreenMapping`]. The pan input converts pointer
-/// deltas back through the same value, so the published spec and the
-/// `physical_offset` mutation stay in the same units.
-pub(crate) const POINTS_PER_CELL: f32 = 10.0;
-
-/// The shared physical-chain payload both surfaces derive their spec from:
-/// the packed rack, the controller chain, the mm→screen mapping (zoom from
-/// `App::physical_zoom`, pan from `App::physical_offset`), the resolved
-/// geometry, and the `[labels]` config the HW label fallback needs. Built
-/// once per frame; `None` when no patch is loaded.
-pub(super) struct RackData<'a> {
-    pub patch: &'a crate::patch::Patch,
-    pub rack: RackLayout,
-    pub chain: PhysicalLayout,
-    pub mapping: ScreenMapping,
-    pub geom: RackGeometry,
-    pub layers_enabled: bool,
-    pub max_shift_layer: u8,
-}
-
-/// Build the shared chain/rack/mapping payload for one frame (port of the
-/// old `render_physical_full` setup: same `PhysicalLayout::build` +
-/// `RackLayout::pack` + `ScreenMapping` construction, same `[labels]` config
-/// load for `Patch::display_label`).
-pub(super) fn rack_data(app: &App) -> Option<RackData<'_>> {
-    let patch = app.patch.as_ref()?;
-    let chain = PhysicalLayout::build(patch);
-    let rack = RackLayout::pack(&chain, &app.physical_rack_spec);
-    let mapping = ScreenMapping::new(
-        crate::physical::PHYSICAL_COLS_PER_MM,
-        crate::physical::PHYSICAL_ROWS_PER_MM,
-        app.physical_zoom as f64,
-        app.physical_offset.0 as f64,
-        app.physical_offset.1 as f64,
-    );
-    let geom = rack_geometry(&rack, &chain, &mapping, POINTS_PER_CELL);
-    // The HW label fallback reads the `[labels]` config, matching the old
-    // renderer's per-frame load.
-    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
-    Some(RackData {
-        patch,
-        rack,
-        chain,
-        mapping,
-        geom,
-        layers_enabled: settings.labels.layers_enabled,
-        max_shift_layer: settings.labels.max_shift_layer,
-    })
-}
-
-/// Faceplate sub-blocks in chain order (port of the old per-module title:
-/// `controller [instance]`, instance omitted for the master faceplate).
-pub(super) fn rack_modules(data: &RackData<'_>) -> Vec<ModuleSpec> {
-    data.geom
-        .module_rects
-        .iter()
-        .map(|&(module_index, rect)| {
-            let module = &data.chain.modules[module_index];
-            let title = match module.module_instance {
-                Some(n) => format!("{} {}", module.controller, n),
-                None => module.controller.clone(),
-            };
-            ModuleSpec { rect, title }
-        })
-        .collect()
-}
-
-/// Element cells with their component state (port of the old
-/// `render_physical_full` cell extraction): the display label via the HW
-/// label fallback chain, the state visuals via [`cell_visuals`], the
-/// hover/selected-circuit emphasis, and the fader flag from the module
-/// geometry key. `shift_border` selects the panels treatment (report the
-/// active shift-group token so the pane draws a group border); the physical
-/// view keeps `None` and folds the shift color into the base glyph color
-/// instead.
-pub(super) fn rack_cells(app: &App, data: &RackData<'_>, shift_border: bool) -> Vec<CellSpec> {
-    let hw_highlight = app.circuit_hw_token_indices();
-    let hw_store = app.current_hw_store();
-    let index_of: HashMap<&str, usize> = data
-        .patch
-        .hw_components
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.id.as_str(), i))
-        .collect();
-    let mut cells = Vec::new();
-    for &(module_index, cell_index, rect, mark) in &data.geom.cells {
-        let comp = &data.chain.modules[module_index].components[cell_index];
-        let Some(&global_index) = index_of.get(comp.id.as_str()) else {
-            continue;
-        };
-        let is_hovered = app.hovered_component == Some(global_index);
-        let is_circuit_hw = hw_highlight.contains(&global_index);
-        let is_shift_active = comp.shift_group.is_some() && comp.shift_group == app.active_shift;
-        let shift: u8 = match comp.shift_group {
-            Some(ShiftGroup::Group1) => 1,
-            Some(ShiftGroup::Group2) => 2,
-            Some(ShiftGroup::Group3) => 3,
-            Some(ShiftGroup::Group4) => 4,
-            None => 1,
-        };
-        // Hand-built patches keep their bespoke labels; display_label would
-        // derive "btn_1"-style names from the token.
-        let label = if data.patch.sections.is_empty() && !comp.label.is_empty() {
-            comp.label.clone()
-        } else {
-            data.patch.display_label(
-                &comp.id,
-                shift,
-                data.layers_enabled,
-                data.max_shift_layer,
-                &hw_store,
-            )
-        };
-        let is_fader = module_is_fader(&data.chain.modules[module_index].geometry_key)
-            && matches!(comp.kind, ComponentKind::Knob | ComponentKind::Encoder);
-        let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, is_fader);
-        let shift_color = if shift_border && is_shift_active {
-            Some(match comp.shift_group {
-                Some(ShiftGroup::Group1) => crate::theme::active().shift1,
-                Some(ShiftGroup::Group2) => crate::theme::active().shift2,
-                Some(ShiftGroup::Group3) => crate::theme::active().shift3,
-                Some(ShiftGroup::Group4) => crate::theme::active().shift4,
-                None => color,
-            })
-        } else {
-            None
-        };
-        let fader_value = match &comp.state {
-            ComponentState::Value(v) => *v,
-            _ => 0.0,
-        };
-        cells.push(CellSpec {
-            rect,
-            glyph,
-            label,
-            state_text,
-            color,
-            is_fader,
-            fader_value,
-            global_index,
-            mark,
-            highlighted: is_hovered || is_circuit_hw,
-            shift_color,
-            kind: comp.kind.clone(),
-        });
-    }
-    cells
-}
-
-/// Build the physical-view payload for one frame (port of the old
-/// `render_physical_full` data extraction): the packed rack under the shared
-/// mm→screen mapping, grid lines at 20 mm steps, the faceplates and the
-/// component cells. Without a patch the surface draws only its background.
-/// Build the physical-view payload for one frame (port of the old
-/// `render_physical_full` data extraction): the packed rack under the shared
-/// mm→screen mapping, grid lines at 20 mm steps, the faceplates and the
-/// component cells. `pane` offsets every resolved rect so the surface paints
-/// inside the tile it was dispatched to; without a patch the surface draws
-/// only its background.
-pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> PhysicalSpec {
-    let t = crate::theme::active();
-    let Some(data) = rack_data(app) else {
-        return PhysicalSpec {
-            background: t.graph_canvas_bg,
-            case_rect: Rect::ZERO,
-            mounts: Vec::new(),
-            fold_bars: Vec::new(),
-            modules: Vec::new(),
-            cells: Vec::new(),
-            grid_lines: Vec::new(),
-            cell_scale: POINTS_PER_CELL,
-            skeleton: app.physical_show_skeleton,
-            paused: app.processing_paused,
-        };
-    };
-    let shift = pane.min;
-    let moved = |r: Rect| r.translate(egui::vec2(shift.x, shift.y));
-    let moved_line = |(a, b): (Pos2, Pos2)| (a + shift, b + shift);
-    PhysicalSpec {
-        background: t.graph_canvas_bg,
-        case_rect: moved(data.geom.case_rect),
-        mounts: data.geom.mounts.iter().map(|&r| moved(r)).collect(),
-        fold_bars: data
-            .geom
-            .fold_bars
-            .iter()
-            .map(|&(r, ref l)| (moved(r), l.clone()))
-            .collect(),
-        modules: rack_modules(&data)
-            .into_iter()
-            .map(|m| ModuleSpec { rect: moved(m.rect), ..m })
-            .collect(),
-        cells: rack_cells(app, &data, false)
-            .into_iter()
-            .map(|c| CellSpec { rect: moved(c.rect), ..c })
-            .collect(),
-        grid_lines: mm_grid_lines(
-            &data.mapping,
-            POINTS_PER_CELL,
-            data.rack.total_width_mm,
-            data.rack.total_height_mm,
-            20.0,
-        )
-        .into_iter()
-        .map(moved_line)
-        .collect(),
-        cell_scale: POINTS_PER_CELL,
-        skeleton: app.physical_show_skeleton,
-        paused: app.processing_paused,
-    }
 }
 
 #[cfg(test)]

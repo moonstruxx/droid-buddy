@@ -11,16 +11,15 @@
 //! what this module adds is the pane chrome, the shift-group borders, and the
 //! hover/click/scroll input report ([`PanelsFrame`]).
 //!
-//! The shell builds [`PanelsSpec`] from `App` state each frame; tests build
-//! it directly. Colors always flow through `crate::theme::active()`.
+//! Tests build [`PanelsSpec`] directly. Colors always flow through
+//! `crate::theme::active()`.
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use crate::app::{App, FocusSlot};
 use crate::patch::ComponentKind;
 use crate::theme::Color;
 
-use super::physical::{paint_cell, rack_cells, rack_data, rack_modules, CellSpec, ModuleSpec};
+use super::physical::{paint_cell, CellSpec, ModuleSpec};
 
 /// The resolved panels-pane payload for one frame: pane chrome state plus the
 /// sub-blocks and cells to draw (pure data, like the other surface specs).
@@ -162,43 +161,6 @@ pub(super) fn panels_frame(i: &egui::InputState, cells: &[CellSpec]) -> PanelsFr
 fn hit_test(cells: &[CellSpec], pos: egui::Pos2) -> Option<usize> {
     cells.iter().rposition(|c| c.rect.contains(pos))
 }
-
-/// Build the panels-pane payload for one frame (port of the old
-/// `render_panels_pane` data extraction): the pane chrome (title, focus
-/// border) plus the same rack faceplates and component cells the physical
-/// view draws, with the active shift-group token on the cells so the pane
-/// renders the group border. `pane` offsets every resolved rect so the pane
-/// paints inside the tile it was dispatched to; without a patch the pane
-/// renders empty.
-pub(crate) fn panels_spec(app: &App, pane: egui::Rect) -> PanelsSpec {
-    let focused = app.tile_stack.focus == FocusSlot::Panels;
-    let paused = app.processing_paused;
-    let shift = pane.min;
-    let moved = |r: Rect| r.translate(egui::vec2(shift.x, shift.y));
-    let Some(data) = rack_data(app) else {
-        return PanelsSpec {
-            title: " Panels ".into(),
-            focused,
-            modules: Vec::new(),
-            cells: Vec::new(),
-            paused,
-        };
-    };
-    PanelsSpec {
-        title: " Panels ".into(),
-        focused,
-        modules: rack_modules(&data)
-            .into_iter()
-            .map(|m| ModuleSpec { rect: moved(m.rect), ..m })
-            .collect(),
-        cells: rack_cells(app, &data, true)
-            .into_iter()
-            .map(|c| CellSpec { rect: moved(c.rect), ..c })
-            .collect(),
-        paused,
-    }
-}
-
 fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
 }
@@ -207,8 +169,7 @@ fn rgb(color: Color) -> egui::Color32 {
 mod tests {
     use super::*;
     use crate::gui::physical::PortMark;
-    use crate::patch::{ComponentKind, ComponentState, HwComponent};
-    use crate::physical::{PhysicalLayout, PlacedModule, RackLayout, RackRowPlacement, RectMm};
+    use crate::patch::ComponentKind;
 
     fn cell(
         rect: Rect,
@@ -447,77 +408,5 @@ mod tests {
         full_output.textures_delta.clear();
         assert_eq!(frame, PanelsFrame::default());
         assert!(full_output.shapes.is_empty());
-    }
-
-    /// Compile-guard the import surface the shell builder will use: the
-    /// physical models the panels spec is built from.
-    #[test]
-    fn panels_spec_builds_from_physical_models() {
-        let chain = PhysicalLayout {
-            modules: vec![crate::physical::PhysicalModule {
-                controller: "P2B8".into(),
-                module_instance: Some(1),
-                geometry_key: "p2b8".into(),
-                is_fallback: false,
-                rect_mm: RectMm {
-                    x_mm: 0.0,
-                    y_mm: 0.0,
-                    w_mm: 200.0,
-                    h_mm: 40.0,
-                },
-                width_hp: 12.0,
-                he: 1,
-                cells: Default::default(),
-                components: vec![HwComponent {
-                    id: "B1.1".into(),
-                    label: "B1.1".into(),
-                    kind: ComponentKind::Button,
-                    shift_group: None,
-                    state: ComponentState::Off,
-                    controller: "P2B8".into(),
-                    led: None,
-                }],
-            }],
-            total_width_mm: 200.0,
-            total_height_mm: 40.0,
-            chain_gaps_mm: Default::default(),
-            hp_mm: 16.6667,
-            he_mm: Default::default(),
-            fallback_width_mm: 0.0,
-            fallback_height_mm: 0.0,
-        };
-        let rack = RackLayout {
-            rows: vec![RackRowPlacement {
-                he: 1,
-                hp: 12.0,
-                label: Some("row 1".into()),
-                y_mm: 0.0,
-                height_mm: 40.0,
-                modules: vec![PlacedModule {
-                    key: "P2B8 1".into(),
-                    module_index: 0,
-                    rect_mm: RectMm {
-                        x_mm: 0.0,
-                        y_mm: 0.0,
-                        w_mm: 200.0,
-                        h_mm: 40.0,
-                    },
-                    overridden: false,
-                }],
-                fill_width_mm: 200.0,
-            }],
-            fold_bars: vec![],
-            mounts: Default::default(),
-            total_width_mm: 200.0,
-            total_height_mm: 40.0,
-            fold_bar_height_mm: 6.0,
-        };
-        let geom = super::super::physical::rack_geometry(
-            &rack,
-            &chain,
-            &crate::physical::ScreenMapping::default(),
-            10.0,
-        );
-        assert_eq!(geom.module_rects.len(), 1);
     }
 }

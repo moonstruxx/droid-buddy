@@ -675,6 +675,31 @@ pub(crate) fn validation_spec_for(app: &crate::app::App) -> Option<ValidationSpe
     ))
 }
 
+pub(super) fn diff_spec_from_report(report: Option<&crate::diff::DiffReport>) -> DiffSpec {
+    let Some(report) = report else {
+        return DiffSpec {
+            title: " Diff (0) ".to_string(),
+            added: vec![],
+            removed: vec![],
+            changed: vec![],
+        };
+    };
+    let added = report.added_cables.clone();
+    let removed = report.removed_cables.clone();
+    let changed: Vec<String> = report
+        .changed_cables
+        .iter()
+        .map(|c| c.cable.clone())
+        .collect();
+    let total = added.len() + removed.len() + changed.len();
+    DiffSpec {
+        title: format!(" Diff ({total}) "),
+        added,
+        removed,
+        changed,
+    }
+}
+
 /// Diff-surface payload, `None` while the diff overlay is hidden.
 pub(crate) fn diff_spec_for(app: &crate::app::App) -> Option<DiffSpec> {
     if !app.diff_showing {

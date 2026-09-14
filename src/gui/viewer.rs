@@ -1215,6 +1215,19 @@ fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
 }
 
+/// The color of a circuit's box: a plugin-declared `color` token wins over
+/// the name-convention match (port of `ui.rs::circuit_color`).
+pub(super) fn circuit_color(name: &str) -> Color {
+    if let Some(token) = crate::schema::load_schema()
+        .circuits
+        .get(&name.to_ascii_lowercase())
+        .and_then(|c| c.color.as_deref())
+    {
+        return kind_token_color(token);
+    }
+    kind_token_color(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
