@@ -117,7 +117,7 @@ pub(crate) struct ViewerFrame {
 /// report for the loop to apply.
 pub(super) fn paint_viewer(
     painter: &Painter,
-    canvas: Vec2,
+    pane: Rect,
     ctx: &Context,
     spec: Option<&ViewerSpec>,
 ) -> ViewerFrame {
@@ -130,8 +130,8 @@ pub(super) fn paint_viewer(
     // message, on the status background.
     let status_h = 22.0;
     let status_rect = Rect::from_min_size(
-        Pos2::new(0.0, canvas.y - status_h),
-        Vec2::new(canvas.x, status_h),
+        Pos2::new(pane.min.x, pane.max.y - status_h),
+        Vec2::new(pane.width(), status_h),
     );
     painter.rect_filled(status_rect, 0.0, rgb(t.status_bg));
     let key = rgb(t.viewer_key);
@@ -150,9 +150,9 @@ pub(super) fn paint_viewer(
     }
 
     // The pane above the status strip: border + mode title.
-    let pane = Rect::from_min_size(
-        Pos2::ZERO,
-        Vec2::new(canvas.x, (canvas.y - status_h).max(1.0)),
+    let content = Rect::from_min_size(
+        pane.min,
+        Vec2::new(pane.width(), (pane.height() - status_h).max(1.0)),
     );
     let border = if spec.focused {
         rgb(t.focus_border)
@@ -160,7 +160,7 @@ pub(super) fn paint_viewer(
         rgb(t.muted)
     };
     painter.rect(
-        pane,
+        content,
         0.0,
         egui::Color32::TRANSPARENT,
         egui::Stroke::new(if spec.focused { 2.0 } else { 1.0 }, border),
@@ -168,7 +168,7 @@ pub(super) fn paint_viewer(
     );
     if !spec.title.is_empty() {
         painter.text(
-            pane.min + egui::vec2(6.0, 3.0),
+            content.min + egui::vec2(6.0, 3.0),
             egui::Align2::LEFT_TOP,
             &spec.title,
             egui::FontId::proportional(12.0),
@@ -176,7 +176,7 @@ pub(super) fn paint_viewer(
         );
     }
 
-    let inner = pane.shrink(4.0);
+    let inner = content.shrink(4.0);
     let (sidebar_w, content_w, minimap_w) = pane_split(
         inner.width(),
         spec.sidebar.is_some(),
@@ -1276,7 +1276,7 @@ mod tests {
             ..Default::default()
         };
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_viewer(ui.painter(), ui.max_rect().size(), ui.ctx(), Some(spec));
+            paint_viewer(ui.painter(), ui.max_rect(), ui.ctx(), Some(spec));
         });
         let labels: Vec<String> = full_output
             .shapes

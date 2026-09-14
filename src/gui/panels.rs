@@ -14,12 +14,15 @@
 //! Tests build [`PanelsSpec`] directly. Colors always flow through
 //! `crate::theme::active()`.
 
+use std::collections::HashMap;
+
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use crate::patch::ComponentKind;
+use crate::app::App;
+use crate::patch::{ComponentKind, HwComponent};
 use crate::theme::Color;
 
-use super::physical::{paint_cell, CellSpec, ModuleSpec};
+use super::physical::{cell_visuals, paint_cell, CellSpec, ModuleSpec, PortMark};
 
 /// The resolved panels-pane payload for one frame: pane chrome state plus the
 /// sub-blocks and cells to draw (pure data, like the other surface specs).
@@ -133,6 +136,99 @@ pub(super) fn paint_panels(
     ctx.input(|i| panels_frame(i, &spec.cells))
 }
 
+/// Cell size + gap of the quad Panels-pane wrap grid, in points. The pane is
+/// a quadrant of the window, so cells stay compact: glyph + state + label fit
+/// a 2-line cell like the physical surface's text cells.
+const PANEL_CELL_W: f32 = 96.0;
+const PANEL_CELL_H: f32 = 40.0;
+const PANEL_CELL_GAP: f32 = 6.0;
+/// Title-zone height above a module block's cell rows.
+const PANEL_TITLE_H: f32 = 20.0;
+
+/// The quad Panels-pane payload for one frame: every patch component grouped
+/// by controller into titled faceplate blocks, wrapped left-to-right within
+/// `pane`. `global_index` stays the component's index into
+/// `patch.hw_components` so hit-testing matches the other surfaces.
+pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
+    let t = crate::theme::active();
+    let Some(patch) = app.patch.as_ref() else {
+        return PanelsSpec {
+            title: " Panels ".into(),
+            focused,
+            modules: Vec::new(),
+            cells: Vec::new(),
+            paused: app.processing_paused,
+        };
+    };
+    let inner = pane.shrink(4.0);
+    let per_row = ((inner.width() + PANEL_CELL_GAP) / (PANEL_CELL_W + PANEL_CELL_GAP))
+        .floor()
+        .max(1.0) as usize;
+    let mut modules = Vec::new();
+    let mut cells = Vec::new();
+    let mut y = inner.min.y;
+    // Group by controller, first-seen declaration order.
+    let mut order: Vec<&str> = Vec::new();
+    let mut groups: HashMap<&str, Vec<(usize, &HwComponent)>> = HashMap::new();
+    for (gi, comp) in patch.hw_components.iter().enumerate() {
+        if !groups.contains_key(comp.controller.as_str()) {
+            order.push(comp.controller.as_str());
+        }
+        groups
+            .entry(comp.controller.as_str())
+            .or_default()
+            .push((gi, comp));
+    }
+    for controller in order {
+        let comps = &groups[controller];
+        let rows = comps.len().div_ceil(per_row).max(1);
+        let block_h = PANEL_TITLE_H + rows as f32 * (PANEL_CELL_H + PANEL_CELL_GAP);
+        modules.push(ModuleSpec {
+            rect: Rect::from_min_size(Pos2::new(inner.min.x, y), Vec2::new(inner.width(), block_h)),
+            title: controller.to_string(),
+        });
+        for (slot, (gi, comp)) in comps.iter().enumerate() {
+            let (col, row) = (slot % per_row, slot / per_row);
+            let x = inner.min.x + col as f32 * (PANEL_CELL_W + PANEL_CELL_GAP);
+            let cy = y + PANEL_TITLE_H + row as f32 * (PANEL_CELL_H + PANEL_CELL_GAP);
+            let is_shift_active =
+                comp.shift_group.is_some() && comp.shift_group == app.active_shift;
+            let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
+            cells.push(CellSpec {
+                rect: Rect::from_min_size(Pos2::new(x, cy), Vec2::new(PANEL_CELL_W, PANEL_CELL_H)),
+                glyph,
+                label: comp.label.clone(),
+                state_text,
+                color,
+                is_fader: false,
+                fader_value: 0.0,
+                global_index: *gi,
+                mark: PortMark::Cell,
+                highlighted: app.selected_component.as_deref() == Some(comp.id.as_str()),
+                shift_color: if is_shift_active {
+                    comp.shift_group.map(|g| match g {
+                        crate::patch::ShiftGroup::Group1 => t.shift1,
+                        crate::patch::ShiftGroup::Group2 => t.shift2,
+                        crate::patch::ShiftGroup::Group3 => t.shift3,
+                        crate::patch::ShiftGroup::Group4 => t.shift4,
+                    })
+                } else {
+                    None
+                },
+                kind: comp.kind,
+            });
+        }
+        y += block_h;
+    }
+    PanelsSpec {
+        title: " Panels ".into(),
+        focused,
+        modules,
+        cells,
+        paused: app.processing_paused,
+    }
+}
+
 /// The pane's hover/click/scroll report from the egui input state: the cell
 /// under the pointer, a primary click on it, and the wheel delta when the
 /// pointer is over a knob/encoder (the value-adjust gesture). Pure so input
@@ -170,6 +266,7 @@ mod tests {
     use super::*;
     use crate::gui::physical::PortMark;
     use crate::patch::ComponentKind;
+    use std::path::Path;
 
     fn cell(
         rect: Rect,
@@ -408,5 +505,71 @@ mod tests {
         full_output.textures_delta.clear();
         assert_eq!(frame, PanelsFrame::default());
         assert!(full_output.shapes.is_empty());
+    }
+
+    #[test]
+    fn panels_spec_groups_every_component_by_controller() {
+        let mut app = crate::app::App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(600.0, 400.0));
+        let spec = panels_spec(&app, true, pane);
+        assert!(spec.focused);
+        let patch = app.patch.as_ref().unwrap();
+        // Every component appears exactly once, keeping its hw_components
+        // index for hit-testing.
+        assert_eq!(spec.cells.len(), patch.hw_components.len());
+        for (i, c) in spec.cells.iter().enumerate() {
+            assert_eq!(c.global_index, i);
+        }
+        // One titled block per controller, and cells stay inside the pane.
+        let controllers: std::collections::HashSet<&str> = patch
+            .hw_components
+            .iter()
+            .map(|c| c.controller.as_str())
+            .collect();
+        assert_eq!(spec.modules.len(), controllers.len());
+        for m in &spec.modules {
+            assert!(controllers.contains(m.title.as_str()));
+        }
+        assert!(
+            spec.cells
+                .iter()
+                .all(|c| c.rect.max.x <= pane.max.x + 0.5 && c.rect.max.y <= pane.max.y + 0.5),
+            "wrapped cells must stay inside the pane"
+        );
+    }
+
+    #[test]
+    fn panels_spec_highlights_selected_and_shift_active_cells() {
+        let mut app = crate::app::App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        let first = app.patch.as_ref().unwrap().hw_components[0].id.clone();
+        app.selected_component = Some(first.clone());
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(600.0, 400.0));
+        let spec = panels_spec(&app, false, pane);
+        let selected = spec
+            .cells
+            .iter()
+            .find(|c| c.global_index == 0)
+            .expect("first component cell");
+        assert!(selected.highlighted);
+        let other = spec.cells.iter().find(|c| c.global_index == 1);
+        if let Some(other) = other {
+            assert!(!other.highlighted);
+        }
+    }
+
+    #[test]
+    fn panels_spec_empty_without_patch() {
+        let app = crate::app::App::new();
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(600.0, 400.0));
+        let spec = panels_spec(&app, false, pane);
+        assert!(!spec.focused);
+        assert!(spec.modules.is_empty());
+        assert!(spec.cells.is_empty());
     }
 }
