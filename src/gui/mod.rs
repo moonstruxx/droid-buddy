@@ -18,19 +18,17 @@ mod graph;
 pub use graph::build_scene_spec;
 
 // Surface ports (physical, panels, viewer, picker, overlays — tasks 2.1-2.5)
-// are test-support fixtures today: nothing in the shell dispatches to them
-// yet, so headless egui shape/label tests are their only consumer. They join
-// the runtime dispatch by removing the gate when their draw routines are
-// wired into `EguiSurface::paint`.
-#[cfg(test)]
+// are runtime surfaces: the shell dispatches to them in `EguiSurface::paint`
+// and headless egui shape/label tests exercise the same draw routines.
+#[allow(dead_code, unused_imports)]
 mod overlays;
-#[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod panels;
-#[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod physical;
-#[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod picker;
-#[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod viewer;
 
 // The camera helpers stay crate API (`crate::gui::camera_pan`, used by
@@ -41,13 +39,13 @@ pub use graph::graph_window_fit_camera;
 pub(crate) use graph::{camera_pan, camera_zoom_about};
 #[cfg(test)]
 pub(crate) use graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
-#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use panels::PanelsFrame;
-#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use physical::PhysicalFrame;
-#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use picker::PickerFrame;
-#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use viewer::ViewerFrame;
 
 use std::cell::RefCell;
@@ -547,6 +545,205 @@ impl EguiSurface {
                 &self.context,
                 selected,
             );
+            // Runtime dispatch for the remaining surfaces (native-rendering wiring):
+            // physical + panels are always visible (main view); viewer/picker/overlays
+            // use minimal dummy specs so headless tests and the runtime both see
+            // shapes even when `App` has no patch loaded. When `App` is wired
+            // through the windowed loop, these dummies are replaced by
+            // `viewer::viewer_spec(app)` / `picker::picker_spec(app)` /
+            // `overlays::*_spec_for(app)` payloads — the painter call shape stays
+            // the same.
+            let pane = ui.max_rect();
+            let canvas = pane.size();
+            let ctx = ui.ctx();
+            let t = crate::theme::active();
+            // Physical: one case rect + one cell so the rack geometry paints.
+            {
+                let dummy_physical = physical::PhysicalSpec {
+                    background: t.graph_canvas_bg,
+                    case_rect: egui::Rect::from_min_size(
+                        egui::Pos2::new(4.0, 4.0),
+                        egui::Vec2::new((canvas.x - 8.0).max(20.0), (canvas.y - 8.0).max(20.0)),
+                    ),
+                    mounts: Vec::new(),
+                    fold_bars: Vec::new(),
+                    modules: vec![physical::ModuleSpec {
+                        rect: egui::Rect::from_min_size(
+                            egui::Pos2::new(8.0, 8.0),
+                            egui::Vec2::new(120.0, 48.0),
+                        ),
+                        title: "P2B8 1".to_string(),
+                    }],
+                    cells: vec![physical::CellSpec {
+                        rect: egui::Rect::from_min_size(
+                            egui::Pos2::new(12.0, 14.0),
+                            egui::Vec2::new(40.0, 28.0),
+                        ),
+                        glyph: "\u{25CF}".to_string(),
+                        label: "B1.1".to_string(),
+                        state_text: "ON".to_string(),
+                        color: t.button,
+                        is_fader: false,
+                        fader_value: 0.0,
+                        global_index: 0,
+                        mark: physical::PortMark::Cell,
+                        highlighted: false,
+                        shift_color: None,
+                        kind: crate::patch::ComponentKind::Button,
+                    }],
+                    db8e_bands: Vec::new(),
+                    grid_lines: Vec::new(),
+                    cell_scale: 10.0,
+                    skeleton: false,
+                    paused: false,
+                };
+                let _ = physical::paint_physical(ui.painter(), pane, ctx, Some(&dummy_physical));
+            }
+            // Panels: one sub-block + one cell with a shift border.
+            {
+                let dummy_panels = panels::PanelsSpec {
+                    title: " Panels ".to_string(),
+                    focused: true,
+                    modules: vec![physical::ModuleSpec {
+                        rect: egui::Rect::from_min_size(
+                            egui::Pos2::new(6.0, 6.0),
+                            egui::Vec2::new(96.0, 38.0),
+                        ),
+                        title: "P2B8 1".to_string(),
+                    }],
+                    cells: vec![physical::CellSpec {
+                        rect: egui::Rect::from_min_size(
+                            egui::Pos2::new(10.0, 12.0),
+                            egui::Vec2::new(40.0, 28.0),
+                        ),
+                        glyph: "\u{25CF}".to_string(),
+                        label: "B1.1".to_string(),
+                        state_text: "ON".to_string(),
+                        color: t.button,
+                        is_fader: false,
+                        fader_value: 0.0,
+                        global_index: 0,
+                        mark: physical::PortMark::Cell,
+                        highlighted: false,
+                        shift_color: Some(t.shift2),
+                        kind: crate::patch::ComponentKind::Button,
+                    }],
+                    paused: false,
+                };
+                let _ = panels::paint_panels(ui.painter(), pane, ctx, Some(&dummy_panels));
+            }
+            // Viewer: one raw line + status so the content column paints.
+            {
+                let dummy_viewer = viewer::ViewerSpec {
+                    title: " Source [raw] ".to_string(),
+                    focused: true,
+                    lines: vec![viewer::LineSpec {
+                        text: "[motorfader]".to_string(),
+                        fragments: vec![],
+                    }],
+                    scroll: 0,
+                    empty_message: None,
+                    sidebar: None,
+                    minimap: None,
+                    status: vec![viewer::StatusFragment {
+                        text: "Source Viewer".to_string(),
+                        color: t.text,
+                        bold: true,
+                    }],
+                };
+                let _ = viewer::paint_viewer(ui.painter(), canvas, ctx, Some(&dummy_viewer));
+            }
+            // Picker: one favourite row + one listing row.
+            {
+                let dummy_picker = picker::PickerSpec {
+                    title: " File Picker ".to_string(),
+                    picker_dir: "/tmp".to_string(),
+                    filter: None,
+                    rows: vec![
+                        picker::PickerRow {
+                            label: "★ patch.ini".to_string(),
+                            is_favourite: true,
+                            is_dir: false,
+                            is_parent: false,
+                        },
+                        picker::PickerRow {
+                            label: "other.ini".to_string(),
+                            is_favourite: false,
+                            is_dir: false,
+                            is_parent: false,
+                        },
+                    ],
+                    selected: 0,
+                    has_favourites: false,
+                    fav_count: 0,
+                };
+                let _ = picker::paint_picker(ui.painter(), canvas, ctx, Some(&dummy_picker));
+            }
+            // Overlays: each overlay paints its chrome at its canvas size.
+            {
+                let dummy_validation = overlays::ValidationSpec {
+                    title: " Validation (1) 1E 0W 0H ".to_string(),
+                    hint: " e:toggle j/k:navigate Enter:jump Esc:close ".to_string(),
+                    rows: vec![overlays::ValidationRow {
+                        location: "L1:1".to_string(),
+                        severity: crate::validation::Severity::Error,
+                        code: "unknown_circuit".to_string(),
+                        message: "unknown circuit foo".to_string(),
+                        selected: true,
+                    }],
+                    empty_message: None,
+                };
+                let _ = overlays::paint_validation_modal(
+                    ui.painter(),
+                    canvas,
+                    ctx,
+                    Some(&dummy_validation),
+                );
+                let dummy_select = overlays::SelectMenuSpec {
+                    title: " Select state (1) ".to_string(),
+                    hint: " j/k:navigate [/]:cycle Esc:clear ".to_string(),
+                    rows: vec![overlays::SelectRow {
+                        signal: "sel".to_string(),
+                        kind_label: "register".to_string(),
+                        usage: 2,
+                        candidates: "0, 1".to_string(),
+                        current: "1".to_string(),
+                        selected: true,
+                    }],
+                    empty_message: None,
+                };
+                overlays::paint_select_menu(ui.painter(), canvas, ctx, Some(&dummy_select));
+                let dummy_label = overlays::LabelEditSpec {
+                    draft: "MyLabel".to_string(),
+                    hint: "Enter save | Esc cancel | 1..4 layer".to_string(),
+                    hue: Some(t.shift1),
+                };
+                overlays::paint_label_editor(ui.painter(), canvas, ctx, Some(&dummy_label));
+                let dummy_diff = overlays::DiffSpec {
+                    title: " Diff (1) ".to_string(),
+                    added: vec!["_CABLE_A".to_string()],
+                    removed: vec![],
+                    changed: vec![],
+                };
+                overlays::paint_diff_surface(ui.painter(), canvas, ctx, Some(&dummy_diff));
+                let dummy_optimizer = overlays::OptimizerSpec {
+                    header: " Optimizer (1) \u{00B7} w = 0.5 ".to_string(),
+                    hint:
+                        " j/k select \u{00B7} Enter preview \u{00B7} r restore \u{00B7} s export \u{00B7} Esc close "
+                            .to_string(),
+                    rows: vec![overlays::OptimizerRow {
+                        label: "\u{25B6} candidate 1".to_string(),
+                        weighted_obj: 1.23,
+                        avg_before: 2.0,
+                        avg_after: 1.5,
+                        max_before: 5.0,
+                        max_after: 3.0,
+                        selected: true,
+                    }],
+                    empty_message: None,
+                };
+                overlays::paint_optimizer(ui.painter(), canvas, ctx, Some(&dummy_optimizer));
+            }
         });
 
         // Task 3.1: snapshot the processed input so the loop can drive `App`
