@@ -595,6 +595,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
+            KeyCode::Char('q') => {
+                // `g q` enters the quad configuration (change `quad-view`,
+                // App-state lane): SourceViewer + Graph slots with the
+                // FULL/FILTERED split, focus starting on Panels.
+                app.enter_quad();
+                app.prefix = None;
+                return false;
+            }
             KeyCode::Char('w') => {
                 // `g w` toggles the GPU graph window (gpu-graph-window D6).
                 // The handler cannot reach GraphWindow (owned by the windowed
@@ -695,6 +703,29 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // view (or clears the modifier selection on panels). Empty-stack states
     // fall through to the legacy per-view branches below.
     if !app.tile_stack.slots.is_empty() {
+        // Quad focus cycle (change `quad-view`, App-state lane): while the
+        // quad configuration is active `Tab` walks the four panes and `Esc`
+        // exits quad keeping the selection; the plain tile cycle below is
+        // bypassed so `quad_focus` stays the source of truth.
+        if app.is_quad() {
+            let shift = key.modifiers.shift;
+            match key.code {
+                KeyCode::Tab if !shift => {
+                    app.cycle_quad_focus(true);
+                    return false;
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    app.cycle_quad_focus(false);
+                    return false;
+                }
+                KeyCode::Esc => {
+                    app.exit_quad();
+                    app.prefix = None;
+                    return false;
+                }
+                _ => {}
+            }
+        }
         let shift = key.modifiers.shift;
         match key.code {
             KeyCode::Tab if !shift => {
@@ -1024,6 +1055,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // Defensive tile sync for pre-tiling open paths; the dispatch
                 // above already removed the slot when one was open.
                 app.tile_stack.close(ViewType::SourceViewer);
+                // Slot-close exits quad (change `quad-view`, handler lane):
+                // the tiled dispatch above routes through `close_focused_view`
+                // (which notifies via `quad_note_view_closed`), while this
+                // legacy empty-stack path deactivates directly, preserving
+                // selection and source scroll via `exit_quad`.
+                if app.is_quad() {
+                    app.exit_quad();
+                }
                 app.viewer_focus = ViewerFocus::Panels;
                 app.prefix = None;
                 return false;
@@ -3559,6 +3598,88 @@ mod tests {
         handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.showing_viewer);
         assert!(app.selected_component.is_none());
+    }
+
+    #[test]
+    fn quad_g_q_enters_and_tab_cycles_four_panes() {
+        use crate::app::QuadFocus;
+        let mut app = app_with_source_navigation();
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(app.is_quad());
+        assert_eq!(app.tile_stack.slots.len(), 2);
+        assert_eq!(app.quad_focus, QuadFocus::Panels);
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert_eq!(app.quad_focus, QuadFocus::Source);
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert_eq!(app.quad_focus, QuadFocus::GraphFull);
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert_eq!(app.quad_focus, QuadFocus::GraphFiltered);
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert_eq!(app.quad_focus, QuadFocus::Panels);
+        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        handle_event(shift_tab(), &mut app);
+        assert_eq!(app.quad_focus, QuadFocus::GraphFiltered);
+    }
+
+    #[test]
+    fn quad_esc_exits_preserving_selection_and_slots() {
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(app.is_quad());
+        handle_event(key(KeyCode::Esc), &mut app);
+        assert!(!app.is_quad());
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert!(app.showing_viewer);
+        assert!(app.showing_graph);
+        assert_eq!(app.tile_stack.slots.len(), 2);
+    }
+
+    #[test]
+    fn quad_g_q_without_patch_keeps_no_patch_status() {
+        let mut app = App::new();
+        assert!(app.patch.is_none());
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(!app.is_quad());
+        assert!(app.tile_stack.slots.is_empty());
+        assert_eq!(app.status_message, "No patch loaded. Press 'l' to load.");
+    }
+
+    #[test]
+    fn quad_slot_close_exits_quad_keeps_selection() {
+        // Graph slot close (handler's graph Esc path via `close_graph`).
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        let scroll_before = app.source_scroll;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(app.is_quad());
+        app.close_graph();
+        assert!(!app.is_quad());
+        assert!(!app.left_split_active);
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.source_scroll, scroll_before);
+        // SourceViewer slot close via the tiled `close_focused_view` path.
+        let mut app = app_with_source_navigation();
+        app.select_component(String::from("B1.1"));
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(app.is_quad());
+        let viewer_slot = app
+            .tile_stack
+            .slots
+            .iter()
+            .position(|v| *v == ViewType::SourceViewer)
+            .expect("quad opens the viewer slot");
+        app.tile_stack.focus = FocusSlot::Slot(viewer_slot);
+        app.close_focused_view();
+        assert!(!app.is_quad());
+        assert!(!app.left_split_active);
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
     }
 
     #[test]
