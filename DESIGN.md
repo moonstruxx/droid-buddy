@@ -1,6 +1,7 @@
 ---
 colors:
-  # Terminal palette (the `terminal` theme maps every token to ANSI Reset; the egui bridge resolves it to neutral white)
+  # Classic palette (terminal and mono described in Theming). Every token resolves
+  # through Theme::egui_color / Theme::egui_from_rgb; terminal maps most tokens to Reset.
   base:
     background: default
     foreground: white
@@ -11,10 +12,10 @@ colors:
     button: white
     switch: white
     knob: magenta
-    encoder: magenta
     cv-in: cyan
     cv-out: green
     led: red
+    fader-led-bar: yellow
   shift:
     group-1: yellow
     group-2: cyan
@@ -22,39 +23,43 @@ colors:
     group-4: green
   state:
     hover-background: dark-gray
-    hover-modifier: reversed
-    dim-modifier: dim
-    emphasis-modifier: bold
+    hover-emphasis: reversed
+    dim: dim
+    emphasis: bold
+  picker:
+    fav-file: light-yellow
+    fav-dir: light-green
   viewer:
-    sidebar-border: blue
-    content-border: dark-gray
+    key: cyan
+    status-background: dark-gray
     focused-border: yellow
-    circuit-default-frame: blue
-    entry-key: cyan
-    entry-value: white
     occurrence: yellow
     current-occurrence: yellow-on-dark-gray
     boolean-modifier: cyan
     exact-value-modifier: magenta
-    minimap-plain: dark-gray
     minimap-occurrence: yellow
-    minimap-modifier: cyan-or-magenta
-    minimap-viewport: reversed-on-dark-gray
-    status-background: dark-gray
-    shortcut-hint: cyan
+    minimap-modifier-boolean: cyan
+    minimap-modifier-exact: magenta
+    minimap-combined: magenta
   graph:
+    canvas-background: black
+    node-fill: dark-gray
     node-border: white
     node-title: yellow
-    port-input: cyan
-    port-output: green
+    node-highlight: yellow
+    node-dim: gray
+    node-controller: green
+    node-jack-input: cyan
+    node-jack-output: green
     cluster-border: blue
     cluster-title: blue
     edge-control: cyan
     edge-audio: green
     edge-midi: magenta
     edge-unknown: dark-gray
+    edge-register: dark-gray
     edge-error: red
-    node-dim: gray
+    edge-highlight: white
     edge-dim: dark-gray
     edge-diff-added: green
     edge-diff-removed: magenta
@@ -64,47 +69,67 @@ colors:
     edge-latency-3: yellow
     edge-latency-4: red
     edge-latency-legend: blue
-  diff:
-    added: green
-    removed: magenta
+  physical:
+    skeleton-module-outline: white
+  panes:
+    focus-border: yellow
+    unfocused-border: dark-gray
   validation:
     error: red
     warning: yellow
     hint: cyan
     modal-border: red
-    selected-bg: dark-gray
+    selected-background: dark-gray
   optimizer:
-    modal-border: blue
-    selected-bg: dark-gray
+    selected-background: dark-gray
+    weight: yellow
+  diff:
+    added: green
+    removed: magenta
 typography:
-  family: terminal-default
-  size: terminal-default
-  modifiers:
+  family:
+    ui: egui-proportional
+    code: egui-monospace
+  size:
+    ui-title: 12
+    ui-body: 11
+    ui-small: 9
+    code: 13
+    code-small: 11
+  weight:
     emphasis: bold
     de-emphasis: dim
     hover: reversed
+  line-height: 1.3
 spacing:
-  component-width: 16
-  component-height: 3
+  component-cell: 16x3-points
   header-height: 3
-  status-height: 3
+  status-height: 22-points
   main-min-height: 10
-  panel-padding: 1
+  panel-padding: 3
+  pane-gap: 3
   picker-width-ratio: 0.7
   picker-height-ratio: 0.5
   viewer-sidebar-width-ratio: 0.2
-  viewer-sidebar-min-width: 20
-  viewer-status-height: 3
-  graph-node-width: 22
-  graph-node-height: 5
+  viewer-sidebar-min-width: 60
+  viewer-status-height: 22
+  viewer-minimap-width: 26
+  graph-node: 22x5
   graph-cluster-padding: 2
+  modal-width-ratio: 0.6
+  modal-height-ratio: 0.7
+  tiled-split-default: 0.6
+  tiled-split-clamp: 0.3-0.7
+  left-split-default: 0.5
 elevation:
   level: none
 motion:
   duration: none
   easing: none
 radii:
-  radius: none
+  pane: 0
+  modal: 8
+  row: 2
 shadows:
   shadow: none
 ---
@@ -113,50 +138,50 @@ shadows:
 
 ## Look and Feel
 
-A flat, high-contrast window interface with no decoration beyond borders and color: no gradients, no shadows, no animation. Visual hierarchy comes entirely from color and weight (bold/dim), with inverted emphasis on hover.
+A flat, high-contrast native window with no decoration beyond thin borders and color: no gradients, no shadows, no animation. Visual hierarchy comes entirely from color and weight, with inverted emphasis on hover. The window is drawn with winit/egui/wgpu; the dark canvas reads as a single surface.
 
-The interface reads like an instrument panel: each physical DROID controller (P2B8, Faderbank, Notebuttons, …) is a bordered box whose title names the controller, and inside it the hardware components sit in a fixed-width grid that mirrors their physical arrangement on the hardware.
+The interface reads like an instrument panel: each physical DROID controller (P2B8, Faderbank, Notebuttons, and more) is a bordered block whose title names the controller, and inside it the hardware components sit in a fixed grid that mirrors their physical arrangement on the hardware. The physical 1:1 rack view shows the same chain at millimeter scale; the signal-flow graph shows the same circuits as a node network.
 
 ## Design Intent
 
-- **Mirror the hardware.** Components are grouped by physical controller and laid out in physical order (left-to-right, top-to-bottom), so a user who knows the rack can find a control by where it physically lives.
-- **State is always visible.** Every component shows its current state inline: buttons and switches show ON/OFF with filled/outline glyphs, knobs and encoders show a percentage, CV I/O shows direction arrows, LEDs show a filled/outline dot.
-- **Color is semantic, not decorative.** Each component kind has one color (knobs magenta, CV in cyan, CV out green, LEDs red) and each shift group has one color (1 yellow, 2 cyan, 3 magenta, 4 green). The same color means the same thing everywhere it appears.
-- **Shift is a spotlight.** When a shift key (1–4) is held, panels containing that shift group get a bold colored border with a `[SHIFT n]` marker in the title; all other panels dim. The status bar repeats the active shift in its group color. The user always knows what a shift key will affect.
-- **Modifier is a wash.** Selecting a modifier hardware token tints every influenced panel cell (boxed + text) with a background wash in `hash(token)%16` hue; unaffected cells dim. Source `select` spans and graph edges/nodes reuse the same hue; status shows `MOD B1.1 → N cells / M cables` in that hue. Rendering priority is `graph_edge_error` (red) > modifier hue > `CableKind`; shift border + modifier wash coexist.
-- **Interaction is forgiving.** Hover reverses the component's colors; click toggles; scroll adjusts values in small steps (±0.05). Keyboard and mouse are interchangeable — the same component is targeted whether reached by `j`/`k` navigation or by pointing.
+- **Mirror the hardware.** Components are grouped by physical controller and laid out in physical order (left-to-right, top-to-bottom), so a user who knows the rack can find a control by where it physically lives. The physical view is the default map; the panel view is its compact representation.
+- **State is always visible.** Every component shows its current state inline: buttons and switches show ON/OFF with filled/outline glyphs, knobs and encoders show a percentage, faders show a vertical track plus an amber LED bar, CV I/O shows direction.
+- **Color is semantic, not decorative.** Each component kind has one color and each shift group has one color. The same color means the same thing everywhere it appears, and a theme swap recolors every surface at once.
+- **Shift is a spotlight.** When a shift key (1-4) is held, panels containing that shift group get a bold colored border with a `[SHIFT n]` marker; all other panels dim. The status bar repeats the active shift in its group color.
+- **Modifier is a wash.** Selecting a modifier hardware token tints every influenced cell with a wash in `hash(token)%16` hue; unaffected cells dim. The same hue tints source `select` spans and graph edges/nodes. Rendering priority is `graph_edge_error` (red) > modifier hue > cable kind; shift border and modifier wash coexist.
+- **Interaction is forgiving.** Hover highlights the component; click toggles; scroll nudges values in small steps. Keyboard and mouse are interchangeable, and focus follows the clicked pane.
 
 ## Theming
 
-Every color in the interface is a named semantic token resolved from the active theme at render time; rendering code contains no raw color literals. The token set covers component kinds (`button`, `knob`, `cv_in`, `cv_out`, `led`, `fader_led_bar`), shift groups (`shift1`–`shift4`), chrome (`accent`, `muted`, `text`, `status_bg`), viewer keys/hints (`viewer_key`), viewer highlights (`focus_border`, `occurrence_highlight`, `modifier_boolean`, `modifier_exact`), the four minimap signal colors (`minimap_occurrence`, `minimap_modifier_boolean`, `minimap_modifier_exact`, `minimap_combined`), the tiled-layout pane borders (`pane_focus_border` — yellow classic, Reset terminal, white mono — and `pane_unfocused_border` — dark gray classic/mono, Reset terminal; the focused pane's border carries the focus token, all other panes the unfocused token), the picker favourites (`picker_fav_file`/`picker_fav_dir`), the graph surface tokens — node/cluster chrome (`graph_node_border`, `graph_cluster_border`, `graph_node_highlight`/`graph_node_dim`), canvas background (`graph_canvas_bg`), edge highlighting (`graph_edge_highlight`/`graph_edge_dim`), the cable-edge colors (`graph_edge_control`, `graph_edge_audio`, `graph_edge_midi`, `graph_edge_error`) — the structural-diff cable colors (`graph_edge_diff_added` green, `graph_edge_diff_removed` magenta) — the validation severity tokens (`validation_error` red, `validation_warning` yellow, `validation_hint` cyan) plus modal chrome (`validation_modal_border`, `validation_selected_bg`), the optimizer preview row (`optimizer_selected_bg`), and the physical-skeleton outline token (`physical_skeleton_module_outline` — classic white, terminal reset, mono light gray). All tokens resolve through `Theme::egui_color`/`Theme::egui_from_rgb` to `Color32` for the egui surfaces.
+Every color is a named semantic token resolved from the active theme at paint time through `egui_color` and `egui_from_rgb`; rendering code contains no raw literals. The token set covers component kinds (`button`, `switch`, `knob`, `cv_in`, `cv_out`, `led`, `fader_led_bar`), shift groups (`shift1`-`shift4`), chrome (`accent`, `muted`, `text`, `status_bg`), viewer keys and highlights (`viewer_key`, `focus_border`, `occurrence_highlight`, `modifier_boolean`, `modifier_exact`), the four minimap signal colors, tiled pane borders (`pane_focus_border` and `pane_unfocused_border`), picker favourites (`picker_fav_file` and `picker_fav_dir`), the graph surface (node and cluster chrome, canvas background, node fill, edge kind colors, highlight and dim tokens, per-kind node frames for controllers and jacks, the register-edge token, diff colors, and the five-stop latency ramp), the physical skeleton outline, validation severity and modal chrome, and the optimizer selection and weight tokens.
 
 Three built-in themes ship, selected by name (case-insensitive; `-`, `_`, and space are interchangeable separators):
 
 | Theme | Character |
 |---|---|
-| `classic` | The original ANSI palette: kind colors white/magenta/cyan/green/red, shifts yellow/cyan/magenta/green, blue accents, dark-gray chrome |
-| `terminal` | Every token is `Color::Reset`; the egui bridge resolves `Reset` to the neutral bright white, so the theme stays legible on any system |
-| `mono` | Grayscale only; shift tokens are pairwise distinct because shift groups are told apart by color alone during normal patching |
+| `classic` | The original ANSI palette: kind colors white/magenta/cyan/green/red, shifts yellow/cyan/magenta/green, blue accents, dark-gray chrome, black graph canvas |
+| `terminal` | Every token is `Reset` (resolved to neutral bright white) except the few that need contrast: the graph canvas stays black and the diff tokens stay distinct grays so added and removed cables remain tellable |
+| `mono` | Grayscale only; shift tokens are pairwise distinct because shift groups are told apart by color alone |
 
-The choice persists in `$XDG_CONFIG_HOME/droid-tui/config.toml` as `theme = "…"` plus `[labels] layers_enabled = true` and `max_shift_layer = 4` (clamped 1..8, disabled coerces display to layer 1 while preserving 2..N). A missing file silently selects `classic` + label defaults; a malformed file or unknown theme name warns once on stderr at startup and falls back to `classic` (and clamped `[labels]`). An optional `[latency] per_circuit` map (lowercased circuit name → AVG microseconds) overrides the ramsize-proportional per-circuit cost model that drives the latency ramp and the optimizer. Per-patch labels live in `$XDG_CONFIG_HOME/droid-tui/labels.toml` keyed by canonicalized absolute patch path (`hw` per-token per-shift + `circuits` per-`NodeId`). The theme is installed before the window opens, so a session never renders with a half-selected palette.
+The choice persists alongside label and latency settings. A missing file silently selects `classic` with sensible defaults; a malformed file or unknown theme name warns once at startup and falls back to `classic`. Per-patch labels live under the config directory keyed by canonicalized absolute patch path (`hw` per-token per-shift and `circuits` per node). The theme is installed before the window opens, so a session never renders with a half-selected palette.
 
 ## Component Anatomy
 
-Each component occupies a fixed cell of 16 columns × 3 rows. A scale factor is tracked through fixed presets of 75 %, 100 %, 150 % and 200 % (`+`/`-`, wrapping around at both ends) and reported in the status bar as `Scaling: N%`; the 75 % floor keeps module cells at a boxable width. It does not currently resize the rendered cells — components always render at 16×3 and the published hit rects match that fixed size.
+Each component occupies a compact cell. A scale factor cycles through 75 percent, 100 percent, 150 percent, and 200 percent with wrapping, reported as `Scaling: N%`; the 75 percent floor keeps module cells boxable. The physical view rescales cells with zoom; the wrapped panel view keeps a fixed cell geometry and the hit rects match what is drawn.
 
 Components without a parse-time LED association render as two-line text cells:
 
-- **Row 1**: a state glyph followed by the component label (e.g. `● TRIG A`).
-- **Row 2**: the state text (ON/OFF, percentage, CV IN/CV OUT), rendered in muted gray.
+- **Row 1**: a state glyph followed by the component label (for example `● TRIG A`).
+- **Row 2**: the state text (ON/OFF, percentage, CV direction), rendered in muted gray.
 
-**Boxed cells for LED-associated components.** When a component's `.ini` section declares an LED association — a bare `led = L.N` entry, or a numbered circuit param `ledN = L.M` (e.g. `led11 = L1.1`) that shares its numeric suffix with a same-suffix element entry (`button11 = B1.1`, `pot11 = P1.1`, `encoder11 = E1.1`, `switch11 = S1.1`, `fader11 = M1.1`) in the same section, the DROID convention for circuits like `matrixmixer` — the association is parsed into `HwComponent.led` and the component renders as one bordered box filling its full cell instead of a bare text cell. The boxed path covers every control kind that can carry a resolvable LED association: each kind renders its own state inside the box (button/switch ON/OFF glyph, knob/encoder/fader percentage). At cell widths narrower than the box content, the content shrinks to fit inside a complete box or the cell falls back to unboxed two-line rendering — partial border fragments never appear:
+**Boxed cells for LED-associated components.** When a section declares an LED association (a bare `led = L.N` entry or a numbered `ledN = L.M` that shares its numeric suffix with a same-suffix element entry such as `buttonN`, `potN`, `encoderN`, `switchN`, or `faderN`), the component renders as one bordered box filling its full cell:
 
-- The box border uses the owning component's kind color — button/switch white, knob/encoder magenta, CV in cyan, CV out green, LED red.
-- The element symbol + label live in the box's top title row, drawn inside the border row; the single interior row holds the element state text plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED component's live state — one state, not a second textual LED state.
-- Hover applies the same reversed/dark-gray emphasis to box content and border that text cells use.
-- Components whose LED id does not resolve to an existing LED component fall back to the unlit glyph/state.
+- The box border uses the owning component's kind color.
+- The element symbol and label live in the box's top title row; the single interior row holds the element state plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED's live state.
+- Hover applies the same emphasis to box content and border that text cells use.
+- Components whose LED id does not resolve fall back to the unlit glyph.
 - LEDs referenced this way are never rendered as standalone grid cells; only unreferenced LEDs appear on their own.
-- Over-long labels truncate with a trailing ellipsis (`…`) while cell geometry and hit rects stay unchanged.
+- Over-long labels truncate with an ellipsis while cell geometry and hit rects stay unchanged.
 
 Glyphs by kind:
 
@@ -166,115 +191,114 @@ Glyphs by kind:
 | Switch | `▣` | `□` |
 | LED | `◉` | `○` |
 | Knob / Encoder | `◉` + percentage | `◉` + `---` |
+| Fader | vertical track + amber bar | track at zero |
 | CV in | `→` | `→` |
 | CV out | `←` | `←` |
 
 ## Panels
 
-- Each panel is a bordered block titled with the controller name (e.g. ` P2B8 `).
-- A panel whose components come from more than one circuit instance is subdivided into per-instance module sub-blocks, each a bordered block titled with the controller name and instance number (e.g. ` P2B8 1 `, ` P2B8 2 `), stacked vertically; within a module, components flow left-to-right and wrap to additional rows at the panel's column width. A single-instance panel renders as one flat grid, and CV I/O is never subdivided.
+- Each panel is a bordered block titled with the controller name (for example `P2B8`).
+- A panel whose components come from more than one circuit instance is subdivided into per-instance module sub-blocks, each a bordered block titled with the controller name and instance number, stacked vertically; within a module, components flow left-to-right and wrap. A single-instance panel renders as one flat grid, and CV I/O is never subdivided.
 - Panel layout follows the display orientation: panels stack vertically in portrait and arrange horizontally in landscape.
-- Panel borders are dark gray by default.
-- Same-kind component rows keep a uniform vertical rhythm; boxed (height 3) and unboxed (height 2) cells do not create irregular gaps between rows.
-- With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim to dark gray.
-- With a modifier active (e.g. `B1.1`→`_TRIG`): influenced cells (boxed LED-cells and text cells inside modules) render with a background wash in `hash(token)%16` modifier hue; unaffected cells dim slightly. Rendering priority is `graph_edge_error` (red) > modifier hue > `CableKind`. Modifier background wash is orthogonal to shift borders — both can coexist (yellow shift border + modifier hue cell bg, e.g. `SHIFT 1` + `B1.1`). Interaction: `Mouse Down` without mods = momentary preview (cleared on `Up`/`Leave`), `Ctrl+Shift+Click` (alias `Ctrl+Click`) = toggle latched, `m` = keyboard alias for hovered component, `Esc` clears shift + modifier; single-var today, additive `MOD B1.1+B1.2 → N cells / M cables` is aspirational.
-- With labels: HW panel cells show `display_label(token, shift)` (`store[layer]→store[1]→preamble[1]→derived`, `effective_shift` clamped 1..8, `layers_enabled=false` coerces to layer 1); source section headers and graph node titles show `circuit_label` override in both FULL and FILTERED panes when present. The centered single-field edit overlay (1-line input + hint) reuses the same `modifier_hue` for its hint/status `B3.17 / Group<N> → N ckts / M cables` (shift-blind structural `influence_subtree`, `graph_edge_error` red > modifier hue), responsive per width (`graph_edge_error` red precedence kept); `e` enters, `1..N` cycles Group layer preserving per-layer drafts, `Enter` saves (atomic `labels.toml` rewrite), `Esc` cancels.
+- Panel borders are dark gray by default; the focused pane uses the focus-border token at a heavier stroke.
+- With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim.
+- With a modifier active: influenced cells render with a background wash in the modifier hue; unaffected cells dim slightly. Modifier wash is orthogonal to shift borders, so both can coexist.
+- With labels: hardware panel cells show the resolved display label; source headers and graph node titles show the circuit label override when present. The centered single-field edit overlay reuses the same modifier hue for its hint.
 
 ## Physical View
 
-- The main view is a **physical 1:1 layout**: a millimeter-accurate grid model of the rack (case rows, fold bars, mount sections, module faceplates) mapped to screen points with aspect-compensated factors (columns/mm ≠ rows/mm so physical proportions survive the non-square cell aspect).
-- **Skeleton reference mode**: `s` swaps the full render for a pure geometry outline — case border, fold-bar dividers labeled with their row, mount regions, module frames, and element-cell markers (`·` elements, `◀`/`▶` CV in/out ports) — in the `physical_skeleton_*` tokens. It is a presentation of the same layout, not a separate surface.
-- **Zoom**: `+`/`-` cycle the presets 75 %, 100 %, 150 %, 200 % with wrap-around (floor 75 % keeps cells boxable); the status bar reports `Scaling: X%` (or the rack-aware physical hint). Zoom actually rescales the physical cells, unlike the legacy fixed 16×3 wrapped-panel cells.
-- **Pan**: arrow keys pan the rack toward the pressed direction when it overflows the main area, and Up/Down fall back to panel navigation when it fits; `j`/`k` always navigate. The mouse wheel pans on overflow — a wheel over a knob/fader cell still adjusts its value when no overflow forces panning.
-- **Rack definition**: `config.toml` gains `[physical]` view defaults (`show_skeleton`, `zoom`, `offset_x`/`offset_y`) and `[physical.rack]` (`rows = [{he, hp, label?}]`, `top_mount_te`, `side_mount_te`, `assign = { "P2B8 1" = 1 }`); absent sections keep the out-of-box single-row case wide enough for the whole chain.
-- **Element state rendering**: each element renders its live state on its physical-view cell — buttons/switches show their toggle glyph, knobs/encoders their percentage, faders a vertical track proportional to value with an amber LED bar mirroring position (`fader_led_bar` token, distinct from the generic LED red), CV I/O their direction — mirroring the panel view's state rendering. Physical-view cells follow a single compact-cell contract: the state glyph always draws, the label shares the first row when the cell is wide enough (ellipsized), and the state text takes the second row when the cell is tall enough; the boxed-LED presentation path (gated on width ≥ 5 and height ≥ 3) is removed — LED-associated elements draw the compact cell with the LED as a co-located cell. Adjoined element-cell `component_rects` are clamped at draw time so two distinct cells never publish overlapping rects at any zoom preset; a shared rounding column resolves deterministically (first cell wins, the neighbor clamps out).
-- **Border abutment + switch placement**: adjacent module borders abut exactly at every zoom preset (edge-rounded mm→screen spans share boundary values); switch cells place per the controller's geometry data and never collapse onto a neighboring control's cell (e.g. a knob's) when geometry lacks a matching switch cell.
+- The main view is a physical 1:1 layout: a millimeter-accurate grid model of the rack (case rows, fold bars, mount sections, module faceplates) mapped to screen points with aspect-compensated factors so physical proportions survive the non-square aspect.
+- **Skeleton reference mode**: `s` swaps the full render for a pure geometry outline (case border, fold-bar dividers, mount regions, module frames, and element-cell markers) in the skeleton tokens. It is a presentation of the same layout, not a separate surface.
+- **Zoom**: `+` and `-` cycle the presets 75 percent, 100 percent, 150 percent, and 200 percent with wrap-around; the status bar reports `Scaling: X%`. Zoom rescales the physical cells.
+- **Pan**: arrow keys pan the rack when it overflows the main area and fall back to panel navigation when it fits; the mouse wheel pans on overflow while a wheel over a knob or fader still adjusts its value when no overflow forces panning.
+- **Rack definition**: the rack is an ordered list of rows plus optional mount sections with auto-pack and per-module row overrides; absent config keeps a single-row case wide enough for the whole chain.
+- **Element state rendering**: each element renders its live state on its physical-view cell (buttons and switches with a glyph, knobs and encoders with a percentage, faders with a vertical track and an amber LED bar, CV I/O with direction). Adjoined element-cell hit rects are clamped at draw time so distinct cells never publish overlapping rects at any zoom preset.
+- **Border abutment and switch placement**: adjacent module borders abut exactly at every zoom preset; switch cells place per the controller's geometry data and never collapse onto a neighboring control's cell when geometry lacks a matching switch cell.
 
 ## Status Bar
 
-A dark-gray band at the bottom, bordered, left-aligned. It shows the current status message in white, appends ` | SHIFT n ACTIVE` in the group color, bold, when a shift is active, appends ` | MOD B1.1 → N cells / M cables` in the modifier hue (bold) when a modifier is active (both can coexist), and permanently displays the current display settings as `Scale: <factor> | Orientation: <Portrait|Landscape>`. Mouse `Down` = momentary modifier preview, `Ctrl+Shift+Click` (or `Ctrl+Click`) = toggle latched, `m` = keyboard alias, `Esc` clears shift + modifier.
+A dark-gray band at the bottom, bordered and left-aligned. It shows the current status message, appends `| SHIFT n ACTIVE` in the group color when a shift is active, appends `| MOD B1.1 → N cells / M cables` in the modifier hue when a modifier is active (both can coexist), and permanently displays the current display settings as `Scale` and `Orientation`. It also surfaces transient hints such as cable tension and latency summaries.
 
 ## File Picker
 
-An overlay centered in the window, roughly 70% of the width and 50% of the height, with a blue-bordered block titled ` File Picker `. Entries are listed with a `▶` marker on the selected row. The picker is a functional browser: directories and `.ini` files are selectable, other files are not. When not at the filesystem root, the parent-directory entry is the first entry, rendered as `..`, and Enter on it navigates up without closing the picker; at the root no `..` entry appears. Entries sort directories first, then `.ini` files.
+An overlay centered in the window, roughly 70 percent of the width and 50 percent of the height, with a blue-bordered block titled `File Picker`. Entries are listed with a `▶` marker on the selected row. Directories and `.ini` files are selectable, other files are not. When not at the filesystem root, the parent-directory entry is the first entry rendered as `..`; at the root no `..` entry appears. Entries sort directories first, then `.ini` files. Favourited files and directories render in their distinct favourite tokens so the pinned section tells kinds apart at a glance.
 
 ## Source Viewer
 
-Opened with `g` then `v`, the source viewer is a slot in the tiled right column: the header and status bands remain, the full-height left pane keeps the hardware panels, and the source pane occupies one horizontal slot at the configured split ratio (60/40 default favoring panels). An open file picker still has absolute precedence and renders over the tiling.
+Opened with `g` then `v`, the source viewer is a slot in the tiled right column: the header and status bands remain, the full-height left pane keeps the hardware panels, and the source pane occupies one horizontal slot at the configured split ratio (60/40 favoring panels by default). An open file picker still has absolute precedence.
 
-- **Adjustable split**: while any view is open in the right column, `[` narrows the right column and `]` widens it in ±10 % steps, clamped to 30–70 % of the main band (default 60/40 favoring panels). The ratio persists across patch loads within a session.
-
-- **Panels pane**: a bordered ` Panels ` block containing the normal hardware layout. Its border is bold yellow when panel focus is active; otherwise it is dark gray. Panels stay interactive while the viewer is open: toggles, shift groups, scale, and orientation work from either focus.
-- **Source pane**: internally split into a circuit sidebar, scrolling source content, and an optional minimap. The sidebar is ~1/5 of the source-pane width, with a 20-column minimum while retaining at least 20 columns for content. It is a blue-bordered ` Circuits ` block listing every `[section]` in parse order; repeated names are disambiguated as `copy`, `copy (1)`, `copy (2)`. The selected entry uses reversed video; other entries are white.
+- **Adjustable split**: while any view is open in the right column, `[` narrows the right column and `]` widens it in ten percent steps, clamped to 30 to 70 percent. The ratio persists across patch loads within a session.
+- **Panels pane**: a bordered `Panels` block containing the normal hardware layout. Its border is bold yellow when panel focus is active; otherwise it is dark gray.
+- **Source pane**: internally split into a circuit sidebar, scrolling source content, and an optional minimap. The sidebar is about one fifth of the source-pane width with a minimum while retaining room for content. It is a blue-bordered `Circuits` block listing every section in parse order; repeated names are disambiguated as `copy`, `copy (1)`, `copy (2)`. The selected entry uses a muted backdrop; other entries are plain.
 - **Focus emphasis**: the source content border and title are bold yellow while source focus is active, and dark gray while panel focus is active. `Tab` switches focus; `Esc` closes the viewer while preserving selection and source position.
-- **Raw mode** (default): the content pane shows retained verbatim `.ini` lines, including comments and blank lines, with vertical scroll. The title is ` Source [raw] `. `t` toggles to prettified mode without closing the viewer.
-- **Prettified mode**: each circuit is rendered as a small ASCII box — a `┌─ name ─┐` cap with a bold, circuit-colored name, one `│ key = value │` line per setting with cyan keys and white values, a `└────┘` base, and a blank line. Circuit frame colors reuse the component palette: buttons/switches/notebuttons white, pots/encoders/faderbank magenta, CV in cyan, CV out green, LEDs red, and unknown circuits blue.
-- **Selection highlights**: selected-token occurrences are yellow and bold; the current occurrence is yellow, bold, and reversed on dark gray. Affected boolean `select`/transitive modifier spans are cyan, bold, and underlined. Affected exact-value (`selectat`) spans are magenta, bold, and underlined. In prettified mode, affected values use the same cyan/magenta modifier colors; token references are yellow, bold, and reversed. Clearing selection clears these highlights.
-- **Minimap**: when the loaded patch and window are wide enough, a ` Map ` column summarizes the full raw file. Plain lines use dark-gray `·`; occurrence lines use yellow `█`; modifier lines use cyan `▓` for boolean or magenta `▓` for exact-value relationships (combined occurrence/modifier lines are magenta `█`). The visible source viewport is shown as a reversed dark-gray indicator and moves proportionally with source scroll. The paint routine publishes the minimap rectangle for click-to-scroll hit testing. It is hidden when the window is too narrow, the source pane is below its minimum width, or keeping it would reduce readable source content below the minimum.
-- **Viewer status bar** (bottom, 3 rows): a dark-gray bordered band reads bold-white `Source Viewer | ` followed by cyan shortcut tokens — `ESC` close, `j/k` scroll, `Up/Down` occurrence navigation, `Home/End` first/last occurrence, `t` mode toggle, `Tab` focus, and `[ / ]` split adjustment. Transient messages (e.g. `Panels/Source split: 50%/50%`) render as trailing spans *after* the hint list so the hints always stay fully visible. (The shared tiled status bar consolidates hints; the viewer-specific status band is retained inside the source slot.)
-- **Empty states**: centered muted `No patch loaded` or `No circuits in patch` appears inside the source content border; the sidebar remains an empty bordered block.
-- **Live interaction**: the source pane never toggles components directly, but the main window stays live while it is open: Enter/Space/click toggle+select components (selection re-jumps the source view), shift/scale/orientation keys work from either focus, and mouse clicks set focus to the clicked pane (component → Panels, source-pane area → Source). Only conflicting navigation keys (`j`/`k`, arrows) follow `Tab` focus.
+- **Raw mode** (default): the content pane shows verbatim `.ini` lines, including comments and blank lines, with vertical scroll. The title is `Source [raw]`. `t` toggles to prettified mode without closing the viewer.
+- **Prettified mode**: each circuit is rendered as a small box with a cap showing the circuit name in its kind color, one `key = value` line per setting with cyan keys and white values, and a base. Circuit frame colors reuse the component palette.
+- **Selection highlights**: selected-token occurrences are yellow and bold; the current occurrence is yellow, bold, and reversed on dark gray. Boolean `select` spans are cyan, bold, and underlined; exact-value (`selectat`) spans are magenta, bold, and underlined. In prettified mode the same colors apply to values and token references.
+- **Minimap**: when the loaded patch and window are wide enough, a `Map` column summarizes the full file. Plain lines use a muted dot; occurrence lines use a solid block in yellow; modifier lines use a shaded block in cyan for boolean or magenta for exact-value (combined lines are solid magenta). The visible viewport is shown as a reversed indicator and moves with source scroll. It hides when the window is too narrow.
+- **Viewer status bar**: a dark-gray band with shortcut hints (`ESC` close, `j/k` scroll, `Up/Down` occurrence navigation, `Home/End` jumps, `t` toggle, `Tab` focus, `[ / ]` split) followed by any transient message so hints stay visible.
+- **Empty states**: centered muted `No patch loaded` or `No circuits in patch` appears inside the source content border.
+- **Live interaction**: the main window stays live while the viewer is open: toggles, shift groups, scale, and orientation work from either focus, and mouse clicks set focus to the clicked pane. Only conflicting navigation keys follow `Tab` focus.
 
 ## Signal-Flow Graph
 
-Opened with `g` then `g` (mirroring the source viewer's `g v`), the signal-flow graph is a slot in the tiled right column: the header and status bands remain, the full-height left pane keeps the hardware panels, and the graph occupies its right-column slot for the patch's signal topology — circuits as nodes, virtual `_cable` connections as directed edges, and comment-banner groups as cluster containers. An open file picker still has absolute precedence. Below a narrow window width the right column collapses and the status bar reports "+N views hidden".
+Opened with `g` then `g`, the signal-flow graph is a slot in the tiled right column: the header and status bands remain, the full-height left pane keeps the hardware panels, and the graph occupies its right-column slot for the patch's signal topology (circuits as nodes, virtual `_cable` connections as directed edges, and comment-banner groups as cluster containers). Below a narrow window width the right column collapses and the status bar reports how many views are hidden.
 
 - **Empty state**: with no patch loaded the surface shows the centered muted prompt `No patch loaded. Press 'l' to load.`
-- **Clusters**: each `# ---- Name ----` banner group is a titled, plain-bordered container (blue border and title) drawn as the padded union of its member nodes' rectangles, so edges run behind the node frames. The renderer publishes each cluster rect for hit testing. Members cohere toward the cluster centroid via a weak internal cohesion force (design D4) so the group reads as a content container, not a layout stripe.
-- **Edges**: cables render as egui polylines between the ports, with the port areas covered by the node frames for a clean join. An edge's color is the cable kind of the producing circuit (its declared `cable_kind` when a plugin circuit declares one, else name-substring inference) — **control** (circuits named clock/gate/trigger/pulsar/div) cyan, **audio** (the default) green, **midi** (midi/note/seq/pitch) magenta, and **unknown** dark gray when no edge produces the cable — overridden by the red `graph_edge_error` token when a topology-validation finding (dangling sink, `n → 1`, or a rack-wiring outlier) references the cable. Register edges (a circuit reading or writing a hardware register, directed by the catalog: output/`led` params write, inputs read, `PBESLR` letters resolving to declared controllers and unmatched letters to master jacks) render with the `graph_edge_register` dark-gray token, below the topology-error/diff/latency precedence like the cable-kind colors. Under an active select state a register edge whose circuit endpoint is classified `NotSelected` survives only when it reaches a controller node (the shared cross-controller pair is kept); the rest are dropped from the build. When the structural diff is shown the colors shift again: added or changed cables draw in the `graph_edge_diff_added` green and removed cables in the `graph_edge_diff_removed` magenta (error red still wins over diff). Cable latency coloring (on by default, `c` toggles on the surface) replaces the kind color for non-error, non-diff cables with a blue→red ramp of five stops: `ramp[round(L/(N×AVG) × (stops−1))]`, where `L` is the edge's forward-loop latency in loop units and `AVG` the per-circuit ramsize-proportional mean — back-edge cables (source after sink) always land on the hottest stop. The status bar appends `latency avg X / max Y (1 loop ≈ 190µs) | N back edge(s)` and hovering a back-edge sink shows `reads _X 1 loop behind`. Edges incident to a circuit instance with processing disabled render with the `graph_edge_dim` token (`dim` modifier), overriding the cable-kind, diff, and modifier-hue colors but preserving the red error highlight.
-- **Wiring-outlier detection**: a learned decision table (`geometry::WiringOutlierScorer`, embedded artifact `tools/outlier_artifact.txt` fitted by `tools/fit_outlier_model.py` on `corpus/features.csv`) classifies direct hardware bindings (zero cable hops) as implausible from `BindingFeatures` — euclidean/manhattan distance, controller/rack flags, source/sink kind — with the invariant guards (adjacent, co-located `L→B`, via-cable) applied at the call site before the scorer and a preserved threshold fallback (`euclidean > 8.0 && cable_hops == 0`) on a table miss (designs D1/D5). A second opinion (`patch::InfluenceStats`, embedded `tools/influence_stats.txt`) z-scores each hardware token's `influence_subtree` size against per-kind corpus mean/std and flags tokens beyond the 3.0 band. Each finding is a `Warning` topology finding carrying a synthetic cable name (`A->B`, or the token's first root var for the influence opinion) so it lights the affected edge in red via the reuse of `graph_edge_error`. This is validation/hygiene only — findings never block building or viewing the graph, and neither channel gates patch loading.
-- **Nodes**: ComfyUI-style rounded frames (`BorderType::Rounded`), 22×5 cells, titled with the circuit name (or `circuit_label` override when a per-`NodeId` label exists — applies in both FULL and FILTERED panes); repeated names append the instance index (`copy`, `copy (1)`, `copy (2)`). Circuit nodes use the white border and yellow title; controller nodes (controller-declaring sections, numbered by chain order) render in `graph_node_controller` green with a `P2B8 #1`-style title; input-jack and output-jack nodes (master registers, one node per token shared across assignments) render in `graph_node_jack_input` cyan / `graph_node_jack_output` green with the register token (`I1`, `O3`) as title. A left `◉` input port marks nodes that consume cables; a right `●` output port marks producers (presence markers, not per-parameter pairing). A node whose circuit instance has processing disabled renders with the `graph_node_dim` token (`dim` modifier), overriding the modifier hue; hover styling stays visible on dimmed nodes. A circuit section classified `NotSelected` under an active select state (`g s`) renders with the same `graph_node_dim` border/title treatment; sections with no select-param match (`Unknown`) are always kept at full brightness.
-- **Interaction**: while the graph pane is focused it owns mouse input inside its slot. Left-dragging a node repositions it; on release the layout locally re-settles around the node (damped, bounded iteration budget) while distant nodes stay anchored, and the node auto-pins at the dropped position so the manual placement survives (design D7). `x` toggles processing for the hovered circuit instance — the graph rebuilds, influence recomputes (dead-ending at disabled sinks), and the status bar reports `Processing disabled/enabled: <name> <instance>`; with no node hovered it is a silent no-op. `p` toggles pin/unpin on the hovered graph node — a pinned node is a fixed solver anchor the solver never moves; the tip (first circuit in `.ini` order, `graph.nodes[0]`) is pinned by default; unpinning releases it to re-flow. Status reports `Pinned/Unpinned: <name> <instance>`. Processing pause stays on `p` on every other surface. `+`/`-` cycle the persistent graph-camera zoom presets when the graph pane is focused (`Shift++`/`Shift+-` zoom the graph regardless of focus) and arrow keys pan the camera on overflow (mirroring the physical-view model). `Alt+[`/`Alt+]` lower/raise cable tension — the solver's spring stiffness (`layout::SPRING_K`, default 0.15, stepped by 0.05 within [0.05, 0.5]) — and re-solve the layout live; the status bar reports `Cable tension: <value>`, and determinism holds per value (same patch + same machine + same tension → same layout). `g s` opens the select-state overlay (see Select State below), and `f` toggles the dependency filter on the hovered node (falling back to the shared circuit selection; a status hint no-ops when neither exists) — the graph rebuilds to that node's upstream-dependency subgraph, solved as its own layout with a fresh camera fit; `Esc` clears the filter before the tiled `Esc` would close the slot, and an active filter survives later rebuilds unless its root node disappears. `Esc` closes the graph slot and the right column reflows; `q`/Ctrl+C still quit and `l` still opens the picker. The status bar continues to show the scale/orientation/shift state.
-- **Kitty-graphics image path**: the graph surface renders as an egui canvas inside its right-column tile (or the `g w` desktop window). Nodes, directed cable edges, cluster containers, and labels are painted from the backend-neutral `SceneSpec` (src/graph_render.rs) under the shared `GraphCamera` (`pixel = world × zoom − pan`); `graph_node_rects` are derived from the same camera so pointer hit-testing stays aligned. Every node/edge/label color derives from the active theme's semantic tokens via `Theme::egui_color`/`Theme::egui_from_rgb` (no hardcoded RGB) with the existing precedence (error red > diff > latency ramp > cable kind) unchanged.
-- **GPU graph window**: `g w` opens the graph in a winit/egui/wgpu desktop window (or `g g` opens the window instead of the tile when `[gui] graph_window = true`). The window paints the same `SceneSpec` under the shared `GraphCamera` (one spec pixel = one egui point), so node positions, edges, and colors match the embedded tile; every interaction maps onto the same `App` mutations — drag → `local_resettle` + `NodeMoved`, hover, `x` disable, `p` pin, `e` label overlay. Canvas polish: middle-drag pan + cursor-anchored wheel zoom (deltas applied to the shared camera), marquee selection, a corner minimap with viewport indicator when the graph overflows, and a hover tooltip showing the circuit name + latency readout. Clicking a node sets `App.selected_circuit` (shared with the tile): the source viewer jumps to the section, the panels highlight the associated hardware, and the tile emphasizes the same node. All window colors — scene pixels and egui chrome alike — derive from theme tokens via `Theme::egui_color`, so switching the theme re-themes window and tile together; no hardcoded RGB in the window. The window never opens under `cargo test`.
+- **Clusters**: each banner group is a titled, plain-bordered container drawn as the padded union of its member nodes, so edges run behind the node frames. Members cohere toward the cluster centroid via a weak internal cohesion force so the group reads as a content container.
+- **Edges**: cables render as polylines between ports, with the port areas covered by the node frames for a clean join. An edge's color is the cable kind of the producing circuit (declared `cable_kind` when present, otherwise name-substring inference): control in cyan, audio in green, midi in magenta, and unknown in dark gray, overridden by the red error token when a topology finding references the cable. Register edges (a circuit reading or writing a hardware register, directed by the catalog) render in the muted register token. Under an active select state, register edges whose circuit endpoint is classified `NotSelected` survive only when they reach a controller node. When the structural diff is shown, added or changed cables draw in the diff-added green and removed cables in the diff-removed magenta; error red still wins. Cable latency coloring (on by default, `c` toggles) replaces the kind color for non-error, non-diff cables with a blue to red ramp of five stops; back-edge cables always land on the hottest stop. Hovering a back-edge sink shows `reads _X 1 loop behind`.
+- **Wiring-outlier detection**: a learned decision table classifies direct hardware bindings as implausible from binding features (distance, controller and rack flags, source and sink kind) with invariant guards applied at the call site and a preserved threshold fallback on a table miss. A second opinion z-scores each hardware token's influence size against per-kind corpus statistics and flags tokens beyond the band. Each finding is a warning topology finding so it lights the affected edge in red. Findings never block building or viewing the graph.
+- **Nodes**: rounded frames titled with the circuit name (or the circuit label override when present, in both full and filtered panes); repeated names append the instance index. Circuit nodes use the white border and yellow title; controller nodes render in the controller token with a `P2B8 #1`-style title; input-jack and output-jack nodes render in their jack tokens with the register token as title. A left input port marks consumers and a right output port marks producers. A node whose circuit instance has processing disabled or whose section is classified `NotSelected` under an active select state renders dimmed; hover styling stays visible on dimmed nodes.
+- **Interaction**: while the graph pane is focused it owns mouse input inside its slot. Dragging a node repositions it; on release the layout locally re-settles around the node while distant nodes stay anchored, and the node auto-pins at the dropped position so the placement survives. `x` toggles processing for the hovered circuit instance; `p` toggles pin and unpin on the hovered node (the first circuit in file order is pinned by default). `+` and `-` cycle the persistent camera zoom presets and arrow keys pan the camera on overflow. `Alt+[` and `Alt+]` lower and raise cable tension and re-solve the layout live; the status bar reports the value and determinism holds per tension value. `g s` opens the select-state overlay, `f` toggles the dependency filter on the hovered node (falling back to the shared circuit selection), and `Esc` clears the filter before it would close the slot. `Esc` closes the graph slot.
+- **Canvas and window**: the graph renders as an egui canvas inside its right-column tile (or the desktop window). Nodes, edges, cluster containers, and labels are painted from the shared scene description under the shared camera; hit rects are derived from the same camera so pointer handling stays aligned. Every color derives from the active theme's semantic tokens with the existing precedence (error red > diff > latency ramp > cable kind) unchanged.
+- **Desktop graph window**: `g w` opens the graph in a desktop window (or `g g` opens the window instead of the tile when configured). The window paints the same scene under the shared camera, so node positions, edges, and colors match the embedded tile; every interaction maps onto the same mutations. Canvas polish includes middle-drag pan, cursor-anchored wheel zoom, marquee selection, a corner minimap with viewport indicator when the graph overflows, and a hover tooltip showing the circuit name and latency. Clicking a node sets the shared circuit selection so the source viewer jumps and the panels highlight the same node. All window colors derive from theme tokens; switching the theme re-themes window and tile together. The window never opens under tests.
 
 ## Select State
 
-`g s` opens a centered overlay (below the picker/prefix priority) listing the patch's discovered select signals — `Register` signals from `select`-style section params and `Cable` signals (`_`-prefixed) from the cable index — each with its inferred candidate values (`parse_candidate_value`: a trailing `V` suffix scales by ÷10, otherwise a plain `f64`, evaluated left-to-right with no operator precedence via the `expression.rs` evaluator; `1V` = 0.1, division by zero yields 0.0). The overlay mirrors the validation modal's geometry: centered, ≈60% × 70%, clamped, rounded border in the `validation_modal_border` token, titled ` Select state (N) `, with the bottom hint ` j/k:navigate [/]:cycle Esc:clear `.
+`g s` opens a centered overlay listing the patch's discovered select signals (register signals from `select`-style params and cable signals from the cable index) each with its inferred candidate values. The overlay is centered, about 60 percent by 70 percent, clamped and rounded, with a border in the validation modal border token, titled `Select state (N)`, with the hint `j/k:navigate [/]:cycle Esc:clear`.
 
-- **Cycle**: `j`/`k` move between signals; `[`/`]` (and Enter) cycle the selected signal's candidate value, writing `App.select_state.state` and rebuilding the graph through `GraphOptions { state, hide_unselected }` so sections reclassify live. `Esc` closes the menu and clears the state, restoring the default graph.
-- **Classification**: every section is labeled `Selected` (its select param matches the assumed value), `NotSelected` (the assumed value excludes it), or `Unknown` (no select-param match, always kept). Selected sections keep their full edges; NotSelected sections dim via the `graph_node_dim` token and lose their controller register edges (a register edge whose circuit endpoint is NotSelected survives only when it reaches a controller node — the shared cross-controller pair is kept). An optional `hide_unselected` mode in `GraphOptions` (off in the menu) additionally drops NotSelected circuit nodes and their controller register edges.
-- **Status**: each cycle updates the status bar to `Select state: N selected / M unselected / K unknown`. The state is deliberately in-memory per session — no persistence, no `.ini` mutation.
+- **Cycle**: `j` and `k` move between signals; `[`, `]`, and `Enter` cycle the selected signal's candidate value, writing the assumed state and rebuilding the graph so sections reclassify live. `Esc` closes the menu and clears the state.
+- **Classification**: every section is labeled `Selected` (its select param matches the assumed value), `NotSelected` (the assumed value excludes it), or `Unknown` (no select-param match, always kept). Selected sections keep their full edges; `NotSelected` sections dim and lose their controller register edges except the shared cross-controller pair. An optional `hide_unselected` mode additionally drops `NotSelected` circuit nodes.
+- **Status**: each cycle updates the status bar to `Select state: N selected / M unselected / K unknown`. The state is in-memory per session with no persistence and no `.ini` mutation.
 
 ## Patch Diff
 
-Opened with `g` then `d`, the patch diff loads a second patch (the B patch) through the file picker and highlights the structural difference from the currently-loaded patch (A). It is a read-only overlay on top of the graph and source surfaces — it never mutates the patch.
+Opened with `g` then `d`, the patch diff loads a second patch through the file picker and highlights the structural difference from the currently loaded patch. It is a read-only overlay on top of the graph and source surfaces.
 
-- **Trigger**: `g d` opens the picker in diff mode; picking a B patch computes `diff_patches(A, B)` (added/removed/changed cables, added/removed/changed circuit nodes) and emits `Event::DiffComputed`. `d` toggles the overlay on/off; `Esc` clears a component-scoped filter first, then hides the overlay.
-- **Graph surface**: with the diff shown, edges whose cable was **added** or **changed** between A and B render in the `graph_edge_diff_added` green and **removed** cables in the `graph_edge_diff_removed` magenta. Topology-error red still takes precedence over the diff colors, and the diff colors take precedence over the cable-kind inference. A scoped diff (`diff_scope`, e.g. set to a single component token) filters the report so the graph highlights and the status hint's cable count match.
-- **Nodes**: added or removed circuit nodes are distinguished on the surface alongside the edge highlights.
+- **Trigger**: `g d` opens the picker in diff mode; picking a second patch computes the added, removed, and changed cables and nodes. `d` toggles the overlay; `Esc` clears a component-scoped filter first, then hides the overlay.
+- **Graph surface**: with the diff shown, edges whose cable was added or changed render in the diff-added token and removed cables in the diff-removed token. Topology-error red still takes precedence over the diff colors, and the diff colors take precedence over the cable-kind inference. A scoped diff filters the report so the graph highlights and the status hint's cable count match.
+- **Nodes**: added or removed circuit nodes are distinguished alongside the edge highlights.
 - **Status**: a trailing hint reports the diff scope and cable count in the status bar.
 
 ## Patch Validation
 
-Loading a patch runs a schema-driven validation pass (`schema.rs` loads the vendored DROID circuit schema; `validation.rs` compares the parsed patch against it). Findings are sorted by (line, column) and each carries a severity — **error** (blocks clean patching), **warning**, or **hint** — plus a diagnostic code and message with its source span.
+Loading a patch runs a schema-driven validation pass. Findings are sorted by line and column and each carries a severity (error, warning, or hint) plus a diagnostic code and message with its source span.
 
-- **Modal**: when the load produces errors or warnings, a centered modal opens (≈60% width × 70% height, clamped, rounded border in `validation_modal_border`, plain-titled ` Validation (N) xE yW zH `). Each row reads `L{line}:{col} [E|W|H] [code] message` — the severity bracket in `validation_error` red / `validation_warning` yellow / `validation_hint` cyan (bold), the location in `text`, the code in `muted`, the message in `text`; the selected row is highlighted via `validation_selected_bg` + bold and non-selected rows dim. A fixed bottom hint lists the keys: `e` toggle, `j/k` navigate, `Enter` jump, `Esc` close.
-- **Responsive**: in narrow windows the modal shrinks to near full-main-width, mirroring the picker/overlay responsiveness.
-- **Scope**: validation findings never block building or viewing the graph; they are informational feedback shown on load (the same `graph_edge_error` red lights offending cables in the graph).
+- **Modal**: when the load produces findings, a centered modal opens (about 60 percent by 70 percent, clamped, rounded border in the validation modal border token, titled with the counts). Each row reads `L{line}:{col} [E|W|H] [code] message` with the severity bracket in the error, warning, or hint color, the location in the text color, the code in muted, and the message in the text color; the selected row is highlighted with the selected-background token and non-selected rows dim. A fixed bottom hint lists `e` toggle, `j/k` navigate, `Enter` jump, `Esc` close.
+- **Responsive**: in narrow windows the modal shrinks to near full width, mirroring the picker and overlay responsiveness.
+- **Scope**: validation findings never block building or viewing the graph; they are informational feedback shown on load, and the same error red lights offending cables in the graph.
 
 ## Circuit Plugins
 
-Users can extend the circuit schema without rebuilding by dropping TOML plugin files into `$XDG_CONFIG_HOME/droid-tui/plugins/` (or a `[plugins] dir` override in `config.toml`; `[plugins] enabled = false` disables loading). Each plugin file contributes one or more `[[circuit]]` tables that merge **over** the embedded schema — a plugin circuit wins on a name collision (warn once per file), and a file that is malformed or missing the required `ramsize` is skipped with one warning (never aborts startup).
+Users can extend the circuit schema without rebuilding by dropping TOML plugin files into the plugins directory (or a configured override; loading can be disabled). Each plugin file contributes one or more `[[circuit]]` tables that merge over the embedded schema: a plugin circuit wins on a name collision with a single warning per file, and a file that is malformed or missing the required `ramsize` is skipped with one warning and never aborts startup.
 
-- **Format**: a circuit table declares `name` (case-insensitive, matching the embedded key convention), `category`, the required `ramsize` (bytes), optional `title`/`description`, optional rendering metadata `cable_kind` / `color`, and `inputs`/`outputs` parameter arrays (`#[serde(default)]` on both). Each parameter carries `name`, `short`, `type`, optional `default`, and the `prefix`/`count`/`start_at` expansion trio, so numbered plugin params expand through the same `expand_names` path as embedded ones.
-- **`cable_kind`**: optional enum `control` / `audio` / `midi` / `unknown` (case-insensitive). When declared, it overrides the name-substring inference for edges produced by that circuit; when absent, inference applies exactly as before.
-- **`color`**: optional component-kind theme token name (a resident ThemeColor key). When declared, the graph node for that circuit uses it; when absent, name-inference applies.
-- **Merge rule**: `schema::merge_plugins(base, files)` applies plugin files in sorted-filename order (deterministic), insert-or-override on collision, warn-once shadow per file. Neutral defaults (`presets`, `manual`, per-param `essential`/`ramhint`/`autotitle`) are applied by the schema layer, not the plugin loader.
-- **Rendering precedence**: declared metadata feeds the same precedence chain as before — `graph_edge_error` red > diff colors > modifier hue > `CableKind` (now declared-or-inferred) > dim for disabled instances. Plugin circuits participate in `ram_overflow` validation and the latency cost model via their declared `ramsize` (never the unknown-circuit fallback), so a plugin circuit can never silently disable RAM validation.
+- **Format**: a circuit table declares `name` (case-insensitive), `category`, the required `ramsize`, optional `title` and `description`, optional rendering metadata `cable_kind` and `color`, and `inputs` and `outputs` parameter arrays. Each parameter carries `name`, `short`, `type`, optional `default`, and the `prefix`, `count`, and `start_at` expansion triple, so numbered plugin params expand through the same path as embedded ones.
+- **`cable_kind`**: optional enum `control`, `audio`, `midi`, or `unknown` (case-insensitive). When declared it overrides the name-substring inference for edges produced by that circuit; when absent inference applies exactly as before.
+- **`color`**: optional component-kind theme token name. When declared the graph node for that circuit uses it; when absent name-inference applies.
+- **Merge rule**: plugin files apply in sorted-filename order, insert-or-override on collision, with a single shadow warning per file. Neutral defaults are applied by the schema layer, not the plugin loader.
+- **Rendering precedence**: declared metadata feeds the same precedence chain: error red > diff colors > modifier hue > cable kind (now declared or inferred) > dim for disabled instances. Plugin circuits participate in RAM overflow validation and the latency cost model via their declared `ramsize`, so a plugin circuit can never silently disable RAM validation.
 
 ## Optimizer
 
-Opened with `g` then `o`, the optimizer is a pane in the tiled right column: it proposes reorderings of the patch's `[section]` blocks that reduce forward-loop latency — the extra loop units a consumer circuit reads from a producer that runs later in the scan. Each candidate is a section permutation scored by a `CostModel` whose per-circuit average latency (`AVG`) is proportional to the circuit's RAM size (overridable per circuit via `[latency] per_circuit` in config). The objective is a weighted blend `(1−w)·Sum + w·max` of the summed and worst forward-loop latency; the pane shows the current weight `w`. The panel view remains visible in the left pane while the optimizer pane is open; the pane border uses the focus tokens (`pane_focus_border` focused, `pane_unfocused_border` otherwise).
+Opened with `g` then `o`, the optimizer is a pane in the tiled right column: it proposes reorderings of the patch's section blocks that reduce forward-loop latency (the extra loop units a consumer reads from a producer that runs later in the scan). Each candidate is a section permutation scored by a cost model whose per-circuit average latency is proportional to the circuit's RAM size (overridable per circuit). The objective is a weighted blend of the summed and worst forward-loop latency; the pane shows the current weight. The panel view remains visible in the left pane while the optimizer pane is open; the pane border uses the focus tokens.
 
-- **Candidates**: candidates come from an extended strategy set — banner min-sum (permutes within each banner group; degenerates to the whole file when the patch has no banners), global min-sum, and min-max (minimizes the worst forward-loop latency). The search opens with a cheap FAS-indegree ranking pass that targets back edges first, scales large patches via multilevel coarsening (banner groups as coarsening hints) with VNS refinement, and adds simulated annealing with a seeded PRNG (deterministic, D9). Each candidate is labeled and shown with its `before → after` average/maximum latency summary. The identity ordering is always among the candidates.
-- **Keys**: `j`/`k` (or Up/Down) move the selection, `Enter` previews the selected candidate, `r` restores the original file order, `s` exports the selected candidate, `[`/`]` adjust the objective weight `w` (0.0 = pure min-sum, 1.0 = pure min-max, blended in between; the pane owns these keys while focused, the status reads `w = 0.N`, and candidates regenerate live under the new weight), `Esc` closes the pane (restoring the file order when a preview is active).
-- **Preview**: applying a candidate reorders `patch.sections` in place and rebuilds the graph, so the latency ramp recolors live and the status bar reads `Preview: <label>`. The original order is remembered and restored by `r`, `Esc`, or previewing another candidate.
-- **Export**: `s` writes a reordered copy of the patch to `<stem>-latopt.ini` next to the source file via the lossless writer (byte-identical round-trip, atomic write, auto-suffix on collision); the status bar reports `Exported <label> → <path>`. The loaded patch is never mutated.
+- **Candidates**: banner min-sum (permutes within each banner group; degenerates to the whole file when the patch has no banners), global min-sum, and min-max. The search opens with a cheap ranking pass that targets back edges first, scales large patches via multilevel coarsening with banner groups as hints and variable-neighborhood refinement, and adds simulated annealing with a seeded PRNG. Each candidate is shown with its `before -> after` average and maximum latency summary. The identity ordering is always among the candidates.
+- **Keys**: `j` and `k` move the selection, `Enter` previews, `r` restores the original order, `s` exports, `[` and `]` adjust the objective weight (0.0 is pure min-sum, 1.0 is pure min-max, blended in between; the pane owns these keys while focused and the status reports the weight, with candidates regenerating live), `Esc` closes the pane (restoring the file order when a preview is active).
+- **Preview**: applying a candidate reorders sections in place and rebuilds the graph, so the latency ramp recolors live and the status bar reads `Preview: <label>`. The original order is remembered and restored on demand.
+- **Export**: `s` writes a reordered copy to `<stem>-latopt.ini` next to the source file via the lossless writer (atomic write with an auto-suffix on collision); the status bar reports the export path. The loaded patch is never mutated.
 
 ## Processing Pause
 
-Pressing `p` toggles `App.processing_paused`, a global pause of the simulated processing. While paused, all panel content renders with the `dim` modifier (borders and cells), the header shows a `PROCESSING PAUSED` marker, and component mutations are blocked (toggles and value changes are no-ops until `p` is pressed again). Geometry (`component_rects`) is unchanged while paused, so mouse hit-testing keeps working. Pause state resets on patch load. On the graph surface `p` instead toggles pin/unpin on the hovered node (see Signal-Flow Graph); processing pause is reached with `p` on every other surface.
+Pressing `p` toggles a global pause of the simulated processing. While paused, all panel content renders dimmed, the header shows a `PROCESSING PAUSED` marker, and component mutations are blocked until `p` is pressed again. Geometry is unchanged while paused, so mouse hit-testing keeps working. Pause state resets on patch load. On the graph surface `p` instead toggles pin and unpin on the hovered node; processing pause is reached with `p` on every other surface.
 
 ## Empty State
 
@@ -282,7 +306,7 @@ With no patch loaded, the main area shows the centered muted prompt `Press 'l' t
 
 ## Visual Validation Provenance
 
-Face correctness is proven by headless egui assertions: each surface's paint routine is driven through a plain `egui::Context` (`ctx.run` → `FullOutput`) and the emitted shape/label lists are asserted for geometry and theme colors — the per-surface shape/label tests live in `src/gui/*.rs` (physical, panels, viewer, picker, overlays, graph) plus the token-resolution matrix in `src/theme.rs`. The pre-port terminal snapshot harness was removed with the teardown (tasks 3.1/4.1).
+Face correctness is proven by headless egui assertions: each surface's paint routine is driven through a plain `egui::Context` and the emitted shape and label lists are asserted for geometry and theme colors. The per-surface shape and label tests live with the painting code and the token-resolution matrix lives with the theme.
 
 <!-- Last updated: 2026-09-05 · tiled-window-manager: main band is a tiled layout — full-height left panel pane + right column of up to 3 slots (graph / source viewer / physical / optimizer), FocusSlot focus routing with pane_focus_border/pane_unfocused_border tokens, Tab/Shift+Tab carousel, `\` vertical split in the left pane (quad replacement), `[`/`]` left/right split ratio (main_split_ratio 0.6, 30–70 %), Alt+[ / Alt+] cable tension on the graph pane, +/- zoom focused pane / Shift++/Shift+- other pane, narrow-terminal collapse <120 cols with "+N views hidden"; optimizer is a right-column pane (render_optimizer_pane) replacing the centered modal; viewer is a right-column slot; optimizer_modal_border superseded by pane focus tokens -->
 <!-- Last updated: 2026-09-03 · optimal-node-arrangement (gv5): graph surface nodes arrange in a layered (Sugiyama-style) layout — longest-path depth columns on x, within-layer order from deterministic barycenter crossing-minimization sweeps on y, coordinates on the GRID_SNAP grid (no jitter); the full solve is a bounded refinement (SOLVE_ITERATIONS 60) so the layered structure survives; parallel edges between the same two circuits normalize to one spring; cable tension still re-flows the refinement -->
@@ -295,3 +319,4 @@ Face correctness is proven by headless egui assertions: each surface's paint rou
 <!-- Last updated: 2026-09-01 · graph-kitty-rendering: graph surface renders as an anti-aliased kitty image when the terminal supports kitty graphics + feature on (src/graph_render.rs tiny-skia/fontdue rasterizer + GraphCamera, src/kitty_protocol.rs emitter), falling back to box-drawing otherwise; image placed z=-1 under the text; every pixel color derives from theme tokens via Theme::rgb(Color) with the existing error>diff>ramp>kind precedence; interactions and graph_node_rects preserved. -->
 <!-- Last updated: 2026-08-28 · latency-optimized-patch-generation: CostModel (AVG ∝ ramsize, [latency] per_circuit overrides) + forward-loop latency ramp (graph_edge_latency_0–_4, c toggle) + g o optimizer menu (optimizer_modal_border/optimizer_selected_bg; preview/restore/export to <stem>-latopt.ini) -->
 <!-- Last updated: 2026-09-12 · select-state-filtering + dependency-walker-subgraph: `g s` centered select-state overlay (Select state (N), j/k navigate, [/]/Enter cycle candidate values, Esc clears) listing discovered Register/Cable signals with inferred candidate values (1V = 0.1, left-to-right no precedence); classification Selected/NotSelected/Unknown with NotSelected dim via graph_node_dim + controller register-edge gating (shared cross-controller pair kept) and optional hide_unselected (off in menu); status `Select state: N selected / M unselected / K unknown`; `f` on the graph pane toggles the upstream-dependency subgraph filter (reversed-edge BFS from the hovered/selected node, subset solved as its own layout, Esc clears before slot close, survives rebuilds, clears when the root vanishes); fixtures graph_select_state.ini / graph_dependency_walk.ini in the graph-surface matrix -->
+<!-- Last updated: 2026-09-14 · native-egui-rendering: native winit/egui/wgpu window shell replaces the terminal stack; all surfaces paint via egui Painter/Color32 through Theme::egui_color/egui_from_rgb (single Color→RGB hop, deterministic, every token covered); frontmatter now enumerates the full token set including picker favourites, graph canvas/fill, per-kind node frames, register edge, latency ramp, pane borders, and skeleton/optimizer tokens; typography and spacing updated to egui point metrics -->

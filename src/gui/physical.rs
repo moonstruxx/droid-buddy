@@ -66,6 +66,16 @@ pub(crate) struct CellSpec {
     pub kind: crate::patch::ComponentKind,
 }
 
+/// A DB8E OLED display band (`db8e-oled-display-placeholder`): the bordered
+/// upper-band rect above the B-grid plus the centered state text derived
+/// from the patch. Decorative only; it carries no `CellSpec`, so it never
+/// publishes a hit rect.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Db8eBand {
+    pub rect: Rect,
+    pub state: &'static str,
+}
+
 /// The fully-resolved physical-view payload for one frame. Pure data:
 /// tests build it directly; [`paint_physical`] only draws it.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +86,8 @@ pub(crate) struct PhysicalSpec {
     pub fold_bars: Vec<(Rect, String)>,
     pub modules: Vec<ModuleSpec>,
     pub cells: Vec<CellSpec>,
+    /// DB8E OLED display bands (decorative, no hit rects).
+    pub db8e_bands: Vec<Db8eBand>,
     /// Vertical + horizontal mm grid lines, already mapped to points.
     pub grid_lines: Vec<(Pos2, Pos2)>,
     /// Points per screen cell: the egui-layer scale over the shared
@@ -180,6 +192,32 @@ pub(crate) fn paint_physical(
     // state text (fader face for fader modules).
     for cell in &spec.cells {
         paint_cell(painter, cell, spec.skeleton, spec.paused);
+    }
+
+    // DB8E OLED display placeholder: bordered upper-band rect with the
+    // centered display state (db8e-oled-display-placeholder). Drawn on the
+    // shared rack path so skeleton and full presentations coincide;
+    // decorative, so it never publishes a hit rect.
+    let placeholder = rgb(crate::theme::active().muted);
+    for band in &spec.db8e_bands {
+        if band.rect.width() < 3.0 || band.rect.height() < 2.0 {
+            continue;
+        }
+        let color = dim(placeholder, spec.paused);
+        painter.rect(
+            band.rect,
+            0.0,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            band.rect.center(),
+            egui::Align2::CENTER_CENTER,
+            band_text(band.state, band.rect.width()),
+            egui::FontId::proportional(11.0),
+            color,
+        );
     }
 
     ctx.input(|i| physical_frame(i, spec.cell_scale, pane))
@@ -428,18 +466,17 @@ pub(crate) fn rack_geometry(
 
     let mut module_rects = Vec::new();
     let mut cells = Vec::new();
+    let mut db8e_bands = Vec::new();
     for row in &rack.rows {
         for placed in &row.modules {
             let abs_y_mm = row.y_mm + placed.rect_mm.y_mm;
-            module_rects.push((
-                placed.module_index,
-                cell(crate::physical::RectMm {
-                    x_mm: placed.rect_mm.x_mm,
-                    y_mm: abs_y_mm,
-                    w_mm: placed.rect_mm.w_mm,
-                    h_mm: placed.rect_mm.h_mm,
-                }),
-            ));
+            let module_rect = cell(crate::physical::RectMm {
+                x_mm: placed.rect_mm.x_mm,
+                y_mm: abs_y_mm,
+                w_mm: placed.rect_mm.w_mm,
+                h_mm: placed.rect_mm.h_mm,
+            });
+            module_rects.push((placed.module_index, module_rect));
             let module = &chain.modules[placed.module_index];
             for (cell_index, component) in module.components.iter().enumerate() {
                 let Some(cell_mm) = chain.cell_for(placed.module_index, &component.id) else {
@@ -461,6 +498,41 @@ pub(crate) fn rack_geometry(
                 });
                 cells.push((placed.module_index, cell_index, rect, mark));
             }
+
+            // DB8E OLED display placeholder (db8e-oled-display-placeholder):
+            // the bordered upper-band rect above the B-grid. Band height
+            // derives from the module's B-grid top (`cells["B"]` min y_mm,
+            // fallback literal 38.0) so geometry drift never hard-codes the
+            // constant; the rect insets the faceplate by 1 pt with the module
+            // border's two strokes subtracted (port of the terminal
+            // placeholder's clipped-rect fix).
+            if module.geometry_key == "db8e" {
+                let b_top_mm = module
+                    .cells
+                    .get("B")
+                    .and_then(|cells| {
+                        cells
+                            .iter()
+                            .map(|c| c.rect_mm.y_mm)
+                            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    })
+                    .unwrap_or(38.0);
+                let ratio = if module.rect_mm.h_mm > 0.0 {
+                    (b_top_mm / module.rect_mm.h_mm).clamp(0.0, 1.0)
+                } else {
+                    0.295
+                };
+                let band_h = (module_rect.height() as f64 * ratio).round() as f32;
+                if module_rect.width() >= 3.0 && band_h >= 3.0 {
+                    db8e_bands.push((
+                        placed.module_index,
+                        Rect::from_min_size(
+                            module_rect.min + Vec2::new(1.0, 1.0),
+                            Vec2::new(module_rect.width() - 2.0, band_h - 2.0),
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -470,6 +542,7 @@ pub(crate) fn rack_geometry(
         fold_bars,
         module_rects,
         cells,
+        db8e_bands,
     }
 }
 
@@ -482,6 +555,8 @@ pub(crate) struct RackGeometry {
     pub module_rects: Vec<(usize, Rect)>,
     /// `(module index, cell index, rect, port mark)` in chain order.
     pub cells: Vec<(usize, usize, Rect, PortMark)>,
+    /// `(module index, band rect)` for DB8E OLED display bands in chain order.
+    pub db8e_bands: Vec<(usize, Rect)>,
 }
 
 /// Vertical + horizontal mm grid lines mapped to points, one line every
@@ -592,6 +667,13 @@ fn clip_label(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// Ellipsize the display state to the band width (port of
+/// `ui.rs::truncate_with_ellipsis` at draw time): ~6.5 pt per proportional
+/// char at the 11 pt band font.
+fn band_text(state: &str, width: f32) -> String {
+    clip_label(state, (width / 6.5).max(1.0) as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,6 +775,118 @@ mod tests {
         (rack, chain)
     }
 
+    /// One DB8E faceplate (6 HP, 3 HE; B-grid top at y_mm 38, real geometry
+    /// values) packed into a single row, so the band math is production-like.
+    fn db8e_fixture() -> (RackLayout, PhysicalLayout) {
+        let chain = PhysicalLayout {
+            modules: vec![crate::physical::PhysicalModule {
+                controller: "DB8E".into(),
+                module_instance: Some(1),
+                geometry_key: "db8e".into(),
+                is_fallback: false,
+                rect_mm: crate::physical::RectMm {
+                    x_mm: 0.0,
+                    y_mm: 0.0,
+                    w_mm: 30.48,
+                    h_mm: 128.5,
+                },
+                width_hp: 6.0,
+                he: 3,
+                cells: {
+                    let mut map = std::collections::HashMap::new();
+                    map.insert(
+                        "B".into(),
+                        vec![
+                            crate::physical::ElementCell {
+                                family: "B".into(),
+                                col: 0,
+                                row: 0,
+                                rect_mm: crate::physical::RectMm {
+                                    x_mm: 2.0,
+                                    y_mm: 38.0,
+                                    w_mm: 8.0,
+                                    h_mm: 8.0,
+                                },
+                                label: "B1.1".into(),
+                                element: Some(1),
+                                kind_letter: Some('B'),
+                            },
+                            crate::physical::ElementCell {
+                                family: "B".into(),
+                                col: 1,
+                                row: 0,
+                                rect_mm: crate::physical::RectMm {
+                                    x_mm: 12.0,
+                                    y_mm: 38.0,
+                                    w_mm: 8.0,
+                                    h_mm: 8.0,
+                                },
+                                label: "B1.2".into(),
+                                element: Some(2),
+                                kind_letter: Some('B'),
+                            },
+                        ],
+                    );
+                    map
+                },
+                components: vec![
+                    HwComponent {
+                        id: "B1.1".into(),
+                        label: "B1.1".into(),
+                        kind: ComponentKind::Button,
+                        shift_group: None,
+                        state: ComponentState::On,
+                        controller: "DB8E".into(),
+                        led: None,
+                    },
+                    HwComponent {
+                        id: "B1.2".into(),
+                        label: "B1.2".into(),
+                        kind: ComponentKind::Button,
+                        shift_group: None,
+                        state: ComponentState::Off,
+                        controller: "DB8E".into(),
+                        led: None,
+                    },
+                ],
+            }],
+            total_width_mm: 30.48,
+            total_height_mm: 128.5,
+            chain_gaps_mm: ChainGaps::default(),
+            hp_mm: 16.6667,
+            he_mm: std::collections::HashMap::new(),
+            fallback_width_mm: 0.0,
+            fallback_height_mm: 0.0,
+        };
+        let rack = RackLayout {
+            rows: vec![RackRowPlacement {
+                he: 3,
+                hp: 6.0,
+                label: Some("row 1".into()),
+                y_mm: 0.0,
+                height_mm: 128.5,
+                modules: vec![PlacedModule {
+                    key: "DB8E 1".into(),
+                    module_index: 0,
+                    rect_mm: crate::physical::RectMm {
+                        x_mm: 0.0,
+                        y_mm: 0.0,
+                        w_mm: 30.48,
+                        h_mm: 128.5,
+                    },
+                    overridden: false,
+                }],
+                fill_width_mm: 30.48,
+            }],
+            fold_bars: vec![],
+            mounts: RackMounts::default(),
+            total_width_mm: 30.48,
+            total_height_mm: 128.5,
+            fold_bar_height_mm: 6.0,
+        };
+        (rack, chain)
+    }
+
     fn mapping() -> ScreenMapping {
         ScreenMapping::new(
             crate::physical::PHYSICAL_COLS_PER_MM,
@@ -707,8 +901,24 @@ mod tests {
     /// cell visuals via `cell_visuals`, one cell per fixture component.
     fn spec(skeleton: bool, paused: bool) -> PhysicalSpec {
         let (rack, chain) = fixture();
+        build_spec((&rack, &chain), skeleton, paused)
+    }
+
+    /// Same builder over a hand-built DB8E rack (one faceplate with a B-grid)
+    /// so the band tests exercise the production geometry values.
+    fn db8e_spec(skeleton: bool, paused: bool) -> PhysicalSpec {
+        let (rack, chain) = db8e_fixture();
+        build_spec((&rack, &chain), skeleton, paused)
+    }
+
+    fn build_spec(
+        fx: (&RackLayout, &PhysicalLayout),
+        skeleton: bool,
+        paused: bool,
+    ) -> PhysicalSpec {
+        let (rack, chain) = fx;
         let m = mapping();
-        let geom = rack_geometry(&rack, &chain, &m, 10.0);
+        let geom = rack_geometry(rack, chain, &m, 10.0);
         let mut cells = Vec::new();
         for &(mi, ci, rect, mark) in &geom.cells {
             let comp = &chain.modules[mi].components[ci];
@@ -736,6 +946,14 @@ mod tests {
                 title: format!("{} {}", chain.modules[mi].controller, 1),
             })
             .collect();
+        let db8e_bands = geom
+            .db8e_bands
+            .iter()
+            .map(|&(_, rect)| Db8eBand {
+                rect,
+                state: crate::physical::db8e_display_state_for_layout(chain),
+            })
+            .collect();
         PhysicalSpec {
             background: crate::theme::active().graph_canvas_bg,
             case_rect: geom.case_rect,
@@ -743,7 +961,8 @@ mod tests {
             fold_bars: geom.fold_bars,
             modules,
             cells,
-            grid_lines: mm_grid_lines(&m, 10.0, 200.0, 40.0, 20.0),
+            db8e_bands,
+            grid_lines: mm_grid_lines(&m, 10.0, rack.total_width_mm, rack.total_height_mm, 20.0),
             cell_scale: 10.0,
             skeleton,
             paused,
@@ -821,6 +1040,13 @@ mod tests {
     }
 
     fn painted_labels(spec: &PhysicalSpec) -> Vec<String> {
+        painted_output(spec).0
+    }
+
+    /// Headless paint of `spec` into a default 800×600 ui: the emitted text
+    /// labels and `Shape::Rect` rects, mirroring the gallery-row assertions
+    /// for the physical surface.
+    fn painted_output(spec: &PhysicalSpec) -> (Vec<String>, Vec<Rect>) {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -832,22 +1058,20 @@ mod tests {
         let mut full_output = ctx.run_ui(raw_input, |ui| {
             paint_physical(ui.painter(), ui.max_rect(), ui.ctx(), Some(spec));
         });
-        let labels: Vec<String> = full_output
-            .shapes
-            .iter()
-            .filter_map(|cs| {
-                if let egui::epaint::Shape::Text(t) = &cs.shape {
-                    Some(t.galley.text().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut labels = Vec::new();
+        let mut rects = Vec::new();
+        for cs in &full_output.shapes {
+            match &cs.shape {
+                egui::epaint::Shape::Text(t) => labels.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Rect(r) => rects.push(r.rect),
+                _ => {}
+            }
+        }
         // The real loop applies `textures_delta` to the wgpu texture manager
         // (mod.rs); a headless test drops the output, so release it first
         // (epaint panics on dropping unapplied deltas).
         full_output.textures_delta.clear();
-        labels
+        (labels, rects)
     }
 
     #[test]
@@ -865,6 +1089,54 @@ mod tests {
             labels.iter().any(|l| l.contains("ON")),
             "state text drawn: {labels:?}"
         );
+    }
+
+    #[test]
+    fn rack_geometry_derives_db8e_band_from_b_grid_top() {
+        let (rack, chain) = db8e_fixture();
+        let geom = rack_geometry(&rack, &chain, &mapping(), 10.0);
+        assert_eq!(geom.db8e_bands.len(), 1);
+        let (mi, band) = geom.db8e_bands[0];
+        assert_eq!(mi, 0);
+        let module = geom.module_rects[0].1;
+        // Band = module inset 1 pt; height = (B-grid top 38 mm / 128.5 mm) of
+        // the module height, rounded, minus the 2 border strokes.
+        let expect_h = (module.height() * 38.0 / 128.5).round() - 2.0;
+        assert!(
+            (band.height() - expect_h).abs() < 1e-3,
+            "h {}",
+            band.height()
+        );
+        assert_eq!(band.min, module.min + egui::vec2(1.0, 1.0));
+        assert!((band.max.x - (module.max.x - 1.0)).abs() < 1e-3);
+        // The band bottom sits at/above the B-grid top (y_mm 38 → 114 pt).
+        assert!(band.max.y <= 114.0 + 1e-3, "y {}", band.max.y);
+    }
+
+    #[test]
+    fn paint_draws_db8e_display_band_and_state() {
+        for skeleton in [false, true] {
+            let spec = db8e_spec(skeleton, false);
+            let (labels, rects) = painted_output(&spec);
+            // Display state derived from the layout (db8e present, no
+            // mismatch marker → "connected"), ellipsized to the band width.
+            let band = spec.db8e_bands[0].rect;
+            let expected = band_text("connected", band.width());
+            assert!(
+                labels.contains(&expected),
+                "db8e state text drawn: {labels:?}"
+            );
+            // A bordered rect inside the module's upper band (above the B-grid).
+            let module = spec.modules[0].rect;
+            assert!(
+                rects.iter().any(|r| {
+                    r.min.x > module.min.x
+                        && r.max.x < module.max.x
+                        && r.min.y <= module.min.y + module.height() * 0.4
+                }),
+                "display band rect drawn: {rects:?}"
+            );
+        }
     }
 
     #[test]

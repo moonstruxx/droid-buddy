@@ -1113,6 +1113,19 @@ impl Patch {
         root_vars: &[String],
         disabled: &HashSet<NodeId>,
     ) -> InfluenceSubtree {
+        let sinks = InfluenceSinks::new(self);
+        self.influence_subtree_with_sinks(root_vars, disabled, &sinks)
+    }
+
+    /// Influence walk over a precomputed sink index (one section pass instead
+    /// of one full scan per popped cable); results identical to
+    /// `influence_subtree_with_disabled`.
+    fn influence_subtree_with_sinks(
+        &self,
+        root_vars: &[String],
+        disabled: &HashSet<NodeId>,
+        sinks: &InfluenceSinks,
+    ) -> InfluenceSubtree {
         if root_vars.is_empty() {
             return InfluenceSubtree::default();
         }
@@ -1138,22 +1151,13 @@ impl Patch {
             influenced_edges.insert(cable.clone());
             // Collect per-param sink entries for this cable, then sort for determinism.
             let mut sink_entries: Vec<(NodeId, usize, String)> = Vec::new();
-            for (idx, section) in self.sections.iter().enumerate() {
-                for (k, v) in &section.entries {
-                    let k_lower = k.to_lowercase();
-                    if k_lower == "output" {
-                        let names = scan_internal_tokens(v);
-                        if names.len() == 1 && names[0] == cable {
-                            continue;
-                        }
-                    }
-                    if scan_internal_tokens(v).iter().any(|n| n == &cable) {
-                        let nid = node_ids
-                            .get(idx)
-                            .cloned()
-                            .unwrap_or_else(|| NodeId::circuit(&section.name, 0));
-                        sink_entries.push((nid, idx, k_lower.clone()));
-                    }
+            if let Some(entries) = sinks.sinks.get(&cable) {
+                for &(sink_idx, ref param_key) in entries {
+                    let nid = node_ids
+                        .get(sink_idx)
+                        .cloned()
+                        .unwrap_or_else(|| NodeId::circuit(&self.sections[sink_idx].name, 0));
+                    sink_entries.push((nid, sink_idx, param_key.clone()));
                 }
             }
             // Sort by (section_name, param_key, section_index) for deterministic BFS expansion.
@@ -1200,6 +1204,113 @@ impl Patch {
             influenced_nodes,
             influenced_edges,
         }
+    }
+}
+
+/// Precomputed per-cable sink index for the influence BFS: one pass over
+/// sections instead of one full scan per popped cable. Sink-entry semantics
+/// match the BFS's own collection — a pure `output = _CABLE` is a source, any
+/// other entry containing the cable records a sink — so walk results are
+/// identical to the scan-based path.
+pub(crate) struct InfluenceSinks {
+    /// cable -> (section index, lowercase param key) sink entries in section
+    /// order (the BFS sorts them afterward).
+    sinks: HashMap<String, Vec<(usize, String)>>,
+}
+
+impl InfluenceSinks {
+    pub(crate) fn new(patch: &Patch) -> Self {
+        let mut sinks: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+        for (idx, section) in patch.sections.iter().enumerate() {
+            for (k, v) in &section.entries {
+                let k_lower = k.to_lowercase();
+                let toks = scan_internal_tokens(v);
+                if toks.len() == 1 && k_lower == "output" {
+                    continue;
+                }
+                // One push per distinct token so a duplicated token in one
+                // value cannot double-record an entry (the scan path used
+                // `.any()` existence).
+                let mut seen: HashSet<&str> = HashSet::new();
+                for t in &toks {
+                    if seen.insert(t.as_str()) {
+                        sinks
+                            .entry(t.clone())
+                            .or_default()
+                            .push((idx, k_lower.clone()));
+                    }
+                }
+            }
+        }
+        Self { sinks }
+    }
+}
+
+/// Precomputed per-token lookups for the influence-outlier pass (design D4):
+/// cable sinks plus root `_VAR`s per hardware token. The naive path walks
+/// every section for every cable and token, which dominated graph build on
+/// melody2 (~28 s release); this context costs two section passes and every
+/// token then walks the precomputed index.
+pub(crate) struct InfluenceContext {
+    sinks: InfluenceSinks,
+    /// hw token -> distinct root `_VAR`s, sorted (matches `hw_token_to_vars`).
+    token_vars: HashMap<String, Vec<String>>,
+}
+
+impl InfluenceContext {
+    pub(crate) fn new(patch: &Patch) -> Self {
+        let sinks = InfluenceSinks::new(patch);
+        let mut token_vars: HashMap<String, Vec<String>> = HashMap::new();
+        for (idx, section) in patch.sections.iter().enumerate() {
+            let mut section_tokens: HashSet<String> = HashSet::new();
+            for (_, v) in &section.entries {
+                for t in scan_hw_tokens(v) {
+                    section_tokens.insert(t);
+                }
+            }
+            if section_tokens.is_empty() {
+                continue;
+            }
+            let Some(outputs) = patch.circuit_outputs.get(idx) else {
+                continue;
+            };
+            for t in section_tokens {
+                token_vars
+                    .entry(t)
+                    .or_default()
+                    .extend(outputs.iter().cloned());
+            }
+        }
+        for vars in token_vars.values_mut() {
+            vars.sort_unstable();
+            vars.dedup();
+        }
+        Self { sinks, token_vars }
+    }
+
+    /// Root `_VAR`s for `hw_token`, identical to `Patch::hw_token_to_vars`.
+    pub(crate) fn root_vars(&self, hw_token: &str) -> Vec<String> {
+        self.token_vars.get(hw_token).cloned().unwrap_or_default()
+    }
+}
+
+impl Patch {
+    /// z-score and influence-subtree size for `hw_token` using a precomputed
+    /// `InfluenceContext`; matches `token_influence_z_score` plus
+    /// `influence_subtree_size_for` results (batch-friendly).
+    pub(crate) fn influence_outlier_with_context(
+        &self,
+        hw_token: &str,
+        ctx: &InfluenceContext,
+    ) -> Option<(f32, usize)> {
+        let kind = crate::geometry::token_kind_u8(hw_token);
+        let vars = ctx.root_vars(hw_token);
+        let size = self
+            .influence_subtree_with_sinks(&vars, &HashSet::new(), &ctx.sinks)
+            .influenced_nodes
+            .len();
+        let z = InfluenceStats::embedded().z_score(kind, size)?;
+        Some((z, size))
     }
 }
 
@@ -4031,6 +4142,48 @@ button = B1.3
         assert!(!patch
             .hw_token_to_vars("B1.1")
             .contains(&String::from("_NOPE")));
+    }
+
+    #[test]
+    fn influence_context_matches_naive_path() {
+        // The precomputed InfluenceContext (sink index + token vars) must
+        // never drift from the per-token public path: identical root vars,
+        // z-scores and subtree sizes, including a multi-hop and a dangling
+        // cable.
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n\
+             [button]\n    button = B1.1\n    output = _TRIG\n\
+             [copy]\n    input = _TRIG\n    output = _MID\n\
+             [switch]\n    select = B1.2\n    input = _MID\n    output = _OUT\n\
+             [quantizer]\n    input = _OUT\n\
+             [orphan]\n    input = _ORPHAN\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let ctx = InfluenceContext::new(&patch);
+        let mut tokens: Vec<&str> = patch.hw_components.iter().map(|c| c.id.as_str()).collect();
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert!(!tokens.is_empty());
+        for token in tokens {
+            assert_eq!(
+                ctx.root_vars(token),
+                patch.hw_token_to_vars(token),
+                "root vars diverge for {token}"
+            );
+            let naive_z = patch.token_influence_z_score(token);
+            let naive_size = patch.influence_subtree_size_for(token);
+            match patch.influence_outlier_with_context(token, &ctx) {
+                Some((z, size)) => {
+                    assert_eq!(size, naive_size, "subtree size diverges for {token}");
+                    assert_eq!(Some(z), naive_z, "z-score diverges for {token}");
+                }
+                None => assert!(
+                    naive_z.is_none(),
+                    "z-score should be None for {token}, got {naive_z:?}"
+                ),
+            }
+        }
     }
 
     #[test]

@@ -503,25 +503,32 @@ fn paint_polish(
             egui::StrokeKind::Middle,
         );
     }
-    ctx.input(|i| {
-        if let Some(marquee) = frame_marquee(Some(spec), i) {
-            let (x, y, w, h) = marquee.rect;
-            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-            painter.rect_filled(rect, 0.0, rgba(accent, 30));
-            painter.rect(
-                rect,
-                0.0,
-                egui::Color32::TRANSPARENT,
-                egui::Stroke::new(1.0, rgb(accent)),
-                egui::StrokeKind::Inside,
-            );
-        }
-        if let Some(pos) = i.pointer.latest_pos() {
-            if let Some(idx) = node_at(spec, pos.x, pos.y) {
-                paint_tooltip(painter, spec, canvas, pos, idx);
-            }
-        }
+    // Read the input state under the context lock, then paint both overlays
+    // after it: text layout takes the context write lock again, so it must not
+    // run inside the ctx.input closure (same-thread reentrant write deadlock).
+    let (marquee, hover) = ctx.input(|i| {
+        let marquee = frame_marquee(Some(spec), i);
+        let hover = i
+            .pointer
+            .latest_pos()
+            .and_then(|pos| node_at(spec, pos.x, pos.y).map(|idx| (pos, idx)));
+        (marquee, hover)
     });
+    if let Some(marquee) = marquee {
+        let (x, y, w, h) = marquee.rect;
+        let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+        painter.rect_filled(rect, 0.0, rgba(accent, 30));
+        painter.rect(
+            rect,
+            0.0,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, rgb(accent)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some((pos, idx)) = hover {
+        paint_tooltip(painter, spec, canvas, pos, idx);
+    }
 }
 
 /// The hovered node's tooltip card: a translucent backdrop with the accent
@@ -1626,6 +1633,275 @@ mod scene_builder_tests {
             id: NodeId::circuit("osc", 0),
             changed_params: vec![],
         };
+    }
+}
+
+/// Headless regression proof for what the desktop graph window paints: drives
+/// [`paint_scene`] through an egui `Context` exactly as `EguiSurface::paint`
+/// does, and pins the emitted shapes across the four view states the window
+/// reaches — ready (fitted camera + scene), waiting (no scene yet), mid-window
+/// (canvas smaller than the fitted scene, so the minimap appears), and zoomed
+/// (camera zoom scales node spacing). A camera/scene regression that silently
+/// repaints the window black or pushes content off-canvas now fails the suite
+/// instead of surfacing only on a live screen (bead droid_tui-69r).
+#[cfg(test)]
+mod window_paint_tests {
+    use super::*;
+    use crate::graph::{Graph, GraphEdge, GraphNode};
+    use crate::patch::NodeId;
+
+    fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(name, idx),
+            kind: NodeKind::Circuit,
+            circuit: name.to_string(),
+            instance_index: idx,
+            section_index: section,
+        }
+    }
+
+    /// Two chained circuits (`clocktool` sources `_CLK`, `osc` sinks it) at
+    /// world positions the first-frame fit frames.
+    fn chain_app() -> App {
+        let graph = Graph {
+            nodes: vec![circuit_node("clocktool", 0, 0), circuit_node("osc", 0, 1)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            ..Graph::default()
+        };
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = vec![(10.0, 20.0), (260.0, 20.0)];
+        app
+    }
+
+    fn theme() -> &'static Theme {
+        crate::theme::active()
+    }
+
+    /// Shapes `paint_scene` emits, bucketed by kind so the four-state tests can
+    /// assert on what the window actually draws (labels, node frames, ports,
+    /// edges, arrowheads, minimap) without depending on egui mesh internals.
+    struct PaintOutput {
+        labels: Vec<String>,
+        rects: Vec<egui::epaint::RectShape>,
+        circles: usize,
+        beziers: usize,
+        polygons: usize,
+    }
+
+    fn paint(scene: Option<&SceneSpec>, canvas: egui::Vec2) -> PaintOutput {
+        paint_with(
+            scene,
+            canvas,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// `paint` with the pointer parked at `pos`, so `paint_polish` renders the
+    /// hover tooltip alongside the scene (the deadlock regression below).
+    fn paint_with_pointer(
+        scene: Option<&SceneSpec>,
+        canvas: egui::Vec2,
+        pos: egui::Pos2,
+    ) -> PaintOutput {
+        paint_with(
+            scene,
+            canvas,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+                events: vec![egui::Event::PointerMoved(pos)],
+                ..Default::default()
+            },
+        )
+    }
+
+    fn paint_with(
+        scene: Option<&SceneSpec>,
+        canvas: egui::Vec2,
+        raw_input: egui::RawInput,
+    ) -> PaintOutput {
+        let ctx = egui::Context::default();
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            paint_scene(ui.painter(), canvas, scene, ui.ctx(), &[]);
+        });
+        let mut labels = Vec::new();
+        let mut rects = Vec::new();
+        let mut circles = 0usize;
+        let mut beziers = 0usize;
+        let mut polygons = 0usize;
+        for cs in &full_output.shapes {
+            match &cs.shape {
+                egui::epaint::Shape::Text(t) => labels.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Rect(r) => rects.push(r.clone()),
+                egui::epaint::Shape::Circle(_) => circles += 1,
+                egui::epaint::Shape::CubicBezier(_) => beziers += 1,
+                egui::epaint::Shape::Path(_) => polygons += 1,
+                _ => {}
+            }
+        }
+        full_output.textures_delta.clear();
+        PaintOutput {
+            labels,
+            rects,
+            circles,
+            beziers,
+            polygons,
+        }
+    }
+
+    /// Left-edge x of each node body fill: the `GRAPH_WINDOW_NODE_W ×
+    /// GRAPH_WINDOW_NODE_H` rects with a non-transparent fill (`rect_filled`
+    /// node frames). The full-canvas background, minimap panel, and port
+    /// circles are a different size or shape, and node borders draw with a
+    /// transparent fill, so the size + fill filter isolates the bodies.
+    fn node_origins(out: &PaintOutput) -> Vec<f32> {
+        let mut xs: Vec<f32> = out
+            .rects
+            .iter()
+            .filter(|r| {
+                (r.rect.width() - GRAPH_WINDOW_NODE_W).abs() < 0.5
+                    && (r.rect.height() - GRAPH_WINDOW_NODE_H).abs() < 0.5
+                    && r.fill != egui::Color32::TRANSPARENT
+            })
+            .map(|r| r.rect.left())
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        xs
+    }
+
+    #[test]
+    fn window_paint_ready_fits_scene_into_canvas() {
+        // The window's first frame: a fitted camera frames the whole graph so
+        // every node body lands on canvas (the original black-window bug).
+        let mut app = chain_app();
+        app.graph_camera = Some(graph_window_fit_camera(&app.graph_positions));
+        let scene = build_scene_spec(&app, theme()).expect("scene present");
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+
+        assert!(
+            out.labels.iter().any(|l| l.contains("clocktool")),
+            "clocktool label: {:?}",
+            out.labels
+        );
+        assert!(
+            out.labels.iter().any(|l| l.contains("osc")),
+            "osc label: {:?}",
+            out.labels
+        );
+        assert_eq!(out.beziers, 1, "one cable edge");
+        assert_eq!(out.polygons, 1, "one direction arrow");
+        assert_eq!(out.circles, 2, "output + input port markers");
+
+        let origins = node_origins(&out);
+        assert_eq!(origins.len(), 2, "both node bodies drawn: {origins:?}");
+        for &x in &origins {
+            assert!(
+                x >= -0.5 && x + GRAPH_WINDOW_NODE_W <= 1280.5,
+                "node body on canvas: {x}"
+            );
+        }
+    }
+
+    /// The hover tooltip must paint without deadlocking: `paint_polish` reads
+    /// the pointer under `ctx.input` (the context write lock), and text layout
+    /// takes that same lock, so the tooltip has to draw after the input
+    /// closure releases it. The old nesting blocked until egui's 10s debug
+    /// lock timeout panicked (reported as "g g force-closes the app"); a
+    /// regression hangs here for 10s and then panics.
+    #[test]
+    fn hover_tooltip_paints_without_deadlocking() {
+        let app = chain_app();
+        let scene = build_scene_spec(&app, theme()).expect("scene present");
+        let node = &scene.nodes[0];
+        let canvas = egui::vec2(1280.0, 800.0);
+        let out = paint_with_pointer(
+            Some(&scene),
+            canvas,
+            egui::pos2(node.x + node.w / 2.0, node.y + node.h / 2.0),
+        );
+        // The unique circuit name appears once as the node label and a second
+        // time inside the tooltip card, so a single hit means no tooltip.
+        let hits = out
+            .labels
+            .iter()
+            .filter(|l| l.contains("clocktool"))
+            .count();
+        assert!(
+            hits >= 2,
+            "node label + tooltip, got {hits}: {:?}",
+            out.labels
+        );
+    }
+
+    #[test]
+    fn window_paint_waiting_draws_nothing() {
+        // No graph yet: paint_scene returns before drawing anything, so the
+        // swapchain clear color alone shows (the empty/waiting window).
+        let out = paint(None, egui::vec2(1280.0, 800.0));
+        assert!(out.labels.is_empty());
+        assert!(out.rects.is_empty());
+        assert_eq!(out.circles, 0);
+        assert_eq!(out.beziers, 0);
+        assert_eq!(out.polygons, 0);
+    }
+
+    #[test]
+    fn window_paint_mid_window_shows_minimap() {
+        // A mid-sized window smaller than the fitted scene overflows, so the
+        // minimap appears bottom-left while the scene content still paints.
+        let mut app = chain_app();
+        app.graph_camera = Some(graph_window_fit_camera(&app.graph_positions));
+        let scene = build_scene_spec(&app, theme()).expect("scene present");
+        let out = paint(Some(&scene), egui::vec2(400.0, 300.0));
+
+        assert!(
+            out.labels.iter().any(|l| l.contains("clocktool")),
+            "content still painted"
+        );
+        let panel = egui::Rect::from_min_size(egui::pos2(10.0, 170.0), egui::vec2(180.0, 120.0));
+        assert!(
+            out.rects
+                .iter()
+                .any(|r| r.rect == panel && r.fill != egui::Color32::TRANSPARENT),
+            "minimap panel drawn bottom-left: {:?}",
+            out.rects.iter().map(|r| r.rect).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn window_paint_zoomed_scales_node_spacing() {
+        // Zooming the camera doubles the node spacing on the painted canvas;
+        // the window reflects camera zoom rather than a fixed spec layout.
+        let identity = {
+            let app = chain_app();
+            let scene = build_scene_spec(&app, theme()).expect("scene present");
+            node_origins(&paint(Some(&scene), egui::vec2(1280.0, 800.0)))
+        };
+        let mut zoomed_app = chain_app();
+        zoomed_app.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+        });
+        let zoomed = {
+            let scene = build_scene_spec(&zoomed_app, theme()).expect("scene present");
+            node_origins(&paint(Some(&scene), egui::vec2(1280.0, 800.0)))
+        };
+
+        assert_eq!(identity.len(), 2);
+        assert_eq!(zoomed.len(), 2);
+        let id_gap = identity[1] - identity[0];
+        let zoom_gap = zoomed[1] - zoomed[0];
+        assert!(
+            (zoom_gap - 2.0 * id_gap).abs() < 0.5,
+            "zoom doubles spacing: {id_gap} -> {zoom_gap}"
+        );
     }
 }
 #[cfg(test)]

@@ -8,9 +8,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
-use crate::geometry::{BindingFeatures, RackGeometry, WiringOutlierScorer};
+use crate::geometry::{BindingFeatures, RackGeometry, WiringContext, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
-use crate::patch::{scan_internal_tokens, scan_register_refs, InfluenceSubtree, Patch};
+use crate::patch::{
+    scan_internal_tokens, scan_register_refs, InfluenceContext, InfluenceSubtree, Patch,
+};
 use crate::schema::load_schema;
 
 // Euclidean-distance wiring-outlier detection is delegated to the learned
@@ -706,6 +708,10 @@ fn validate_topology(patch: &Patch) -> Vec<TopologyIssue> {
 
 fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<TopologyIssue> {
     let scorer = WiringOutlierScorer::embedded();
+    // Shared feature context: the per-pair path rescans every section twice
+    // and re-resolves geometry, which dominated graph build on melody2
+    // (~24 s release). Built once; pairs cost O(1) lookups.
+    let ctx = WiringContext::new(patch, geometry);
     let mut outliers = Vec::new();
     let mut seen_pairs: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
@@ -740,7 +746,7 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
                 if !seen_pairs.insert(key.clone()) {
                     continue;
                 }
-                let Some(feat) = BindingFeatures::from_tokens(a, b, geometry, patch) else {
+                let Some(feat) = BindingFeatures::from_tokens_with_context(a, b, 0, &ctx) else {
                     continue;
                 };
                 // Invariant guards (design D5) — hard guarantees, never
@@ -777,20 +783,23 @@ const INFLUENCE_ZSCORE_BAND: f32 = 3.0;
 /// the renderer's error-highlight token colors it. Never gates patch loading
 /// (warnings only). Deterministic: tokens sorted, first root var (sorted).
 fn validate_influence_outliers(patch: &Patch) -> Vec<TopologyIssue> {
+    // Shared context: the naive per-token path rescanned every section for
+    // every popped cable and every token (quadratic); this builds the sink
+    // and root-var indexes once.
+    let ctx = InfluenceContext::new(patch);
     let mut tokens: Vec<&str> = patch.hw_components.iter().map(|c| c.id.as_str()).collect();
     tokens.sort_unstable();
     tokens.dedup();
     let mut issues = Vec::new();
     for token in tokens {
-        let Some(z) = patch.token_influence_z_score(token) else {
+        let Some((z, size)) = patch.influence_outlier_with_context(token, &ctx) else {
             continue;
         };
         if z <= INFLUENCE_ZSCORE_BAND {
             continue;
         }
-        let vars = patch.hw_token_to_vars(token);
+        let vars = ctx.root_vars(token);
         let cable = vars.first().cloned().unwrap_or_else(|| token.to_string());
-        let size = patch.influence_subtree_size_for(token);
         issues.push(TopologyIssue {
             cable,
             severity: TopologySeverity::Warning,
