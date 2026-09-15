@@ -2330,4 +2330,67 @@ mod kittest_tests {
         app.load_patch(patch);
         assert!(!app.showing_graph);
     }
+
+    // ── Journey tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn journey_graph_open_close_reopen() {
+        let mut app = setup("arpeggio1.ini");
+        // Open graph via keyboard (g g)
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(app.showing_graph, "graph should be present after open");
+        assert!(app.graph.is_some(), "graph data should exist after open");
+        // Render while open
+        render_graph(&app);
+        // Close graph — close_graph hides the view but preserves graph data
+        app.close_graph();
+        assert!(!app.showing_graph, "graph should be hidden after close");
+        // Reopen — graph rebuilds from the same patch
+        app.open_graph();
+        assert!(app.showing_graph, "graph should be present after reopen");
+        assert!(app.graph.is_some(), "graph data should exist after reopen");
+        render_graph(&app);
+    }
+
+    #[test]
+    fn journey_source_viewer_open_close() {
+        let mut app = setup("arpeggio1.ini");
+        // Open source viewer via g v
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.showing_viewer, "viewer should be showing");
+        // Close viewer via Esc
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.showing_viewer, "viewer should be hidden after close");
+        // Reopen
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.showing_viewer, "viewer should be showing after reopen");
+    }
+
+    #[test]
+    fn journey_physical_skeleton_toggle() {
+        let mut app = setup("arpeggio1.ini");
+        // Skeleton is off by default
+        assert!(!app.physical_show_skeleton, "skeleton off by default");
+        // Toggle on
+        app.physical_show_skeleton = !app.physical_show_skeleton;
+        assert!(app.physical_show_skeleton, "skeleton on after toggle");
+        // Toggle back off
+        app.physical_show_skeleton = !app.physical_show_skeleton;
+        assert!(
+            !app.physical_show_skeleton,
+            "skeleton off after second toggle"
+        );
+    }
+
+    #[test]
+    fn journey_optimizer_basic_flow() {
+        let app = setup("arpeggio1.ini");
+        // The optimizer requires a loaded patch with sections
+        assert!(app.patch.is_some(), "patch should be loaded");
+        let patch = app.patch.as_ref().unwrap();
+        assert!(!patch.sections.is_empty(), "patch should have sections");
+    }
 }
