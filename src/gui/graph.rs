@@ -37,13 +37,10 @@ pub(crate) fn paint_scene(
     scene: Option<&SceneSpec>,
     selected: &[usize],
 ) {
-    let painter = ui.painter();
-    let ctx = ui.ctx();
     paint_scene_in(
-        painter,
+        ui,
         egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
         scene,
-        ctx,
         selected,
     );
 }
@@ -53,18 +50,17 @@ pub(crate) fn paint_scene(
 /// have produced coordinates inside the pane, because egui has no painter
 /// translate primitive.
 pub(crate) fn paint_scene_in(
-    painter: &egui::Painter,
+    ui: &mut egui::Ui,
     canvas: egui::Rect,
     scene: Option<&SceneSpec>,
-    ctx: &egui::Context,
     selected: &[usize],
 ) {
     let Some(spec) = scene else {
         return; // No scene: the swapchain clear color shows through.
     };
+    let painter = ui.painter();
     let clipped = painter.with_clip_rect(canvas);
     let painter = &clipped;
-    painter.rect_filled(canvas, 0.0, rgb(spec.background));
 
     for cluster in &spec.clusters {
         let rect = egui::Rect::from_min_size(
@@ -154,9 +150,14 @@ pub(crate) fn paint_scene_in(
                 rgb(node.label_color),
             );
         }
+        // AccessKit annotation for egui_kittest query-by-label
+        let response = ui.allocate_rect(rect, egui::Sense::hover());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &node.label));
     }
 
     // Task 3.2/3.3: selection, navigation and inspection overlays.
+    let ctx = ui.ctx();
     paint_polish(painter, canvas, scene, ctx, selected);
 }
 

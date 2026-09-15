@@ -605,13 +605,13 @@ fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selec
 
     // Graph FULL (bottom-left): the shared full-graph scene (influence
     // highlight/dim), clipped to the pane.
-    graph::paint_scene_in(ui.painter(), q.full, scene, ctx, selected);
+    graph::paint_scene_in(ui, q.full, scene, selected);
 
     // Graph FILTERED (bottom-right): the influence-induced subgraph freshly
     // fit into its pane with its own compact camera.
     if let Some(f) = q.filtered {
         let subset = graph::build_subset_scene(app, t, f);
-        graph::paint_scene_in(ui.painter(), f, subset.as_ref(), ctx, selected);
+        graph::paint_scene_in(ui, f, subset.as_ref(), selected);
     }
 }
 

@@ -131,6 +131,11 @@ pub(super) fn paint_panels(
             );
         }
         paint_cell(&painter, cell, false, spec.paused);
+
+        // AccessKit annotation for egui_kittest query-by-label
+        let response = ui.allocate_rect(cell.rect, egui::Sense::hover());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &cell.label));
     }
 
     drop(painter);
