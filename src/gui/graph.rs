@@ -679,7 +679,9 @@ enum SceneInfluence {
 pub fn build_scene_spec(app: &App, theme: &Theme) -> Option<SceneSpec> {
     let graph = app.graph.as_ref()?;
     let camera = app.graph_camera.unwrap_or_default();
-    let filtered = !app.dependency_nodes.is_empty();
+    let dep_filtered = !app.dependency_nodes.is_empty();
+    let inf_filtered = app.influence_filter_active;
+    let filtered = dep_filtered || inf_filtered;
     build_scene(
         app,
         theme,
@@ -690,8 +692,16 @@ pub fn build_scene_spec(app: &App, theme: &Theme) -> Option<SceneSpec> {
             influence: SceneInfluence::FromApp,
             render_clusters: !filtered,
         },
-        |idx| !filtered || app.dependency_nodes.contains(&idx),
-        |idx| !filtered || app.dependency_edges.contains(&idx),
+        |idx| {
+            !filtered
+                || (dep_filtered && app.dependency_nodes.contains(&idx))
+                || (inf_filtered && app.influence_nodes.contains(&idx))
+        },
+        |idx| {
+            !filtered
+                || (dep_filtered && app.dependency_edges.contains(&idx))
+                || (inf_filtered && app.influence_edges.contains(&idx))
+        },
     )
 }
 
@@ -2208,5 +2218,114 @@ mod fit_tests {
         assert!(camera.zoom.is_finite());
         assert!(camera.zoom > 0.0);
         assert!(camera.pan.0.is_finite() && camera.pan.1.is_finite());
+    }
+}
+
+// ── egui_kittest integration tests ──────────────────────────────────────────
+
+#[cfg(test)]
+mod kittest_tests {
+    use crate::app::App;
+    use crate::handler::{handle_event, key_modifiers, KeyCode, KeyEvent};
+    use crate::patch::Patch;
+    use crate::theme;
+    use std::path::Path;
+
+    fn setup(patch_name: &str) -> App {
+        theme::init(theme::Theme::classic());
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{patch_name}"))).unwrap();
+        app.load_patch(patch);
+        app
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        handle_event(KeyEvent::new(code, key_modifiers::NONE), app);
+    }
+
+    fn render_graph(app: &App) {
+        let scene = super::build_scene_spec(app, theme::active());
+        let canvas = egui::vec2(800.0, 600.0);
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            super::paint_scene(ui.painter(), canvas, scene.as_ref(), ui.ctx(), &[]);
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn graph_renders_without_panic() {
+        let mut app = setup("arpeggio1.ini");
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(app.showing_graph);
+        render_graph(&app);
+    }
+
+    #[test]
+    fn graph_has_nodes_after_open() {
+        let mut app = setup("arpeggio1.ini");
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.nodes.is_empty());
+        assert!(!graph.edges.is_empty());
+    }
+
+    #[test]
+    fn graph_close_and_reopen() {
+        let mut app = setup("arpeggio1.ini");
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(app.showing_graph);
+        render_graph(&app);
+
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.showing_graph);
+
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(app.showing_graph);
+        render_graph(&app);
+    }
+
+    #[test]
+    fn prefix_g_v_opens_source_viewer() {
+        let mut app = setup("arpeggio1.ini");
+        assert!(!app.showing_viewer);
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.showing_viewer);
+    }
+
+    #[test]
+    fn esc_closes_source_viewer() {
+        let mut app = setup("arpeggio1.ini");
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.showing_viewer);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.showing_viewer);
+    }
+
+    #[test]
+    fn shift_group_toggle() {
+        let mut app = setup("arpeggio1.ini");
+        assert!(app.active_shift.is_none());
+        key(&mut app, KeyCode::Char('1'));
+        assert!(app.active_shift.is_some());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.active_shift.is_none());
+    }
+
+    #[test]
+    fn reload_patch_resets_graph_state() {
+        let mut app = setup("arpeggio1.ini");
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(app.showing_graph);
+
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        assert!(!app.showing_graph);
     }
 }
