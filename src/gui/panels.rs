@@ -222,6 +222,17 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
                     None
                 },
                 kind: comp.kind,
+                modifier_wash: app.hold_component.as_ref().and_then(|tok| {
+                    if app.patch.as_ref().is_some_and(|p| {
+                        p.hw_components
+                            .iter()
+                            .any(|c| c.id == *tok && c.id == comp.id)
+                    }) {
+                        Some(crate::theme::modifier_hue(tok))
+                    } else {
+                        None
+                    }
+                }),
             });
         }
         y += block_h;
@@ -294,6 +305,7 @@ mod tests {
             mark: PortMark::Cell,
             highlighted: false,
             shift_color: shift,
+            modifier_wash: None,
             kind,
         }
     }

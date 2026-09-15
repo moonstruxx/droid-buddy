@@ -1603,6 +1603,12 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                             }
                         }
                     }
+                    // Modifier hold: mouse Down without keyboard modifiers on a component.
+                    // Sets `hold_component` so the panels paint a wash backdrop; clears
+                    // when the mouse is released or leaves the panel area.
+                    if mouse.modifiers == key_modifiers::NONE {
+                        app.hold_component = Some(token.clone());
+                    }
                     app.select_component(token);
                 }
                 // Clicking a component is a panel interaction: hand keyboard
@@ -1767,6 +1773,8 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                     app.pinned.insert(node.id.clone());
                 }
             }
+            // Modifier hold: release the mouse hold wash.
+            app.hold_component = None;
         }
         MouseEventKind::ScrollUp => {
             // Task 2.3: wheel pans the graph camera on the graph surface
