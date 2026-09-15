@@ -3535,6 +3535,34 @@ mod tests {
     }
 
     #[test]
+    fn g_w_toggle_cycles_open_close_open_without_crashing() {
+        // Regression: Toggle → Toggle → Toggle must not corrupt the request queue.
+        // Each g+w pair queues one Toggle; the consumer clears it on the next
+        // poll. Three cycles: open, close, open.
+        let mut app = app_with_fixture();
+
+        // Cycle 1: open
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('w')), &mut app);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
+
+        // Cycle 2: close
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('w')), &mut app);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
+
+        // Cycle 3: reopen — must not panic or produce a stale request
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('w')), &mut app);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
+
+        assert!(app.prefix.is_none(), "prefix cleared after g w");
+    }
+
+    #[test]
     fn g_g_with_window_enabled_queues_open_without_tile() {
         let mut app = app_with_fixture();
         app.graph_window_enabled = true;

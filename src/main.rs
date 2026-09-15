@@ -150,11 +150,8 @@ mod windowed {
     impl ApplicationHandler for AppHandler {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             event_loop.set_control_flow(ControlFlow::Poll);
-            // Native-only: the window is the whole app, so it opens at startup
-            // and every frame is driven by the window's redraw events.
-            if !self.window.is_open() {
-                self.open_window(event_loop);
-            }
+            // The window opens lazily from `about_to_wait` (which calls
+            // `act_on_window_request`) so close/open races are impossible.
         }
 
         fn window_event(
