@@ -32,12 +32,13 @@ fn clamp01(x: f32) -> f32 {
 /// Paint one graph scene into the full canvas from the origin (compat
 /// wrapper for the single-pane path and the shape tests).
 pub(crate) fn paint_scene(
-    painter: &egui::Painter,
+    ui: &mut egui::Ui,
     canvas: egui::Vec2,
     scene: Option<&SceneSpec>,
-    ctx: &egui::Context,
     selected: &[usize],
 ) {
+    let painter = ui.painter();
+    let ctx = ui.ctx();
     paint_scene_in(
         painter,
         egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
@@ -2032,7 +2033,7 @@ mod window_paint_tests {
     ) -> PaintOutput {
         let ctx = egui::Context::default();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_scene(ui.painter(), canvas, scene, ui.ctx(), &[]);
+            paint_scene(ui, canvas, scene, &[]);
         });
         let mut labels = Vec::new();
         let mut rects = Vec::new();
@@ -2247,7 +2248,7 @@ mod kittest_tests {
         let scene = super::build_scene_spec(app, theme::active());
         let canvas = egui::vec2(800.0, 600.0);
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
-            super::paint_scene(ui.painter(), canvas, scene.as_ref(), ui.ctx(), &[]);
+            super::paint_scene(ui, canvas, scene.as_ref(), &[]);
         });
         harness.run();
     }
