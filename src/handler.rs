@@ -980,6 +980,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.toggle_dependency_filter();
                 return false;
             }
+            KeyCode::Char('i') => {
+                // Change D task 2.1: `i` toggles the influence-filtered induced
+                // subgraph rooted at the hovered node (fallback: the shared
+                // circuit selection); a second `i` restores the full graph.
+                app.toggle_influence_filter();
+                return false;
+            }
             KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph

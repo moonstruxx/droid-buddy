@@ -813,6 +813,19 @@ pub struct App {
     /// Edge indices (into `graph.edges`) with both endpoints in the set;
     /// empty when the filter is inactive.
     pub dependency_edges: Vec<usize>,
+    /// Influence-filtered induced subgraph (change D task 2.1): the frozen
+    /// influence root node while the `i` filter is active. Cleared by a second
+    /// `i`, Esc, a patch load, and graph close; presentation-only, never
+    /// mutates the graph.
+    pub influence_root: Option<NodeId>,
+    /// Node indices (into `graph.nodes`) of the influence subset, sorted;
+    /// empty when the filter is inactive.
+    pub influence_nodes: Vec<usize>,
+    /// Edge indices (into `graph.edges`) with both endpoints in the set;
+    /// empty when the filter is inactive.
+    pub influence_edges: Vec<usize>,
+    /// Whether the influence-filtered view is active.
+    pub influence_filter_active: bool,
     /// Per-patch XDG label store (`~/.config/droid-tui/labels.toml`), keyed by
     /// canonicalized absolute patch path. Loaded once at `App::new` via
     /// `LabelStore::load()` (warn-once, empty fallback) and persisted atomically
@@ -931,6 +944,10 @@ impl App {
             dependency_root: None,
             dependency_nodes: Vec::new(),
             dependency_edges: Vec::new(),
+            influence_root: None,
+            influence_nodes: Vec::new(),
+            influence_edges: Vec::new(),
+            influence_filter_active: false,
             label_store: LabelStore::load(),
             favorites: FavoritesStore::load(),
             editing: None,
@@ -2697,6 +2714,25 @@ impl App {
                 self.dependency_edges.clear();
             }
         }
+        // Re-apply influence filter (change D task 2.2): same root-vanished
+        // clearing rule as the dependency filter.
+        if self.influence_filter_active {
+            let Some(root) = self.influence_root.clone() else {
+                return;
+            };
+            let root_present = self
+                .graph
+                .as_ref()
+                .is_some_and(|g| g.nodes.iter().any(|n| n.id == root));
+            if root_present {
+                self.apply_influence_subset();
+            } else {
+                self.influence_root = None;
+                self.influence_nodes.clear();
+                self.influence_edges.clear();
+                self.influence_filter_active = false;
+            }
+        }
     }
 
     /// Clear the renderer-published cluster rects each frame while the graph is
@@ -2757,6 +2793,39 @@ impl App {
             "Dependencies of {label}: {} nodes",
             self.dependency_nodes.len()
         );
+    }
+
+    /// Toggle the influence-filtered induced subgraph rooted at the hovered
+    /// graph node, falling back to the shared circuit selection; a second `i`
+    /// clears it (change D task 2.1). With neither root available the view is
+    /// unchanged and the status hints.
+    pub fn toggle_influence_filter(&mut self) {
+        if self.influence_filter_active {
+            self.clear_influence_filter();
+            return;
+        }
+        let Some(graph) = &self.graph else {
+            self.status_message = String::from("Open the graph first");
+            return;
+        };
+        let Some(_influence) = &self.influence else {
+            self.status_message = String::from("No influence active");
+            return;
+        };
+        let root_idx = self.hovered_graph_node.or_else(|| {
+            self.selected_circuit()
+                .and_then(|id| graph.nodes.iter().position(|n| n.id == *id))
+        });
+        let Some(root_idx) = root_idx else {
+            self.status_message = String::from("No graph node selected");
+            return;
+        };
+        let root = graph.nodes[root_idx].id.clone();
+        self.influence_root = Some(root);
+        self.influence_filter_active = true;
+        self.apply_influence_subset();
+        let label = self.influence_root_label();
+        self.status_message = format!("Influence of {label}: {} nodes", self.influence_nodes.len());
     }
 
     /// Clear the dependency filter and restore the full graph solve (change D
@@ -2857,6 +2926,121 @@ impl App {
         }
     }
 
+    /// Clear the influence filter and restore the full graph solve (change D
+    /// task 2.1).
+    pub fn clear_influence_filter(&mut self) {
+        if !self.influence_filter_active {
+            return;
+        }
+        self.influence_root = None;
+        self.influence_nodes.clear();
+        self.influence_edges.clear();
+        self.influence_filter_active = false;
+        self.rebuild_graph();
+    }
+
+    /// Recompute the influence-induced subgraph from the frozen root over the
+    /// current graph and solve it as its own layout, writing the subset
+    /// positions back into the full-length array (change D task 2.1).
+    /// Mirrors `apply_dependency_subset` but uses `Graph::induced_subgraph`
+    /// with the influence subtree's influenced nodes. Deterministic per root:
+    /// same patch + same tension + same pins -> same subset layout.
+    fn apply_influence_subset(&mut self) {
+        let (members, edges) = {
+            let Some(root) = &self.influence_root else {
+                return;
+            };
+            let Some(graph) = &self.graph else {
+                return;
+            };
+            let Some(influence) = &self.influence else {
+                return;
+            };
+            let Some(root_idx) = graph.nodes.iter().position(|n| n.id == *root) else {
+                return;
+            };
+            // Use the influence subtree's influenced nodes as the member set
+            let member_set: HashSet<usize> = graph
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| influence.influenced_nodes.contains(&n.id))
+                .map(|(i, _)| i)
+                .collect();
+            // Ensure the root is included even if not in influence (shouldn't happen)
+            let mut member_set = member_set;
+            member_set.insert(root_idx);
+            let edges = graph.internal_edges(&member_set);
+            let mut member_vec: Vec<usize> = member_set.into_iter().collect();
+            member_vec.sort_unstable();
+            (member_vec, edges)
+        };
+        self.influence_nodes = members;
+        self.influence_edges = edges;
+
+        let (subset, pins) = {
+            let Some(graph) = &self.graph else {
+                return;
+            };
+            let nodes: Vec<GraphNode> = self
+                .influence_nodes
+                .iter()
+                .map(|&i| graph.nodes[i].clone())
+                .collect();
+            let edges: Vec<GraphEdge> = self
+                .influence_edges
+                .iter()
+                .map(|&i| graph.edges[i].clone())
+                .collect();
+            let subset = Graph {
+                nodes,
+                edges,
+                clusters: Vec::new(),
+                validation: Vec::new(),
+                latency: None,
+                highlighted_nodes: HashSet::new(),
+                highlighted_edges: HashSet::new(),
+                not_selected: HashSet::new(),
+            };
+            let pins: Vec<usize> = self
+                .influence_nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
+                .map(|(pi, _)| pi)
+                .collect();
+            (subset, pins)
+        };
+        let sub_pos = crate::layout::solve(&subset, &pins, self.tension);
+        let mut positions = vec![(0.0, 0.0); self.graph.as_ref().map_or(0, |g| g.nodes.len())];
+        for (pi, &fi) in self.influence_nodes.iter().enumerate() {
+            positions[fi] = sub_pos[pi];
+        }
+        self.graph_positions = positions;
+        self.graph_cluster_rects.clear();
+        self.graph_node_rects.clear();
+    }
+
+    /// Display label of the frozen influence root for the status line: the
+    /// circuit name (+ instance), the controller name, or the jack token.
+    fn influence_root_label(&self) -> String {
+        let Some(graph) = &self.graph else {
+            return String::new();
+        };
+        let Some(root) = &self.influence_root else {
+            return String::new();
+        };
+        let Some(node) = graph.nodes.iter().find(|n| &n.id == root) else {
+            return format!("{root:?}");
+        };
+        match &node.kind {
+            NodeKind::Circuit if node.instance_index > 0 => {
+                format!("{} {}", node.circuit, node.instance_index + 1)
+            }
+            _ => node.circuit.clone(),
+        }
+    }
+
     /// Reset graph-view state on patch load: the graph is rebuilt from a fresh
     /// solve the next time it opens.
     fn reset_graph_state(&mut self) {
@@ -2880,6 +3064,12 @@ impl App {
         self.dependency_root = None;
         self.dependency_nodes.clear();
         self.dependency_edges.clear();
+        // The influence filter is per-patch presentation state: cleared on
+        // graph close and patch load (change D task 2.1).
+        self.influence_root = None;
+        self.influence_nodes.clear();
+        self.influence_edges.clear();
+        self.influence_filter_active = false;
         // Quad is per-patch configuration on top of the slots: a new patch
         // reverts to the plain tiled layout (change `quad-view`, App-state).
         self.quad_active = false;
