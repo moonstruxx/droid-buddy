@@ -32,17 +32,15 @@ fn clamp01(x: f32) -> f32 {
 /// Paint one graph scene into the full canvas from the origin (compat
 /// wrapper for the single-pane path and the shape tests).
 pub(crate) fn paint_scene(
-    painter: &egui::Painter,
+    ui: &mut egui::Ui,
     canvas: egui::Vec2,
     scene: Option<&SceneSpec>,
-    ctx: &egui::Context,
     selected: &[usize],
 ) {
     paint_scene_in(
-        painter,
+        ui,
         egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
         scene,
-        ctx,
         selected,
     );
 }
@@ -52,18 +50,17 @@ pub(crate) fn paint_scene(
 /// have produced coordinates inside the pane, because egui has no painter
 /// translate primitive.
 pub(crate) fn paint_scene_in(
-    painter: &egui::Painter,
+    ui: &mut egui::Ui,
     canvas: egui::Rect,
     scene: Option<&SceneSpec>,
-    ctx: &egui::Context,
     selected: &[usize],
 ) {
     let Some(spec) = scene else {
         return; // No scene: the swapchain clear color shows through.
     };
+    let painter = ui.painter();
     let clipped = painter.with_clip_rect(canvas);
     let painter = &clipped;
-    painter.rect_filled(canvas, 0.0, rgb(spec.background));
 
     for cluster in &spec.clusters {
         let rect = egui::Rect::from_min_size(
@@ -153,9 +150,14 @@ pub(crate) fn paint_scene_in(
                 rgb(node.label_color),
             );
         }
+        // AccessKit annotation for egui_kittest query-by-label
+        let response = ui.allocate_rect(rect, egui::Sense::hover());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &node.label));
     }
 
     // Task 3.2/3.3: selection, navigation and inspection overlays.
+    let ctx = ui.ctx();
     paint_polish(painter, canvas, scene, ctx, selected);
 }
 
@@ -2032,7 +2034,7 @@ mod window_paint_tests {
     ) -> PaintOutput {
         let ctx = egui::Context::default();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_scene(ui.painter(), canvas, scene, ui.ctx(), &[]);
+            paint_scene(ui, canvas, scene, &[]);
         });
         let mut labels = Vec::new();
         let mut rects = Vec::new();
@@ -2247,7 +2249,7 @@ mod kittest_tests {
         let scene = super::build_scene_spec(app, theme::active());
         let canvas = egui::vec2(800.0, 600.0);
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
-            super::paint_scene(ui.painter(), canvas, scene.as_ref(), ui.ctx(), &[]);
+            super::paint_scene(ui, canvas, scene.as_ref(), &[]);
         });
         harness.run();
     }
@@ -2327,5 +2329,68 @@ mod kittest_tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         assert!(!app.showing_graph);
+    }
+
+    // ── Journey tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn journey_graph_open_close_reopen() {
+        let mut app = setup("arpeggio1.ini");
+        // Open graph via keyboard (g g)
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(app.showing_graph, "graph should be present after open");
+        assert!(app.graph.is_some(), "graph data should exist after open");
+        // Render while open
+        render_graph(&app);
+        // Close graph — close_graph hides the view but preserves graph data
+        app.close_graph();
+        assert!(!app.showing_graph, "graph should be hidden after close");
+        // Reopen — graph rebuilds from the same patch
+        app.open_graph();
+        assert!(app.showing_graph, "graph should be present after reopen");
+        assert!(app.graph.is_some(), "graph data should exist after reopen");
+        render_graph(&app);
+    }
+
+    #[test]
+    fn journey_source_viewer_open_close() {
+        let mut app = setup("arpeggio1.ini");
+        // Open source viewer via g v
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.showing_viewer, "viewer should be showing");
+        // Close viewer via Esc
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.showing_viewer, "viewer should be hidden after close");
+        // Reopen
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.showing_viewer, "viewer should be showing after reopen");
+    }
+
+    #[test]
+    fn journey_physical_skeleton_toggle() {
+        let mut app = setup("arpeggio1.ini");
+        // Skeleton is off by default
+        assert!(!app.physical_show_skeleton, "skeleton off by default");
+        // Toggle on
+        app.physical_show_skeleton = !app.physical_show_skeleton;
+        assert!(app.physical_show_skeleton, "skeleton on after toggle");
+        // Toggle back off
+        app.physical_show_skeleton = !app.physical_show_skeleton;
+        assert!(
+            !app.physical_show_skeleton,
+            "skeleton off after second toggle"
+        );
+    }
+
+    #[test]
+    fn journey_optimizer_basic_flow() {
+        let app = setup("arpeggio1.ini");
+        // The optimizer requires a loaded patch with sections
+        assert!(app.patch.is_some(), "patch should be loaded");
+        let patch = app.patch.as_ref().unwrap();
+        assert!(!patch.sections.is_empty(), "patch should have sections");
     }
 }

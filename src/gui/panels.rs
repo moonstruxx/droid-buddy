@@ -59,14 +59,14 @@ pub(crate) struct PanelsFrame {
 /// Paint the panels pane. `None` draws nothing. Returns the frame's
 /// hover/click/scroll report for the loop to apply.
 pub(super) fn paint_panels(
-    painter: &Painter,
+    ui: &mut egui::Ui,
     pane: egui::Rect,
-    ctx: &Context,
     spec: Option<&PanelsSpec>,
 ) -> PanelsFrame {
     let Some(spec) = spec else {
         return PanelsFrame::default();
     };
+    let painter = ui.painter().with_clip_rect(pane);
     let t = crate::theme::active();
     let border_color = if spec.focused {
         rgb(t.focus_border)
@@ -130,10 +130,16 @@ pub(super) fn paint_panels(
                 egui::StrokeKind::Inside,
             );
         }
-        paint_cell(painter, cell, false, spec.paused);
+        paint_cell(&painter, cell, false, spec.paused);
+
+        // AccessKit annotation for egui_kittest query-by-label
+        let response = ui.allocate_rect(cell.rect, egui::Sense::hover());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &cell.label));
     }
 
-    ctx.input(|i| panels_frame(i, &spec.cells))
+    drop(painter);
+    ui.ctx().input(|i| panels_frame(i, &spec.cells))
 }
 
 /// Cell size + gap of the quad Panels-pane wrap grid, in points. The pane is
@@ -339,7 +345,7 @@ mod tests {
             ..Default::default()
         };
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_panels(ui.painter(), ui.max_rect(), ui.ctx(), Some(spec));
+            paint_panels(ui, ui.max_rect(), Some(spec));
         });
         let mut labels = Vec::new();
         let mut rects = Vec::new();
@@ -500,7 +506,7 @@ mod tests {
         let raw_input = egui::RawInput::default();
         let mut frame = PanelsFrame::default();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            frame = paint_panels(ui.painter(), ui.max_rect(), ui.ctx(), None);
+            frame = paint_panels(ui, ui.max_rect(), None);
         });
         full_output.textures_delta.clear();
         assert_eq!(frame, PanelsFrame::default());
