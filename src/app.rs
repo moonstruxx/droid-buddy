@@ -782,6 +782,10 @@ pub struct App {
     pub physical_viewport: Option<Rect>,
     /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
     pub active_modifier_var: Option<String>,
+    /// Hardware token of the component currently being held with the mouse (mouse Down on
+    /// a modifier-eligible component without keyboard modifiers). Cleared on mouse Up or
+    /// Leave. Drives the modifier wash rendering in panels and the status bar hint.
+    pub hold_component: Option<String>,
     /// Forward influence result for the active modifier, if any.
     pub influence: Option<crate::patch::InfluenceSubtree>,
     /// Cached induced-subgraph solve of the influence set (quad-view FILTERED
@@ -937,6 +941,7 @@ impl App {
             physical_rack_size: (0, 0),
             physical_viewport: None,
             active_modifier_var: None,
+            hold_component: None,
             influence: None,
             influence_subset: None,
             disabled_circuits: HashSet::new(),
@@ -3191,6 +3196,7 @@ impl App {
 
     fn clear_influence_state(&mut self) {
         self.active_modifier_var = None;
+        self.hold_component = None;
         self.influence = None;
         self.influence_subset = None;
         if let Some(graph) = self.graph.as_mut() {

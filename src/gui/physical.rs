@@ -61,6 +61,10 @@ pub(crate) struct CellSpec {
     pub mark: PortMark,
     pub highlighted: bool,
     pub shift_color: Option<Color>,
+    /// When set, paint a transparent wash backdrop in this cell's color to visualize
+    /// the modifier hold state (mouse Down without keyboard modifiers on a
+    /// modifier-eligible component).
+    pub modifier_wash: Option<Color>,
     /// Component kind: lets the input layer tell knobs/encoders apart for
     /// wheel-over-component semantics.
     pub kind: crate::patch::ComponentKind,
@@ -262,6 +266,14 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     if cell.highlighted {
         let mut bg = rgb(crate::theme::active().muted);
         bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 90);
+        painter.rect_filled(rect, 0.0, bg);
+    }
+
+    // Modifier-hold wash: a low-alpha tinted backdrop on the held component so the
+    // user can see which modifier is active while holding the mouse button.
+    if let Some(wash) = cell.modifier_wash {
+        let mut bg = rgb(wash);
+        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 50);
         painter.rect_filled(rect, 0.0, bg);
     }
 
@@ -941,6 +953,7 @@ mod tests {
                 mark,
                 highlighted: false,
                 shift_color: None,
+                modifier_wash: None,
                 kind: comp.kind,
             });
         }
