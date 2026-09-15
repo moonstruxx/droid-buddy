@@ -427,6 +427,71 @@ impl Graph {
             .map(|(i, _)| i)
             .collect()
     }
+
+    /// Build an induced subgraph from a set of node indices (e.g. influenced
+    /// nodes). Keeps only edges with both endpoints in the set and clusters
+    /// that intersect the member set. Returns the subset graph with node/edge
+    /// indices mapped to full-graph positions for position mapping.
+    /// Deterministic: members sorted, edges in full-graph order, clusters
+    /// filtered and re-indexed.
+    pub fn induced_subgraph(&self, members: &HashSet<usize>) -> InducedSubgraph {
+        let mut member_vec: Vec<usize> = members.iter().copied().collect();
+        member_vec.sort_unstable();
+        let member_set: HashSet<usize> = member_vec.iter().copied().collect();
+        let edges = self.internal_edges(&member_set);
+
+        // Build subset nodes
+        let subset_nodes: Vec<GraphNode> = member_vec
+            .iter()
+            .map(|&fi| self.nodes[fi].clone())
+            .collect();
+
+        // Build subset edges (parallel to full-graph edge indices)
+        let subset_edges: Vec<GraphEdge> = edges.iter().map(|&ei| self.edges[ei].clone()).collect();
+
+        // Filter clusters that intersect the member set and re-index their ranges
+        let subset_clusters: Vec<Cluster> = self
+            .clusters
+            .iter()
+            .filter(|c| {
+                // Check if any section in the cluster's range maps to a member node
+                c.section_range.clone().any(|sec_idx| {
+                    self.nodes
+                        .iter()
+                        .enumerate()
+                        .any(|(ni, n)| n.section_index == sec_idx && member_set.contains(&ni))
+                })
+            })
+            .map(|c| Cluster {
+                title: c.title.clone(),
+                section_range: c.section_range.clone(),
+            })
+            .collect();
+
+        InducedSubgraph {
+            full_nodes: member_vec,
+            full_edges: edges,
+            nodes: subset_nodes,
+            edges: subset_edges,
+            clusters: subset_clusters,
+        }
+    }
+}
+
+/// An induced subgraph of a `Graph` with mapping back to full-graph indices.
+/// Used for the influence-filtered view (mirroring the dependency filter).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InducedSubgraph {
+    /// Full-graph node indices of the subset members, sorted.
+    pub full_nodes: Vec<usize>,
+    /// Full-graph edge indices of internal edges, in full-graph order.
+    pub full_edges: Vec<usize>,
+    /// Subset nodes (parallel to `full_nodes`).
+    pub nodes: Vec<GraphNode>,
+    /// Subset edges (parallel to `full_edges`).
+    pub edges: Vec<GraphEdge>,
+    /// Clusters intersecting the subset (section ranges unchanged).
+    pub clusters: Vec<Cluster>,
 }
 
 /// Compute forward-loop latency as a graph-build step (design D2), mirroring
@@ -2437,5 +2502,139 @@ mod fixture_tests {
         .into_iter()
         .collect();
         assert_eq!(cables, expected, "internal edge set mismatch");
+    }
+    /// `induced_subgraph` returns the influenced nodes plus their internal
+    /// edges, with intersecting clusters. Empty set yields empty subgraph.
+    #[test]
+    fn induced_subgraph_empty_set() {
+        let graph = dependency_walk_graph();
+        let subset = graph.induced_subgraph(&HashSet::new());
+        assert!(subset.nodes.is_empty());
+        assert!(subset.edges.is_empty());
+        assert!(subset.full_nodes.is_empty());
+        assert!(subset.full_edges.is_empty());
+        assert!(subset.clusters.is_empty());
+    }
+
+    /// Single node yields that node with no edges.
+    #[test]
+    fn induced_subgraph_single_node() {
+        let graph = dependency_walk_graph();
+        let mut members = HashSet::new();
+        members.insert(0); // first node
+        let subset = graph.induced_subgraph(&members);
+        assert_eq!(subset.nodes.len(), 1);
+        assert_eq!(subset.full_nodes, vec![0]);
+        assert!(subset.edges.is_empty());
+        assert!(subset.full_edges.is_empty());
+    }
+
+    /// Two connected nodes yields both nodes and the edge between them.
+    #[test]
+    fn induced_subgraph_two_node_chain() {
+        let graph = dependency_walk_graph();
+        // Find an edge and its endpoints
+        let edge_idx = graph
+            .edges
+            .iter()
+            .position(|e| !e.cable.is_empty())
+            .expect("at least one edge");
+        let src = graph.edges[edge_idx]
+            .source_index(&graph.nodes)
+            .expect("source resolves");
+        let sink = graph.edges[edge_idx]
+            .sink_index(&graph.nodes)
+            .expect("sink resolves");
+        let mut members = HashSet::new();
+        members.insert(src);
+        members.insert(sink);
+        let subset = graph.induced_subgraph(&members);
+        assert_eq!(subset.nodes.len(), 2);
+        assert_eq!(subset.edges.len(), 1);
+        assert_eq!(subset.full_nodes.len(), 2);
+        assert_eq!(subset.full_edges.len(), 1);
+    }
+
+    /// Register edges from a NotSelected circuit to a controller are excluded
+    /// from the subset when the circuit is not in the member set (mirrors
+    /// `internal_edges` behavior).
+    #[test]
+    fn induced_subgraph_register_edge_exclusion() {
+        let graph = dependency_walk_graph();
+        // Find a register edge (cable starts with _REG:)
+        let reg_edge_idx = graph
+            .edges
+            .iter()
+            .position(|e| e.cable.starts_with("_REG:"));
+        if let Some(ei) = reg_edge_idx {
+            let src = graph.edges[ei]
+                .source_index(&graph.nodes)
+                .expect("source resolves");
+            let _sink = graph.edges[ei]
+                .sink_index(&graph.nodes)
+                .expect("sink resolves");
+            // Only include one endpoint - edge should be excluded
+            let mut members = HashSet::new();
+            members.insert(src);
+            let subset = graph.induced_subgraph(&members);
+            assert!(
+                subset.edges.is_empty(),
+                "edge with one endpoint outside set excluded"
+            );
+        }
+    }
+
+    /// Determinism: same input set always produces same output order.
+    #[test]
+    fn induced_subgraph_deterministic() {
+        let graph = dependency_walk_graph();
+        let mut members = HashSet::new();
+        for i in 0..graph.nodes.len().min(5) {
+            members.insert(i);
+        }
+        let subset1 = graph.induced_subgraph(&members);
+        let subset2 = graph.induced_subgraph(&members);
+        assert_eq!(subset1.full_nodes, subset2.full_nodes);
+        assert_eq!(subset1.full_edges, subset2.full_edges);
+        assert_eq!(subset1.nodes.len(), subset2.nodes.len());
+        assert_eq!(subset1.edges.len(), subset2.edges.len());
+    }
+
+    /// Cluster inheritance: clusters intersecting the member set are included.
+    #[test]
+    fn induced_subgraph_cluster_inheritance() {
+        // Build a graph with banner groups
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[clocktool]\n    output = _CLK\n[copy]\n    input = _CLK\n[osc]\n    input = _CLK\n",
+            String::from("clusters"),
+        )
+        .unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let graph = Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
+        // Include nodes from first cluster
+        let mut members = HashSet::new();
+        for (ni, node) in graph.nodes.iter().enumerate() {
+            if node.circuit == "clocktool" || node.circuit == "copy" {
+                members.insert(ni);
+            }
+        }
+        let subset = graph.induced_subgraph(&members);
+        // The first banner group cluster should be included
+        assert!(
+            !subset.clusters.is_empty(),
+            "at least one cluster intersects"
+        );
     }
 }
