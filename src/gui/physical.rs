@@ -192,6 +192,11 @@ pub(crate) fn paint_physical(
     // state text (fader face for fader modules).
     for cell in &spec.cells {
         paint_cell(&painter, cell, spec.skeleton, spec.paused);
+
+        // AccessKit annotation for egui_kittest query-by-label
+        let response = ui.allocate_rect(cell.rect, egui::Sense::hover());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &cell.label));
     }
 
     // DB8E OLED display placeholder: bordered upper-band rect with the
