@@ -15,6 +15,7 @@ egui = "0.36"
 egui-winit = "0.36"
 egui-wgpu = "0.36"
 wgpu = "30"
+egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
 
 [dev-dependencies]
 tempfile = "3"
