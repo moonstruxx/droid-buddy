@@ -116,14 +116,14 @@ pub(crate) struct PhysicalFrame {
 /// Paint the physical 1:1 view into `pane`. `None` draws nothing.
 /// Returns the frame's pan/zoom/skeleton input report for the loop to apply.
 pub(crate) fn paint_physical(
-    painter: &Painter,
+    ui: &mut egui::Ui,
     pane: egui::Rect,
-    ctx: &Context,
     spec: Option<&PhysicalSpec>,
 ) -> PhysicalFrame {
     let Some(spec) = spec else {
         return PhysicalFrame::default();
     };
+    let painter = ui.painter().with_clip_rect(pane);
     painter.rect_filled(pane, 0.0, rgb(spec.background));
 
     let grid = rgb(crate::theme::active().muted);
@@ -191,7 +191,7 @@ pub(crate) fn paint_physical(
     // Element cells: skeleton markers, or the full state glyph + label +
     // state text (fader face for fader modules).
     for cell in &spec.cells {
-        paint_cell(painter, cell, spec.skeleton, spec.paused);
+        paint_cell(&painter, cell, spec.skeleton, spec.paused);
     }
 
     // DB8E OLED display placeholder: bordered upper-band rect with the
@@ -220,7 +220,8 @@ pub(crate) fn paint_physical(
         );
     }
 
-    ctx.input(|i| physical_frame(i, spec.cell_scale, pane))
+    drop(painter);
+    ui.ctx().input(|i| physical_frame(i, spec.cell_scale, pane))
 }
 
 /// Draw one element cell: skeleton marker, compact state cell, or the fader
@@ -1056,7 +1057,7 @@ mod tests {
             ..Default::default()
         };
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_physical(ui.painter(), ui.max_rect(), ui.ctx(), Some(spec));
+            paint_physical(ui, ui.max_rect(), Some(spec));
         });
         let mut labels = Vec::new();
         let mut rects = Vec::new();
@@ -1158,7 +1159,7 @@ mod tests {
         let raw_input = egui::RawInput::default();
         let mut frame = PhysicalFrame::default();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            frame = paint_physical(ui.painter(), ui.max_rect(), ui.ctx(), None);
+            frame = paint_physical(ui, ui.max_rect(), None);
         });
         full_output.textures_delta.clear();
         assert_eq!(frame, PhysicalFrame::default());

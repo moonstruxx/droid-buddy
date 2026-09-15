@@ -586,16 +586,17 @@ fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selec
         app.left_split_active,
     );
     app.pane_rects = quad_pane_rects(app, &q);
-    let ctx = ui.ctx();
     let bg = t.egui_color(t.graph_canvas_bg);
 
     // Panels (top-left): real hw components grouped by controller.
     let painter = ui.painter().with_clip_rect(q.panels);
     painter.rect_filled(q.panels, 0.0, bg);
+    drop(painter);
     let focused = app.quad_focus == crate::app::QuadFocus::Panels;
     let spec = panels::panels_spec(app, focused, q.panels);
-    let _ = panels::paint_panels(&painter, q.panels, ctx, Some(&spec));
+    let _ = panels::paint_panels(ui, q.panels, Some(&spec));
 
+    let ctx = ui.ctx();
     // Source (top-right): the raw/prettified viewer.
     let painter = ui.painter().with_clip_rect(q.source);
     painter.rect_filled(q.source, 0.0, bg);
@@ -669,10 +670,9 @@ impl EguiSurface {
             } else {
                 app.pane_rects.clear();
                 graph::paint_scene(
-                    ui.painter(),
+                    ui,
                     window_rect.size(),
                     scene,
-                    &self.context,
                     selected,
                 );
             // Runtime dispatch for the remaining surfaces (native-rendering wiring):
@@ -685,7 +685,6 @@ impl EguiSurface {
             // the same.
             let pane = ui.max_rect();
             let canvas = pane.size();
-            let ctx = ui.ctx();
             let t = crate::theme::active();
             // Physical: one case rect + one cell so the rack geometry paints.
             {
@@ -727,7 +726,7 @@ impl EguiSurface {
                     skeleton: false,
                     paused: false,
                 };
-                let _ = physical::paint_physical(ui.painter(), pane, ctx, Some(&dummy_physical));
+                let _ = physical::paint_physical(ui, pane, Some(&dummy_physical));
             }
             // Panels: one sub-block + one cell with a shift border.
             {
@@ -760,9 +759,10 @@ impl EguiSurface {
                     }],
                     paused: false,
                 };
-                let _ = panels::paint_panels(ui.painter(), pane, ctx, Some(&dummy_panels));
+                let _ = panels::paint_panels(ui, pane, Some(&dummy_panels));
             }
             // Viewer: one raw line + status so the content column paints.
+            let ctx = ui.ctx();
             {
                 let dummy_viewer = viewer::ViewerSpec {
                     title: " Source [raw] ".to_string(),
