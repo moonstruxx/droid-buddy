@@ -103,6 +103,17 @@ fn queue_startup_window_open(app: &mut App) {
     app.request_graph_window(GraphWindowRequest::Open);
 }
 
+/// True when a window event should end the event loop.
+///
+/// This is the exit decision that regressed twice: droid_tui-7y5, where a
+/// close request shut the window but never exited the loop, and
+/// droid_tui-5u9, where the keyboard quit flag was ignored. It maps the two
+/// quit signals to a bool rather than a winit event, so a `#[cfg(test)]`
+/// case can assert it without building an `ActiveEventLoop` or `KeyEvent`.
+fn should_exit(close_requested: bool, quit_requested: bool) -> bool {
+    close_requested || quit_requested
+}
+
 mod windowed {
     use color_eyre::Result;
     use winit::application::ApplicationHandler;
@@ -115,7 +126,7 @@ mod windowed {
     use droid_tui::{config, handler, theme};
     use winit::keyboard::ModifiersState;
 
-    use super::{load_initial_patch, queue_startup_window_open, seed_app};
+    use super::{load_initial_patch, queue_startup_window_open, seed_app, should_exit};
 
     /// The native application: owns the single `App` and the graph window,
     /// driven by winit's event loop (gpu-graph-window design D1).
@@ -183,7 +194,9 @@ mod windowed {
                 }
                 WindowEvent::CloseRequested => {
                     self.window.close();
-                    event_loop.exit();
+                    if should_exit(true, false) {
+                        event_loop.exit();
+                    }
                 }
                 WindowEvent::RedrawRequested => {
                     // Rebuild the scene from App state and push it before
@@ -223,7 +236,8 @@ mod windowed {
                 // Keyboard events also go through the DROID TUI handler so
                 // application keybindings (q, l, g v, g g, 1-4, etc.) work.
                 other @ WindowEvent::KeyboardInput { .. } => {
-                    if handler::handle_window_event(&other, self.modifiers, &mut self.app) {
+                    let quit = handler::handle_window_event(&other, self.modifiers, &mut self.app);
+                    if should_exit(false, quit) {
                         event_loop.exit();
                         return;
                     }
