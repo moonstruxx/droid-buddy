@@ -216,6 +216,11 @@ impl GraphWindow {
                     .with_inner_size(LogicalSize::new(1280.0, 800.0)),
             )
             .map_err(|err| WindowError::new(format!("could not create window: {err}")))?;
+        // Request keyboard focus/activation immediately: on Wayland a freshly
+        // created window maps unfocused unless it asks for it, which left the
+        // DROID keybindings dead at startup until the user clicked the window
+        // (bead droid_tui-5u9).
+        window.focus_window();
         // A stale surface must not survive a reopen; the display handle is
         // injected into the wgpu instance so Wayland-GLES can create surfaces.
         EGUI.with(|slot| *slot.borrow_mut() = None);
@@ -615,6 +620,95 @@ fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selec
     }
 }
 
+/// Paint the tiled main band (tiled-window-manager D1/D6): a full-height left
+/// panel pane plus the open right-column slots stacked top-to-bottom. Panels
+/// always render; each `tile_stack` slot paints its surface into an even
+/// horizontal cut of the right column. Publishes `pane_rects` for focus
+/// hit-testing. The caller uses this when tiles are open and neither the quad
+/// nor the empty-stack single-graph path applies.
+fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
+    let t = crate::theme::active();
+    let window = ui.max_rect();
+    let bg = t.egui_color(t.graph_canvas_bg);
+    let x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
+    let panels_rect = egui::Rect::from_min_max(window.min, egui::pos2(x, window.max.y));
+    let right = egui::Rect::from_min_max(egui::pos2(x, window.min.y), window.max);
+
+    let slots = app.tile_stack.slots.clone();
+    app.pane_rects = Vec::with_capacity(slots.len() + 1);
+    app.pane_rects
+        .push((crate::app::FocusSlot::Panels, to_cell_rect(panels_rect)));
+
+    // Panels (left, full height): real hw components grouped by controller.
+    let painter = ui.painter().with_clip_rect(panels_rect);
+    painter.rect_filled(panels_rect, 0.0, bg);
+    drop(painter);
+    let focused = app.tile_stack.focus == crate::app::FocusSlot::Panels;
+    let spec = panels::panels_spec(app, focused, panels_rect);
+    let _ = panels::paint_panels(ui, panels_rect, Some(&spec));
+
+    if slots.is_empty() {
+        return;
+    }
+    let slot_h = right.height() / slots.len() as f32;
+    for (i, view) in slots.iter().enumerate() {
+        let y0 = right.min.y + slot_h * i as f32;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(right.min.x, y0),
+            egui::vec2(right.width(), slot_h),
+        );
+        app.pane_rects
+            .push((crate::app::FocusSlot::Slot(i), to_cell_rect(rect)));
+        match view {
+            crate::app::ViewType::Graph => {
+                graph::paint_scene_in(ui, rect, scene, selected);
+            }
+            crate::app::ViewType::SourceViewer => {
+                let painter = ui.painter().with_clip_rect(rect);
+                painter.rect_filled(rect, 0.0, bg);
+                let spec = viewer::viewer_spec(app);
+                let _ = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
+            }
+            // Physical and Optimizer render elsewhere today: the optimizer is
+            // an overlay (`paint_overlays`), and the physical 1:1 view has no
+            // app-to-spec builder in the gui lane yet.
+            crate::app::ViewType::Physical | crate::app::ViewType::Optimizer => {}
+        }
+    }
+}
+
+/// Dispatch the overlays over the base surface, bottom of the z-order first:
+/// diff, optimizer, validation, select, picker, label edit, help. Called after
+/// the base paint so every overlay draws in both the quad and single-pane
+/// branches.
+fn paint_overlays(app: &App, ui: &mut egui::Ui) {
+    let painter = ui.painter();
+    let canvas = ui.max_rect().size();
+    let ctx = ui.ctx();
+    if let Some(spec) = overlays::diff_spec_for(app) {
+        overlays::paint_diff_surface(painter, canvas, ctx, Some(&spec));
+    }
+    if let Some(spec) = overlays::optimizer_spec(app) {
+        overlays::paint_optimizer(painter, canvas, ctx, Some(&spec));
+    }
+    if let Some(spec) = overlays::validation_spec_for(app) {
+        let _ = overlays::paint_validation_modal(painter, canvas, ctx, Some(&spec));
+    }
+    if let Some(spec) = overlays::select_menu_spec(app) {
+        overlays::paint_select_menu(painter, canvas, ctx, Some(&spec));
+    }
+    if app.showing_picker {
+        let spec = picker::picker_spec(app);
+        let _ = picker::paint_picker(painter, canvas, ctx, Some(&spec));
+    }
+    if let Some(spec) = overlays::label_edit_spec(app) {
+        overlays::paint_label_editor(painter, canvas, ctx, Some(&spec));
+    }
+    if app.showing_help {
+        overlays::paint_help(painter, canvas, crate::help::active_view(app));
+    }
+}
+
 impl EguiSurface {
     /// Paint one egui frame into the window and present it, reporting the
     /// frame's input state (task 3.1) for the loop to map onto `App`
@@ -663,220 +757,47 @@ impl EguiSurface {
             .or_default()
             .native_pixels_per_point = Some(scale);
 
+        // Extract keyboard events from raw_input BEFORE run_ui consumes them.
+        // Keyboard events are one-shot in egui — key_pressed() only returns true
+        // for the frame the event arrived. After run_ui takes ownership of
+        // raw_input, the keyboard events are gone. Pointer state (position,
+        // button state) is accumulated and survives, so it can be read after.
+        let window_keys: Vec<WindowGraphKey> = raw_input
+            .events
+            .iter()
+            .filter_map(|e| {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = e
+                {
+                    let no_mod =
+                        !(modifiers.shift || modifiers.ctrl || modifiers.alt || modifiers.command);
+                    match key {
+                        egui::Key::X if no_mod => Some(WindowGraphKey::ToggleProcessing),
+                        egui::Key::P if no_mod => Some(WindowGraphKey::TogglePin),
+                        egui::Key::E if no_mod => Some(WindowGraphKey::BeginEdit),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let mut full_output = self.context.run_ui(raw_input, |ui| {
             let window_rect = ui.max_rect();
             if app.is_quad() && window_rect.width() >= crate::app::QUAD_WIDTH_THRESHOLD {
                 paint_quad(app, ui, scene, selected);
-            } else {
+            } else if app.tile_stack.slots.is_empty() {
                 app.pane_rects.clear();
-                graph::paint_scene(
-                    ui,
-                    window_rect.size(),
-                    scene,
-                    selected,
-                );
-            // Runtime dispatch for the remaining surfaces (native-rendering wiring):
-            // physical + panels are always visible (main view); viewer/picker/overlays
-            // use minimal dummy specs so headless tests and the runtime both see
-            // shapes even when `App` has no patch loaded. When `App` is wired
-            // through the windowed loop, these dummies are replaced by
-            // `viewer::viewer_spec(app)` / `picker::picker_spec(app)` /
-            // `overlays::*_spec_for(app)` payloads — the painter call shape stays
-            // the same.
-            let pane = ui.max_rect();
-            let canvas = pane.size();
-            let t = crate::theme::active();
-            // Physical: one case rect + one cell so the rack geometry paints.
-            {
-                let dummy_physical = physical::PhysicalSpec {
-                    background: t.graph_canvas_bg,
-                    case_rect: egui::Rect::from_min_size(
-                        egui::Pos2::new(4.0, 4.0),
-                        egui::Vec2::new((canvas.x - 8.0).max(20.0), (canvas.y - 8.0).max(20.0)),
-                    ),
-                    mounts: Vec::new(),
-                    fold_bars: Vec::new(),
-                    modules: vec![physical::ModuleSpec {
-                        rect: egui::Rect::from_min_size(
-                            egui::Pos2::new(8.0, 8.0),
-                            egui::Vec2::new(120.0, 48.0),
-                        ),
-                        title: "P2B8 1".to_string(),
-                    }],
-                    cells: vec![physical::CellSpec {
-                        rect: egui::Rect::from_min_size(
-                            egui::Pos2::new(12.0, 14.0),
-                            egui::Vec2::new(40.0, 28.0),
-                        ),
-                        glyph: "\u{25CF}".to_string(),
-                        label: "B1.1".to_string(),
-                        state_text: "ON".to_string(),
-                        color: t.button,
-                        is_fader: false,
-                        fader_value: 0.0,
-                        global_index: 0,
-                        mark: physical::PortMark::Cell,
-                        highlighted: false,
-                        shift_color: None,
-                        modifier_wash: None,
-                        kind: crate::patch::ComponentKind::Button,
-                    }],
-                    db8e_bands: Vec::new(),
-                    grid_lines: Vec::new(),
-                    cell_scale: 10.0,
-                    skeleton: false,
-                    paused: false,
-                };
-                let _ = physical::paint_physical(ui, pane, Some(&dummy_physical));
+                graph::paint_scene(ui, window_rect.size(), scene, selected);
+            } else {
+                paint_tiled(app, ui, scene, selected);
             }
-            // Panels: one sub-block + one cell with a shift border.
-            {
-                let dummy_panels = panels::PanelsSpec {
-                    title: " Panels ".to_string(),
-                    focused: true,
-                    modules: vec![physical::ModuleSpec {
-                        rect: egui::Rect::from_min_size(
-                            egui::Pos2::new(6.0, 6.0),
-                            egui::Vec2::new(96.0, 38.0),
-                        ),
-                        title: "P2B8 1".to_string(),
-                    }],
-                    cells: vec![physical::CellSpec {
-                        rect: egui::Rect::from_min_size(
-                            egui::Pos2::new(10.0, 12.0),
-                            egui::Vec2::new(40.0, 28.0),
-                        ),
-                        glyph: "\u{25CF}".to_string(),
-                        label: "B1.1".to_string(),
-                        state_text: "ON".to_string(),
-                        color: t.button,
-                        is_fader: false,
-                        fader_value: 0.0,
-                        global_index: 0,
-                        mark: physical::PortMark::Cell,
-                        highlighted: false,
-                        shift_color: Some(t.shift2),
-                        modifier_wash: None,
-                        kind: crate::patch::ComponentKind::Button,
-                    }],
-                    paused: false,
-                };
-                let _ = panels::paint_panels(ui, pane, Some(&dummy_panels));
-            }
-            // Viewer: one raw line + status so the content column paints.
-            let ctx = ui.ctx();
-            {
-                let dummy_viewer = viewer::ViewerSpec {
-                    title: " Source [raw] ".to_string(),
-                    focused: true,
-                    lines: vec![viewer::LineSpec {
-                        text: "[motorfader]".to_string(),
-                        fragments: vec![],
-                    }],
-                    scroll: 0,
-                    empty_message: None,
-                    sidebar: None,
-                    minimap: None,
-                    status: vec![viewer::StatusFragment {
-                        text: "Source Viewer".to_string(),
-                        color: t.text,
-                        bold: true,
-                    }],
-                };
-                let _ = viewer::paint_viewer(ui.painter(), pane, ctx, Some(&dummy_viewer));
-            }
-            // Picker: one favourite row + one listing row.
-            {
-                let dummy_picker = picker::PickerSpec {
-                    title: " File Picker ".to_string(),
-                    picker_dir: "/tmp".to_string(),
-                    filter: None,
-                    rows: vec![
-                        picker::PickerRow {
-                            label: "★ patch.ini".to_string(),
-                            is_favourite: true,
-                            is_dir: false,
-                            is_parent: false,
-                        },
-                        picker::PickerRow {
-                            label: "other.ini".to_string(),
-                            is_favourite: false,
-                            is_dir: false,
-                            is_parent: false,
-                        },
-                    ],
-                    selected: 0,
-                    has_favourites: false,
-                    fav_count: 0,
-                };
-                let _ = picker::paint_picker(ui.painter(), canvas, ctx, Some(&dummy_picker));
-            }
-            // Overlays: each overlay paints its chrome at its canvas size.
-            {
-                let dummy_validation = overlays::ValidationSpec {
-                    title: " Validation (1) 1E 0W 0H ".to_string(),
-                    hint: " e:toggle j/k:navigate Enter:jump Esc:close ".to_string(),
-                    rows: vec![overlays::ValidationRow {
-                        location: "L1:1".to_string(),
-                        severity: crate::validation::Severity::Error,
-                        code: "unknown_circuit".to_string(),
-                        message: "unknown circuit foo".to_string(),
-                        selected: true,
-                    }],
-                    empty_message: None,
-                };
-                let _ = overlays::paint_validation_modal(
-                    ui.painter(),
-                    canvas,
-                    ctx,
-                    Some(&dummy_validation),
-                );
-                let dummy_select = overlays::SelectMenuSpec {
-                    title: " Select state (1) ".to_string(),
-                    hint: " j/k:navigate [/]:cycle Esc:clear ".to_string(),
-                    rows: vec![overlays::SelectRow {
-                        signal: "sel".to_string(),
-                        kind_label: "register".to_string(),
-                        usage: 2,
-                        candidates: "0, 1".to_string(),
-                        current: "1".to_string(),
-                        selected: true,
-                    }],
-                    empty_message: None,
-                };
-                overlays::paint_select_menu(ui.painter(), canvas, ctx, Some(&dummy_select));
-                let dummy_label = overlays::LabelEditSpec {
-                    draft: "MyLabel".to_string(),
-                    hint: "Enter save | Esc cancel | 1..4 layer".to_string(),
-                    hue: Some(t.shift1),
-                };
-                overlays::paint_label_editor(ui.painter(), canvas, ctx, Some(&dummy_label));
-                let dummy_diff = overlays::DiffSpec {
-                    title: " Diff (1) ".to_string(),
-                    added: vec!["_CABLE_A".to_string()],
-                    removed: vec![],
-                    changed: vec![],
-                };
-                overlays::paint_diff_surface(ui.painter(), canvas, ctx, Some(&dummy_diff));
-                let dummy_optimizer = overlays::OptimizerSpec {
-                    header: " Optimizer (1) \u{00B7} w = 0.5 ".to_string(),
-                    hint:
-                        " j/k select \u{00B7} Enter preview \u{00B7} r restore \u{00B7} s export \u{00B7} Esc close "
-                            .to_string(),
-                    rows: vec![overlays::OptimizerRow {
-                        label: "\u{25B6} candidate 1".to_string(),
-                        weighted_obj: 1.23,
-                        avg_before: 2.0,
-                        avg_after: 1.5,
-                        max_before: 5.0,
-                        max_after: 3.0,
-                        selected: true,
-                    }],
-                    empty_message: None,
-                };
-                overlays::paint_optimizer(ui.painter(), canvas, ctx, Some(&dummy_optimizer));
-            }
-            }
+            paint_overlays(app, ui);
         });
 
         // Task 3.1: snapshot the processed input so the loop can drive `App`
@@ -885,21 +806,6 @@ impl EguiSurface {
         // `x`/`p` have no modifier guard there either.
         let window_frame = self.context.input(|i| {
             let pointer = i.pointer.latest_pos().map(|p| (p.x, p.y));
-            let mut keys = Vec::new();
-            if i.key_pressed(egui::Key::X) {
-                keys.push(WindowGraphKey::ToggleProcessing);
-            }
-            if i.key_pressed(egui::Key::P) {
-                keys.push(WindowGraphKey::TogglePin);
-            }
-            if i.key_pressed(egui::Key::E)
-                && !(i.modifiers.shift
-                    || i.modifiers.ctrl
-                    || i.modifiers.alt
-                    || i.modifiers.command)
-            {
-                keys.push(WindowGraphKey::BeginEdit);
-            }
             // Task 3.2/3.3: middle-drag pans the shared camera, wheel zooms
             // about the cursor, and an empty-canvas left drag selects nodes.
             // `smooth_scroll_delta.y` is positive when scrolling down (zoom
@@ -922,7 +828,7 @@ impl EguiSurface {
                 primary_pressed: i.pointer.primary_pressed(),
                 primary_down: i.pointer.primary_down(),
                 primary_released: i.pointer.primary_released(),
-                keys,
+                keys: window_keys,
                 pan_delta,
                 zoom,
                 marquee: graph::frame_marquee(scene, i),
@@ -1235,6 +1141,187 @@ mod tests {
             "panels title missing: {labels:?}"
         );
         assert_eq!(app.pane_rects.len(), 4, "quad publishes four pane rects");
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_tiled_renders_panels_and_viewer_slot_headless() {
+        // `g v` opens the SourceViewer as a right-column slot; the tiled base
+        // paint must render it next to the panels pane (the gap this fixes),
+        // not just the always-on graph scene.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(crate::app::ViewType::SourceViewer);
+        assert!(app.showing_viewer);
+
+        let ctx = egui::Context::default();
+        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
+        });
+        let labels: Vec<String> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("Panels")),
+            "panels title missing: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Source")),
+            "viewer title missing: {labels:?}"
+        );
+        assert_eq!(app.pane_rects.len(), 2, "panels + one viewer slot");
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_tiled_renders_graph_slot_headless() {
+        // `g g` opens the Graph as a right-column slot; with the slot open the
+        // tiled base paint renders the graph scene next to the panels pane and
+        // publishes pane rects for both.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph();
+        assert!(app.showing_graph);
+        assert!(app.tile_stack.is_open(crate::app::ViewType::Graph));
+
+        let ctx = egui::Context::default();
+        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        assert!(
+            scene.as_ref().is_some_and(|s| !s.nodes.is_empty()),
+            "graph scene must have nodes"
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
+        });
+        assert!(
+            !full_output.shapes.is_empty(),
+            "tiled paint must emit shapes for panels and the graph slot"
+        );
+        assert_eq!(app.pane_rects.len(), 2, "panels + one graph slot");
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_tiled_empty_stack_falls_back_cleanly() {
+        // No open tiles: the tiled paint still renders the panels pane and
+        // publishes its single pane rect (the dispatch routes this case to the
+        // single-graph path, but the helper must not panic when called direct).
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_tiled(&mut app, ui, None, &[]);
+        });
+        assert_eq!(
+            app.pane_rects.len(),
+            1,
+            "panels only when the stack is empty"
+        );
+        let labels: Vec<String> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("Panels")),
+            "panels title missing: {labels:?}"
+        );
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_dispatches_overlays_over_base() {
+        // The overlay dispatch sits after the base paint and runs in both
+        // branches; with the flags set every overlay's title lands as a text
+        // shape in the same frame (mouse routing is out of scope).
+        let mut app = App::new();
+        app.showing_picker = true;
+        app.showing_help = true;
+        app.diff_showing = true;
+        app.showing_validation = true;
+        app.validation_issues = vec![crate::validation::ValidationIssue {
+            span: crate::patch::Span {
+                line: 0,
+                col_start: 0,
+                col_end: 4,
+            },
+            severity: crate::validation::Severity::Warning,
+            code: "unknown_circuit".into(),
+            message: "unknown circuit foo".into(),
+        }];
+
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_overlays(&app, ui);
+        });
+        let labels: Vec<String> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("File Picker")),
+            "picker title missing: {labels:?}"
+        );
+        // Help paints the active view's bare title; the picker's carries
+        // padding, so this exact match only the help paint can satisfy.
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.as_str() == crate::help::active_view(&app).title()),
+            "help title missing: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Diff")),
+            "diff title missing: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Validation")),
+            "validation title missing: {labels:?}"
+        );
         full_output.textures_delta.clear();
     }
 }

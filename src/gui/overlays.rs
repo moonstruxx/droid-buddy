@@ -282,6 +282,47 @@ pub(super) fn paint_select_menu(
     }
 }
 
+// ── Help modal ───────────────────────────────────────────────────────────────
+
+pub(super) fn paint_help(painter: &Painter, canvas: Vec2, view: crate::help::HelpView) {
+    let t = crate::theme::active();
+    let cw = (canvas.x * 0.50).clamp(24.0 * 6.0, 80.0 * 6.0);
+    let ch = (canvas.y * 0.70).clamp(10.0 * 12.0, 40.0 * 12.0);
+    let rect = Rect::from_center_size(
+        Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
+        Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
+    );
+    painter.rect_filled(rect, 8.0, rgb(t.muted).gamma_multiply(0.12));
+    painter.rect(
+        rect,
+        8.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.min + egui::vec2(8.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        view.title(),
+        egui::FontId::proportional(12.0),
+        rgb(t.text),
+    );
+    let mut y = rect.min.y + 24.0;
+    for (key, action) in crate::help::keybindings(view) {
+        if y + 14.0 > rect.max.y - 8.0 {
+            break;
+        }
+        painter.text(
+            Pos2::new(rect.min.x + 8.0, y),
+            egui::Align2::LEFT_TOP,
+            format!("{key}  {action}"),
+            egui::FontId::monospace(10.0),
+            rgb(t.text),
+        );
+        y += 14.0;
+    }
+}
+
 // ── Label editor ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
