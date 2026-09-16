@@ -181,7 +181,10 @@ mod windowed {
                 WindowEvent::ModifiersChanged(mods) => {
                     self.modifiers = mods.state();
                 }
-                WindowEvent::CloseRequested => self.window.close(),
+                WindowEvent::CloseRequested => {
+                    self.window.close();
+                    event_loop.exit();
+                }
                 WindowEvent::RedrawRequested => {
                     // Rebuild the scene from App state and push it before
                     // painting so the window shows the current graph (the
