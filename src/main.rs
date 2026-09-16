@@ -365,4 +365,28 @@ mod tests {
         queue_startup_window_open(&mut app);
         assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
     }
+
+    #[test]
+    fn should_exit_on_close_request() {
+        // Regression droid_tui-7y5: a close request shut the window but never
+        // exited the event loop.
+        assert!(should_exit(true, false));
+    }
+
+    #[test]
+    fn should_exit_on_quit_request() {
+        // Regression droid_tui-5u9: the keyboard quit flag was ignored, so
+        // `q` never quit.
+        assert!(should_exit(false, true));
+    }
+
+    #[test]
+    fn should_exit_keeps_running_without_signal() {
+        assert!(!should_exit(false, false));
+    }
+
+    #[test]
+    fn should_exit_on_both_signals() {
+        assert!(should_exit(true, true));
+    }
 }
