@@ -6118,6 +6118,25 @@ mod tests {
     }
 
     #[test]
+    fn window_non_keyboard_events_do_not_quit() {
+        // Close/redraw/modifier handling lives in main.rs's event loop, never
+        // the keyboard quit path; each non-keyboard variant must hit the
+        // `_ => false` arm of `handle_window_event`.
+        let cases = [
+            WindowEvent::CloseRequested,
+            WindowEvent::RedrawRequested,
+            WindowEvent::ModifiersChanged(winit::event::Modifiers::default()),
+        ];
+        for event in cases {
+            let mut app = App::new();
+            assert!(
+                !handle_window_event(&event, ModifiersState::empty(), &mut app),
+                "non-keyboard window event must not set the quit flag"
+            );
+        }
+    }
+
+    #[test]
     fn window_q_quits() {
         let mut app = App::new();
         assert!(window_press(
