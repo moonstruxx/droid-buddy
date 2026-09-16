@@ -169,7 +169,7 @@ mod windowed {
 
         fn window_event(
             &mut self,
-            _event_loop: &ActiveEventLoop,
+            event_loop: &ActiveEventLoop,
             window_id: WindowId,
             event: WindowEvent,
         ) {
@@ -220,8 +220,15 @@ mod windowed {
                 // Keyboard events also go through the DROID TUI handler so
                 // application keybindings (q, l, g v, g g, 1-4, etc.) work.
                 other @ WindowEvent::KeyboardInput { .. } => {
-                    handler::handle_window_event(&other, self.modifiers, &mut self.app);
+                    if handler::handle_window_event(&other, self.modifiers, &mut self.app) {
+                        event_loop.exit();
+                        return;
+                    }
                     self.window.window_event(&other);
+                    // Force a redraw so DROID handler mutations (picker open,
+                    // shift toggle, graph open, etc.) are reflected even when
+                    // egui does not think the event needs repainting.
+                    self.window.request_redraw();
                 }
                 other => self.window.window_event(&other),
             }
