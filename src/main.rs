@@ -1,6 +1,6 @@
 use color_eyre::Result;
 
-use droid_tui::app::App;
+use droid_tui::app::{App, GraphWindowRequest};
 use droid_tui::latency::CostModel;
 use droid_tui::{config, schema, theme};
 
@@ -95,6 +95,14 @@ fn try_load_file(app: &mut App, path: &std::path::Path) -> bool {
     }
 }
 
+/// Startup open (bead droid_tui-59t): the window is the whole app, and
+/// `about_to_wait` creates it only from a pending request (opening inside
+/// `resumed` crashed on Wayland after a close, commit 136c54c), so `run`
+/// queues the initial `Open` — without it the loop idles with no window.
+fn queue_startup_window_open(app: &mut App) {
+    app.request_graph_window(GraphWindowRequest::Open);
+}
+
 mod windowed {
     use color_eyre::Result;
     use winit::application::ApplicationHandler;
@@ -105,8 +113,9 @@ mod windowed {
     use droid_tui::app::{App, GraphWindowRequest};
     use droid_tui::gui::{self, GraphWindow};
     use droid_tui::{config, handler, theme};
+    use winit::keyboard::ModifiersState;
 
-    use super::{load_initial_patch, seed_app};
+    use super::{load_initial_patch, queue_startup_window_open, seed_app};
 
     /// The native application: owns the single `App` and the graph window,
     /// driven by winit's event loop (gpu-graph-window design D1).
@@ -114,6 +123,10 @@ mod windowed {
         app: App,
         window: GraphWindow,
         error: Option<color_eyre::Report>,
+        /// Current keyboard modifier state, updated on every
+        /// `ModifiersChanged` event so that `handle_window_event`
+        /// receives accurate Ctrl/Shift/Alt info.
+        modifiers: ModifiersState,
     }
 
     impl AppHandler {
@@ -165,6 +178,9 @@ mod windowed {
                 return;
             }
             match event {
+                WindowEvent::ModifiersChanged(mods) => {
+                    self.modifiers = mods.state();
+                }
                 WindowEvent::CloseRequested => self.window.close(),
                 WindowEvent::RedrawRequested => {
                     // Rebuild the scene from App state and push it before
@@ -201,6 +217,12 @@ mod windowed {
                 }
                 // Every other event feeds the egui input pipeline so pointer
                 // and keyboard input reach the painter's WinitState.
+                // Keyboard events also go through the DROID TUI handler so
+                // application keybindings (q, l, g v, g g, 1-4, etc.) work.
+                other @ WindowEvent::KeyboardInput { .. } => {
+                    handler::handle_window_event(&other, self.modifiers, &mut self.app);
+                    self.window.window_event(&other);
+                }
                 other => self.window.window_event(&other),
             }
         }
@@ -224,11 +246,16 @@ mod windowed {
         let mut app = App::new();
         seed_app(&mut app, settings);
         load_initial_patch(&mut app, initial_patch.as_deref());
+        // Build the graph from the loaded patch so the window paints
+        // content on its first frame (bead droid_tui-59t).
+        app.open_graph();
         let mut handler = AppHandler {
             app,
             window: GraphWindow::new(),
             error: None,
+            modifiers: ModifiersState::empty(),
         };
+        queue_startup_window_open(&mut handler.app);
         event_loop
             .run_app(&mut handler)
             .map_err(|err| color_eyre::Report::msg(format!("winit event loop failed: {err}")))?;
@@ -292,21 +319,26 @@ mod tests {
     }
 
     #[test]
-    fn startup_seeding_produces_no_graph_until_requested() {
-        // Mirrors the fixed startup: load a patch but do NOT auto-open the graph.
-        // The window must open on the physical/panels view, so the startup scene
-        // is None/empty until `g g` explicitly builds the graph.
+    fn startup_builds_graph_from_loaded_patch() {
+        // Regression droid_tui-59t: the window opens at startup and paints
+        // the graph on its first frame, so the graph data must be built
+        // before the event loop starts.
         let mut app = App::new();
         load_initial_patch(&mut app, None);
-        let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
-        assert!(
-            scene.is_none() || scene.is_some_and(|s| s.nodes.is_empty()),
-            "startup must not produce a graph scene before g g"
-        );
-        // Explicit `g g` still produces a non-empty graph.
         app.open_graph();
         let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
-        let spec = scene.expect("g g must produce a scene to paint");
-        assert!(!spec.nodes.is_empty(), "g g must paint nodes");
+        let spec = scene.expect("startup must produce a scene to paint");
+        assert!(!spec.nodes.is_empty(), "startup must paint nodes");
+    }
+
+    #[test]
+    fn startup_queues_the_window_open_request() {
+        // Regression droid_tui-59t: window creation is deferred to
+        // `about_to_wait` (136c54c), so startup must leave a pending Open
+        // request or the app runs an event loop with no window at all.
+        let mut app = App::new();
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
+        queue_startup_window_open(&mut app);
+        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
     }
 }
