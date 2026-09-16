@@ -2254,6 +2254,51 @@ mod kittest_tests {
         harness.run();
     }
 
+    /// Repaint the graph through a harness and hand the harness back so the
+    /// caller can query widgets by AccessKit label after the frame settles.
+    fn render_graph_queryable(app: &App) -> egui_kittest::Harness<'static> {
+        let scene = super::build_scene_spec(app, theme::active());
+        let canvas = egui::vec2(800.0, 600.0);
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            super::paint_scene(ui, canvas, scene.as_ref(), &[]);
+        });
+        harness.run();
+        harness
+    }
+
+    /// Drive one key through the winit seam (the conversion entry the desktop
+    /// loop uses) and return the quit signal.
+    fn winit_key(logical_key: &winit::keyboard::Key, app: &mut App) -> bool {
+        crate::handler::handle_window_key_event(
+            logical_key,
+            winit::event::ElementState::Pressed,
+            winit::keyboard::ModifiersState::empty(),
+            app,
+        )
+    }
+
+    #[test]
+    fn window_key_event_drives_quit_and_graph_repaint_exposes_node_labels() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = setup("arpeggio1.ini");
+
+        // `q` pressed through the winit seam returns the quit signal end to end.
+        let quit = winit_key(&winit::keyboard::Key::Character("q".into()), &mut app);
+        assert!(quit, "q pressed via the winit seam must signal quit");
+
+        // `g g` through the same seam opens the graph view.
+        winit_key(&winit::keyboard::Key::Character("g".into()), &mut app);
+        winit_key(&winit::keyboard::Key::Character("g".into()), &mut app);
+        assert!(app.showing_graph, "g g must open the graph view");
+
+        // Repaint and resolve a graph node by its AccessKit label. `get_by_label`
+        // panics when the label is absent, so a clean return proves the repaint
+        // exposed the node.
+        let harness = render_graph_queryable(&app);
+        harness.get_by_label("arpeggio");
+    }
+
     #[test]
     fn graph_renders_without_panic() {
         let mut app = setup("arpeggio1.ini");
