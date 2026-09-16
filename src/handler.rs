@@ -6116,6 +6116,88 @@ mod tests {
             "unbound key must not mutate app state"
         );
     }
+
+    #[test]
+    fn window_q_quits() {
+        let mut app = App::new();
+        assert!(window_press(
+            &winit_char("q"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        // A plain `q` press quits and leaves the app unmutated otherwise.
+        assert!(!app.showing_picker);
+        assert!(!app.showing_viewer);
+        assert!(app.prefix.is_none());
+        assert_eq!(app.active_shift, None);
+    }
+
+    #[test]
+    fn window_l_opens_picker() {
+        let mut app = app_with_fixture();
+        assert!(!window_press(
+            &winit_char("l"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.showing_picker, "l opens the file picker");
+    }
+
+    #[test]
+    fn window_g_v_opens_source_viewer() {
+        let mut app = app_with_fixture();
+        assert!(!window_press(
+            &winit_char("g"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.prefix.is_some(), "first g arms the prefix");
+        assert!(!window_press(
+            &winit_char("v"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.showing_viewer, "g v opens the source viewer");
+        assert!(
+            app.tile_stack.is_open(ViewType::SourceViewer),
+            "the viewer takes a right-column slot"
+        );
+        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(app.prefix.is_none(), "prefix cleared on open");
+    }
+
+    #[test]
+    fn window_e_opens_label_edit_overlay() {
+        let mut app = app_with_fixture();
+        app.hovered_component = Some(0);
+        assert!(!window_press(
+            &winit_char("e"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(
+            app.editing.is_some(),
+            "e opens the label edit overlay on the hovered component"
+        );
+    }
+
+    #[test]
+    fn window_esc_clears_armed_prefix() {
+        let mut app = app_with_fixture();
+        assert!(!window_press(
+            &winit_char("g"),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.prefix.is_some());
+        assert!(!window_press(
+            &winit_key(NamedKey::Escape),
+            ModifiersState::empty(),
+            &mut app
+        ));
+        assert!(app.prefix.is_none(), "Esc cancels the armed prefix");
+    }
+
     #[test]
     fn panels_frame_hover_sets_hovered_component() {
         let mut app = app_with_fixture();
