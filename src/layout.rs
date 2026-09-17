@@ -244,13 +244,20 @@ fn dense_columns(depth: &[usize]) -> Vec<usize> {
 /// nodes in a column never share vertical space. All coordinates land on the
 /// [`GRID_SNAP`] grid. Unlike [`solve`] this path never runs force relaxation.
 ///
-/// `widths` is parallel to `graph.nodes`: entry `i` is node `i`'s width.
-/// Missing or negative entries fall back to 0 (the size estimator plugs in
-/// later). The returned `Vec<(f32, f32)>` is parallel to `graph.nodes`: index
-/// `i` holds node `i`'s position. Pure and deterministic: same graph + same
-/// widths → identical positions. Within-column order is strict file order
-/// (task 1.2 adds the barycenter option).
-pub fn solve_columns(graph: &Graph, widths: &[f32]) -> Vec<(f32, f32)> {
+/// Controller and jack nodes sit in fixed outer columns (design D4): the left
+/// outer column holds controllers + input jacks, the right outer column holds
+/// output jacks, and the circuit columns (circuit-only depth, outer nodes
+/// excluded) run between them. Within-column vertical order follows `ordering`
+/// (task 1.2): strict slot order by default, barycenter crossing-minimization
+/// as the option; column assignment is identical for both.
+///
+/// `widths` is parallel to `graph.nodes`: entry `i` is node `i`'s width. Pass
+/// [`estimated_widths`] to size nodes from the renderer's inputs (title +
+/// port markers, task 1.3); missing or negative entries fall back to 0. The
+/// returned `Vec<(f32, f32)>` is parallel to `graph.nodes`: index `i` holds
+/// node `i`'s position. Pure and deterministic: same graph + same widths +
+/// same ordering → identical positions.
+pub fn solve_columns(graph: &Graph, widths: &[f32], ordering: LayoutOrdering) -> Vec<(f32, f32)> {
     let n = graph.nodes.len();
     if n == 0 {
         return Vec::new();
@@ -258,8 +265,9 @@ pub fn solve_columns(graph: &Graph, widths: &[f32]) -> Vec<(f32, f32)> {
     let width: Vec<f32> = (0..n)
         .map(|i| widths.get(i).copied().unwrap_or(0.0).max(0.0))
         .collect();
-    let col = dense_columns(&topological_depth(graph));
-    let ncols = col.iter().copied().max().map_or(0, |m| m + 1);
+    let depth = circuit_depth(graph);
+    let (col, ncols) = assign_columns(graph, &depth);
+    let rank = column_ranks(graph, &depth, ordering);
 
     // Block width = widest member, snapped up to 2·GRID_SNAP so the block's
     // center line (every member's x) lands exactly on the grid.
@@ -278,9 +286,13 @@ pub fn solve_columns(graph: &Graph, widths: &[f32]) -> Vec<(f32, f32)> {
         left += bw + HORIZONTAL_SPACING;
     }
 
+    // Stack slots within each column in rank order (strict = file order,
+    // barycenter = crossing-minimized order).
     let mut slot = vec![0usize; ncols];
     let mut positions = vec![(0.0f32, 0.0f32); n];
-    for i in 0..n {
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (col[i], rank[i]));
+    for i in order {
         let c = col[i];
         let x = block_left[c] + block_width[c] / 2.0;
         let y = slot[c] as f32 * VERTICAL_SPACING;
@@ -290,27 +302,158 @@ pub fn solve_columns(graph: &Graph, widths: &[f32]) -> Vec<(f32, f32)> {
     positions
 }
 
-/// Deterministic within-layer ordering that reduces edge crossings between
-/// adjacent layers (barycenter heuristic, design gv5).
-///
-/// Nodes are grouped into layers by longest-path depth. A fixed number of
-/// sweeps alternates left→right and right→left; in each sweep every layer is
-/// re-ordered by the mean (barycenter) of its neighbors' current orders in
-/// the adjacent layer, using a stable sort so equal barycenters keep their
-/// current relative order. Nodes with no neighbor in the adjacent layer keep
-/// their current order. No RNG and a fixed sweep count make the result
-/// deterministic: same graph → same order.
-fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
+/// Circuit-only longest-path depth (graph-column-layout D4): the capped
+/// Bellman-Ford relaxation over the subgraph induced by circuit nodes, so
+/// controller/jack nodes never shift the circuit columns. Non-circuit nodes
+/// get depth 0 (their placement is the fixed outer columns, not the depth
+/// columns).
+fn circuit_depth(graph: &Graph) -> Vec<usize> {
     let n = graph.nodes.len();
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
+    let circuit_edges: Vec<(usize, usize)> = edges
+        .iter()
+        .copied()
+        .filter(|&(u, v)| {
+            graph.nodes[u].kind == NodeKind::Circuit && graph.nodes[v].kind == NodeKind::Circuit
+        })
+        .collect();
+    depth_over(n, &circuit_edges)
+}
 
+/// Column index per node and total column count (graph-column-layout D4): the
+/// left outer column (controllers + input jacks, index 0 when present), the
+/// dense-normalized circuit-depth columns, and the right outer column
+/// (output jacks, last when present). All-circuit graphs keep the plain
+/// dense-normalized assignment.
+fn assign_columns(graph: &Graph, depth: &[usize]) -> (Vec<usize>, usize) {
+    let n = graph.nodes.len();
+    let has_left = graph
+        .nodes
+        .iter()
+        .any(|nd| matches!(nd.kind, NodeKind::Controller | NodeKind::InputJack));
+    let has_right = graph.nodes.iter().any(|nd| nd.kind == NodeKind::OutputJack);
+    let left_offset = usize::from(has_left);
+
+    // Dense-normalize circuit depths only (outer nodes are excluded from the
+    // circuit columns by design D4).
+    let circuit_indices: Vec<usize> = (0..n)
+        .filter(|&i| graph.nodes[i].kind == NodeKind::Circuit)
+        .collect();
+    let circ_depths: Vec<usize> = circuit_indices.iter().map(|&i| depth[i]).collect();
+    let circ_dense = dense_columns(&circ_depths);
+    let n_circ_cols = circ_dense.iter().copied().max().map_or(0, |m| m + 1);
+
+    let mut col = vec![0usize; n];
+    for (k, &i) in circuit_indices.iter().enumerate() {
+        col[i] = left_offset + circ_dense[k];
+    }
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if node.kind == NodeKind::OutputJack {
+            col[i] = left_offset + n_circ_cols;
+        }
+    }
+    let ncols = left_offset + n_circ_cols + usize::from(has_right);
+    (col, ncols)
+}
+
+/// Within-column vertical order for the column path (task 1.2): strict keeps
+/// file order; barycenter re-orders each column by the crossing-minimization
+/// sweeps over the circuit subgraph (design gv5 + D4: outer-column nodes are
+/// not part of the signal-flow layers and keep file order). Deterministic per
+/// (graph, ordering); column assignment is identical for both.
+fn column_ranks(graph: &Graph, depth: &[usize], ordering: LayoutOrdering) -> Vec<usize> {
+    let n = graph.nodes.len();
+    let mut rank: Vec<usize> = (0..n).collect();
+    if ordering == LayoutOrdering::Barycenter {
+        let index = node_index(graph);
+        let edges = edge_pairs(graph, &index);
+        let active: Vec<bool> = graph
+            .nodes
+            .iter()
+            .map(|nd| nd.kind == NodeKind::Circuit)
+            .collect();
+        let layers = crossing_minimized_layers(n, &edges, depth, &active);
+        for layer in &layers {
+            for (pos, &i) in layer.iter().enumerate() {
+                rank[i] = pos;
+            }
+        }
+    }
+    rank
+}
+
+/// Title mirroring the renderer's `instance_title` (src/gui/graph.rs): the
+/// first occurrence of a single-instance circuit is the plain name; among
+/// repeated instances the first stays plain and later occurrences carry the
+/// zero-based index (`copy`, `copy (1)`, ...).
+fn estimated_title(name: &str, index: usize, repeats: Option<usize>) -> String {
+    match repeats {
+        Some(n) if n > 1 && index > 0 => format!("{name} ({index})"),
+        _ => name.to_string(),
+    }
+}
+
+/// Estimated rendered width of node `i` (graph-column-layout D3, task 1.3):
+/// title characters at [`NODE_ESTIMATE_CHAR_WIDTH`] each, frame padding
+/// ([`NODE_ESTIMATE_PADDING`]), plus a fixed marker width per input/output
+/// port the node has edges for ([`NODE_ESTIMATE_PORT_WIDTH`]) — the same
+/// inputs the renderer uses (title from `instance_title`, port presence from
+/// incidence). Non-circuit nodes (controllers/jacks) have no instance suffix,
+/// mirroring the renderer.
+fn estimate_node_width(graph: &Graph, i: usize) -> f32 {
+    let node = &graph.nodes[i];
+    let title = if node.kind == NodeKind::Circuit {
+        let repeats = graph
+            .nodes
+            .iter()
+            .filter(|o| o.kind == NodeKind::Circuit && o.circuit == node.circuit)
+            .count();
+        estimated_title(&node.circuit, node.instance_index, Some(repeats))
+    } else {
+        node.circuit.clone()
+    };
+    let title_w = title.chars().count() as f32 * NODE_ESTIMATE_CHAR_WIDTH;
+    let index = node_index(graph);
+    let edges = edge_pairs(graph, &index);
+    let has_in = edges.iter().any(|&(_, v)| v == i);
+    let has_out = edges.iter().any(|&(u, _)| u == i);
+    let ports_w = NODE_ESTIMATE_PORT_WIDTH * (usize::from(has_in) + usize::from(has_out)) as f32;
+    title_w + NODE_ESTIMATE_PADDING + ports_w
+}
+
+/// Estimated width of every node (graph-column-layout D3, task 1.3): the
+/// renderer-input sizes that feed the column placement, so wide nodes widen
+/// their column. Deterministic; rendering remains size-authoritative.
+pub fn estimated_widths(graph: &Graph) -> Vec<f32> {
+    (0..graph.nodes.len())
+        .map(|i| estimate_node_width(graph, i))
+        .collect()
+}
+
+/// Core barycenter sweeps (design gv5): group the `active` node indices into
+/// layers by `depth`, run [`CROSSING_SWEEPS`] alternating-direction passes
+/// that re-order each layer by the mean (barycenter) of its neighbors' current
+/// orders in the adjacent layer (stable sort, so equal barycenters keep their
+/// current relative order), and return the re-ordered layers. `active` lets
+/// callers exclude nodes that must not join the sweeps (outer-column nodes,
+/// design D4) without building a subgraph. No RNG and a fixed sweep count
+/// make the result deterministic: same inputs → same layers.
+fn crossing_minimized_layers(
+    n: usize,
+    edges: &[(usize, usize)],
+    depth: &[usize],
+    active: &[bool],
+) -> Vec<Vec<usize>> {
     // Group node indices by depth into layers, preserving file order within
     // each layer. Depth can exceed `n` on cyclic graphs, so layers live in a
     // map keyed by depth, not a fixed-size vec.
     let mut layers: Vec<Vec<usize>> = Vec::new();
     let mut layer_of_depth: HashMap<usize, usize> = HashMap::new();
     for (i, &d) in depth.iter().enumerate().take(n) {
+        if !active[i] {
+            continue;
+        }
         let li = *layer_of_depth.entry(d).or_insert_with(|| {
             layers.push(Vec::new());
             layers.len() - 1
@@ -361,7 +504,7 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
             // Barycenter = mean of neighbor orders in the adjacent layer.
             let mut sum = vec![0.0f32; n];
             let mut count = vec![0usize; n];
-            for &(u, v) in &edges {
+            for &(u, v) in edges {
                 if in_layer[u] && in_adj[v] {
                     sum[u] += order[v] as f32;
                     count[u] += 1;
@@ -396,6 +539,27 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
         }
     }
 
+    layers
+}
+
+/// Deterministic within-layer ordering that reduces edge crossings between
+/// adjacent layers (barycenter heuristic, design gv5).
+///
+/// Wrapper over [`crossing_minimized_layers`] flattening the re-ordered
+/// layers into a per-node within-layer order for the layered seed
+/// ([`seed_positions`]). No RNG and a fixed sweep count make the result
+/// deterministic: same graph → same order.
+fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
+    let n = graph.nodes.len();
+    let index = node_index(graph);
+    let edges = edge_pairs(graph, &index);
+    let layers = crossing_minimized_layers(n, &edges, depth, &vec![true; n]);
+    let mut order = vec![0usize; n];
+    for layer in &layers {
+        for (pos, &i) in layer.iter().enumerate() {
+            order[i] = pos;
+        }
+    }
     order
 }
 
@@ -608,6 +772,18 @@ mod tests {
             kind: NodeKind::Circuit,
             circuit: name.to_string(),
             instance_index: 0,
+            section_index,
+        }
+    }
+
+    /// Circuit node with an explicit occurrence index (for repeated instances,
+    /// mirroring the renderer's `instance_title` input).
+    fn instance_node(name: &str, instance_index: usize, section_index: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(name, instance_index),
+            kind: NodeKind::Circuit,
+            circuit: name.to_string(),
+            instance_index,
             section_index,
         }
     }
@@ -1494,7 +1670,7 @@ mod tests {
         // single-member column stacks at slot 0 (y = 0).
         let graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
         let widths = vec![20.0; 5];
-        let positions = solve_columns(&graph, &widths);
+        let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
         assert_eq!(positions.len(), 5);
         for (i, (x, y)) in positions.iter().enumerate() {
             assert_eq!(*y, 0.0, "node {i} should sit on slot 0");
@@ -1536,8 +1712,8 @@ mod tests {
             ],
         );
         let widths: Vec<f32> = (0..24).map(|i| 30.0 + (i % 5) as f32 * 7.5).collect();
-        let a = solve_columns(&graph, &widths);
-        let b = solve_columns(&graph, &widths);
+        let a = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        let b = solve_columns(&graph, &widths, LayoutOrdering::Strict);
         assert_eq!(a, b);
         assert_finite_and_bounded(&a);
     }
@@ -1563,7 +1739,7 @@ mod tests {
             ],
         );
         let widths: Vec<f32> = (0..12).map(|i| 17.5 + i as f32 * 1.3).collect();
-        for (x, y) in solve_columns(&graph, &widths) {
+        for (x, y) in solve_columns(&graph, &widths, LayoutOrdering::Strict) {
             let sx = (x / GRID_SNAP).round() * GRID_SNAP;
             let sy = (y / GRID_SNAP).round() * GRID_SNAP;
             assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
@@ -1571,13 +1747,64 @@ mod tests {
         }
     }
 
+    /// No-overlap property (design D3), verified against the solver's own
+    /// column assignment: nodes in the same column stack on distinct
+    /// [`VERTICAL_SPACING`] slots (never sharing vertical space), and every
+    /// node's horizontal extent stays inside its column block, so blocks (and
+    /// the nodes in them) never overlap. Shared by the fractional-width,
+    /// estimated-width, and mixed-kind tests so the property is checked the
+    /// same way everywhere.
+    fn assert_columns_do_not_overlap(graph: &Graph, widths: &[f32], positions: &[(f32, f32)]) {
+        let n = graph.nodes.len();
+        assert_eq!(positions.len(), n);
+        let depth = circuit_depth(graph);
+        let (cols, ncols) = assign_columns(graph, &depth);
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); ncols];
+        for (i, &c) in cols.iter().enumerate() {
+            members[c].push(i);
+        }
+
+        let mut block_span: Vec<(f32, f32)> = Vec::with_capacity(ncols);
+        for (c, list) in members.iter().enumerate() {
+            // Vertical: slots are ≥ VERTICAL_SPACING apart, so no two members
+            // share vertical space.
+            for a in 0..list.len() {
+                for b in (a + 1)..list.len() {
+                    let dy = (positions[list[a]].1 - positions[list[b]].1).abs();
+                    assert!(
+                        dy >= VERTICAL_SPACING,
+                        "graph {n}: column {c} nodes {} and {} share vertical space (dy {dy})",
+                        list[a],
+                        list[b]
+                    );
+                }
+            }
+            // Horizontal: the block spans the members' extents (per-column
+            // max width), so adjacent blocks keep a real gap.
+            let left = list
+                .iter()
+                .map(|&i| positions[i].0 - widths[i] / 2.0)
+                .fold(f32::INFINITY, f32::min);
+            let right = list
+                .iter()
+                .map(|&i| positions[i].0 + widths[i] / 2.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            block_span.push((left, right));
+        }
+        for k in 0..ncols.saturating_sub(1) {
+            let gap = block_span[k + 1].0 - block_span[k].1;
+            assert!(
+                gap >= HORIZONTAL_SPACING - 1e-3,
+                "graph {n}: column {k} block overlaps column {} (gap {gap})",
+                k + 1
+            );
+        }
+    }
+
     #[test]
     fn column_nodes_never_share_vertical_space() {
-        // No-overlap property (design D3): nodes in the same column stack on
-        // distinct VERTICAL_SPACING slots (never sharing vertical space), and
-        // every node's horizontal extent stays inside its column block, so
-        // blocks (and the nodes in them) never overlap. Checked across graph
-        // shapes and fractional widths.
+        // No-overlap property (design D3), checked across graph shapes and
+        // fractional widths.
         let mut sixty_chain = Vec::new();
         for chain in 0..3 {
             for k in 0..19 {
@@ -1608,51 +1835,8 @@ mod tests {
         for (n, edges) in cases {
             let graph = make_graph(n, &edges);
             let widths: Vec<f32> = (0..n).map(|i| 15.0 + (i % 7) as f32 * 6.3).collect();
-            let positions = solve_columns(&graph, &widths);
-            assert_eq!(positions.len(), n);
-
-            let cols = dense_columns(&topological_depth(&graph));
-            let ncols = cols.iter().copied().max().map_or(0, |m| m + 1);
-            let mut members: Vec<Vec<usize>> = vec![Vec::new(); ncols];
-            for (i, &c) in cols.iter().enumerate() {
-                members[c].push(i);
-            }
-
-            let mut block_span: Vec<(f32, f32)> = Vec::with_capacity(ncols);
-            for (c, list) in members.iter().enumerate() {
-                // Vertical: slots are ≥ VERTICAL_SPACING apart, so no two
-                // members share vertical space.
-                for a in 0..list.len() {
-                    for b in (a + 1)..list.len() {
-                        let dy = (positions[list[a]].1 - positions[list[b]].1).abs();
-                        assert!(
-                            dy >= VERTICAL_SPACING,
-                            "graph {n}: column {c} nodes {} and {} share vertical space (dy {dy})",
-                            list[a],
-                            list[b]
-                        );
-                    }
-                }
-                // Horizontal: the block spans the members' extents (per-column
-                // max width), so adjacent blocks keep a real gap.
-                let left = list
-                    .iter()
-                    .map(|&i| positions[i].0 - widths[i] / 2.0)
-                    .fold(f32::INFINITY, f32::min);
-                let right = list
-                    .iter()
-                    .map(|&i| positions[i].0 + widths[i] / 2.0)
-                    .fold(f32::NEG_INFINITY, f32::max);
-                block_span.push((left, right));
-            }
-            for k in 0..ncols.saturating_sub(1) {
-                let gap = block_span[k + 1].0 - block_span[k].1;
-                assert!(
-                    gap >= HORIZONTAL_SPACING - 1e-3,
-                    "graph {n}: column {k} block overlaps column {} (gap {gap})",
-                    k + 1
-                );
-            }
+            let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+            assert_columns_do_not_overlap(&graph, &widths, &positions);
         }
     }
 
@@ -1669,11 +1853,324 @@ mod tests {
             let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             max - min
         };
-        let narrow_span = span(&solve_columns(&graph, &narrow));
-        let wide_span = span(&solve_columns(&graph, &wide));
+        let narrow_span = span(&solve_columns(&graph, &narrow, LayoutOrdering::Strict));
+        let wide_span = span(&solve_columns(&graph, &wide, LayoutOrdering::Strict));
         assert!(
             wide_span > narrow_span,
             "wide nodes should spread columns: {wide_span} !> {narrow_span}"
+        );
+    }
+
+    // ── graph-column-layout: ordering switch (task 1.2) ─────────────────────
+
+    #[test]
+    fn both_orderings_assign_identical_columns() {
+        // Task 1.2 contract: strict and barycenter produce the SAME column
+        // assignment; only the within-column vertical order may differ. The
+        // crossed A→D / B→C fixture (depth 0 = [A, B], depth 1 = [C, D]) keeps
+        // both nodes of a layer in one column under either ordering.
+        let graph = Graph {
+            nodes: vec![node("A", 0), node("B", 1), node("C", 2), node("D", 3)],
+            edges: vec![
+                GraphEdge {
+                    cable: "_X".to_string(),
+                    source: NodeId::circuit("A", 0),
+                    sink: NodeId::circuit("D", 0),
+                },
+                GraphEdge {
+                    cable: "_Y".to_string(),
+                    source: NodeId::circuit("B", 0),
+                    sink: NodeId::circuit("C", 0),
+                },
+            ],
+            ..Default::default()
+        };
+        let widths = vec![20.0; 4];
+        let strict = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        let bary = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
+        for i in 0..4 {
+            assert_eq!(
+                strict[i].0, bary[i].0,
+                "node {i} must keep its column under both orderings"
+            );
+        }
+        assert_columns_do_not_overlap(&graph, &widths, &strict);
+        assert_columns_do_not_overlap(&graph, &widths, &bary);
+    }
+
+    #[test]
+    fn barycenter_ordering_flips_the_crossing_layer() {
+        // The crossed A→D / B→C fixture crosses under file order; the
+        // barycenter sweeps re-order layer 1 to [D, C], so the within-column
+        // vertical order differs from strict while columns stay identical.
+        let graph = Graph {
+            nodes: vec![node("A", 0), node("B", 1), node("C", 2), node("D", 3)],
+            edges: vec![
+                GraphEdge {
+                    cable: "_X".to_string(),
+                    source: NodeId::circuit("A", 0),
+                    sink: NodeId::circuit("D", 0),
+                },
+                GraphEdge {
+                    cable: "_Y".to_string(),
+                    source: NodeId::circuit("B", 0),
+                    sink: NodeId::circuit("C", 0),
+                },
+            ],
+            ..Default::default()
+        };
+        let widths = vec![20.0; 4];
+        let strict = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        let bary = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
+        // Strict keeps file order: C (index 2) above D (index 3) in column 1.
+        assert!(
+            strict[2].1 < strict[3].1,
+            "strict keeps file order in column 1"
+        );
+        // Barycenter flips layer 1 to [D, C]: D now stacks above C.
+        assert!(
+            bary[3].1 < bary[2].1,
+            "barycenter re-orders column 1 to [D, C]"
+        );
+        // Columns unchanged: A/B still left of C/D.
+        assert!(strict[0].0 < strict[2].0);
+        assert_eq!(strict[0].0, bary[0].0);
+        assert_eq!(strict[3].0, bary[3].0);
+    }
+
+    #[test]
+    fn barycenter_ordering_is_deterministic() {
+        let graph = make_graph(
+            20,
+            &[(0, 2), (1, 2), (2, 3), (3, 4), (4, 0), (5, 6), (6, 7)],
+        );
+        let widths: Vec<f32> = (0..20).map(|i| 20.0 + (i % 4) as f32 * 3.0).collect();
+        let a = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
+        let b = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
+        assert_eq!(a, b);
+        assert_finite_and_bounded(&a);
+    }
+
+    // ── graph-column-layout: node-size estimator (task 1.3) ─────────────────
+
+    #[test]
+    fn estimated_widths_scale_with_title_length_and_ports() {
+        // The estimator mirrors the renderer's inputs: title characters (with
+        // the repeated-instance suffix) and one marker width per port
+        // direction the node has edges for.
+        let graph = Graph {
+            nodes: vec![
+                node("osc", 0),
+                node("mixer", 1),
+                node("clocktool", 2),
+                node("copy", 3),
+                instance_node("copy", 1, 4),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".to_string(),
+                    source: NodeId::circuit("clocktool", 0),
+                    sink: NodeId::circuit("osc", 0),
+                },
+                GraphEdge {
+                    cable: "_OUT".to_string(),
+                    source: NodeId::circuit("osc", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+            ],
+            ..Default::default()
+        };
+        let widths = estimated_widths(&graph);
+        // Longer titles estimate wider: clocktool > mixer > osc.
+        assert!(
+            widths[2] > widths[1],
+            "clocktool should estimate wider than mixer"
+        );
+        assert!(
+            widths[1] > widths[0],
+            "mixer should estimate wider than osc"
+        );
+        // Repeated instances carry the `(1)` suffix, so the second copy is
+        // wider than the first (plain) one.
+        assert!(
+            widths[4] > widths[3],
+            "copy (1) should estimate wider than copy"
+        );
+        // Ports add marker width: osc has an input and an output; a port-less
+        // node is narrower than an equally titled one with ports.
+        let no_ports = estimated_widths(&Graph {
+            nodes: vec![node("osc", 0)],
+            edges: vec![],
+            ..Default::default()
+        });
+        assert!(
+            widths[0] > no_ports[0],
+            "osc with ports should exceed the port-less osc"
+        );
+    }
+
+    #[test]
+    fn no_overlap_holds_with_estimated_widths() {
+        // Task 1.3: the no-overlap property holds when the placement feeds on
+        // the estimator's widths instead of hand-chosen ones. Mixed title
+        // lengths exercise wide and narrow blocks together.
+        let graph = Graph {
+            nodes: vec![
+                node("osc", 0),
+                node("mixer", 1),
+                node("clocktool", 2),
+                node("p8s8", 3),
+                node("resonant_filter", 4),
+                node("copy", 5),
+                node("copy", 6),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".to_string(),
+                    source: NodeId::circuit("clocktool", 0),
+                    sink: NodeId::circuit("osc", 0),
+                },
+                GraphEdge {
+                    cable: "_OSC".to_string(),
+                    source: NodeId::circuit("osc", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+                GraphEdge {
+                    cable: "_P".to_string(),
+                    source: NodeId::circuit("p8s8", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+                GraphEdge {
+                    cable: "_F".to_string(),
+                    source: NodeId::circuit("resonant_filter", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+            ],
+            ..Default::default()
+        };
+        let widths = estimated_widths(&graph);
+        let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    // ── graph-column-layout: fixed outer columns (task 2.3) ─────────────────
+
+    /// Node of the given kind with the matching `NodeId` variant (Controller
+    /// type/ordinal, Jack token), so mixed-kind graphs mirror graph.rs.
+    fn kind_node(name: &str, kind: NodeKind, section_index: usize) -> GraphNode {
+        let id = match kind {
+            NodeKind::Circuit => NodeId::circuit(name, 0),
+            NodeKind::Controller => NodeId::Controller(name.to_string(), 0),
+            NodeKind::InputJack | NodeKind::OutputJack => NodeId::Jack(name.to_string()),
+        };
+        GraphNode {
+            id,
+            kind,
+            circuit: name.to_string(),
+            instance_index: 0,
+            section_index,
+        }
+    }
+
+    /// Synthetic mixed-kind graph over explicit (source, sink) index pairs.
+    fn make_mixed_graph(nodes: Vec<GraphNode>, edges: &[(usize, usize)]) -> Graph {
+        let edges: Vec<GraphEdge> = edges
+            .iter()
+            .map(|&(s, t)| GraphEdge {
+                cable: "_C".to_string(),
+                source: nodes[s].id.clone(),
+                sink: nodes[t].id.clone(),
+            })
+            .collect();
+        Graph {
+            nodes,
+            edges,
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn controller_and_input_jacks_sit_left_output_jacks_right() {
+        // Task 2.3 / design D4: on the column path, controllers and input
+        // jacks share the left outer column, output jacks the right outer
+        // column, and circuit columns run between them (circuit-only depth
+        // excludes the outer nodes).
+        let nodes = vec![
+            kind_node("ctrl", NodeKind::Controller, 0),
+            kind_node("in", NodeKind::InputJack, 1),
+            kind_node("osc", NodeKind::Circuit, 2),
+            kind_node("mixer", NodeKind::Circuit, 3),
+            kind_node("out", NodeKind::OutputJack, 4),
+        ];
+        let graph = make_mixed_graph(nodes, &[(0, 2), (1, 2), (2, 3), (3, 4)]);
+        let widths = vec![20.0; 5];
+        let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+
+        // Controller and input jack share the leftmost column.
+        assert_eq!(
+            positions[0].0, positions[1].0,
+            "controller and input jack must share the left column"
+        );
+        let left_x = positions[0].0;
+        // Circuits sit strictly between the outer columns.
+        assert!(
+            positions[2].0 > left_x,
+            "circuit osc must sit right of the left column"
+        );
+        assert!(
+            positions[3].0 > positions[2].0,
+            "circuit mixer must sit right of osc"
+        );
+        assert!(
+            positions[4].0 > positions[3].0,
+            "output jack must sit right of the circuits"
+        );
+        // Grid snap holds on the mixed-kind path.
+        for (x, y) in &positions {
+            let sx = (x / GRID_SNAP).round() * GRID_SNAP;
+            let sy = (y / GRID_SNAP).round() * GRID_SNAP;
+            assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
+            assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
+        }
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    #[test]
+    fn outer_columns_do_not_shift_circuit_columns() {
+        // Design D4: circuit columns come from the circuit-only depth, so
+        // outer-column nodes never widen or renumber the circuit block range.
+        // The same two-circuit chain yields the same circuit columns whether
+        // or not jacks/controllers are present.
+        let bare = Graph {
+            nodes: vec![node("a", 0), node("b", 1)],
+            edges: vec![GraphEdge {
+                cable: "_AB".to_string(),
+                source: NodeId::circuit("a", 0),
+                sink: NodeId::circuit("b", 0),
+            }],
+            ..Default::default()
+        };
+        let with_outer = make_mixed_graph(
+            vec![
+                kind_node("in", NodeKind::InputJack, 0),
+                kind_node("a", NodeKind::Circuit, 1),
+                kind_node("b", NodeKind::Circuit, 2),
+                kind_node("out", NodeKind::OutputJack, 3),
+            ],
+            &[(0, 1), (1, 2), (2, 3)],
+        );
+        let widths = vec![20.0; 4];
+        let bare_pos = solve_columns(&bare, &[20.0; 2], LayoutOrdering::Strict);
+        let outer_pos = solve_columns(&with_outer, &widths, LayoutOrdering::Strict);
+        // Circuit pitch identical: the a→b gap (block 20 + spacing 80) is the
+        // same with and without the outer columns.
+        let bare_pitch = bare_pos[1].0 - bare_pos[0].0;
+        let outer_pitch = outer_pos[2].0 - outer_pos[1].0;
+        assert_eq!(
+            bare_pitch, outer_pitch,
+            "outer columns must not change circuit pitch"
         );
     }
 }
