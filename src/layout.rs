@@ -27,7 +27,8 @@
 
 use std::collections::HashMap;
 
-use crate::graph::{Graph, NodeId};
+use crate::config::LayoutOrdering;
+use crate::graph::{Graph, NodeId, NodeKind};
 
 /// Freeze when total kinetic energy (sum of |velocity|², unit mass) is below.
 const ENERGY_THRESHOLD: f32 = 0.5;
@@ -79,6 +80,13 @@ const CROSSING_SWEEPS: usize = 8;
 /// (`HORIZONTAL_SPACING` and `VERTICAL_SPACING` are both multiples of it), so
 /// the arrangement reads as cleanly aligned columns.
 pub const GRID_SNAP: f32 = 10.0;
+
+/// Per-character width of a node title in the size estimator.
+const NODE_ESTIMATE_CHAR_WIDTH: f32 = 8.0;
+/// Left + right frame padding in the size estimator.
+const NODE_ESTIMATE_PADDING: f32 = 16.0;
+/// Width reserved per input/output port marker in the size estimator.
+const NODE_ESTIMATE_PORT_WIDTH: f32 = 14.0;
 
 /// Default iteration cap for a damped local re-settle (fewer than a solve).
 pub const LOCAL_ITERATIONS: usize = 40;
@@ -187,13 +195,19 @@ pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
 /// depth grows by at most the cycle length per pass and can exceed n — the
 /// per-depth maps must not assume depth < n.
 fn topological_depth(graph: &Graph) -> Vec<usize> {
-    let n = graph.nodes.len();
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
+    depth_over(graph.nodes.len(), &edges)
+}
+
+/// Capped Bellman-Ford longest-path depth over an explicit edge list (node
+/// indices into `0..n`). Shared by [`topological_depth`] and the column
+/// arrangement's circuit-only depth ([`circuit_depth`]).
+fn depth_over(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
     let mut depth = vec![0usize; n];
     for _ in 0..n {
         let mut changed = false;
-        for &(u, v) in &edges {
+        for &(u, v) in edges {
             if depth[v] < depth[u] + 1 {
                 depth[v] = depth[u] + 1;
                 changed = true;
