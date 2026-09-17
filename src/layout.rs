@@ -2173,4 +2173,140 @@ mod tests {
             "outer columns must not change circuit pitch"
         );
     }
+
+    // ── graph-column-layout: task 4.1 audit coverage ───────────────────────
+
+    #[test]
+    fn dense_normalization_collapses_gaps_and_duplicate_depths() {
+        // Dense normalization contract (design D2): depth values map to dense
+        // columns 0..N-1 with no empty columns. Longest-path depth is always
+        // contiguous, so the gap collapse is pinned white-box on the helper
+        // (depth 5 lands at column 2, not 5), while the duplicate collapse is
+        // pinned end-to-end on a fan (all depth-0 sources share one column).
+        assert_eq!(dense_columns(&[0, 2, 5, 2, 0, 5]), vec![0, 1, 2, 1, 0, 2]);
+        assert_eq!(dense_columns(&[0, 2, 5]), vec![0, 1, 2]);
+        assert_eq!(dense_columns(&[3, 3, 3]), vec![0, 0, 0]);
+
+        // End-to-end: a fan of sources into one sink — every source sits at
+        // depth 0 and must collapse into a single column on distinct slots.
+        let graph = make_graph(5, &[(0, 4), (1, 4), (2, 4), (3, 4)]);
+        let widths = vec![20.0; 5];
+        let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        for i in 1..4 {
+            assert_eq!(
+                positions[i].0, positions[0].0,
+                "source {i} must share the depth-0 column"
+            );
+        }
+        for a in 0..4 {
+            for b in (a + 1)..4 {
+                assert!(
+                    (positions[a].1 - positions[b].1).abs() >= VERTICAL_SPACING,
+                    "sources {a} and {b} share vertical space"
+                );
+            }
+        }
+        assert!(
+            positions[4].0 > positions[0].0,
+            "the sink must sit in its own column right of the sources"
+        );
+    }
+
+    #[test]
+    fn barycenter_columns_snap_to_grid_and_never_overlap() {
+        // No-overlap and grid-snap hold under the barycenter ordering too: a
+        // 3×2 crossed layer gives multi-member columns that barycenter
+        // re-orders vertically, and the stacking contract must still hold
+        // with fractional widths (the strict-only snap/no-overlap tests do
+        // not cover this ordering on a non-trivial column).
+        let graph = Graph {
+            nodes: vec![
+                node("A", 0),
+                node("B", 1),
+                node("C", 2),
+                node("D", 3),
+                node("E", 4),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_AE".to_string(),
+                    source: NodeId::circuit("A", 0),
+                    sink: NodeId::circuit("E", 0),
+                },
+                GraphEdge {
+                    cable: "_BD".to_string(),
+                    source: NodeId::circuit("B", 0),
+                    sink: NodeId::circuit("D", 0),
+                },
+                GraphEdge {
+                    cable: "_BE".to_string(),
+                    source: NodeId::circuit("B", 0),
+                    sink: NodeId::circuit("E", 0),
+                },
+                GraphEdge {
+                    cable: "_CD".to_string(),
+                    source: NodeId::circuit("C", 0),
+                    sink: NodeId::circuit("D", 0),
+                },
+            ],
+            ..Default::default()
+        };
+        let widths: Vec<f32> = (0..5).map(|i| 17.5 + i as f32 * 2.1).collect();
+        let positions = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
+        for (x, y) in &positions {
+            let sx = (x / GRID_SNAP).round() * GRID_SNAP;
+            let sy = (y / GRID_SNAP).round() * GRID_SNAP;
+            assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
+            assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
+        }
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    #[test]
+    fn cyclic_patch_columns_terminate_and_stay_dense() {
+        // Capped Bellman-Ford on a cycle still terminates (design D2): depth
+        // keeps growing but stays within a contiguous band, so the dense
+        // normalization yields a finite 0..N-1 column range with no empty
+        // columns. Here the 4-cycle plus three depth-0 fans map to exactly 5
+        // columns under both orderings, with the no-overlap, grid-snap, and
+        // determinism contracts intact.
+        let graph = make_graph(
+            7,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0), // 4-cycle
+                (4, 1),
+                (5, 1),
+                (6, 2), // fans into the cycle
+            ],
+        );
+        let widths = vec![20.0; 7];
+        for ordering in [LayoutOrdering::Strict, LayoutOrdering::Barycenter] {
+            let positions = solve_columns(&graph, &widths, ordering);
+            assert_finite_and_bounded(&positions);
+            let (cols, ncols) = assign_columns(&graph, &circuit_depth(&graph));
+            assert_eq!(
+                ncols, 5,
+                "cycle + fans must dense-normalize to 5 columns, got {ncols}"
+            );
+            assert_eq!(cols.iter().copied().max(), Some(ncols - 1));
+            for c in 0..ncols {
+                assert!(cols.contains(&c), "column {c} is empty");
+            }
+            assert_columns_do_not_overlap(&graph, &widths, &positions);
+            for (x, y) in &positions {
+                let sx = (x / GRID_SNAP).round() * GRID_SNAP;
+                let sy = (y / GRID_SNAP).round() * GRID_SNAP;
+                assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
+                assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
+            }
+            assert_eq!(
+                solve_columns(&graph, &widths, ordering),
+                positions,
+                "cyclic solve under {ordering:?} must be deterministic"
+            );
+        }
+    }
 }
