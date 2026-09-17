@@ -2582,12 +2582,26 @@ impl App {
     /// Solve the full graph's node positions by the active layout mode
     /// (graph-column-layout D5): column mode places nodes via
     /// `layout::solve_columns` (width-aware, deterministic, no force
-    /// relaxation; pins are ignored until task 3.2), force mode runs the
-    /// spring solver with the current pins and tension.
+    /// relaxation; pins are fixed-position anchors, design D6), force mode
+    /// runs the spring solver with the current pins and tension.
     fn solve_graph_positions(&self, g: &Graph, pins: &[usize]) -> Vec<(f32, f32)> {
         match self.layout_mode {
             crate::config::LayoutMode::Column => {
-                layout::solve_columns(g, &layout::estimated_widths(g), self.layout_ordering)
+                // Pins anchor at their current position (the previous solve's
+                // output): the tip pin is seeded on build, and every pinned
+                // node keeps its position while the rest arrange around it.
+                // On the first solve `graph_positions` is empty, so there is
+                // nothing to anchor yet and the pin set is naturally seeded.
+                let anchored: Vec<(usize, (f32, f32))> = pins
+                    .iter()
+                    .filter_map(|&i| self.graph_positions.get(i).map(|&pos| (i, pos)))
+                    .collect();
+                layout::solve_columns_pinned(
+                    g,
+                    &layout::estimated_widths(g),
+                    self.layout_ordering,
+                    &anchored,
+                )
             }
             crate::config::LayoutMode::Force => layout::solve(g, pins, self.tension),
         }
@@ -3596,6 +3610,27 @@ mod tests {
     }
 
     #[test]
+    fn column_mode_pinned_node_keeps_anchor_across_rebuild() {
+        // Design D6 on the column path: a pinned node is a fixed-position
+        // anchor. Anchor the tip (seeded pinned) one slot below its natural
+        // position, then rebuild: the pin must hold it there instead of the
+        // solver re-placing it at its natural slot.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let natural = app.graph_positions[0];
+        // One vertical slot below natural (VERTICAL_SPACING = 12·GRID_SNAP).
+        let anchored = (natural.0, natural.1 + 12.0 * layout::GRID_SNAP);
+        app.graph_positions[0] = anchored;
+        app.rebuild_graph();
+        assert_eq!(
+            app.graph_positions[0], anchored,
+            "pinned tip must keep its anchored position across a rebuild"
+        );
+    }
+
+    #[test]
     fn back_edge_hover_status_reports_loop_behind_for_sink() {
         // graph_latency_backedge.ini: `_LOOP` is produced by the later [lfo]
         // and consumed by the earlier [contour] — the one back-edge. Hovering
@@ -4272,8 +4307,9 @@ mod tests {
     #[test]
     fn tip_is_pinned_by_default_on_open() {
         let mut app = App::new();
-        // Pin anchoring (fixed-position tip) is force-path semantics; the
-        // column path ignores pins until task 3.2.
+        // Force-path anchor semantics: the seeded tip stays exactly at its
+        // seed position. (The column path anchors it at the block center
+        // instead, so this assertion runs the force solver.)
         app.layout_mode = crate::config::LayoutMode::Force;
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);

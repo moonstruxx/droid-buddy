@@ -25,7 +25,7 @@
 //! re-solves) seeds deterministically from its own graph and converges
 //! independently.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::LayoutOrdering;
 use crate::graph::{Graph, NodeId, NodeKind};
@@ -258,6 +258,24 @@ fn dense_columns(depth: &[usize]) -> Vec<usize> {
 /// node `i`'s position. Pure and deterministic: same graph + same widths +
 /// same ordering → identical positions.
 pub fn solve_columns(graph: &Graph, widths: &[f32], ordering: LayoutOrdering) -> Vec<(f32, f32)> {
+    solve_columns_pinned(graph, widths, ordering, &[])
+}
+
+/// Column arrangement with fixed-position anchors (design D6, task 3.2):
+/// `pins` holds `(node index, fixed position)` pairs. Each pinned node sits
+/// exactly at its fixed position while the remaining nodes arrange around it:
+/// unpinned nodes keep the column structure and stack in the slots not
+/// occupied by a pinned node in their column. Deterministic per (graph,
+/// widths, ordering, pins) — same inputs, same output.
+///
+/// Pins are honored exactly; the no-overlap property holds when pinned
+/// positions are grid-aligned (as previous column-solve outputs are).
+pub fn solve_columns_pinned(
+    graph: &Graph,
+    widths: &[f32],
+    ordering: LayoutOrdering,
+    pins: &[(usize, (f32, f32))],
+) -> Vec<(f32, f32)> {
     let n = graph.nodes.len();
     if n == 0 {
         return Vec::new();
@@ -286,6 +304,20 @@ pub fn solve_columns(graph: &Graph, widths: &[f32], ordering: LayoutOrdering) ->
         left += bw + HORIZONTAL_SPACING;
     }
 
+    // Fixed anchors: pinned nodes keep their given position exactly. Reserve
+    // the slot nearest each pinned node's y in its column, so unpinned nodes
+    // stack around it without sharing its vertical space.
+    let mut fixed: Vec<Option<(f32, f32)>> = vec![None; n];
+    let mut reserved: Vec<HashSet<usize>> = vec![HashSet::new(); ncols];
+    for &(i, pos) in pins {
+        if i >= n {
+            continue;
+        }
+        fixed[i] = Some(pos);
+        let slot = (pos.1 / VERTICAL_SPACING).round().max(0.0) as usize;
+        reserved[col[i]].insert(slot);
+    }
+
     // Stack slots within each column in rank order (strict = file order,
     // barycenter = crossing-minimized order).
     let mut slot = vec![0usize; ncols];
@@ -293,7 +325,14 @@ pub fn solve_columns(graph: &Graph, widths: &[f32], ordering: LayoutOrdering) ->
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| (col[i], rank[i]));
     for i in order {
+        if let Some(pos) = fixed[i] {
+            positions[i] = pos;
+            continue;
+        }
         let c = col[i];
+        while reserved[c].contains(&slot[c]) {
+            slot[c] += 1;
+        }
         let x = block_left[c] + block_width[c] / 2.0;
         let y = slot[c] as f32 * VERTICAL_SPACING;
         positions[i] = (x, y);
@@ -1747,6 +1786,107 @@ mod tests {
         }
     }
 
+    // ── graph-column-layout: pinned anchors on the column path (task 3.2) ──
+
+    #[test]
+    fn columns_pinned_node_keeps_position_rest_arrange_around() {
+        // Design D6: a pinned node is a fixed-position anchor. Pin the middle
+        // member of a column at slot 0's position: it stays there exactly and
+        // the remaining column members dense-stack into the free slots below.
+        let graph = make_graph(4, &[(0, 3), (1, 3), (2, 3)]);
+        let widths = vec![20.0; 4];
+        let positions =
+            solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[(1, (10.0, 0.0))]);
+        assert_eq!(
+            positions,
+            vec![(10.0, 120.0), (10.0, 0.0), (10.0, 240.0), (110.0, 0.0)],
+            "pinned node holds slot 0 while the rest arrange around it"
+        );
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    #[test]
+    fn columns_pinned_solve_is_deterministic() {
+        // Determinism contract (design D9) extends to the pin set: same graph,
+        // widths, ordering, and anchors → identical positions.
+        let graph = make_graph(6, &[(0, 5), (1, 5), (2, 5), (3, 5), (4, 5)]);
+        let widths = vec![20.0; 6];
+        let pins = [(1, (10.0, 120.0)), (3, (10.0, 360.0))];
+        let a = solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &pins);
+        let b = solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &pins);
+        assert_eq!(a, b);
+        assert_finite_and_bounded(&a);
+    }
+
+    #[test]
+    fn columns_pinned_leaves_other_columns_untouched() {
+        // Pinning one column rearranges only that column: the other columns'
+        // positions are byte-identical to the unpinned solve.
+        let graph = make_graph(4, &[(0, 3), (1, 3), (2, 3)]);
+        let widths = vec![20.0; 4];
+        let pinless = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        let pinned =
+            solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[(1, (10.0, 0.0))]);
+        assert_ne!(pinned[0], pinless[0], "the pinned column re-flows");
+        assert_eq!(pinned[3], pinless[3], "the other column is untouched");
+    }
+
+    #[test]
+    fn columns_pinned_empty_pin_set_matches_plain_solve() {
+        // `solve_columns` delegates with an empty pin set: no-pin callers keep
+        // the pre-task-3.2 arrangement exactly.
+        let graph = make_graph(4, &[(0, 3), (1, 3), (2, 3)]);
+        let widths = vec![20.0; 4];
+        let plain = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        let pinned = solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[]);
+        assert_eq!(plain, pinned);
+    }
+
+    #[test]
+    fn columns_pinned_multiple_anchors_reserve_their_slots() {
+        // Two anchors in one column: each reserves its slot and the unpinned
+        // members dense-stack into the remaining slots in rank order.
+        let graph = make_graph(6, &[(0, 5), (1, 5), (2, 5), (3, 5), (4, 5)]);
+        let widths = vec![20.0; 6];
+        let positions = solve_columns_pinned(
+            &graph,
+            &widths,
+            LayoutOrdering::Strict,
+            &[(1, (10.0, 120.0)), (3, (10.0, 360.0))],
+        );
+        assert_eq!(
+            positions,
+            vec![
+                (10.0, 0.0),
+                (10.0, 120.0),
+                (10.0, 240.0),
+                (10.0, 360.0),
+                (10.0, 480.0),
+                (110.0, 0.0),
+            ]
+        );
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    #[test]
+    fn columns_pinned_keeps_offgrid_position_exactly() {
+        // D6 keeps the anchor verbatim, even off the slot grid: the pinned
+        // node stays at its given y while unpinned members keep the slot grid.
+        let graph = make_graph(4, &[(0, 3), (1, 3), (2, 3)]);
+        let widths = vec![20.0; 4];
+        let positions = solve_columns_pinned(
+            &graph,
+            &widths,
+            LayoutOrdering::Strict,
+            &[(1, (10.0, 10.0))],
+        );
+        assert_eq!(
+            positions,
+            vec![(10.0, 120.0), (10.0, 10.0), (10.0, 240.0), (110.0, 0.0)],
+            "off-grid anchor kept exactly, others stay on the slot grid"
+        );
+    }
+
     /// No-overlap property (design D3), verified against the solver's own
     /// column assignment: nodes in the same column stack on distinct
     /// [`VERTICAL_SPACING`] slots (never sharing vertical space), and every
@@ -2308,5 +2448,69 @@ mod tests {
                 "cyclic solve under {ordering:?} must be deterministic"
             );
         }
+    }
+
+    // ── graph-column-layout: pins as fixed-position anchors (task 3.2) ─────
+
+    #[test]
+    fn pinned_column_node_keeps_position_while_rest_arrange_around_it() {
+        // Design D6: pins are fixed-position anchors on the column path. Pin
+        // node 0 (column 0, shared with node 1) at a grid-aligned position one
+        // slot lower than its natural slot: it must sit exactly there while
+        // node 1 stacks around it without overlap.
+        let graph = make_graph(6, &[(0, 2), (1, 2), (2, 3), (3, 4), (3, 5)]);
+        let widths: Vec<f32> = (0..6).map(|i| 15.0 + (i % 7) as f32 * 6.3).collect();
+        let natural = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        let anchor = (natural[0].0, natural[0].1 + VERTICAL_SPACING);
+        let positions =
+            solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[(0, anchor)]);
+        assert_eq!(
+            positions[0], anchor,
+            "pinned node must sit exactly at its anchor"
+        );
+        // The rest arranged around it: node 1 moved off the pinned slot.
+        assert!(
+            (positions[1].1 - positions[0].1).abs() >= VERTICAL_SPACING,
+            "node 1 overlaps the pinned slot"
+        );
+        // Unpinned nodes still grid-snap.
+        for (x, y) in &positions {
+            let sx = (x / GRID_SNAP).round() * GRID_SNAP;
+            let sy = (y / GRID_SNAP).round() * GRID_SNAP;
+            assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
+            assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
+        }
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
+        // Determinism per (graph, widths, ordering, pins).
+        let again = solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[(0, anchor)]);
+        assert_eq!(positions, again);
+        // The no-pin entry delegates with an empty pin set.
+        assert_eq!(
+            solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[]),
+            natural
+        );
+    }
+
+    #[test]
+    fn pinned_column_node_keeps_anchor_against_its_natural_column_slot() {
+        // The anchor wins over the natural column layout: pin node 2 (column
+        // 1) at a position the column path would never give it — the slot of
+        // the neighbouring column's first node. It must stay exactly there
+        // and no other node may collide with it.
+        let graph = make_graph(6, &[(0, 2), (1, 2), (2, 3), (3, 4), (3, 5)]);
+        let widths: Vec<f32> = (0..6).map(|i| 20.0 + (i % 3) as f32 * 5.0).collect();
+        let natural = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+        // Column 1's block center, but one slot lower than its natural y.
+        let anchor = (natural[2].0, natural[2].1 + VERTICAL_SPACING);
+        let positions =
+            solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &[(2, anchor)]);
+        assert_eq!(positions[2], anchor);
+        for (i, (x, y)) in positions.iter().enumerate() {
+            let sx = (x / GRID_SNAP).round() * GRID_SNAP;
+            let sy = (y / GRID_SNAP).round() * GRID_SNAP;
+            assert!((sx - x).abs() < 1e-3, "node {i} x {x} off the grid");
+            assert!((sy - y).abs() < 1e-3, "node {i} y {y} off the grid");
+        }
+        assert_columns_do_not_overlap(&graph, &widths, &positions);
     }
 }
