@@ -164,14 +164,32 @@ pub fn local_resettle(
 /// exactly on the [`GRID_SNAP`] grid (no jitter), so the convergence target is
 /// a clean horizontal chain of aligned columns.
 pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
+    // Longest-path topological depth ([`topological_depth`]) with
+    // crossing-minimized within-layer order (barycenter sweeps, deterministic).
+    let depth = topological_depth(graph);
+    let order = crossing_minimized_orders(graph, &depth);
+
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let x = depth[i] as f32 * HORIZONTAL_SPACING;
+            let y = order[i] as f32 * VERTICAL_SPACING;
+            (x, y)
+        })
+        .collect()
+}
+
+/// Longest-path topological depth via bounded Bellman-Ford relaxation, shared
+/// by the layered seed and the column arrangement. The n-pass bound keeps
+/// cyclic graphs finite: each pass relaxes every edge once, so on a cycle
+/// depth grows by at most the cycle length per pass and can exceed n — the
+/// per-depth maps must not assume depth < n.
+fn topological_depth(graph: &Graph) -> Vec<usize> {
     let n = graph.nodes.len();
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
-
-    // Longest-path topological depth via bounded Bellman-Ford relaxation. The
-    // n-pass bound keeps cyclic graphs finite: each pass relaxes every edge
-    // once, so on a cycle depth grows by at most the cycle length per pass and
-    // can exceed n — the per-depth map below must not assume depth < n.
     let mut depth = vec![0usize; n];
     for _ in 0..n {
         let mut changed = false;
@@ -185,20 +203,77 @@ pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
             break;
         }
     }
+    depth
+}
 
-    // Crossing-minimized within-layer order (barycenter sweeps, deterministic).
-    let order = crossing_minimized_orders(graph, &depth);
-
-    graph
-        .nodes
+/// Map the capped Bellman-Ford depth to dense column indices `0..N-1` (N =
+/// distinct depth values), so column indices are contiguous no matter how the
+/// depth values are distributed (graph-column-layout D2).
+fn dense_columns(depth: &[usize]) -> Vec<usize> {
+    let mut distinct: Vec<usize> = depth.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    depth
         .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            let x = depth[i] as f32 * HORIZONTAL_SPACING;
-            let y = order[i] as f32 * VERTICAL_SPACING;
-            (x, y)
+        .map(|&d| match distinct.binary_search(&d) {
+            Ok(i) | Err(i) => i,
         })
         .collect()
+}
+
+/// Deterministic column arrangement (graph-column-layout D1, D2 and D3): nodes
+/// are assigned to columns by the capped Bellman-Ford topological depth,
+/// dense-normalized to `0..N-1`, then placed width-aware. Each column is a
+/// block as wide as its widest member; blocks run left to right separated by
+/// [`HORIZONTAL_SPACING`]; every node sits centered on its block's center
+/// line; nodes stack vertically on distinct [`VERTICAL_SPACING`] slots, so
+/// nodes in a column never share vertical space. All coordinates land on the
+/// [`GRID_SNAP`] grid. Unlike [`solve`] this path never runs force relaxation.
+///
+/// `widths` is parallel to `graph.nodes`: entry `i` is node `i`'s width.
+/// Missing or negative entries fall back to 0 (the size estimator plugs in
+/// later). The returned `Vec<(f32, f32)>` is parallel to `graph.nodes`: index
+/// `i` holds node `i`'s position. Pure and deterministic: same graph + same
+/// widths → identical positions. Within-column order is strict file order
+/// (task 1.2 adds the barycenter option).
+pub fn solve_columns(graph: &Graph, widths: &[f32]) -> Vec<(f32, f32)> {
+    let n = graph.nodes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let width: Vec<f32> = (0..n)
+        .map(|i| widths.get(i).copied().unwrap_or(0.0).max(0.0))
+        .collect();
+    let col = dense_columns(&topological_depth(graph));
+    let ncols = col.iter().copied().max().map_or(0, |m| m + 1);
+
+    // Block width = widest member, snapped up to 2·GRID_SNAP so the block's
+    // center line (every member's x) lands exactly on the grid.
+    let block_units = 2.0 * GRID_SNAP;
+    let mut block_width = vec![0.0f32; ncols];
+    for i in 0..n {
+        block_width[col[i]] = block_width[col[i]].max(width[i]);
+    }
+    for bw in &mut block_width {
+        *bw = (*bw / block_units).ceil() * block_units;
+    }
+    let mut block_left = Vec::with_capacity(ncols);
+    let mut left = 0.0f32;
+    for &bw in &block_width {
+        block_left.push(left);
+        left += bw + HORIZONTAL_SPACING;
+    }
+
+    let mut slot = vec![0usize; ncols];
+    let mut positions = vec![(0.0f32, 0.0f32); n];
+    for i in 0..n {
+        let c = col[i];
+        let x = block_left[c] + block_width[c] / 2.0;
+        let y = slot[c] as f32 * VERTICAL_SPACING;
+        positions[i] = (x, y);
+        slot[c] += 1;
+    }
+    positions
 }
 
 /// Deterministic within-layer ordering that reduces edge crossings between
@@ -1394,5 +1469,197 @@ mod tests {
         );
         assert!(count > 0);
         assert_finite_and_bounded(&positions);
+    }
+
+    // ── graph-column-layout: width-aware column arrangement (task 1.1) ─────
+
+    #[test]
+    fn columns_arrange_by_dense_normalized_depth() {
+        // A chain: depth 0..4 dense-normalizes to columns 0..4; each column is
+        // a block of the member width (20) plus the horizontal gap, and each
+        // single-member column stacks at slot 0 (y = 0).
+        let graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        let widths = vec![20.0; 5];
+        let positions = solve_columns(&graph, &widths);
+        assert_eq!(positions.len(), 5);
+        for (i, (x, y)) in positions.iter().enumerate() {
+            assert_eq!(*y, 0.0, "node {i} should sit on slot 0");
+            let expected = i as f32 * (20.0 + HORIZONTAL_SPACING) + 10.0;
+            assert_eq!(*x, expected, "node {i} off its block center");
+        }
+    }
+
+    #[test]
+    fn columns_are_deterministic() {
+        // Determinism contract (design D9): same graph + same widths → identical
+        // positions. Includes cycles (bounded depth growth) and fractional
+        // widths that exercise the width-aware path.
+        let graph = make_graph(
+            24,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 0),
+                (0, 5),
+                (5, 6),
+                (6, 7),
+                (7, 8),
+                (9, 10),
+                (10, 11),
+                (11, 12),
+                (12, 9),
+                (13, 14),
+                (14, 15),
+                (15, 16),
+                (16, 17),
+                (17, 18),
+                (18, 19),
+                (20, 21),
+                (21, 22),
+                (22, 23),
+            ],
+        );
+        let widths: Vec<f32> = (0..24).map(|i| 30.0 + (i % 5) as f32 * 7.5).collect();
+        let a = solve_columns(&graph, &widths);
+        let b = solve_columns(&graph, &widths);
+        assert_eq!(a, b);
+        assert_finite_and_bounded(&a);
+    }
+
+    #[test]
+    fn column_placement_snaps_to_grid() {
+        // GRID_SNAP contract: every coordinate lands on the layout grid even
+        // with fractional widths.
+        let graph = make_graph(
+            12,
+            &[
+                (0, 3),
+                (1, 3),
+                (2, 3),
+                (3, 6),
+                (4, 6),
+                (5, 6),
+                (6, 9),
+                (7, 9),
+                (8, 9),
+                (9, 10),
+                (10, 11),
+            ],
+        );
+        let widths: Vec<f32> = (0..12).map(|i| 17.5 + i as f32 * 1.3).collect();
+        for (x, y) in solve_columns(&graph, &widths) {
+            let sx = (x / GRID_SNAP).round() * GRID_SNAP;
+            let sy = (y / GRID_SNAP).round() * GRID_SNAP;
+            assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
+            assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
+        }
+    }
+
+    #[test]
+    fn column_nodes_never_share_vertical_space() {
+        // No-overlap property (design D3): nodes in the same column stack on
+        // distinct VERTICAL_SPACING slots (never sharing vertical space), and
+        // every node's horizontal extent stays inside its column block, so
+        // blocks (and the nodes in them) never overlap. Checked across graph
+        // shapes and fractional widths.
+        let mut sixty_chain = Vec::new();
+        for chain in 0..3 {
+            for k in 0..19 {
+                sixty_chain.push((chain * 20 + k, chain * 20 + k + 1));
+            }
+        }
+        let cases: Vec<(usize, Vec<(usize, usize)>)> = vec![
+            (6, vec![(0, 2), (1, 2), (2, 3), (3, 4), (3, 5)]),
+            (
+                12,
+                vec![
+                    (0, 3),
+                    (1, 3),
+                    (2, 3),
+                    (3, 6),
+                    (4, 6),
+                    (5, 6),
+                    (6, 9),
+                    (7, 9),
+                    (8, 9),
+                    (9, 10),
+                    (10, 11),
+                    (11, 9),
+                ],
+            ),
+            (60, sixty_chain),
+        ];
+        for (n, edges) in cases {
+            let graph = make_graph(n, &edges);
+            let widths: Vec<f32> = (0..n).map(|i| 15.0 + (i % 7) as f32 * 6.3).collect();
+            let positions = solve_columns(&graph, &widths);
+            assert_eq!(positions.len(), n);
+
+            let cols = dense_columns(&topological_depth(&graph));
+            let ncols = cols.iter().copied().max().map_or(0, |m| m + 1);
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); ncols];
+            for (i, &c) in cols.iter().enumerate() {
+                members[c].push(i);
+            }
+
+            let mut block_span: Vec<(f32, f32)> = Vec::with_capacity(ncols);
+            for (c, list) in members.iter().enumerate() {
+                // Vertical: slots are ≥ VERTICAL_SPACING apart, so no two
+                // members share vertical space.
+                for a in 0..list.len() {
+                    for b in (a + 1)..list.len() {
+                        let dy = (positions[list[a]].1 - positions[list[b]].1).abs();
+                        assert!(
+                            dy >= VERTICAL_SPACING,
+                            "graph {n}: column {c} nodes {} and {} share vertical space (dy {dy})",
+                            list[a],
+                            list[b]
+                        );
+                    }
+                }
+                // Horizontal: the block spans the members' extents (per-column
+                // max width), so adjacent blocks keep a real gap.
+                let left = list
+                    .iter()
+                    .map(|&i| positions[i].0 - widths[i] / 2.0)
+                    .fold(f32::INFINITY, f32::min);
+                let right = list
+                    .iter()
+                    .map(|&i| positions[i].0 + widths[i] / 2.0)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                block_span.push((left, right));
+            }
+            for k in 0..ncols.saturating_sub(1) {
+                let gap = block_span[k + 1].0 - block_span[k].1;
+                assert!(
+                    gap >= HORIZONTAL_SPACING - 1e-3,
+                    "graph {n}: column {k} block overlaps column {} (gap {gap})",
+                    k + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn column_pitch_grows_with_node_widths() {
+        // Width-aware placement: wider members make wider blocks, so the block
+        // pitch (and total span) grows with the widths — not a fixed constant.
+        let graph = make_graph(6, &[(0, 2), (1, 2), (2, 3), (3, 4), (3, 5)]);
+        let narrow = vec![10.0; 6];
+        let wide = vec![200.0; 6];
+        let span = |positions: &[(f32, f32)]| {
+            let xs: Vec<f32> = positions.iter().map(|&(x, _)| x).collect();
+            let min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        let narrow_span = span(&solve_columns(&graph, &narrow));
+        let wide_span = span(&solve_columns(&graph, &wide));
+        assert!(
+            wide_span > narrow_span,
+            "wide nodes should spread columns: {wide_span} !> {narrow_span}"
+        );
     }
 }
