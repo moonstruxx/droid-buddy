@@ -987,6 +987,25 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.toggle_influence_filter();
                 return false;
             }
+            KeyCode::Char('h') if graph_slot_focused(app) => {
+                // graph-column-layout D5: `h` toggles between the deterministic
+                // column arrangement and the force solver on the focused graph
+                // pane. Flipping the mode then rebuilding re-solves under the
+                // new arrangement (`solve_graph_positions` dispatches by mode)
+                // and emits GraphRebuilt; the status mirrors the tension hint.
+                app.layout_mode = match app.layout_mode {
+                    crate::config::LayoutMode::Column => crate::config::LayoutMode::Force,
+                    crate::config::LayoutMode::Force => crate::config::LayoutMode::Column,
+                };
+                app.status_message = match app.layout_mode {
+                    crate::config::LayoutMode::Column => String::from("Layout: column"),
+                    crate::config::LayoutMode::Force => String::from("Layout: force"),
+                };
+                if app.graph.is_some() {
+                    app.rebuild_graph();
+                }
+                return false;
+            }
             KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph
@@ -3672,6 +3691,55 @@ mod tests {
         assert_eq!(
             app.graph_positions, before,
             "same tension reproduces layout"
+        );
+    }
+
+    #[test]
+    fn graph_h_toggles_layout_mode_column_to_force_and_resolves() {
+        // graph-column-layout 3.1: `h` on the focused graph pane switches the
+        // arrangement from the default column path to the force solver. The
+        // rebuild re-solves under the new mode and the status names the mode.
+        let mut app = app_with_fixture();
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+
+        handle_event(key(KeyCode::Char('h')), &mut app);
+
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert_eq!(app.status_message, "Layout: force");
+        let graph = app.graph.as_ref().unwrap();
+        let expected = crate::layout::solve(graph, &app.pinned_indices(graph), app.tension);
+        assert_eq!(
+            app.graph_positions, expected,
+            "column→force toggle re-solves with the force solver"
+        );
+    }
+
+    #[test]
+    fn graph_h_toggles_layout_mode_force_to_column_and_resolves() {
+        // Same toggle in reverse: a force-layout graph flips to the column
+        // arrangement, re-solved with the active ordering.
+        let mut app = app_with_fixture();
+        app.layout_mode = crate::config::LayoutMode::Force;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+
+        handle_event(key(KeyCode::Char('h')), &mut app);
+
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.status_message, "Layout: column");
+        let graph = app.graph.as_ref().unwrap();
+        let expected = crate::layout::solve_columns(
+            graph,
+            &crate::layout::estimated_widths(graph),
+            app.layout_ordering,
+        );
+        assert_eq!(
+            app.graph_positions, expected,
+            "force→column toggle re-solves with the column solver"
         );
     }
 
