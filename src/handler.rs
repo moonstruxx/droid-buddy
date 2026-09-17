@@ -4625,6 +4625,11 @@ mod tests {
     #[test]
     fn drag_node_moves_position_resettles_and_emits_node_moved() {
         let mut app = graph_app();
+        // The drag re-settle is force-path semantics (local_resettle under
+        // spring tension); the column arrangement is now the default, so pin
+        // this test to the force arrangement to keep the force-path drag
+        // contract covered (graph-column-layout 4.2).
+        app.layout_mode = crate::config::LayoutMode::Force;
         assert!(!app.graph.as_ref().unwrap().nodes.is_empty());
         // Subscribe a probe to the synchronous bus to observe NodeMoved.
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
