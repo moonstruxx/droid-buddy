@@ -3720,26 +3720,35 @@ mod tests {
     #[test]
     fn graph_h_toggles_layout_mode_force_to_column_and_resolves() {
         // Same toggle in reverse: a force-layout graph flips to the column
-        // arrangement, re-solved with the active ordering.
+        // arrangement, re-solved with the active ordering. The tip stays
+        // pinned (design D6): it anchors at its force-solve position while the
+        // remaining nodes arrange around it.
         let mut app = app_with_fixture();
         app.layout_mode = crate::config::LayoutMode::Force;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.showing_graph);
+        let before = app.graph_positions.clone();
 
         handle_event(key(KeyCode::Char('h')), &mut app);
 
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.status_message, "Layout: column");
         let graph = app.graph.as_ref().unwrap();
-        let expected = crate::layout::solve_columns(
+        let anchored: Vec<(usize, (f32, f32))> = app
+            .pinned_indices(graph)
+            .into_iter()
+            .filter_map(|i| before.get(i).map(|&pos| (i, pos)))
+            .collect();
+        let expected = crate::layout::solve_columns_pinned(
             graph,
             &crate::layout::estimated_widths(graph),
             app.layout_ordering,
+            &anchored,
         );
         assert_eq!(
             app.graph_positions, expected,
-            "force→column toggle re-solves with the column solver"
+            "force→column toggle re-solves with the column solver, tip anchored"
         );
     }
 
