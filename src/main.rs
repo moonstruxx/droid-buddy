@@ -57,6 +57,11 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // [gui] graph_window: seed the GPU-window preference (gpu-graph-window D6);
     // matching App::new's default.
     app.graph_window_enabled = settings.gui.graph_window;
+
+    // [layout] mode/ordering: seed the graph-arrangement preference
+    // (graph-column-layout D5); matching App::new's defaults.
+    app.layout_mode = settings.layout.mode;
+    app.layout_ordering = settings.layout.ordering;
 }
 
 /// Bundled demo patch shown when no `argv[1]` path is given. `Patch::sample()`
@@ -307,6 +312,26 @@ mod tests {
         let mut app = App::new();
         seed_app(&mut app, &settings);
         assert!(!app.graph_window_enabled);
+    }
+
+    #[test]
+    fn seed_app_seeds_layout_mode_and_ordering_from_settings() {
+        let mut settings = config::Settings::default();
+        settings.layout.mode = config::LayoutMode::Force;
+        settings.layout.ordering = config::LayoutOrdering::Barycenter;
+        let mut app = App::new();
+        seed_app(&mut app, &settings);
+        assert_eq!(app.layout_mode, config::LayoutMode::Force);
+        assert_eq!(app.layout_ordering, config::LayoutOrdering::Barycenter);
+    }
+
+    #[test]
+    fn seed_app_keeps_column_layout_by_default() {
+        let settings = config::Settings::default();
+        let mut app = App::new();
+        seed_app(&mut app, &settings);
+        assert_eq!(app.layout_mode, config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, config::LayoutOrdering::Strict);
     }
 
     #[test]

@@ -3649,6 +3649,9 @@ mod tests {
         // and re-solve the layout live; the status reports the current value.
         // Plain brackets now adjust the tiled split instead (task 4.2).
         let mut app = app_with_fixture();
+        // Tension is a force-path control: the column arrangement ignores it
+        // (graph-column-layout D5), so this test runs the force solver.
+        app.layout_mode = crate::config::LayoutMode::Force;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.showing_graph);
