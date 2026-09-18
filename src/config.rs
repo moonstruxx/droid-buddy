@@ -1,6 +1,6 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
-//! and `[physical.rack]`, `[plugins]`, `[gui]`) stored in `config.toml` under
-//! the XDG config home.
+//! and `[physical.rack]`, `[plugins]`, `[gui]`, `[layout]`) stored in
+//! `config.toml` under the XDG config home.
 //! Loaded once at startup, before the terminal UI initializes (design decision 5).
 //!
 //! This module stays decoupled from the theme catalog: canonical name
@@ -42,6 +42,14 @@ pub const DEFAULT_PLUGINS_ENABLED: bool = true;
 /// box, and without the `gui` feature the value is inert.
 pub const DEFAULT_GRAPH_WINDOW: bool = false;
 
+/// Graph-arrangement defaults under `[layout]` (graph-column-layout D5): the
+/// deterministic column arrangement is the out-of-box default; the force
+/// solver stays reachable via the toggle.
+pub const DEFAULT_LAYOUT_MODE: LayoutMode = LayoutMode::Column;
+/// Within-column ordering default: strict slot order (nthelper style); the
+/// barycenter crossing-minimization sweeps are opt-in.
+pub const DEFAULT_LAYOUT_ORDERING: LayoutOrdering = LayoutOrdering::Strict;
+
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -75,6 +83,14 @@ fn default_plugins_enabled() -> bool {
 
 fn default_graph_window() -> bool {
     DEFAULT_GRAPH_WINDOW
+}
+
+fn default_layout_mode() -> LayoutMode {
+    DEFAULT_LAYOUT_MODE
+}
+
+fn default_layout_ordering() -> LayoutOrdering {
+    DEFAULT_LAYOUT_ORDERING
 }
 
 /// Per-label configuration under `[labels]`.
@@ -194,6 +210,88 @@ impl Default for Gui {
     }
 }
 
+/// Graph-arrangement mode under `[layout]` (graph-column-layout D5): the
+/// deterministic column arrangement or the force-directed solver. Unknown
+/// values in the file warn once on stderr and fall back to
+/// [`LayoutMode::Column`]; the manual `Deserialize` keeps the rest of the
+/// file loadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    Column,
+    Force,
+}
+
+impl<'de> Deserialize<'de> for LayoutMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "column" => Self::Column,
+            "force" => Self::Force,
+            other => {
+                eprintln!("warning: unknown layout mode \"{other}\"; valid choices: column, force");
+                Self::Column
+            }
+        })
+    }
+}
+
+/// Within-column ordering under `[layout]` (graph-column-layout D5): strict
+/// slot order or barycenter crossing-minimization sweeps. Unknown values in
+/// the file warn once on stderr and fall back to [`LayoutOrdering::Strict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutOrdering {
+    Strict,
+    Barycenter,
+}
+
+impl<'de> Deserialize<'de> for LayoutOrdering {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "strict" => Self::Strict,
+            "barycenter" => Self::Barycenter,
+            other => {
+                eprintln!(
+                    "warning: unknown layout ordering \"{other}\"; valid choices: strict, barycenter"
+                );
+                Self::Strict
+            }
+        })
+    }
+}
+
+/// Graph-arrangement preferences under `[layout]` (graph-column-layout D5).
+///
+/// `mode` picks the default arrangement (the deterministic column layout or
+/// the force solver); `ordering` picks the within-column order on the column
+/// path (strict slot order or barycenter sweeps). Unknown values warn once on
+/// stderr and fall back to the defaults; the enum types make invalid values
+/// unrepresentable, so no clamp-on-save is needed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    #[serde(default = "default_layout_mode")]
+    pub mode: LayoutMode,
+    #[serde(default = "default_layout_ordering")]
+    pub ordering: LayoutOrdering,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            mode: default_layout_mode(),
+            ordering: default_layout_ordering(),
+        }
+    }
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions). `Eq` is intentionally not
 /// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
@@ -211,6 +309,8 @@ pub struct Settings {
     pub plugins: Plugins,
     #[serde(default)]
     pub gui: Gui,
+    #[serde(default)]
+    pub layout: Layout,
 }
 
 impl Default for Settings {
@@ -222,6 +322,7 @@ impl Default for Settings {
             physical: Physical::default(),
             plugins: Plugins::default(),
             gui: Gui::default(),
+            layout: Layout::default(),
         }
     }
 }
@@ -269,8 +370,9 @@ pub fn load(canonicalize: ThemeCanonicalizer<'_>, catalog: &[&str]) -> Settings 
 
 /// Load settings from an explicit file path (injection point for tests).
 ///
-/// Warn-once contract: each call emits at most one stderr warning — the
-/// loader runs exactly once per process at startup.
+/// Warn-once contract: each call warns at most once per issue (malformed
+/// TOML, unknown theme, unknown layout value) — the loader runs exactly once
+/// per process at startup.
 pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&str]) -> Settings {
     // Any read error (missing file/dir being the normal fresh-machine
     // case) falls back to defaults without ceremony.
@@ -497,6 +599,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 gui: Gui::default(),
+                layout: Layout::default(),
             },
         )
         .unwrap();
@@ -530,6 +633,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 gui: Gui::default(),
+                layout: Layout::default(),
             },
         )
         .unwrap();
@@ -604,6 +708,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 gui: Gui::default(),
+                layout: Layout::default(),
             },
         )
         .unwrap();
@@ -632,6 +737,7 @@ mod tests {
                     physical: Physical::default(),
                     plugins: Plugins::default(),
                     gui: Gui::default(),
+                    layout: Layout::default(),
                 },
             )
             .unwrap();
@@ -659,6 +765,7 @@ mod tests {
             physical: Physical::default(),
             plugins: Plugins::default(),
             gui: Gui::default(),
+            layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -730,6 +837,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 gui: Gui::default(),
+                layout: Layout::default(),
             },
         )
         .unwrap();
@@ -906,6 +1014,7 @@ mod tests {
             },
             plugins: Plugins::default(),
             gui: Gui::default(),
+            layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -946,6 +1055,7 @@ mod tests {
                 },
                 plugins: Plugins::default(),
                 gui: Gui::default(),
+                layout: Layout::default(),
             },
         )
         .unwrap();
@@ -1061,6 +1171,7 @@ mod tests {
                 enabled: false,
             },
             gui: Gui::default(),
+            layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1111,6 +1222,7 @@ mod tests {
             physical: Physical::default(),
             plugins: Plugins::default(),
             gui: Gui { graph_window: true },
+            layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1135,5 +1247,134 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_at(&dir), Settings::default());
+    }
+
+    // ── graph-column-layout 2.1: [layout] mode / ordering ──
+
+    #[test]
+    fn layout_defaults_when_table_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.layout, Layout::default());
+        assert_eq!(loaded.layout.mode, LayoutMode::Column);
+        assert_eq!(loaded.layout.ordering, LayoutOrdering::Strict);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn layout_defaults_when_file_empty() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.layout, Layout::default());
+    }
+
+    #[test]
+    fn layout_mode_force_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[layout]\nmode = \"force\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.layout.mode, LayoutMode::Force);
+        assert_eq!(loaded.layout.ordering, LayoutOrdering::Strict);
+    }
+
+    #[test]
+    fn layout_ordering_barycenter_parses() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[layout]\nordering = \"barycenter\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.layout.ordering, LayoutOrdering::Barycenter);
+        assert_eq!(loaded.layout.mode, LayoutMode::Column);
+    }
+
+    #[test]
+    fn unknown_layout_mode_falls_back_to_default() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"mono\"\n[layout]\nmode = \"sideways\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        // Only the bad value falls back; the rest of the file still loads.
+        assert_eq!(loaded.layout.mode, LayoutMode::Column);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn unknown_layout_ordering_falls_back_to_default() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[layout]\nordering = \"bogus\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.layout.ordering, LayoutOrdering::Strict);
+        assert_eq!(loaded.layout.mode, LayoutMode::Column);
+    }
+
+    #[test]
+    fn malformed_layout_value_type_falls_back_to_defaults() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[layout]\nmode = 42\n",
+        )
+        .unwrap();
+        // A wrong-type value fails the whole file, mirroring the `[gui]`/
+        // `[physical.rack]` malformed-value precedent.
+        assert_eq!(load_at(&dir), Settings::default());
+    }
+
+    #[test]
+    fn layout_save_round_trips_through_load() {
+        let dir = TempDir::new().unwrap();
+        let settings = Settings {
+            theme: "classic".to_string(),
+            labels: Labels::default(),
+            latency: Latency::default(),
+            physical: Physical::default(),
+            plugins: Plugins::default(),
+            gui: Gui::default(),
+            layout: Layout {
+                mode: LayoutMode::Force,
+                ordering: LayoutOrdering::Barycenter,
+            },
+        };
+        save_to_dir(dir.path(), &settings).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[layout]"), "body: {body}");
+        assert!(body.contains("mode = \"force\""), "body: {body}");
+        assert!(body.contains("ordering = \"barycenter\""), "body: {body}");
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.layout, settings.layout);
     }
 }
