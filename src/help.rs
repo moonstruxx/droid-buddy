@@ -66,6 +66,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g g", "open signal-flow graph"),
             ("g d", "diff against another patch"),
             ("g o", "open latency optimizer"),
+            ("g c", "toggle latency coloring"),
             ("g q", "quad Panels/Source/Graph FULL/FILTERED"),
             ("?", "show this help"),
             ("1-4", "shift groups"),
@@ -91,7 +92,8 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
         HelpView::Graph => vec![
             ("x", "toggle circuit processing"),
             ("p", "pin/unpin node"),
-            ("c", "toggle latency coloring"),
+            ("c", "center graph"),
+            ("Shift+c", "fit and center graph"),
             ("e", "edit label"),
             ("d", "diff overlay"),
             ("+/-", "camera zoom"),
@@ -188,6 +190,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn keybindings_reflect_graph_center_fit_and_g_c_chord() {
+        // Design D3/D5: bare `c` centers the graph, `Shift+c` refits, and
+        // latency coloring lives on the `g c` chord in the panels table.
+        let graph = keybindings(HelpView::Graph);
+        assert!(graph.contains(&("c", "center graph")));
+        assert!(graph.contains(&("Shift+c", "fit and center graph")));
+        assert!(
+            !graph.contains(&("c", "toggle latency coloring")),
+            "latency coloring must not remain on bare c in the graph table"
+        );
+
+        let panels = keybindings(HelpView::Panels);
+        assert!(panels.contains(&("g c", "toggle latency coloring")));
     }
 
     #[test]

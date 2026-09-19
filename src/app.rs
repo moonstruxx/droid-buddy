@@ -919,7 +919,7 @@ impl App {
             graph_drag: None,
             hovered_graph_node: None,
             graph_camera: None,
-            graph_zoom_preset: 5,
+            graph_zoom_preset: Self::GRAPH_ZOOM_FIT_INDEX as u8,
             graph_canvas_px: None,
             tension: crate::layout::DEFAULT_TENSION,
             layout_mode: crate::config::DEFAULT_LAYOUT_MODE,
@@ -1153,9 +1153,9 @@ impl App {
     pub fn toggle_latency_coloring(&mut self) {
         self.latency_coloring = !self.latency_coloring;
         self.status_message = if self.latency_coloring {
-            String::from("Latency coloring on (c to toggle)")
+            String::from("Latency coloring on (g c to toggle)")
         } else {
-            String::from("Latency coloring off (c to toggle)")
+            String::from("Latency coloring off (g c to toggle)")
         };
     }
 
@@ -1953,12 +1953,24 @@ impl App {
     /// (`1.0` = the frame-the-graph fit, with wrap-around at both ends). The
     /// steps below `0.75` reach the true fit of a large patch from an
     /// over-zoomed camera (bug droid_tui-ttz: `0.75` bottomed out ~7x above a
-    /// `~0.1` fit). `+`/`-` apply the ratio about the canvas centre so the
-    /// visible content stays anchored and the pane never empties (task 2.3).
-    pub const GRAPH_ZOOM_PRESETS: [f32; 8] = [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+    /// `~0.1` fit). `0.03125` sits exactly 2x below the old `0.0625` minimum,
+    /// the required zoom-out floor (design D4). `+`/`-` apply the ratio about
+    /// the canvas centre so the visible content stays anchored and the pane
+    /// never empties (task 2.3).
+    pub const GRAPH_ZOOM_PRESETS: [f32; 9] =
+        [0.03125, 0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+    /// Index of the `1.0` (fitted-zoom) entry in `GRAPH_ZOOM_PRESETS`. Reset
+    /// sites and tests route through this constant instead of a literal index
+    /// so a preset-list edit cannot silently shift which entry is the fit.
+    pub const GRAPH_ZOOM_FIT_INDEX: usize = 6;
     /// One wheel/arrow pan step of the graph camera in pixels, mirroring
     /// `PHYSICAL_PAN_STEP`; the handler gating on overflow reuses this step.
     pub const GRAPH_PAN_STEP_PX: f32 = 24.0;
+    /// Fit-zoom floor for the camera, shared with the window fit's
+    /// `WINDOW_FIT_MIN_NODE_PX`: only keeps the fit from collapsing zoom below
+    /// legibility on very large graphs; it never frames fewer nodes than the
+    /// pure fit (the `fit_to_world` floor-frames guard decides).
+    pub const GRAPH_FIT_MIN_NODE_PX: f32 = 2.2;
 
     /// The graph canvas centre in world coordinates, for anchoring zoom. Falls
     /// back to the world origin when the canvas size has not been published.
@@ -2029,6 +2041,66 @@ impl App {
             self.graph_camera.map(|c| c.pan.1).unwrap_or(0.0)
         );
         true
+    }
+
+    /// Positions the camera should frame: the dependency-filter subset when
+    /// the `f` filter is active, else every node. Same selection as the
+    /// first-frame seed in `main.rs`, so center/fit and the initial fit agree
+    /// on what counts as the drawn graph.
+    fn graph_fit_positions(&self) -> Vec<(f32, f32)> {
+        if self.dependency_nodes.is_empty() {
+            self.graph_positions.clone()
+        } else {
+            self.dependency_nodes
+                .iter()
+                .map(|&i| self.graph_positions[i])
+                .collect()
+        }
+    }
+
+    /// Center the drawn graph in the visible pane: pan so the bounds' center
+    /// maps to the canvas center, zoom unchanged (design D3 `c`). Silent no-op
+    /// until the renderer has published both the camera and the canvas size,
+    /// or when there are no positions to center.
+    pub fn center_graph_camera(&mut self) -> bool {
+        let Some(cam) = self.graph_camera else {
+            return false;
+        };
+        let Some((pw, ph)) = self.graph_canvas_px else {
+            return false;
+        };
+        let positions = self.graph_fit_positions();
+        if positions.is_empty() {
+            return false;
+        }
+        let bounds = WorldBounds::from_positions(&positions);
+        let (cx, cy) = (
+            (bounds.min_x + bounds.max_x) / 2.0,
+            (bounds.min_y + bounds.max_y) / 2.0,
+        );
+        // Inverse of `pixel = world * zoom - pan`: pan = center * zoom -
+        // canvas / 2, mirroring `fit_to_world`'s centered pan exactly.
+        self.graph_camera = Some(GraphCamera {
+            zoom: cam.zoom,
+            pan: (cx * cam.zoom - pw / 2.0, cy * cam.zoom - ph / 2.0),
+        });
+        self.status_message = String::from("Graph centered");
+        true
+    }
+
+    /// Full refit of the drawn graph against `viewport` (design D3 `Shift+c`):
+    /// a fresh width-first `fit_to_world` over the dependency-filter-aware
+    /// bounds, the zoom preset reset to the fitted-zoom entry, and the canvas
+    /// size re-published so later center/zoom/pan anchor on the new viewport.
+    pub fn fit_graph_camera(&mut self, viewport: (f32, f32)) {
+        let positions = self.graph_fit_positions();
+        self.graph_camera = Some(GraphCamera::fit_to_world(
+            WorldBounds::from_positions(&positions),
+            viewport,
+            Self::GRAPH_FIT_MIN_NODE_PX,
+        ));
+        self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
+        self.graph_canvas_px = Some(viewport);
     }
 
     /// Physical-view status hint (4.3), composed once: `Physical N% · Pan
@@ -2640,7 +2712,7 @@ impl App {
         // renderer seeds a legible `fit_to_world` on the next kitty frame; a
         // previously-zoomed/panned camera must not linger across a new solve.
         self.graph_camera = None;
-        self.graph_zoom_preset = 5;
+        self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = None;
         self.emit_graph_built();
     }
@@ -3098,7 +3170,7 @@ impl App {
         self.graph_drag = None;
         self.hovered_graph_node = None;
         self.graph_camera = None;
-        self.graph_zoom_preset = 5;
+        self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = None;
         // Manual pins are per-patch graph state: cleared on every load so a
         // new patch re-seeds its own tip on the next open (design D3/D7).
@@ -3543,6 +3615,108 @@ mod tests {
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
         assert!(app.graph_cluster_rects.is_empty());
+    }
+
+    #[test]
+    fn graph_zoom_presets_have_two_x_zoom_out_floor() {
+        // The preset list carries the required zoom-out headroom: 0.03125 is
+        // exactly 2x below the old 0.0625 minimum, and the fit index follows
+        // the 1.0 entry rather than a hardcoded position (design D4).
+        assert_eq!(App::GRAPH_ZOOM_PRESETS.len(), 9);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[0], 0.03125);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[1], 0.0625);
+        // Compile-time invariant: the fit index points at the 1.0 entry.
+        const _: () = assert!(App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] == 1.0);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS.last(), Some(&2.0));
+        let app = App::new();
+        assert_eq!(
+            app.graph_zoom_preset as usize,
+            App::GRAPH_ZOOM_FIT_INDEX,
+            "fresh app starts at the fitted-zoom preset"
+        );
+    }
+
+    #[test]
+    fn center_graph_camera_pans_bounds_center_to_canvas_center() {
+        // Seed a camera (zoom 2, arbitrary pan) and a canvas; the bounds of
+        // the positions span (0,0)..(100,200), center (50,100). Centering must
+        // set pan so that center maps to the canvas center (320,150) via the
+        // published transform, leave zoom untouched, and report success.
+        let mut app = App::new();
+        app.graph_positions = vec![(0.0, 0.0), (100.0, 0.0), (50.0, 200.0)];
+        app.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (10.0, 20.0),
+        });
+        app.graph_canvas_px = Some((640.0, 300.0));
+
+        assert!(app.center_graph_camera());
+
+        let cam = app.graph_camera.unwrap();
+        assert_eq!(cam.zoom, 2.0, "centering must not change zoom");
+        let (px, py) = cam.world_to_pixel(50.0, 100.0);
+        assert!(
+            (px - 320.0).abs() < 1e-2 && (py - 150.0).abs() < 1e-2,
+            "bounds center must map to canvas center: ({px},{py})"
+        );
+        // Pan is the exact inverse transform: center * zoom - canvas / 2.
+        assert!((cam.pan.0 - (50.0 * 2.0 - 320.0)).abs() < 1e-3);
+        assert!((cam.pan.1 - (100.0 * 2.0 - 150.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn center_graph_camera_is_silent_noop_without_camera_or_canvas() {
+        // Fresh app: no camera and no published canvas size, so centering is a
+        // no-op that returns false and leaves the camera (and status) alone.
+        let mut app = App::new();
+        let status_before = app.status_message.clone();
+        assert!(!app.center_graph_camera());
+        assert!(app.graph_camera.is_none());
+        assert_eq!(app.status_message, status_before, "no-op sets no status");
+
+        // Camera present but canvas size unpublished: still a no-op, pan
+        // untouched.
+        let mut app = App::new();
+        app.graph_camera = Some(GraphCamera {
+            zoom: 1.5,
+            pan: (7.0, 8.0),
+        });
+        assert!(!app.center_graph_camera());
+        let cam = app.graph_camera.unwrap();
+        assert_eq!(cam.pan, (7.0, 8.0));
+        assert_eq!(cam.zoom, 1.5);
+    }
+
+    #[test]
+    fn fit_graph_camera_refits_to_viewport_and_resets_preset() {
+        // Fit against a non-1280x800 viewport: the resulting camera must frame
+        // the positions' bounds inside (640,300), the preset must reset to the
+        // fitted-zoom entry, and the canvas size must be re-published.
+        let mut app = App::new();
+        app.graph_positions = vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0), (100.0, 100.0)];
+        app.graph_camera = Some(GraphCamera {
+            zoom: 9.0,
+            pan: (400.0, 200.0),
+        });
+        app.graph_zoom_preset = 0;
+
+        let viewport = (640.0, 300.0);
+        app.fit_graph_camera(viewport);
+
+        assert_eq!(
+            app.graph_zoom_preset as usize,
+            App::GRAPH_ZOOM_FIT_INDEX,
+            "refit resets the zoom preset to the fitted-zoom entry"
+        );
+        assert_eq!(app.graph_canvas_px, Some(viewport));
+        let cam = app.graph_camera.unwrap();
+        assert!(cam.zoom > 0.0 && cam.zoom.is_finite());
+        let (x0, y0) = cam.world_to_pixel(0.0, 0.0);
+        let (x1, y1) = cam.world_to_pixel(100.0, 100.0);
+        assert!(
+            x0 >= 0.0 && y0 >= 0.0 && x1 <= viewport.0 && y1 <= viewport.1,
+            "bounds must be framed by the viewport: corners ({x0},{y0}) and ({x1},{y1})"
+        );
     }
 
     #[test]
@@ -4234,10 +4408,10 @@ mod tests {
         let mut app = App::new();
         app.toggle_latency_coloring();
         assert!(!app.latency_coloring);
-        assert_eq!(app.status_message, "Latency coloring off (c to toggle)");
+        assert_eq!(app.status_message, "Latency coloring off (g c to toggle)");
         app.toggle_latency_coloring();
         assert!(app.latency_coloring);
-        assert_eq!(app.status_message, "Latency coloring on (c to toggle)");
+        assert_eq!(app.status_message, "Latency coloring on (g c to toggle)");
     }
 
     #[test]
