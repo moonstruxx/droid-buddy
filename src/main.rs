@@ -1,6 +1,6 @@
 use color_eyre::Result;
 
-use droid_tui::app::{App, GraphWindowRequest};
+use droid_tui::app::{App, FocusSlot, GraphWindowRequest, ViewType};
 use droid_tui::latency::CostModel;
 use droid_tui::{config, schema, theme};
 
@@ -108,6 +108,24 @@ fn queue_startup_window_open(app: &mut App) {
     app.request_graph_window(GraphWindowRequest::Open);
 }
 
+/// The graph window is the only surface, so it owns tile focus: the shared
+/// handler gates graph-surface keys (`-`/`+` zoom presets, `h` layout toggle,
+/// Alt+[ / Alt+] tension) on `graph_slot_focused`, which reads
+/// `tile_stack.focus`. The terminal `g g` path focuses the slot after
+/// `open_graph` (handler `focus_tile_slot`); the windowed startup must mirror
+/// that or the delivered zoom-out presets stay keyboard-dead on the primary
+/// surface (verified live in graph-pane-centering task 4.4).
+fn focus_startup_graph_slot(app: &mut App) {
+    if let Some(i) = app
+        .tile_stack
+        .slots
+        .iter()
+        .position(|v| *v == ViewType::Graph)
+    {
+        app.tile_stack.focus = FocusSlot::Slot(i);
+    }
+}
+
 /// True when a window event should end the event loop.
 ///
 /// This is the exit decision that regressed twice: droid_tui-7y5, where a
@@ -131,7 +149,10 @@ mod windowed {
     use droid_tui::{config, handler, theme};
     use winit::keyboard::ModifiersState;
 
-    use super::{load_initial_patch, queue_startup_window_open, seed_app, should_exit};
+    use super::{
+        focus_startup_graph_slot, load_initial_patch, queue_startup_window_open, seed_app,
+        should_exit,
+    };
 
     /// The native application: owns the single `App` and the graph window,
     /// driven by winit's event loop (gpu-graph-window design D1).
@@ -213,7 +234,9 @@ mod windowed {
                         // black, painting the layered seed plane through the
                         // identity camera): seed `App.graph_camera` when
                         // unset, dependency-filter aware, and reuse it after
-                        // so pan/zoom survive.
+                        // so pan/zoom survive. The paint path publishes the
+                        // real canvas and re-seeds with the exact pane size
+                        // from the next frame (design D2).
                         let fit: Vec<(f32, f32)> = if self.app.dependency_nodes.is_empty() {
                             self.app.graph_positions.clone()
                         } else {
@@ -223,7 +246,15 @@ mod windowed {
                                 .map(|&i| self.app.graph_positions[i])
                                 .collect()
                         };
-                        self.app.graph_camera = Some(gui::graph_window_fit_camera(&fit));
+                        let viewport = self
+                            .window
+                            .with_window(|window| {
+                                let size = window.inner_size();
+                                let scale = window.scale_factor() as f32;
+                                (size.width as f32 / scale, size.height as f32 / scale)
+                            })
+                            .unwrap_or((1280.0, 800.0));
+                        self.app.graph_camera = Some(gui::graph_window_fit_camera(&fit, viewport));
                     }
                     let scene = gui::build_scene_spec(&self.app, theme::active());
                     self.window.set_scene(scene.as_ref());
@@ -278,6 +309,9 @@ mod windowed {
         // Build the graph from the loaded patch so the window paints
         // content on its first frame (bead droid_tui-59t).
         app.open_graph();
+        // The graph window is the only surface, so it owns tile focus (see
+        // `focus_startup_graph_slot`; verified live in task 4.4).
+        focus_startup_graph_slot(&mut app);
         let mut handler = AppHandler {
             app,
             window: GraphWindow::new(),
@@ -296,6 +330,7 @@ mod windowed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use droid_tui::app::{FocusSlot, ViewType};
 
     #[test]
     fn seed_app_enables_graph_window_from_setting() {
@@ -378,6 +413,32 @@ mod tests {
         let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
         let spec = scene.expect("startup must produce a scene to paint");
         assert!(!spec.nodes.is_empty(), "startup must paint nodes");
+    }
+
+    #[test]
+    fn startup_focuses_the_graph_slot() {
+        // Live verification (graph-pane-centering task 4.4): the graph window
+        // is the only surface, so it must own tile focus. The shared handler
+        // gates graph-surface keys (`-`/`+` zoom presets, `h` layout toggle,
+        // Alt+[ / Alt+] tension) on `graph_slot_focused`, which reads
+        // `tile_stack.focus`; with focus left on Panels those keys routed to
+        // the invisible `cycle_panel_scale` and the delivered zoom-out
+        // presets were keyboard-dead on the primary surface. Mirror the
+        // terminal `g g` path's `focus_tile_slot` after `open_graph`.
+        let mut app = App::new();
+        load_initial_patch(&mut app, None);
+        app.open_graph();
+        focus_startup_graph_slot(&mut app);
+        assert_eq!(
+            app.tile_stack.slots,
+            vec![ViewType::Graph],
+            "startup opens exactly the graph slot"
+        );
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Slot(0),
+            "the graph window owns tile focus at startup"
+        );
     }
 
     #[test]
