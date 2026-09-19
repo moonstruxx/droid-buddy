@@ -235,23 +235,19 @@ pub fn camera_zoom_about(cam: &GraphCamera, factor: f32, anchor_px: (f32, f32)) 
     next.zoom_by(factor, (wx, wy));
     next
 }
-/// Availability the window fit frames the world into: the fixed design
-/// viewport (the loop owns the window; the old kitty renderer used the same
-/// 1280×800 canvas) minus one node frame so edge nodes never clip.
-const WINDOW_FIT_VIEWPORT_W: f32 = 1280.0;
-const WINDOW_FIT_VIEWPORT_H: f32 = 800.0;
-
 /// First-frame camera fit for the desktop graph window, seeded into
 /// `App::graph_camera` when it is still unset so the scene frames the whole
 /// graph instead of painting the layered seed plane off-viewport (bug: the
 /// window opened black). Reused afterwards through the `camera_pan` /
 /// `camera_zoom_about` mappings, so user pan/zoom survives. Dependency-filter
-/// aware via the caller's positions slice. Pure and window-free.
-pub fn graph_window_fit_camera(positions: &[(f32, f32)]) -> GraphCamera {
+/// aware via the caller's positions slice. `viewport` is the visible pane
+/// size in points (design D2), replacing the fixed design viewport; one node
+/// frame is subtracted so edge nodes never clip. Pure and window-free.
+pub fn graph_window_fit_camera(positions: &[(f32, f32)], viewport: (f32, f32)) -> GraphCamera {
     let node_w = crate::app::GRAPH_WINDOW_NODE_W;
     let node_h = crate::app::GRAPH_WINDOW_NODE_H;
-    let avail_w = (WINDOW_FIT_VIEWPORT_W - node_w).max(1.0);
-    let avail_h = (WINDOW_FIT_VIEWPORT_H - node_h).max(1.0);
+    let avail_w = (viewport.0 - node_w).max(1.0);
+    let avail_h = (viewport.1 - node_h).max(1.0);
     GraphCamera::fit_to_world(
         WorldBounds::from_positions(positions),
         (avail_w, avail_h),
@@ -2086,7 +2082,10 @@ mod window_paint_tests {
         // The window's first frame: a fitted camera frames the whole graph so
         // every node body lands on canvas (the original black-window bug).
         let mut app = chain_app();
-        app.graph_camera = Some(graph_window_fit_camera(&app.graph_positions));
+        app.graph_camera = Some(graph_window_fit_camera(
+            &app.graph_positions,
+            (1280.0, 800.0),
+        ));
         let scene = build_scene_spec(&app, theme()).expect("scene present");
         let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
 
@@ -2159,10 +2158,14 @@ mod window_paint_tests {
 
     #[test]
     fn window_paint_mid_window_shows_minimap() {
-        // A mid-sized window smaller than the fitted scene overflows, so the
-        // minimap appears bottom-left while the scene content still paints.
+        // A mid-sized canvas smaller than the fitted scene overflows: seed
+        // the design-viewport fit and paint into a smaller canvas, modelling
+        // the zoomed-in state that shows the minimap bottom-left.
         let mut app = chain_app();
-        app.graph_camera = Some(graph_window_fit_camera(&app.graph_positions));
+        app.graph_camera = Some(graph_window_fit_camera(
+            &app.graph_positions,
+            (1280.0, 800.0),
+        ));
         let scene = build_scene_spec(&app, theme()).expect("scene present");
         let out = paint(Some(&scene), egui::vec2(400.0, 300.0));
 
@@ -2216,7 +2219,7 @@ mod fit_tests {
     #[test]
     fn graph_window_fit_camera_frames_a_spread_world() {
         let positions = vec![(0.0, 0.0), (160.0, 0.0), (320.0, 120.0)];
-        let camera = super::graph_window_fit_camera(&positions);
+        let camera = super::graph_window_fit_camera(&positions, (1280.0, 800.0));
         assert!(camera.zoom.is_finite());
         assert!(camera.zoom > 0.0);
         assert!(camera.pan.0.is_finite() && camera.pan.1.is_finite());
@@ -2437,5 +2440,98 @@ mod kittest_tests {
         assert!(app.patch.is_some(), "patch should be loaded");
         let patch = app.patch.as_ref().unwrap();
         assert!(!patch.sections.is_empty(), "patch should have sections");
+    }
+}
+
+#[cfg(test)]
+mod zz_throwaway_dump {
+    use crate::app::App;
+    use crate::graph::NodeKind;
+    use crate::graph_render::WorldBounds;
+    use crate::patch::Patch;
+    use crate::theme;
+    use std::path::Path;
+
+    #[test]
+    fn dump_arpeggio_node_kinds_and_positions() {
+        theme::init(theme::Theme::classic());
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let g = app.graph.as_ref().unwrap();
+        let pos = &app.graph_positions;
+        println!(
+            "== total nodes {} == positions len {}",
+            g.nodes.len(),
+            pos.len()
+        );
+        for (i, (node, p)) in g.nodes.iter().zip(pos.iter()).enumerate() {
+            println!(
+                "[{i}] kind={:?} id={:?} circuit={} pos=({:.1},{:.1})",
+                node.kind, node.id, node.circuit, p.0, p.1
+            );
+        }
+        let bounds = WorldBounds::from_positions(pos);
+        println!("== graph_fit_positions(ALL) bounds = {:?}", bounds);
+        // Distinguish circuit-only vs controller/jack extents.
+        let mut circuit_bounds = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for (node, p) in g.nodes.iter().zip(pos.iter()) {
+            if node.kind == NodeKind::Circuit {
+                circuit_bounds.0 = circuit_bounds.0.min(p.0);
+                circuit_bounds.1 = circuit_bounds.1.min(p.1);
+                circuit_bounds.2 = circuit_bounds.2.max(p.0);
+                circuit_bounds.3 = circuit_bounds.3.max(p.1);
+            }
+        }
+        println!("== circuit-only bounds = {:?}", circuit_bounds);
+    }
+}
+
+#[cfg(test)]
+mod zz_throwaway_dump2 {
+    use crate::app::App;
+    use crate::graph_render::{GraphCamera, WorldBounds};
+    use crate::patch::Patch;
+    use crate::theme;
+    use std::path::Path;
+
+    fn build() -> App {
+        theme::init(theme::Theme::classic());
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app
+    }
+
+    #[test]
+    fn dump_scene_under_c_camera() {
+        let mut app = build();
+        let pos = &app.graph_positions;
+        let bounds = WorldBounds::from_positions(pos);
+        println!("== ALL bounds {:?}", bounds);
+        // The C fit: fit_to_world(all bounds, 512x800, GRAPH_FIT_MIN_NODE_PX=2.2)
+        let cam = GraphCamera::fit_to_world(bounds, (512.0, 800.0), 2.2);
+        println!("== C camera zoom={} pan={:?}", cam.zoom, cam.pan);
+        app.graph_camera = Some(cam);
+        let spec = crate::gui::graph::build_scene_spec(&app, theme::active()).unwrap();
+        println!(
+            "== build_scene_spec rendered {} nodes (of {} graph.nodes)",
+            spec.nodes.len(),
+            app.graph.as_ref().unwrap().nodes.len()
+        );
+        for (i, n) in spec.nodes.iter().enumerate() {
+            println!(
+                "  spec[{i}] label={} x={:.0} y={:.0} w={} h={}",
+                n.label, n.x, n.y, n.w, n.h
+            );
+        }
+        println!("== spec edges = {}", spec.edges.len());
     }
 }

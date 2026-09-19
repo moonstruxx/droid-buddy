@@ -595,6 +595,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.prefix = None;
                 return false;
             }
+            KeyCode::Char('c') => {
+                // `g c` toggles cable latency coloring. The bare `c` key now
+                // centers the graph (design D3), so latency coloring lives on
+                // this chord only.
+                app.toggle_latency_coloring();
+                app.prefix = None;
+                return false;
+            }
             KeyCode::Char('q') => {
                 // `g q` enters the quad configuration (change `quad-view`,
                 // App-state lane): SourceViewer + Graph slots with the
@@ -962,9 +970,21 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             KeyCode::Char('c') => {
-                // Bare `c` toggles cable latency coloring on the graph surface;
+                // Bare `c` centers the graph in the visible pane (design D3);
                 // Ctrl+C (quit) is matched above with its modifier guard.
-                app.toggle_latency_coloring();
+                app.center_graph_camera();
+                return false;
+            }
+            KeyCode::Char('C') => {
+                // Shift+c (winit reports Shift+c as `Char('C')`): refit the
+                // camera to the published pane size and reset the preset to
+                // the fitted zoom (design D3/D4).
+                let viewport = app.graph_canvas_px.unwrap_or((1280.0, 800.0));
+                app.fit_graph_camera(viewport);
+                app.status_message = format!(
+                    "Graph zoom {:.0}%",
+                    App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] * 100.0
+                );
                 return false;
             }
             KeyCode::Char('x') => {
@@ -2000,6 +2020,28 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         }
     }
 
+    // Design D3: the camera keys act on the pane without a hovered node,
+    // mirroring the terminal graph's `c`/`Shift+c`. The fit status text
+    // matches the terminal path exactly.
+    for key in &frame.keys {
+        match key {
+            crate::gui::WindowGraphKey::CenterGraph => {
+                app.center_graph_camera();
+            }
+            crate::gui::WindowGraphKey::FitGraph => {
+                let viewport = app.graph_canvas_px.unwrap_or((1280.0, 800.0));
+                app.fit_graph_camera(viewport);
+                app.status_message = format!(
+                    "Graph zoom {:.0}%",
+                    App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] * 100.0
+                );
+            }
+            crate::gui::WindowGraphKey::ToggleProcessing
+            | crate::gui::WindowGraphKey::TogglePin
+            | crate::gui::WindowGraphKey::BeginEdit => {}
+        }
+    }
+
     for key in &frame.keys {
         let Some(idx) = app.hovered_graph_node else {
             continue;
@@ -2009,6 +2051,10 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             crate::gui::WindowGraphKey::TogglePin => graph_node_pin_toggle(app, idx),
             crate::gui::WindowGraphKey::BeginEdit => {
                 begin_graph_node_edit(app, idx);
+            }
+            crate::gui::WindowGraphKey::CenterGraph | crate::gui::WindowGraphKey::FitGraph => {
+                // Handled above: the camera keys act on the pane, not a node.
+                continue;
             }
         }
     }
@@ -2629,12 +2675,12 @@ mod tests {
             (z1 - z0 * 1.5).abs() < 1e-2,
             "'+' zooms in one preset: {z0} -> {z1}"
         );
-        // Presets are now multipliers of the fitted zoom: 1.0 is index 5,
-        // one '+' lands on 1.5 (index 6).
-        assert_eq!(app.graph_zoom_preset, 6);
+        // Presets are multipliers of the fitted zoom: 1.0 is
+        // GRAPH_ZOOM_FIT_INDEX (6), one '+' lands on 1.5 (index 7).
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8 + 1);
         assert!(app.status_message.contains("Graph zoom"));
 
-        // Wrap at the top preset (200%) back to the bottom (6.25%): the
+        // Wrap at the top preset (200%) back to the bottom (3.125%): the
         // deep zoom-out steps exist so a fitted camera can reach the true
         // fit of a large patch (bug droid_tui-ttz).
         handle_event(key(KeyCode::Char('+')), &mut app);
@@ -2643,8 +2689,8 @@ mod tests {
         handle_event(key(KeyCode::Char('+')), &mut app);
         let z3 = app.graph_camera.unwrap().zoom;
         assert!(
-            (z3 - z2 * (0.0625 / 2.0)).abs() < 1e-2,
-            "wrap from 200% to 6.25%: {z2} -> {z3}"
+            (z3 - z2 * (0.03125 / 2.0)).abs() < 1e-2,
+            "wrap from 200% to 3.125%: {z2} -> {z3}"
         );
         assert_eq!(app.graph_zoom_preset, 0);
     }
@@ -2691,9 +2737,118 @@ mod tests {
         app.graph_canvas_px = Some((1280.0, 720.0));
         app.open_graph();
         assert!(app.graph_camera.is_none());
-        // Default preset is the fitted zoom (1.0, index 5), not a stale one.
-        assert_eq!(app.graph_zoom_preset, 5);
+        // Default preset is the fitted zoom (1.0, GRAPH_ZOOM_FIT_INDEX), not
+        // a stale one.
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
         assert!(app.graph_canvas_px.is_none());
+    }
+
+    #[test]
+    fn c_centers_graph_camera_on_graph_surface() {
+        // Design D3: bare `c` pans so the drawn bounds' center maps to the
+        // visible pane's center. Zoom stays untouched, and latency coloring
+        // is no longer flipped by the bare key (it moved to the `g c` chord).
+        let mut app = app_with_fixture();
+        app.open_graph();
+        // Seed an off-center camera + canvas, as the renderer publishes them.
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 2.0,
+            pan: (10.0, 20.0),
+        });
+        app.graph_canvas_px = Some((640.0, 300.0));
+        let latency_before = app.latency_coloring;
+
+        handle_event(key(KeyCode::Char('c')), &mut app);
+
+        let cam = app.graph_camera.unwrap();
+        assert_eq!(cam.zoom, 2.0, "centering must not change zoom");
+        assert_ne!(cam.pan, (10.0, 20.0), "centering must pan");
+        assert_eq!(app.status_message, "Graph centered");
+        assert_eq!(
+            app.latency_coloring, latency_before,
+            "bare c must not flip latency coloring"
+        );
+    }
+
+    #[test]
+    fn c_centering_is_noop_until_camera_and_canvas_are_published() {
+        // Mirror of the app.rs contract: without a published camera or canvas
+        // size the center is a silent no-op (box-drawing path) — no pan, no
+        // status change.
+        let mut app = app_with_fixture();
+        app.open_graph();
+        assert!(app.graph_camera.is_none());
+
+        handle_event(key(KeyCode::Char('c')), &mut app);
+
+        assert!(app.graph_camera.is_none());
+        assert_ne!(app.status_message, "Graph centered");
+    }
+
+    #[test]
+    fn shift_c_refits_graph_camera_against_published_canvas() {
+        // Design D3/D4: Shift+c is a full refit against the published pane
+        // size, and the zoom preset resets to the fitted-zoom entry so the
+        // `+`/`-` cycle and the first-frame fit agree.
+        let mut app = app_with_fixture();
+        app.open_graph();
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 9.0,
+            pan: (123.0, 456.0),
+        });
+        app.graph_zoom_preset = 0;
+        app.graph_canvas_px = Some((640.0, 300.0));
+
+        handle_event(shift_key(KeyCode::Char('C')), &mut app);
+
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
+        assert_eq!(app.graph_canvas_px, Some((640.0, 300.0)));
+        assert!(
+            app.status_message.contains("Graph zoom"),
+            "unexpected status: {:?}",
+            app.status_message
+        );
+        let cam = app.graph_camera.unwrap();
+        assert!(cam.zoom > 0.0 && cam.zoom.is_finite(), "refit zooms");
+    }
+
+    #[test]
+    fn shift_c_falls_back_to_default_viewport_before_first_publish() {
+        // Before the renderer publishes a canvas size the refit uses the
+        // default viewport and publishes it, so later keys anchor on it.
+        let mut app = app_with_fixture();
+        app.open_graph();
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 9.0,
+            pan: (123.0, 456.0),
+        });
+        assert!(app.graph_canvas_px.is_none());
+
+        handle_event(shift_key(KeyCode::Char('C')), &mut app);
+
+        assert_eq!(app.graph_canvas_px, Some((1280.0, 800.0)));
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
+    }
+
+    #[test]
+    fn g_c_toggles_latency_coloring_with_existing_status_text() {
+        // Design D3: latency coloring moved to the `g c` chord; the status
+        // text keeps its existing shape.
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        assert!(app.latency_coloring, "latency coloring on by default");
+
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('c')), &mut app);
+
+        assert!(!app.latency_coloring);
+        assert_eq!(app.status_message, "Latency coloring off (g c to toggle)");
+
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('c')), &mut app);
+
+        assert!(app.latency_coloring);
+        assert_eq!(app.status_message, "Latency coloring on (g c to toggle)");
     }
 
     /// Open the graph slot via `g` then `g`.
@@ -4931,23 +5086,6 @@ mod tests {
     }
 
     #[test]
-    fn c_key_toggles_latency_coloring_on_graph_surface() {
-        // Bare `c` flips the graph-surface cable coloring; it must never
-        // collide with Ctrl+C (quit), which carries a modifier.
-        let mut app = app_with_fixture();
-        assert!(app.latency_coloring, "on by default");
-        app.open_graph();
-
-        handle_event(key(KeyCode::Char('c')), &mut app);
-        assert!(!app.latency_coloring);
-        assert_eq!(app.status_message, "Latency coloring off (c to toggle)");
-
-        handle_event(key(KeyCode::Char('c')), &mut app);
-        assert!(app.latency_coloring);
-        assert_eq!(app.status_message, "Latency coloring on (c to toggle)");
-    }
-
-    #[test]
     fn scroll_adjustment_blocked_while_paused() {
         let content = "[pot]\n    pot = P1.1\n    output = _X\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
@@ -5260,6 +5398,119 @@ mod tests {
                 node.circuit, node.instance_index
             )
         );
+    }
+
+    // --- GPU graph window camera keys (design D3/D4) -----------------------
+    // Mirrors of the terminal `c`/`Shift+c` tests: the window dispatches the
+    // same camera mutations through `WindowGraphKey`.
+
+    #[test]
+    fn graph_window_c_key_centers_camera() {
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        // Seed an off-center camera + canvas, as the renderer publishes them.
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 2.0,
+            pan: (10.0, 20.0),
+        });
+        app.graph_canvas_px = Some((640.0, 300.0));
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                keys: vec![WindowGraphKey::CenterGraph],
+                ..Default::default()
+            },
+            &mut app,
+        );
+
+        let cam = app.graph_camera.unwrap();
+        assert_eq!(cam.zoom, 2.0, "centering must not change zoom");
+        assert_ne!(cam.pan, (10.0, 20.0), "centering must pan");
+        assert_eq!(app.status_message, "Graph centered");
+    }
+
+    #[test]
+    fn graph_window_c_centering_is_noop_without_canvas_size() {
+        // Mirror of the app.rs contract: without a published canvas size the
+        // center is a silent no-op — no pan, no status change.
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 2.0,
+            pan: (10.0, 20.0),
+        });
+        assert!(app.graph_canvas_px.is_none());
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                keys: vec![WindowGraphKey::CenterGraph],
+                ..Default::default()
+            },
+            &mut app,
+        );
+
+        assert_eq!(
+            app.graph_camera.unwrap().pan,
+            (10.0, 20.0),
+            "no-op pan without canvas size"
+        );
+        assert_ne!(app.status_message, "Graph centered");
+    }
+
+    #[test]
+    fn graph_window_shift_c_refits_camera_against_published_canvas() {
+        // Design D3/D4: Shift+c is a full refit against the published pane
+        // size, and the zoom preset resets to the fitted-zoom entry.
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 9.0,
+            pan: (123.0, 456.0),
+        });
+        app.graph_zoom_preset = 0;
+        app.graph_canvas_px = Some((640.0, 300.0));
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                keys: vec![WindowGraphKey::FitGraph],
+                ..Default::default()
+            },
+            &mut app,
+        );
+
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
+        assert_eq!(app.graph_canvas_px, Some((640.0, 300.0)));
+        assert!(
+            app.status_message.contains("Graph zoom"),
+            "unexpected status: {:?}",
+            app.status_message
+        );
+        let cam = app.graph_camera.unwrap();
+        assert!(cam.zoom > 0.0 && cam.zoom.is_finite(), "refit zooms");
+    }
+
+    #[test]
+    fn graph_window_shift_c_falls_back_to_default_viewport_before_first_publish() {
+        // Before the renderer publishes a canvas size the refit uses the
+        // default viewport and publishes it, so later keys anchor on it.
+        use crate::gui::{WindowFrame, WindowGraphKey};
+        let mut app = app_with_graph_window();
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 9.0,
+            pan: (123.0, 456.0),
+        });
+        assert!(app.graph_canvas_px.is_none());
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                keys: vec![WindowGraphKey::FitGraph],
+                ..Default::default()
+            },
+            &mut app,
+        );
+
+        assert_eq!(app.graph_canvas_px, Some((1280.0, 800.0)));
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
     }
 
     #[test]
