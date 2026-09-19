@@ -82,6 +82,12 @@ pub enum WindowGraphKey {
     TogglePin,
     /// `e`: begin the circuit label edit overlay for the hovered node.
     BeginEdit,
+    /// `c`: center the drawn graph in the pane (design D3, mirror of the
+    /// terminal graph surface's bare `c`). Acts on the pane, not a node.
+    CenterGraph,
+    /// `Shift+c`: refit the camera against the pane size (design D3/D4,
+    /// mirror of the terminal graph surface's `Shift+c`).
+    FitGraph,
 }
 
 /// Raw window-frame input the loop turns into `App` mutations (task 3.1).
@@ -609,7 +615,13 @@ fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selec
     let _ = viewer::paint_viewer(&painter, q.source, ctx, Some(&spec));
 
     // Graph FULL (bottom-left): the shared full-graph scene (influence
-    // highlight/dim), clipped to the pane.
+    // highlight/dim), clipped to the pane. The pane is the visible graph
+    // canvas: publish its size and seed the camera on the first frame
+    // (design D1/D2), so fit/center/zoom anchoring uses the real pane.
+    app.graph_canvas_px = Some((q.full.width(), q.full.height()));
+    if app.graph_camera.is_none() {
+        app.fit_graph_camera((q.full.width(), q.full.height()));
+    }
     graph::paint_scene_in(ui, q.full, scene, selected);
 
     // Graph FILTERED (bottom-right): the influence-induced subgraph freshly
@@ -661,6 +673,12 @@ fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
             .push((crate::app::FocusSlot::Slot(i), to_cell_rect(rect)));
         match view {
             crate::app::ViewType::Graph => {
+                // The slot is the visible graph canvas: publish its size and
+                // seed the camera on the first frame (design D1/D2).
+                app.graph_canvas_px = Some((rect.width(), rect.height()));
+                if app.graph_camera.is_none() {
+                    app.fit_graph_camera((rect.width(), rect.height()));
+                }
                 graph::paint_scene_in(ui, rect, scene, selected);
             }
             crate::app::ViewType::SourceViewer => {
@@ -709,6 +727,27 @@ fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     }
 }
 
+/// Publish the window canvas size in points and seed the first-frame camera
+/// fit when none exists (design D1/D2). The window paint path runs without
+/// the loop's RedrawRequested seed, so it re-seeds the same
+/// dependency-filter aware fit; every frame it also refreshes
+/// `graph_canvas_px` for zoom anchoring and arrow-pan gating. Mirrors the
+/// window-size fallback in main.rs.
+fn publish_window_canvas(app: &mut App, canvas_px: (f32, f32)) {
+    app.graph_canvas_px = Some(canvas_px);
+    if app.graph_camera.is_none() {
+        let fit: Vec<(f32, f32)> = if app.dependency_nodes.is_empty() {
+            app.graph_positions.clone()
+        } else {
+            app.dependency_nodes
+                .iter()
+                .map(|&i| app.graph_positions[i])
+                .collect()
+        };
+        app.graph_camera = Some(graph_window_fit_camera(&fit, canvas_px));
+    }
+}
+
 impl EguiSurface {
     /// Paint one egui frame into the window and present it, reporting the
     /// frame's input state (task 3.1) for the loop to map onto `App`
@@ -732,6 +771,10 @@ impl EguiSurface {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         let scale = window.scale_factor() as f32;
+
+        // The canvas is the visible graph pane: publish its size in points
+        // every frame and seed the first-frame fit (design D1/D2).
+        publish_window_canvas(app, (w as f32 / scale, h as f32 / scale));
 
         // main.rs forwards no window events yet (task 3.1 wires them), so
         // resizes are detected here and mirrored into the wgpu surface.
@@ -779,6 +822,19 @@ impl EguiSurface {
                         egui::Key::X if no_mod => Some(WindowGraphKey::ToggleProcessing),
                         egui::Key::P if no_mod => Some(WindowGraphKey::TogglePin),
                         egui::Key::E if no_mod => Some(WindowGraphKey::BeginEdit),
+                        // Design D3: `c` centers the pane camera, Shift+c
+                        // refits against the pane size — mirror of the terminal
+                        // graph keys. Ctrl+C quits in the DROID key dispatch
+                        // before egui sees the event, and this guard still
+                        // excludes ctrl/alt/command so the mapping never
+                        // shadows the quit.
+                        egui::Key::C if !modifiers.ctrl && !modifiers.alt && !modifiers.command => {
+                            Some(if modifiers.shift {
+                                WindowGraphKey::FitGraph
+                            } else {
+                                WindowGraphKey::CenterGraph
+                            })
+                        }
                         _ => None,
                     }
                 } else {
@@ -1223,6 +1279,111 @@ mod tests {
         );
         assert_eq!(app.pane_rects.len(), 2, "panels + one graph slot");
         full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_tiled_graph_slot_publishes_canvas_and_seeds_camera() {
+        // Task 2.1: a graph slot publishes the slot as the visible canvas and
+        // the first frame seeds the camera from its size, so fit/center/zoom
+        // anchoring and arrow-pan gating see the real pane.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph();
+        assert!(
+            app.graph_camera.is_none(),
+            "open_graph leaves the camera unseeded"
+        );
+
+        let ctx = egui::Context::default();
+        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
+        });
+        // One graph slot: the right column starts at 0.6 × 800 = 480.
+        let (cw, ch) = app
+            .graph_canvas_px
+            .expect("canvas published by the tiled paint");
+        assert!((cw - 320.0).abs() < 0.01, "slot width on canvas: {cw}");
+        assert!((ch - 600.0).abs() < 0.01, "slot height on canvas: {ch}");
+        assert!(
+            app.graph_camera.is_some(),
+            "camera seeded from the slot size on the first frame"
+        );
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_quad_graph_pane_publishes_canvas_and_seeds_camera() {
+        // Task 2.1: the quad's FULL pane publishes the pane as the visible
+        // canvas and seeds the camera on the first frame like the tiled slot.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.select_component(String::from("B1.1"));
+        assert!(app.enter_quad());
+        assert!(
+            app.graph_camera.is_none(),
+            "enter_quad leaves the camera unseeded"
+        );
+
+        let ctx = egui::Context::default();
+        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_quad(&mut app, ui, scene.as_ref(), &[]);
+        });
+        // FULL pane: bottom-left, from (0, 300) to (480, 600).
+        let (cw, ch) = app
+            .graph_canvas_px
+            .expect("canvas published by the quad paint");
+        assert!((cw - 480.0).abs() < 0.01, "FULL pane width on canvas: {cw}");
+        assert!(
+            (ch - 300.0).abs() < 0.01,
+            "FULL pane height on canvas: {ch}"
+        );
+        assert!(
+            app.graph_camera.is_some(),
+            "camera seeded from the FULL pane size on the first frame"
+        );
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn window_canvas_publishes_size_and_seeds_camera() {
+        // Task 2.2: the window paint path publishes the canvas size every
+        // frame and seeds the first-frame fit when none exists.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph();
+        assert!(app.graph_camera.is_none());
+
+        publish_window_canvas(&mut app, (640.0, 360.0));
+        assert_eq!(app.graph_canvas_px, Some((640.0, 360.0)));
+        let seeded = app.graph_camera.expect("seeded on the first frame");
+        assert!(seeded.zoom.is_finite() && seeded.zoom > 0.0);
+
+        // An already-seeded camera is left untouched.
+        let pan = seeded.pan;
+        publish_window_canvas(&mut app, (640.0, 360.0));
+        assert_eq!(app.graph_camera.unwrap().pan, pan);
     }
 
     #[test]
