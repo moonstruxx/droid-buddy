@@ -18,8 +18,8 @@
 //!
 //! ## Layout model
 //!
-//! Features model the **embedded source view** (panels | source, 60/40 split),
-//! **portrait** orientation, **scale 1.0** — the layout where the panel grid,
+//! Features model the **embedded source view** (panels | source, 60/40 split)
+//! at **scale 1.0** — the layout where the panel grid,
 //! the source sidebar, and the minimap coexist, so every degradation channel
 //! is observable from one feature vector. This mirrors `render_embedded_main`
 //! (`src/ui.rs`): panels pane at `Percentage(60)`, source pane at

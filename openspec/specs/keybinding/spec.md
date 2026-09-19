@@ -75,7 +75,7 @@ When user presses `g` then `g`
 Then the graph view opens (not the source viewer)
 
 #### Scenario: Existing keybindings preserved
-All existing keybindings SHALL remain functional and unchanged while the graph view is closed; opening the graph view SHALL NOT alter shift group, scale, orientation, or picker state.
+All existing keybindings SHALL remain functional and unchanged while the graph view is closed; opening the graph view SHALL NOT alter shift group, scale, or picker state.
 
 #### Scenario: g g opens the window when configured
 Given the `gui` feature is always enabled and the `[gui] graph_window` toggle is removed
@@ -125,12 +125,12 @@ When user presses `t` again
 Then raw text is shown again
 
 ### Requirement: Live panel interaction while viewer is open
-While the source pane is open, component toggles (Enter/Space/click), shift-group changes (`1`–`4`), scale (`+`/`-`), and orientation (`o`) SHALL work regardless of viewer focus. Only conflicting navigation keys (`j`/`k`, Up/Down/Home/End) are routed by `ViewerFocus`; `Tab` switches focus.
+While the source pane is open, component toggles (Enter/Space/click), shift-group changes (`1`–`4`), and scale (`+`/`-`) SHALL work regardless of viewer focus. Only conflicting navigation keys (`j`/`k`, Up/Down/Home/End) are routed by `ViewerFocus`; `Tab` switches focus.
 
 #### Scenario: Panel keys work while source focused
 Given viewer is open and source is focused
-When user presses a digit, `+`, `o`, or Space on a hovered component
-Then the shift group / scale / orientation / component state changes accordingly
+When user presses a digit, `+`, or Space on a hovered component
+Then the shift group / scale / component state changes accordingly
 And selecting a component scrolls the source view to its first occurrence
 
 ### Requirement: Esc cancels prefix without clearing shift group

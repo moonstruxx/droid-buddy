@@ -473,9 +473,6 @@ fn regression_viewer_live_interaction() {
     let scale_before = app.scale_factor;
     handle_event(key(KeyCode::Char('+')), &mut app);
     assert_ne!(app.scale_factor, scale_before, "scale live");
-    let orient_before = app.orientation.clone();
-    handle_event(key(KeyCode::Char('o')), &mut app);
-    assert_ne!(app.orientation, orient_before, "orientation live");
 
     // Enter toggles AND selects the hovered component; selection jumps
     // source_scroll to its first occurrence.
