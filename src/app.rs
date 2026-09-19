@@ -488,15 +488,6 @@ pub enum SourceViewMode {
     Prettified,
 }
 
-/// Orientation of the patch display.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Orientation {
-    /// Portrait mode
-    Portrait,
-    /// Landscape mode
-    Landscape,
-}
-
 /// Right-column view slot kind (change `tiled-window-manager`, D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewType {
@@ -727,8 +718,6 @@ pub struct App {
     pub source_pane_rect: Option<Rect>,
     /// Scale factor for rendering (1.0 = default). Used for progressive scaling.
     pub scale_factor: f32,
-    /// Current display orientation.
-    pub orientation: Orientation,
     /// Split ratio for viewer/source pane division (0.3 to 0.7).
     /// 0.6 means panels get 60%, source gets 40%.
     /// This is a view preference that persists across patch loads.
@@ -935,7 +924,6 @@ impl App {
             minimap_rect: None,
             source_pane_rect: None,
             scale_factor: 1.0,
-            orientation: Orientation::Portrait,
             viewer_split_ratio: 0.6,
             main_split_ratio: 0.6,
             left_split_ratio: 0.5,

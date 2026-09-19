@@ -152,10 +152,9 @@ const PANEL_CELL_GAP: f32 = 6.0;
 const PANEL_TITLE_H: f32 = 20.0;
 
 /// The quad Panels-pane payload for one frame: every patch component grouped
-/// by controller into titled faceplate blocks, wrapped left-to-right within
-/// `pane` (portrait) or into horizontal rows (landscape). `global_index`
-/// stays the component's index into `patch.hw_components` so hit-testing
-/// matches the other surfaces.
+/// by controller into titled faceplate blocks, flowing left-to-right and
+/// wrapping rows within `pane`. `global_index` stays the component's index
+/// into `patch.hw_components` so hit-testing matches the other surfaces.
 pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
     let t = crate::theme::active();
     let Some(patch) = app.patch.as_ref() else {
@@ -168,9 +167,6 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
         };
     };
     let inner = pane.shrink(4.0);
-    let per_row = ((inner.width() + PANEL_CELL_GAP) / (PANEL_CELL_W + PANEL_CELL_GAP))
-        .floor()
-        .max(1.0) as usize;
     let mut modules = Vec::new();
     let mut cells = Vec::new();
 
@@ -187,143 +183,75 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
             .push((gi, comp));
     }
 
-    let is_landscape = app.orientation == crate::app::Orientation::Landscape;
+    // Flow module blocks horizontally, wrapping rows.
+    let mut x = inner.min.x;
+    let mut y = inner.min.y;
+    let row_height = PANEL_CELL_H + PANEL_CELL_GAP;
+    for controller in order {
+        let comps = &groups[controller];
+        // All cells of this module go in one row (block_cols = comps.len); the outer
+        // wrap handles pane overflow at the module level.
+        let block_cols = comps.len();
+        let rows = 1;
+        let block_h = PANEL_TITLE_H + rows as f32 * row_height;
+        let block_w = block_cols as f32 * (PANEL_CELL_W + PANEL_CELL_GAP) - PANEL_CELL_GAP;
 
-    if is_landscape {
-        // Landscape: flow module blocks horizontally, wrapping rows.
-        let mut x = inner.min.x;
-        let mut y = inner.min.y;
-        let row_height = PANEL_CELL_H + PANEL_CELL_GAP;
-        for controller in order {
-            let comps = &groups[controller];
-            // Landscape: all cells of this module go in one row (block_cols = comps.len).
-            // The outer wrap handles pane overflow at the module level.
-            let block_cols = comps.len();
-            let rows = 1;
-            let block_h = PANEL_TITLE_H + rows as f32 * row_height;
-            let block_w = block_cols as f32 * (PANEL_CELL_W + PANEL_CELL_GAP) - PANEL_CELL_GAP;
+        // Wrap to next row if this block does not fit in the remaining width.
+        if x + block_w > inner.max.x + 0.5 && x > inner.min.x {
+            x = inner.min.x;
+            y += block_h + PANEL_CELL_GAP;
+        }
 
-            // Wrap to next row if this block does not fit in the remaining width.
-            if x + block_w > inner.max.x + 0.5 && x > inner.min.x {
-                x = inner.min.x;
-                y += block_h + PANEL_CELL_GAP;
-            }
+        let block_x = x;
+        modules.push(ModuleSpec {
+            rect: Rect::from_min_size(Pos2::new(block_x, y), Vec2::new(block_w, block_h)),
+            title: controller.to_string(),
+        });
 
-            let block_x = x;
-            modules.push(ModuleSpec {
-                rect: Rect::from_min_size(Pos2::new(block_x, y), Vec2::new(block_w, block_h)),
-                title: controller.to_string(),
-            });
-
-            for (slot, (gi, comp)) in comps.iter().enumerate() {
-                // In landscape, all cells share row 0 within this module.
-                let col = slot;
-                let cx = block_x + col as f32 * (PANEL_CELL_W + PANEL_CELL_GAP);
-                let cy = y + PANEL_TITLE_H;
-                let is_shift_active =
-                    comp.shift_group.is_some() && comp.shift_group == app.active_shift;
-                let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
-                cells.push(CellSpec {
-                    rect: Rect::from_min_size(
-                        Pos2::new(cx, cy),
-                        Vec2::new(PANEL_CELL_W, PANEL_CELL_H),
-                    ),
-                    glyph,
-                    label: comp.label.clone(),
-                    state_text,
-                    color,
-                    is_fader: false,
-                    fader_value: 0.0,
-                    global_index: *gi,
-                    mark: PortMark::Cell,
-                    highlighted: app.selected_component.as_deref() == Some(comp.id.as_str()),
-                    shift_color: if is_shift_active {
-                        comp.shift_group.map(|g| match g {
-                            crate::patch::ShiftGroup::Group1 => t.shift1,
-                            crate::patch::ShiftGroup::Group2 => t.shift2,
-                            crate::patch::ShiftGroup::Group3 => t.shift3,
-                            crate::patch::ShiftGroup::Group4 => t.shift4,
-                        })
+        for (slot, (gi, comp)) in comps.iter().enumerate() {
+            // All cells share row 0 within this module.
+            let col = slot;
+            let cx = block_x + col as f32 * (PANEL_CELL_W + PANEL_CELL_GAP);
+            let cy = y + PANEL_TITLE_H;
+            let is_shift_active =
+                comp.shift_group.is_some() && comp.shift_group == app.active_shift;
+            let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
+            cells.push(CellSpec {
+                rect: Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(PANEL_CELL_W, PANEL_CELL_H)),
+                glyph,
+                label: comp.label.clone(),
+                state_text,
+                color,
+                is_fader: false,
+                fader_value: 0.0,
+                global_index: *gi,
+                mark: PortMark::Cell,
+                highlighted: app.selected_component.as_deref() == Some(comp.id.as_str()),
+                shift_color: if is_shift_active {
+                    comp.shift_group.map(|g| match g {
+                        crate::patch::ShiftGroup::Group1 => t.shift1,
+                        crate::patch::ShiftGroup::Group2 => t.shift2,
+                        crate::patch::ShiftGroup::Group3 => t.shift3,
+                        crate::patch::ShiftGroup::Group4 => t.shift4,
+                    })
+                } else {
+                    None
+                },
+                kind: comp.kind,
+                modifier_wash: app.hold_component.as_ref().and_then(|tok| {
+                    if app.patch.as_ref().is_some_and(|p| {
+                        p.hw_components
+                            .iter()
+                            .any(|c| c.id == *tok && c.id == comp.id)
+                    }) {
+                        Some(crate::theme::modifier_hue(tok))
                     } else {
                         None
-                    },
-                    kind: comp.kind,
-                    modifier_wash: app.hold_component.as_ref().and_then(|tok| {
-                        if app.patch.as_ref().is_some_and(|p| {
-                            p.hw_components
-                                .iter()
-                                .any(|c| c.id == *tok && c.id == comp.id)
-                        }) {
-                            Some(crate::theme::modifier_hue(tok))
-                        } else {
-                            None
-                        }
-                    }),
-                });
-            }
-            x += block_w + PANEL_CELL_GAP;
-        }
-    } else {
-        // Portrait: stack module blocks vertically (original layout).
-        let mut y = inner.min.y;
-        for controller in order {
-            let comps = &groups[controller];
-            let rows = comps.len().div_ceil(per_row).max(1);
-            let block_h = PANEL_TITLE_H + rows as f32 * (PANEL_CELL_H + PANEL_CELL_GAP);
-            modules.push(ModuleSpec {
-                rect: Rect::from_min_size(
-                    Pos2::new(inner.min.x, y),
-                    Vec2::new(inner.width(), block_h),
-                ),
-                title: controller.to_string(),
+                    }
+                }),
             });
-            for (slot, (gi, comp)) in comps.iter().enumerate() {
-                let (col, row) = (slot % per_row, slot / per_row);
-                let x = inner.min.x + col as f32 * (PANEL_CELL_W + PANEL_CELL_GAP);
-                let cy = y + PANEL_TITLE_H + row as f32 * (PANEL_CELL_H + PANEL_CELL_GAP);
-                let is_shift_active =
-                    comp.shift_group.is_some() && comp.shift_group == app.active_shift;
-                let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
-                cells.push(CellSpec {
-                    rect: Rect::from_min_size(
-                        Pos2::new(x, cy),
-                        Vec2::new(PANEL_CELL_W, PANEL_CELL_H),
-                    ),
-                    glyph,
-                    label: comp.label.clone(),
-                    state_text,
-                    color,
-                    is_fader: false,
-                    fader_value: 0.0,
-                    global_index: *gi,
-                    mark: PortMark::Cell,
-                    highlighted: app.selected_component.as_deref() == Some(comp.id.as_str()),
-                    shift_color: if is_shift_active {
-                        comp.shift_group.map(|g| match g {
-                            crate::patch::ShiftGroup::Group1 => t.shift1,
-                            crate::patch::ShiftGroup::Group2 => t.shift2,
-                            crate::patch::ShiftGroup::Group3 => t.shift3,
-                            crate::patch::ShiftGroup::Group4 => t.shift4,
-                        })
-                    } else {
-                        None
-                    },
-                    kind: comp.kind,
-                    modifier_wash: app.hold_component.as_ref().and_then(|tok| {
-                        if app.patch.as_ref().is_some_and(|p| {
-                            p.hw_components
-                                .iter()
-                                .any(|c| c.id == *tok && c.id == comp.id)
-                        }) {
-                            Some(crate::theme::modifier_hue(tok))
-                        } else {
-                            None
-                        }
-                    }),
-                });
-            }
-            y += block_h;
         }
+        x += block_w + PANEL_CELL_GAP;
     }
     PanelsSpec {
         title: " Panels ".into(),
@@ -619,7 +547,9 @@ mod tests {
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(600.0, 400.0));
+        // A wide pane so every module block (a module is one row of cells) fits
+        // horizontally; the horizontal layout wraps at the block level only.
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(3000.0, 800.0));
         let spec = panels_spec(&app, true, pane);
         assert!(spec.focused);
         let patch = app.patch.as_ref().unwrap();
@@ -639,11 +569,12 @@ mod tests {
         for m in &spec.modules {
             assert!(controllers.contains(m.title.as_str()));
         }
+        // Wrapping keeps cells within the pane horizontally; rows can extend
+        // past the pane's bottom edge (the pane scrolls), so only the x bound
+        // is asserted here.
         assert!(
-            spec.cells
-                .iter()
-                .all(|c| c.rect.max.x <= pane.max.x + 0.5 && c.rect.max.y <= pane.max.y + 0.5),
-            "wrapped cells must stay inside the pane"
+            spec.cells.iter().all(|c| c.rect.max.x <= pane.max.x + 0.5),
+            "wrapped cells must stay inside the pane horizontally"
         );
     }
 
@@ -680,56 +611,22 @@ mod tests {
     }
 
     #[test]
-    fn panels_spec_landscape_reflows_horizontally() {
-        // Landscape orientation should flow content more horizontally than portrait.
-        // Portrait: modules stacked vertically, each module fills pane width.
-        // Landscape: content fills available width and wraps fewer times.
+    fn panels_spec_flows_horizontally() {
+        // Module blocks always flow left-to-right and wrap rows; there is no
+        // portrait vertical-stack variant anymore.
         let mut app = crate::app::App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         let cell_count = patch.hw_components.len();
         assert!(app.load_patch(patch));
 
-        // Portrait at narrow pane: modules stack vertically.
         let narrow_pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(300.0, 800.0));
-        app.orientation = crate::app::Orientation::Portrait;
-        let spec_portrait = panels_spec(&app, false, narrow_pane);
-        assert_eq!(spec_portrait.cells.len(), cell_count);
+        let spec = panels_spec(&app, false, narrow_pane);
+        assert_eq!(spec.cells.len(), cell_count);
 
-        // Landscape at same narrow pane: reload from disk to re-own the patch.
-        let patch2 =
-            crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
-                .unwrap();
-        app.load_patch(patch2);
-        app.orientation = crate::app::Orientation::Landscape;
-        let spec_landscape = panels_spec(&app, false, narrow_pane);
-        assert_eq!(spec_landscape.cells.len(), cell_count);
-
-        // Count module rows for each orientation.
-        let mut portrait_ys: Vec<f32> =
-            spec_portrait.modules.iter().map(|m| m.rect.min.y).collect();
-        portrait_ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        portrait_ys.dedup();
-
-        let mut landscape_ys: Vec<f32> = spec_landscape
-            .modules
-            .iter()
-            .map(|m| m.rect.min.y)
-            .collect();
-        landscape_ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        landscape_ys.dedup();
-
-        assert!(
-            landscape_ys.len() <= portrait_ys.len(),
-            "landscape ({}) should use no more module rows than portrait ({})",
-            landscape_ys.len(),
-            portrait_ys.len()
-        );
-
-        // In landscape, cells within each module should share the same y
-        // (flow horizontally, not vertically).
-        for module in &spec_landscape.modules {
-            let module_cells: Vec<_> = spec_landscape
+        // Cells within a module share the same y: they flow horizontally.
+        for module in &spec.modules {
+            let module_cells: Vec<_> = spec
                 .cells
                 .iter()
                 .filter(|c| module.rect.contains_rect(c.rect))
@@ -738,12 +635,30 @@ mod tests {
                 let mut cell_ys: Vec<f32> = module_cells.iter().map(|c| c.rect.min.y).collect();
                 cell_ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 cell_ys.dedup();
-                assert_eq!(
-                    cell_ys.len(),
-                    1,
-                    "landscape cells in the same module should share the same y"
-                );
+                assert_eq!(cell_ys.len(), 1, "module cells should share the same y");
             }
         }
+
+        // The narrow pane forces wrapping onto more than one module row.
+        let mut module_ys: Vec<f32> = spec.modules.iter().map(|m| m.rect.min.y).collect();
+        module_ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        module_ys.dedup();
+        assert!(
+            module_ys.len() > 1,
+            "narrow pane should wrap modules onto more than one row"
+        );
+
+        // Module blocks start at the pane's left edge (left-to-right flow).
+        let inner = narrow_pane.shrink(4.0);
+        let first_row_min_y = module_ys[0];
+        let first_row: Vec<_> = spec
+            .modules
+            .iter()
+            .filter(|m| m.rect.min.y == first_row_min_y)
+            .collect();
+        assert_eq!(
+            first_row[0].rect.min.x, inner.min.x,
+            "first block in a row should start at the pane's left edge"
+        );
     }
 }

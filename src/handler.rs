@@ -1212,8 +1212,8 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     return false;
                 }
                 // Live interaction: everything else falls through to normal
-                // panel handling below (shift/scale/orientation/Enter-toggle
-                // work even while the source pane is focused). Only j/k and
+                // panel handling below (shift/scale/Enter-toggle work even
+                // while the source pane is focused). Only j/k and
                 // Up/Down/Home/End stay routed by focus because they would
                 // otherwise conflict with panel navigation.
                 _ => {}
@@ -1428,17 +1428,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.active_shift = None;
             app.status_message = String::from("Shift cleared");
             app.prefix = None;
-            false
-        }
-        KeyCode::Char('o') => {
-            app.orientation = match app.orientation {
-                crate::app::Orientation::Portrait => crate::app::Orientation::Landscape,
-                crate::app::Orientation::Landscape => crate::app::Orientation::Portrait,
-            };
-            app.status_message = format!(
-                "Scale: {:.1} | Orientation: {:?}",
-                app.scale_factor, app.orientation
-            );
             false
         }
         KeyCode::Char('+') | KeyCode::Char('-') => {
@@ -4193,14 +4182,6 @@ mod tests {
             "scale live when source focused"
         );
 
-        // Orientation toggle works live.
-        let orient_before = app.orientation.clone();
-        handle_event(key(KeyCode::Char('o')), &mut app);
-        assert_ne!(
-            app.orientation, orient_before,
-            "orientation live when source focused"
-        );
-
         // Enter toggles the hovered component AND selects it; the selection
         // re-jumps source_scroll to the first occurrence so the visible
         // source view follows the interaction.
@@ -4262,9 +4243,6 @@ mod tests {
         let scale_before = app.scale_factor;
         handle_event(key(KeyCode::Char('+')), &mut app);
         assert_ne!(app.scale_factor, scale_before);
-        let orient_before = app.orientation.clone();
-        handle_event(key(KeyCode::Char('o')), &mut app);
-        assert_ne!(app.orientation, orient_before);
         app.hovered_component = Some(0);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_event(key(KeyCode::Enter), &mut app);
