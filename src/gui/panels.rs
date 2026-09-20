@@ -14,12 +14,12 @@
 //! Tests build [`PanelsSpec`] directly. Colors always flow through
 //! `crate::theme::active()`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
 use crate::app::App;
-use crate::patch::{ComponentKind, HwComponent};
+use crate::patch::{ComponentKind, HwComponent, Patch};
 use crate::theme::Color;
 
 use super::physical::{cell_visuals, paint_cell, CellSpec, ModuleSpec, PortMark};
@@ -170,6 +170,28 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
     let mut modules = Vec::new();
     let mut cells = Vec::new();
 
+    // HW-cell labels resolve through the overlay fallback chain
+    // (`Patch::display_label`: store[layer] → store[1] → preamble[1] →
+    // derived), so an edited label renders on the panels surface. The store,
+    // shift layer, and layer config all come from App state: the `[labels]`
+    // section is seeded at startup (ADR 13: config loads once), so painters
+    // never re-read the config file per frame.
+    let hw_store = app.current_hw_store();
+    let shift = app.active_shift_layer();
+    let layers_enabled = app.labels.layers_enabled;
+    let max_shift_layer = app.labels.max_shift_layer;
+    let label_for = |patch: &Patch, comp: &HwComponent| {
+        patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store)
+    };
+    // Modifier wash set (design D): while a modifier is active (latched or
+    // held), its influenced hardware tokens wash in the token hue and every
+    // other cell dims. The set is computed once per frame.
+    let modifier = app.active_modifier();
+    let wash_tokens: HashSet<String> = match (modifier, app.modifier_influence.as_ref()) {
+        (Some(_tok), Some(inf)) => patch.influenced_hw_tokens(inf).into_iter().collect(),
+        _ => HashSet::new(),
+    };
+
     // Group by controller, first-seen declaration order.
     let mut order: Vec<&str> = Vec::new();
     let mut groups: HashMap<&str, Vec<(usize, &HwComponent)>> = HashMap::new();
@@ -219,7 +241,7 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
             cells.push(CellSpec {
                 rect: Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(PANEL_CELL_W, PANEL_CELL_H)),
                 glyph,
-                label: comp.label.clone(),
+                label: label_for(patch, comp),
                 state_text,
                 color,
                 is_fader: false,
@@ -238,17 +260,12 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
                     None
                 },
                 kind: comp.kind,
-                modifier_wash: app.hold_component.as_ref().and_then(|tok| {
-                    if app.patch.as_ref().is_some_and(|p| {
-                        p.hw_components
-                            .iter()
-                            .any(|c| c.id == *tok && c.id == comp.id)
-                    }) {
-                        Some(crate::theme::modifier_hue(tok))
-                    } else {
-                        None
-                    }
+                modifier_wash: modifier.and_then(|tok| {
+                    wash_tokens
+                        .contains(comp.id.as_str())
+                        .then(|| crate::theme::modifier_hue(tok))
                 }),
+                dimmed: modifier.is_some() && !wash_tokens.contains(comp.id.as_str()),
             });
         }
         x += block_w + PANEL_CELL_GAP;
@@ -322,6 +339,7 @@ mod tests {
             highlighted: false,
             shift_color: shift,
             modifier_wash: None,
+            dimmed: false,
             kind,
         }
     }

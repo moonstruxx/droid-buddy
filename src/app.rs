@@ -785,6 +785,15 @@ pub struct App {
     /// a modifier-eligible component without keyboard modifiers). Cleared on mouse Up or
     /// Leave. Drives the modifier wash rendering in panels and the status bar hint.
     pub hold_component: Option<String>,
+    /// Hardware token of the latched modifier (`m`, Ctrl+Click, or Ctrl+Shift+Click).
+    /// Persists after release until Esc or a second toggle on the same token (single-var
+    /// latch; additive unions are aspirational). Unions with `hold_component` for the
+    /// active-modifier wash and the MOD status hint.
+    pub latched_component: Option<String>,
+    /// Influence subtree of the active modifier (latched ∪ held), independent of
+    /// `selected_component` so the wash/graph keep the modifier's own set after
+    /// the selection moves. `None` when no modifier is active.
+    pub modifier_influence: Option<crate::patch::InfluenceSubtree>,
     /// Forward influence result for the active modifier, if any.
     pub influence: Option<crate::patch::InfluenceSubtree>,
     /// Cached induced-subgraph solve of the influence set (quad-view FILTERED
@@ -838,6 +847,12 @@ pub struct App {
     /// at `App::new` via `FavoritesStore::load()` (warn-once, empty fallback)
     /// and persisted via `favorites.save()` on toggle (mirrors `LabelStore`).
     pub favorites: FavoritesStore,
+    /// `[labels]` config section (`layers_enabled` / `max_shift_layer`), seeded
+    /// at startup by `seed_app` (ADR 13: config loads once, before the window
+    /// opens) and defaulted in `App::new`; label resolution in painters and the
+    /// label overlay reads it from App state instead of re-reading the config
+    /// file per frame/event.
+    pub labels: crate::config::Labels,
     /// Inline single-field label-edit overlay state. `None` when not editing.
     pub editing: Option<EditState>,
     /// Canonical absolute path of the currently loaded patch, if any. Drives
@@ -942,6 +957,8 @@ impl App {
             physical_viewport: None,
             active_modifier_var: None,
             hold_component: None,
+            latched_component: None,
+            modifier_influence: None,
             influence: None,
             influence_subset: None,
             disabled_circuits: HashSet::new(),
@@ -954,6 +971,7 @@ impl App {
             influence_edges: Vec::new(),
             influence_filter_active: false,
             label_store: LabelStore::load(),
+            labels: crate::config::Labels::default(),
             favorites: FavoritesStore::load(),
             editing: None,
             current_patch_path: None,
@@ -2145,6 +2163,10 @@ impl App {
             // bootstrap, but surface the errors via validation modal/status.
             self.reset_graph_state();
             self.clear_influence_state();
+            // The latch names a token of the previous patch; drop it with the
+            // load (not via clear_influence_state, which also runs on selection moves).
+            self.latched_component = None;
+            self.modifier_influence = None;
             self.clear_diff();
             self.patch = Some(patch);
             self.selected_component = None;
@@ -2192,6 +2214,10 @@ impl App {
         // No Error: install patch and keep warnings/hints.
         self.reset_graph_state();
         self.clear_influence_state();
+        // The latch names a token of the previous patch; drop it with the
+        // load (not via clear_influence_state, which also runs on selection moves).
+        self.latched_component = None;
+        self.modifier_influence = None;
         self.clear_diff();
         self.optimizer = None;
         self.tile_stack.close(ViewType::Optimizer);
@@ -2267,6 +2293,10 @@ impl App {
         if has_error {
             self.reset_graph_state();
             self.clear_influence_state();
+            // The latch names a token of the previous patch; drop it with the
+            // load (not via clear_influence_state, which also runs on selection moves).
+            self.latched_component = None;
+            self.modifier_influence = None;
             self.clear_diff();
             self.patch = Some(patch);
             self.selected_component = None;
@@ -2309,8 +2339,13 @@ impl App {
             };
             return true;
         }
+        // No Error: install patch and keep warnings/hints.
         self.reset_graph_state();
         self.clear_influence_state();
+        // The latch names a token of the previous patch; drop it with the
+        // load (not via clear_influence_state, which also runs on selection moves).
+        self.latched_component = None;
+        self.modifier_influence = None;
         self.clear_diff();
         self.optimizer = None;
         self.tile_stack.close(ViewType::Optimizer);
@@ -2525,6 +2560,18 @@ impl App {
             state.layer_drafts = preserved;
         }
         true
+    }
+
+    /// The raw shift layer (1-4) for the active shift group, `1` when none.
+    /// Used to resolve HW labels through `Patch::display_label`.
+    pub fn active_shift_layer(&self) -> u8 {
+        match self.active_shift {
+            Some(ShiftGroup::Group1) => 1,
+            Some(ShiftGroup::Group2) => 2,
+            Some(ShiftGroup::Group3) => 3,
+            Some(ShiftGroup::Group4) => 4,
+            None => 1,
+        }
     }
 
     /// Effective layer for the current HW edit after `max_shift_layer` clamp and
@@ -2861,6 +2908,13 @@ impl App {
     pub fn adjust_tension(&mut self, dir: i32) {
         let next = (self.tension + dir as f32 * crate::layout::TENSION_STEP)
             .clamp(crate::layout::TENSION_MIN, crate::layout::TENSION_MAX);
+        // Column arrangement ignores spring stiffness: adjust the stored value
+        // silently (it survives a later switch to force mode) but show no
+        // status and never rebuild, per the cable-tension spec clause.
+        if self.layout_mode != crate::config::LayoutMode::Force {
+            self.tension = next;
+            return;
+        }
         self.status_message = format!("Cable tension: {:.2}", next);
         if (next - self.tension).abs() < f32::EPSILON {
             return; // already at the clamp; keep the layout untouched
@@ -3303,6 +3357,66 @@ impl App {
             graph.highlighted_nodes.clear();
             graph.highlighted_edges.clear();
         }
+    }
+
+    /// The active modifier token: the latched one (persists after release) or,
+    /// while a mouse hold is in progress without a latch, the held one. Drives
+    /// the modifier wash, the MOD status hint, and the graph hue override.
+    pub fn active_modifier(&self) -> Option<&str> {
+        self.latched_component
+            .as_deref()
+            .or(self.hold_component.as_deref())
+    }
+
+    /// The `MOD <token> -> N cells / M cables` status line for the active
+    /// modifier (design D status hint), or `None` when no modifier is active.
+    /// Cells are the influenced hardware tokens; cables the influenced edges.
+    pub fn modifier_status(&self) -> Option<String> {
+        let token = self.active_modifier()?;
+        let cells = self
+            .modifier_influence
+            .as_ref()
+            .and_then(|inf| {
+                self.patch
+                    .as_ref()
+                    .map(|p| p.influenced_hw_tokens(inf).len())
+            })
+            .unwrap_or(0);
+        let cables = self
+            .modifier_influence
+            .as_ref()
+            .map(|inf| inf.influenced_edges.len())
+            .unwrap_or(0);
+        Some(format!(
+            "MOD {} \u{2192} {} cells / {} cables",
+            token, cells, cables
+        ))
+    }
+
+    /// Recompute the modifier influence subtree for the active (latched ∪
+    /// held) token — the set the panels wash, the MOD status, and the graph
+    /// hue override share. Cleared when no modifier is active. Never touches
+    /// `selected_component`, so the wash survives selection changes.
+    pub fn refresh_modifier_influence(&mut self) {
+        self.modifier_influence = self.active_modifier().and_then(|token| {
+            let patch = self.patch.as_ref()?;
+            let vars = patch.hw_token_to_vars(token);
+            (!vars.is_empty())
+                .then(|| patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits))
+        });
+    }
+
+    /// Toggle the single-var latch for `token`: latch on when inactive (and
+    /// recompute the modifier influence), clear when already latched. Returns
+    /// `true` when the latch is now active.
+    pub fn toggle_modifier_latch(&mut self, token: &str) -> bool {
+        self.latched_component = if self.latched_component.as_deref() == Some(token) {
+            None
+        } else {
+            Some(token.to_string())
+        };
+        self.refresh_modifier_influence();
+        self.latched_component.is_some()
     }
 
     /// Toggle the global processing pause, reporting the new state in the
@@ -3926,6 +4040,9 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
+        // Clamp/status reporting is force-path behavior; column mode is a
+        // silent no-status store (see handler::column_mode_tension_*).
+        app.layout_mode = crate::config::LayoutMode::Force;
         app.tension = crate::layout::TENSION_MIN;
         let before = app.graph_positions.clone();
 
@@ -4383,6 +4500,31 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         app.load_patch(patch);
         assert!(!app.processing_paused, "pause reset on load");
+    }
+
+    #[test]
+    fn load_patch_clears_modifier_latch() {
+        // The latch names a token of the previous patch: loading a fresh patch
+        // drops it, so no stale wash or all-cell dim survives onto the new patch.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        let token = app
+            .patch
+            .as_ref()
+            .and_then(|p| p.hw_components.first())
+            .expect("fixture has hw components")
+            .id
+            .clone();
+        assert!(app.toggle_modifier_latch(&token));
+        assert!(app.latched_component.is_some());
+        let next = Patch::from_ini_file(Path::new("fixtures/led_pairs.ini")).unwrap();
+        app.load_patch(next);
+        assert!(app.latched_component.is_none(), "latch cleared on load");
+        assert!(
+            app.modifier_influence.is_none(),
+            "modifier influence cleared on load"
+        );
     }
 
     #[test]

@@ -1205,6 +1205,36 @@ impl Patch {
             influenced_edges,
         }
     }
+
+    /// Hardware tokens that appear as param values in the influenced sink
+    /// circuits — the hardware cells the modifier drives (design D: per-token
+    /// `hw_tokens` set). Computed on demand from a completed influence walk so
+    /// the panels/physical wash and the MOD status share one mapping. Order is
+    /// deterministic (hw_components declaration order).
+    pub fn influenced_hw_tokens(&self, influence: &InfluenceSubtree) -> Vec<String> {
+        // Rebuild the same occurrence-numbered node ids the walk used, then
+        // keep section indices whose node is influenced.
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut influenced: HashSet<String> = HashSet::new();
+        for section in &self.sections {
+            let count = counts.entry(section.name.clone()).or_insert(0);
+            let nid = NodeId::circuit(&section.name, *count);
+            *count += 1;
+            if !influence.influenced_nodes.contains(&nid) {
+                continue;
+            }
+            for (_key, value) in &section.entries {
+                for token in scan_hw_tokens(value) {
+                    let _ = influenced.insert(token.clone());
+                }
+            }
+        }
+        self.hw_components
+            .iter()
+            .map(|c| c.id.clone())
+            .filter(|id| influenced.contains(id))
+            .collect()
+    }
 }
 
 /// Precomputed per-cable sink index for the influence BFS: one pass over

@@ -476,8 +476,13 @@ pub(super) fn raw_line_kinds(
 }
 
 /// Turn per-byte kinds into styled fragments (port of the span-run assembly
-/// in `ui.rs::build_raw_highlighted_lines`).
-pub(super) fn line_fragments(raw: &str, kinds: &[HighlightKind]) -> LineSpec {
+/// in `ui.rs::build_raw_highlighted_lines`). `modifier_hue` overrides the
+/// fixed modifier tokens while a modifier is active (design D hue parity).
+pub(super) fn line_fragments(
+    raw: &str,
+    kinds: &[HighlightKind],
+    modifier_hue: Option<Color>,
+) -> LineSpec {
     let t = crate::theme::active();
     let mut fragments = Vec::new();
     let mut start = 0usize;
@@ -492,8 +497,15 @@ pub(super) fn line_fragments(raw: &str, kinds: &[HighlightKind]) -> LineSpec {
                 HighlightKind::None => unreachable!(),
                 HighlightKind::OccOther => (t.occurrence_highlight, true, false, false),
                 HighlightKind::OccCurrent => (t.occurrence_highlight, true, true, false),
-                HighlightKind::ModCyan => (t.modifier_boolean, true, false, true),
-                HighlightKind::ModMagenta => (t.modifier_exact, true, false, true),
+                HighlightKind::ModCyan => (
+                    modifier_hue.unwrap_or(t.modifier_boolean),
+                    true,
+                    false,
+                    true,
+                ),
+                HighlightKind::ModMagenta => {
+                    (modifier_hue.unwrap_or(t.modifier_exact), true, false, true)
+                }
             };
             fragments.push(Fragment {
                 range: (start, end),
@@ -561,10 +573,13 @@ pub(super) struct EntrySpec {
 /// branch in `ui.rs::build_prettified_highlighted_lines`): a modifier source
 /// value renders in the modifier token (exact vs boolean), otherwise token
 /// occurrences highlight in the occurrence token and the rest in plain text.
+/// `modifier_hue` overrides the modifier tokens while a modifier is active
+/// (design D hue parity).
 pub(super) fn entry_value_fragments(
     value: &str,
     selected: Option<&str>,
     mods: &[ModifierAffect],
+    modifier_hue: Option<Color>,
 ) -> Vec<Fragment> {
     let t = crate::theme::active();
     let Some(token) = selected else {
@@ -584,9 +599,9 @@ pub(super) fn entry_value_fragments(
         return vec![Fragment {
             range: (0, value.len()),
             color: if is_exact {
-                t.modifier_exact
+                modifier_hue.unwrap_or(t.modifier_exact)
             } else {
-                t.modifier_boolean
+                modifier_hue.unwrap_or(t.modifier_boolean)
             },
             bold: true,
             reversed: false,
@@ -949,6 +964,9 @@ fn raw_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
     let occ_spans = patch.occurrences_for(token);
     let mod_affects = patch.modifier_entries_for(token);
     let current = occ_spans.get(app.occurrence_cursor).copied();
+    // Hue parity: while the selected component is the active modifier, its
+    // select spans render in the per-token hue instead of the fixed tokens.
+    let mod_hue = (app.active_modifier() == Some(token)).then(|| crate::theme::modifier_hue(token));
     patch
         .raw_lines
         .iter()
@@ -968,7 +986,7 @@ fn raw_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
                 .cloned()
                 .collect();
             let kinds = raw_line_kinds(raw, &occ, &mods, current);
-            line_fragments(raw, &kinds)
+            line_fragments(raw, &kinds, mod_hue)
         })
         .collect()
 }
@@ -983,7 +1001,13 @@ fn prettified_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
         Some(tok) => patch.modifier_entries_for(tok),
         None => &[],
     };
+    // Hue parity: while the selected component is the active modifier, its
+    // modifier-value spans render in the per-token hue (raw path mirrors this).
     let circuit_store = app.current_circuit_store();
+    let mod_hue = match selected {
+        Some(tok) if app.active_modifier() == Some(tok) => Some(crate::theme::modifier_hue(tok)),
+        _ => None,
+    };
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut lines = Vec::new();
     for circuit in &circuits {
@@ -998,7 +1022,7 @@ fn prettified_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
             .map(|(key, value)| EntrySpec {
                 key: key.clone(),
                 value: value.clone(),
-                fragments: entry_value_fragments(value, selected, mods),
+                fragments: entry_value_fragments(value, selected, mods, mod_hue),
             })
             .collect();
         lines.extend(prettified_box_lines(&display_name, color, &entries));
@@ -1318,7 +1342,7 @@ mod tests {
     fn line_fragments_split_runs_with_colors() {
         let raw = "pot = P1.1";
         let kinds = raw_line_kinds(raw, &[span(0, 6, 10)], &[], None);
-        let line = line_fragments(raw, &kinds);
+        let line = line_fragments(raw, &kinds, None);
         assert_eq!(line.text, raw);
         // Only the styled occurrence run becomes a fragment; the plain prefix
         // renders as default theme text.
@@ -1345,16 +1369,36 @@ mod tests {
             source: "P1.1".into(),
             selectat: Some("x".into()),
         }];
-        let frags = entry_value_fragments("P1.1", Some("P1"), &mods);
+        let frags = entry_value_fragments("P1.1", Some("P1"), &mods, None);
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0].color, crate::theme::active().modifier_exact);
         assert!(frags[0].underlined);
         // Non-modifier value with a token occurrence.
-        let frags = entry_value_fragments("in P1.1", Some("P1.1"), &[]);
+        let frags = entry_value_fragments("in P1.1", Some("P1.1"), &[], None);
         assert!(
             frags.iter().any(|f| f.reversed),
             "occurrence highlighted: {frags:?}"
         );
+    }
+
+    #[test]
+    fn entry_value_fragments_apply_modifier_hue_override() {
+        // While the selected component is the active modifier, the select
+        // span renders in the per-token hue instead of the fixed tokens
+        // (design D cross-view hue parity).
+        let mods = vec![ModifierAffect {
+            span: span(0, 0, 4),
+            source: "P1.1".into(),
+            selectat: Some("x".into()),
+        }];
+        let hue = crate::theme::modifier_hue("P1.1");
+        let frags = entry_value_fragments("P1.1", Some("P1.1"), &mods, Some(hue));
+        assert_eq!(frags.len(), 1);
+        assert_eq!(frags[0].color, hue);
+        assert!(frags[0].underlined);
+        // Without the override the fixed exact token is used.
+        let plain = entry_value_fragments("P1.1", Some("P1.1"), &mods, None);
+        assert_eq!(plain[0].color, crate::theme::active().modifier_exact);
     }
 
     #[test]
@@ -1363,7 +1407,7 @@ mod tests {
         let entries = vec![EntrySpec {
             key: "output".into(),
             value: "P1.1".into(),
-            fragments: entry_value_fragments("P1.1", None, &[]),
+            fragments: entry_value_fragments("P1.1", None, &[], None),
         }];
         let lines = prettified_box_lines("seq", color, &entries);
         assert_eq!(lines.len(), 3);
@@ -1396,7 +1440,7 @@ mod tests {
     fn paint_raw_mode_draws_lines_and_highlight() {
         let raw = "pot = P1.1";
         let kinds = raw_line_kinds(raw, &[span(0, 6, 10)], &[], None);
-        let lines = vec![line_fragments(raw, &kinds)];
+        let lines = vec![line_fragments(raw, &kinds, None)];
         let labels = painted_labels(&raw_spec(lines));
         assert!(
             labels.iter().any(|l| l.contains("Source [raw]")),

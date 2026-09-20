@@ -65,6 +65,10 @@ pub(crate) struct CellSpec {
     /// the modifier hold state (mouse Down without keyboard modifiers on a
     /// modifier-eligible component).
     pub modifier_wash: Option<Color>,
+    /// When any modifier is active and this cell is NOT in its influence set,
+    /// dim the cell content (design D: unaffected cells dim while a modifier
+    /// is held or latched). Orthogonal to the paused dim.
+    pub dimmed: bool,
     /// Component kind: lets the input layer tell knobs/encoders apart for
     /// wheel-over-component semantics.
     pub kind: crate::patch::ComponentKind,
@@ -288,7 +292,7 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     // the cell is wide enough; the state text takes the second row.
     let font = egui::FontId::monospace((rect.height() * 0.42).clamp(6.0, 15.0));
     let line_h = font.size * 1.25;
-    let color = dim(rgb(base), paused);
+    let color = dim(rgb(base), paused || cell.dimmed);
     let mut first = cell.glyph.clone();
     if rect.width() >= 28.0 && !cell.label.is_empty() {
         let budget = (rect.width() / font.size).floor() as usize;
@@ -355,7 +359,7 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
     }
     let font = egui::FontId::proportional((rect.height() * 0.34).clamp(8.0, 13.0));
     let line_h = font.size * 1.25;
-    let color = dim(rgb(base), paused);
+    let color = dim(rgb(base), paused || cell.dimmed);
     let budget = (text_w / font.size).floor() as usize;
     if budget > 0 && !cell.label.is_empty() {
         painter.text(
@@ -954,6 +958,7 @@ mod tests {
                 highlighted: false,
                 shift_color: None,
                 modifier_wash: None,
+                dimmed: false,
                 kind: comp.kind,
             });
         }

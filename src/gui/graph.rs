@@ -848,14 +848,21 @@ fn build_scene(
         // Border/title token chain: dim beats highlight beats kind frames.
         // With an active influence (FULL) or in the FILTERED subset, the
         // influenced border/title token marks the influenced set and the rest
-        // dims; hover/selection interaction feedback stays highest.
+        // dims; hover/selection interaction feedback stays highest. While a
+        // modifier is active (latched or held) the influence hue is the
+        // per-token `modifier_hue`, matching the panels wash (design D).
         let dim = theme.rgb(theme.graph_node_dim);
-        let hl = theme.rgb(theme.graph_node_highlight);
+        let hl = if let Some(tok) = app.active_modifier() {
+            theme.rgb(crate::theme::modifier_hue(tok))
+        } else {
+            theme.rgb(theme.graph_node_highlight)
+        };
         let influenced = match influence {
             SceneInfluence::AllHighlighted => true,
             SceneInfluence::FromApp => app
-                .influence
+                .modifier_influence
                 .as_ref()
+                .or(app.influence.as_ref())
                 .is_some_and(|s| s.influenced_nodes.contains(&node.id)),
         };
         let (border, label_color, border_width) = match influence {
@@ -863,7 +870,11 @@ fn build_scene(
             SceneInfluence::FromApp if disabled => (dim, dim, 1.0),
             SceneInfluence::FromApp if highlighted || selected => (hl, hl, 3.0),
             SceneInfluence::FromApp if influenced => (hl, hl, 3.0),
-            SceneInfluence::FromApp if app.influence.is_some() => (dim, dim, 1.0),
+            SceneInfluence::FromApp
+                if app.modifier_influence.is_some() || app.influence.is_some() =>
+            {
+                (dim, dim, 1.0)
+            }
             SceneInfluence::FromApp => {
                 let (b, t) = match node.kind {
                     NodeKind::Controller => {
@@ -970,20 +981,29 @@ fn build_scene(
         let influenced = match influence {
             SceneInfluence::AllHighlighted => true,
             SceneInfluence::FromApp => app
-                .influence
+                .modifier_influence
                 .as_ref()
+                .or(app.influence.as_ref())
                 .is_some_and(|s| s.influenced_edges.contains(&edge.cable)),
         };
         let color = if has_error {
             // Error red outranks influence (guardrails), in both modes.
             theme.rgb(theme.graph_edge_error)
         } else if matches!(influence, SceneInfluence::AllHighlighted) {
-            theme.rgb(theme.graph_edge_highlight)
+            if let Some(tok) = app.active_modifier() {
+                theme.rgb(crate::theme::modifier_hue(tok))
+            } else {
+                theme.rgb(theme.graph_edge_highlight)
+            }
         } else if incident_disabled || incident_unselected {
             theme.rgb(theme.graph_edge_dim)
         } else if influenced {
-            theme.rgb(theme.graph_edge_highlight)
-        } else if app.influence.is_some() {
+            if let Some(tok) = app.active_modifier() {
+                theme.rgb(crate::theme::modifier_hue(tok))
+            } else {
+                theme.rgb(theme.graph_edge_highlight)
+            }
+        } else if app.modifier_influence.is_some() || app.influence.is_some() {
             theme.rgb(theme.graph_edge_dim)
         } else if let Some(state) = diff_state {
             match state {
