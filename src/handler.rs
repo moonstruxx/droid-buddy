@@ -1421,12 +1421,48 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.status_message = String::from("Shift 4 active");
             false
         }
+        KeyCode::Char('m') => {
+            // Modifier latch alias (design D): `m` toggles the single-var
+            // latch for the hovered component, falling back to the selected
+            // one. The MOD status reports the union's counts.
+            let token = app
+                .hovered_component
+                .and_then(|idx| {
+                    app.patch
+                        .as_ref()
+                        .and_then(|p| p.hw_components.get(idx))
+                        .map(|c| c.id.clone())
+                })
+                .or_else(|| app.selected_component.clone());
+            match token {
+                Some(tok) => {
+                    let on = app.toggle_modifier_latch(&tok);
+                    app.status_message = if on {
+                        app.modifier_status()
+                            .unwrap_or_else(|| format!("MOD {} latched", tok))
+                    } else {
+                        String::from("Modifier latch cleared")
+                    };
+                }
+                None => {
+                    app.status_message = String::from("No component to latch");
+                }
+            }
+            false
+        }
         KeyCode::Esc => {
             // When viewer is closed, Esc clears shift (and prefix already
             // handled above). When viewer was open, this branch is unreachable
-            // because the viewer Esc handler returned early.
+            // because the viewer Esc handler returned early. Esc also clears
+            // the modifier latch (spec: Esc clears all modifiers).
             app.active_shift = None;
-            app.status_message = String::from("Shift cleared");
+            if app.latched_component.is_some() {
+                app.latched_component = None;
+                app.refresh_modifier_influence();
+                app.status_message = String::from("Shift and modifier cleared");
+            } else {
+                app.status_message = String::from("Shift cleared");
+            }
             app.prefix = None;
             false
         }
@@ -1633,9 +1669,20 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     }
                     // Modifier hold: mouse Down without keyboard modifiers on a component.
                     // Sets `hold_component` so the panels paint a wash backdrop; clears
-                    // when the mouse is released or leaves the panel area.
-                    if mouse.modifiers == key_modifiers::NONE {
+                    // when the mouse is released or leaves the panel area. Ctrl+Click /
+                    // Ctrl+Shift+Click toggle the persistent single-var latch instead
+                    // (design D chord); the momentary hold stays on the plain Down.
+                    if mouse.modifiers.ctrl {
+                        let on = app.toggle_modifier_latch(&token);
+                        app.status_message = if on {
+                            app.modifier_status()
+                                .unwrap_or_else(|| format!("MOD {} latched", token))
+                        } else {
+                            String::from("Modifier latch cleared")
+                        };
+                    } else if mouse.modifiers == key_modifiers::NONE {
                         app.hold_component = Some(token.clone());
+                        app.refresh_modifier_influence();
                     }
                     app.select_component(token);
                 }
@@ -1803,6 +1850,7 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
             }
             // Modifier hold: release the mouse hold wash.
             app.hold_component = None;
+            app.refresh_modifier_influence();
         }
         MouseEventKind::ScrollUp => {
             // Task 2.3: wheel pans the graph camera on the graph surface
@@ -3836,6 +3884,28 @@ mod tests {
             app.graph_positions, before,
             "same tension reproduces layout"
         );
+    }
+
+    #[test]
+    fn column_mode_tension_adjusts_silently_without_rebuild() {
+        // Column arrangement ignores spring stiffness: Alt+[/Alt+] still
+        // stores the value (it survives a later switch to force mode) but
+        // shows no status and never re-solves (cable-tension spec clause).
+        let mut app = app_with_fixture();
+        app.layout_mode = crate::config::LayoutMode::Column;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+        let default = crate::layout::DEFAULT_TENSION;
+        let before = app.graph_positions.clone();
+        // The fixture sets `patch` directly, so the starter "No patch loaded"
+        // status is stale; clear it so the column-mode silence is observable.
+        app.status_message = String::new();
+
+        handle_event(alt_key(KeyCode::Char(']')), &mut app);
+        assert_eq!(app.tension, default + crate::layout::TENSION_STEP);
+        assert_eq!(app.status_message, String::new(), "no status on column");
+        assert_eq!(app.graph_positions, before, "no re-solve on column");
     }
 
     #[test]

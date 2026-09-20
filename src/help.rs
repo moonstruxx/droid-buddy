@@ -75,6 +75,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("arrows/wheel", "pan when rack overflows"),
             ("Enter/Space", "toggle component"),
             ("e", "edit label / validation modal"),
+            ("m", "latch modifier on hovered component"),
             ("p", "pause processing"),
             ("q", "quit"),
         ],

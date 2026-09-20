@@ -62,6 +62,11 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // (graph-column-layout D5); matching App::new's defaults.
     app.layout_mode = settings.layout.mode;
     app.layout_ordering = settings.layout.ordering;
+
+    // [labels]: seed the label-resolution section on App once at startup so
+    // painters and the label overlay read it from state (ADR 13) instead of
+    // re-reading the config file per frame/event.
+    app.labels = settings.labels.clone();
 }
 
 /// Bundled demo patch shown when no `argv[1]` path is given. `Patch::sample()`
