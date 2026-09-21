@@ -15,7 +15,7 @@
 
 mod graph;
 
-pub use graph::build_scene_spec;
+pub use graph::{build_scene_spec, graph_pane_rect};
 
 // Surface ports (physical, panels, viewer, picker, overlays — tasks 2.1-2.5)
 // are runtime surfaces: the shell dispatches to them in `EguiSurface::paint`
@@ -734,6 +734,16 @@ fn paint_overlays(app: &App, ui: &mut egui::Ui) {
 /// `graph_canvas_px` for zoom anchoring and arrow-pan gating. Mirrors the
 /// window-size fallback in main.rs.
 fn publish_window_canvas(app: &mut App, canvas_px: (f32, f32)) {
+    // A pane-local graph (graph tile slot or quad FULL pane) publishes and
+    // seeds its own pane size from the paint path. Writing the full-window
+    // canvas here would clobber it every frame before c / Shift+c, wheel
+    // zoom, and arrow-pan gating read the one source of truth, so the window
+    // canvas is published and the fit seeded only when the scene fills the
+    // whole window.
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(canvas_px.0, canvas_px.1));
+    if graph::graph_pane_rect(app, window).is_some() {
+        return;
+    }
     app.graph_canvas_px = Some(canvas_px);
     if app.graph_camera.is_none() {
         let fit: Vec<(f32, f32)> = if app.dependency_nodes.is_empty() {
@@ -1169,7 +1179,12 @@ mod tests {
         assert!(app.enter_quad());
         assert!(app.influence_subset.is_some());
         let ctx = egui::Context::default();
-        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1213,7 +1228,12 @@ mod tests {
         assert!(app.showing_viewer);
 
         let ctx = egui::Context::default();
-        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1258,7 +1278,12 @@ mod tests {
         assert!(app.tile_stack.is_open(crate::app::ViewType::Graph));
 
         let ctx = egui::Context::default();
-        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
         assert!(
             scene.as_ref().is_some_and(|s| !s.nodes.is_empty()),
             "graph scene must have nodes"
@@ -1297,7 +1322,12 @@ mod tests {
         );
 
         let ctx = egui::Context::default();
-        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1337,7 +1367,12 @@ mod tests {
         );
 
         let ctx = egui::Context::default();
-        let scene = crate::gui::graph::build_scene_spec(&app, crate::theme::active());
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1374,6 +1409,11 @@ mod tests {
         assert!(app.load_patch(patch));
         app.open_graph();
         assert!(app.graph_camera.is_none());
+        // Pane-graphics unification: while the graph occupies a tile slot
+        // (pane-local scene), the whole-window canvas must not clobber the
+        // pane's canvas source of truth, so close the slot to exercise the
+        // whole-window branch below.
+        app.close_graph();
 
         publish_window_canvas(&mut app, (640.0, 360.0));
         assert_eq!(app.graph_canvas_px, Some((640.0, 360.0)));

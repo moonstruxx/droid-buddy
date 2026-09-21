@@ -1953,6 +1953,13 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         app.hovered_graph_node = None;
         return;
     };
+    // The scene is painted as absolute window coordinates from the graph pane's
+    // origin (the egui painter has no translate; the scene builder shifts the
+    // camera by the pane origin), but this shared camera is pane-relative. The
+    // pointer and wheel-zoom anchor arrive in window coordinates, so map them
+    // into the pane before the world mapping, or click/drag/wheel land one
+    // pane origin away from the drawn node.
+    let (ox, oy) = graph_pane_origin(app);
     // Window pan/zoom reaches the shared camera (design D5): both surfaces
     // consume the same camera, so a middle-drag or wheel zoom in the window
     // moves the terminal tile identically. Applied before hit-testing so the
@@ -1960,8 +1967,8 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     if frame.pan_delta != (0.0, 0.0) {
         camera = crate::gui::camera_pan(&camera, frame.pan_delta.0, frame.pan_delta.1);
     }
-    if let Some((factor, anchor)) = frame.zoom {
-        camera = crate::gui::camera_zoom_about(&camera, factor, anchor);
+    if let Some((factor, (ax, ay))) = frame.zoom {
+        camera = crate::gui::camera_zoom_about(&camera, factor, (ax - ox, ay - oy));
     }
     app.graph_camera = Some(camera);
     // The node's pixel rect is `world × zoom − pan` at a fixed pixel size, so
@@ -1970,7 +1977,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     let nw = crate::app::GRAPH_WINDOW_NODE_W / camera.zoom;
     let nh = crate::app::GRAPH_WINDOW_NODE_H / camera.zoom;
     let hit = frame.pointer.and_then(|(px, py)| {
-        let (wx, wy) = camera.pixel_to_world(px, py);
+        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
         app.graph_positions
             .iter()
             .enumerate()
@@ -1994,7 +2001,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         let Some((px, py)) = frame.pointer else {
             return;
         };
-        let (wx, wy) = camera.pixel_to_world(px, py);
+        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
         if let Some((nx, ny)) = app.graph_positions.get(node_index).copied() {
             // Grab offset in world units so the node follows the pointer
             // without jumping on the first drag delta (mirrors GraphDrag).
@@ -2023,7 +2030,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         let Some((px, py)) = frame.pointer else {
             return;
         };
-        let (wx, wy) = camera.pixel_to_world(px, py);
+        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
         if let Some(pos) = app.graph_positions.get_mut(drag.node_index) {
             *pos = (
                 clamp_drag(wx + drag.offset_x),
@@ -2095,6 +2102,27 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             }
         }
     }
+}
+
+/// The min corner (in points) of the graph pane the renderer published for
+/// this frame — the origin the full graph scene is painted from. (0, 0) when
+/// the graph fills the whole window or no pane rect was published yet (the
+/// whole-window canvas origin). The quad publishes the FULL pane first, so
+/// the first match is the pane the shared scene is drawn on.
+fn graph_pane_origin(app: &App) -> (f32, f32) {
+    let Some(idx) = app
+        .tile_stack
+        .slots
+        .iter()
+        .position(|v| *v == crate::app::ViewType::Graph)
+    else {
+        return (0.0, 0.0);
+    };
+    app.pane_rects
+        .iter()
+        .find(|(slot, _)| matches!(slot, FocusSlot::Slot(i) if *i == idx))
+        .map(|(_, rect)| (rect.x as f32, rect.y as f32))
+        .unwrap_or((0.0, 0.0))
 }
 
 fn adjust_value(comp: &mut HwComponent, delta: f32) {
@@ -4951,9 +4979,12 @@ mod tests {
         let mut app = app_with_graph_window();
         let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
         let (x, y) = app.graph_positions[0];
+        // Window-frame pointers are in window space; the shared camera is
+        // pane-relative, so the handler maps them through the pane origin.
+        let (ox, oy) = graph_pane_origin(&app);
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 5.0, y + 5.0)),
+                pointer: Some((x + 5.0 + ox, y + 5.0 + oy)),
                 primary_pressed: true,
                 primary_down: true,
                 ..Default::default()
@@ -5349,11 +5380,14 @@ mod tests {
         let mut app = app_with_graph_window();
         let (x, y) = app.graph_positions[0];
         let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        // Window-frame pointers are in window space; the shared camera is
+        // pane-relative, so the handler maps them through the pane origin.
+        let (ox, oy) = graph_pane_origin(&app);
         // Press on node 0: grabs the node, no move yet (mirrors the terminal
         // Down/Drag split).
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 5.0, y + 5.0)),
+                pointer: Some((x + 5.0 + ox, y + 5.0 + oy)),
                 primary_pressed: true,
                 primary_down: true,
                 ..Default::default()
@@ -5366,7 +5400,7 @@ mod tests {
         // Drag the pointer +30/+20: the node follows without jumping.
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 35.0, y + 25.0)),
+                pointer: Some((x + 35.0 + ox, y + 25.0 + oy)),
                 primary_down: true,
                 ..Default::default()
             },
@@ -5426,9 +5460,10 @@ mod tests {
         let mut app = app_with_graph_window();
         let (x, y) = app.graph_positions[0];
         let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        let (ox, oy) = graph_pane_origin(&app);
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 5.0, y + 5.0)),
+                pointer: Some((x + 5.0 + ox, y + 5.0 + oy)),
                 keys: vec![WindowGraphKey::ToggleProcessing],
                 ..Default::default()
             },
@@ -5574,6 +5609,10 @@ mod tests {
             .find_map(|i| clean_sample_point(&app, i).map(|p| (i, p)))
             .expect("fixture has a clean non-tip sample point");
         let node = app.graph.as_ref().unwrap().nodes[idx].clone();
+        // `clean_sample_point` is world space; window-frame pointers are
+        // window space, offset by the pane origin.
+        let (ox, oy) = graph_pane_origin(&app);
+        let point = (point.0 + ox, point.1 + oy);
         handle_graph_window_frame(
             &WindowFrame {
                 pointer: Some(point),
@@ -5599,9 +5638,10 @@ mod tests {
         let mut app = app_with_graph_window();
         let (x, y) = app.graph_positions[0];
         let node = app.graph.as_ref().unwrap().nodes[0].clone();
+        let (ox, oy) = graph_pane_origin(&app);
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 5.0, y + 5.0)),
+                pointer: Some((x + 5.0 + ox, y + 5.0 + oy)),
                 keys: vec![WindowGraphKey::BeginEdit],
                 ..Default::default()
             },
@@ -5630,6 +5670,9 @@ mod tests {
             "window pan reaches the shared camera"
         );
         let anchor = (100.0, 100.0);
+        // The wheel-zoom anchor arrives in window coordinates; the handler
+        // maps it through the pane origin before reaching the shared camera.
+        let (ox, oy) = graph_pane_origin(&app);
         handle_graph_window_frame(
             &WindowFrame {
                 zoom: Some((1.5, anchor)),
@@ -5639,7 +5682,7 @@ mod tests {
         );
         assert_eq!(
             app.graph_camera.unwrap(),
-            camera_zoom_about(&panned, 1.5, anchor),
+            camera_zoom_about(&panned, 1.5, (anchor.0 - ox, anchor.1 - oy)),
             "window wheel zoom reaches the shared camera"
         );
     }

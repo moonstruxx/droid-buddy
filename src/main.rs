@@ -234,14 +234,38 @@ mod windowed {
                     // painting so the window shows the current graph (the
                     // loop owns both; `set_scene` no-ops on an unchanged
                     // scene, so an idle loop never re-arms the redraw).
+                    // The window's logical rect in points, for the pane
+                    // rect and the first-frame fit.
+                    let (w, h) = self
+                        .window
+                        .with_window(|window| {
+                            let size = window.inner_size();
+                            (size.width.max(1), size.height.max(1))
+                        })
+                        .unwrap_or((1280, 800));
+                    let scale = self
+                        .window
+                        .with_window(|window| window.scale_factor() as f32)
+                        .unwrap_or(1.0);
+                    let win = egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(w as f32 / scale, h as f32 / scale),
+                    );
+                    // The rect the graph scene will be painted into this frame:
+                    // the graph tile slot (or the quad FULL pane) when one is
+                    // open, else the whole window — the same mirror as the
+                    // render dispatch. The scene builder shifts the camera by
+                    // its origin, so fit/center/zoom anchor to this same rect.
+                    let pane = gui::graph_pane_rect(&self.app, win).unwrap_or(win);
                     if self.app.graph_camera.is_none() {
                         // First-frame camera fit (bug: the window opened
                         // black, painting the layered seed plane through the
                         // identity camera): seed `App.graph_camera` when
                         // unset, dependency-filter aware, and reuse it after
-                        // so pan/zoom survive. The paint path publishes the
-                        // real canvas and re-seeds with the exact pane size
-                        // from the next frame (design D2).
+                        // so pan/zoom survive. The fit anchors to the exact
+                        // pane size the scene is painted into (a tile slot or
+                        // quad FULL pane, not the whole window) so c /
+                        // Shift+c and arrow-pan gating see the real pane.
                         let fit: Vec<(f32, f32)> = if self.app.dependency_nodes.is_empty() {
                             self.app.graph_positions.clone()
                         } else {
@@ -251,17 +275,12 @@ mod windowed {
                                 .map(|&i| self.app.graph_positions[i])
                                 .collect()
                         };
-                        let viewport = self
-                            .window
-                            .with_window(|window| {
-                                let size = window.inner_size();
-                                let scale = window.scale_factor() as f32;
-                                (size.width as f32 / scale, size.height as f32 / scale)
-                            })
-                            .unwrap_or((1280.0, 800.0));
-                        self.app.graph_camera = Some(gui::graph_window_fit_camera(&fit, viewport));
+                        self.app.graph_camera = Some(gui::graph_window_fit_camera(
+                            &fit,
+                            (pane.width(), pane.height()),
+                        ));
                     }
-                    let scene = gui::build_scene_spec(&self.app, theme::active());
+                    let scene = gui::build_scene_spec(&self.app, theme::active(), pane);
                     self.window.set_scene(scene.as_ref());
                     // The frame reports the window's input state; the loop
                     // owns `app`, so it maps the interactions here (D6: the
@@ -415,7 +434,11 @@ mod tests {
         let mut app = App::new();
         load_initial_patch(&mut app, None);
         app.open_graph();
-        let scene = droid_tui::gui::build_scene_spec(&app, theme::active());
+        let scene = droid_tui::gui::build_scene_spec(
+            &app,
+            theme::active(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+        );
         let spec = scene.expect("startup must produce a scene to paint");
         assert!(!spec.nodes.is_empty(), "startup must paint nodes");
     }
