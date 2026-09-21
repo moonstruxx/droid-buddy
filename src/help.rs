@@ -120,9 +120,13 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Shift+c", "fit and center graph"),
             ("e", "edit label"),
             ("d", "diff overlay"),
+            ("h", "toggle column/force layout"),
+            ("f", "dependency filter"),
+            ("i", "influence filter"),
+            ("g s", "open select-state menu"),
             ("+/-", "camera zoom"),
             ("arrows", "pan camera"),
-            ("[/]", "cable tension"),
+            ("Alt+[/Alt+]", "cable tension"),
             (
                 "r",
                 "cycle view in focused slot (graph / source / physical)",
@@ -276,6 +280,24 @@ mod tests {
 
         let panels = keybindings(HelpView::Panels);
         assert!(panels.contains(&("g c", "toggle latency coloring")));
+    }
+
+    #[test]
+    fn keybindings_reflect_graph_filters_and_tension_binding() {
+        // Change `help-keybinding-parity` task 1.2: the graph table documents
+        // the layout toggle, dependency/influence filters, the select-state
+        // chord, and the Alt-modified cable-tension binding (plain brackets
+        // adjust the tiled split).
+        let graph = keybindings(HelpView::Graph);
+        assert!(graph.contains(&("h", "toggle column/force layout")));
+        assert!(graph.contains(&("f", "dependency filter")));
+        assert!(graph.contains(&("i", "influence filter")));
+        assert!(graph.contains(&("g s", "open select-state menu")));
+        assert!(graph.contains(&("Alt+[/Alt+]", "cable tension")));
+        assert!(
+            !graph.contains(&("[/]", "cable tension")),
+            "bare brackets no longer adjust cable tension"
+        );
     }
 
     #[test]
