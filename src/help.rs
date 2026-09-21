@@ -135,6 +135,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("?", "show this help"),
         ],
         HelpView::Physical => vec![
+            ("+/-", "zoom presets"),
+            ("arrows/wheel", "pan rack on overflow"),
+            ("j/k", "navigate"),
             ("s", "toggle skeleton presentation"),
             (
                 "r",
@@ -280,6 +283,19 @@ mod tests {
 
         let panels = keybindings(HelpView::Panels);
         assert!(panels.contains(&("g c", "toggle latency coloring")));
+    }
+
+    #[test]
+    fn keybindings_reflect_physical_surface() {
+        // Change `help-keybinding-parity` task 1.3: the Physical tile table
+        // documents the zoom presets, overflow pan (arrows + wheel), and the
+        // j/k navigation the surface really binds.
+        let physical = keybindings(HelpView::Physical);
+        assert!(physical.contains(&("+/-", "zoom presets")));
+        assert!(physical.contains(&("arrows/wheel", "pan rack on overflow")));
+        assert!(physical.contains(&("j/k", "navigate")));
+        assert!(physical.contains(&("s", "toggle skeleton presentation")));
+        assert!(physical.contains(&("Esc", "close Physical tile")));
     }
 
     #[test]
