@@ -17,6 +17,8 @@ pub enum HelpView {
     Viewer,
     /// Signal-flow graph surface (`g g`).
     Graph,
+    /// Physical rack tile (`s`).
+    Physical,
     /// Validation modal (`e`).
     Validation,
     /// Optimizer menu (`g o`).
@@ -32,6 +34,7 @@ impl HelpView {
             HelpView::Panels => "Panels / Physical",
             HelpView::Viewer => "Source Viewer",
             HelpView::Graph => "Signal-flow Graph",
+            HelpView::Physical => "Physical Rack",
             HelpView::Validation => "Validation",
             HelpView::Optimizer => "Optimizer",
             HelpView::Picker => "File Picker",
@@ -40,7 +43,10 @@ impl HelpView {
 }
 
 /// The active view, mirroring the handler priority chain
-/// (picker > validation > optimizer > graph > viewer > panels).
+/// (picker > validation > optimizer > graph > viewer > panels). The Physical
+/// slot has no legacy `showing_*` flag, so it resolves from tile focus
+/// directly — a focused Physical slot outranks the legacy graph/viewer bools
+/// so `?` describes the surface the user is actually on.
 pub fn active_view(app: &App) -> HelpView {
     if app.showing_picker {
         HelpView::Picker
@@ -48,6 +54,12 @@ pub fn active_view(app: &App) -> HelpView {
         HelpView::Validation
     } else if app.optimizer.is_some() {
         HelpView::Optimizer
+    } else if matches!(
+        app.tile_stack.focus,
+        crate::app::FocusSlot::Slot(i)
+            if app.tile_stack.slots.get(i) == Some(&crate::app::ViewType::Physical)
+    ) {
+        HelpView::Physical
     } else if app.showing_graph {
         HelpView::Graph
     } else if app.showing_viewer {
@@ -68,10 +80,14 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g o", "open latency optimizer"),
             ("g c", "toggle latency coloring"),
             ("g q", "quad Panels/Source/Graph FULL/FILTERED"),
+            (
+                "r",
+                "cycle view in focused slot (graph / source / physical)",
+            ),
             ("?", "show this help"),
             ("1-4", "shift groups"),
             ("+/-", "scale presets"),
-            ("s", "toggle skeleton presentation"),
+            ("s", "open Physical tile slot"),
             ("arrows/wheel", "pan when rack overflows"),
             ("Enter/Space", "toggle component"),
             ("e", "edit label / validation modal"),
@@ -85,6 +101,10 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Home/End", "jump to first/last occurrence"),
             ("t", "toggle raw/prettified"),
             ("Tab", "switch pane focus"),
+            (
+                "r",
+                "cycle view in focused slot (graph / source / physical)",
+            ),
             ("[/]", "adjust panels/source split"),
             ("e", "edit label"),
             ("Esc", "close viewer"),
@@ -100,7 +120,20 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("+/-", "camera zoom"),
             ("arrows", "pan camera"),
             ("[/]", "cable tension"),
+            (
+                "r",
+                "cycle view in focused slot (graph / source / physical)",
+            ),
             ("Esc", "close graph"),
+            ("?", "show this help"),
+        ],
+        HelpView::Physical => vec![
+            ("s", "toggle skeleton presentation"),
+            (
+                "r",
+                "cycle view in focused slot (graph / source / physical)",
+            ),
+            ("Esc", "close Physical tile"),
             ("?", "show this help"),
         ],
         HelpView::Validation => vec![
@@ -167,6 +200,11 @@ mod tests {
         assert_eq!(active_view(&a), HelpView::Graph);
 
         let mut a = app();
+        a.tile_stack.open(crate::app::ViewType::Physical);
+        a.tile_stack.focus = crate::app::FocusSlot::Slot(0);
+        assert_eq!(active_view(&a), HelpView::Physical);
+
+        let mut a = app();
         a.showing_viewer = true;
         assert_eq!(active_view(&a), HelpView::Viewer);
     }
@@ -177,6 +215,7 @@ mod tests {
             HelpView::Panels,
             HelpView::Viewer,
             HelpView::Graph,
+            HelpView::Physical,
             HelpView::Validation,
             HelpView::Optimizer,
             HelpView::Picker,
@@ -190,6 +229,33 @@ mod tests {
                     "view {view:?} has empty description for {key}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn keybindings_include_carousel_key() {
+        // `r` rotates the focused right-column slot through the carousel on
+        // every surface that can hold a slot; the optimizer is excluded.
+        let row = (
+            "r",
+            "cycle view in focused slot (graph / source / physical)",
+        );
+        for view in [
+            HelpView::Panels,
+            HelpView::Viewer,
+            HelpView::Graph,
+            HelpView::Physical,
+        ] {
+            assert!(
+                keybindings(view).contains(&row),
+                "view {view:?} must document the r carousel key"
+            );
+        }
+        for view in [HelpView::Validation, HelpView::Optimizer, HelpView::Picker] {
+            assert!(
+                !keybindings(view).contains(&row),
+                "view {view:?} must not document the r carousel key"
+            );
         }
     }
 
@@ -215,6 +281,7 @@ mod tests {
             HelpView::Panels,
             HelpView::Viewer,
             HelpView::Graph,
+            HelpView::Physical,
             HelpView::Validation,
             HelpView::Optimizer,
             HelpView::Picker,

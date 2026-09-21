@@ -17,8 +17,9 @@
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
+use crate::app::App;
 use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
-use crate::physical::{PhysicalLayout, RackLayout, ScreenMapping};
+use crate::physical::{PhysicalLayout, RackLayout, RackSpec, ScreenMapping};
 use crate::theme::Color;
 
 use super::graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
@@ -119,6 +120,91 @@ pub(crate) struct PhysicalFrame {
     pub zoom: Option<(f32, (f32, f32))>,
     /// `s` pressed this frame (no modifiers): toggle skeleton presentation.
     pub skeleton_toggle: bool,
+}
+
+/// Points per screen cell: the egui-layer scale over the shared
+/// `ScreenMapping` (mm→cells). Mirrors the test builder's 10 px/cell so the
+/// production pane and the headless paint tests share one geometry.
+const PHYSICAL_CELL_SCALE: f32 = 10.0;
+
+/// The app-driven physical spec: build the controller chain from the loaded
+/// patch (`PhysicalLayout::build`), pack it into the configured rack (or the
+/// default case when none is set), and resolve cells/geometry under the
+/// app's physical zoom/offset. `None` when no patch is loaded — the slot
+/// then paints nothing. Mirrors the test-only `build_spec`.
+pub(crate) fn physical_spec(app: &App) -> Option<PhysicalSpec> {
+    let patch = app.patch.as_ref()?;
+    let chain = PhysicalLayout::build(patch);
+    let rack_spec = if app.physical_rack_spec.rows.is_empty() {
+        RackSpec::default_case(&chain)
+    } else {
+        app.physical_rack_spec.clone()
+    };
+    let rack = RackLayout::pack(&chain, &rack_spec);
+    let m = ScreenMapping::new(
+        crate::physical::PHYSICAL_COLS_PER_MM,
+        crate::physical::PHYSICAL_ROWS_PER_MM,
+        app.physical_zoom as f64,
+        app.physical_offset.0 as f64,
+        app.physical_offset.1 as f64,
+    );
+    let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
+    let mut cells = Vec::new();
+    for &(mi, ci, rect, mark) in &geom.cells {
+        let comp = &chain.modules[mi].components[ci];
+        let (glyph, state_text, color) = cell_visuals(comp, false, false);
+        cells.push(CellSpec {
+            rect,
+            glyph,
+            label: comp.label.clone(),
+            state_text,
+            color,
+            is_fader: false,
+            fader_value: 0.0,
+            global_index: ci,
+            mark,
+            highlighted: false,
+            shift_color: None,
+            modifier_wash: None,
+            dimmed: false,
+            kind: comp.kind,
+        });
+    }
+    let modules = geom
+        .module_rects
+        .iter()
+        .map(|&(mi, rect)| ModuleSpec {
+            rect,
+            title: format!("{} {}", chain.modules[mi].controller, 1),
+        })
+        .collect();
+    let db8e_bands = geom
+        .db8e_bands
+        .iter()
+        .map(|&(_, rect)| Db8eBand {
+            rect,
+            state: crate::physical::db8e_display_state_for_layout(&chain),
+        })
+        .collect();
+    Some(PhysicalSpec {
+        background: crate::theme::active().graph_canvas_bg,
+        case_rect: geom.case_rect,
+        mounts: geom.mounts,
+        fold_bars: geom.fold_bars,
+        modules,
+        cells,
+        db8e_bands,
+        grid_lines: mm_grid_lines(
+            &m,
+            PHYSICAL_CELL_SCALE,
+            rack.total_width_mm,
+            rack.total_height_mm,
+            20.0,
+        ),
+        cell_scale: PHYSICAL_CELL_SCALE,
+        skeleton: app.physical_show_skeleton,
+        paused: app.processing_paused,
+    })
 }
 
 /// Paint the physical 1:1 view into `pane`. `None` draws nothing.
