@@ -632,6 +632,40 @@ fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selec
     }
 }
 
+/// Pane frame (tiled-window-manager D6): the border stroke carries the focus
+/// token when the pane is focused and the unfocused token otherwise, plus the
+/// pane title in the same color. Panels, viewer, and graph tiles draw their
+/// pane chrome through this one source.
+pub(crate) fn draw_pane_frame(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    focused: bool,
+    title: &str,
+    t: &crate::theme::Theme,
+) {
+    let border = t.egui_color(if focused {
+        t.pane_focus_border
+    } else {
+        t.pane_unfocused_border
+    });
+    painter.rect(
+        rect,
+        0.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(if focused { 2.0 } else { 1.0 }, border),
+        egui::StrokeKind::Inside,
+    );
+    if !title.is_empty() {
+        painter.text(
+            rect.min + egui::vec2(6.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            title,
+            egui::FontId::proportional(12.0),
+            border,
+        );
+    }
+}
+
 /// Paint the tiled main band (tiled-window-manager D1/D6): a full-height left
 /// panel pane plus the open right-column slots stacked top-to-bottom. Panels
 /// always render; each `tile_stack` slot paints its surface into an even
@@ -680,6 +714,16 @@ fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                     app.fit_graph_camera((rect.width(), rect.height()));
                 }
                 graph::paint_scene_in(ui, rect, scene, selected);
+                // The graph scene paints no pane chrome of its own, so the
+                // slot frame marks it like the panels and viewer panes.
+                let painter = ui.painter().with_clip_rect(rect);
+                draw_pane_frame(
+                    &painter,
+                    rect,
+                    app.tile_stack.focus == crate::app::FocusSlot::Slot(i),
+                    "",
+                    t,
+                );
             }
             crate::app::ViewType::SourceViewer => {
                 let painter = ui.painter().with_clip_rect(rect);
@@ -687,10 +731,25 @@ fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 let spec = viewer::viewer_spec(app);
                 let _ = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
             }
-            // Physical and Optimizer render elsewhere today: the optimizer is
-            // an overlay (`paint_overlays`), and the physical 1:1 view has no
-            // app-to-spec builder in the gui lane yet.
-            crate::app::ViewType::Physical | crate::app::ViewType::Optimizer => {}
+            crate::app::ViewType::Physical => {
+                let painter = ui.painter().with_clip_rect(rect);
+                painter.rect_filled(rect, 0.0, bg);
+                drop(painter);
+                let spec = physical::physical_spec(app);
+                let _ = physical::paint_physical(ui, rect, spec.as_ref());
+                // The physical surface paints no pane chrome of its own;
+                // frame the slot like the graph tile.
+                let painter = ui.painter().with_clip_rect(rect);
+                draw_pane_frame(
+                    &painter,
+                    rect,
+                    app.tile_stack.focus == crate::app::FocusSlot::Slot(i),
+                    "",
+                    t,
+                );
+            }
+            // The optimizer renders as an overlay (`paint_overlays`).
+            crate::app::ViewType::Optimizer => {}
         }
     }
 }
@@ -1303,6 +1362,103 @@ mod tests {
             "tiled paint must emit shapes for panels and the graph slot"
         );
         assert_eq!(app.pane_rects.len(), 2, "panels + one graph slot");
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_tiled_renders_physical_slot_headless() {
+        // `s` opens the Physical rack as a right-column slot; the tiled base
+        // paint builds the app-driven spec (chain → rack → cells under the
+        // app's zoom/offset) and paints the physical surface next to the
+        // panels pane.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(crate::app::ViewType::Physical);
+        assert!(app.tile_stack.is_open(crate::app::ViewType::Physical));
+
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
+        });
+        assert!(
+            !full_output.shapes.is_empty(),
+            "tiled paint must emit shapes for panels and the physical slot"
+        );
+        let labels: Vec<String> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("P2B8 1")),
+            "physical module title missing: {labels:?}"
+        );
+        assert_eq!(app.pane_rects.len(), 2, "panels + one physical slot");
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_tiled_pane_frames_use_focus_tokens() {
+        // FIX 4: every tiled pane draws its border stroke from the pane focus
+        // tokens: the focused pane pops in `pane_focus_border`, the other
+        // panes recede in `pane_unfocused_border` (the old `focus_border` /
+        // `muted` pair never reached the renderer).
+        let t = crate::theme::active();
+        let focus = t.egui_color(t.pane_focus_border);
+        let unfocused = t.egui_color(t.pane_unfocused_border);
+
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph();
+        app.tile_stack.focus = crate::app::FocusSlot::Slot(0);
+
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let scene = crate::gui::graph::build_scene_spec(
+            &app,
+            t,
+            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
+        });
+        let strokes: Vec<egui::Stroke> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Rect(r) if r.stroke.width > 0.0 => Some(r.stroke),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            strokes.iter().any(|s| s.color == focus),
+            "focused graph-slot frame in the focus token: {strokes:?}"
+        );
+        assert!(
+            strokes.iter().any(|s| s.color == unfocused),
+            "unfocused panels frame in the unfocused token: {strokes:?}"
+        );
         full_output.textures_delta.clear();
     }
 

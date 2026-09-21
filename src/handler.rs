@@ -333,6 +333,16 @@ fn optimizer_slot_focused(app: &App) -> bool {
     }
 }
 
+/// True when keys should act on the Physical pane: the Physical slot holds
+/// tile focus. No legacy flag path exists — `s` opens the slot and the
+/// presentation keys act only while it is focused.
+fn physical_slot_focused(app: &App) -> bool {
+    match app.tile_stack.focus {
+        FocusSlot::Slot(i) => app.tile_stack.slots.get(i) == Some(&ViewType::Physical),
+        FocusSlot::Panels => false,
+    }
+}
+
 /// Cycle the physical panel scale presets (shared by the panels arm and the
 /// graph arm's scale-the-other-pane path).
 fn cycle_panel_scale(app: &mut App, plus: bool) {
@@ -1332,16 +1342,36 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             app.toggle_processing_pause();
             false
         }
+        KeyCode::Char('r') => {
+            // Carousel key: rotate the focused right-column slot through
+            // graph/source/physical while Tab keeps cycling focus. No-op on
+            // panels, inside quad (rotating would desync `quad_focus`), and
+            // while the optimizer slot holds focus — the optimizer branch
+            // above owns `r` (restore) and returns before this one.
+            if !app.is_quad() {
+                app.cycle_view_in_slot(true);
+                sync_viewer_focus_from_tiles(app);
+            }
+            false
+        }
         KeyCode::Char('s') => {
-            // Skeleton toggle (`s`): presentation switch of the main view
-            // (task 3.1, design D7). Free in the normal-key path — the
-            // optimizer overlay's `s` (export) returns earlier.
-            app.physical_show_skeleton = !app.physical_show_skeleton;
-            app.status_message = if app.physical_show_skeleton {
-                String::from("Skeleton: on")
+            // `s` opens/focuses the Physical tile slot (design D12). While
+            // the Physical slot holds focus, `s` toggles the skeleton
+            // presentation inside the slot — the physical surface's own
+            // presentation switch (mirroring how `p` acts on the graph
+            // surface). Free in the normal-key path — the optimizer
+            // overlay's `s` (export) returns earlier.
+            if physical_slot_focused(app) {
+                app.physical_show_skeleton = !app.physical_show_skeleton;
+                app.status_message = if app.physical_show_skeleton {
+                    String::from("Skeleton: on")
+                } else {
+                    String::from("Skeleton: off")
+                };
             } else {
-                String::from("Skeleton: off")
-            };
+                app.open_view(ViewType::Physical);
+                sync_viewer_focus_from_tiles(app);
+            }
             false
         }
         KeyCode::Char('g') => {
@@ -1660,6 +1690,9 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                     } else if mouse.modifiers == key_modifiers::NONE {
                         app.hold_component = Some(token.clone());
                         app.refresh_modifier_influence();
+                        if let Some(status) = app.modifier_status() {
+                            app.status_message = status;
+                        }
                     }
                     app.select_component(token);
                 }
@@ -1695,6 +1728,20 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                         app.viewer_focus = ViewerFocus::Panels;
                     }
                     app.tile_stack.focus = FocusSlot::Panels;
+                }
+            }
+        }
+        MouseEventKind::Up(_) => {
+            // Momentary hold release: drop the held token and its wash. The
+            // status clears only when no latch survives; otherwise it
+            // falls back to the latched MOD line.
+            if app.hold_component.is_some() {
+                app.hold_component = None;
+                app.refresh_modifier_influence();
+                if app.latched_component.is_none() {
+                    app.status_message.clear();
+                } else if let Some(status) = app.modifier_status() {
+                    app.status_message = status;
                 }
             }
         }
@@ -1825,9 +1872,18 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                     app.pinned.insert(node.id.clone());
                 }
             }
-            // Modifier hold: release the mouse hold wash.
-            app.hold_component = None;
-            app.refresh_modifier_influence();
+            // Modifier hold: release the mouse hold wash. The status
+            // clears only when no latch survives; otherwise it falls
+            // back to the latched MOD line.
+            if app.hold_component.is_some() {
+                app.hold_component = None;
+                app.refresh_modifier_influence();
+                if app.latched_component.is_none() {
+                    app.status_message.clear();
+                } else if let Some(status) = app.modifier_status() {
+                    app.status_message = status;
+                }
+            }
         }
         MouseEventKind::ScrollUp => {
             // Task 2.3: wheel pans the graph camera on the graph surface
@@ -2404,6 +2460,33 @@ mod tests {
             app.patch.as_ref().unwrap().hw_components[0].state,
             ComponentState::On
         ));
+    }
+
+    #[test]
+    fn momentary_hold_sets_mod_status_and_release_clears_or_keeps_latch() {
+        let mut app = app_with_fixture();
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        assert_eq!(app.hold_component.as_deref(), Some("B1.1"));
+        let held = app.modifier_status().expect("hold reports MOD");
+        assert!(held.starts_with("MOD B1.1"), "status: {held}");
+        assert_eq!(app.status_message, held);
+
+        handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 5, 1), &mut app);
+        assert!(app.hold_component.is_none());
+        assert!(app.status_message.is_empty());
+
+        handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            &mut app,
+        );
+        app.toggle_modifier_latch("B1.1");
+        let latched = app.modifier_status().expect("latch reports MOD");
+        handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 5, 1), &mut app);
+        assert!(app.hold_component.is_none());
+        assert_eq!(app.status_message, latched);
     }
 
     #[test]
@@ -4053,6 +4136,94 @@ mod tests {
         handle_event(shift_tab(), &mut app);
         assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
         assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    }
+
+    #[test]
+    fn r_rotates_focused_slot_through_carousel() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
+        // SourceViewer is the middle carousel member: forward = Physical,
+        // then Graph, then wrap back to SourceViewer.
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+        assert!(!app.showing_viewer && !app.showing_graph);
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Graph]);
+        assert!(app.showing_graph);
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
+        assert!(app.showing_viewer);
+        // The slot keeps focus through the rotation.
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+    }
+
+    #[test]
+    fn r_keeps_tab_focus_cycling_intact() {
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+        // Tab still cycles focus: slot -> panels -> slot.
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        // `r` while panels are focused is a no-op on the stack.
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+        handle_event(shift_tab(), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+    }
+
+    #[test]
+    fn r_noop_without_right_column_slot() {
+        let mut app = app_with_source_navigation();
+        assert!(app.tile_stack.slots.is_empty());
+        let status = app.status_message.clone();
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert!(app.tile_stack.slots.is_empty());
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert!(!app.showing_viewer && !app.showing_graph);
+        assert_eq!(app.status_message, status);
+    }
+
+    #[test]
+    fn r_on_optimizer_slot_restores_instead_of_rotating() {
+        let mut app = app_with_fixture();
+        open_optimizer(&mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Optimizer]);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        // The optimizer branch owns `r` (restore) and returns before the
+        // carousel arm; the optimizer is never a carousel member.
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Optimizer]);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert!(app.optimizer.is_some());
+    }
+
+    #[test]
+    fn s_opens_and_focuses_physical_slot_and_toggles_skeleton_inside() {
+        let mut app = app_with_fixture();
+        assert!(app.tile_stack.slots.is_empty());
+        // `s` opens a Physical slot and focuses it.
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        // While the slot holds focus, `s` is the skeleton presentation
+        // toggle inside the physical surface.
+        assert!(!app.physical_show_skeleton);
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(app.physical_show_skeleton);
+        assert_eq!(app.status_message, "Skeleton: on");
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(!app.physical_show_skeleton);
+        assert_eq!(app.status_message, "Skeleton: off");
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
+        // With panels focused again, `s` re-focuses the open slot.
+        app.tile_stack.focus = FocusSlot::Panels;
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.tile_stack.slots, vec![ViewType::Physical]);
     }
 
     #[test]

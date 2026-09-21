@@ -30,8 +30,8 @@ use super::physical::{cell_visuals, paint_cell, CellSpec, ModuleSpec, PortMark};
 pub(crate) struct PanelsSpec {
     /// Pane title (the terminal's " Panels ").
     pub title: String,
-    /// Keyboard focus state: the focused pane draws a bold `focus_border`
-    /// instead of the muted border.
+    /// Keyboard focus state: the focused pane draws a bold `pane_focus_border`
+    /// instead of the unfocused border.
     pub focused: bool,
     /// Module sub-blocks (faceplates) with their outline rects and titles.
     pub modules: Vec<ModuleSpec>,
@@ -68,27 +68,7 @@ pub(super) fn paint_panels(
     };
     let painter = ui.painter().with_clip_rect(pane);
     let t = crate::theme::active();
-    let border_color = if spec.focused {
-        rgb(t.focus_border)
-    } else {
-        rgb(t.muted)
-    };
-    painter.rect(
-        pane,
-        0.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(if spec.focused { 2.0 } else { 1.0 }, border_color),
-        egui::StrokeKind::Inside,
-    );
-    if !spec.title.is_empty() {
-        painter.text(
-            pane.min + egui::vec2(6.0, 3.0),
-            egui::Align2::LEFT_TOP,
-            &spec.title,
-            egui::FontId::proportional(12.0),
-            border_color,
-        );
-    }
+    super::draw_pane_frame(&painter, pane, spec.focused, &spec.title, t);
 
     // Module sub-blocks: faceplate borders + titles, inset inside the pane.
     let inner = pane.shrink(3.0);
@@ -417,7 +397,7 @@ mod tests {
             labels.iter().any(|l| l.contains("Panels")),
             "pane title: {labels:?}"
         );
-        let focus = crate::theme::active().egui_color(crate::theme::active().focus_border);
+        let focus = crate::theme::active().egui_color(crate::theme::active().pane_focus_border);
         assert!(
             rects.iter().any(
                 |r| r.rect == Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0))

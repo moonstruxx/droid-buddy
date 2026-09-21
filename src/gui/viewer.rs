@@ -149,32 +149,13 @@ pub(super) fn paint_viewer(
         x += f.text.chars().count() as f32 * font.size * 0.55 + 2.0;
     }
 
-    // The pane above the status strip: border + mode title.
+    // The pane above the status strip: frame + mode title, focused panes in
+    // the focus token.
     let content = Rect::from_min_size(
         pane.min,
         Vec2::new(pane.width(), (pane.height() - status_h).max(1.0)),
     );
-    let border = if spec.focused {
-        rgb(t.focus_border)
-    } else {
-        rgb(t.muted)
-    };
-    painter.rect(
-        content,
-        0.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(if spec.focused { 2.0 } else { 1.0 }, border),
-        egui::StrokeKind::Inside,
-    );
-    if !spec.title.is_empty() {
-        painter.text(
-            content.min + egui::vec2(6.0, 3.0),
-            egui::Align2::LEFT_TOP,
-            &spec.title,
-            egui::FontId::proportional(12.0),
-            border,
-        );
-    }
+    super::draw_pane_frame(painter, content, spec.focused, &spec.title, t);
 
     let inner = content.shrink(4.0);
     let (sidebar_w, content_w, minimap_w) = pane_split(
@@ -1221,6 +1202,10 @@ fn viewer_status(app: &App) -> Vec<StatusFragment> {
         },
     ];
     if !app.status_message.is_empty() {
+        let status_color = app
+            .active_modifier()
+            .map(crate::theme::modifier_hue)
+            .unwrap_or(t.text);
         fragments.push(StatusFragment {
             text: " | ".into(),
             color: t.text,
@@ -1228,7 +1213,7 @@ fn viewer_status(app: &App) -> Vec<StatusFragment> {
         });
         fragments.push(StatusFragment {
             text: app.status_message.clone(),
-            color: t.text,
+            color: status_color,
             bold: true,
         });
     }
@@ -1399,6 +1384,29 @@ mod tests {
         // Without the override the fixed exact token is used.
         let plain = entry_value_fragments("P1.1", Some("P1.1"), &mods, None);
         assert_eq!(plain[0].color, crate::theme::active().modifier_exact);
+    }
+
+    #[test]
+    fn viewer_status_uses_modifier_hue_while_modifier_active() {
+        let t = crate::theme::active();
+        let mut app = crate::app::App::new();
+        app.status_message = String::from("hello");
+        let plain = viewer_status(&app);
+        assert_eq!(plain.last().expect("status").color, t.text);
+        app.hold_component = Some(String::from("B1.1"));
+        app.status_message = String::from("MOD B1.1");
+        let held = viewer_status(&app);
+        assert_eq!(
+            held.last().expect("status").color,
+            crate::theme::modifier_hue("B1.1")
+        );
+        app.hold_component = None;
+        app.latched_component = Some(String::from("B1.1"));
+        let latched = viewer_status(&app);
+        assert_eq!(
+            latched.last().expect("status").color,
+            crate::theme::modifier_hue("B1.1")
+        );
     }
 
     #[test]
