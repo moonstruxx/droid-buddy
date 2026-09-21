@@ -669,14 +669,60 @@ enum SceneInfluence {
     AllHighlighted,
 }
 
-/// Builds the window scene spec from the current `App` graph state (design
-/// D3): nodes map through the shared `GraphCamera` (identity fallback when
-/// `App.graph_camera` is unset), edges resolve the full color-precedence
-/// chain, clusters become padded member unions. `None` when no graph exists
-/// or the positional state is inconsistent with the graph.
-pub fn build_scene_spec(app: &App, theme: &Theme) -> Option<SceneSpec> {
+/// The egui rect the full graph scene is painted into on the current frame:
+/// the graph tile slot (tiled layout) or the quad FULL pane (quad layout on a
+/// wide window). `None` when the scene fills the whole window (no open slot;
+/// a quad below the width threshold collapses to slots, covered by the slot
+/// case). Mirrors the render dispatch ([`crate::gui::EguiSurface::paint`]):
+/// the same ratio clamps produce the same rect the paint path clips with.
+pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
+    let wide = window.width() >= crate::app::QUAD_WIDTH_THRESHOLD;
+    if app.is_quad() && wide {
+        let x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
+        let y = window.min.y + window.height() * app.left_split_ratio.clamp(0.2, 0.8);
+        return Some(egui::Rect::from_min_max(
+            egui::pos2(window.min.x, y),
+            if app.left_split_active {
+                egui::pos2(x, window.max.y)
+            } else {
+                window.max
+            },
+        ));
+    }
+    if app.tile_stack.slots.is_empty() {
+        return None;
+    }
+    let left_x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
+    let right = egui::Rect::from_min_max(egui::pos2(left_x, window.min.y), window.max);
+    let slots = &app.tile_stack.slots;
+    let idx = slots
+        .iter()
+        .position(|v| *v == crate::app::ViewType::Graph)?;
+    let slot_h = right.height() / slots.len() as f32;
+    let y0 = right.min.y + slot_h * idx as f32;
+    Some(egui::Rect::from_min_size(
+        egui::pos2(right.min.x, y0),
+        egui::vec2(right.width(), slot_h),
+    ))
+}
+
+/// Builds the full graph scene into `pane` (design D3): nodes map through
+/// the shared `GraphCamera` (identity fallback when `App.graph_camera` is
+/// unset) with the pan offset by the pane origin — the egui painter has no
+/// translate primitive, so scene pixels come out as absolute window
+/// coordinates the pane's clip frames (the same convention as the quad
+/// FILTERED pane's [`build_subset_scene`]). Edges resolve the full
+/// color-precedence chain, clusters become padded member unions. `None` when
+/// no graph exists or the positional state is inconsistent with the graph.
+pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<SceneSpec> {
     let graph = app.graph.as_ref()?;
-    let camera = app.graph_camera.unwrap_or_default();
+    let mut camera = app.graph_camera.unwrap_or_default();
+    // pixel = world × zoom − pan + pane.min: subtracting the pane origin from
+    // the pan shifts every spec coordinate into the pane's absolute screen
+    // placement, so a slot/quad pane clip frames the drawn content instead of
+    // clipping it to a sliver or off the canvas (tile slots and the quad FULL
+    // pane both start away from the window origin).
+    camera.pan = (camera.pan.0 - pane.min.x, camera.pan.1 - pane.min.y);
     let dep_filtered = !app.dependency_nodes.is_empty();
     let inf_filtered = app.influence_filter_active;
     let filtered = dep_filtered || inf_filtered;
@@ -1428,18 +1474,33 @@ mod scene_builder_tests {
     }
 
     fn spec(app: &App) -> SceneSpec {
-        build_scene_spec(app, theme()).expect("scene present")
+        build_scene_spec(
+            app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, 0.0)),
+        )
+        .expect("scene present")
     }
 
     #[test]
     fn scene_requires_graph_and_aligned_positions() {
-        assert!(build_scene_spec(&App::new(), theme()).is_none());
+        assert!(build_scene_spec(
+            &App::new(),
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, 0.0))
+        )
+        .is_none());
         let graph = Graph {
             nodes: vec![circuit_node("copy", 0, 0)],
             ..Graph::default()
         };
         let app = scene_app(graph, &[]);
-        assert!(build_scene_spec(&app, theme()).is_none());
+        assert!(build_scene_spec(
+            &app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, 0.0))
+        )
+        .is_none());
     }
 
     #[test]
@@ -2106,7 +2167,12 @@ mod window_paint_tests {
             &app.graph_positions,
             (1280.0, 800.0),
         ));
-        let scene = build_scene_spec(&app, theme()).expect("scene present");
+        let scene = build_scene_spec(
+            &app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+        )
+        .expect("scene present");
         let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
 
         assert!(
@@ -2142,7 +2208,12 @@ mod window_paint_tests {
     #[test]
     fn hover_tooltip_paints_without_deadlocking() {
         let app = chain_app();
-        let scene = build_scene_spec(&app, theme()).expect("scene present");
+        let scene = build_scene_spec(
+            &app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+        )
+        .expect("scene present");
         let node = &scene.nodes[0];
         let canvas = egui::vec2(1280.0, 800.0);
         let out = paint_with_pointer(
@@ -2186,7 +2257,12 @@ mod window_paint_tests {
             &app.graph_positions,
             (1280.0, 800.0),
         ));
-        let scene = build_scene_spec(&app, theme()).expect("scene present");
+        let scene = build_scene_spec(
+            &app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0)),
+        )
+        .expect("scene present");
         let out = paint(Some(&scene), egui::vec2(400.0, 300.0));
 
         assert!(
@@ -2209,7 +2285,12 @@ mod window_paint_tests {
         // the window reflects camera zoom rather than a fixed spec layout.
         let identity = {
             let app = chain_app();
-            let scene = build_scene_spec(&app, theme()).expect("scene present");
+            let scene = build_scene_spec(
+                &app,
+                theme(),
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+            )
+            .expect("scene present");
             node_origins(&paint(Some(&scene), egui::vec2(1280.0, 800.0)))
         };
         let mut zoomed_app = chain_app();
@@ -2218,7 +2299,12 @@ mod window_paint_tests {
             pan: (0.0, 0.0),
         });
         let zoomed = {
-            let scene = build_scene_spec(&zoomed_app, theme()).expect("scene present");
+            let scene = build_scene_spec(
+                &zoomed_app,
+                theme(),
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+            )
+            .expect("scene present");
             node_origins(&paint(Some(&scene), egui::vec2(1280.0, 800.0)))
         };
 
@@ -2269,7 +2355,11 @@ mod kittest_tests {
     }
 
     fn render_graph(app: &App) {
-        let scene = super::build_scene_spec(app, theme::active());
+        let scene = super::build_scene_spec(
+            app,
+            theme::active(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        );
         let canvas = egui::vec2(800.0, 600.0);
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             super::paint_scene(ui, canvas, scene.as_ref(), &[]);
@@ -2280,7 +2370,11 @@ mod kittest_tests {
     /// Repaint the graph through a harness and hand the harness back so the
     /// caller can query widgets by AccessKit label after the frame settles.
     fn render_graph_queryable(app: &App) -> egui_kittest::Harness<'static> {
-        let scene = super::build_scene_spec(app, theme::active());
+        let scene = super::build_scene_spec(
+            app,
+            theme::active(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        );
         let canvas = egui::vec2(800.0, 600.0);
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             super::paint_scene(ui, canvas, scene.as_ref(), &[]);
@@ -2540,7 +2634,12 @@ mod zz_throwaway_dump2 {
         let cam = GraphCamera::fit_to_world(bounds, (512.0, 800.0), 2.2);
         println!("== C camera zoom={} pan={:?}", cam.zoom, cam.pan);
         app.graph_camera = Some(cam);
-        let spec = crate::gui::graph::build_scene_spec(&app, theme::active()).unwrap();
+        let spec = crate::gui::graph::build_scene_spec(
+            &app,
+            theme::active(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(512.0, 800.0)),
+        )
+        .unwrap();
         println!(
             "== build_scene_spec rendered {} nodes (of {} graph.nodes)",
             spec.nodes.len(),
