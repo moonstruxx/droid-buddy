@@ -1,5 +1,5 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
-//! and `[physical.rack]`, `[plugins]`, `[gui]`, `[layout]`) stored in
+//! and `[physical.rack]`, `[plugins]`, `[layout]`) stored in
 //! `config.toml` under the XDG config home.
 //! Loaded once at startup, before the terminal UI initializes (design decision 5).
 //!
@@ -36,11 +36,6 @@ pub const MAX_PHYSICAL_ZOOM: f64 = 2.0;
 /// Plugin-loading default under `[plugins]`: enabled by default, no directory
 /// override (the standard XDG plugins dir applies).
 pub const DEFAULT_PLUGINS_ENABLED: bool = true;
-
-/// GPU-graph-window default under `[gui]` (gpu-graph-window D6): the window is
-/// off unless configured, so `g g` keeps its terminal-tile behavior out of the
-/// box, and without the `gui` feature the value is inert.
-pub const DEFAULT_GRAPH_WINDOW: bool = false;
 
 /// Graph-arrangement defaults under `[layout]` (graph-column-layout D5): the
 /// deterministic column arrangement is the out-of-box default; the force
@@ -79,10 +74,6 @@ fn default_physical_offset() -> f64 {
 
 fn default_plugins_enabled() -> bool {
     DEFAULT_PLUGINS_ENABLED
-}
-
-fn default_graph_window() -> bool {
-    DEFAULT_GRAPH_WINDOW
 }
 
 fn default_layout_mode() -> LayoutMode {
@@ -192,24 +183,6 @@ impl Plugins {
     }
 }
 
-/// GPU-window preference under `[gui]` (gpu-graph-window D6).
-///
-/// `graph_window = true` makes `g g` open the native graph window instead of
-/// the terminal graph tile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Gui {
-    #[serde(default = "default_graph_window")]
-    pub graph_window: bool,
-}
-
-impl Default for Gui {
-    fn default() -> Self {
-        Self {
-            graph_window: default_graph_window(),
-        }
-    }
-}
-
 /// Graph-arrangement mode under `[layout]` (graph-column-layout D5): the
 /// deterministic column arrangement or the force-directed solver. Unknown
 /// values in the file warn once on stderr and fall back to
@@ -308,8 +281,6 @@ pub struct Settings {
     #[serde(default)]
     pub plugins: Plugins,
     #[serde(default)]
-    pub gui: Gui,
-    #[serde(default)]
     pub layout: Layout,
 }
 
@@ -321,7 +292,6 @@ impl Default for Settings {
             latency: Latency::default(),
             physical: Physical::default(),
             plugins: Plugins::default(),
-            gui: Gui::default(),
             layout: Layout::default(),
         }
     }
@@ -598,7 +568,6 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical::default(),
                 plugins: Plugins::default(),
-                gui: Gui::default(),
                 layout: Layout::default(),
             },
         )
@@ -632,7 +601,6 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical::default(),
                 plugins: Plugins::default(),
-                gui: Gui::default(),
                 layout: Layout::default(),
             },
         )
@@ -707,7 +675,6 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical::default(),
                 plugins: Plugins::default(),
-                gui: Gui::default(),
                 layout: Layout::default(),
             },
         )
@@ -736,7 +703,6 @@ mod tests {
                     latency: Latency::default(),
                     physical: Physical::default(),
                     plugins: Plugins::default(),
-                    gui: Gui::default(),
                     layout: Layout::default(),
                 },
             )
@@ -764,7 +730,6 @@ mod tests {
             },
             physical: Physical::default(),
             plugins: Plugins::default(),
-            gui: Gui::default(),
             layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
@@ -836,7 +801,6 @@ mod tests {
                 },
                 physical: Physical::default(),
                 plugins: Plugins::default(),
-                gui: Gui::default(),
                 layout: Layout::default(),
             },
         )
@@ -1013,7 +977,6 @@ mod tests {
                 },
             },
             plugins: Plugins::default(),
-            gui: Gui::default(),
             layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
@@ -1054,7 +1017,6 @@ mod tests {
                     },
                 },
                 plugins: Plugins::default(),
-                gui: Gui::default(),
                 layout: Layout::default(),
             },
         )
@@ -1170,7 +1132,6 @@ mod tests {
                 dir: Some(PathBuf::from("/custom/plugins")),
                 enabled: false,
             },
-            gui: Gui::default(),
             layout: Layout::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
@@ -1184,66 +1145,18 @@ mod tests {
         assert_eq!(loaded.plugins, settings.plugins);
     }
 
-    // ── gpu-graph-window 3.2: [gui] graph_window ──
+    // ── removed `[gui] graph_window`: unknown keys stay tolerated ──
 
     #[test]
-    fn gui_defaults_when_table_missing() {
-        let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
-        let loaded = load_at(&dir);
-        assert_eq!(loaded.gui, Gui::default());
-        assert!(!loaded.gui.graph_window);
-        assert_eq!(loaded.theme, "mono");
-    }
-
-    #[test]
-    fn gui_graph_window_parses() {
+    fn unknown_gui_table_is_ignored() {
+        // The `[gui] graph_window` toggle was removed. A user config that still
+        // carries it must load without error: serde ignores unknown fields.
         let dir = TempDir::new().unwrap();
         let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
             "theme = \"classic\"\n[gui]\ngraph_window = true\n",
-        )
-        .unwrap();
-        let loaded = load_at(&dir);
-        assert!(loaded.gui.graph_window);
-    }
-
-    #[test]
-    fn gui_save_round_trips_through_load() {
-        let dir = TempDir::new().unwrap();
-        let settings = Settings {
-            theme: "classic".to_string(),
-            labels: Labels::default(),
-            latency: Latency::default(),
-            physical: Physical::default(),
-            plugins: Plugins::default(),
-            gui: Gui { graph_window: true },
-            layout: Layout::default(),
-        };
-        save_to_dir(dir.path(), &settings).unwrap();
-        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
-        assert!(body.contains("[gui]"), "body: {body}");
-        assert!(body.contains("graph_window = true"), "body: {body}");
-        let loaded = load_from(
-            &dir.path().join(CONFIG_FILE_NAME),
-            &test_canonical,
-            &TEST_CATALOG,
-        );
-        assert_eq!(loaded.gui, settings.gui);
-    }
-
-    #[test]
-    fn malformed_gui_value_falls_back_to_defaults() {
-        let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(
-            cfg_dir.join(CONFIG_FILE_NAME),
-            "theme = \"classic\"\n[gui]\ngraph_window = \"yes\"\n",
         )
         .unwrap();
         assert_eq!(load_at(&dir), Settings::default());
@@ -1359,7 +1272,6 @@ mod tests {
             latency: Latency::default(),
             physical: Physical::default(),
             plugins: Plugins::default(),
-            gui: Gui::default(),
             layout: Layout {
                 mode: LayoutMode::Force,
                 ordering: LayoutOrdering::Barycenter,

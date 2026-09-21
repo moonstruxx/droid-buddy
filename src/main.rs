@@ -54,10 +54,6 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     app.physical_show_skeleton = settings.physical.show_skeleton;
     app.physical_rack_spec = settings.physical.rack.clone();
 
-    // [gui] graph_window: seed the GPU-window preference (gpu-graph-window D6);
-    // matching App::new's default.
-    app.graph_window_enabled = settings.gui.graph_window;
-
     // [layout] mode/ordering: seed the graph-arrangement preference
     // (graph-column-layout D5); matching App::new's defaults.
     app.layout_mode = settings.layout.mode;
@@ -172,23 +168,16 @@ mod windowed {
     }
 
     impl AppHandler {
-        /// Consume the handler's pending GPU-graph-window request (design D6):
-        /// the handler cannot reach `GraphWindow` (owned by this loop), so it
-        /// queues Open/Toggle on `App` and the loop performs the matching
-        /// open/close on its next frame. A failed open (headless display)
-        /// leaves the window closed; the app keeps running.
+        /// Consume the handler's pending native-window request: the handler
+        /// cannot reach `GraphWindow` (owned by this loop), so it queues `Open`
+        /// on `App` and the loop opens the window on its next frame. A failed
+        /// open (headless display) leaves the window closed; the app keeps
+        /// running.
         fn act_on_window_request(&mut self, event_loop: &ActiveEventLoop) {
             match self.app.take_graph_window_request() {
                 GraphWindowRequest::None => {}
                 GraphWindowRequest::Open => {
                     if !self.window.is_open() {
-                        self.open_window(event_loop);
-                    }
-                }
-                GraphWindowRequest::Toggle => {
-                    if self.window.is_open() {
-                        self.window.close();
-                    } else {
                         self.open_window(event_loop);
                     }
                 }
@@ -350,28 +339,12 @@ mod windowed {
     }
 }
 
-/// `seed_app` wires the `[gui] graph_window` preference into `App` (design D6).
+/// `seed_app` wires the `[physical]`, `[layout]` and `[labels]` sections into
+/// `App` (design D6).
 #[cfg(test)]
 mod tests {
     use super::*;
     use droid_tui::app::{FocusSlot, ViewType};
-
-    #[test]
-    fn seed_app_enables_graph_window_from_setting() {
-        let mut settings = config::Settings::default();
-        settings.gui.graph_window = true;
-        let mut app = App::new();
-        seed_app(&mut app, &settings);
-        assert!(app.graph_window_enabled);
-    }
-
-    #[test]
-    fn seed_app_keeps_graph_window_disabled_by_default() {
-        let settings = config::Settings::default();
-        let mut app = App::new();
-        seed_app(&mut app, &settings);
-        assert!(!app.graph_window_enabled);
-    }
 
     #[test]
     fn seed_app_seeds_layout_mode_and_ordering_from_settings() {

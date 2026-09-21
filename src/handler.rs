@@ -290,7 +290,6 @@ pub fn handle_window_key_event(
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::app::GraphWindowRequest;
 use crate::app::{
     is_entry_selectable, is_picker_parent_entry, App, FocusSlot, GraphDrag, PrefixState,
     SourceViewMode, ViewType, ViewerFocus,
@@ -554,17 +553,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             KeyCode::Char('g') => {
                 // `g g` opens the graph surface, mirroring `g v` (design D7).
-                if app.graph_window_enabled {
-                    // `[gui] graph_window = true`: build the graph and open
-                    // the GPU graph window instead of the terminal tile
-                    // (gpu-graph-window D6); the windowed loop in main.rs
-                    // consumes the request next frame. `build_graph_state`
-                    // (not `open_graph`) keeps the embedded tile closed.
-                    app.build_graph_state();
-                    app.request_graph_window(GraphWindowRequest::Open);
-                    app.prefix = None;
-                    return false;
-                }
                 app.open_graph();
                 // Tiled open path: `open_graph` registers the slot; focus
                 // follows it so Esc/keys act on the graph pane.
@@ -608,17 +596,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // App-state lane): SourceViewer + Graph slots with the
                 // FULL/FILTERED split, focus starting on Panels.
                 app.enter_quad();
-                app.prefix = None;
-                return false;
-            }
-            KeyCode::Char('w') => {
-                // `g w` toggles the GPU graph window (gpu-graph-window D6).
-                // The handler cannot reach GraphWindow (owned by the windowed
-                // loop in main.rs), so it records a request the loop consumes
-                // on its next frame.
-                {
-                    app.request_graph_window(GraphWindowRequest::Toggle);
-                }
                 app.prefix = None;
                 return false;
             }
@@ -3601,24 +3578,6 @@ mod tests {
         assert!(app.prefix.is_none());
     }
     #[test]
-    fn gg_with_graph_window_enabled_builds_the_graph() {
-        // Regression (gpu-graph-window follow-up): with `[gui] graph_window =
-        // true`, `g g` must build the graph exactly like the embedded mode
-        // before recording the window request; previously the window stayed
-        // empty because the branch skipped the build. The terminal tile stays
-        // closed: the desktop window replaces it.
-        let mut app = app_with_fixture();
-        app.graph_window_enabled = true;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        let graph = app.graph.as_ref().expect("g g builds the graph");
-        assert!(!graph.nodes.is_empty());
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
-        assert!(app.prefix.is_none());
-        assert!(!app.showing_graph, "window replaces the terminal tile");
-        assert!(app.tile_stack.slots.is_empty());
-    }
-    #[test]
     fn g_then_v_initial_position_bof_when_no_selection() {
         let mut app = app_with_source_navigation();
         // No selection -> BOF
@@ -3766,69 +3725,13 @@ mod tests {
         );
     }
 
-    // `g w` / `g g` GPU-graph-window keys (gpu-graph-window 3.2). The handler
-    // only records requests; the windowed loop in main.rs consumes them.
-
     #[test]
-    fn g_w_queues_window_toggle_request() {
-        let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(KeyCode::Char('w')), &mut app);
-        assert!(!quit);
-        assert!(app.prefix.is_none());
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
-        // One-shot: the consumer's poll-and-clear leaves nothing behind.
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
-    }
-
-    #[test]
-    fn g_w_toggle_cycles_open_close_open_without_crashing() {
-        // Regression: Toggle → Toggle → Toggle must not corrupt the request queue.
-        // Each g+w pair queues one Toggle; the consumer clears it on the next
-        // poll. Three cycles: open, close, open.
-        let mut app = app_with_fixture();
-
-        // Cycle 1: open
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('w')), &mut app);
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
-
-        // Cycle 2: close
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('w')), &mut app);
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
-
-        // Cycle 3: reopen — must not panic or produce a stale request
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('w')), &mut app);
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Toggle);
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
-
-        assert!(app.prefix.is_none(), "prefix cleared after g w");
-    }
-
-    #[test]
-    fn g_g_with_window_enabled_queues_open_without_tile() {
-        let mut app = app_with_fixture();
-        app.graph_window_enabled = true;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(!quit);
-        assert!(!app.showing_graph, "window replaces the terminal tile");
-        assert!(app.tile_stack.slots.is_empty());
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::Open);
-    }
-
-    #[test]
-    fn g_g_with_window_disabled_still_opens_terminal_tile() {
+    fn g_g_opens_graph_tile() {
         let mut app = app_with_fixture();
         handle_event(key(KeyCode::Char('g')), &mut app);
         let quit = handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(!quit);
-        assert!(app.showing_graph, "default: `g g` opens the terminal tile");
-        assert_eq!(app.take_graph_window_request(), GraphWindowRequest::None);
+        assert!(app.showing_graph, "`g g` opens the graph tile");
     }
 
     #[test]

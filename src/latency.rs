@@ -383,7 +383,6 @@ mod tests {
             },
             physical: crate::config::Physical::default(),
             plugins: crate::config::Plugins::default(),
-            gui: crate::config::Gui::default(),
             layout: crate::config::Layout::default(),
         };
         let model = CostModel::from_config(&settings);
