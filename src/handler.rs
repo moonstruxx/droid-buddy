@@ -2020,6 +2020,27 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     });
     app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
 
+    // Marquee commit (ibu-marquee-selection): the window already highlighted
+    // `marquee.nodes` in scene order, so the first enclosed index is the
+    // primary. It arrives in the same window-space mapping the click path
+    // uses (pane origin + pixel_to_world), matching the drawn highlight.
+    // Empty marquee is a no-op. The guard keeps a held drag from churning
+    // scroll/cursor via repeated `select_circuit` calls.
+    if let Some(marquee) = frame.marquee.as_ref() {
+        if let Some(&first) = marquee.nodes.first() {
+            if let Some(node_id) = app
+                .graph
+                .as_ref()
+                .and_then(|g| g.nodes.get(first))
+                .map(|n| n.id.clone())
+            {
+                if app.selected_circuit() != Some(&node_id) {
+                    app.select_circuit(node_id);
+                }
+            }
+        }
+    }
+
     if frame.primary_pressed {
         let Some(node_index) = hit else {
             app.hovered_graph_node = None;
@@ -5071,6 +5092,73 @@ mod tests {
             app.tile_stack.is_open(ViewType::SourceViewer),
             "window press opens a tiled viewer slot"
         );
+    }
+
+    #[test]
+    fn graph_window_frame_marquee_selects_primary_and_opens_viewer() {
+        use crate::gui::{MarqueeSelection, WindowFrame};
+        let mut app = app_with_graph_window();
+        let nodes = &app.graph.as_ref().unwrap().nodes;
+        assert!(nodes.len() >= 2, "fixture needs two nodes for a marquee");
+        let primary = nodes[1].id.clone();
+        handle_graph_window_frame(
+            &WindowFrame {
+                marquee: Some(MarqueeSelection {
+                    rect: (0.0, 0.0, 400.0, 200.0),
+                    nodes: vec![1, 0],
+                }),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.selected_circuit(), Some(&primary));
+        assert!(app.showing_viewer);
+        assert!(
+            app.tile_stack.is_open(ViewType::SourceViewer),
+            "marquee commit opens a tiled viewer slot"
+        );
+    }
+
+    #[test]
+    fn graph_window_frame_marquee_repeat_is_idempotent() {
+        use crate::gui::{MarqueeSelection, WindowFrame};
+        let mut app = app_with_graph_window();
+        let frame = WindowFrame {
+            marquee: Some(MarqueeSelection {
+                rect: (0.0, 0.0, 400.0, 200.0),
+                nodes: vec![1, 0],
+            }),
+            ..Default::default()
+        };
+        handle_graph_window_frame(&frame, &mut app);
+        // A held drag must not churn viewer state: perturb the committed
+        // scroll/cursor, then repeat the identical frame.
+        app.source_scroll = 9999;
+        app.occurrence_cursor = 7;
+        let selected = app.selected_circuit().cloned();
+        handle_graph_window_frame(&frame, &mut app);
+        assert_eq!(app.selected_circuit(), selected.as_ref());
+        assert_eq!(app.source_scroll, 9999);
+        assert_eq!(app.occurrence_cursor, 7);
+    }
+
+    #[test]
+    fn graph_window_frame_empty_marquee_leaves_selection() {
+        use crate::gui::{MarqueeSelection, WindowFrame};
+        let mut app = app_with_graph_window();
+        assert_eq!(app.selected_circuit(), None);
+        handle_graph_window_frame(
+            &WindowFrame {
+                marquee: Some(MarqueeSelection {
+                    rect: (0.0, 0.0, 400.0, 200.0),
+                    nodes: Vec::new(),
+                }),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.selected_circuit(), None);
+        assert!(!app.showing_viewer);
     }
 
     // ── 5.1 regression anchoring inside handler.rs (fixtures/source_navigation.ini) ──
