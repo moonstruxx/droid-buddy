@@ -1,0 +1,3 @@
+Monitoring signals from all objects owned by org.freedesktop.portal.Desktop
+The name org.freedesktop.portal.Desktop is owned by :1.58
+/org/gtk/gio/DesktopAppInfo: org.gtk.gio.DesktopAppInfo.Launched (b'/usr/share/applications/org.gnome.Evolution.desktop', '', int64 1394350, ['mailto:support@can-doc.de'], {'startup-id': <'745f7a6f-178c-4fdf-a8f9-a4e9d8c7287c_TIME0'>, 'origin-prgname': <b'/usr/lib/xdg-desktop-portal'>, 'origin-pid': <int64 4663>})

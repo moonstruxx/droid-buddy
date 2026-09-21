@@ -1,0 +1,45 @@
+[driver] app pid=2613263 bin=/home/bjoern/projects/droid_tui/target/release/droid_tui
+[driver] window=12582916
+[driver] rdp session=/org/freedesktop/portal/desktop/session/1_2595/dts3074762684
+[driver] 0_baseline -> /home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/shots/0_baseline.png
+[driver]   pix (2560, 1600, 23126, [('#404040', 11120), ('#202020', 5098), ('#e0e0e0', 4766), ('#00e000', 985), ('#e00000', 315)])
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:73: PyGIWarning: Atspi was imported without specifying a version first. Use gi.require_version('Atspi', '2.0') before import to ensure that the right version gets loaded.
+  from gi.repository import Atspi
+
+(process:2613224): dbind-WARNING **: 03:26:04.448: AT-SPI: Unable to open bus connection: Failed to connect to socket /run/user/1000/at-spi2-I4NJV3/socket: No such file or directory
+
+(process:2613224): dbind-WARNING **: 03:26:04.449: AT-SPI: Unable to open bus connection: Failed to connect to socket /run/user/1000/at-spi2-I9PJV3/socket: No such file or directory
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:83: DeprecationWarning: Atspi.Accessible.get_text is deprecated
+  t = obj.get_text(0, -1)
+[driver]   atspi[0]: 
+[driver] 1_gg_graph_open -> /home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/shots/1_gg_graph_open.png
+[driver]   pix (2560, 1600, 23126, [('#404040', 11120), ('#202020', 5098), ('#e0e0e0', 4766), ('#00e000', 985), ('#e00000', 315)])
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:133: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  changed = sum(1 for p in diff.getdata() if sum(p) > 40)
+[driver]   diff-vs-prev (None, 0)
+[driver]   atspi[0]: 
+[driver] 2_c_center -> /home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/shots/2_c_center.png
+[driver]   pix (2560, 1600, 9113, [('#e0e0e0', 5808), ('#404040', 1804), ('#202020', 398), ('#e00000', 315), ('#00e000', 182)])
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:133: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  changed = sum(1 for p in diff.getdata() if sum(p) > 40)
+[driver]   diff-vs-prev ((1536, 0, 1908, 1600), 148137)
+[driver]   atspi[0]: 
+[driver] 3_C_shiftc_fit -> /home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/shots/3_C_shiftc_fit.png
+[driver]   pix (2560, 1600, 9312, [('#e0e0e0', 5990), ('#404040', 1804), ('#202020', 398), ('#e00000', 315), ('#00e000', 182)])
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:133: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  changed = sum(1 for p in diff.getdata() if sum(p) > 40)
+[driver]   diff-vs-prev ((1564, 1348, 1853, 1572), 3155)
+[driver]   atspi[0]: 
+[driver] 4_minus_x6_zoomout -> /home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/shots/4_minus_x6_zoomout.png
+[driver]   pix (2560, 1600, 5088, [('#404040', 1804), ('#e0e0e0', 1802), ('#202020', 398), ('#e00000', 315), ('#00e000', 182)])
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:133: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  changed = sum(1 for p in diff.getdata() if sum(p) > 40)
+[driver]   diff-vs-prev ((1556, 1340, 1916, 1580), 36850)
+[driver]   atspi[0]: 
+[driver] 5_gc_latency -> /home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/shots/5_gc_latency.png
+[driver]   pix (2560, 1600, 5088, [('#404040', 1804), ('#e0e0e0', 1802), ('#202020', 398), ('#e00000', 315), ('#00e000', 182)])
+/home/bjoern/projects/droid_tui/.opencode/.tmp/gpc-verify/verify_gpc.py:133: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  changed = sum(1 for p in diff.getdata() if sum(p) > 40)
+[driver]   diff-vs-prev (None, 0)
+[driver]   atspi[0]: 
+[driver] done

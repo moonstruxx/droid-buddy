@@ -1,0 +1,14 @@
+docs(design): correct cell anatomy to the shared compact renderer
+
+Component Anatomy described a boxed LED-cell path the renderer does not
+have. Panels and the physical view draw the same compact two-line cell
+(glyph plus label row, state row, fader strip), so the section now says
+that and the glyph table matches cell_visuals: LED uses the filled and
+hollow disc, CV I/O use the direction triangles, switch adds the value
+glyph. The panels label note now states that the panels pane resolves
+display_label while the physical view draws the parsed component label.
+
+Consolidate the 14 historical changelog footers into one current entry.
+
+Add SPEC_VS_CODE_AUDIT.md (2026-09-19), the spec-vs-code divergence
+catalogue that drives the follow-on fixes.
