@@ -145,7 +145,7 @@ The interface reads like an instrument panel: each physical DROID controller (P2
 ## Design Intent
 
 - **Mirror the hardware.** Components are grouped by physical controller and laid out in physical order (left-to-right, top-to-bottom), so a user who knows the rack can find a control by where it physically lives. The physical view is the default map; the panel view is its compact representation.
-- **State is always visible.** Every component shows its current state inline: buttons and switches show ON/OFF with filled/outline glyphs, knobs and encoders show a percentage, faders show a vertical track plus an amber LED bar, CV I/O shows direction.
+- **State is always visible.** Every component shows its current state inline: buttons and switches show ON/OFF with filled/outline glyphs, knobs and encoders show a percentage, faders show a vertical track plus a bar in the `fader_led_bar` token, CV I/O shows direction.
 - **Color is semantic, not decorative.** Each component kind has one color and each shift group has one color. The same color means the same thing everywhere it appears, and a theme swap recolors every surface at once.
 - **Shift is a spotlight.** When a shift key (1-4) is held, panels containing that shift group get a bold colored border with a `[SHIFT n]` marker; all other panels dim. The status bar repeats the active shift in its group color.
 - **Modifier is a wash.** A modifier hardware token tints every influenced cell with a wash in `hash(token)%16` hue; unaffected cells dim. Pressing the mouse down on a component holds the token while the button stays down, while `m` on the hovered (or selected) component, Ctrl+Click, or Ctrl+Shift+Click latches it; the latch survives release until `Esc` or a second toggle on the same token. The wash follows the union of the held and latched tokens. The same hue tints source `select` spans and graph edges/nodes. Rendering priority is `graph_edge_error` (red) > modifier hue > cable kind; shift border and modifier wash coexist.
@@ -169,31 +169,26 @@ The choice persists alongside label and latency settings. A missing file silentl
 
 Each component occupies a compact cell. A scale factor cycles through 75 percent, 100 percent, 150 percent, and 200 percent with wrapping, reported as `Scaling: N%`; the 75 percent floor keeps module cells boxable. The physical view rescales cells with zoom; the wrapped panel view keeps a fixed cell geometry and the hit rects match what is drawn.
 
-Components without a parse-time LED association render as two-line text cells:
+Every component renders as a compact two-line cell. The panels pane and the physical view share the same cell paint routine, so a component looks the same on both surfaces:
 
-- **Row 1**: a state glyph followed by the component label (for example `● TRIG A`).
-- **Row 2**: the state text (ON/OFF, percentage, CV direction), rendered in muted gray.
-
-**Boxed cells for LED-associated components.** When a section declares an LED association (a bare `led = L.N` entry or a numbered `ledN = L.M` that shares its numeric suffix with a same-suffix element entry such as `buttonN`, `potN`, `encoderN`, `switchN`, or `faderN`), the component renders as one bordered box filling its full cell:
-
-- The box border uses the owning component's kind color.
-- The element symbol and label live in the box's top title row; the single interior row holds the element state plus the LED glyph (`◉` lit, `○` unlit) reflecting the associated LED's live state.
-- Hover applies the same emphasis to box content and border that text cells use.
-- Components whose LED id does not resolve fall back to the unlit glyph.
-- LEDs referenced this way are never rendered as standalone grid cells; only unreferenced LEDs appear on their own.
+- **Row 1**: a state glyph, followed by the component label when the cell is wide enough (for example `● TRIG A`).
+- **Row 2**: the state text (ON/OFF, percentage, CV direction) in muted gray, at a smaller proportional size. The row draws only when the cell is tall enough for both lines; short cells keep the glyph row alone.
+- Fader-marked knobs and encoders skip the two rows and draw a bottom-up strip filled to the component's value in the `fader_led_bar` token.
 - Over-long labels truncate with an ellipsis while cell geometry and hit rects stay unchanged.
+
+The parser records LED associations (a bare `led = L.N` entry, or a numbered `ledN = L.M` paired by numeric suffix with a same-suffix element entry such as `buttonN`, `potN`, `encoderN`, `switchN`, or `faderN`). That association feeds the parsed component data; it does not add a border or an LED glyph to the element's own cell.
 
 Glyphs by kind:
 
 | Kind | On / value | Off / idle |
 |---|---|---|
 | Button | `●` | `○` |
-| Switch | `▣` | `□` |
-| LED | `◉` | `○` |
+| Switch | `▣` for ON, `◉` + percentage for a value | `□` |
+| LED | `●` | `○` |
 | Knob / Encoder | `◉` + percentage | `◉` + `---` |
-| Fader | vertical track + amber bar | track at zero |
-| CV in | `→` | `→` |
-| CV out | `←` | `←` |
+| Fader | `▮` + track filled to value | `▮` + empty track |
+| CV in | `◀` `CV IN` | `◀` `CV IN` |
+| CV out | `▶` `CV OUT` | `▶` `CV OUT` |
 
 ## Panels
 
@@ -203,7 +198,7 @@ Glyphs by kind:
 - Panel borders are dark gray by default; the focused pane uses the focus-border token at a heavier stroke.
 - With a shift active: panels containing the active shift group get a bold border in the group color and a `[SHIFT n]` title marker; all other panels dim.
 - With a modifier active: influenced cells render with a background wash in the modifier hue; unaffected cells dim slightly. The wash follows the held token while the mouse button is down and the latched token (`m`, Ctrl+Click) after release; `Esc` clears the latch. Modifier wash is orthogonal to shift borders, so both can coexist.
-- With labels: hardware panel cells show the resolved display label; source headers and graph node titles show the circuit label override when present. The label store, active shift layer, and layer config are seeded into `App` at startup, so painters resolve labels from app state and never re-read the config file per frame. The centered single-field edit overlay reuses the same modifier hue for its hint.
+- With labels: hardware cells in the panels pane show the resolved display label; the physical view draws the component's own label; source headers and graph node titles show the circuit label override when present. The label store, active shift layer, and layer config are seeded into `App` at startup, so painters resolve labels from app state and never re-read the config file per frame. The centered single-field edit overlay reuses the same modifier hue for its hint.
 
 ## Physical View
 
@@ -212,7 +207,7 @@ Glyphs by kind:
 - **Zoom**: `+` and `-` cycle the presets 75 percent, 100 percent, 150 percent, and 200 percent with wrap-around; the status bar reports `Scaling: X%`. Zoom rescales the physical cells.
 - **Pan**: arrow keys pan the rack when it overflows the main area and fall back to panel navigation when it fits; the mouse wheel pans on overflow while a wheel over a knob or fader still adjusts its value when no overflow forces panning.
 - **Rack definition**: the rack is an ordered list of rows plus optional mount sections with auto-pack and per-module row overrides; absent config keeps a single-row case wide enough for the whole chain.
-- **Element state rendering**: each element renders its live state on its physical-view cell (buttons and switches with a glyph, knobs and encoders with a percentage, faders with a vertical track and an amber LED bar, CV I/O with direction). Adjoined element-cell hit rects are clamped at draw time so distinct cells never publish overlapping rects at any zoom preset.
+- **Element state rendering**: each element renders its live state on its physical-view cell (buttons and switches with a glyph, knobs and encoders with a percentage, faders with a vertical track and a bar in the `fader_led_bar` token, CV I/O with direction). Adjoined element-cell hit rects are clamped at draw time so distinct cells never publish overlapping rects at any zoom preset.
 - **Border abutment and switch placement**: adjacent module borders abut exactly at every zoom preset; switch cells place per the controller's geometry data and never collapse onto a neighboring control's cell when geometry lacks a matching switch cell.
 
 ## Status Bar
@@ -309,17 +304,4 @@ With no patch loaded, the main area shows the centered muted prompt `Press 'l' t
 
 Face correctness is proven by headless egui assertions: each surface's paint routine is driven through a plain `egui::Context` and the emitted shape and label lists are asserted for geometry and theme colors. The per-surface shape and label tests live with the painting code and the token-resolution matrix lives with the theme.
 
-<!-- Last updated: 2026-09-05 · tiled-window-manager: main band is a tiled layout — full-height left panel pane + right column of up to 3 slots (graph / source viewer / physical / optimizer), FocusSlot focus routing with pane_focus_border/pane_unfocused_border tokens, Tab/Shift+Tab carousel, `\` vertical split in the left pane (quad replacement), `[`/`]` left/right split ratio (main_split_ratio 0.6, 30–70 %), Alt+[ / Alt+] cable tension on the graph pane, +/- zoom focused pane / Shift++/Shift+- other pane, narrow-terminal collapse <120 cols with "+N views hidden"; optimizer is a right-column pane (render_optimizer_pane) replacing the centered modal; viewer is a right-column slot; optimizer_modal_border superseded by pane focus tokens -->
-<!-- Last updated: 2026-09-03 · optimal-node-arrangement (gv5): graph surface nodes arrange in a layered (Sugiyama-style) layout — longest-path depth columns on x, within-layer order from deterministic barycenter crossing-minimization sweeps on y, coordinates on the GRID_SNAP grid (no jitter); the full solve is a bounded refinement (SOLVE_ITERATIONS 60) so the layered structure survives; parallel edges between the same two circuits normalize to one spring; cable tension still re-flows the refinement -->
-<!-- Last updated: 2026-09-02 · latency-optimizer-upgrades: extended optimizer strategy set (FAS-indegree first pass, multilevel coarsening + VNS with banner-group hints, SA with seeded PRNG — deterministic D9) + weighted slider objective (1−w)·Sum + w·max adjusted by [ / ] while the menu is open (status w = 0.N; candidates regenerate live) -->
-<!-- Last updated: 2026-08-31 · circuit-plugin-system: user TOML plugin files in $XDG_CONFIG_HOME/droid-tui/plugins/ (or [plugins] dir; [plugins] enabled=false disables) with [[circuit]] tables (name/category/ramsize + optional cable_kind/color + inputs/outputs with prefix/count/start_at) merged over the embedded schema (plugin wins on collision, warn-once shadow, malformed/missing-ramsize skipped) -->
-<!-- Last updated: 2026-08-30 · physical-scale-model: physical 1:1 mm view (grid model, `s` skeleton reference mode, `Scaling: X%` zoom presets, arrow/wheel pan, [physical]/[physical.rack] config) + physical_skeleton_* tokens + skeleton|full gallery rows and coincidence assertion -->
-<!-- Last updated: 2026-09-01 · graph-layout-rework: graph surface single-axis pipeline layout (topological-depth seed, cable-spring dominance), pinned tip + `p` pin/unpin + drag auto-pin that survive the solver, cluster cohesion + enclosing-rectangle rendering, width-first aspect-preserving camera fit (box + kitty), kitty-gfx default renderer with box-drawing fallback →
-<!-- Last updated: 2026-09-03 · graph-cable-tension: `[`/`]` on the graph surface lower/raise cable tension (solver spring stiffness, default 0.15, step 0.05, range [0.05, 0.5]) and re-solve the layout live; status reports `Cable tension: <value>`; determinism holds per tension value (same patch + same machine + same tension → same layout) -->
-<!-- Last updated: 2026-09-08 · register-jack-controller-nodes: graph surface draws hardware registers as nodes — controller nodes (P2B8 #1-style titles, graph_node_controller green), input/output-jack nodes (I1/O3 titles, graph_node_jack_input cyan / graph_node_jack_output green), register edges (graph_edge_register dark gray) directed by the catalog (outputs/led write, inputs read) with PBESLR letters resolving to declared controllers and unmatched letters falling back to master jacks; NodeKind enum in graph.rs, NodeId enum in patch.rs -->
-<!-- Last updated: 2026-09-01 · graph-kitty-rendering: graph surface renders as an anti-aliased kitty image when the terminal supports kitty graphics + feature on (src/graph_render.rs tiny-skia/fontdue rasterizer + GraphCamera, src/kitty_protocol.rs emitter), falling back to box-drawing otherwise; image placed z=-1 under the text; every pixel color derives from theme tokens via Theme::rgb(Color) with the existing error>diff>ramp>kind precedence; interactions and graph_node_rects preserved. -->
-<!-- Last updated: 2026-08-28 · latency-optimized-patch-generation: CostModel (AVG ∝ ramsize, [latency] per_circuit overrides) + forward-loop latency ramp (graph_edge_latency_0–_4, c toggle) + g o optimizer menu (optimizer_modal_border/optimizer_selected_bg; preview/restore/export to <stem>-latopt.ini) -->
-<!-- Last updated: 2026-09-12 · select-state-filtering + dependency-walker-subgraph: `g s` centered select-state overlay (Select state (N), j/k navigate, [/]/Enter cycle candidate values, Esc clears) listing discovered Register/Cable signals with inferred candidate values (1V = 0.1, left-to-right no precedence); classification Selected/NotSelected/Unknown with NotSelected dim via graph_node_dim + controller register-edge gating (shared cross-controller pair kept) and optional hide_unselected (off in menu); status `Select state: N selected / M unselected / K unknown`; `f` on the graph pane toggles the upstream-dependency subgraph filter (reversed-edge BFS from the hovered/selected node, subset solved as its own layout, Esc clears before slot close, survives rebuilds, clears when the root vanishes); fixtures graph_select_state.ini / graph_dependency_walk.ini in the graph-surface matrix -->
-<!-- Last updated: 2026-09-14 · native-egui-rendering: native winit/egui/wgpu window shell replaces the terminal stack; all surfaces paint via egui Painter/Color32 through Theme::egui_color/egui_from_rgb (single Color→RGB hop, deterministic, every token covered); frontmatter now enumerates the full token set including picker favourites, graph canvas/fill, per-kind node frames, register edge, latency ramp, pane borders, and skeleton/optimizer tokens; typography and spacing updated to egui point metrics -->
-<!-- Last updated: 2026-09-21 · orientation-removal + modifier-wash + graph-pane-origin + g-w-removal: panels always flow left-to-right (no orientation toggle or status segment); the modifier wash covers the held and latched token's influenced cells with dimmed neighbours, resolved from App-seeded labels; the graph scene paints from the pane rect with window input mapped through the pane origin; `g w` is gone — the desktop graph window opens at startup only. -->
-<!-- Last updated: 2026-09-18 · graph-column-layout: the signal-flow graph arranges in a deterministic column layout by default (`[layout] mode = "column"`) — dense-normalized circuit-depth columns with fixed outer controller/jack columns, width-aware blocks, strict or barycenter within-column order (`[layout] ordering`), pins as fixed-position anchors, no force relaxation; `h` on the graph pane toggles to the retained force solver and back; cable tension stays a force-path control. -->
+<!-- Last updated: 2026-09-21 · changelog consolidated into this entry. Current state: native winit/egui/wgpu window; tiled main band (panels plus the right-column graph, source, physical, and optimizer slots) with pane focus tokens; deterministic column graph layout by default, force solver via `h` with pin anchors and cable tension on the force path; `g s` select-state filtering and `f` upstream-dependency filter; `g c` latency coloring; modifier wash for the held and latched token with dimmed neighbours; labels seeded on App from the `[labels]` policy; panels flow left to right (no orientation toggle); the desktop graph window opens at startup only (`g w` removed). Component anchors above document current behavior. -->
