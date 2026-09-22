@@ -488,12 +488,14 @@ pub enum SourceViewMode {
     Prettified,
 }
 
-/// Right-column view slot kind (change `tiled-window-manager`, D1).
+/// Right-column view slot kind (change `tiled-window-manager`, D1); the
+/// module UI is a view too (`Panels`, change `pane-class-layout`, D2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewType {
     Graph,
     SourceViewer,
     Physical,
+    Panels,
     Optimizer,
 }
 
@@ -1466,7 +1468,7 @@ impl App {
                 self.recompute_influence();
             }
             ViewType::SourceViewer => self.showing_viewer = true,
-            ViewType::Physical | ViewType::Optimizer => {}
+            ViewType::Physical | ViewType::Optimizer | ViewType::Panels => {}
         }
         self.tile_stack.focus = FocusSlot::Slot(idx);
     }
@@ -1494,6 +1496,7 @@ impl App {
                 self.quad_note_view_closed(ViewType::SourceViewer);
             }
             ViewType::Physical => self.tile_stack.close(ViewType::Physical),
+            ViewType::Panels => {}
         }
     }
 
@@ -1560,7 +1563,7 @@ impl App {
                 self.recompute_influence();
             }
             ViewType::SourceViewer => self.showing_viewer = true,
-            ViewType::Physical | ViewType::Optimizer => {}
+            ViewType::Physical | ViewType::Optimizer | ViewType::Panels => {}
         }
     }
 
@@ -1705,7 +1708,7 @@ impl App {
                 self.hovered_graph_node = None;
             }
             ViewType::SourceViewer => self.showing_viewer = false,
-            ViewType::Physical => {}
+            ViewType::Physical | ViewType::Panels => {}
             ViewType::Optimizer => self.drop_optimizer_state(),
         }
         self.quad_note_view_closed(view);

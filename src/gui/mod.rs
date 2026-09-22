@@ -748,8 +748,10 @@ fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                     t,
                 );
             }
-            // The optimizer renders as an overlay (`paint_overlays`).
-            crate::app::ViewType::Optimizer => {}
+            // Not tile views in the legacy painter: the optimizer renders as
+            // an overlay (`paint_overlays`) and the module UI is the always-on
+            // left pane. `paint_panes` (task 2.1) replaces this dispatch.
+            crate::app::ViewType::Optimizer | crate::app::ViewType::Panels => {}
         }
     }
 }
