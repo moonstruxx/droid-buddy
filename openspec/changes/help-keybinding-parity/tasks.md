@@ -9,7 +9,7 @@
 
 ## 2. Parity tests
 
-- [ ] 2.1 Extend the `help.rs` table tests so each view's rows assert the keys added/corrected in tasks 1.1-1.4 (the existing `keybindings_reflect_graph_center_fit_and_g_c_chord` and `keybindings_include_carousel_key` tests set the pattern); verify with `cargo test --lib help` <!-- agent: horst-engineer.build, depends_on: [1.4], touches: [src/help.rs] -->
+- [x] 2.1 Extend the `help.rs` table tests so each view's rows assert the keys added/corrected in tasks 1.1-1.4 (the existing `keybindings_reflect_graph_center_fit_and_g_c_chord` and `keybindings_include_carousel_key` tests set the pattern); verify with `cargo test --lib help` <!-- agent: horst-engineer.build, depends_on: [1.4], touches: [src/help.rs] -->
 - [ ] 2.2 Add a handler-side parity test in `src/handler.rs` pinning that `?` opens the modal and the keys added in 1.1-1.4 dispatch through `handle_event` without being eaten by an earlier branch (mirror `question_mark_opens_help_from_every_view`); verify with `cargo test --lib handler` <!-- agent: horst-engineer.build, depends_on: [2.1], touches: [src/handler.rs] -->
 
 ## 3. Verification gate

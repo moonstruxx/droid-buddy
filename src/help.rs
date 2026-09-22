@@ -300,6 +300,24 @@ mod tests {
     }
 
     #[test]
+    fn keybindings_reflect_panels_surface() {
+        // Change `help-keybinding-parity` task 1.1: the Panels table lists the
+        // left-pane split toggle, the select-state chord, and pane-focus cycling.
+        let panels = keybindings(HelpView::Panels);
+        assert!(panels.contains(&("\\", "toggle left-pane vertical split")));
+        assert!(panels.contains(&("g s", "open select-state menu")));
+        assert!(panels.contains(&("Tab/Shift+Tab", "cycle pane focus")));
+    }
+
+    #[test]
+    fn keybindings_reflect_picker_filter() {
+        // Change `help-keybinding-parity` task 1.4: the Picker table documents
+        // Ctrl+f for the filter, distinct from bare `f` (favourite toggle).
+        let picker = keybindings(HelpView::Picker);
+        assert!(picker.contains(&("Ctrl+f", "toggle filter")));
+    }
+
+    #[test]
     fn keybindings_reflect_graph_filters_and_tension_binding() {
         // Change `help-keybinding-parity` task 1.2: the graph table documents
         // the layout toggle, dependency/influence filters, the select-state
