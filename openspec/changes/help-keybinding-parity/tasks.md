@@ -14,4 +14,4 @@
 
 ## 3. Verification gate
 
-- [ ] 3.1 Run the full verification gate and confirm green: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` <!-- agent: rusty-engineer.fast, depends_on: [2.2], touches: [] -->
+- [x] 3.1 Run the full verification gate and confirm green: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` <!-- agent: rusty-engineer.fast, depends_on: [2.2], touches: [] -->
