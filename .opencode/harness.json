@@ -8,9 +8,9 @@
     "repo": "none"
   },
   "models": {
-    "plan": "opencode/deepseek-v4-flash",
-    "build": "opencode/deepseek-v4-flash",
-    "fast": "opencode/deepseek-v4-flash"
+    "plan": "opencode/deepseek-v4.1-flash",
+    "build": "opencode/deepseek-v4.1-flash",
+    "fast": "opencode/deepseek-v4.1-flash"
   },
   "agents": {
     "maxConcurrent": 3
