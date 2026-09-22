@@ -2698,6 +2698,153 @@ mod tests {
     }
 
     #[test]
+    fn help_parity_keys_dispatch_through_handle_event() {
+        // Task 2.2: every key synced into the help tables in 1.1-1.4 must
+        // reach its handler branch without being swallowed by an earlier one,
+        // and `?` must still open the modal over the surfaces those tables
+        // document.
+
+        // `?` opens the help modal over each surface whose table changed.
+        for (label, app) in [
+            ("panels", App::new()),
+            ("picker", {
+                let mut a = App::new();
+                a.showing_picker = true;
+                a
+            }),
+        ] {
+            let mut app = app;
+            handle_event(key(KeyCode::Char('?')), &mut app);
+            assert!(app.showing_help, "? must open help over {label}");
+        }
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "? must open help over the graph");
+        let mut app = app_with_source_navigation();
+        open_optimizer(&mut app);
+        handle_event(key(KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help, "? must open help over the optimizer");
+
+        // Panels: `\` toggles the left-pane split, `g s` opens the select
+        // menu, and Tab/Shift+Tab cycle pane focus while a slot is open.
+        let mut app = App::new();
+        handle_event(key(KeyCode::Char('\\')), &mut app);
+        assert!(app.left_split_active, "\\ toggles the left split");
+        assert_eq!(app.status_message, "Left split on");
+
+        let mut app = app_with_select_patch();
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(app.select_state.is_some(), "g s opens the select menu");
+
+        let mut app = app_with_source_navigation();
+        open_viewer(&mut app);
+        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Panels,
+            "Tab cycles forward"
+        );
+        handle_event(shift_tab(), &mut app);
+        assert_eq!(
+            app.tile_stack.focus,
+            FocusSlot::Slot(0),
+            "Shift+Tab cycles backward"
+        );
+
+        // Graph: `h` toggles the arrangement, `f` the dependency filter, `i`
+        // the influence filter, and `Alt+[`/`Alt+]` the cable tension.
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        handle_event(key(KeyCode::Char('h')), &mut app);
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert_eq!(app.status_message, "Layout: force");
+
+        app.hovered_graph_node = Some(0);
+        handle_event(key(KeyCode::Char('f')), &mut app);
+        assert!(
+            app.dependency_root.is_some(),
+            "f engages the dependency filter"
+        );
+
+        app.select_component(String::from("B1.1"));
+        assert!(
+            app.influence.is_some(),
+            "fixture seeds an influence subtree"
+        );
+        handle_event(key(KeyCode::Char('i')), &mut app);
+        assert!(
+            app.influence_filter_active,
+            "i engages the influence filter"
+        );
+
+        // `g s` also opens the select menu from the graph surface.
+        let mut app = app_with_select_patch();
+        open_graph_slot(&mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('s')), &mut app);
+        assert!(
+            app.select_state.is_some(),
+            "g s opens the select menu on the graph"
+        );
+
+        // Tension is a force-path control: run the force solver so `Alt+[`/
+        // `Alt+]` re-solve and report.
+        let mut app = app_with_fixture();
+        app.layout_mode = crate::config::LayoutMode::Force;
+        open_graph_slot(&mut app);
+        let default = crate::layout::DEFAULT_TENSION;
+        handle_event(alt_key(KeyCode::Char(']')), &mut app);
+        assert_eq!(
+            app.tension,
+            default + crate::layout::TENSION_STEP,
+            "Alt+] raises cable tension"
+        );
+        handle_event(alt_key(KeyCode::Char('[')), &mut app);
+        assert_eq!(app.tension, default, "Alt+[ lowers cable tension");
+
+        // Physical: `+`/`-` cycle zoom presets, arrows pan an overflowing
+        // rack, and j/k navigate without panning.
+        let mut app = app_with_overflowing_rack();
+        handle_event(key(KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 1.5, "+ steps the zoom preset");
+        handle_event(key(KeyCode::Char('-')), &mut app);
+        assert_eq!(app.scale_factor, 1.0, "- steps the zoom preset back");
+        handle_event(key(KeyCode::Right), &mut app);
+        assert_eq!(app.physical_offset, (8.0, 0.0), "Right pans the rack");
+        handle_event(key(KeyCode::Left), &mut app);
+        assert_eq!(app.physical_offset, (0.0, 0.0), "Left pans back");
+        handle_event(key(KeyCode::Char('j')), &mut app);
+        assert_eq!(app.hovered_component, Some(1), "j navigates");
+        handle_event(key(KeyCode::Char('k')), &mut app);
+        assert_eq!(app.hovered_component, Some(0), "k navigates");
+
+        // Picker: Ctrl+f latches the filter.
+        let mut app = App::new();
+        app.showing_picker = true;
+        assert!(!handle_event(ctrl_f_key(), &mut app));
+        assert!(app.picker_filter_active, "Ctrl+f latches the picker filter");
+
+        // Optimizer: 0/1 snap the objective weight to its endpoints.
+        let mut app = app_with_source_navigation();
+        open_optimizer(&mut app);
+        handle_event(key(KeyCode::Char('1')), &mut app);
+        assert_eq!(
+            app.optimizer.as_ref().unwrap().weight,
+            1.0,
+            "1 snaps the weight to 1.0"
+        );
+        handle_event(key(KeyCode::Char('0')), &mut app);
+        assert_eq!(
+            app.optimizer.as_ref().unwrap().weight,
+            0.0,
+            "0 snaps the weight to 0.0"
+        );
+    }
+
+    #[test]
     fn esc_closes_help_and_returns_false() {
         let mut app = App::new();
         handle_event(key(KeyCode::Char('?')), &mut app);
