@@ -107,7 +107,7 @@ pub(crate) fn paint_validation_modal(
         Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
     );
     let _ = (w, h);
-    painter.rect_filled(rect, 8.0, rgb(t.muted).gamma_multiply(0.12));
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
     painter.rect(
         rect,
         8.0,
@@ -128,7 +128,7 @@ pub(crate) fn paint_validation_modal(
         egui::Align2::LEFT_TOP,
         &spec.hint,
         egui::FontId::proportional(10.0),
-        rgb(t.muted),
+        rgb(t.text),
     );
     let inner_top = rect.min.y + 24.0;
     let inner_bottom = rect.max.y - 18.0;
@@ -138,7 +138,7 @@ pub(crate) fn paint_validation_modal(
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(12.0),
-            rgb(t.muted),
+            rgb(t.text),
         );
         return ValidationFrame::default();
     }
@@ -222,7 +222,7 @@ pub(super) fn paint_select_menu(
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
         Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
     );
-    painter.rect_filled(rect, 8.0, rgb(t.muted).gamma_multiply(0.12));
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
     painter.rect(
         rect,
         8.0,
@@ -242,7 +242,7 @@ pub(super) fn paint_select_menu(
         egui::Align2::LEFT_TOP,
         &spec.hint,
         egui::FontId::proportional(10.0),
-        rgb(t.muted),
+        rgb(t.text),
     );
     if let Some(msg) = &spec.empty_message {
         painter.text(
@@ -250,7 +250,7 @@ pub(super) fn paint_select_menu(
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(12.0),
-            rgb(t.muted),
+            rgb(t.text),
         );
         return;
     }
@@ -267,8 +267,9 @@ pub(super) fn paint_select_menu(
             );
             painter.rect_filled(r, 2.0, rgb(t.validation_selected_bg));
         }
+        let prefix = if row.selected { "▶ " } else { "  " };
         let text = format!(
-            "{} [{}] x{}  candidates: {}  current: {}",
+            "{prefix}{} [{}] x{}  candidates: {}  current: {}",
             row.signal, row.kind_label, row.usage, row.candidates, row.current
         );
         painter.text(
@@ -292,7 +293,7 @@ pub(super) fn paint_help(painter: &Painter, canvas: Vec2, view: crate::help::Hel
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
         Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
     );
-    painter.rect_filled(rect, 8.0, rgb(t.muted).gamma_multiply(0.12));
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
     painter.rect(
         rect,
         8.0,
@@ -348,7 +349,7 @@ pub(super) fn paint_label_editor(
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
         Vec2::new(cw.min(canvas.x - 8.0), 80.0),
     );
-    painter.rect_filled(rect, 8.0, rgb(t.muted).gamma_multiply(0.18));
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
     painter.rect(
         rect,
         8.0,
@@ -400,73 +401,80 @@ pub(super) fn paint_diff_surface(
         return;
     };
     let t = crate::theme::active();
-    let rect = Rect::from_min_size(Pos2::ZERO, canvas);
-    painter.rect_filled(rect, 0.0, rgb(t.muted).gamma_multiply(0.06));
+    let origin = Pos2::ZERO;
+    // The dialog paints an opaque card anchored at the window origin. A
+    // full-canvas fill would hide the graph this overlay is coloring, and the
+    // old translucent wash left the text unreadable over the panels.
+    let sections: [(&str, &Vec<String>, Color); 3] = [
+        ("Added", &spec.added, t.graph_edge_diff_added),
+        ("Removed", &spec.removed, t.graph_edge_diff_removed),
+        ("Changed", &spec.changed, t.graph_edge_diff_added),
+    ];
+    let mut body_h = 0.0;
+    for (_, items, _) in &sections {
+        if items.is_empty() {
+            continue;
+        }
+        body_h += 16.0 + 14.0 * items.len().min(12) as f32 + 6.0;
+    }
+    let empty = body_h == 0.0;
+    let card_w = (canvas.x - 16.0)
+        .clamp(24.0 * 8.0, 80.0 * 8.0)
+        .min(canvas.x - 8.0);
+    let card_h = (26.0 + if empty { 24.0 } else { body_h } + 8.0).min(canvas.y - 8.0);
+    let card = Rect::from_min_size(origin + egui::vec2(4.0, 4.0), Vec2::new(card_w, card_h));
+    painter.rect_filled(card, 6.0, rgb(t.muted));
+    painter.rect(
+        card,
+        6.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, rgb(t.validation_modal_border)),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
-        rect.min + egui::vec2(8.0, 6.0),
+        card.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
         &spec.title,
         egui::FontId::proportional(12.0),
         rgb(t.text),
     );
-    let mut y = rect.min.y + 26.0;
-    let draw_section =
-        |painter: &Painter, y: &mut f32, label: &str, items: &[String], color: Color| {
-            if items.is_empty() {
-                return;
-            }
-            painter.text(
-                Pos2::new(rect.min.x + 8.0, *y),
-                egui::Align2::LEFT_TOP,
-                label,
-                egui::FontId::proportional(11.0),
-                rgb(color),
-            );
-            *y += 16.0;
-            for item in items.iter().take(12) {
-                if *y + 14.0 > rect.max.y - 8.0 {
-                    break;
-                }
-                painter.text(
-                    Pos2::new(rect.min.x + 16.0, *y),
-                    egui::Align2::LEFT_TOP,
-                    item,
-                    egui::FontId::monospace(10.0),
-                    rgb(t.text),
-                );
-                *y += 14.0;
-            }
-            *y += 6.0;
-        };
-    draw_section(
-        painter,
-        &mut y,
-        "Added",
-        &spec.added,
-        t.graph_edge_diff_added,
-    );
-    draw_section(
-        painter,
-        &mut y,
-        "Removed",
-        &spec.removed,
-        t.graph_edge_diff_removed,
-    );
-    draw_section(
-        painter,
-        &mut y,
-        "Changed",
-        &spec.changed,
-        t.graph_edge_diff_added,
-    );
-    if spec.added.is_empty() && spec.removed.is_empty() && spec.changed.is_empty() {
+    if empty {
         painter.text(
-            rect.center(),
+            card.center(),
             egui::Align2::CENTER_CENTER,
             "No differences",
             egui::FontId::proportional(12.0),
-            rgb(t.muted),
+            rgb(t.text),
         );
+        return;
+    }
+    let mut y = card.min.y + 26.0;
+    for (label, items, color) in &sections {
+        if items.is_empty() {
+            continue;
+        }
+        painter.text(
+            Pos2::new(card.min.x + 8.0, y),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(11.0),
+            rgb(*color),
+        );
+        y += 16.0;
+        for item in items.iter().take(12) {
+            if y + 14.0 > card.max.y - 8.0 {
+                break;
+            }
+            painter.text(
+                Pos2::new(card.min.x + 16.0, y),
+                egui::Align2::LEFT_TOP,
+                item,
+                egui::FontId::monospace(10.0),
+                rgb(t.text),
+            );
+            y += 14.0;
+        }
+        y += 6.0;
     }
 }
 
@@ -501,10 +509,31 @@ pub(super) fn paint_optimizer(
         return;
     };
     let t = crate::theme::active();
-    let rect = Rect::from_min_size(Pos2::ZERO, canvas);
-    painter.rect_filled(rect, 0.0, rgb(t.muted).gamma_multiply(0.04));
+    let origin = Pos2::ZERO;
+    // Opaque dialog card, same reasoning as `paint_diff_surface`: the preview
+    // recolors the graph latency ramp, so a full-canvas fill would hide what
+    // the candidates are scored against.
+    let rows = spec.rows.len().min(12) as f32;
+    let body_h = if spec.empty_message.is_some() {
+        24.0
+    } else {
+        rows * 16.0
+    };
+    let card_w = (canvas.x - 16.0)
+        .clamp(24.0 * 8.0, 80.0 * 8.0)
+        .min(canvas.x - 8.0);
+    let card_h = (24.0 + body_h + 18.0).min(canvas.y - 8.0);
+    let card = Rect::from_min_size(origin + egui::vec2(4.0, 4.0), Vec2::new(card_w, card_h));
+    painter.rect_filled(card, 6.0, rgb(t.muted));
+    painter.rect(
+        card,
+        6.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, rgb(t.validation_modal_border)),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
-        rect.min + egui::vec2(8.0, 6.0),
+        card.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
         &spec.header,
         egui::FontId::proportional(12.0),
@@ -512,23 +541,23 @@ pub(super) fn paint_optimizer(
     );
     if let Some(msg) = &spec.empty_message {
         painter.text(
-            rect.center(),
+            card.center(),
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(12.0),
-            rgb(t.muted),
+            rgb(t.text),
         );
         return;
     }
-    let mut y = rect.min.y + 24.0;
-    for row in &spec.rows {
-        if y + 16.0 > rect.max.y - 18.0 {
+    let mut y = card.min.y + 24.0;
+    for row in spec.rows.iter().take(12) {
+        if y + 16.0 > card.max.y - 18.0 {
             break;
         }
         if row.selected {
             let r = Rect::from_min_size(
-                Pos2::new(rect.min.x + 2.0, y),
-                Vec2::new(rect.width() - 4.0, 16.0),
+                Pos2::new(card.min.x + 2.0, y),
+                Vec2::new(card.width() - 4.0, 16.0),
             );
             painter.rect_filled(r, 2.0, rgb(t.optimizer_selected_bg));
         }
@@ -541,9 +570,9 @@ pub(super) fn paint_optimizer(
             row.max_before,
             row.max_after
         );
-        let color = if row.selected { t.text } else { t.muted };
+        let color = t.text;
         painter.text(
-            Pos2::new(rect.min.x + 8.0, y + 1.0),
+            Pos2::new(card.min.x + 8.0, y + 1.0),
             egui::Align2::LEFT_TOP,
             text,
             egui::FontId::monospace(10.0),
@@ -552,11 +581,11 @@ pub(super) fn paint_optimizer(
         y += 16.0;
     }
     painter.text(
-        Pos2::new(rect.min.x + 8.0, rect.max.y - 14.0),
+        Pos2::new(card.min.x + 8.0, card.max.y - 14.0),
         egui::Align2::LEFT_TOP,
         &spec.hint,
         egui::FontId::proportional(10.0),
-        rgb(t.muted),
+        rgb(t.text),
     );
 }
 
@@ -779,6 +808,216 @@ mod tests {
             .collect();
         full_output.textures_delta.clear();
         labels
+    }
+
+    /// Rect fills (geometry + color) the paint routine emitted, so a test can
+    /// assert a dialog paints an opaque backdrop and no translucent wash.
+    fn painted_rect_fills<F: FnMut(&egui::Painter, Vec2, &egui::Context)>(
+        size: Vec2,
+        mut f: F,
+    ) -> Vec<(egui::Rect, egui::Color32)> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            f(ui.painter(), ui.max_rect().size(), ui.ctx());
+        });
+        let fills: Vec<(egui::Rect, egui::Color32)> = full_output
+            .shapes
+            .iter()
+            .filter_map(|cs| {
+                if let egui::epaint::Shape::Rect(r) = &cs.shape {
+                    Some((r.rect, r.fill))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        full_output.textures_delta.clear();
+        fills
+    }
+
+    /// A dialog background must be fully opaque. Alpha 0 is allowed for the
+    /// stroke-only border rect; anything between 0 and 255 is the translucent
+    /// wash this test guards against.
+    fn assert_opaque_card(fills: &[(egui::Rect, egui::Color32)], what: &str) {
+        assert!(
+            fills.iter().all(|(_, f)| f.a() == 255 || f.a() == 0),
+            "{what} must not paint a translucent background: {fills:?}"
+        );
+        let card = fills
+            .iter()
+            .find(|(_, f)| f.a() == 255)
+            .unwrap_or_else(|| panic!("{what} must paint an opaque card"));
+        assert!(
+            card.0.contains(Pos2::new(5.0, 5.0)),
+            "{what} card must cover the top-left content: {:?}",
+            card.0
+        );
+    }
+
+    #[test]
+    fn diff_surface_paints_an_opaque_card() {
+        let spec = DiffSpec {
+            title: " Diff (1) ".into(),
+            added: vec!["_CABLE_A".into()],
+            removed: Vec::new(),
+            changed: Vec::new(),
+        };
+        let fills = painted_rect_fills(Vec2::new(400.0, 300.0), |p, c, ctx| {
+            paint_diff_surface(p, c, ctx, Some(&spec));
+        });
+        assert_opaque_card(&fills, "diff surface");
+    }
+
+    #[test]
+    fn optimizer_paints_an_opaque_card() {
+        let spec = OptimizerSpec {
+            header: " Optimizer (1) ".into(),
+            hint: " Esc close ".into(),
+            rows: vec![OptimizerRow {
+                label: "candidate 1".into(),
+                weighted_obj: 1.0,
+                avg_before: 2.0,
+                avg_after: 1.0,
+                max_before: 4.0,
+                max_after: 2.0,
+                selected: true,
+            }],
+            empty_message: None,
+        };
+        let fills = painted_rect_fills(Vec2::new(400.0, 300.0), |p, c, ctx| {
+            paint_optimizer(p, c, ctx, Some(&spec));
+        });
+        assert_opaque_card(&fills, "optimizer");
+    }
+
+    /// Renders a dialog and asserts no text is painted in the card's own fill
+    /// color. A dialog background is opaque, so text sharing that color is
+    /// invisible (`muted` text on a `muted` card was exactly that).
+    fn assert_dialog_text_readable<F>(what: &str, size: Vec2, mut f: F)
+    where
+        F: FnMut(&egui::Painter, Vec2, &egui::Context),
+    {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            f(ui.painter(), ui.max_rect().size(), ui.ctx());
+        });
+        let mut card_fill = None;
+        let mut texts = Vec::new();
+        for cs in &full_output.shapes {
+            match &cs.shape {
+                egui::epaint::Shape::Rect(r) if r.fill.a() == 255 && card_fill.is_none() => {
+                    card_fill = Some(r.fill);
+                }
+                egui::epaint::Shape::Text(t) => {
+                    texts.push((t.galley.text().to_string(), t.fallback_color));
+                }
+                _ => {}
+            }
+        }
+        full_output.textures_delta.clear();
+        let card_fill = card_fill.unwrap_or_else(|| panic!("{what}: no opaque card painted"));
+        for (label, color) in &texts {
+            assert_ne!(
+                *color, card_fill,
+                "{what}: text {label:?} is painted in the card background color, so it is invisible"
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_text_never_matches_its_own_background() {
+        let size = Vec2::new(400.0, 300.0);
+        let issues = vec![ValidationIssue {
+            span: crate::patch::Span {
+                line: 0,
+                col_start: 0,
+                col_end: 4,
+            },
+            severity: Severity::Error,
+            code: "unknown_circuit".into(),
+            message: "unknown circuit foo".into(),
+        }];
+        let validation = validation_spec(&issues, 0);
+        assert_dialog_text_readable("validation modal", size, |p, c, ctx| {
+            paint_validation_modal(p, c, ctx, Some(&validation));
+        });
+
+        let select = SelectMenuSpec {
+            title: " Select state (1) ".into(),
+            hint: " Esc:clear ".into(),
+            rows: vec![SelectRow {
+                signal: "sel".into(),
+                kind_label: "register".into(),
+                usage: 2,
+                candidates: "0, 1".into(),
+                current: "1".into(),
+                selected: true,
+            }],
+            empty_message: None,
+        };
+        assert_dialog_text_readable("select menu", size, |p, c, ctx| {
+            paint_select_menu(p, c, ctx, Some(&select));
+        });
+
+        let diff = DiffSpec {
+            title: " Diff (1) ".into(),
+            added: vec!["_A".into()],
+            removed: Vec::new(),
+            changed: Vec::new(),
+        };
+        assert_dialog_text_readable("diff surface", size, |p, c, ctx| {
+            paint_diff_surface(p, c, ctx, Some(&diff));
+        });
+
+        let optimizer = OptimizerSpec {
+            header: " Optimizer (2) ".into(),
+            hint: " Esc close ".into(),
+            rows: vec![
+                OptimizerRow {
+                    label: "candidate 1".into(),
+                    weighted_obj: 1.0,
+                    avg_before: 2.0,
+                    avg_after: 1.0,
+                    max_before: 4.0,
+                    max_after: 2.0,
+                    selected: true,
+                },
+                OptimizerRow {
+                    label: "candidate 2".into(),
+                    weighted_obj: 1.1,
+                    avg_before: 2.0,
+                    avg_after: 1.2,
+                    max_before: 4.0,
+                    max_after: 2.5,
+                    selected: false,
+                },
+            ],
+            empty_message: None,
+        };
+        assert_dialog_text_readable("optimizer", size, |p, c, ctx| {
+            paint_optimizer(p, c, ctx, Some(&optimizer));
+        });
+
+        let label = LabelEditSpec {
+            draft: "B1.1".into(),
+            hint: " Enter save ".into(),
+            hue: None,
+        };
+        assert_dialog_text_readable("label editor", size, |p, c, ctx| {
+            paint_label_editor(p, c, ctx, Some(&label));
+        });
+
+        assert_dialog_text_readable("help modal", size, |p, c, _ctx| {
+            paint_help(p, c, crate::help::HelpView::Panels);
+        });
     }
 
     #[test]

@@ -549,7 +549,7 @@ fn paint_polish(
     }
 }
 
-/// The hovered node's tooltip card: a translucent backdrop with the accent
+/// The hovered node's tooltip card: an opaque backdrop with the accent
 /// border, placed above-right of the cursor and clamped to the canvas.
 fn paint_tooltip(
     painter: &egui::Painter,
@@ -572,7 +572,7 @@ fn paint_tooltip(
     painter.rect(
         rect,
         egui::CornerRadius::same(4),
-        rgba(spec.background, 235),
+        rgba(spec.background, 255),
         egui::Stroke::new(1.0, rgb(node.border)),
         egui::StrokeKind::Inside,
     );
@@ -583,7 +583,7 @@ fn paint_tooltip(
     );
 }
 
-/// The minimap panel: translucent scene-background backdrop, accent-bordered,
+/// The minimap panel: opaque scene-background backdrop, accent-bordered,
 /// node frames as accent rects, and a viewport indicator showing what the
 /// canvas currently displays.
 fn paint_minimap(
@@ -597,7 +597,7 @@ fn paint_minimap(
     painter.rect_filled(
         panel,
         egui::CornerRadius::same(4),
-        rgba(spec.background, 215),
+        rgba(spec.background, 255),
     );
     painter.rect(
         panel,
@@ -2233,6 +2233,18 @@ mod window_paint_tests {
             "node label + tooltip, got {hits}: {:?}",
             out.labels
         );
+        // The tooltip card is a dialog backdrop: no rect in this frame may be
+        // partially transparent (the card was a 235-alpha wash before).
+        let translucent: Vec<_> = out
+            .rects
+            .iter()
+            .filter(|r| r.fill.a() != 255 && r.fill.a() != 0)
+            .map(|r| (r.rect, r.fill))
+            .collect();
+        assert!(
+            translucent.is_empty(),
+            "tooltip backdrop must be opaque: {translucent:?}"
+        );
     }
 
     #[test]
@@ -2270,13 +2282,19 @@ mod window_paint_tests {
             "content still painted"
         );
         let panel = egui::Rect::from_min_size(egui::pos2(10.0, 170.0), egui::vec2(180.0, 120.0));
-        assert!(
-            out.rects
-                .iter()
-                .any(|r| r.rect == panel && r.fill != egui::Color32::TRANSPARENT),
-            "minimap panel drawn bottom-left: {:?}",
-            out.rects.iter().map(|r| r.rect).collect::<Vec<_>>()
-        );
+        let panel_fill = out
+            .rects
+            .iter()
+            .find(|r| r.rect == panel)
+            .map(|r| r.fill)
+            .unwrap_or_else(|| {
+                panic!(
+                    "minimap panel drawn bottom-left: {:?}",
+                    out.rects.iter().map(|r| r.rect).collect::<Vec<_>>()
+                )
+            });
+        assert_ne!(panel_fill, egui::Color32::TRANSPARENT);
+        assert_eq!(panel_fill.a(), 255, "minimap panel must be opaque");
     }
 
     #[test]

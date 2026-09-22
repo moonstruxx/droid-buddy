@@ -221,7 +221,7 @@ pub(super) fn paint_picker(
             egui::Align2::LEFT_TOP,
             &spec.picker_dir,
             egui::FontId::proportional(10.0),
-            rgb(t.muted),
+            rgb(t.text),
         );
     }
 
@@ -240,7 +240,7 @@ pub(super) fn paint_picker(
             egui::Align2::LEFT_TOP,
             format!("filter: {filter}"),
             egui::FontId::proportional(10.0),
-            rgb(t.muted),
+            rgb(t.text),
         );
         inner.min.y + (filter_y - 4.0) + 16.0
     } else if spec.picker_dir.is_empty() {
@@ -260,7 +260,7 @@ pub(super) fn paint_picker(
                 egui::Align2::LEFT_TOP,
                 "── favourites ──",
                 egui::FontId::proportional(10.0),
-                rgb(t.muted),
+                rgb(t.text),
             );
             y += row_h;
         }

@@ -760,7 +760,12 @@ fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
 /// branches.
 fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     let painter = ui.painter();
-    let canvas = ui.max_rect().size();
+    // Center overlays on the window, not on `ui.max_rect()`: the base paint
+    // allocates graph-node rects in scene coordinates, and `allocate_rect`
+    // expands the Ui's max_rect to include them, which would drag a centered
+    // modal off to the side. `viewport_rect()` is the canvas `paint` published
+    // and is unaffected by that expansion.
+    let canvas = ui.ctx().viewport_rect().size();
     let ctx = ui.ctx();
     if let Some(spec) = overlays::diff_spec_for(app) {
         overlays::paint_diff_surface(painter, canvas, ctx, Some(&spec));
@@ -1122,6 +1127,64 @@ mod tests {
         assert!(!window.is_open());
         assert_eq!(window.window_id(), None);
         assert!(window.with_window(|_| true).is_none());
+    }
+
+    #[test]
+    fn overlays_center_on_the_viewport_after_graph_nodes_expand_the_ui() {
+        // Regression: the base paint allocates graph-node rects in scene
+        // coordinates, and egui's `allocate_rect` expands `ui.max_rect()` to
+        // include them. The overlay canvas must come from the viewport, or a
+        // centered modal is dragged off to the side of the window.
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+        let mut app = crate::app::App::new();
+        app.showing_help = true;
+        let ctx = egui::Context::default();
+        let canvas = egui::vec2(1280.0, 800.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            let _ = ui.allocate_rect(
+                egui::Rect::from_min_size(egui::pos2(3000.0, 20.0), egui::vec2(60.0, 40.0)),
+                egui::Sense::hover(),
+            );
+            assert!(
+                ui.max_rect().width() > canvas.x,
+                "base paint expanded max_rect: {:?}",
+                ui.max_rect()
+            );
+            paint_overlays(&app, ui);
+        });
+        let t = crate::theme::active();
+        let border = t.egui_color(t.validation_modal_border);
+        let fill = t.egui_color(t.muted);
+        let mut border_rect = None;
+        let mut fill_alpha = None;
+        for cs in &out.shapes {
+            if let egui::epaint::Shape::Rect(r) = &cs.shape {
+                if r.stroke.color == border && border_rect.is_none() {
+                    border_rect = Some(r.rect);
+                }
+                if r.fill == fill && r.rect.width() > 400.0 {
+                    fill_alpha = Some(r.fill.a());
+                }
+            }
+        }
+        let rect = border_rect.expect("help modal border drawn");
+        assert!(
+            (rect.center().x - canvas.x / 2.0).abs() < 0.5,
+            "modal centered on the viewport: {:?}",
+            rect
+        );
+        assert!(
+            (rect.center().y - canvas.y / 2.0).abs() < 0.5,
+            "modal centered on the viewport: {:?}",
+            rect
+        );
+        assert_eq!(fill_alpha, Some(255), "modal fill is opaque");
+        out.textures_delta.clear();
+        crate::theme::set_test_theme(None);
     }
 
     #[test]
