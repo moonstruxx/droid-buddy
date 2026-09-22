@@ -167,6 +167,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("j/k/arrows", "navigate"),
             ("Enter", "select"),
             ("f", "toggle favourite"),
+            ("Ctrl+f", "toggle filter"),
             ("Esc", "close"),
             ("?", "show this help"),
         ],
