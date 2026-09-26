@@ -4540,9 +4540,9 @@ mod tests {
         let graph_pane = app.open_graph_pane_for_test();
         app.layout.focus = graph_pane;
         assert!(!app.physical_pan_if_overflow(1, 0));
-        // Focus back to the module UI: the plain main view pans again even
-        // though the graph pane stays open.
-        app.layout.focus = crate::panes::PaneId::BigLeft;
+        // Focus another pane (the source viewer): the main view pans again
+        // even though the graph pane stays open.
+        app.layout.focus = crate::panes::PaneId::SmallTop;
         assert!(app.physical_pan_if_overflow(1, 0));
         assert_eq!(app.physical_offset, (8.0, 0.0));
     }
