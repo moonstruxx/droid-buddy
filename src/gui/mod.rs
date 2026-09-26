@@ -1118,7 +1118,10 @@ mod tests {
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        assert!(app.layout.has_small_view(), "startup is the small arrangement");
+        assert!(
+            app.layout.has_small_view(),
+            "startup is the small arrangement"
+        );
 
         let mut out = run_paint_panes(&mut app);
         let labels = text_labels(&out);
@@ -1149,7 +1152,10 @@ mod tests {
         let geom = app.pane_geometry(band);
         assert_eq!(
             geom[0],
-            (crate::panes::PaneId::BigLeft, crate::app::Rect::new(0, 0, 400, 600))
+            (
+                crate::panes::PaneId::BigLeft,
+                crate::app::Rect::new(0, 0, 400, 600)
+            )
         );
         assert_eq!(
             geom[1],
@@ -1184,7 +1190,10 @@ mod tests {
         assert!(!app.layout.has_small_view(), "big arrangement");
 
         let mut out = run_paint_panes(&mut app);
-        assert!(!out.shapes.is_empty(), "big arrangement must paint both panes");
+        assert!(
+            !out.shapes.is_empty(),
+            "big arrangement must paint both panes"
+        );
         assert_eq!(app.pane_hit_rects.len(), 2, "two big panes");
         assert!(app
             .pane_hit_rects
@@ -1211,7 +1220,11 @@ mod tests {
         app.layout.maximized = Some(crate::panes::PaneId::BigLeft);
 
         let mut out = run_paint_panes(&mut app);
-        assert_eq!(app.pane_hit_rects.len(), 1, "maximize collapses to one pane");
+        assert_eq!(
+            app.pane_hit_rects.len(),
+            1,
+            "maximize collapses to one pane"
+        );
         assert_eq!(
             app.pane_hit_rects[0],
             (
@@ -1233,38 +1246,73 @@ mod tests {
 
     #[test]
     fn paint_panes_focus_border_tokens_headless() {
-        // The focused pane's frame uses `pane_focus_border`; every other pane
-        // uses `pane_unfocused_border` (spec "Focus border marks the active
-        // pane").
+        // The focused pane's frame uses `pane_focus_border` (2px); every other
+        // pane uses `pane_unfocused_border` (1px) (spec "Focus border marks the
+        // active pane"). Assert by pane identity, not just color presence.
         let t = crate::theme::active();
         let focus = t.egui_color(t.pane_focus_border);
         let unfocused = t.egui_color(t.pane_unfocused_border);
 
+        // The two big-pane rects in an 800x600 band with the boundary at 0.5.
+        let left = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 600.0));
+        let right = egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(400.0, 600.0));
+        let strokes_at = |out: &egui::FullOutput, target: egui::Rect| -> Vec<egui::Stroke> {
+            out.shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::epaint::Shape::Rect(r)
+                        if r.stroke.width > 0.0
+                            && (r.rect.min - target.min).length() < 1.0
+                            && (r.rect.max - target.max).length() < 1.0 =>
+                    {
+                        Some(r.stroke)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Big arrangement: graph left, physical right (both panes frame through
+        // `draw_pane_frame`), focus the graph.
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        app.open_graph(); // graph in BigLeft, source viewer in SmallTop
-        app.layout.focus = crate::panes::PaneId::SmallTop; // focus the viewer
+        app.open_graph();
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        app.layout.big_right.view = Some(crate::app::ViewType::Physical);
+        app.layout.focus = crate::panes::PaneId::BigLeft;
 
         let mut out = run_paint_panes(&mut app);
-        let strokes: Vec<egui::Stroke> = out
-            .shapes
-            .iter()
-            .filter_map(|cs| match &cs.shape {
-                egui::epaint::Shape::Rect(r) if r.stroke.width > 0.0 => Some(r.stroke),
-                _ => None,
-            })
-            .collect();
+        let left_strokes = strokes_at(&out, left);
+        let right_strokes = strokes_at(&out, right);
         assert!(
-            strokes.iter().any(|s| s.color == focus),
-            "focused viewer frame in the focus token: {strokes:?}"
+            left_strokes
+                .iter()
+                .any(|s| s.color == focus && s.width == 2.0),
+            "focused graph pane frame uses the focus token at 2px: {left_strokes:?}"
         );
         assert!(
-            strokes.iter().any(|s| s.color == unfocused),
-            "unfocused graph frame in the unfocused token: {strokes:?}"
+            right_strokes
+                .iter()
+                .any(|s| s.color == unfocused && s.width == 1.0),
+            "unfocused physical pane frame uses the unfocused token at 1px: {right_strokes:?}"
+        );
+
+        // Move focus to the right pane: the tokens swap by pane identity.
+        app.layout.focus = crate::panes::PaneId::BigRight;
+        let mut out2 = run_paint_panes(&mut app);
+        assert!(
+            strokes_at(&out2, right).iter().any(|s| s.color == focus),
+            "now-focused physical pane uses the focus token"
+        );
+        assert!(
+            strokes_at(&out2, left).iter().any(|s| s.color == unfocused),
+            "now-unfocused graph pane uses the unfocused token"
         );
         out.textures_delta.clear();
+        out2.textures_delta.clear();
     }
 
     #[test]
@@ -1322,7 +1370,8 @@ mod tests {
             egui::vec2(800.0, 600.0),
         ));
         let mut app = App::new();
-        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch =
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         assert!(app.load_patch(patch));
         // Close the startup source viewer and clear the second small pane so
         // the module UI is the only view open.
@@ -1366,7 +1415,8 @@ mod tests {
         // card"); running the full base + overlay paint must fill that pane and
         // never emit the legacy overlay card over the band.
         let mut app = App::new();
-        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch =
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.open_view(crate::app::ViewType::Optimizer);
         assert_eq!(

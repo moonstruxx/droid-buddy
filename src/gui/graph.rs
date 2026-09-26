@@ -2303,10 +2303,21 @@ mod kittest_tests {
     #[test]
     fn prefix_g_v_opens_source_viewer() {
         let mut app = setup("arpeggio1.ini");
-        assert!(!app.showing_viewer);
+        // The startup pane config (task 1.2) already opens the source viewer in
+        // a small pane, so `g v` routes focus to that pane instead of opening a
+        // second copy.
+        assert!(
+            app.showing_viewer,
+            "the startup pane config opens the source viewer"
+        );
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(app.showing_viewer);
+        assert!(app.showing_viewer, "the viewer stays open (no duplicate)");
+        assert_eq!(
+            app.layout.pane(app.layout.focus).view,
+            Some(crate::app::ViewType::SourceViewer),
+            "g v routes focus to the source-viewer pane"
+        );
     }
 
     #[test]
