@@ -9,19 +9,19 @@
 
 ## 2. Paint the class layout
 
-- [ ] 2.1 Replace `paint_tiled` with `paint_panes`, painting both arrangements, the maximize override, the focus borders, and each pane's view; verify with headless egui shape tests <!-- agent: layout-designer-engineer.build, depends_on: [1.4], touches: [src/gui/mod.rs] -->
+- [x] 2.1 Replace `paint_tiled` with `paint_panes`, painting both arrangements, the maximize override, the focus borders, and each pane's view; verify with headless egui shape tests <!-- agent: layout-designer-engineer.build, depends_on: [1.4], touches: [src/gui/mod.rs] -->
 - [ ] 2.2 Remove the optimizer overlay path from `paint_overlays` and paint the optimizer inside its small pane by passing the pane rect to `paint_optimizer`; verify that no overlay card rect is emitted while the optimizer is open <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/gui/mod.rs, src/gui/overlays.rs] -->
 - [ ] 2.3 Make the panels paintable as a pane view and drop the always-on left pane assumption; verify with headless shape tests <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/gui/panels.rs, src/gui/mod.rs] -->
 
 ## 3. Keys and handler routing
 
-- [ ] 3.1 Route `z`, `Alt+b`, and `Alt+s` in `handle_event` under the existing focus, overlay, and picker priority, and make `Esc` clear the maximize before closing a view; verify with handler tests <!-- agent: rusty-engineer.build, depends_on: [1.4], touches: [src/handler.rs] -->
+- [x] 3.1 Route `z`, `Alt+b`, and `Alt+s` in `handle_event` under the existing focus, overlay, and picker priority, and make `Esc` clear the maximize before closing a view; verify with handler tests <!-- agent: rusty-engineer.build, depends_on: [1.4], touches: [src/handler.rs] -->
 - [ ] 3.2 Route pane keys by the focused pane's view (graph, viewer, optimizer, panels) and keep `[`/`]` view-local while the optimizer is focused; verify with handler tests <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/handler.rs] -->
 - [ ] 3.3 Add `z`, `Alt+b`, and `Alt+s` and the pane model to the `src/help.rs` tables; verify with `cargo test --lib help` <!-- agent: rusty-engineer.build, depends_on: [3.1], touches: [src/help.rs] -->
 
 ## 4. Tests
 
-- [ ] 4.1 Pane model tests: geometry in both arrangements, class routing, replace-on-open, physical and module UI exclusivity, the arrangement transitions on first open and last close, maximize toggle and clears, swap big and small including both no-op cases, and focus cycling with an empty pane; verify with `cargo test --lib panes` <!-- agent: horst-engineer.build, depends_on: [1.4], touches: [src/panes.rs] -->
+- [x] 4.1 Pane model tests: geometry in both arrangements, class routing, replace-on-open, physical and module UI exclusivity, the arrangement transitions on first open and last close, maximize toggle and clears, swap big and small including both no-op cases, and focus cycling with an empty pane; verify with `cargo test --lib panes` <!-- agent: horst-engineer.build, depends_on: [1.4], touches: [src/panes.rs] -->
 - [ ] 4.2 Headless egui shape tests for `paint_panes`: both arrangements, maximize filling the band, focus border tokens, and the optimizer drawn inside its pane with no overlay card; verify with `cargo test --lib gui` <!-- agent: horst-engineer.build, depends_on: [2.2, 2.3], touches: [src/gui/mod.rs] -->
 - [ ] 4.3 Handler parity tests for `z`, `Alt+b`, and `Alt+s` dispatch and for the help tables listing them; verify with `cargo test --lib handler help` <!-- agent: horst-engineer.build, depends_on: [3.3], touches: [src/handler.rs, src/help.rs] -->
 
