@@ -692,6 +692,43 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         return false;
     }
 
+    // Class-layout pane keys (change `pane-class-layout`, task 3.1). Priority
+    // is overlay (help / validation / label editor) > picker > armed `g`
+    // prefix > these keys > the per-view routing below, so `z`, `Alt+b`, and
+    // `Alt+s` act on the band from any focused pane but never while the edit
+    // overlay, help modal, validation modal, or picker has focus (spec
+    // "Overlays take priority"). The select-state menu is a centered overlay
+    // too and consumes them (spec "Overlays render above the pane layout").
+    if app.select_state.is_none() {
+        if key.code == KeyCode::Esc && key.modifiers.is_none() {
+            // Spec "Esc clears maximize first": restore the arrangement
+            // instead of closing the focused view; the view stays open. This
+            // path also covers the mirror's empty-slot case where the tiled
+            // dispatch below would never run.
+            if app.layout.maximized.is_some() {
+                app.layout.maximized = None;
+                app.status_message = String::from("Layout restored");
+                app.prefix = None;
+                return false;
+            }
+        } else if key.modifiers.alt {
+            match key.code {
+                KeyCode::Char('b') => {
+                    app.swap_big();
+                    return false;
+                }
+                KeyCode::Char('s') => {
+                    app.swap_small();
+                    return false;
+                }
+                _ => {}
+            }
+        } else if key.code == KeyCode::Char('z') {
+            app.maximize_toggle();
+            return false;
+        }
+    }
+
     // Focused-pane dispatch (change `tiled-window-manager`, D7): while
     // right-column slots are open, `Tab` cycles tile focus forward,
     // `Shift+Tab`/`BackTab` cycles backward, and `Esc` closes the focused
@@ -2950,6 +2987,150 @@ mod tests {
 
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, key_modifiers::SHIFT)
+    }
+
+    // ---- Class-layout pane keys (change `pane-class-layout`, task 3.1) ----
+
+    #[test]
+    fn z_toggles_maximize_of_the_focused_pane() {
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        assert!(app.layout.maximized.is_none());
+        // Default focus is the left big pane holding the module UI.
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert_eq!(app.layout.maximized, Some(PaneId::BigLeft));
+        assert_eq!(app.status_message, "Maximized");
+        // A second `z` restores the arrangement with the same views.
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_none());
+        assert_eq!(app.status_message, "Layout restored");
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+    }
+
+    #[test]
+    fn z_maximizes_the_focused_small_pane() {
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Tab), &mut app); // -> SmallTop (source viewer)
+        assert_eq!(app.layout.focus, PaneId::SmallTop);
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert_eq!(app.layout.maximized, Some(PaneId::SmallTop));
+    }
+
+    #[test]
+    fn focus_change_clears_the_maximize() {
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_some());
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert!(app.layout.maximized.is_none());
+    }
+
+    #[test]
+    fn esc_clears_maximize_before_closing_the_view() {
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_some());
+        let view_before = app.layout.big_left.view;
+        handle_event(key(KeyCode::Esc), &mut app);
+        assert!(app.layout.maximized.is_none());
+        assert_eq!(app.layout.big_left.view, view_before, "view must stay open");
+        assert_eq!(app.status_message, "Layout restored");
+    }
+
+    #[test]
+    fn esc_clears_maximize_even_with_an_empty_mirror_slot_set() {
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        // Close the source viewer so the mirror has no slots; the tiled Esc
+        // dispatch below would not run in that state.
+        handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop
+        handle_event(key(KeyCode::Esc), &mut app); // close source viewer
+        assert!(app.tile_stack.slots.is_empty());
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert_eq!(app.layout.maximized, Some(PaneId::SmallTop));
+        handle_event(key(KeyCode::Esc), &mut app);
+        assert!(app.layout.maximized.is_none());
+        assert_eq!(app.status_message, "Layout restored");
+    }
+
+    #[test]
+    fn alt_b_promotes_the_focused_small_view_into_the_big_pane() {
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop (source viewer)
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        assert_eq!(app.layout.big_left.view, Some(ViewType::SourceViewer));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.focus, PaneId::SmallTop, "focus is preserved");
+    }
+
+    #[test]
+    fn alt_b_reports_noop_when_the_only_big_pane_is_focused() {
+        let mut app = app_with_fixture();
+        // Startup small arrangement: BigLeft is the only big pane and holds focus.
+        assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
+        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        assert_eq!(app.status_message, "No swap applies");
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+    }
+
+    #[test]
+    fn alt_s_exchanges_the_two_small_panes() {
+        let mut app = app_with_fixture();
+        // Default: SmallTop holds the source viewer, SmallBottom is empty.
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.layout.small_top.view, None);
+        assert_eq!(app.layout.small_bottom.view, Some(ViewType::SourceViewer));
+    }
+
+    #[test]
+    fn alt_s_exchanges_a_promoted_view_pair() {
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('o')), &mut app); // optimizer -> SmallBottom
+        assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.layout.small_top.view, Some(ViewType::Optimizer));
+        assert_eq!(app.layout.small_bottom.view, Some(ViewType::SourceViewer));
+    }
+
+    #[test]
+    fn alt_s_reports_noop_without_small_panes() {
+        let mut app = app_with_fixture();
+        // Close the only small-class view: the right half becomes one big pane.
+        handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop
+        handle_event(key(KeyCode::Esc), &mut app); // close source viewer
+        assert!(!app.layout.has_small_view());
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.status_message, "No swap applies");
+    }
+
+    #[test]
+    fn help_modal_consumes_the_pane_layout_keys() {
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('?')), &mut app);
+        assert!(app.showing_help);
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_none(), "help eats z");
+        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+    }
+
+    #[test]
+    fn picker_consumes_the_pane_layout_keys() {
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('l')), &mut app);
+        assert!(app.showing_picker);
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_none());
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
     }
 
     #[test]
