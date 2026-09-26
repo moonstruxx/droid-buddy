@@ -27,5 +27,5 @@
 
 ## 5. Spec sync and verification gate
 
-- [ ] 5.1 Sync the spec deltas and remove the `tiling-window-manager` and `quad-view` specs, and flag `ARCHITECTURE.md` and `DESIGN.md` for regeneration rather than hand-editing them; verify with `openspec validate pane-class-layout --strict` <!-- agent: devops-engineer.fast, depends_on: [4.3], touches: [openspec/specs/**] -->
-- [ ] 5.2 Run the full verification gate and confirm all four exit 0: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` <!-- agent: rusty-engineer.fast, depends_on: [5.1], touches: [] -->
+- [x] 5.1 Sync the spec deltas and remove the `tiling-window-manager` and `quad-view` specs, and flag `ARCHITECTURE.md` and `DESIGN.md` for regeneration rather than hand-editing them; verify with `openspec validate pane-class-layout --strict` <!-- agent: devops-engineer.fast, depends_on: [4.3], touches: [openspec/specs/**] -->
+- [x] 5.2 Run the full verification gate and confirm all four exit 0: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` <!-- agent: rusty-engineer.fast, depends_on: [5.1], touches: [] -->
