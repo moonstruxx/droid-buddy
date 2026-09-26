@@ -499,41 +499,18 @@ pub(crate) struct OptimizerSpec {
     pub empty_message: Option<String>,
 }
 
-pub(super) fn paint_optimizer(
-    painter: &Painter,
-    canvas: Vec2,
-    _ctx: &Context,
-    spec: Option<&OptimizerSpec>,
-) {
+pub(super) fn paint_optimizer(painter: &Painter, pane: Rect, spec: Option<&OptimizerSpec>) {
     let Some(spec) = spec else {
         return;
     };
     let t = crate::theme::active();
-    let origin = Pos2::ZERO;
-    // Opaque dialog card, same reasoning as `paint_diff_surface`: the preview
-    // recolors the graph latency ramp, so a full-canvas fill would hide what
-    // the candidates are scored against.
-    let rows = spec.rows.len().min(12) as f32;
-    let body_h = if spec.empty_message.is_some() {
-        24.0
-    } else {
-        rows * 16.0
-    };
-    let card_w = (canvas.x - 16.0)
-        .clamp(24.0 * 8.0, 80.0 * 8.0)
-        .min(canvas.x - 8.0);
-    let card_h = (24.0 + body_h + 18.0).min(canvas.y - 8.0);
-    let card = Rect::from_min_size(origin + egui::vec2(4.0, 4.0), Vec2::new(card_w, card_h));
-    painter.rect_filled(card, 6.0, rgb(t.muted));
-    painter.rect(
-        card,
-        6.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(1.0, rgb(t.validation_modal_border)),
-        egui::StrokeKind::Inside,
-    );
+    // The optimizer owns its pane: fill the whole region rather than floating a
+    // card over other panes (spec "No overlay card"). The preview recolors the
+    // graph latency ramp in the neighbouring pane, so the fill stays inside
+    // this pane's clip.
+    painter.rect_filled(pane, 0.0, rgb(t.muted));
     painter.text(
-        card.min + egui::vec2(8.0, 6.0),
+        pane.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
         &spec.header,
         egui::FontId::proportional(12.0),
@@ -541,7 +518,7 @@ pub(super) fn paint_optimizer(
     );
     if let Some(msg) = &spec.empty_message {
         painter.text(
-            card.center(),
+            pane.center(),
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(12.0),
@@ -549,15 +526,15 @@ pub(super) fn paint_optimizer(
         );
         return;
     }
-    let mut y = card.min.y + 24.0;
+    let mut y = pane.min.y + 24.0;
     for row in spec.rows.iter().take(12) {
-        if y + 16.0 > card.max.y - 18.0 {
+        if y + 16.0 > pane.max.y - 18.0 {
             break;
         }
         if row.selected {
             let r = Rect::from_min_size(
-                Pos2::new(card.min.x + 2.0, y),
-                Vec2::new(card.width() - 4.0, 16.0),
+                Pos2::new(pane.min.x + 2.0, y),
+                Vec2::new((pane.width() - 4.0).max(0.0), 16.0),
             );
             painter.rect_filled(r, 2.0, rgb(t.optimizer_selected_bg));
         }
@@ -572,7 +549,7 @@ pub(super) fn paint_optimizer(
         );
         let color = t.text;
         painter.text(
-            Pos2::new(card.min.x + 8.0, y + 1.0),
+            Pos2::new(pane.min.x + 8.0, y + 1.0),
             egui::Align2::LEFT_TOP,
             text,
             egui::FontId::monospace(10.0),
@@ -581,7 +558,7 @@ pub(super) fn paint_optimizer(
         y += 16.0;
     }
     painter.text(
-        Pos2::new(card.min.x + 8.0, card.max.y - 14.0),
+        Pos2::new(pane.min.x + 8.0, pane.max.y - 14.0),
         egui::Align2::LEFT_TOP,
         &spec.hint,
         egui::FontId::proportional(10.0),
@@ -873,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn optimizer_paints_an_opaque_card() {
+    fn optimizer_paints_an_opaque_pane() {
         let spec = OptimizerSpec {
             header: " Optimizer (1) ".into(),
             hint: " Esc close ".into(),
@@ -888,8 +865,8 @@ mod tests {
             }],
             empty_message: None,
         };
-        let fills = painted_rect_fills(Vec2::new(400.0, 300.0), |p, c, ctx| {
-            paint_optimizer(p, c, ctx, Some(&spec));
+        let fills = painted_rect_fills(Vec2::new(400.0, 300.0), |p, c, _ctx| {
+            paint_optimizer(p, Rect::from_min_size(Pos2::ZERO, c), Some(&spec));
         });
         assert_opaque_card(&fills, "optimizer");
     }
@@ -1002,8 +979,8 @@ mod tests {
             ],
             empty_message: None,
         };
-        assert_dialog_text_readable("optimizer", size, |p, c, ctx| {
-            paint_optimizer(p, c, ctx, Some(&optimizer));
+        assert_dialog_text_readable("optimizer", size, |p, c, _ctx| {
+            paint_optimizer(p, Rect::from_min_size(Pos2::ZERO, c), Some(&optimizer));
         });
 
         let label = LabelEditSpec {
@@ -1166,8 +1143,8 @@ mod tests {
             }],
             empty_message: None,
         };
-        let labels = painted_labels(Vec2::new(400.0, 300.0), |p, c, ctx| {
-            paint_optimizer(p, c, ctx, Some(&spec));
+        let labels = painted_labels(Vec2::new(400.0, 300.0), |p, c, _ctx| {
+            paint_optimizer(p, Rect::from_min_size(Pos2::ZERO, c), Some(&spec));
         });
         assert!(labels.iter().any(|l| l.contains("Optimizer")), "{labels:?}");
         assert!(
@@ -1186,7 +1163,7 @@ mod tests {
             paint_select_menu(ui.painter(), ui.max_rect().size(), ui.ctx(), None);
             paint_label_editor(ui.painter(), ui.max_rect().size(), ui.ctx(), None);
             paint_diff_surface(ui.painter(), ui.max_rect().size(), ui.ctx(), None);
-            paint_optimizer(ui.painter(), ui.max_rect().size(), ui.ctx(), None);
+            paint_optimizer(ui.painter(), ui.max_rect(), None);
         });
         full_output.textures_delta.clear();
         assert!(full_output.shapes.is_empty());

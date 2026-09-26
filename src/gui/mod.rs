@@ -551,18 +551,29 @@ pub(crate) fn draw_pane_frame(
     }
 }
 
+/// Whether the band has anything to paint: a maximized pane, or at least one
+/// pane holding a view. Panels counts here — the module UI is a view in the
+/// class layout (design D2), not a permanent left pane, so a band showing only
+/// the module UI still paints through `paint_panes` instead of falling back to
+/// the empty-band graph canvas.
+fn band_has_views(app: &App, band: crate::app::Rect) -> bool {
+    app.layout.maximized.is_some()
+        || app
+            .pane_geometry(band)
+            .iter()
+            .any(|(id, _)| app.layout.pane(*id).view.is_some())
+}
+
 /// Paint the class-based main band (`pane-class-layout`, design D1): every
 /// pane of the current arrangement (`App::pane_geometry` — the left big pane
 /// plus either a second big pane or two small panes, and the maximize override
 /// that collapses the band to the focused pane) paints its view into its cell.
 /// Each pane's border carries the `pane_focus_border` token when it holds
 /// `App.layout.focus` and `pane_unfocused_border` otherwise; the panels and
-/// viewer surfaces draw their own frame, the graph and physical surfaces get
-/// one here. An empty pane stays a bare background; the optimizer still
-/// renders as an overlay card (`paint_overlays`, task 2.2 moves it into its
-/// pane). Publishes `pane_hit_rects` (the drawn geometry, ADR 35) and the
-/// legacy `FocusSlot` mirror `pane_rects` for handler/main compat via
-/// `App::refresh_hit_geometry`.
+/// viewer surfaces draw their own frame, the graph, physical, and optimizer
+/// panes get one here. An empty pane stays a bare background. Publishes
+/// `pane_hit_rects` (the drawn geometry, ADR 35) and the legacy `FocusSlot`
+/// mirror `pane_rects` for handler/main compat via `App::refresh_hit_geometry`.
 fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
     let t = crate::theme::active();
     let bg = t.egui_color(t.graph_canvas_bg);
@@ -614,17 +625,26 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 let painter = ui.painter().with_clip_rect(rect);
                 draw_pane_frame(&painter, rect, focused, "", t);
             }
-            // The optimizer still paints as an overlay (`paint_overlays`);
-            // empty panes stay bare.
-            Some(crate::app::ViewType::Optimizer) | None => {}
+            Some(crate::app::ViewType::Optimizer) => {
+                // The optimizer lives in its own small pane (spec "Optimizer
+                // as side pane"): fill the pane with its candidate list and
+                // frame it, never as a card over another pane.
+                let painter = ui.painter().with_clip_rect(rect);
+                let spec = overlays::optimizer_spec(app);
+                overlays::paint_optimizer(&painter, rect, spec.as_ref());
+                let painter = ui.painter().with_clip_rect(rect);
+                draw_pane_frame(&painter, rect, focused, "", t);
+            }
+            // An empty pane stays bare.
+            None => {}
         }
     }
 }
 
 /// Dispatch the overlays over the base surface, bottom of the z-order first:
-/// diff, optimizer, validation, select, picker, label edit, help. Called after
-/// the base paint so every overlay draws in both the quad and single-pane
-/// branches.
+/// diff, validation, select, picker, label edit, help. Called after the base
+/// paint. The optimizer is NOT here — it lives in its own small pane
+/// (`paint_panes`).
 fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     let painter = ui.painter();
     // Center overlays on the window, not on `ui.max_rect()`: the base paint
@@ -636,9 +656,6 @@ fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     let ctx = ui.ctx();
     if let Some(spec) = overlays::diff_spec_for(app) {
         overlays::paint_diff_surface(painter, canvas, ctx, Some(&spec));
-    }
-    if let Some(spec) = overlays::optimizer_spec(app) {
-        overlays::paint_optimizer(painter, canvas, ctx, Some(&spec));
     }
     if let Some(spec) = overlays::validation_spec_for(app) {
         let _ = overlays::paint_validation_modal(painter, canvas, ctx, Some(&spec));
@@ -699,8 +716,9 @@ impl EguiSurface {
     /// publishes `pane_rects` (renderer-owns-geometry contract).
     ///
     /// Surface dispatch: every pane of the layout arrangement paints its view
-    /// (Panels, source viewer, physical, graph); with no open view the whole
-    /// window is the bare graph canvas via [`graph::paint_scene`].
+    /// (Panels, source viewer, physical, graph, optimizer); with no view open
+    /// in any pane the whole window is the bare graph canvas via
+    /// [`graph::paint_scene`].
     fn paint(
         &mut self,
         window: &Window,
@@ -786,18 +804,15 @@ impl EguiSurface {
         let mut full_output = self.context.run_ui(raw_input, |ui| {
             let window_rect = ui.max_rect();
             let band = to_cell_rect(window_rect);
-            // ADR 35: the arrangement decides the paint. With no open view
-            // (and nothing maximized) the whole window is the bare graph
-            // canvas; otherwise every pane of the arrangement paints.
-            let has_open = app
-                .pane_geometry(band)
-                .iter()
-                .any(|(id, _)| matches!(app.layout.pane(*id).view, Some(v) if v != crate::app::ViewType::Panels));
-            if !has_open && app.layout.maximized.is_none() {
+            // ADR 35: the arrangement decides the paint. With nothing open
+            // (no view in any pane and no maximize) the whole window is the
+            // bare graph canvas; otherwise every pane of the arrangement
+            // paints. Panels is a view, so it counts like any other (D2).
+            if band_has_views(app, band) {
+                paint_panes(app, ui, scene, selected);
+            } else {
                 app.pane_rects.clear();
                 graph::paint_scene(ui, window_rect.size(), scene, selected);
-            } else {
-                paint_panes(app, ui, scene, selected);
             }
             paint_overlays(app, ui);
         });
@@ -1278,6 +1293,115 @@ mod tests {
             app.graph_camera.is_some(),
             "camera seeded from the pane size on the first frame"
         );
+        out.textures_delta.clear();
+    }
+
+    /// Run the full base + overlay paint (`paint_panes` then `paint_overlays`)
+    /// in one headless frame over an 800x600 band.
+    fn run_band(app: &mut App) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let scene = scene_for(app, win);
+        ctx.run_ui(raw, |ui| {
+            paint_panes(app, ui, scene.as_ref(), &[]);
+            paint_overlays(app, ui);
+        })
+    }
+
+    #[test]
+    fn panels_paint_as_a_pane_view_headless() {
+        // 2.3: the module UI is a view, not a permanent left pane. A band
+        // showing only the module UI still has something to paint and must not
+        // fall through to the empty-band graph canvas.
+        let band = to_cell_rect(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        // Close the startup source viewer and clear the second small pane so
+        // the module UI is the only view open.
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        assert!(!app.layout.has_small_view());
+        assert!(
+            band_has_views(&app, band),
+            "the module UI counts as an open view"
+        );
+
+        let mut out = run_paint_panes(&mut app);
+        let labels = text_labels(&out);
+        assert!(
+            labels.iter().any(|l| l.contains("Panels")),
+            "panels paint as a pane view: {labels:?}"
+        );
+        assert_eq!(
+            app.pane_rects.len(),
+            1,
+            "only the module UI pane is hit-testable"
+        );
+        assert!(app
+            .pane_hit_rects
+            .iter()
+            .any(|(id, _)| *id == crate::panes::PaneId::BigLeft));
+
+        // A band with nothing open has nothing to paint.
+        let mut empty = App::new();
+        empty.layout.big_left.view = None;
+        empty.layout.big_right.view = None;
+        empty.layout.small_top.view = None;
+        empty.layout.small_bottom.view = None;
+        assert!(!band_has_views(&empty, band), "no view open -> empty band");
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn optimizer_paints_inside_its_pane_without_overlay_card() {
+        // 2.2: the optimizer occupies its own small pane (spec "No overlay
+        // card"); running the full base + overlay paint must fill that pane and
+        // never emit the legacy overlay card over the band.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(crate::app::ViewType::Optimizer);
+        assert_eq!(
+            app.layout.small_bottom.view,
+            Some(crate::app::ViewType::Optimizer),
+            "optimizer opens in the free small pane"
+        );
+
+        let mut out = run_band(&mut app);
+        let t = crate::theme::active();
+        let muted = t.egui_color(t.muted);
+        // The optimizer fills its own pane: an opaque muted rect at the
+        // SmallBottom pane origin (400, 300).
+        let fills_pane = out.shapes.iter().any(|cs| match &cs.shape {
+            egui::epaint::Shape::Rect(r) => {
+                r.fill == muted
+                    && r.fill.a() == 255
+                    && (r.rect.min.x - 400.0).abs() < 1.0
+                    && (r.rect.min.y - 300.0).abs() < 1.0
+            }
+            _ => false,
+        });
+        assert!(fills_pane, "optimizer fills its small pane");
+        // No card border over the band (the legacy optimizer overlay stroke).
+        let border = t.egui_color(t.validation_modal_border);
+        assert!(
+            !out.shapes.iter().any(|cs| matches!(
+                &cs.shape,
+                egui::epaint::Shape::Rect(r)
+                    if r.stroke.width > 0.0 && r.stroke.color == border
+            )),
+            "no optimizer overlay card border over the band"
+        );
+        let labels = text_labels(&out);
+        assert!(labels.iter().any(|l| l.contains("Optimizer")), "{labels:?}");
         out.textures_delta.clear();
     }
 
