@@ -3067,6 +3067,61 @@ mod tests {
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
     }
 
+    // Task 4.3 handler parity: the centered overlays (validation modal, label
+    // editor) consume the pane-layout keys exactly like the help modal and the
+    // picker (keybinding spec "SHALL NOT fire while ... the validation modal,
+    // the label overlay ... has focus").
+    #[test]
+    fn validation_modal_consumes_the_pane_layout_keys() {
+        let mut app = app_with_fixture();
+        app.showing_validation = true;
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_none(), "validation eats z");
+        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        assert!(app.showing_validation, "the modal stays open");
+    }
+
+    #[test]
+    fn label_overlay_consumes_the_pane_layout_keys() {
+        let mut app = app_with_fixture();
+        app.editing = Some(crate::app::EditState::new_hw(
+            String::from("B1.1"),
+            1,
+            String::new(),
+        ));
+        handle_event(key(KeyCode::Char('z')), &mut app);
+        assert!(app.layout.maximized.is_none(), "label overlay eats z");
+        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        assert!(app.editing.is_some(), "the overlay stays open");
+    }
+
+    // Spec "Swap the two big panes": with no small view open both halves are
+    // big panes, and `Alt+b` exchanges their views while focus stays put.
+    #[test]
+    fn alt_b_exchanges_the_two_big_panes_through_dispatch() {
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        // Two big panes (no small view): module UI left, graph right. Set the
+        // arrangement and its mirror together so `reconcile_from_mirror` keeps
+        // it, then exercise the real Alt+b dispatch.
+        app.layout.big_right.view = Some(ViewType::Graph);
+        app.layout.small_top.view = None;
+        app.tile_stack.slots = vec![ViewType::Graph];
+        app.tile_stack.focus = FocusSlot::Panels;
+        assert_eq!(app.layout.focus, PaneId::BigLeft);
+
+        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
+        assert_eq!(app.layout.big_right.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.focus, PaneId::BigLeft, "focus preserved");
+    }
+
     #[test]
     fn graph_plus_cycles_zoom_presets_and_wraps() {
         let mut app = app_with_fixture();

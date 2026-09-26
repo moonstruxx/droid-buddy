@@ -309,7 +309,12 @@ mod tests {
         }
         for view in [HelpView::Validation, HelpView::Picker] {
             let rows = keybindings(view);
-            assert!(!rows.contains(&z), "view {view:?} must not document z");
+            for row in [z, alt_b, alt_s] {
+                assert!(
+                    !rows.contains(&row),
+                    "view {view:?} must not document {row:?}"
+                );
+            }
         }
     }
 
