@@ -22,8 +22,8 @@
 ## 4. Tests
 
 - [x] 4.1 Pane model tests: geometry in both arrangements, class routing, replace-on-open, physical and module UI exclusivity, the arrangement transitions on first open and last close, maximize toggle and clears, swap big and small including both no-op cases, and focus cycling with an empty pane; verify with `cargo test --lib panes` <!-- agent: horst-engineer.build, depends_on: [1.4], touches: [src/panes.rs] -->
-- [ ] 4.2 Headless egui shape tests for `paint_panes`: both arrangements, maximize filling the band, focus border tokens, and the optimizer drawn inside its pane with no overlay card; verify with `cargo test --lib gui` <!-- agent: horst-engineer.build, depends_on: [2.2, 2.3], touches: [src/gui/mod.rs] -->
-- [ ] 4.3 Handler parity tests for `z`, `Alt+b`, and `Alt+s` dispatch and for the help tables listing them; verify with `cargo test --lib handler help` <!-- agent: horst-engineer.build, depends_on: [3.3], touches: [src/handler.rs, src/help.rs] -->
+- [x] 4.2 Headless egui shape tests for `paint_panes`: both arrangements, maximize filling the band, focus border tokens, and the optimizer drawn inside its pane with no overlay card; verify with `cargo test --lib gui` <!-- agent: horst-engineer.build, depends_on: [2.2, 2.3], touches: [src/gui/mod.rs] -->
+- [x] 4.3 Handler parity tests for `z`, `Alt+b`, and `Alt+s` dispatch and for the help tables listing them; verify with `cargo test --lib handler help` <!-- agent: horst-engineer.build, depends_on: [3.3], touches: [src/handler.rs, src/help.rs] -->
 
 ## 5. Spec sync and verification gate
 
