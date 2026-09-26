@@ -2185,12 +2185,17 @@ impl App {
     /// visible main area on that axis (4.3). `dir_x`/`dir_y` are ±1 or 0 in
     /// key direction (Right/Down positive, Left/Up negative); screen content
     /// shifts by the opposite sign (D5). Returns whether it panned so callers
-    /// keep the existing navigate/wheel-adjust fallback otherwise. The pan
-    /// applies only to the plain main view — viewer/graph surfaces keep
-    /// their own arrow and wheel semantics (no-interference priority).
+    /// keep the existing navigate/wheel-adjust fallback otherwise.
+    ///
+    /// The pan applies only while the physical view's pane holds focus: the
+    /// graph pane and the source pane keep their own arrow semantics. Change
+    /// `pane-class-layout`: the source viewer is co-visible from startup, so
+    /// the gate is the focused pane, not the legacy `showing_viewer` flag.
     pub fn physical_pan_if_overflow(&mut self, dir_x: i32, dir_y: i32) -> bool {
-        if self.showing_viewer || self.showing_graph {
-            return false;
+        if let Some(graph) = self.pane_holding(crate::app::ViewType::Graph) {
+            if self.layout.focus == graph {
+                return false;
+            }
         }
         let area = self.physical_main_area();
         let (ox, oy) = self.physical_overflow(area);
@@ -4524,21 +4529,32 @@ mod tests {
     }
 
     #[test]
-    fn physical_pan_skipped_under_viewer_graph() {
+    fn physical_pan_skipped_under_focused_viewer_graph() {
         let mut app = App::new();
         app.patch = Some(Patch::from_ini_str("[a]\n    out1 = B1.1\n", String::from("a")).unwrap());
         app.physical_rack_size = (200, 100);
         app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
-        // Each open surface independently suppresses panning.
-        app.showing_viewer = true;
+        // Change `pane-class-layout`: the source viewer is co-visible from
+        // startup, so panning is gated on the *focused* pane, not on any open
+        // surface. A focused graph pane suppresses panning.
+        let graph_pane = app.open_graph_pane_for_test();
+        app.layout.focus = graph_pane;
         assert!(!app.physical_pan_if_overflow(1, 0));
-        app.showing_viewer = false;
-        app.showing_graph = true;
-        assert!(!app.physical_pan_if_overflow(1, 0));
-        app.showing_graph = false;
-        // Plain main view pans again.
+        // Focus back to the module UI: the plain main view pans again even
+        // though the graph pane stays open.
+        app.layout.focus = crate::panes::PaneId::BigLeft;
         assert!(app.physical_pan_if_overflow(1, 0));
         assert_eq!(app.physical_offset, (8.0, 0.0));
+    }
+
+    /// Test helper: place the graph in a big pane without going through the
+    /// handler layer, returning the pane that holds it.
+    impl App {
+        fn open_graph_pane_for_test(&mut self) -> crate::panes::PaneId {
+            self.open_view(crate::app::ViewType::Graph);
+            self.pane_holding(crate::app::ViewType::Graph)
+                .expect("graph open")
+        }
     }
 
     #[test]
