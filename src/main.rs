@@ -1,6 +1,6 @@
 use color_eyre::Result;
 
-use droid_tui::app::{App, FocusSlot, GraphWindowRequest, ViewType};
+use droid_tui::app::{App, GraphWindowRequest};
 use droid_tui::latency::CostModel;
 use droid_tui::{config, schema, theme};
 
@@ -109,24 +109,6 @@ fn queue_startup_window_open(app: &mut App) {
     app.request_graph_window(GraphWindowRequest::Open);
 }
 
-/// The graph window is the only surface, so it owns tile focus: the shared
-/// handler gates graph-surface keys (`-`/`+` zoom presets, `h` layout toggle,
-/// Alt+[ / Alt+] tension) on `graph_slot_focused`, which reads
-/// `tile_stack.focus`. The terminal `g g` path focuses the slot after
-/// `open_graph` (handler `focus_tile_slot`); the windowed startup must mirror
-/// that or the delivered zoom-out presets stay keyboard-dead on the primary
-/// surface (verified live in graph-pane-centering task 4.4).
-fn focus_startup_graph_slot(app: &mut App) {
-    if let Some(i) = app
-        .tile_stack
-        .slots
-        .iter()
-        .position(|v| *v == ViewType::Graph)
-    {
-        app.tile_stack.focus = FocusSlot::Slot(i);
-    }
-}
-
 /// True when a window event should end the event loop.
 ///
 /// This is the exit decision that regressed twice: droid_tui-7y5, where a
@@ -150,10 +132,7 @@ mod windowed {
     use droid_tui::{config, handler, theme};
     use winit::keyboard::ModifiersState;
 
-    use super::{
-        focus_startup_graph_slot, load_initial_patch, queue_startup_window_open, seed_app,
-        should_exit,
-    };
+    use super::{load_initial_patch, queue_startup_window_open, seed_app, should_exit};
 
     /// The native application: owns the single `App` and the graph window,
     /// driven by winit's event loop (gpu-graph-window design D1).
@@ -319,12 +298,9 @@ mod windowed {
         let mut app = App::new();
         seed_app(&mut app, settings);
         load_initial_patch(&mut app, initial_patch.as_deref());
-        // Build the graph from the loaded patch so the window paints
-        // content on its first frame (bead droid_tui-59t).
-        app.open_graph();
-        // The graph window is the only surface, so it owns tile focus (see
-        // `focus_startup_graph_slot`; verified live in task 4.4).
-        focus_startup_graph_slot(&mut app);
+        // The band opens on the module UI plus the source viewer (spec
+        // "Startup pane configuration"); the graph is built only when the
+        // user opens it with `g g`, so no graph view is opened here.
         let mut handler = AppHandler {
             app,
             window: GraphWindow::new(),
@@ -344,7 +320,7 @@ mod windowed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use droid_tui::app::{FocusSlot, ViewType};
+    use droid_tui::app::ViewType;
 
     #[test]
     fn seed_app_seeds_layout_mode_and_ordering_from_settings() {
@@ -417,29 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn startup_focuses_the_graph_slot() {
-        // Live verification (graph-pane-centering task 4.4): the graph window
-        // is the only surface, so it must own tile focus. The shared handler
-        // gates graph-surface keys (`-`/`+` zoom presets, `h` layout toggle,
-        // Alt+[ / Alt+] tension) on `graph_slot_focused`, which reads
-        // `tile_stack.focus`; with focus left on Panels those keys routed to
-        // the invisible `cycle_panel_scale` and the delivered zoom-out
-        // presets were keyboard-dead on the primary surface. Mirror the
-        // terminal `g g` path's `focus_tile_slot` after `open_graph`.
+    fn startup_opens_with_the_module_ui_and_source_viewer() {
+        // Spec "Startup pane configuration": the band starts with the module
+        // UI in the left big pane and the source viewer in a small pane, and
+        // no graph view is opened until the user presses `g g`.
         let mut app = App::new();
         load_initial_patch(&mut app, None);
-        app.open_graph();
-        focus_startup_graph_slot(&mut app);
-        assert_eq!(
-            app.tile_stack.slots,
-            vec![ViewType::Graph],
-            "startup opens exactly the graph slot"
-        );
-        assert_eq!(
-            app.tile_stack.focus,
-            FocusSlot::Slot(0),
-            "the graph window owns tile focus at startup"
-        );
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        assert_eq!(app.layout.focus, droid_tui::panes::PaneId::BigLeft);
+        assert!(app.graph.is_none());
     }
 
     #[test]
