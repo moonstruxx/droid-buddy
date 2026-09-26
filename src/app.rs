@@ -456,11 +456,6 @@ pub struct GraphDrag {
 pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
 pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
 
-/// Minimum window width (egui points) for the quad 4-pane layout; below it
-/// the window falls back to the single-pane graph view so narrow windows stay
-/// readable (quad-view change, `EguiSurface::paint`).
-pub const QUAD_WIDTH_THRESHOLD: f32 = 120.0;
-
 /// Cached influence-induced subgraph solve (quad-view FILTERED pane): the
 /// influenced nodes and their internal edges solved as their own compact
 /// layout, recomputed whenever influence recomputes so the pane never
@@ -618,6 +613,11 @@ pub struct App {
     /// focused-pane identity (`Panels` = left pane). Hit-testing input for
     /// focus routing; rebuilt every frame like `component_rects`.
     pub pane_rects: Vec<(FocusSlot, Rect)>,
+    /// Pane rects the renderer drew this frame, keyed by pane id (ADR 35:
+    /// drawn geometry and hit geometry share one source). Written each frame
+    /// by `refresh_hit_geometry` from `pane_geometry`; `pane_rects` (the
+    /// legacy `FocusSlot` mirror for handler/main) derives from it.
+    pub pane_hit_rects: Vec<(PaneId, Rect)>,
     /// True when the signal-flow graph view (`g g`) is open.
     pub showing_graph: bool,
     /// The signal-flow graph built from the current patch. `None` until a
@@ -911,6 +911,7 @@ impl App {
             quad_active: false,
             quad_focus: QuadFocus::Panels,
             pane_rects: Vec::new(),
+            pane_hit_rects: Vec::new(),
             showing_graph: false,
             graph: None,
             graph_positions: Vec::new(),
@@ -1787,8 +1788,8 @@ impl App {
     /// as one big pane or two small panes split at `small_split_ratio`, and
     /// the maximize override returning only the maximized pane at full band.
     /// Returns every arrangement pane in tree order, empty panes included.
-    /// Task 2.1 wires the renderer to this; `App.pane_rects` stays owned by
-    /// the legacy tiled painter until then.
+    /// The single geometry source (ADR 35): the renderer draws from it and
+    /// publishes it as `pane_hit_rects` via `refresh_hit_geometry`.
     pub fn pane_geometry(&self, band: Rect) -> Vec<(PaneId, Rect)> {
         if let Some(id) = self.layout.maximized {
             return vec![(id, band)];
@@ -1821,6 +1822,32 @@ impl App {
             );
             vec![(PaneId::BigLeft, left), (PaneId::BigRight, right)]
         }
+    }
+
+    /// Publish the pane geometry the renderer drew this frame (ADR 35: drawn
+    /// geometry and hit geometry share one source) and derive the legacy
+    /// `FocusSlot` mirror `pane_rects` from it for handler/main compat. Runs
+    /// `sync_mirror` first so a fresh `App` (whose mirror is not yet derived
+    /// from the layout) publishes complete pane rects from frame one. Panels
+    /// maps to `FocusSlot::Panels`, any other open view to its slot index,
+    /// and empty panes are dropped (nothing to hit-test).
+    pub fn refresh_hit_geometry(&mut self, band: Rect) {
+        self.sync_mirror();
+        self.pane_hit_rects = self.pane_geometry(band);
+        self.pane_rects = self
+            .pane_hit_rects
+            .iter()
+            .filter_map(|(id, rect)| {
+                let slot = match self.layout.pane(*id).view {
+                    Some(ViewType::Panels) => FocusSlot::Panels,
+                    Some(view) => {
+                        FocusSlot::Slot(self.tile_stack.slots.iter().position(|v| *v == view)?)
+                    }
+                    None => return None,
+                };
+                Some((slot, *rect))
+            })
+            .collect();
     }
 
     /// Toggle the `\` vertical split in the left pane.
