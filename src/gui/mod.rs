@@ -1344,6 +1344,104 @@ mod tests {
         out.textures_delta.clear();
     }
 
+    #[test]
+    fn graph_pane_rect_uses_the_class_layout_pane_not_the_tile_mirror() {
+        // Bug droid_tui-up5: `graph_pane_rect` derived the drawn graph pane from
+        // the legacy `tile_stack` slot mirror (left_x = width * main_split_ratio,
+        // equal-height slots) instead of the class layout's `pane_geometry`, so
+        // the scene origin, the first-frame fit, and the mouse origin disagreed
+        // with the pane `paint_panes` actually draws the graph in. Here the
+        // startup arrangement (Panels big-left + SourceViewer small-top) gets the
+        // Graph view opened into the left big pane (0,0,400,600); the mirror
+        // formula would instead return the top-right small pane (400,0,400,300).
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph(); // Graph is Big-class -> replaces the module UI in BigLeft.
+
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        // The real pane from the one geometry source the paint path uses.
+        let real = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        let pane_from_geometry = app
+            .pane_geometry(to_cell_rect(win))
+            .into_iter()
+            .find_map(|(id, cell)| {
+                (app.layout.pane(id).view == Some(crate::app::ViewType::Graph)).then(|| {
+                    egui::Rect::from_min_size(
+                        egui::pos2(cell.x as f32, cell.y as f32),
+                        egui::vec2(cell.width as f32, cell.height as f32),
+                    )
+                })
+            })
+            .expect("the graph is in a pane of the arrangement");
+        assert_eq!(pane_from_geometry, real);
+
+        assert_eq!(
+            graph_pane_rect(&app, win),
+            Some(real),
+            "the scene pane must be the class-layout graph pane"
+        );
+        // Guard that the two formulas genuinely disagree (the old code returned
+        // the top-right small pane), so the assertion above is not vacuous.
+        let legacy = egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(400.0, 300.0));
+        assert_ne!(legacy, real, "mirror and class formulas disagree by design");
+        assert_ne!(
+            graph_pane_rect(&app, win),
+            Some(legacy),
+            "still returns the legacy tile-mirror geometry"
+        );
+    }
+
+    #[test]
+    fn center_graph_camera_centers_nodes_in_the_real_pane() {
+        // Bug droid_tui-up5: `c` (`center_graph_camera`) computed a pane-local
+        // pan against the real pane size, but `build_scene_spec` then added the
+        // legacy mirror pane's origin, so the bounds center landed off by the
+        // origin delta ("nodes move but are not centered"). In the two-pane
+        // arrangement the y origin was wrong by half the band height.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph();
+
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let real = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        // Realistic flow: the paint publishes the real pane size, then `c`.
+        app.graph_camera = None;
+        app.fit_graph_camera((real.width(), real.height()));
+        assert!(
+            app.center_graph_camera(),
+            "center succeeds with a camera + canvas"
+        );
+
+        let pane = graph_pane_rect(&app, win).expect("graph pane open");
+        assert_eq!(pane, real);
+        let scene = build_scene_spec(&app, crate::theme::active(), pane).expect("scene built");
+        // Node spec x/y is the node's top-left at the mapped solver position;
+        // the bounding box of those mapped positions must sit on the pane center.
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for n in &scene.nodes {
+            min_x = min_x.min(n.x);
+            max_x = max_x.max(n.x);
+            min_y = min_y.min(n.y);
+            max_y = max_y.max(n.y);
+        }
+        let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        assert!(
+            (center.x - real.center().x).abs() < 1.0,
+            "graph centered horizontally in the pane: {center:?} vs {:?}",
+            real.center()
+        );
+        assert!(
+            (center.y - real.center().y).abs() < 1.0,
+            "graph centered vertically in the pane: {center:?} vs {:?}",
+            real.center()
+        );
+    }
+
     /// Run the full base + overlay paint (`paint_panes` then `paint_overlays`)
     /// in one headless frame over an 800x600 band.
     fn run_band(app: &mut App) -> egui::FullOutput {
