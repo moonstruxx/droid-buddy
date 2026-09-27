@@ -131,6 +131,29 @@ const PANEL_CELL_GAP: f32 = 6.0;
 /// Title-zone height above a module block's cell rows.
 const PANEL_TITLE_H: f32 = 20.0;
 
+/// Column count for a module block: the widest grid (most columns) that is
+/// still portrait, i.e. whose block height exceeds its width. Module faceplates
+/// are physically vertical (Euroack controllers are taller than wide), and the
+/// cells themselves are landscape (`PANEL_CELL_W` × `PANEL_CELL_H`), so a block
+/// needs more rows than columns to read as portrait. Scanning the column count
+/// upward and keeping the last fit yields the most compact portrait grid for
+/// `n` cells; a single cell has no portrait grid (one column renders short and
+/// wide) and stays one column.
+fn portrait_columns(n: usize) -> usize {
+    let step_x = PANEL_CELL_W + PANEL_CELL_GAP;
+    let step_y = PANEL_CELL_H + PANEL_CELL_GAP;
+    let mut best = 1;
+    for cols in 1..=n.max(1) {
+        let rows = n.div_ceil(cols);
+        let w = cols as f32 * step_x - PANEL_CELL_GAP;
+        let h = PANEL_TITLE_H + rows as f32 * step_y;
+        if h > w {
+            best = cols;
+        }
+    }
+    best
+}
+
 /// The quad Panels-pane payload for one frame: every patch component grouped
 /// by controller into titled faceplate blocks, flowing left-to-right and
 /// wrapping rows within `pane`. `global_index` stays the component's index
@@ -185,24 +208,30 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
             .push((gi, comp));
     }
 
-    // Flow module blocks horizontally, wrapping rows.
+    // Flow module blocks horizontally, wrapping rows. Blocks now have
+    // variable heights, so the row advances by the tallest block placed in it
+    // (`row_h`) rather than the height of the block that happens to wrap.
     let mut x = inner.min.x;
     let mut y = inner.min.y;
+    let mut row_h = 0.0f32;
     let row_height = PANEL_CELL_H + PANEL_CELL_GAP;
     for controller in order {
         let comps = &groups[controller];
-        // All cells of this module go in one row (block_cols = comps.len); the outer
-        // wrap handles pane overflow at the module level.
-        let block_cols = comps.len();
-        let rows = 1;
+        // Portrait faceplate: cells fill a grid with few columns and enough
+        // rows that the block is taller than wide (see `portrait_columns`).
+        // The outer wrap still handles pane overflow at the module level.
+        let cols = portrait_columns(comps.len());
+        let rows = comps.len().div_ceil(cols);
         let block_h = PANEL_TITLE_H + rows as f32 * row_height;
-        let block_w = block_cols as f32 * (PANEL_CELL_W + PANEL_CELL_GAP) - PANEL_CELL_GAP;
+        let block_w = cols as f32 * (PANEL_CELL_W + PANEL_CELL_GAP) - PANEL_CELL_GAP;
 
         // Wrap to next row if this block does not fit in the remaining width.
         if x + block_w > inner.max.x + 0.5 && x > inner.min.x {
             x = inner.min.x;
-            y += block_h + PANEL_CELL_GAP;
+            y += row_h + PANEL_CELL_GAP;
+            row_h = 0.0;
         }
+        row_h = row_h.max(block_h);
 
         let block_x = x;
         modules.push(ModuleSpec {
@@ -211,10 +240,11 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
         });
 
         for (slot, (gi, comp)) in comps.iter().enumerate() {
-            // All cells share row 0 within this module.
-            let col = slot;
+            // Row-major fill of the portrait grid.
+            let col = slot % cols;
+            let row = slot / cols;
             let cx = block_x + col as f32 * (PANEL_CELL_W + PANEL_CELL_GAP);
-            let cy = y + PANEL_TITLE_H;
+            let cy = y + PANEL_TITLE_H + row as f32 * row_height;
             let is_shift_active =
                 comp.shift_group.is_some() && comp.shift_group == app.active_shift;
             let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
@@ -545,8 +575,8 @@ mod tests {
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        // A wide pane so every module block (a module is one row of cells) fits
-        // horizontally; the horizontal layout wraps at the block level only.
+        // A wide pane so every portrait module block fits horizontally; the
+        // outer layout wraps at the block level only.
         let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(3000.0, 800.0));
         let spec = panels_spec(&app, true, pane);
         assert!(spec.focused);
@@ -610,8 +640,10 @@ mod tests {
 
     #[test]
     fn panels_spec_flows_horizontally() {
-        // Module blocks always flow left-to-right and wrap rows; there is no
-        // portrait vertical-stack variant anymore.
+        // Module blocks still flow left-to-right and wrap rows; only the cells
+        // *inside* a module block now stack into a portrait grid. This test
+        // replaces the old single-row assumption ("all cells of a module share
+        // the same y") that the portrait grid invalidates.
         let mut app = crate::app::App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
@@ -621,21 +653,6 @@ mod tests {
         let narrow_pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(300.0, 800.0));
         let spec = panels_spec(&app, false, narrow_pane);
         assert_eq!(spec.cells.len(), cell_count);
-
-        // Cells within a module share the same y: they flow horizontally.
-        for module in &spec.modules {
-            let module_cells: Vec<_> = spec
-                .cells
-                .iter()
-                .filter(|c| module.rect.contains_rect(c.rect))
-                .collect();
-            if module_cells.len() > 1 {
-                let mut cell_ys: Vec<f32> = module_cells.iter().map(|c| c.rect.min.y).collect();
-                cell_ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                cell_ys.dedup();
-                assert_eq!(cell_ys.len(), 1, "module cells should share the same y");
-            }
-        }
 
         // The narrow pane forces wrapping onto more than one module row.
         let mut module_ys: Vec<f32> = spec.modules.iter().map(|m| m.rect.min.y).collect();
@@ -658,5 +675,111 @@ mod tests {
             first_row[0].rect.min.x, inner.min.x,
             "first block in a row should start at the pane's left edge"
         );
+    }
+
+    /// Every multi-cell module must be a portrait grid: taller than wide, cells
+    /// in more than one row, all cells inside the module rect, and no two cells
+    /// overlapping. Fails on the old single-row layout (blocks were wide and
+    /// short, and every cell shared row 0).
+    #[test]
+    fn module_blocks_are_portrait_grids() {
+        let mut app = crate::app::App::new();
+        let patch =
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(3000.0, 2000.0));
+        let spec = panels_spec(&app, true, pane);
+        assert!(!spec.modules.is_empty());
+
+        let mut checked_multi = 0;
+        for module in &spec.modules {
+            let module_cells: Vec<_> = spec
+                .cells
+                .iter()
+                .filter(|c| module.rect.contains_rect(c.rect))
+                .collect();
+            if module_cells.len() < 2 {
+                continue;
+            }
+            checked_multi += 1;
+            assert!(
+                module.rect.height() > module.rect.width(),
+                "module {:?} must be portrait (h {:.1} > w {:.1})",
+                module.title,
+                module.rect.height(),
+                module.rect.width()
+            );
+            let mut cell_ys: Vec<i32> = module_cells
+                .iter()
+                .map(|c| c.rect.min.y.round() as i32)
+                .collect();
+            cell_ys.sort_unstable();
+            cell_ys.dedup();
+            assert!(
+                cell_ys.len() > 1,
+                "module {:?} cells must span more than one row",
+                module.title
+            );
+            for (i, a) in module_cells.iter().enumerate() {
+                assert!(
+                    module.rect.contains_rect(a.rect),
+                    "cell {} of {:?} escapes the block",
+                    a.label,
+                    module.title
+                );
+                for b in &module_cells[i + 1..] {
+                    assert!(
+                        !a.rect.intersects(b.rect),
+                        "cells {} and {} of {:?} overlap",
+                        a.label,
+                        b.label,
+                        module.title
+                    );
+                }
+            }
+        }
+        assert!(checked_multi >= 1, "fixture has no multi-component module");
+    }
+
+    /// No two module blocks may overlap — the row advance uses the tallest
+    /// block of the row, so variable-height portrait blocks pack cleanly.
+    #[test]
+    fn module_blocks_do_not_overlap() {
+        let mut app = crate::app::App::new();
+        let patch =
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(600.0, 2000.0));
+        let spec = panels_spec(&app, false, pane);
+        for (i, a) in spec.modules.iter().enumerate() {
+            for b in &spec.modules[i + 1..] {
+                assert!(
+                    !a.rect.intersects(b.rect),
+                    "module blocks {:?} and {:?} overlap",
+                    a.title,
+                    b.title
+                );
+            }
+        }
+    }
+
+    /// The portrait grid rule itself: every multi-cell count yields a block
+    /// with height > width; a single cell has no portrait grid.
+    #[test]
+    fn portrait_columns_always_yield_portrait_blocks() {
+        let step_y = PANEL_CELL_H + PANEL_CELL_GAP;
+        let step_x = PANEL_CELL_W + PANEL_CELL_GAP;
+        for n in 2..=64usize {
+            let cols = portrait_columns(n);
+            assert!(cols >= 1 && cols <= n, "n={n} cols={cols}");
+            let rows = n.div_ceil(cols);
+            let w = cols as f32 * step_x - PANEL_CELL_GAP;
+            let h = PANEL_TITLE_H + rows as f32 * step_y;
+            assert!(
+                h > w,
+                "n={n}: cols={cols} rows={rows} h={h:.1} w={w:.1} not portrait"
+            );
+        }
+        assert_eq!(portrait_columns(1), 1, "a single cell stays one column");
     }
 }
