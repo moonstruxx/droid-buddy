@@ -505,46 +505,9 @@ fn theme_clear_color() -> wgpu::Color {
     }
 }
 
-/// The four quad pane rects partitioning `window` (quad-view paint dispatch):
-/// a vertical divider at `main_ratio` (left/right split) and a horizontal
-/// divider at `left_ratio` (the `\` split). `left_split_active` gates the
-/// FILTERED pane; off, the bottom row is the FULL graph alone. Pure geometry
-/// so the layout tests headless.
-struct QuadRects {
-    panels: egui::Rect,
-    source: egui::Rect,
-    full: egui::Rect,
-    filtered: Option<egui::Rect>,
-}
-
-fn quad_rects(
-    window: egui::Rect,
-    main_ratio: f32,
-    left_ratio: f32,
-    left_split_active: bool,
-) -> QuadRects {
-    let x = window.min.x + window.width() * main_ratio.clamp(0.3, 0.7);
-    let y = window.min.y + window.height() * left_ratio.clamp(0.2, 0.8);
-    let panels = egui::Rect::from_min_max(window.min, egui::pos2(x, y));
-    let source = egui::Rect::from_min_max(egui::pos2(x, window.min.y), egui::pos2(window.max.x, y));
-    let full = if left_split_active {
-        egui::Rect::from_min_max(egui::pos2(window.min.x, y), egui::pos2(x, window.max.y))
-    } else {
-        egui::Rect::from_min_max(egui::pos2(window.min.x, y), window.max)
-    };
-    let filtered =
-        left_split_active.then_some(egui::Rect::from_min_max(egui::pos2(x, y), window.max));
-    QuadRects {
-        panels,
-        source,
-        full,
-        filtered,
-    }
-}
-
 /// Round an egui-point rect into the app's cell-grid `Rect` domain (the
-/// renderer→handler geometry handoff). The quad panes publish their layout
-/// here so focus hit-testing sees the same four regions as the paint.
+/// renderer→handler geometry handoff). The paint derives the arrangement
+/// band here before `App::pane_geometry` partitions it.
 fn to_cell_rect(r: egui::Rect) -> crate::app::Rect {
     crate::app::Rect::new(
         r.min.x.round().max(0.0) as u16,
@@ -552,84 +515,6 @@ fn to_cell_rect(r: egui::Rect) -> crate::app::Rect {
         r.width().round().max(0.0) as u16,
         r.height().round().max(0.0) as u16,
     )
-}
-
-/// The quad panes as `(FocusSlot, cell Rect)` for focus hit-testing: the
-/// Panels pane on `FocusSlot::Panels`, the Source pane on the viewer slot,
-/// and both graph panes on the graph slot (the FILTERED pane shares the FULL
-/// pane's focus, mirroring `App::cycle_quad_focus`).
-fn quad_pane_rects(app: &App, q: &QuadRects) -> Vec<(crate::app::FocusSlot, crate::app::Rect)> {
-    let viewer_slot = app
-        .tile_stack
-        .slots
-        .iter()
-        .position(|v| *v == crate::app::ViewType::SourceViewer);
-    let graph_slot = app
-        .tile_stack
-        .slots
-        .iter()
-        .position(|v| *v == crate::app::ViewType::Graph);
-    let mut out = vec![(crate::app::FocusSlot::Panels, to_cell_rect(q.panels))];
-    if let Some(i) = viewer_slot {
-        out.push((crate::app::FocusSlot::Slot(i), to_cell_rect(q.source)));
-    }
-    if let Some(i) = graph_slot {
-        out.push((crate::app::FocusSlot::Slot(i), to_cell_rect(q.full)));
-        if let Some(f) = q.filtered {
-            out.push((crate::app::FocusSlot::Slot(i), to_cell_rect(f)));
-        }
-    }
-    out
-}
-
-/// Paint the quad 2x2 layout into the window: top row Panels | Source, bottom
-/// row Graph FULL | Graph FILTERED (`left_split_active` gates the FILTERED
-/// pane). Publishes `pane_rects` for focus hit-testing. The caller falls
-/// back to the single-pane path when quad is inactive or the window is too
-/// narrow.
-fn paint_quad(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
-    let t = crate::theme::active();
-    let window_rect = ui.max_rect();
-    let q = quad_rects(
-        window_rect,
-        app.main_split_ratio,
-        app.left_split_ratio,
-        app.left_split_active,
-    );
-    app.pane_rects = quad_pane_rects(app, &q);
-    let bg = t.egui_color(t.graph_canvas_bg);
-
-    // Panels (top-left): real hw components grouped by controller.
-    let painter = ui.painter().with_clip_rect(q.panels);
-    painter.rect_filled(q.panels, 0.0, bg);
-    drop(painter);
-    let focused = app.quad_focus == crate::app::QuadFocus::Panels;
-    let spec = panels::panels_spec(app, focused, q.panels);
-    let _ = panels::paint_panels(ui, q.panels, Some(&spec));
-
-    let ctx = ui.ctx();
-    // Source (top-right): the raw/prettified viewer.
-    let painter = ui.painter().with_clip_rect(q.source);
-    painter.rect_filled(q.source, 0.0, bg);
-    let spec = viewer::viewer_spec(app);
-    let _ = viewer::paint_viewer(&painter, q.source, ctx, Some(&spec));
-
-    // Graph FULL (bottom-left): the shared full-graph scene (influence
-    // highlight/dim), clipped to the pane. The pane is the visible graph
-    // canvas: publish its size and seed the camera on the first frame
-    // (design D1/D2), so fit/center/zoom anchoring uses the real pane.
-    app.graph_canvas_px = Some((q.full.width(), q.full.height()));
-    if app.graph_camera.is_none() {
-        app.fit_graph_camera((q.full.width(), q.full.height()));
-    }
-    graph::paint_scene_in(ui, q.full, scene, selected);
-
-    // Graph FILTERED (bottom-right): the influence-induced subgraph freshly
-    // fit into its pane with its own compact camera.
-    if let Some(f) = q.filtered {
-        let subset = graph::build_subset_scene(app, t, f);
-        graph::paint_scene_in(ui, f, subset.as_ref(), selected);
-    }
 }
 
 /// Pane frame (tiled-window-manager D6): the border stroke carries the focus
@@ -666,48 +551,56 @@ pub(crate) fn draw_pane_frame(
     }
 }
 
-/// Paint the tiled main band (tiled-window-manager D1/D6): a full-height left
-/// panel pane plus the open right-column slots stacked top-to-bottom. Panels
-/// always render; each `tile_stack` slot paints its surface into an even
-/// horizontal cut of the right column. Publishes `pane_rects` for focus
-/// hit-testing. The caller uses this when tiles are open and neither the quad
-/// nor the empty-stack single-graph path applies.
-fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
+/// Whether the band has anything to paint: a maximized pane, or at least one
+/// pane holding a view. Panels counts here — the module UI is a view in the
+/// class layout (design D2), not a permanent left pane, so a band showing only
+/// the module UI still paints through `paint_panes` instead of falling back to
+/// the empty-band graph canvas.
+fn band_has_views(app: &App, band: crate::app::Rect) -> bool {
+    app.layout.maximized.is_some()
+        || app
+            .pane_geometry(band)
+            .iter()
+            .any(|(id, _)| app.layout.pane(*id).view.is_some())
+}
+
+/// Paint the class-based main band (`pane-class-layout`, design D1): every
+/// pane of the current arrangement (`App::pane_geometry` — the left big pane
+/// plus either a second big pane or two small panes, and the maximize override
+/// that collapses the band to the focused pane) paints its view into its cell.
+/// Each pane's border carries the `pane_focus_border` token when it holds
+/// `App.layout.focus` and `pane_unfocused_border` otherwise; the panels and
+/// viewer surfaces draw their own frame, the graph, physical, and optimizer
+/// panes get one here. An empty pane stays a bare background. Publishes
+/// `pane_hit_rects` (the drawn geometry, ADR 35) and the legacy `FocusSlot`
+/// mirror `pane_rects` for handler/main compat via `App::refresh_hit_geometry`.
+fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
     let t = crate::theme::active();
-    let window = ui.max_rect();
     let bg = t.egui_color(t.graph_canvas_bg);
-    let x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
-    let panels_rect = egui::Rect::from_min_max(window.min, egui::pos2(x, window.max.y));
-    let right = egui::Rect::from_min_max(egui::pos2(x, window.min.y), window.max);
+    // ADR 35: the panes painted here are the hit geometry, so both handoffs
+    // derive from the one `pane_geometry` source.
+    app.refresh_hit_geometry(to_cell_rect(ui.max_rect()));
+    let panes = app.pane_hit_rects.clone();
 
-    let slots = app.tile_stack.slots.clone();
-    app.pane_rects = Vec::with_capacity(slots.len() + 1);
-    app.pane_rects
-        .push((crate::app::FocusSlot::Panels, to_cell_rect(panels_rect)));
-
-    // Panels (left, full height): real hw components grouped by controller.
-    let painter = ui.painter().with_clip_rect(panels_rect);
-    painter.rect_filled(panels_rect, 0.0, bg);
-    drop(painter);
-    let focused = app.tile_stack.focus == crate::app::FocusSlot::Panels;
-    let spec = panels::panels_spec(app, focused, panels_rect);
-    let _ = panels::paint_panels(ui, panels_rect, Some(&spec));
-
-    if slots.is_empty() {
-        return;
-    }
-    let slot_h = right.height() / slots.len() as f32;
-    for (i, view) in slots.iter().enumerate() {
-        let y0 = right.min.y + slot_h * i as f32;
+    for (id, cell) in panes {
         let rect = egui::Rect::from_min_size(
-            egui::pos2(right.min.x, y0),
-            egui::vec2(right.width(), slot_h),
+            egui::pos2(cell.x as f32, cell.y as f32),
+            egui::vec2(cell.width as f32, cell.height as f32),
         );
-        app.pane_rects
-            .push((crate::app::FocusSlot::Slot(i), to_cell_rect(rect)));
-        match view {
-            crate::app::ViewType::Graph => {
-                // The slot is the visible graph canvas: publish its size and
+        let focused = app.layout.focus == id;
+        // Every pane owns its background so an empty pane reads as a
+        // deliberate region of the arrangement rather than showing the
+        // previous frame through.
+        ui.painter().with_clip_rect(rect).rect_filled(rect, 0.0, bg);
+        match app.layout.pane(id).view {
+            Some(crate::app::ViewType::Panels) => {
+                // Module UI: real hw components grouped by controller. The
+                // surface draws its own focus frame from `spec.focused`.
+                let spec = panels::panels_spec(app, focused, rect);
+                let _ = panels::paint_panels(ui, rect, Some(&spec));
+            }
+            Some(crate::app::ViewType::Graph) => {
+                // The pane is the visible graph canvas: publish its size and
                 // seed the camera on the first frame (design D1/D2).
                 app.graph_canvas_px = Some((rect.width(), rect.height()));
                 if app.graph_camera.is_none() {
@@ -715,58 +608,54 @@ fn paint_tiled(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 }
                 graph::paint_scene_in(ui, rect, scene, selected);
                 // The graph scene paints no pane chrome of its own, so the
-                // slot frame marks it like the panels and viewer panes.
+                // pane frame marks it like the panels and viewer panes.
                 let painter = ui.painter().with_clip_rect(rect);
-                draw_pane_frame(
-                    &painter,
-                    rect,
-                    app.tile_stack.focus == crate::app::FocusSlot::Slot(i),
-                    "",
-                    t,
-                );
+                draw_pane_frame(&painter, rect, focused, "", t);
             }
-            crate::app::ViewType::SourceViewer => {
+            Some(crate::app::ViewType::SourceViewer) => {
                 let painter = ui.painter().with_clip_rect(rect);
-                painter.rect_filled(rect, 0.0, bg);
                 let spec = viewer::viewer_spec(app);
                 let _ = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
             }
-            crate::app::ViewType::Physical => {
-                let painter = ui.painter().with_clip_rect(rect);
-                painter.rect_filled(rect, 0.0, bg);
-                drop(painter);
+            Some(crate::app::ViewType::Physical) => {
                 let spec = physical::physical_spec(app);
                 let _ = physical::paint_physical(ui, rect, spec.as_ref());
                 // The physical surface paints no pane chrome of its own;
-                // frame the slot like the graph tile.
+                // frame the pane like the graph tile.
                 let painter = ui.painter().with_clip_rect(rect);
-                draw_pane_frame(
-                    &painter,
-                    rect,
-                    app.tile_stack.focus == crate::app::FocusSlot::Slot(i),
-                    "",
-                    t,
-                );
+                draw_pane_frame(&painter, rect, focused, "", t);
             }
-            // The optimizer renders as an overlay (`paint_overlays`).
-            crate::app::ViewType::Optimizer => {}
+            Some(crate::app::ViewType::Optimizer) => {
+                // The optimizer lives in its own small pane (spec "Optimizer
+                // as side pane"): fill the pane with its candidate list and
+                // frame it, never as a card over another pane.
+                let painter = ui.painter().with_clip_rect(rect);
+                let spec = overlays::optimizer_spec(app);
+                overlays::paint_optimizer(&painter, rect, spec.as_ref());
+                let painter = ui.painter().with_clip_rect(rect);
+                draw_pane_frame(&painter, rect, focused, "", t);
+            }
+            // An empty pane stays bare.
+            None => {}
         }
     }
 }
 
 /// Dispatch the overlays over the base surface, bottom of the z-order first:
-/// diff, optimizer, validation, select, picker, label edit, help. Called after
-/// the base paint so every overlay draws in both the quad and single-pane
-/// branches.
+/// diff, validation, select, picker, label edit, help. Called after the base
+/// paint. The optimizer is NOT here — it lives in its own small pane
+/// (`paint_panes`).
 fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     let painter = ui.painter();
-    let canvas = ui.max_rect().size();
+    // Center overlays on the window, not on `ui.max_rect()`: the base paint
+    // allocates graph-node rects in scene coordinates, and `allocate_rect`
+    // expands the Ui's max_rect to include them, which would drag a centered
+    // modal off to the side. `viewport_rect()` is the canvas `paint` published
+    // and is unaffected by that expansion.
+    let canvas = ui.ctx().viewport_rect().size();
     let ctx = ui.ctx();
     if let Some(spec) = overlays::diff_spec_for(app) {
         overlays::paint_diff_surface(painter, canvas, ctx, Some(&spec));
-    }
-    if let Some(spec) = overlays::optimizer_spec(app) {
-        overlays::paint_optimizer(painter, canvas, ctx, Some(&spec));
     }
     if let Some(spec) = overlays::validation_spec_for(app) {
         let _ = overlays::paint_validation_modal(painter, canvas, ctx, Some(&spec));
@@ -823,13 +712,13 @@ impl EguiSurface {
     /// mutations. Pointer positions are egui points; the scene is painted 1:1
     /// (one spec pixel = one egui point), so they double as spec-pixel coords.
     /// `selected` is the window-local marquee selection driving the highlight.
-    /// `app` flows through so the quad dispatch builds real per-pane specs and
+    /// `app` flows through so the base paint builds real per-pane specs and
     /// publishes `pane_rects` (renderer-owns-geometry contract).
     ///
-    /// Surface dispatch: in quad mode (wide enough window) this frame paints
-    /// the four panes (Panels | Source / Graph FULL | Graph FILTERED);
-    /// otherwise it paints the single graph canvas via
-    /// [`graph::paint_scene`] with the surface dummy specs (tasks 2.1-2.5).
+    /// Surface dispatch: every pane of the layout arrangement paints its view
+    /// (Panels, source viewer, physical, graph, optimizer); with no view open
+    /// in any pane the whole window is the bare graph canvas via
+    /// [`graph::paint_scene`].
     fn paint(
         &mut self,
         window: &Window,
@@ -914,13 +803,16 @@ impl EguiSurface {
 
         let mut full_output = self.context.run_ui(raw_input, |ui| {
             let window_rect = ui.max_rect();
-            if app.is_quad() && window_rect.width() >= crate::app::QUAD_WIDTH_THRESHOLD {
-                paint_quad(app, ui, scene, selected);
-            } else if app.tile_stack.slots.is_empty() {
+            let band = to_cell_rect(window_rect);
+            // ADR 35: the arrangement decides the paint. With nothing open
+            // (no view in any pane and no maximize) the whole window is the
+            // bare graph canvas; otherwise every pane of the arrangement
+            // paints. Panels is a view, so it counts like any other (D2).
+            if band_has_views(app, band) {
+                paint_panes(app, ui, scene, selected);
+            } else {
                 app.pane_rects.clear();
                 graph::paint_scene(ui, window_rect.size(), scene, selected);
-            } else {
-                paint_tiled(app, ui, scene, selected);
             }
             paint_overlays(app, ui);
         });
@@ -1125,192 +1017,114 @@ mod tests {
     }
 
     #[test]
-    fn quad_rects_partition_the_window_without_overlap() {
-        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let q = quad_rects(window, 0.6, 0.5, true);
-        // The vertical divider lands at 0.6 and the horizontal at 0.5
-        // (f32 arithmetic: assert with tolerance).
-        assert!((q.panels.max.x - 480.0).abs() < 0.01);
-        assert!((q.panels.max.y - 300.0).abs() < 0.01);
-        assert!((q.source.min.x - 480.0).abs() < 0.01);
-        assert!((q.full.min.y - 300.0).abs() < 0.01);
-        // With the split active the FULL graph is the bottom-left quadrant.
-        assert!((q.full.max.x - 480.0).abs() < 0.01);
-        assert_eq!(q.full.max.y, window.max.y);
-        let f = q.filtered.expect("split active -> filtered pane");
-        assert!((f.min.x - 480.0).abs() < 0.01);
-        assert!((f.min.y - 300.0).abs() < 0.01);
-        assert_eq!(f.max, window.max);
-        // The four panes tile the window exactly, with no gaps or overlap.
-        let mut area = 0.0;
-        for r in [q.panels, q.source, q.full, f] {
-            assert!(window.contains_rect(r));
-            area += r.width() * r.height();
+    fn overlays_center_on_the_viewport_after_graph_nodes_expand_the_ui() {
+        // Regression: the base paint allocates graph-node rects in scene
+        // coordinates, and egui's `allocate_rect` expands `ui.max_rect()` to
+        // include them. The overlay canvas must come from the viewport, or a
+        // centered modal is dragged off to the side of the window.
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+        let mut app = crate::app::App::new();
+        app.showing_help = true;
+        let ctx = egui::Context::default();
+        let canvas = egui::vec2(1280.0, 800.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            let _ = ui.allocate_rect(
+                egui::Rect::from_min_size(egui::pos2(3000.0, 20.0), egui::vec2(60.0, 40.0)),
+                egui::Sense::hover(),
+            );
+            assert!(
+                ui.max_rect().width() > canvas.x,
+                "base paint expanded max_rect: {:?}",
+                ui.max_rect()
+            );
+            paint_overlays(&app, ui);
+        });
+        let t = crate::theme::active();
+        let border = t.egui_color(t.validation_modal_border);
+        let fill = t.egui_color(t.muted);
+        let mut border_rect = None;
+        let mut fill_alpha = None;
+        for cs in &out.shapes {
+            if let egui::epaint::Shape::Rect(r) = &cs.shape {
+                if r.stroke.color == border && border_rect.is_none() {
+                    border_rect = Some(r.rect);
+                }
+                if r.fill == fill && r.rect.width() > 400.0 {
+                    fill_alpha = Some(r.fill.a());
+                }
+            }
         }
-        assert!((area - window.width() * window.height()).abs() < 0.5);
+        let rect = border_rect.expect("help modal border drawn");
+        assert!(
+            (rect.center().x - canvas.x / 2.0).abs() < 0.5,
+            "modal centered on the viewport: {:?}",
+            rect
+        );
+        assert!(
+            (rect.center().y - canvas.y / 2.0).abs() < 0.5,
+            "modal centered on the viewport: {:?}",
+            rect
+        );
+        assert_eq!(fill_alpha, Some(255), "modal fill is opaque");
+        out.textures_delta.clear();
+        crate::theme::set_test_theme(None);
     }
 
-    #[test]
-    fn quad_rects_hide_filtered_pane_when_split_off() {
-        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let q = quad_rects(window, 0.6, 0.5, false);
-        assert!(q.filtered.is_none());
-        // The FULL graph spans the whole bottom row.
-        assert_eq!(q.full.min.y, 300.0);
-        assert_eq!(q.full.max, window.max);
+    /// Build the full graph scene for a paint test (the scene rect only frames
+    /// the graph content; each pane publishes its own canvas during paint).
+    fn scene_for(app: &App, win: egui::Rect) -> Option<SceneSpec> {
+        crate::gui::graph::build_scene_spec(
+            app,
+            crate::theme::active(),
+            crate::gui::graph::graph_pane_rect(app, win).unwrap_or(win),
+        )
     }
 
-    #[test]
-    fn quad_rects_clamp_ratios() {
-        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0));
-        let q = quad_rects(window, 0.9, 0.1, true);
-        // Out-of-range ratios clamp so panes never collapse to zero width:
-        // 0.9 -> 0.7, 0.1 -> 0.2.
-        assert_eq!(q.panels.max.x, 700.0);
-        assert_eq!(q.panels.max.y, 200.0);
-    }
-
-    #[test]
-    fn quad_pane_rects_map_slots_and_both_graph_panes() {
-        let mut app = App::new();
-        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
-            .unwrap();
-        assert!(app.load_patch(patch));
-        assert!(app.enter_quad());
-        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let q = quad_rects(
-            window,
-            app.main_split_ratio,
-            app.left_split_ratio,
-            app.left_split_active,
-        );
-        let rects = quad_pane_rects(&app, &q);
-        assert_eq!(rects.len(), 4);
-        assert_eq!(
-            rects[0],
-            (crate::app::FocusSlot::Panels, to_cell_rect(q.panels))
-        );
-        let viewer_slot = app
-            .tile_stack
-            .slots
-            .iter()
-            .position(|v| *v == crate::app::ViewType::SourceViewer)
-            .unwrap();
-        let graph_slot = app
-            .tile_stack
-            .slots
-            .iter()
-            .position(|v| *v == crate::app::ViewType::Graph)
-            .unwrap();
-        assert_eq!(
-            rects[1],
-            (
-                crate::app::FocusSlot::Slot(viewer_slot),
-                to_cell_rect(q.source)
-            )
-        );
-        assert_eq!(
-            rects[2],
-            (
-                crate::app::FocusSlot::Slot(graph_slot),
-                to_cell_rect(q.full)
-            )
-        );
-        assert_eq!(
-            rects[3],
-            (
-                crate::app::FocusSlot::Slot(graph_slot),
-                to_cell_rect(q.filtered.unwrap())
-            )
-        );
-    }
-
-    #[test]
-    fn paint_quad_draws_four_panes_headless() {
-        // The quad dispatch runs inside a real egui frame headless: shapes
-        // land for every pane (Panels + Source top, FULL + FILTERED bottom)
-        // and the four pane rects publish for focus hit-testing.
-        let mut app = App::new();
-        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
-            .unwrap();
-        assert!(app.load_patch(patch));
-        app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
-        assert!(app.influence_subset.is_some());
+    /// Run `paint_panes` once inside a headless egui context over an 800x600
+    /// band and return the frame output for shape/label assertions.
+    fn run_paint_panes(app: &mut App) -> egui::FullOutput {
         let ctx = egui::Context::default();
         let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            crate::theme::active(),
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
-        );
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
+            screen_rect: Some(win),
             ..Default::default()
         };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_quad(&mut app, ui, scene.as_ref(), &[]);
-        });
-        assert!(
-            !full_output.shapes.is_empty(),
-            "quad paint must emit shapes for all four panes"
-        );
-        let labels: Vec<String> = full_output
-            .shapes
+        let scene = scene_for(app, win);
+        ctx.run_ui(raw, |ui| {
+            paint_panes(app, ui, scene.as_ref(), &[]);
+        })
+    }
+
+    fn text_labels(out: &egui::FullOutput) -> Vec<String> {
+        out.shapes
             .iter()
             .filter_map(|cs| match &cs.shape {
                 egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
                 _ => None,
             })
-            .collect();
-        assert!(
-            labels.iter().any(|l| l.contains("Panels")),
-            "panels title missing: {labels:?}"
-        );
-        assert_eq!(app.pane_rects.len(), 4, "quad publishes four pane rects");
-        full_output.textures_delta.clear();
+            .collect()
     }
 
     #[test]
-    fn paint_tiled_renders_panels_and_viewer_slot_headless() {
-        // `g v` opens the SourceViewer as a right-column slot; the tiled base
-        // paint must render it next to the panels pane (the gap this fixes),
-        // not just the always-on graph scene.
+    fn paint_panes_renders_small_arrangement_headless() {
+        // Startup arrangement (spec "Startup pane configuration"): the module
+        // UI in the left big pane, the source viewer in the first small pane,
+        // and the second small pane empty.
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        app.open_view(crate::app::ViewType::SourceViewer);
-        assert!(app.showing_viewer);
-
-        let ctx = egui::Context::default();
-        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            crate::theme::active(),
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        assert!(
+            app.layout.has_small_view(),
+            "startup is the small arrangement"
         );
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
-        });
-        let labels: Vec<String> = full_output
-            .shapes
-            .iter()
-            .filter_map(|cs| match &cs.shape {
-                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
-                _ => None,
-            })
-            .collect();
+
+        let mut out = run_paint_panes(&mut app);
+        let labels = text_labels(&out);
         assert!(
             labels.iter().any(|l| l.contains("Panels")),
             "panels title missing: {labels:?}"
@@ -1319,153 +1133,192 @@ mod tests {
             labels.iter().any(|l| l.contains("Source")),
             "viewer title missing: {labels:?}"
         );
-        assert_eq!(app.pane_rects.len(), 2, "panels + one viewer slot");
-        full_output.textures_delta.clear();
+        assert_eq!(
+            app.pane_hit_rects.len(),
+            3,
+            "three panes in the small arrangement"
+        );
+        assert_eq!(
+            app.pane_rects.len(),
+            2,
+            "panels + source viewer are hit-testable"
+        );
+        // Geometry: left big pane 0..400, the right half split into two
+        // quarter small panes top and bottom (main and small ratios at 0.5).
+        let band = to_cell_rect(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
+        let geom = app.pane_geometry(band);
+        assert_eq!(
+            geom[0],
+            (
+                crate::panes::PaneId::BigLeft,
+                crate::app::Rect::new(0, 0, 400, 600)
+            )
+        );
+        assert_eq!(
+            geom[1],
+            (
+                crate::panes::PaneId::SmallTop,
+                crate::app::Rect::new(400, 0, 400, 300)
+            )
+        );
+        assert_eq!(
+            geom[2],
+            (
+                crate::panes::PaneId::SmallBottom,
+                crate::app::Rect::new(400, 300, 400, 300)
+            )
+        );
+        out.textures_delta.clear();
     }
 
     #[test]
-    fn paint_tiled_renders_graph_slot_headless() {
-        // `g g` opens the Graph as a right-column slot; with the slot open the
-        // tiled base paint renders the graph scene next to the panels pane and
-        // publishes pane rects for both.
+    fn paint_panes_renders_big_arrangement_headless() {
+        // No small-class view open: the right half is one big pane, so the band
+        // is two equal big panes side by side (design D1).
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        app.open_graph();
-        assert!(app.showing_graph);
-        assert!(app.tile_stack.is_open(crate::app::ViewType::Graph));
+        app.open_graph(); // graph lands in the left big pane
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        app.layout.big_right.view = Some(crate::app::ViewType::Physical);
+        app.layout.focus = crate::panes::PaneId::BigRight;
+        assert!(!app.layout.has_small_view(), "big arrangement");
 
-        let ctx = egui::Context::default();
-        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            crate::theme::active(),
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
-        );
+        let mut out = run_paint_panes(&mut app);
         assert!(
-            scene.as_ref().is_some_and(|s| !s.nodes.is_empty()),
-            "graph scene must have nodes"
+            !out.shapes.is_empty(),
+            "big arrangement must paint both panes"
         );
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
-        });
-        assert!(
-            !full_output.shapes.is_empty(),
-            "tiled paint must emit shapes for panels and the graph slot"
-        );
-        assert_eq!(app.pane_rects.len(), 2, "panels + one graph slot");
-        full_output.textures_delta.clear();
-    }
-
-    #[test]
-    fn paint_tiled_renders_physical_slot_headless() {
-        // `s` opens the Physical rack as a right-column slot; the tiled base
-        // paint builds the app-driven spec (chain → rack → cells under the
-        // app's zoom/offset) and paints the physical surface next to the
-        // panels pane.
-        let mut app = App::new();
-        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
-            .unwrap();
-        assert!(app.load_patch(patch));
-        app.open_view(crate::app::ViewType::Physical);
-        assert!(app.tile_stack.is_open(crate::app::ViewType::Physical));
-
-        let ctx = egui::Context::default();
-        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            crate::theme::active(),
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
-        );
-        let raw = egui::RawInput {
-            screen_rect: Some(win),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
-        });
-        assert!(
-            !full_output.shapes.is_empty(),
-            "tiled paint must emit shapes for panels and the physical slot"
-        );
-        let labels: Vec<String> = full_output
-            .shapes
+        assert_eq!(app.pane_hit_rects.len(), 2, "two big panes");
+        assert!(app
+            .pane_hit_rects
             .iter()
-            .filter_map(|cs| match &cs.shape {
-                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            labels.iter().any(|l| l.contains("P2B8 1")),
-            "physical module title missing: {labels:?}"
-        );
-        assert_eq!(app.pane_rects.len(), 2, "panels + one physical slot");
-        full_output.textures_delta.clear();
+            .any(|(id, _)| *id == crate::panes::PaneId::BigLeft));
+        let (_, right) = app
+            .pane_hit_rects
+            .iter()
+            .find(|(id, _)| *id == crate::panes::PaneId::BigRight)
+            .expect("right big pane published");
+        assert_eq!(*right, crate::app::Rect::new(400, 0, 400, 600));
+        out.textures_delta.clear();
     }
 
     #[test]
-    fn paint_tiled_pane_frames_use_focus_tokens() {
-        // FIX 4: every tiled pane draws its border stroke from the pane focus
-        // tokens: the focused pane pops in `pane_focus_border`, the other
-        // panes recede in `pane_unfocused_border` (the old `focus_border` /
-        // `muted` pair never reached the renderer).
+    fn paint_panes_maximize_override_fills_the_band() {
+        // `z` maximizes the focused pane to the full band (non-latching display
+        // state): the arrangement collapses to that one pane.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph(); // graph lands in the left big pane, focused
+        app.layout.maximized = Some(crate::panes::PaneId::BigLeft);
+
+        let mut out = run_paint_panes(&mut app);
+        assert_eq!(
+            app.pane_hit_rects.len(),
+            1,
+            "maximize collapses to one pane"
+        );
+        assert_eq!(
+            app.pane_hit_rects[0],
+            (
+                crate::panes::PaneId::BigLeft,
+                crate::app::Rect::new(0, 0, 800, 600)
+            ),
+            "maximized pane fills the whole band"
+        );
+        // The graph publishes the full band as its canvas.
+        assert_eq!(app.graph_canvas_px, Some((800.0, 600.0)));
+        // The hidden source viewer must not paint while the graph is maximized.
+        let labels = text_labels(&out);
+        assert!(
+            !labels.iter().any(|l| l.contains("Source")),
+            "hidden panes do not paint: {labels:?}"
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_panes_focus_border_tokens_headless() {
+        // The focused pane's frame uses `pane_focus_border` (2px); every other
+        // pane uses `pane_unfocused_border` (1px) (spec "Focus border marks the
+        // active pane"). Assert by pane identity, not just color presence.
         let t = crate::theme::active();
         let focus = t.egui_color(t.pane_focus_border);
         let unfocused = t.egui_color(t.pane_unfocused_border);
 
+        // The two big-pane rects in an 800x600 band with the boundary at 0.5.
+        let left = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 600.0));
+        let right = egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(400.0, 600.0));
+        let strokes_at = |out: &egui::FullOutput, target: egui::Rect| -> Vec<egui::Stroke> {
+            out.shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::epaint::Shape::Rect(r)
+                        if r.stroke.width > 0.0
+                            && (r.rect.min - target.min).length() < 1.0
+                            && (r.rect.max - target.max).length() < 1.0 =>
+                    {
+                        Some(r.stroke)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Big arrangement: graph left, physical right (both panes frame through
+        // `draw_pane_frame`), focus the graph.
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
         app.open_graph();
-        app.tile_stack.focus = crate::app::FocusSlot::Slot(0);
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        app.layout.big_right.view = Some(crate::app::ViewType::Physical);
+        app.layout.focus = crate::panes::PaneId::BigLeft;
 
-        let ctx = egui::Context::default();
-        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            t,
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
-        );
-        let raw = egui::RawInput {
-            screen_rect: Some(win),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
-        });
-        let strokes: Vec<egui::Stroke> = full_output
-            .shapes
-            .iter()
-            .filter_map(|cs| match &cs.shape {
-                egui::epaint::Shape::Rect(r) if r.stroke.width > 0.0 => Some(r.stroke),
-                _ => None,
-            })
-            .collect();
+        let mut out = run_paint_panes(&mut app);
+        let left_strokes = strokes_at(&out, left);
+        let right_strokes = strokes_at(&out, right);
         assert!(
-            strokes.iter().any(|s| s.color == focus),
-            "focused graph-slot frame in the focus token: {strokes:?}"
+            left_strokes
+                .iter()
+                .any(|s| s.color == focus && s.width == 2.0),
+            "focused graph pane frame uses the focus token at 2px: {left_strokes:?}"
         );
         assert!(
-            strokes.iter().any(|s| s.color == unfocused),
-            "unfocused panels frame in the unfocused token: {strokes:?}"
+            right_strokes
+                .iter()
+                .any(|s| s.color == unfocused && s.width == 1.0),
+            "unfocused physical pane frame uses the unfocused token at 1px: {right_strokes:?}"
         );
-        full_output.textures_delta.clear();
+
+        // Move focus to the right pane: the tokens swap by pane identity.
+        app.layout.focus = crate::panes::PaneId::BigRight;
+        let mut out2 = run_paint_panes(&mut app);
+        assert!(
+            strokes_at(&out2, right).iter().any(|s| s.color == focus),
+            "now-focused physical pane uses the focus token"
+        );
+        assert!(
+            strokes_at(&out2, left).iter().any(|s| s.color == unfocused),
+            "now-unfocused graph pane uses the unfocused token"
+        );
+        out.textures_delta.clear();
+        out2.textures_delta.clear();
     }
 
     #[test]
-    fn paint_tiled_graph_slot_publishes_canvas_and_seeds_camera() {
-        // Task 2.1: a graph slot publishes the slot as the visible canvas and
-        // the first frame seeds the camera from its size, so fit/center/zoom
+    fn paint_panes_graph_publishes_canvas_and_seeds_camera() {
+        // The graph pane publishes its own rect as the visible canvas and the
+        // first frame seeds the camera from its size, so fit/center/zoom
         // anchoring and arrow-pan gating see the real pane.
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
@@ -1477,146 +1330,227 @@ mod tests {
             "open_graph leaves the camera unseeded"
         );
 
-        let ctx = egui::Context::default();
-        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            crate::theme::active(),
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
-        );
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_tiled(&mut app, ui, scene.as_ref(), &[]);
-        });
-        // One graph slot: the right column starts at 0.6 × 800 = 480.
+        let mut out = run_paint_panes(&mut app);
+        // The graph opens in the left big pane: 0.5 of 800 wide, full height.
         let (cw, ch) = app
             .graph_canvas_px
-            .expect("canvas published by the tiled paint");
-        assert!((cw - 320.0).abs() < 0.01, "slot width on canvas: {cw}");
-        assert!((ch - 600.0).abs() < 0.01, "slot height on canvas: {ch}");
+            .expect("canvas published by the pane paint");
+        assert!((cw - 400.0).abs() < 0.01, "pane width on canvas: {cw}");
+        assert!((ch - 600.0).abs() < 0.01, "pane height on canvas: {ch}");
         assert!(
             app.graph_camera.is_some(),
-            "camera seeded from the slot size on the first frame"
+            "camera seeded from the pane size on the first frame"
         );
-        full_output.textures_delta.clear();
+        out.textures_delta.clear();
     }
 
     #[test]
-    fn paint_quad_graph_pane_publishes_canvas_and_seeds_camera() {
-        // Task 2.1: the quad's FULL pane publishes the pane as the visible
-        // canvas and seeds the camera on the first frame like the tiled slot.
+    fn graph_pane_rect_uses_the_class_layout_pane_not_the_tile_mirror() {
+        // Bug droid_tui-up5: `graph_pane_rect` derived the drawn graph pane from
+        // the legacy `tile_stack` slot mirror (left_x = width * main_split_ratio,
+        // equal-height slots) instead of the class layout's `pane_geometry`, so
+        // the scene origin, the first-frame fit, and the mouse origin disagreed
+        // with the pane `paint_panes` actually draws the graph in. Here the
+        // startup arrangement (Panels big-left + SourceViewer small-top) gets the
+        // Graph view opened into the left big pane (0,0,400,600); the mirror
+        // formula would instead return the top-right small pane (400,0,400,300).
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
-        app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
-        assert!(
-            app.graph_camera.is_none(),
-            "enter_quad leaves the camera unseeded"
-        );
+        app.open_graph(); // Graph is Big-class -> replaces the module UI in BigLeft.
 
-        let ctx = egui::Context::default();
         let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let scene = crate::gui::graph::build_scene_spec(
-            &app,
-            crate::theme::active(),
-            crate::gui::graph::graph_pane_rect(&app, win).unwrap_or(win),
+        // The real pane from the one geometry source the paint path uses.
+        let real = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        let pane_from_geometry = app
+            .pane_geometry(to_cell_rect(win))
+            .into_iter()
+            .find_map(|(id, cell)| {
+                (app.layout.pane(id).view == Some(crate::app::ViewType::Graph)).then(|| {
+                    egui::Rect::from_min_size(
+                        egui::pos2(cell.x as f32, cell.y as f32),
+                        egui::vec2(cell.width as f32, cell.height as f32),
+                    )
+                })
+            })
+            .expect("the graph is in a pane of the arrangement");
+        assert_eq!(pane_from_geometry, real);
+
+        assert_eq!(
+            graph_pane_rect(&app, win),
+            Some(real),
+            "the scene pane must be the class-layout graph pane"
         );
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_quad(&mut app, ui, scene.as_ref(), &[]);
-        });
-        // FULL pane: bottom-left, from (0, 300) to (480, 600).
-        let (cw, ch) = app
-            .graph_canvas_px
-            .expect("canvas published by the quad paint");
-        assert!((cw - 480.0).abs() < 0.01, "FULL pane width on canvas: {cw}");
-        assert!(
-            (ch - 300.0).abs() < 0.01,
-            "FULL pane height on canvas: {ch}"
+        // Guard that the two formulas genuinely disagree (the old code returned
+        // the top-right small pane), so the assertion above is not vacuous.
+        let legacy = egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(400.0, 300.0));
+        assert_ne!(legacy, real, "mirror and class formulas disagree by design");
+        assert_ne!(
+            graph_pane_rect(&app, win),
+            Some(legacy),
+            "still returns the legacy tile-mirror geometry"
         );
-        assert!(
-            app.graph_camera.is_some(),
-            "camera seeded from the FULL pane size on the first frame"
-        );
-        full_output.textures_delta.clear();
     }
 
     #[test]
-    fn window_canvas_publishes_size_and_seeds_camera() {
-        // Task 2.2: the window paint path publishes the canvas size every
-        // frame and seeds the first-frame fit when none exists.
+    fn center_graph_camera_centers_nodes_in_the_real_pane() {
+        // Bug droid_tui-up5: `c` (`center_graph_camera`) computed a pane-local
+        // pan against the real pane size, but `build_scene_spec` then added the
+        // legacy mirror pane's origin, so the bounds center landed off by the
+        // origin delta ("nodes move but are not centered"). In the two-pane
+        // arrangement the y origin was wrong by half the band height.
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
         app.open_graph();
-        assert!(app.graph_camera.is_none());
-        // Pane-graphics unification: while the graph occupies a tile slot
-        // (pane-local scene), the whole-window canvas must not clobber the
-        // pane's canvas source of truth, so close the slot to exercise the
-        // whole-window branch below.
-        app.close_graph();
 
-        publish_window_canvas(&mut app, (640.0, 360.0));
-        assert_eq!(app.graph_canvas_px, Some((640.0, 360.0)));
-        let seeded = app.graph_camera.expect("seeded on the first frame");
-        assert!(seeded.zoom.is_finite() && seeded.zoom > 0.0);
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let real = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0));
+        // Realistic flow: the paint publishes the real pane size, then `c`.
+        app.graph_camera = None;
+        app.fit_graph_camera((real.width(), real.height()));
+        assert!(
+            app.center_graph_camera(),
+            "center succeeds with a camera + canvas"
+        );
 
-        // An already-seeded camera is left untouched.
-        let pan = seeded.pan;
-        publish_window_canvas(&mut app, (640.0, 360.0));
-        assert_eq!(app.graph_camera.unwrap().pan, pan);
+        let pane = graph_pane_rect(&app, win).expect("graph pane open");
+        assert_eq!(pane, real);
+        let scene = build_scene_spec(&app, crate::theme::active(), pane).expect("scene built");
+        // Node spec x/y is the node's top-left at the mapped solver position;
+        // the bounding box of those mapped positions must sit on the pane center.
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for n in &scene.nodes {
+            min_x = min_x.min(n.x);
+            max_x = max_x.max(n.x);
+            min_y = min_y.min(n.y);
+            max_y = max_y.max(n.y);
+        }
+        let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        assert!(
+            (center.x - real.center().x).abs() < 1.0,
+            "graph centered horizontally in the pane: {center:?} vs {:?}",
+            real.center()
+        );
+        assert!(
+            (center.y - real.center().y).abs() < 1.0,
+            "graph centered vertically in the pane: {center:?} vs {:?}",
+            real.center()
+        );
+    }
+
+    /// Run the full base + overlay paint (`paint_panes` then `paint_overlays`)
+    /// in one headless frame over an 800x600 band.
+    fn run_band(app: &mut App) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let scene = scene_for(app, win);
+        ctx.run_ui(raw, |ui| {
+            paint_panes(app, ui, scene.as_ref(), &[]);
+            paint_overlays(app, ui);
+        })
     }
 
     #[test]
-    fn paint_tiled_empty_stack_falls_back_cleanly() {
-        // No open tiles: the tiled paint still renders the panels pane and
-        // publishes its single pane rect (the dispatch routes this case to the
-        // single-graph path, but the helper must not panic when called direct).
+    fn panels_paint_as_a_pane_view_headless() {
+        // 2.3: the module UI is a view, not a permanent left pane. A band
+        // showing only the module UI still has something to paint and must not
+        // fall through to the empty-band graph canvas.
+        let band = to_cell_rect(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
         let mut app = App::new();
-        let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_tiled(&mut app, ui, None, &[]);
-        });
+        let patch =
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        // Close the startup source viewer and clear the second small pane so
+        // the module UI is the only view open.
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        assert!(!app.layout.has_small_view());
+        assert!(
+            band_has_views(&app, band),
+            "the module UI counts as an open view"
+        );
+
+        let mut out = run_paint_panes(&mut app);
+        let labels = text_labels(&out);
+        assert!(
+            labels.iter().any(|l| l.contains("Panels")),
+            "panels paint as a pane view: {labels:?}"
+        );
         assert_eq!(
             app.pane_rects.len(),
             1,
-            "panels only when the stack is empty"
+            "only the module UI pane is hit-testable"
         );
-        let labels: Vec<String> = full_output
-            .shapes
+        assert!(app
+            .pane_hit_rects
             .iter()
-            .filter_map(|cs| match &cs.shape {
-                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            labels.iter().any(|l| l.contains("Panels")),
-            "panels title missing: {labels:?}"
+            .any(|(id, _)| *id == crate::panes::PaneId::BigLeft));
+
+        // A band with nothing open has nothing to paint.
+        let mut empty = App::new();
+        empty.layout.big_left.view = None;
+        empty.layout.big_right.view = None;
+        empty.layout.small_top.view = None;
+        empty.layout.small_bottom.view = None;
+        assert!(!band_has_views(&empty, band), "no view open -> empty band");
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn optimizer_paints_inside_its_pane_without_overlay_card() {
+        // 2.2: the optimizer occupies its own small pane (spec "No overlay
+        // card"); running the full base + overlay paint must fill that pane and
+        // never emit the legacy overlay card over the band.
+        let mut app = App::new();
+        let patch =
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(crate::app::ViewType::Optimizer);
+        assert_eq!(
+            app.layout.small_bottom.view,
+            Some(crate::app::ViewType::Optimizer),
+            "optimizer opens in the free small pane"
         );
-        full_output.textures_delta.clear();
+
+        let mut out = run_band(&mut app);
+        let t = crate::theme::active();
+        let muted = t.egui_color(t.muted);
+        // The optimizer fills its own pane: an opaque muted rect at the
+        // SmallBottom pane origin (400, 300).
+        let fills_pane = out.shapes.iter().any(|cs| match &cs.shape {
+            egui::epaint::Shape::Rect(r) => {
+                r.fill == muted
+                    && r.fill.a() == 255
+                    && (r.rect.min.x - 400.0).abs() < 1.0
+                    && (r.rect.min.y - 300.0).abs() < 1.0
+            }
+            _ => false,
+        });
+        assert!(fills_pane, "optimizer fills its small pane");
+        // No card border over the band (the legacy optimizer overlay stroke).
+        let border = t.egui_color(t.validation_modal_border);
+        assert!(
+            !out.shapes.iter().any(|cs| matches!(
+                &cs.shape,
+                egui::epaint::Shape::Rect(r)
+                    if r.stroke.width > 0.0 && r.stroke.color == border
+            )),
+            "no optimizer overlay card border over the band"
+        );
+        let labels = text_labels(&out);
+        assert!(labels.iter().any(|l| l.contains("Optimizer")), "{labels:?}");
+        out.textures_delta.clear();
     }
 
     #[test]

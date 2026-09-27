@@ -13,6 +13,7 @@ pub mod help;
 pub mod latency;
 pub mod layout;
 pub mod optimize;
+pub mod panes;
 pub mod patch;
 pub mod physical;
 pub mod plugin;

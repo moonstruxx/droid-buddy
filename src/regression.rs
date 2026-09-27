@@ -466,6 +466,12 @@ fn regression_viewer_live_interaction() {
     let mut app = fixture_app();
     open_viewer(&mut app);
     assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    // Class layout: mouse clicks focus the pane they land in, so publish the
+    // pane hit rects the renderer would (module UI left, source viewer right).
+    app.pane_hit_rects = vec![
+        (crate::panes::PaneId::BigLeft, Rect::new(0, 0, 70, 40)),
+        (crate::panes::PaneId::SmallTop, Rect::new(70, 0, 50, 40)),
+    ];
 
     // Panel keys are live while Source focused.
     handle_event(key(KeyCode::Char('1')), &mut app);

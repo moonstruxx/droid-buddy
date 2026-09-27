@@ -8,7 +8,7 @@
 //! dispatches to each frame; the camera helpers (`camera_pan`,
 //! `camera_zoom_about`) are the window's bridge to `App::graph_camera`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{MarqueeSelection, WindowFrame};
 use crate::app::{App, GRAPH_WINDOW_NODE_H, GRAPH_WINDOW_NODE_W};
@@ -46,8 +46,8 @@ pub(crate) fn paint_scene(
 }
 
 /// Paint one graph scene clipped into `canvas` (absolute scene coordinates).
-/// The quad panes each paint their pane's scene here; the scene builder must
-/// have produced coordinates inside the pane, because egui has no painter
+/// Each graph pane paints its pane's scene here; the scene builder must have
+/// produced coordinates inside the pane, because egui has no painter
 /// translate primitive.
 pub(crate) fn paint_scene_in(
     ui: &mut egui::Ui,
@@ -549,7 +549,7 @@ fn paint_polish(
     }
 }
 
-/// The hovered node's tooltip card: a translucent backdrop with the accent
+/// The hovered node's tooltip card: an opaque backdrop with the accent
 /// border, placed above-right of the cursor and clamped to the canvas.
 fn paint_tooltip(
     painter: &egui::Painter,
@@ -572,7 +572,7 @@ fn paint_tooltip(
     painter.rect(
         rect,
         egui::CornerRadius::same(4),
-        rgba(spec.background, 235),
+        rgba(spec.background, 255),
         egui::Stroke::new(1.0, rgb(node.border)),
         egui::StrokeKind::Inside,
     );
@@ -583,7 +583,7 @@ fn paint_tooltip(
     );
 }
 
-/// The minimap panel: translucent scene-background backdrop, accent-bordered,
+/// The minimap panel: opaque scene-background backdrop, accent-bordered,
 /// node frames as accent rects, and a viewport indicator showing what the
 /// canvas currently displays.
 fn paint_minimap(
@@ -597,7 +597,7 @@ fn paint_minimap(
     painter.rect_filled(
         panel,
         egui::CornerRadius::same(4),
-        rgba(spec.background, 215),
+        rgba(spec.background, 255),
     );
     painter.rect(
         panel,
@@ -659,59 +659,31 @@ fn edge_ctrl(start: (f32, f32), end: (f32, f32)) -> Option<(f32, f32)> {
     }
     Some(((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0))
 }
-/// Influence styling mode for the scene builder (quad-view): the FULL graph
-/// derives highlight/dim from `App.influence` (influenced bold, the rest
-/// dimmed); the FILTERED pane styles every element as influenced, because
-/// the subset is the influence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SceneInfluence {
-    FromApp,
-    AllHighlighted,
-}
-
 /// The egui rect the full graph scene is painted into on the current frame:
-/// the graph tile slot (tiled layout) or the quad FULL pane (quad layout on a
-/// wide window). `None` when the scene fills the whole window (no open slot;
-/// a quad below the width threshold collapses to slots, covered by the slot
-/// case). Mirrors the render dispatch ([`crate::gui::EguiSurface::paint`]):
-/// the same ratio clamps produce the same rect the paint path clips with.
+/// the class-layout pane holding the Graph view. Derived from
+/// `App::pane_geometry` — the ADR 35 single geometry source the render
+/// dispatch (`paint_panes`) draws from and publishes as `pane_hit_rects` —
+/// not the legacy `tile_stack` slot mirror, so the scene origin, the
+/// first-frame fit, the mouse origin, and the paint path all agree on the
+/// same rect. `None` when no pane holds the Graph view.
 pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
-    let wide = window.width() >= crate::app::QUAD_WIDTH_THRESHOLD;
-    if app.is_quad() && wide {
-        let x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
-        let y = window.min.y + window.height() * app.left_split_ratio.clamp(0.2, 0.8);
-        return Some(egui::Rect::from_min_max(
-            egui::pos2(window.min.x, y),
-            if app.left_split_active {
-                egui::pos2(x, window.max.y)
-            } else {
-                window.max
-            },
-        ));
-    }
-    if app.tile_stack.slots.is_empty() {
-        return None;
-    }
-    let left_x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
-    let right = egui::Rect::from_min_max(egui::pos2(left_x, window.min.y), window.max);
-    let slots = &app.tile_stack.slots;
-    let idx = slots
-        .iter()
-        .position(|v| *v == crate::app::ViewType::Graph)?;
-    let slot_h = right.height() / slots.len() as f32;
-    let y0 = right.min.y + slot_h * idx as f32;
-    Some(egui::Rect::from_min_size(
-        egui::pos2(right.min.x, y0),
-        egui::vec2(right.width(), slot_h),
-    ))
+    let band = super::to_cell_rect(window);
+    app.pane_geometry(band).into_iter().find_map(|(id, cell)| {
+        (app.layout.pane(id).view == Some(crate::app::ViewType::Graph)).then(|| {
+            // Same cell → egui conversion `paint_panes` uses.
+            egui::Rect::from_min_size(
+                egui::pos2(cell.x as f32, cell.y as f32),
+                egui::vec2(cell.width as f32, cell.height as f32),
+            )
+        })
+    })
 }
 
 /// Builds the full graph scene into `pane` (design D3): nodes map through
 /// the shared `GraphCamera` (identity fallback when `App.graph_camera` is
 /// unset) with the pan offset by the pane origin — the egui painter has no
 /// translate primitive, so scene pixels come out as absolute window
-/// coordinates the pane's clip frames (the same convention as the quad
-/// FILTERED pane's [`build_subset_scene`]). Edges resolve the full
+/// coordinates the pane's clip frames. Edges resolve the full
 /// color-precedence chain, clusters become padded member unions. `None` when
 /// no graph exists or the positional state is inconsistent with the graph.
 pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<SceneSpec> {
@@ -719,9 +691,9 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     let mut camera = app.graph_camera.unwrap_or_default();
     // pixel = world × zoom − pan + pane.min: subtracting the pane origin from
     // the pan shifts every spec coordinate into the pane's absolute screen
-    // placement, so a slot/quad pane clip frames the drawn content instead of
-    // clipping it to a sliver or off the canvas (tile slots and the quad FULL
-    // pane both start away from the window origin).
+    // placement, so the pane clip frames the drawn content instead of clipping
+    // it to a sliver or off the canvas (a pane in the class layout starts away
+    // from the window origin).
     camera.pan = (camera.pan.0 - pane.min.x, camera.pan.1 - pane.min.y);
     let dep_filtered = !app.dependency_nodes.is_empty();
     let inf_filtered = app.influence_filter_active;
@@ -733,7 +705,6 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
             graph,
             positions: &app.graph_positions,
             camera,
-            influence: SceneInfluence::FromApp,
             render_clusters: !filtered,
         },
         |idx| {
@@ -749,77 +720,18 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     )
 }
 
-/// Builds the quad FILTERED-pane scene: the influence-induced subgraph
-/// (`App.influence_subset`) freshly fit into `pane` with its own compact
-/// camera (not the shared FULL camera), every element styled influenced.
-/// Scene pixel coordinates are absolute (pane origin added to the fit pan),
-/// because the egui painter has no translate primitive. `None` when no
-/// subset exists or its indices no longer match the graph.
-pub fn build_subset_scene(app: &App, theme: &Theme, pane: egui::Rect) -> Option<SceneSpec> {
-    let subset = app.influence_subset.as_ref()?;
-    let graph = app.graph.as_ref()?;
-    if subset.nodes.iter().any(|&i| i >= graph.nodes.len())
-        || subset.edges.iter().any(|&i| i >= graph.edges.len())
-    {
-        return None;
-    }
-    let subset_graph = Graph {
-        nodes: subset
-            .nodes
-            .iter()
-            .map(|&i| graph.nodes[i].clone())
-            .collect(),
-        edges: subset
-            .edges
-            .iter()
-            .map(|&i| graph.edges[i].clone())
-            .collect(),
-        clusters: Vec::new(),
-        validation: Vec::new(),
-        latency: None,
-        highlighted_nodes: HashSet::new(),
-        highlighted_edges: HashSet::new(),
-        not_selected: HashSet::new(),
-    };
-    let avail = (
-        (pane.width() - GRAPH_WINDOW_NODE_W).max(1.0),
-        (pane.height() - GRAPH_WINDOW_NODE_H).max(1.0),
-    );
-    let mut camera = GraphCamera::fit_to_world(
-        WorldBounds::from_positions(&subset.positions),
-        avail,
-        WINDOW_FIT_MIN_NODE_PX,
-    );
-    camera.pan = (camera.pan.0 - pane.min.x, camera.pan.1 - pane.min.y);
-    build_scene(
-        app,
-        theme,
-        SceneInput {
-            graph: &subset_graph,
-            positions: &subset.positions,
-            camera,
-            influence: SceneInfluence::AllHighlighted,
-            render_clusters: false,
-        },
-        |_| true,
-        |_| true,
-    )
-}
-
 /// Shared scene core inputs: the graph to map through `camera`, its solved
-/// positions, and the styling/render switches. Bundled so `build_scene` stays
-/// under the argument-count lint.
+/// positions, and the render switches. Bundled so `build_scene` stays under
+/// the argument-count lint.
 struct SceneInput<'a> {
     graph: &'a Graph,
     positions: &'a [(f32, f32)],
     camera: GraphCamera,
-    influence: SceneInfluence,
     render_clusters: bool,
 }
 
 /// Shared scene core: maps `graph` through `camera`, keeps only visible
-/// nodes/edges, and styles each element per `influence`. Used by the full
-/// graph (FULL pane) and the induced subset (FILTERED pane).
+/// nodes/edges, and styles each element from `App`'s influence and diff state.
 fn build_scene(
     app: &App,
     theme: &Theme,
@@ -831,7 +743,6 @@ fn build_scene(
         graph,
         positions,
         camera,
-        influence,
         render_clusters,
     } = input;
     if positions.len() != graph.nodes.len() {
@@ -892,50 +803,38 @@ fn build_scene(
         };
 
         // Border/title token chain: dim beats highlight beats kind frames.
-        // With an active influence (FULL) or in the FILTERED subset, the
-        // influenced border/title token marks the influenced set and the rest
-        // dims; hover/selection interaction feedback stays highest. While a
-        // modifier is active (latched or held) the influence hue is the
-        // per-token `modifier_hue`, matching the panels wash (design D).
+        // With an active influence the influenced border/title token marks the
+        // influenced set and the rest dims; hover/selection interaction feedback
+        // stays highest. While a modifier is active (latched or held) the
+        // influence hue is the per-token `modifier_hue`, matching the panels
+        // wash (design D).
         let dim = theme.rgb(theme.graph_node_dim);
         let hl = if let Some(tok) = app.active_modifier() {
             theme.rgb(crate::theme::modifier_hue(tok))
         } else {
             theme.rgb(theme.graph_node_highlight)
         };
-        let influenced = match influence {
-            SceneInfluence::AllHighlighted => true,
-            SceneInfluence::FromApp => app
-                .modifier_influence
-                .as_ref()
-                .or(app.influence.as_ref())
-                .is_some_and(|s| s.influenced_nodes.contains(&node.id)),
-        };
-        let (border, label_color, border_width) = match influence {
-            SceneInfluence::AllHighlighted => (hl, hl, 3.0),
-            SceneInfluence::FromApp if disabled => (dim, dim, 1.0),
-            SceneInfluence::FromApp if highlighted || selected => (hl, hl, 3.0),
-            SceneInfluence::FromApp if influenced => (hl, hl, 3.0),
-            SceneInfluence::FromApp
-                if app.modifier_influence.is_some() || app.influence.is_some() =>
-            {
-                (dim, dim, 1.0)
-            }
-            SceneInfluence::FromApp => {
-                let (b, t) = match node.kind {
-                    NodeKind::Controller => {
-                        (theme.graph_node_controller, theme.graph_node_controller)
-                    }
-                    NodeKind::InputJack => {
-                        (theme.graph_node_jack_input, theme.graph_node_jack_input)
-                    }
-                    NodeKind::OutputJack => {
-                        (theme.graph_node_jack_output, theme.graph_node_jack_output)
-                    }
-                    NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
-                };
-                (theme.rgb(b), theme.rgb(t), 1.0)
-            }
+        let influenced = app
+            .modifier_influence
+            .as_ref()
+            .or(app.influence.as_ref())
+            .is_some_and(|s| s.influenced_nodes.contains(&node.id));
+        let (border, label_color, border_width) = if disabled {
+            (dim, dim, 1.0)
+        } else if highlighted || selected || influenced {
+            (hl, hl, 3.0)
+        } else if app.modifier_influence.is_some() || app.influence.is_some() {
+            (dim, dim, 1.0)
+        } else {
+            let (b, t) = match node.kind {
+                NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
+                NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
+                NodeKind::OutputJack => {
+                    (theme.graph_node_jack_output, theme.graph_node_jack_output)
+                }
+                NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
+            };
+            (theme.rgb(b), theme.rgb(t), 1.0)
         };
 
         let idx = nodes.len();
@@ -1024,23 +923,14 @@ fn build_scene(
             }
         }
 
-        let influenced = match influence {
-            SceneInfluence::AllHighlighted => true,
-            SceneInfluence::FromApp => app
-                .modifier_influence
-                .as_ref()
-                .or(app.influence.as_ref())
-                .is_some_and(|s| s.influenced_edges.contains(&edge.cable)),
-        };
+        let influenced = app
+            .modifier_influence
+            .as_ref()
+            .or(app.influence.as_ref())
+            .is_some_and(|s| s.influenced_edges.contains(&edge.cable));
         let color = if has_error {
-            // Error red outranks influence (guardrails), in both modes.
+            // Error red outranks influence (guardrails).
             theme.rgb(theme.graph_edge_error)
-        } else if matches!(influence, SceneInfluence::AllHighlighted) {
-            if let Some(tok) = app.active_modifier() {
-                theme.rgb(crate::theme::modifier_hue(tok))
-            } else {
-                theme.rgb(theme.graph_edge_highlight)
-            }
         } else if incident_disabled || incident_unselected {
             theme.rgb(theme.graph_edge_dim)
         } else if influenced {
@@ -1094,9 +984,7 @@ fn build_scene(
             error: has_error,
             dim: incident_disabled
                 || incident_unselected
-                || (matches!(influence, SceneInfluence::FromApp)
-                    && app.influence.is_some()
-                    && !influenced),
+                || (app.influence.is_some() && !influenced),
             diff: diff_state,
             latency: ramp.map(|ramp_stop| crate::graph_render::EdgeLatency {
                 ramp_stop,
@@ -1106,9 +994,9 @@ fn build_scene(
     }
 
     // Cluster containers are padded unions of the kept member node rects in
-    // the un-filtered graph; subset rendering (dependency filter or the quad
-    // FILTERED pane) skips them because the member index mapping does not
-    // match the full-graph range.
+    // the un-filtered graph; a filtered render (dependency or influence subset)
+    // skips them because the member index mapping does not match the
+    // full-graph range.
     let clusters = if render_clusters {
         graph
             .clusters
@@ -1430,6 +1318,7 @@ mod tests {
 #[cfg(test)]
 mod scene_builder_tests {
     use super::*;
+    use std::collections::HashSet;
     use std::path::Path;
 
     use crate::app::LabelStore;
@@ -1700,67 +1589,6 @@ mod scene_builder_tests {
         let s = spec(&app);
         assert_eq!(s.nodes[1].border, theme().rgb(theme().graph_node_highlight));
         assert_eq!(s.nodes[1].border_width, 3.0);
-    }
-
-    #[test]
-    fn subset_scene_drops_uninfluenced_and_fits_pane() {
-        // A 3-node chain; the influence subset covers nodes 0..=1 and the
-        // first edge, so the FILTERED scene holds two nodes and one edge,
-        // compactly fit into the pane with absolute coordinates.
-        let graph = Graph {
-            nodes: vec![
-                circuit_node("clocktool", 0, 0),
-                circuit_node("osc", 0, 1),
-                circuit_node("unrelated", 0, 2),
-            ],
-            edges: vec![
-                GraphEdge {
-                    cable: "_CLK".into(),
-                    source: NodeId::circuit("clocktool", 0),
-                    sink: NodeId::circuit("osc", 0),
-                },
-                GraphEdge {
-                    cable: "_OUT".into(),
-                    source: NodeId::circuit("osc", 0),
-                    sink: NodeId::circuit("unrelated", 0),
-                },
-            ],
-            ..Graph::default()
-        };
-        let mut app = scene_app(graph, &[(0.0, 0.0), (260.0, 0.0), (520.0, 0.0)]);
-        app.influence_subset = Some(crate::app::InfluenceSubset {
-            nodes: vec![0, 1],
-            edges: vec![0],
-            // Close in X, far apart in Y: the pane fit is height-limited, so
-            // the width-limited fit cannot push the second node's left edge
-            // exactly onto the first node's right edge (a zero-length edge).
-            positions: vec![(10.0, 10.0), (15.0, 90.0)],
-        });
-        let pane = egui::Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(400.0, 400.0));
-        let s = build_subset_scene(&app, theme(), pane).expect("subset scene");
-        assert_eq!(s.nodes.len(), 2);
-        assert_eq!(s.edges.len(), 1);
-        assert!(
-            s.nodes
-                .iter()
-                .all(|n| n.x >= pane.min.x && n.y >= pane.min.y),
-            "subset scene must use absolute pane coordinates"
-        );
-        assert!(s
-            .nodes
-            .iter()
-            .all(|n| n.border == theme().rgb(theme().graph_node_highlight)));
-        assert!(s
-            .edges
-            .iter()
-            .all(|e| e.color == theme().rgb(theme().graph_edge_highlight)));
-    }
-
-    #[test]
-    fn subset_scene_none_without_influence_subset() {
-        let app = chain_app();
-        let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
-        assert!(build_subset_scene(&app, theme(), pane).is_none());
     }
 
     #[test]
@@ -2233,6 +2061,18 @@ mod window_paint_tests {
             "node label + tooltip, got {hits}: {:?}",
             out.labels
         );
+        // The tooltip card is a dialog backdrop: no rect in this frame may be
+        // partially transparent (the card was a 235-alpha wash before).
+        let translucent: Vec<_> = out
+            .rects
+            .iter()
+            .filter(|r| r.fill.a() != 255 && r.fill.a() != 0)
+            .map(|r| (r.rect, r.fill))
+            .collect();
+        assert!(
+            translucent.is_empty(),
+            "tooltip backdrop must be opaque: {translucent:?}"
+        );
     }
 
     #[test]
@@ -2270,13 +2110,19 @@ mod window_paint_tests {
             "content still painted"
         );
         let panel = egui::Rect::from_min_size(egui::pos2(10.0, 170.0), egui::vec2(180.0, 120.0));
-        assert!(
-            out.rects
-                .iter()
-                .any(|r| r.rect == panel && r.fill != egui::Color32::TRANSPARENT),
-            "minimap panel drawn bottom-left: {:?}",
-            out.rects.iter().map(|r| r.rect).collect::<Vec<_>>()
-        );
+        let panel_fill = out
+            .rects
+            .iter()
+            .find(|r| r.rect == panel)
+            .map(|r| r.fill)
+            .unwrap_or_else(|| {
+                panic!(
+                    "minimap panel drawn bottom-left: {:?}",
+                    out.rects.iter().map(|r| r.rect).collect::<Vec<_>>()
+                )
+            });
+        assert_ne!(panel_fill, egui::Color32::TRANSPARENT);
+        assert_eq!(panel_fill.a(), 255, "minimap panel must be opaque");
     }
 
     #[test]
@@ -2455,10 +2301,21 @@ mod kittest_tests {
     #[test]
     fn prefix_g_v_opens_source_viewer() {
         let mut app = setup("arpeggio1.ini");
-        assert!(!app.showing_viewer);
+        // The startup pane config (task 1.2) already opens the source viewer in
+        // a small pane, so `g v` routes focus to that pane instead of opening a
+        // second copy.
+        assert!(
+            app.showing_viewer,
+            "the startup pane config opens the source viewer"
+        );
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(app.showing_viewer);
+        assert!(app.showing_viewer, "the viewer stays open (no duplicate)");
+        assert_eq!(
+            app.layout.pane(app.layout.focus).view,
+            Some(crate::app::ViewType::SourceViewer),
+            "g v routes focus to the source-viewer pane"
+        );
     }
 
     #[test]
