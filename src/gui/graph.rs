@@ -660,25 +660,23 @@ fn edge_ctrl(start: (f32, f32), end: (f32, f32)) -> Option<(f32, f32)> {
     Some(((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0))
 }
 /// The egui rect the full graph scene is painted into on the current frame:
-/// the graph tile slot. `None` when the scene fills the whole window (no open
-/// slot). Mirrors the render dispatch ([`crate::gui::EguiSurface::paint`]):
-/// the same ratio clamps produce the same rect the paint path clips with.
+/// the class-layout pane holding the Graph view. Derived from
+/// `App::pane_geometry` — the ADR 35 single geometry source the render
+/// dispatch (`paint_panes`) draws from and publishes as `pane_hit_rects` —
+/// not the legacy `tile_stack` slot mirror, so the scene origin, the
+/// first-frame fit, the mouse origin, and the paint path all agree on the
+/// same rect. `None` when no pane holds the Graph view.
 pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
-    if app.tile_stack.slots.is_empty() {
-        return None;
-    }
-    let left_x = window.min.x + window.width() * app.main_split_ratio.clamp(0.3, 0.7);
-    let right = egui::Rect::from_min_max(egui::pos2(left_x, window.min.y), window.max);
-    let slots = &app.tile_stack.slots;
-    let idx = slots
-        .iter()
-        .position(|v| *v == crate::app::ViewType::Graph)?;
-    let slot_h = right.height() / slots.len() as f32;
-    let y0 = right.min.y + slot_h * idx as f32;
-    Some(egui::Rect::from_min_size(
-        egui::pos2(right.min.x, y0),
-        egui::vec2(right.width(), slot_h),
-    ))
+    let band = super::to_cell_rect(window);
+    app.pane_geometry(band).into_iter().find_map(|(id, cell)| {
+        (app.layout.pane(id).view == Some(crate::app::ViewType::Graph)).then(|| {
+            // Same cell → egui conversion `paint_panes` uses.
+            egui::Rect::from_min_size(
+                egui::pos2(cell.x as f32, cell.y as f32),
+                egui::vec2(cell.width as f32, cell.height as f32),
+            )
+        })
+    })
 }
 
 /// Builds the full graph scene into `pane` (design D3): nodes map through
