@@ -48,19 +48,17 @@ Pointer hit-testing (`handle_graph_window_frame`) currently converts the fixed p
 
 ### 3. Level of detail: fit titles to frames, then omit
 
-**Decision:** compute the label font as the smaller of the frame-derived size and a width-derived size (monospace advance ≈ 0.6 × font, so `font ≤ w / (0.6 × chars)`), ellipsize when even the minimum font cannot fit, and skip labels, ports, and cluster titles entirely when the frame height is below a legibility threshold. Node frames keep a small minimum pixel size.
+**Decision:** compute the label font as the smaller of the frame-derived size and a width-derived size (monospace advance ≈ 0.6 × font, so `font ≤ w / (0.6 × chars)`), ellipsize when even the minimum font cannot fit, and skip labels, ports, and cluster titles entirely when the frame height is below a legibility threshold. Node frames and cable strokes get a minimum *render* size (about 1 px) applied at paint time, so geometry never vanishes at the zoom floor.
 
-**Why:** with per-node widths, long titles (including `LabelStore` overrides, which the estimator does not see) no longer fit the old font ratio. A zoomed-out graph must not be a wall of overlapping text.
+**Why:** with per-node widths, long titles (including `LabelStore` overrides, which the estimator does not see) no longer fit the old font ratio. A zoomed-out graph must not be a wall of overlapping text. The 1 px render floor is deliberately tiny: it only prevents geometry from disappearing, so the non-overlap guarantee is stated for the fit zoom and above — below the floor, frames converge to dense marks and overlap is visually meaningless.
 
 **Alternatives considered:** ellipsize only (text becomes unreadable dots); keep a fixed font (defeats zoom-out).
 
 ### 4. Extent-aware fit, one API
 
-**Decision:** change `fit_to_world` to take the node world extent and compute `zoom = min(V_w / (span_w + node_w), V_h / (span_h + node_h))`, preserving the existing `floor_frames` guard; reinterpret `min_node_px` as a *node-pixel* floor (zoom floor = `min_node_px / NODE_WORLD_H`). Route `graph_window_fit_camera` through the same math instead of subtracting a fixed pixel frame, and update `App::fit_graph_camera` and `center_graph_camera` (which gains a half-node offset).
+**Decision:** add `GraphCamera::fit_to_world_with_nodes(bounds, node_world, pixel_size, min_node_px)`, which expands the world bounds by one node extent and fits `zoom = min(V_w / (span_w + node_w), V_h / (span_h + node_h))`. The `floor_frames` guard is preserved; note that this guard algebraically implies `min_node_px / node_h ≤ fit_zoom`, so the floor parameter can never *raise* the zoom above the pure fit — it is retained for API parity, and the minimum drawn node size is enforced at render time instead. Route `graph_window_fit_camera` through the same math instead of subtracting a fixed pixel frame, and update `App::fit_graph_camera` and `center_graph_camera` (which gains a half-node offset). `fit_to_world` is retained unchanged as the fixed-node compatibility wrapper until every caller migrates.
 
-**Why:** a fit must frame whole boxes, and the old "subtract 200×80 px" trick encodes the fixed-size assumption. One API removes the divergence between the pane path and the window path.
-
-**Alternatives considered:** keep the pixel-subtraction heuristic (wrong once node size depends on zoom — it becomes circular); add a separate fit function for the window path (two sources of truth).
+**Alternatives considered:** changing `fit_to_world`'s signature in place (breaks the crate mid-migration, so parallel waves could not compile or test); keep the pixel-subtraction heuristic (wrong once node size depends on zoom — it becomes circular); add a separate fit function for the window path (two sources of truth).
 
 ### 5. Hit-testing in world units with a minimum hit size
 
@@ -78,7 +76,8 @@ Pointer hit-testing (`handle_graph_window_frame`) currently converts the fixed p
 |---|---|
 | Long `LabelStore` title overrides exceed the estimated world width | Title fit-to-frame (decision 3) shrinks then ellipsizes; the frame never grows beyond the reserved slot. |
 | Filtered (dependency/influence) renders use subset indices | Widths are computed from the full graph and indexed through the same full-graph mapping the scene builder already uses. |
-| `NODE_WORLD_H` (80) close to `VERTICAL_SPACING` (120) leaves a thin gap at zoom-out | Gap scales with zoom, so it stays proportional; minimum frame size keeps rows distinguishable. |
+| `NODE_WORLD_H` (80) close to `VERTICAL_SPACING` (120) leaves a thin gap at zoom-out | Gap scales with zoom, so it stays proportional; the 1 px render floor keeps rows distinguishable down to the preset floor. |
+| At the lowest zoom presets the 1 px render floor binds and frames may touch | Accepted: the spec states non-overlap for the fit zoom and above; below the floor the graph is a dense structure by design. |
 | Force arrangement still overlaps (no reserved boxes) | Documented non-goal; the column arrangement is the default. |
 | Existing shape/fit assertions encode fixed pixel sizes | Each implementation task updates its own file's assertions; the regression task covers the cross-layer behavior. |
 | Minimap dots become sub-pixel when zoomed far out | `minimap_layout` already clamps dot dimensions to ≥ 1 px; the paint task raises the floor to ≥ 2 px. |

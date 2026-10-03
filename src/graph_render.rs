@@ -138,6 +138,69 @@ impl GraphCamera {
         Self { zoom, pan }
     }
 
+    /// Extent-aware initial fit (design decision 4): like [`fit_to_world`], but
+    /// frames whole node *bodies* rather than node center points. Node positions
+    /// are the node box's top-left corner, so the drawn content spans
+    /// `[min_x, max_x + node_w] × [min_y, max_y + node_h]`; the fit zoom is
+    /// `min(pw / cw, ph / ch)` over those expanded spans.
+    ///
+    /// `min_node_px` is reinterpreted as the minimum *drawn* node pixel size,
+    /// applied to the node height: `floor_zoom = min_node_px / node_h`. As in
+    /// [`fit_to_world`], the `floor_frames` guard is preserved — the floor may
+    /// apply only when the floored content still fits the viewport on both axes,
+    /// so a large floor can never push content off-canvas (framing wins over
+    /// legibility). The guard implies `binding_floor <= fit_zoom`, so the floor
+    /// only ever *binds* (and anchors the content's top-left, matching the
+    /// clamped branch of [`fit_to_world`]) when it meets the fit exactly;
+    /// otherwise the fit centers the content. Degenerate zero-span bounds and a
+    /// `node_world` of `(0, 0)` stay finite via the `MIN_SPAN` guard.
+    pub fn fit_to_world_with_nodes(
+        bounds: WorldBounds,
+        node_world: (f32, f32),
+        pixel_size: (f32, f32),
+        min_node_px: f32,
+    ) -> Self {
+        let pixel_size = (pixel_size.0.max(1.0), pixel_size.1.max(1.0));
+        let node_w = node_world.0;
+        let node_h = node_world.1;
+        let cw = (bounds.max_x + node_w - bounds.min_x).max(MIN_SPAN);
+        let ch = (bounds.max_y + node_h - bounds.min_y).max(MIN_SPAN);
+        let fit_zoom = (pixel_size.0 / cw).min(pixel_size.1 / ch);
+        // Node-pixel floor: the minimum drawn node height in pixels, expressed
+        // as a zoom. No node height (or no floor) means no floor at all.
+        let floor_zoom = if min_node_px > 0.0 && node_h > 0.0 {
+            min_node_px / node_h
+        } else {
+            0.0
+        };
+        // Preserve the `floor_frames` guard idea: the floor applies only when the
+        // floored content still fits the viewport on both axes. A floor above the
+        // fit would push nodes off-canvas, so the pure fit wins.
+        let floor_frames =
+            floor_zoom > 0.0 && cw * floor_zoom <= pixel_size.0 && ch * floor_zoom <= pixel_size.1;
+        let binding_floor = if floor_frames { floor_zoom } else { 0.0 };
+        let zoom = fit_zoom.max(binding_floor).max(MIN_ZOOM);
+        // The guard leaves the floor at or below the fit; it can only bind (and
+        // hence anchor the content's top-left) when it meets the fit exactly. A
+        // smaller active floor is a no-op raise, so the fit centers the content.
+        // `zoom > fit_zoom` additionally covers the `MIN_ZOOM` floor raising a
+        // sub-`MIN_ZOOM` fit, mirroring `fit_to_world`'s clamped branch.
+        let floor_binds = binding_floor > 0.0 && binding_floor >= fit_zoom;
+        let pan = if floor_binds || zoom > fit_zoom {
+            (bounds.min_x * zoom, bounds.min_y * zoom)
+        } else {
+            let (cx, cy) = (
+                (bounds.min_x + bounds.max_x + node_w) / 2.0,
+                (bounds.min_y + bounds.max_y + node_h) / 2.0,
+            );
+            (
+                cx * zoom - pixel_size.0 / 2.0,
+                cy * zoom - pixel_size.1 / 2.0,
+            )
+        };
+        Self { zoom, pan }
+    }
+
     /// World point → pixel point.
     pub fn world_to_pixel(&self, x: f32, y: f32) -> (f32, f32) {
         (x * self.zoom - self.pan.0, y * self.zoom - self.pan.1)
@@ -536,6 +599,137 @@ mod tests {
                 max_y: 0.0
             }
         );
+    }
+
+    /// Every corner of `bounds` expanded by `node_world` on the far side lands
+    /// inside the viewport for `cam`.
+    fn assert_node_extent_on_canvas(
+        cam: &GraphCamera,
+        bounds: WorldBounds,
+        node_world: (f32, f32),
+        pixel: (f32, f32),
+    ) {
+        let corners = [
+            (bounds.min_x, bounds.min_y),
+            (bounds.max_x + node_world.0, bounds.min_y),
+            (bounds.min_x, bounds.max_y + node_world.1),
+            (bounds.max_x + node_world.0, bounds.max_y + node_world.1),
+        ];
+        for (wx, wy) in corners {
+            let (px, py) = cam.world_to_pixel(wx, wy);
+            assert!(
+                px >= -1e-3 && py >= -1e-3 && px <= pixel.0 + 1e-3 && py <= pixel.1 + 1e-3,
+                "node corner ({wx},{wy}) → ({px},{py}) off-canvas ({},{})",
+                pixel.0,
+                pixel.1
+            );
+        }
+    }
+
+    #[test]
+    fn fit_with_nodes_keeps_whole_node_frames_on_canvas() {
+        // The fit frames the world bounds expanded by one node extent, so every
+        // node's full frame (not only its top-left corner) lies on canvas.
+        let bounds = WorldBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 300.0,
+            max_y: 200.0,
+        };
+        let node_world = (100.0, 80.0);
+        let pixel = (640.0, 400.0);
+        let cam = GraphCamera::fit_to_world_with_nodes(bounds, node_world, pixel, 0.0);
+        assert_node_extent_on_canvas(&cam, bounds, node_world, pixel);
+        // Framing wins: the expanded fit still fills at least one axis.
+        assert_close(cam.zoom, (pixel.0 / 400.0).min(pixel.1 / 280.0), 1e-3);
+    }
+
+    #[test]
+    fn fit_with_nodes_widens_the_fitted_span_over_a_zero_extent_fit() {
+        // A node extent grows the fitted span, so the extent-aware fit is
+        // slightly smaller than the point-only fit over the same bounds.
+        let bounds = WorldBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 300.0,
+            max_y: 200.0,
+        };
+        let pixel = (640.0, 400.0);
+        let point_fit = GraphCamera::fit_to_world_with_nodes(bounds, (0.0, 0.0), pixel, 0.0);
+        let node_fit = GraphCamera::fit_to_world_with_nodes(bounds, (100.0, 80.0), pixel, 0.0);
+        assert_close(point_fit.zoom, 2.0, 1e-3);
+        assert!(
+            node_fit.zoom < point_fit.zoom,
+            "node extent must widen the span: {} vs {}",
+            node_fit.zoom,
+            point_fit.zoom
+        );
+    }
+
+    #[test]
+    fn fit_with_nodes_floor_does_not_break_framing() {
+        // Mirror `fit_to_world_frames_a_spread_world_instead_of_clamping`: a
+        // spread-out world with a node-pixel floor far above the fit keeps the
+        // pure fit, so a large floor never pushes a node off-canvas.
+        let positions: Vec<(f32, f32)> = (0..1000).map(|i| (i as f32, (i % 50) as f32)).collect();
+        let bounds = WorldBounds::from_positions(&positions);
+        let node_world = (100.0, 80.0);
+        let pixel = (640.0, 400.0);
+        let min_node_px = 100.0; // floor_zoom = 1.25, above the fit
+        let cam = GraphCamera::fit_to_world_with_nodes(bounds, node_world, pixel, min_node_px);
+
+        let cw = (bounds.max_x + node_world.0 - bounds.min_x).max(MIN_SPAN);
+        let ch = (bounds.max_y + node_world.1 - bounds.min_y).max(MIN_SPAN);
+        let fit_zoom = (pixel.0 / cw).min(pixel.1 / ch);
+        assert_close(cam.zoom, fit_zoom, 1e-4);
+        assert!(
+            cam.zoom * node_world.1 < min_node_px,
+            "the floor must not force a node size that breaks framing"
+        );
+        assert_node_extent_on_canvas(&cam, bounds, node_world, pixel);
+    }
+
+    #[test]
+    fn fit_with_nodes_binding_floor_anchors_content_top_left() {
+        // A floor that meets the fit binds (the guard leaves it at or below the
+        // fit): the content's top-left anchors to the viewport origin and every
+        // expanded corner stays on canvas.
+        let bounds = WorldBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 100.0,
+            max_y: 100.0,
+        };
+        let node_world = (100.0, 100.0);
+        let pixel = (400.0, 400.0);
+        let cam = GraphCamera::fit_to_world_with_nodes(bounds, node_world, pixel, 200.0);
+        // cw = ch = 200, fit_zoom = 2; floor_zoom = 200/100 = 2 → binds.
+        assert_close(cam.zoom, 2.0, 1e-3);
+        let (px, py) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        assert_close(px, 0.0, 1e-3);
+        assert_close(py, 0.0, 1e-3);
+        assert_node_extent_on_canvas(&cam, bounds, node_world, pixel);
+    }
+
+    #[test]
+    fn fit_with_nodes_handles_degenerate_zero_span_and_zero_extent() {
+        // Coincident positions with no node extent must stay finite.
+        let cam = GraphCamera::fit_to_world_with_nodes(
+            WorldBounds {
+                min_x: 3.0,
+                min_y: 4.0,
+                max_x: 3.0,
+                max_y: 4.0,
+            },
+            (0.0, 0.0),
+            (640.0, 400.0),
+            8.0,
+        );
+        assert!(cam.zoom.is_finite() && cam.zoom > 0.0);
+        let (px, py) = cam.world_to_pixel(3.0, 4.0);
+        assert!(px.is_finite() && py.is_finite());
+        assert_close(px, 320.0, 1e-2);
+        assert_close(py, 200.0, 1e-2);
     }
 }
 // ---------------------------------------------------------------------------

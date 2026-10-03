@@ -20,14 +20,14 @@ Node bodies SHALL be sized in world units and projected through the camera, so a
 - **WHEN** the user zooms in
 - **THEN** node frames, their corner radius, borders, and port markers render larger in proportion, and cable strokes scale with them.
 
-#### Scenario: Column arrangement never overlaps at any zoom
+#### Scenario: Column arrangement never overlaps at the fit zoom and above
 
-- **WHEN** a graph with many circuits is displayed on the column arrangement at any zoom preset
+- **WHEN** a graph with many circuits is displayed on the column arrangement at the fit zoom or any zoom above it
 - **THEN** no two node frames overlap, because each node's world width does not exceed the width the column arrangement reserved for it.
 
 ### Requirement: Level of detail at extreme zoom
 
-Node labels SHALL be laid out to fit their frame: the font SHALL shrink to fit the frame width, and text that still does not fit SHALL be ellipsized. Labels, port markers, and cluster titles SHALL be omitted when a node's frame falls below a legibility threshold, so a zoomed-out graph does not render overlapping text. Node frames SHALL keep a minimum pixel size and a minimum stroke width so they remain visible at the zoom floor.
+Node labels SHALL be laid out to fit their frame: the font SHALL shrink to fit the frame width, and text that still does not fit SHALL be ellipsized. Labels, port markers, and cluster titles SHALL be omitted when a node's frame falls below a legibility threshold, so a zoomed-out graph does not render overlapping text. Node frames and cable strokes SHALL keep a minimum render size (a non-vanishing floor of about one pixel) so the graph never disappears at the zoom floor; below that floor the frames read as dense marks rather than distinguishable boxes.
 
 #### Scenario: Labels hidden when frames are too small
 
@@ -42,7 +42,7 @@ Node labels SHALL be laid out to fit their frame: the font SHALL shrink to fit t
 #### Scenario: Frames stay visible at the zoom floor
 
 - **WHEN** the user zooms to the minimum preset
-- **THEN** node frames and cable edges still render at a visible minimum size rather than disappearing.
+- **THEN** node frames and cable edges still render at a non-vanishing minimum size rather than disappearing, even though the whole graph reads as a dense structure at that scale.
 
 ### Requirement: Fit frames whole node bodies
 
