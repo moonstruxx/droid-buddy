@@ -72,6 +72,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("+/-", "zoom presets"),
             ("arrows/wheel", "pan rack on overflow"),
             ("j/k", "navigate"),
+            ("click", "focus element across source + graph"),
             ("Enter/Space", "toggle component"),
             ("s", "toggle skeleton presentation"),
             ("m", "latch modifier on hovered component"),
@@ -412,6 +413,7 @@ mod tests {
         ("arrows/wheel", "pan rack on overflow"),
         ("arrows", "pan rack on overflow"),
         ("j/k", "navigate"),
+        ("click", "focus element across source + graph"),
         ("Enter/Space", "toggle component"),
         ("s", "toggle skeleton presentation"),
         ("m", "latch modifier on hovered component"),
@@ -490,6 +492,7 @@ mod tests {
         for (key, desc) in [
             // Navigation, zoom, skeleton, select-state, focus (task 3.1 scope).
             ("j/k", "navigate"),
+            ("click", "focus element across source + graph"),
             ("+/-", "zoom presets"),
             ("s", "toggle skeleton presentation"),
             ("g s", "open select-state menu"),
@@ -560,6 +563,7 @@ mod tests {
             "Ctrl+c",
             "Enter/Space",
             "Esc",
+            "click",
             "Tab/Shift+Tab",
             "arrows/wheel",
             "d",

@@ -1759,6 +1759,47 @@ mod scene_builder_tests {
     }
 
     #[test]
+    fn scene_element_focus_highlights_register_edge_and_controller_node() {
+        // droid_tui-8ia: the element-focus set (`_REG:<token>` + both endpoints,
+        // the controller node and the sink circuit) drives the same highlight
+        // the influence walk uses, so a clicked module-UI cell lights its own
+        // graph entity even when the walk alone would not cover the controller.
+        let controller = GraphNode {
+            id: NodeId::Controller(String::from("p2b8"), 1),
+            kind: NodeKind::Controller,
+            circuit: String::from("p2b8"),
+            instance_index: 1,
+            section_index: 0,
+        };
+        let graph = Graph {
+            nodes: vec![circuit_node("button", 0, 1), controller],
+            edges: vec![GraphEdge {
+                cable: "_REG:B1.1".into(),
+                source: NodeId::Controller(String::from("p2b8"), 1),
+                sink: NodeId::circuit("button", 0),
+            }],
+            ..Graph::default()
+        };
+        let mut app = scene_app(graph, &[(10.0, 20.0), (260.0, 20.0)]);
+        let mut nodes = HashSet::new();
+        nodes.insert(NodeId::circuit("button", 0));
+        nodes.insert(NodeId::Controller(String::from("p2b8"), 1));
+        let mut edges = HashSet::new();
+        edges.insert(String::from("_REG:B1.1"));
+        app.influence = Some(InfluenceSubtree {
+            influenced_nodes: nodes,
+            influenced_edges: edges,
+        });
+        let s = spec(&app);
+        assert_eq!(s.nodes[0].border, theme().rgb(theme().graph_node_highlight));
+        assert_eq!(s.nodes[1].border, theme().rgb(theme().graph_node_highlight));
+        assert_eq!(s.nodes[1].border_width, 3.0);
+        assert_eq!(s.edges[0].color, theme().rgb(theme().graph_edge_highlight));
+        assert_eq!(s.edges[0].width, EDGE_WIDTH + 1.0);
+        assert!(!s.edges[0].dim);
+    }
+
+    #[test]
     fn scene_influence_hover_still_beats_influence_styling() {
         // Hover is interaction feedback: it outranks the influence dim so the
         // user sees the pointer target even when it is not influenced.

@@ -573,6 +573,9 @@ fn band_has_views(app: &App, band: crate::app::Rect) -> bool {
 fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
     let t = crate::theme::active();
     let bg = t.egui_color(t.graph_canvas_bg);
+    // Per-frame hit geometry: republished from the physical pane below when one
+    // is open, otherwise cleared so a stale rect can never hit-test.
+    app.component_rects.clear();
     // ADR 35: the panes painted here are the hit geometry, so both handoffs
     // derive from the one `pane_geometry` source.
     app.refresh_hit_geometry(to_cell_rect(ui.max_rect()));
@@ -595,8 +598,21 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 // this pane draws the shared focus frame like the graph and
                 // optimizer panes (spec pane-class-layout: every pane border
                 // carries the focus/unfocused token).
-                let spec = physical::physical_spec(app);
+                // The spec is anchored at this pane's origin so the drawn rack
+                // and the published hit geometry follow the pane wherever the
+                // module UI is placed (not just BigLeft at 0,0).
+                let spec = physical::physical_spec(app, rect);
                 let _ = physical::paint_physical(ui, rect, spec.as_ref());
+                // Publish the drawn element cells as the app-level hit geometry
+                // (`component_rects`): only real components (Some index) are
+                // hit-testable; unused geometry cells are never published.
+                if let Some(spec) = spec.as_ref() {
+                    app.component_rects = spec
+                        .cells
+                        .iter()
+                        .filter_map(|c| c.component_index.map(|i| (i, to_cell_rect(c.rect))))
+                        .collect();
+                }
                 let painter = ui.painter().with_clip_rect(rect);
                 draw_pane_frame(&painter, rect, focused, " Module UI ", t);
             }
@@ -829,6 +845,7 @@ impl EguiSurface {
                 paint_panes(app, ui, scene, selected);
             } else {
                 app.pane_rects.clear();
+                app.component_rects.clear();
                 graph::paint_scene(ui, window_rect.size(), scene, selected);
             }
             paint_overlays(app, ui);
@@ -1335,6 +1352,171 @@ mod tests {
         );
         out.textures_delta.clear();
         out2.textures_delta.clear();
+    }
+
+    #[test]
+    fn module_ui_hit_geometry_follows_its_pane_through_the_real_paint_path() {
+        // Regression (droid_tui-c4x follow-up): the module UI must publish hit
+        // geometry in the same space the pointer arrives in. Chaining the real
+        // `paint_panes` publication with the real window-frame handler (instead
+        // of feeding the handler synthetic rects) is what catches the module UI
+        // drawing/hit-testing in rack-local coordinates: with the module UI in
+        // a non-origin pane, the center of a published rect must still hover
+        // and select its component.
+        use crate::gui::WindowFrame;
+        use crate::handler::handle_graph_window_frame;
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/multi_module_p2b8.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        // Reachable arrangement (Tab + Alt+b): the module UI in the small top
+        // pane, whose origin is not the window origin.
+        app.layout.big_left.view = Some(crate::app::ViewType::SourceViewer);
+        app.layout.small_top.view = Some(crate::app::ViewType::Physical);
+        app.layout.focus = crate::panes::PaneId::SmallTop;
+
+        let mut out = run_paint_panes(&mut app);
+        let (_, pane) = app
+            .pane_hit_rects
+            .iter()
+            .find(|(id, _)| *id == crate::panes::PaneId::SmallTop)
+            .expect("module UI pane published");
+        assert!(pane.x > 0, "the pane must be away from the window origin");
+        let (idx, rect) = app.component_rects[0];
+        assert!(
+            rect.x >= pane.x,
+            "published cell rect is anchored in the pane: {rect:?} vs {pane:?}"
+        );
+        let cx = rect.x as f32 + rect.width as f32 / 2.0;
+        let cy = rect.y as f32 + rect.height as f32 / 2.0;
+
+        // Hover: the published center must resolve to the drawn component.
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((cx, cy)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_component, Some(idx));
+
+        // Click: the same point focuses the component (select, no toggle —
+        // droid_tui-8ia click semantics) and reports it.
+        let token = app.patch.as_ref().unwrap().hw_components[idx].id.clone();
+        let before = app.patch.as_ref().unwrap().hw_components[idx].state.clone();
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((cx, cy)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let after = app.patch.as_ref().unwrap().hw_components[idx].state.clone();
+        assert_eq!(
+            before, after,
+            "the published center must not toggle the component"
+        );
+        assert_eq!(app.selected_component.as_deref(), Some(token.as_str()));
+        assert_eq!(
+            app.status_message,
+            format!("Focused: {token}"),
+            "status reports the element focus"
+        );
+        assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn module_ui_hit_geometry_follows_its_pane_at_the_default_arrangement() {
+        // The startup arrangement (module UI in BigLeft at the window origin)
+        // must keep working: a published cell center still hovers its component
+        // when the pane origin is zero.
+        use crate::gui::WindowFrame;
+        use crate::handler::handle_graph_window_frame;
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/multi_module_p2b8.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        let mut out = run_paint_panes(&mut app);
+        let (idx, rect) = app.component_rects[0];
+        let cx = rect.x as f32 + rect.width as f32 / 2.0;
+        let cy = rect.y as f32 + rect.height as f32 / 2.0;
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((cx, cy)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_component, Some(idx));
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_panes_publishes_physical_component_rects() {
+        // Regression (droid_tui-c4x): the module UI pane must publish its drawn
+        // element cells as `component_rects` so the window can hit-test them.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/multi_module_p2b8.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        assert_eq!(
+            app.layout.pane(crate::panes::PaneId::BigLeft).view,
+            Some(crate::app::ViewType::Physical),
+            "the default arrangement puts the module UI in the left big pane"
+        );
+
+        let mut out = run_paint_panes(&mut app);
+        // Every published rect lies inside the left big pane, and equals the
+        // pane-anchored spec's cells.
+        let (_, left) = app
+            .pane_hit_rects
+            .iter()
+            .find(|(id, _)| *id == crate::panes::PaneId::BigLeft)
+            .expect("left big pane published");
+        let pane = egui::Rect::from_min_size(
+            egui::pos2(left.x as f32, left.y as f32),
+            egui::vec2(left.width as f32, left.height as f32),
+        );
+        let spec = physical::physical_spec(&app, pane).expect("module UI spec");
+        let expected: Vec<_> = spec
+            .cells
+            .iter()
+            .filter_map(|c| c.component_index.map(|i| (i, to_cell_rect(c.rect))))
+            .collect();
+        assert!(!expected.is_empty(), "the module UI draws cells");
+        assert_eq!(app.component_rects, expected);
+        for (_, rect) in &app.component_rects {
+            assert!(
+                rect.x >= left.x && rect.y >= left.y,
+                "inside pane: {rect:?}"
+            );
+        }
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn paint_panes_clears_stale_component_rects_without_a_physical_pane() {
+        // The module UI is the only publisher of `component_rects`; a band with
+        // no Physical pane must clear any stale rects so they can never
+        // hit-test against the wrong surface.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.layout.big_left.view = Some(crate::app::ViewType::Graph);
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        app.component_rects = vec![(0, crate::app::Rect::new(0, 0, 16, 2))];
+
+        let mut out = run_paint_panes(&mut app);
+        assert!(
+            app.component_rects.is_empty(),
+            "no physical pane publishes nothing"
+        );
+        out.textures_delta.clear();
     }
 
     #[test]

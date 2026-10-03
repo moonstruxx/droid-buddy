@@ -1947,6 +1947,60 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// `main.rs` owns both the window and the `App`, so it calls this once per
 /// painted frame (D6: the loop acts on what it owns).
 pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
+    // Module UI (Physical pane) pointer routing. The window frame is the only
+    // live pointer path, and the module UI has no graph: handle hover/click on
+    // the rack before the graph-camera gate so it works with no graph open.
+    if let Some((px, py)) = frame.pointer {
+        let col = px.round().max(0.0) as u16;
+        let row = py.round().max(0.0) as u16;
+        let in_physical_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
+            app.layout.pane(*id).view == Some(ViewType::Physical) && rect_contains(rect, col, row)
+        });
+        if in_physical_pane {
+            let hit = app
+                .component_rects
+                .iter()
+                .find(|(_, rect)| rect_contains(rect, col, row))
+                .map(|(idx, _)| *idx);
+            app.hovered_component = hit;
+            if frame.primary_pressed {
+                focus_pane_at(app, col, row);
+                sync_viewer_focus_from_tiles(app);
+                if let Some(idx) = hit {
+                    let token_id = app
+                        .patch
+                        .as_ref()
+                        .and_then(|p| p.hw_components.get(idx))
+                        .map(|c| c.id.clone());
+                    if let Some(token) = token_id {
+                        // Click semantics (droid_tui-8ia, decided): a left-click
+                        // on a module-UI element FOCUSES it across surfaces and
+                        // never toggles state — the element stays selected, the
+                        // source pane jumps to its occurrence, and the graph
+                        // highlights its register entity + influence subtree.
+                        // State toggle stays on Enter/Space over the hovered
+                        // cell (`handle_event`).
+                        app.select_component(token.clone());
+                        // Focus the graph on the element's own node(s) when the
+                        // graph pane is open (its camera + canvas are then
+                        // published). `select_component` already filled the
+                        // influence set with the register endpoints.
+                        if app.pane_holding(ViewType::Graph).is_some() {
+                            let focus = app.influence.as_ref().map(|s| s.influenced_nodes.clone());
+                            if let Some(focus) = focus {
+                                app.center_graph_camera_on_nodes(&focus);
+                            }
+                        }
+                        app.status_message = format!("Focused: {token}");
+                    }
+                }
+            }
+            return;
+        }
+        // Pointer is over a different pane: drop a stale module-UI hover, then
+        // fall through to the graph logic unchanged.
+        app.hovered_component = None;
+    }
     let Some(mut camera) = app.graph_camera else {
         app.hovered_graph_node = None;
         return;
@@ -5868,6 +5922,72 @@ mod tests {
         let mut app = app_with_graph();
         app.graph_camera = Some(crate::graph_render::GraphCamera::new());
         app
+    }
+
+    /// A fixture app with the pane hit geometry published, so the window-frame
+    /// module-UI path can resolve the Physical pane and its cells.
+    fn app_with_module_ui() -> App {
+        let mut app = app_with_fixture();
+        app.refresh_hit_geometry(Rect::new(0, 0, 800, 600));
+        app
+    }
+
+    #[test]
+    fn graph_window_frame_hover_over_module_ui_sets_hovered_component() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_module_ui();
+        // (12, 1) is inside component 0's rect (0,0)-(16,2) and the left big
+        // pane (the module UI).
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((12.0, 1.0)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_component, Some(0));
+    }
+
+    #[test]
+    fn graph_window_frame_press_on_module_ui_selects_without_toggling() {
+        // droid_tui-8ia (decided): a module-UI left-click FOCUSES the element —
+        // it must not mutate component state. State toggle stays on
+        // Enter/Space over the hovered cell.
+        use crate::gui::WindowFrame;
+        let mut app = app_with_module_ui();
+        // Focus the source pane first so the click's focus move is observable.
+        app.layout.focus = crate::panes::PaneId::SmallTop;
+        let before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((12.0, 1.0)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let after = app.patch.as_ref().unwrap().hw_components[0].state.clone();
+        assert_eq!(before, after, "a focus click must not toggle state");
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
+        assert_eq!(app.status_message, "Focused: B1.1");
+    }
+
+    #[test]
+    fn graph_window_frame_pointer_outside_module_ui_clears_hover() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_module_ui();
+        app.hovered_component = Some(1);
+        // (500, 10) is in the source-viewer small pane, not the module UI.
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((500.0, 10.0)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_component, None);
     }
 
     /// Pointer just inside `target`'s drawn world box, accepted only when no

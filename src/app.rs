@@ -2371,6 +2371,49 @@ impl App {
         true
     }
 
+    /// Center the graph camera on the world bounds of `nodes` (element focus,
+    /// droid_tui-8ia): pan only, zoom unchanged, framing each node's world
+    /// extent the way `center_graph_camera` frames the whole graph. Returns
+    /// whether it panned — false without a camera or published canvas, or when
+    /// none of `nodes` resolves to a placed node.
+    pub fn center_graph_camera_on_nodes(&mut self, nodes: &HashSet<NodeId>) -> bool {
+        let Some(cam) = self.graph_camera else {
+            return false;
+        };
+        let Some((pw, ph)) = self.graph_canvas_px else {
+            return false;
+        };
+        let Some(graph) = self.graph.as_ref() else {
+            return false;
+        };
+        let sizes = crate::layout::node_world_sizes(graph);
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for (i, node) in graph.nodes.iter().enumerate() {
+            if !nodes.contains(&node.id) {
+                continue;
+            }
+            let (Some(&(x, y)), Some(&(w, h))) = (self.graph_positions.get(i), sizes.get(i)) else {
+                continue;
+            };
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + w);
+            max_y = max_y.max(y + h);
+        }
+        if !min_x.is_finite() || !min_y.is_finite() {
+            return false;
+        }
+        let (cx, cy) = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        self.graph_camera = Some(GraphCamera {
+            zoom: cam.zoom,
+            pan: (cx * cam.zoom - pw / 2.0, cy * cam.zoom - ph / 2.0),
+        });
+        true
+    }
+
     /// Full refit of the drawn graph against `viewport` (design D3 `Shift+c`):
     /// a fresh width-first extent-aware fit over the dependency-filter-aware
     /// bounds, framing whole node bodies via [`Self::graph_fit_node_world`], the
@@ -3580,13 +3623,12 @@ impl App {
             return;
         };
         let vars = patch.hw_token_to_vars(&token);
-        if vars.is_empty() {
-            self.clear_influence_state();
-            return;
-        }
-        self.active_modifier_var = Some(vars[0].clone());
-        let subtree = patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits);
-        self.influence = Some(subtree.clone());
+        self.active_modifier_var = vars.first().cloned();
+        let mut subtree = if vars.is_empty() {
+            crate::patch::InfluenceSubtree::default()
+        } else {
+            patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits)
+        };
         // Only (re)build full-graph state when a graph already exists or the
         // graph tile is open. Otherwise keep influence without eagerly
         // constructing a graph so plain panel interactions don't emit
@@ -3610,6 +3652,21 @@ impl App {
             self.graph_drag = None;
             self.emit_graph_built();
         }
+        // Element focus (droid_tui-8ia): the selected hardware element's own
+        // register edge(s) `_REG:<token>` and their endpoints — the controller
+        // (or jack) node plus the circuit instance(s) that read/write the
+        // register — join the influence subtree. This lights the element's own
+        // graph entity alongside its downstream influence, and still focuses a
+        // register-bearing element whose root-var influence is empty (e.g. an
+        // LED or CV jack with no producing section).
+        if let Some(graph) = self.graph.as_ref() {
+            extend_with_register_focus(graph, &token, &mut subtree);
+        }
+        if subtree.influenced_nodes.is_empty() && subtree.influenced_edges.is_empty() {
+            self.clear_influence_state();
+            return;
+        }
+        self.influence = Some(subtree.clone());
         if let Some(graph) = self.graph.as_mut() {
             graph.highlighted_nodes = subtree.influenced_nodes.clone();
             graph.highlighted_edges = subtree.influenced_edges.clone();
@@ -4053,6 +4110,27 @@ fn clusters_from_patch(patch: &Patch) -> Vec<Cluster> {
             section_range: group.section_range.clone(),
         })
         .collect()
+}
+
+/// Union the selected hardware element's own register edge(s) into `subtree`
+/// (droid_tui-8ia element focus): every `_REG:<token>` edge plus its two
+/// endpoint nodes — the controller/jack node and the circuit instance that
+/// reads or writes the register — so a module-UI element click lights its own
+/// graph entity next to the influence walk. Iterates graph edges in their
+/// deterministic (cable, source, sink) order, so the result is reproducible.
+fn extend_with_register_focus(
+    graph: &Graph,
+    token: &str,
+    subtree: &mut crate::patch::InfluenceSubtree,
+) {
+    let cable = format!("_REG:{token}");
+    for edge in &graph.edges {
+        if edge.cable == cable {
+            subtree.influenced_edges.insert(edge.cable.clone());
+            subtree.influenced_nodes.insert(edge.source.clone());
+            subtree.influenced_nodes.insert(edge.sink.clone());
+        }
+    }
 }
 
 /// Case-aware picker filter match (bead t9g): a lowercase filter character
@@ -6490,7 +6568,91 @@ mod tests {
         app.open_view(ViewType::Graph);
         let graph = app.graph.as_ref().unwrap();
         assert!(!graph.highlighted_nodes.is_empty());
-        assert_eq!(graph.highlighted_nodes, influence.influenced_nodes);
+        // Opening the graph re-derives the influence with the graph present,
+        // so the element's own register entity joins the walk (droid_tui-8ia):
+        // the pre-open nodes stay a subset and `_REG:B1.1` is highlighted.
+        for node in &influence.influenced_nodes {
+            assert!(
+                graph.highlighted_nodes.contains(node),
+                "influence node {node:?} survives the re-derive"
+            );
+        }
+        assert!(graph.highlighted_edges.contains("_REG:B1.1"));
+    }
+
+    #[test]
+    fn selecting_an_element_focuses_its_register_edge_and_endpoints_on_the_graph() {
+        // droid_tui-8ia element focus: a module-UI element click maps to the
+        // graph entity the element belongs to — its `_REG:<token>` edge plus
+        // both endpoints (the controller/jack node and the circuit instance
+        // reading/writing the register) — alongside the influence subtree.
+        let mut app = App::new();
+        let patch =
+            Patch::from_ini_file(Path::new("fixtures/modifier_switch_passthrough.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(ViewType::Graph);
+        app.select_component(String::from("B1.1"));
+        let graph = app.graph.as_ref().unwrap();
+        let edge = graph
+            .edges
+            .iter()
+            .find(|e| e.cable == "_REG:B1.1")
+            .expect("the fixture wires B1.1 to a register edge");
+        assert!(
+            graph.highlighted_edges.contains("_REG:B1.1"),
+            "the element's register edge is highlighted"
+        );
+        assert!(
+            graph.highlighted_nodes.contains(&edge.source),
+            "register edge source {:?} is highlighted",
+            edge.source
+        );
+        assert!(
+            graph.highlighted_nodes.contains(&edge.sink),
+            "register edge sink {:?} is highlighted",
+            edge.sink
+        );
+        assert!(app
+            .influence
+            .as_ref()
+            .unwrap()
+            .influenced_edges
+            .contains("_REG:B1.1"));
+    }
+
+    #[test]
+    fn center_graph_camera_on_nodes_pans_to_their_bounds_center() {
+        // The element-focus centering helper frames the focused nodes' world
+        // extents (droid_tui-8ia): pan moves so their bounds center lands on
+        // the canvas center, zoom unchanged.
+        let mut app = App::new();
+        let patch =
+            Patch::from_ini_file(Path::new("fixtures/modifier_switch_passthrough.ini")).unwrap();
+        assert!(app.load_patch(patch));
+        app.open_view(ViewType::Graph);
+        app.graph_camera = Some(GraphCamera {
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        });
+        app.graph_canvas_px = Some((640.0, 300.0));
+        let mut focus: HashSet<NodeId> = HashSet::new();
+        let graph = app.graph.as_ref().unwrap();
+        focus.insert(graph.nodes[0].id.clone());
+        focus.insert(graph.nodes[1].id.clone());
+        let sizes = crate::layout::node_world_sizes(graph);
+        let (x0, y0) = app.graph_positions[0];
+        let (w0, h0) = sizes[0];
+        let (x1, y1) = app.graph_positions[1];
+        let (w1, h1) = sizes[1];
+        let cx = (x0.min(x1) + (x0 + w0).max(x1 + w1)) / 2.0;
+        let cy = (y0.min(y1) + (y0 + h0).max(y1 + h1)) / 2.0;
+        assert!(app.center_graph_camera_on_nodes(&focus));
+        let cam = app.graph_camera.unwrap();
+        assert!((cam.pan.0 - (cx * cam.zoom - 320.0)).abs() < 0.01);
+        assert!((cam.pan.1 - (cy * cam.zoom - 150.0)).abs() < 0.01);
+        // No camera/canvas -> silent no-op.
+        app.graph_camera = None;
+        assert!(!app.center_graph_camera_on_nodes(&focus));
     }
 
     // ---- change C 4.1: select-state menu state transitions ----

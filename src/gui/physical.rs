@@ -46,9 +46,9 @@ pub(crate) struct ModuleSpec {
 
 /// A resolved element cell for painting: the screen rect (points), the
 /// glyph/state the kind renders, its theme color, and the interaction flags
-/// (hover/circuit highlight, shift color, paused dim). `global_index` is the
-/// component's index into `patch.hw_components`, so the window can hit-test
-/// exactly like the terminal did.
+/// (hover/circuit highlight, shift color, paused dim). `component_index` is the
+/// component's index into `patch.hw_components` (`None` for unused geometry
+/// cells), so the window can hit-test the module UI against `component_rects`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CellSpec {
     pub rect: Rect,
@@ -58,7 +58,7 @@ pub(crate) struct CellSpec {
     pub color: Color,
     pub is_fader: bool,
     pub fader_value: f32,
-    pub global_index: usize,
+    pub component_index: Option<usize>,
     pub mark: PortMark,
     pub highlighted: bool,
     pub shift_color: Option<Color>,
@@ -134,9 +134,17 @@ const PHYSICAL_CELL_SCALE: f32 = 10.0;
 /// The app-driven physical spec: build the controller chain from the loaded
 /// patch (`PhysicalLayout::build`), pack it into the configured rack (or the
 /// default case when none is set), and resolve cells/geometry under the
-/// app's physical zoom/offset. `None` when no patch is loaded — the slot
-/// then paints nothing. Mirrors the test-only `build_spec`.
-pub(crate) fn physical_spec(app: &App) -> Option<PhysicalSpec> {
+/// app's physical zoom/offset, anchored at `pane`'s top-left corner. `None`
+/// when no patch is loaded — the slot then paints nothing. Mirrors the
+/// test-only `build_spec`.
+///
+/// `pane` is the on-screen rect the rack is drawn into: the module UI can
+/// occupy any pane of the arrangement (BigLeft at startup, but BigRight or a
+/// small pane after a swap), so the rack-local mm geometry must be translated
+/// by the pane origin — otherwise the drawn rack and the published
+/// `component_rects` hit geometry stay at the window origin and stop matching
+/// the pane (and each other) as soon as the module UI is not in BigLeft.
+pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec> {
     let patch = app.patch.as_ref()?;
     let chain = PhysicalLayout::build(patch);
     let rack_spec = if app.physical_rack_spec.rows.is_empty() {
@@ -145,15 +153,39 @@ pub(crate) fn physical_spec(app: &App) -> Option<PhysicalSpec> {
         app.physical_rack_spec.clone()
     };
     let rack = RackLayout::pack(&chain, &rack_spec);
+    // `mm_to_screen` returns screen cells and `rack_geometry` scales them to
+    // points, so the pane origin is folded into the offset in cell units
+    // (offset is subtracted: `screen = mm·factor·zoom − offset`).
+    let pane_dx = pane.min.x as f64 / PHYSICAL_CELL_SCALE as f64;
+    let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
     let m = ScreenMapping::new(
         crate::physical::PHYSICAL_COLS_PER_MM,
         crate::physical::PHYSICAL_ROWS_PER_MM,
         app.physical_zoom as f64,
-        app.physical_offset.0 as f64,
-        app.physical_offset.1 as f64,
+        app.physical_offset.0 as f64 - pane_dx,
+        app.physical_offset.1 as f64 - pane_dy,
     );
     let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
     let mut cells = Vec::new();
+
+    // The physical chain clones components per module, so the module-local cell
+    // index is not the `patch.hw_components` index the handler's
+    // `component_rects` hit-testing uses. Map by token id to recover the global
+    // index for every real element.
+    let index_of: std::collections::HashMap<&str, usize> = patch
+        .hw_components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id.as_str(), i))
+        .collect();
+
+    // Persistent selection emphasis (droid_tui-8ia): the shared element
+    // selection (`selected_component`) keeps the clicked cell marked after the
+    // pointer leaves, and the graph-node selection (`selected_circuit`) marks
+    // every hardware cell of that circuit's section. Both reuse the hover
+    // backdrop below so the module UI shows one selection language.
+    let selected_circuit_cells: std::collections::HashSet<usize> =
+        app.circuit_hw_token_indices().into_iter().collect();
 
     // Track which LED tokens are folded into elements (so we don't render them standalone)
     let mut folded_leds: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -186,6 +218,14 @@ pub(crate) fn physical_spec(app: &App) -> Option<PhysicalSpec> {
     // Render all element cells from geometry (including unused ones)
     for &(mi, ci, rect, mark) in &geom.cells {
         let module = &chain.modules[mi];
+
+        // Global `patch.hw_components` index for a real element; `None` for an
+        // unused geometry cell (rendered dimmed and unlabelled, never hit).
+        let component_index = if ci < module.components.len() {
+            index_of.get(module.components[ci].id.as_str()).copied()
+        } else {
+            None
+        };
 
         // ci might be out of bounds for patch components if it's an unused element
         // In that case, we still render the cell but dimmed and unlabelled
@@ -265,9 +305,13 @@ pub(crate) fn physical_spec(app: &App) -> Option<PhysicalSpec> {
             color,
             is_fader,
             fader_value,
-            global_index: ci,
+            component_index,
             mark,
-            highlighted: false,
+            highlighted: component_index.is_some_and(|i| {
+                app.hovered_component == Some(i)
+                    || selected_circuit_cells.contains(&i)
+                    || app.selected_component.as_deref() == Some(module.components[ci].id.as_str())
+            }),
             shift_color: None,
             modifier_wash: None,
             dimmed: is_dimmed,
@@ -1167,7 +1211,7 @@ mod tests {
                 color,
                 is_fader: false,
                 fader_value: 0.0,
-                global_index: ci,
+                component_index: Some(ci),
                 mark,
                 highlighted: false,
                 shift_color: None,
@@ -1206,6 +1250,144 @@ mod tests {
             cell_scale: 10.0,
             skeleton,
             paused,
+        }
+    }
+
+    /// A fresh App holding a patch loaded from `path` (the same physical view
+    /// defaults `physical_spec` reads: zoom 1, no pan).
+    fn app_with_patch(path: &str) -> App {
+        let patch = crate::patch::Patch::from_ini_file(std::path::Path::new(path)).unwrap();
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        app
+    }
+
+    #[test]
+    fn physical_spec_component_index_is_the_global_hw_index() {
+        // Regression (droid_tui-c4x): the physical chain clones components per
+        // module, so a module-local cell index must never be published as the
+        // `patch.hw_components` index — otherwise hit-testing a second module's
+        // cells resolves to the first module's components.
+        let app = app_with_patch("fixtures/multi_module_p2b8.ini");
+        let patch = app.patch.as_ref().unwrap();
+        let chain = PhysicalLayout::build(patch);
+        let rack_spec = if app.physical_rack_spec.rows.is_empty() {
+            RackSpec::default_case(&chain)
+        } else {
+            app.physical_rack_spec.clone()
+        };
+        let rack = RackLayout::pack(&chain, &rack_spec);
+        let m = ScreenMapping::new(
+            crate::physical::PHYSICAL_COLS_PER_MM,
+            crate::physical::PHYSICAL_ROWS_PER_MM,
+            app.physical_zoom as f64,
+            app.physical_offset.0 as f64,
+            app.physical_offset.1 as f64,
+        );
+        let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
+        // A zero-origin pane keeps the spec rack-local so it matches `geom`.
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+        assert_eq!(spec.cells.len(), geom.cells.len());
+        for (cell, &(mi, ci, rect, _)) in spec.cells.iter().zip(geom.cells.iter()) {
+            let comp = &chain.modules[mi].components[ci];
+            let expected = patch
+                .hw_components
+                .iter()
+                .position(|c| c.id == comp.id)
+                .expect("every chain component exists in the patch");
+            assert_eq!(cell.component_index, Some(expected), "cell {}", comp.id);
+            assert_eq!(cell.rect, rect);
+        }
+        // The second module's cells carry global indices past the first module's
+        // component count, which the module-local `ci` could not produce.
+        let first_module_len = chain.modules[0].components.len();
+        assert!(
+            spec.cells
+                .iter()
+                .any(|c| c.component_index.is_some_and(|i| i >= first_module_len)),
+            "the second module publishes global indices"
+        );
+        // Published indices are distinct and in range; unused geometry cells are
+        // never published (they would carry `None`).
+        let mut idx: Vec<usize> = spec
+            .cells
+            .iter()
+            .filter_map(|c| c.component_index)
+            .collect();
+        let published = idx.len();
+        idx.sort_unstable();
+        idx.dedup();
+        assert_eq!(idx.len(), published, "component indices are distinct");
+        assert!(idx.iter().all(|&i| i < patch.hw_components.len()));
+    }
+
+    #[test]
+    fn physical_spec_marks_the_selected_element_cell_highlighted() {
+        // droid_tui-8ia: the shared element selection keeps the clicked module
+        // UI cell visibly marked after the pointer leaves (hover alone used to
+        // be the only highlight source).
+        let mut app = app_with_patch("fixtures/source_navigation.ini");
+        let idx = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("fixture declares B1.1");
+        let before = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let cell = before
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .expect("B1.1 cell");
+        assert!(!cell.highlighted, "nothing selected or hovered yet");
+
+        app.select_component(String::from("B1.1"));
+        let after = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let cell = after
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .expect("B1.1 cell");
+        assert!(
+            cell.highlighted,
+            "the selected element stays marked after the pointer leaves"
+        );
+    }
+
+    #[test]
+    fn physical_spec_marks_the_selected_circuits_cells_highlighted() {
+        // droid_tui-8ia reverse direction: clicking a graph node sets
+        // `selected_circuit`; `circuit_hw_token_indices` maps it back to the
+        // module UI cells, which the spec must mark (it was computed but unused
+        // before this change).
+        let mut app = app_with_patch("fixtures/source_navigation.ini");
+        app.open_view(crate::app::ViewType::Graph);
+        let node = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.circuit == "button")
+            .expect("fixture has a button circuit")
+            .id
+            .clone();
+        app.select_circuit(node);
+        let indices = app.circuit_hw_token_indices();
+        assert!(
+            !indices.is_empty(),
+            "the button section names hardware tokens"
+        );
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        for i in indices {
+            let cell = spec
+                .cells
+                .iter()
+                .find(|c| c.component_index == Some(i))
+                .unwrap_or_else(|| panic!("cell for hardware index {i}"));
+            assert!(cell.highlighted, "circuit cell {i} is highlighted");
         }
     }
 

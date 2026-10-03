@@ -1279,7 +1279,9 @@ fn regression_graph_anchor_hit_testing_low_and_high_zoom() {
     let (w, h) = sizes[0];
     let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
     // Pane origin as the renderer publishes it: the graph in BigLeft at (0,0),
-    // so the window-space pointer equals the pane-space pointer.
+    // so the window-space pointer equals the pane-space pointer. The pane must
+    // genuinely hold the Graph view, or the module-UI pointer branch claims it.
+    app.layout.big_left.view = Some(crate::app::ViewType::Graph);
     app.pane_hit_rects = vec![(crate::panes::PaneId::BigLeft, Rect::new(0, 0, 120, 40))];
     let (ox, oy) = (0.0_f32, 0.0_f32);
 
