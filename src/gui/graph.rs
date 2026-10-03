@@ -154,9 +154,13 @@ pub(crate) fn paint_scene_in(
             egui::StrokeKind::Inside,
         );
         // Cluster titles scale with the zoom and are omitted when so small
-        // they would not be legible (design decision 3).
-        let title_px = (CLUSTER_TITLE_PX * zoom).clamp(MIN_LABEL_PX, 40.0);
-        if !cluster.title.is_empty() && title_px >= MIN_LABEL_PX {
+        // they would not be legible (design decision 3). Gating on the raw
+        // zoom-derived size keeps the legibility floor from resurrecting a
+        // title that is below the threshold (the clamp would raise it to
+        // exactly MIN_LABEL_PX and defeat the gate).
+        let raw_title_px = CLUSTER_TITLE_PX * zoom;
+        if !cluster.title.is_empty() && raw_title_px >= MIN_LABEL_PX {
+            let title_px = raw_title_px.clamp(MIN_LABEL_PX, 40.0);
             painter.text(
                 rect.left_top() + egui::vec2(6.0, 3.0),
                 egui::Align2::LEFT_TOP,
