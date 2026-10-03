@@ -24,6 +24,17 @@ use crate::theme::Color;
 
 use super::graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 
+/// Fixed screen-space font (points) for a module-UI cell label: the label
+/// keeps this size at every `physical_zoom`, so zooming the rack never grows
+/// or shrinks label text (label-guess-and-screen-scale, design decision 4).
+/// 10 pt sits mid-range in the old height-derived `height × 0.42` clamp
+/// (6–15 pt), matching a typical ~24 pt cell height.
+const CELL_LABEL_SIZE: f32 = 10.0;
+/// Monospace advance as a fraction of the font size (egui's monospace face is
+/// close to 0.6 em — mirrors `gui::graph`'s `MONO_ADVANCE`), used to budget
+/// the label characters that fit a cell at the fixed [`CELL_LABEL_SIZE`] font.
+const MONO_ADVANCE: f32 = 0.6;
+
 /// What an element cell draws in skeleton mode: a plain cell dot or an
 /// in/out port marker (CV jacks on the master faceplate), mirroring
 /// `ui.rs::PortMark`.
@@ -542,14 +553,19 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         painter.rect_filled(led_rect, led_size * 0.3, led_color);
     }
 
-    // Compact cell: state glyph always; the label joins the first row when
-    // the cell is wide enough; the state text takes the second row.
-    let font = egui::FontId::monospace((rect.height() * 0.42).clamp(6.0, 15.0));
+    // Compact cell: state glyph always; the label shares the first row at the
+    // fixed screen-space size once the cell is at least one character of that
+    // font wide (label-guess-and-screen-scale, task 2.2); the state text
+    // takes the second row.
+    let font = egui::FontId::monospace(CELL_LABEL_SIZE);
     let line_h = font.size * 1.25;
     let color = dim(rgb(base), paused || cell.dimmed);
     let mut first = cell.glyph.clone();
-    if rect.width() >= 28.0 && !cell.label.is_empty() {
-        let budget = (rect.width() / font.size).floor() as usize;
+    // One character of the fixed font is the hide threshold: a narrower cell
+    // renders the glyph but no label text at all.
+    let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+    if rect.width() >= char_w && !cell.label.is_empty() {
+        let budget = (rect.width() / char_w).floor() as usize;
         let room = budget.saturating_sub(cell.glyph.chars().count() + 1);
         if room > 0 {
             first.push(' ');
@@ -1168,10 +1184,16 @@ mod tests {
     }
 
     fn mapping() -> ScreenMapping {
+        mapping_at(1.0)
+    }
+
+    /// The same mapping at a physical zoom preset — the value
+    /// `physical_spec` feeds from `app.physical_zoom`.
+    fn mapping_at(zoom: f64) -> ScreenMapping {
         ScreenMapping::new(
             crate::physical::PHYSICAL_COLS_PER_MM,
             crate::physical::PHYSICAL_ROWS_PER_MM,
-            1.0,
+            zoom,
             0.0,
             0.0,
         )
@@ -1181,23 +1203,31 @@ mod tests {
     /// cell visuals via `cell_visuals`, one cell per fixture component.
     fn spec(skeleton: bool, paused: bool) -> PhysicalSpec {
         let (rack, chain) = fixture();
-        build_spec((&rack, &chain), skeleton, paused)
+        build_spec((&rack, &chain), skeleton, paused, 1.0)
+    }
+
+    /// The fixture spec at a physical zoom preset, going through the same
+    /// `ScreenMapping` zoom path `physical_spec` takes for `physical_zoom`.
+    fn spec_at_zoom(zoom: f64) -> PhysicalSpec {
+        let (rack, chain) = fixture();
+        build_spec((&rack, &chain), false, false, zoom)
     }
 
     /// Same builder over a hand-built DB8E rack (one faceplate with a B-grid)
     /// so the band tests exercise the production geometry values.
     fn db8e_spec(skeleton: bool, paused: bool) -> PhysicalSpec {
         let (rack, chain) = db8e_fixture();
-        build_spec((&rack, &chain), skeleton, paused)
+        build_spec((&rack, &chain), skeleton, paused, 1.0)
     }
 
     fn build_spec(
         fx: (&RackLayout, &PhysicalLayout),
         skeleton: bool,
         paused: bool,
+        zoom: f64,
     ) -> PhysicalSpec {
         let (rack, chain) = fx;
-        let m = mapping();
+        let m = mapping_at(zoom);
         let geom = rack_geometry(rack, chain, &m, 10.0);
         let mut cells = Vec::new();
         for &(mi, ci, rect, mark) in &geom.cells {
@@ -1497,6 +1527,69 @@ mod tests {
         (labels, rects)
     }
 
+    /// One headless `Context::run_ui` pass over `paint`: every emitted text
+    /// shape as `(text, font, galley width)` so tests can assert on the exact
+    /// font a label was painted with, not just its content.
+    fn headless_texts(mut paint: impl FnMut(&mut egui::Ui)) -> Vec<(String, egui::FontId, f32)> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| paint(ui));
+        let mut texts = Vec::new();
+        for cs in &full_output.shapes {
+            if let egui::epaint::Shape::Text(t) = &cs.shape {
+                let font = t.galley.job.sections[0].format.font_id.clone();
+                texts.push((t.galley.text().to_string(), font, t.galley.size().x));
+            }
+        }
+        full_output.textures_delta.clear();
+        texts
+    }
+
+    /// `headless_texts` over a whole spec paint (`paint_physical`).
+    fn painted_texts(spec: &PhysicalSpec) -> Vec<(String, egui::FontId, f32)> {
+        headless_texts(|ui| {
+            paint_physical(ui, ui.max_rect(), Some(spec));
+        })
+    }
+
+    /// `headless_texts` over a single cell paint (`paint_cell`, full
+    /// presentation), for the label font/ellipsize/omission tests.
+    fn painted_cell(cell: &CellSpec) -> Vec<(String, egui::FontId, f32)> {
+        headless_texts(|ui| {
+            let painter = ui.painter();
+            paint_cell(painter, cell, false, false);
+        })
+    }
+
+    /// A compact full-presentation button cell for the label tests: the
+    /// fixed-size label path, no interaction flags.
+    fn cell_spec(rect: Rect, label: &str) -> CellSpec {
+        CellSpec {
+            rect,
+            glyph: "\u{25CF}".to_string(),
+            label: label.to_string(),
+            state_text: "ON".to_string(),
+            color: crate::theme::active().button,
+            is_fader: false,
+            fader_value: 0.0,
+            component_index: Some(0),
+            mark: PortMark::Cell,
+            highlighted: false,
+            shift_color: None,
+            modifier_wash: None,
+            dimmed: false,
+            kind: ComponentKind::Button,
+            led_state: None,
+            led_rgb: None,
+        }
+    }
+
     #[test]
     fn paint_draws_module_title_and_cell_labels() {
         let labels = painted_labels(&spec(false, false));
@@ -1511,6 +1604,96 @@ mod tests {
         assert!(
             labels.iter().any(|l| l.contains("ON")),
             "state text drawn: {labels:?}"
+        );
+    }
+
+    /// label-guess-and-screen-scale, task 2.2: the cell label renders at the
+    /// fixed `CELL_LABEL_SIZE` at every zoom preset — the font never derives
+    /// from the (zoom-scaled) cell height — and every preset still shows a
+    /// label next to the glyph.
+    #[test]
+    fn cell_label_font_is_identical_across_zoom_presets() {
+        let mut sizes = Vec::new();
+        for &zoom in &[0.75f64, 1.0, 1.5, 2.0] {
+            let spec = spec_at_zoom(zoom);
+            let rows: Vec<(String, egui::FontId, f32)> = painted_texts(&spec)
+                .into_iter()
+                .filter(|(_, font, _)| font.family == egui::FontFamily::Monospace)
+                .collect();
+            assert!(!rows.is_empty(), "cell first rows drawn at zoom {zoom}");
+            assert!(
+                rows.iter().any(|(text, _, _)| text.contains(' ')),
+                "a label joins the glyph row at zoom {zoom}: {rows:?}"
+            );
+            for (text, font, _) in &rows {
+                assert_eq!(
+                    font.size, CELL_LABEL_SIZE,
+                    "fixed label font at zoom {zoom}: {text:?} painted at {} pt",
+                    font.size
+                );
+            }
+            sizes.extend(rows.iter().map(|(_, font, _)| font.size));
+        }
+        // One size across all four presets, not merely four stable sizes.
+        assert!(
+            sizes.iter().all(|&s| s == CELL_LABEL_SIZE),
+            "identical font across zoom presets: {sizes:?}"
+        );
+    }
+
+    /// label-guess-and-screen-scale, task 2.2: a cell narrower than one
+    /// character of `CELL_LABEL_SIZE` renders the glyph but no label text.
+    #[test]
+    fn cell_narrower_than_one_character_hides_the_label() {
+        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+        let rect = Rect::from_min_size(Pos2::new(4.0, 4.0), Vec2::new(char_w * 0.9, 24.0));
+        let texts = painted_cell(&cell_spec(rect, "B1.1"));
+        // The glyph row stays (state glyph always), but carries no label —
+        // assert on the monospace first row so the second-row state text
+        // (which has its own ellipsis rule) cannot satisfy the check.
+        let rows: Vec<&str> = texts
+            .iter()
+            .filter(|(_, font, _)| font.family == egui::FontFamily::Monospace)
+            .map(|(text, _, _)| text.as_str())
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains('\u{25CF}')),
+            "glyph row drawn: {texts:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains(' ') && !row.contains("B1.1")),
+            "no label below one character of the label font: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|(t, _, _)| t.contains("B1.1")),
+            "no label text anywhere: {texts:?}"
+        );
+    }
+
+    /// label-guess-and-screen-scale, task 2.2: a narrow-but-wide-enough cell
+    /// still shows the glyph row with the label ellipsized to the cell width,
+    /// never the full label and never an overflowing row.
+    #[test]
+    fn cell_label_ellipsizes_to_the_cell_width() {
+        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+        // Room for the glyph, the separating space, and a few label
+        // characters — but far short of the whole label.
+        let rect = Rect::from_min_size(Pos2::new(4.0, 4.0), Vec2::new(char_w * 8.0, 24.0));
+        let texts = painted_cell(&cell_spec(rect, "averylonglabel"));
+        let (row, _, width) = texts
+            .iter()
+            .find(|(_, font, _)| font.family == egui::FontFamily::Monospace)
+            .expect("glyph row drawn");
+        assert!(row.contains('\u{2026}'), "ellipsized: {row:?}");
+        assert!(
+            !row.contains("averylonglabel"),
+            "not the full label: {row:?}"
+        );
+        assert!(
+            *width <= rect.width() + 1.0,
+            "row fits the cell width: {width} pt > {} pt ({row:?})",
+            rect.width()
         );
     }
 

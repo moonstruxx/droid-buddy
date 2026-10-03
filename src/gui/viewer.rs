@@ -994,7 +994,12 @@ fn prettified_highlighted_lines(patch: &Patch, app: &App) -> Vec<LineSpec> {
     for circuit in &circuits {
         let idx = *counts.get(&circuit.name).unwrap_or(&0);
         let node_id = NodeId::circuit(&circuit.name, idx);
-        let display_name = patch.circuit_display_label(&node_id, &circuit_store);
+        // Label chain (label-guess-and-screen-scale 1.3): stored label →
+        // tree-derived guess → raw circuit name.
+        let display_name = patch
+            .circuit_label(&node_id, &circuit_store)
+            .or_else(|| app.guessed_labels.get(&node_id).cloned())
+            .unwrap_or_else(|| node_id.name().to_string());
         counts.insert(circuit.name.clone(), idx + 1);
         let color = circuit_color(&circuit.name);
         let entries: Vec<EntrySpec> = circuit
@@ -1028,7 +1033,10 @@ fn sidebar_spec(patch: &Patch, app: &App) -> SidebarSpec {
             let idx = *counts.get(&s.name).unwrap_or(&0);
             let node_id = NodeId::circuit(&s.name, idx);
             counts.insert(s.name.clone(), idx + 1);
-            patch.circuit_display_label(&node_id, &circuit_store)
+            patch
+                .circuit_label(&node_id, &circuit_store)
+                .or_else(|| app.guessed_labels.get(&node_id).cloned())
+                .unwrap_or_else(|| node_id.name().to_string())
         })
         .collect();
     SidebarSpec {
@@ -1655,6 +1663,27 @@ mod tests {
         assert!(spec.lines[0].text.starts_with('\u{250C}'));
         assert_eq!(spec.empty_message, None);
         assert!(spec.sidebar.is_some());
+    }
+
+    #[test]
+    fn viewer_spec_prettified_header_and_sidebar_use_guessed_label() {
+        // label-guess-and-screen-scale 1.3: circuit headers and sidebar rows
+        // resolve stored label → cached guess → raw name.
+        let content = "[seq]\noutput = P1.1\n";
+        let patch = Patch::from_ini_str(content, "test".to_string()).unwrap();
+        let mut app = App::new();
+        app.patch = Some(patch);
+        app.source_view_mode = SourceViewMode::Prettified;
+        app.guessed_labels
+            .insert(NodeId::circuit("seq", 0), "Guessed Seq".into());
+        let spec = viewer_spec(&app);
+        assert!(
+            spec.lines.iter().any(|l| l.text.contains("Guessed Seq")),
+            "header shows the guess: {:?}",
+            spec.lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        let sidebar = spec.sidebar.as_ref().unwrap();
+        assert_eq!(sidebar.names, vec!["Guessed Seq".to_string()]);
     }
 
     #[test]

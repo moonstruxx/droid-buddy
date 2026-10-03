@@ -630,6 +630,13 @@ pub struct App {
     /// The signal-flow graph built from the current patch. `None` until a
     /// patch is loaded and the graph is opened.
     pub graph: Option<Graph>,
+    /// Tree-derived circuit labels, cached per graph build
+    /// (label-guess-and-screen-scale 1.2): circuit nodes without a stored
+    /// label map to the nearest explicit upstream label (see
+    /// `Graph::guess_labels`). Recomputed in `build_graph_state` /
+    /// `rebuild_graph` and on label save; cleared with the graph state.
+    /// Painters read only this cache — never walk the graph per frame.
+    pub guessed_labels: HashMap<NodeId, String>,
     /// Frozen node positions from the last full solve, parallel to
     /// `graph.nodes` (index `i` ↔ `graph.nodes[i]`). Re-solved on open and on
     /// node move; never mutated by a continuous tick (design D1).
@@ -940,6 +947,7 @@ impl App {
             pane_hit_rects: Vec::new(),
             showing_graph: false,
             graph: None,
+            guessed_labels: HashMap::new(),
             graph_positions: Vec::new(),
             graph_cluster_rects: Vec::new(),
             graph_node_rects: Vec::new(),
@@ -2876,6 +2884,8 @@ impl App {
                 }
             }
         }
+        // A new upstream label changes downstream guesses (design decision 2).
+        self.refresh_guessed_labels();
     }
 
     /// Cycle the edited HW layer inside the overlay (`1..N` digit) while
@@ -3178,6 +3188,35 @@ impl App {
         // and resets stay instant, so only an open settles.
         self.graph_settle = None;
         self.graph_settle_pending = true;
+        self.refresh_guessed_labels();
+    }
+
+    /// Recompute the cached tree-derived circuit labels from the current
+    /// patch, graph, label stores, and shift policy (label-guess-and-
+    /// screen-scale 1.2). Clears the cache when no graph is built, so
+    /// labels resolve store → raw name until the first `g g` (design
+    /// decision 3). Runs per graph build and per label save — never per
+    /// frame (design decision 2).
+    pub fn refresh_guessed_labels(&mut self) {
+        let shift = self.active_shift_layer();
+        let (layers_enabled, max_shift_layer) =
+            (self.labels.layers_enabled, self.labels.max_shift_layer);
+        let guessed = match (self.patch.as_ref(), self.graph.as_ref()) {
+            (Some(patch), Some(graph)) => {
+                let circuit_store = self.current_circuit_store();
+                let hw_store = self.current_hw_store();
+                graph.guess_labels(
+                    patch,
+                    &circuit_store,
+                    &hw_store,
+                    shift,
+                    layers_enabled,
+                    max_shift_layer,
+                )
+            }
+            _ => HashMap::new(),
+        };
+        self.guessed_labels = guessed;
     }
 
     pub fn open_graph(&mut self) {
@@ -3331,6 +3370,7 @@ impl App {
                 self.influence_filter_active = false;
             }
         }
+        self.refresh_guessed_labels();
     }
 
     /// Clear the renderer-published cluster rects each frame while the graph is
@@ -3668,6 +3708,7 @@ impl App {
         // new patch re-seeds its own tip on the next open (design D3/D7).
         self.pinned.clear();
         self.select_state = None;
+        self.guessed_labels.clear();
         // The dependency filter is per-patch presentation state: cleared on
         // graph close and patch load (change D task 2.1).
         self.dependency_root = None;
@@ -5962,6 +6003,88 @@ mod tests {
             patch.circuit_display_label(&other_node, &store),
             "motorfader"
         );
+    }
+
+    /// label-guess-and-screen-scale 1.2: opening the graph fills the guess
+    /// cache from the nearest explicit upstream label; with no graph built
+    /// the cache stays empty (design decision 3: no graph, no guess).
+    #[test]
+    fn guessed_labels_fill_on_graph_open() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[p2b8]\n").unwrap();
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[pulser]\n    output = _CLK\n[envelope]\n    input = _CLK\n    button = B1.1\n",
+            "patch".to_string(),
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch);
+        // No graph built yet → no guess.
+        assert!(app.guessed_labels.is_empty());
+        // A stored upstream port label seeds the guess on open.
+        let key = LabelStore::canonical_key(&patch_path);
+        app.label_store
+            .patches
+            .entry(key)
+            .or_default()
+            .hw
+            .entry("B1.1".to_string())
+            .or_default()
+            .insert(1, "[RATC]".to_string());
+        app.open_graph();
+        assert_eq!(
+            app.guessed_labels
+                .get(&NodeId::circuit("envelope", 0))
+                .map(String::as_str),
+            Some("[RATC]")
+        );
+    }
+
+    /// label-guess-and-screen-scale 1.2: saving a label recomputes the cache
+    /// — a new stored upstream label redirects the downstream guess, and the
+    /// newly labeled circuit itself drops out of the map.
+    #[test]
+    fn guessed_labels_refresh_after_label_save() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let patch_path = dir.path().join("patch.ini");
+        std::fs::write(&patch_path, "[p2b8]\n").unwrap();
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[pulser]\n    output = _CLK\n[envelope]\n    input = _CLK\n    button = B1.1\n",
+            "patch".to_string(),
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.label_store = LabelStore::default();
+        app.load_patch_at(&patch_path, patch);
+        let key = LabelStore::canonical_key(&patch_path);
+        app.label_store
+            .patches
+            .entry(key)
+            .or_default()
+            .hw
+            .entry("B1.1".to_string())
+            .or_default()
+            .insert(1, "[RATC]".to_string());
+        app.open_graph();
+        assert_eq!(
+            app.guessed_labels
+                .get(&NodeId::circuit("envelope", 0))
+                .map(String::as_str),
+            Some("[RATC]")
+        );
+        // Label the mid-chain circuit: the downstream guess follows it.
+        let pulser = NodeId::circuit("pulser", 0);
+        app.editing = Some(EditState::new_circuit(pulser.clone(), "Mid".to_string()));
+        app.commit_edit_to_dir(dir.path()).unwrap();
+        assert_eq!(
+            app.guessed_labels
+                .get(&NodeId::circuit("envelope", 0))
+                .map(String::as_str),
+            Some("Mid")
+        );
+        assert!(!app.guessed_labels.contains_key(&pulser));
     }
 
     #[test]

@@ -37,10 +37,16 @@ pub use graph::graph_window_fit_camera;
 pub(crate) use graph::{camera_pan, camera_zoom_about};
 #[cfg(test)]
 pub(crate) use graph::{paint_scene, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
+// Headless cross-layer regression (`src/regression.rs`, same precedent as
+// `paint_scene`): the viewer spec and the physical-module-UI spec + painter.
 #[allow(unused_imports)]
 pub(crate) use physical::PhysicalFrame;
+#[cfg(test)]
+pub(crate) use physical::{paint_physical, physical_spec};
 #[allow(unused_imports)]
 pub(crate) use picker::PickerFrame;
+#[cfg(test)]
+pub(crate) use viewer::viewer_spec;
 #[allow(unused_imports)]
 pub(crate) use viewer::ViewerFrame;
 
