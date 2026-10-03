@@ -399,7 +399,7 @@ mod tests {
         // no graph view is opened until the user presses `g g`.
         let mut app = App::new();
         load_initial_patch(&mut app, None);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert_eq!(app.layout.focus, droid_tui::panes::PaneId::BigLeft);
         assert!(app.graph.is_none());

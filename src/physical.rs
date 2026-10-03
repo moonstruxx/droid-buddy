@@ -470,6 +470,46 @@ impl PhysicalLayout {
         let mut modules: Vec<PhysicalModule> = Vec::new();
         let mut slots: Vec<(String, Option<u32>)> = Vec::new();
 
+        // D5: Master faceplate at chain position 0 (replaces CV I/O group)
+        // Add master/master18 as the first module in the chain.
+        let master_geometry_key = master_key.to_string();
+        let master_entry = data.controller(&master_geometry_key);
+        let (master_width_mm, master_height_mm, master_width_hp, master_he, master_cells) =
+            match master_entry {
+                Some(e) if e.width_mm > 0.0 && e.height_mm > 0.0 => (
+                    e.width_mm,
+                    e.height_mm,
+                    e.width_hp,
+                    e.he,
+                    preprocess_cells(&e.element_cells),
+                ),
+                _ => (
+                    fallback_w,
+                    fallback_h,
+                    data.fallback_width_hp(),
+                    data.fallback_he(),
+                    HashMap::new(),
+                ),
+            };
+
+        modules.push(PhysicalModule {
+            controller: String::from("CV I/O"),
+            module_instance: None,
+            geometry_key: master_geometry_key,
+            is_fallback: master_entry.is_none(),
+            rect_mm: RectMm {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                w_mm: master_width_mm,
+                h_mm: master_height_mm,
+            },
+            width_hp: master_width_hp,
+            he: master_he,
+            cells: master_cells,
+            components: Vec::new(), // CV I/O components will be added below
+        });
+        slots.push((String::from("CV I/O"), None));
+
         for comp in &patch.hw_components {
             let key = if comp.controller == "CV I/O" {
                 (String::from("CV I/O"), None)
@@ -787,12 +827,18 @@ impl RackLayout {
                     let mut r = cursor;
                     loop {
                         let capacity = spec.rows[r].hp * hp_mm;
-                        let x = if fills[r] > 0.0 {
-                            fills[r] + gap
-                        } else {
-                            fills[r]
-                        };
-                        if x + module.rect_mm.w_mm <= capacity || r + 1 >= spec.rows.len() {
+                        let row_empty = fills[r] <= 0.0;
+                        let x = if row_empty { 0.0 } else { fills[r] + gap };
+                        // An empty row always accepts its first module, even
+                        // an over-wide one: otherwise a module wider than
+                        // every configured row would skip to the last row and
+                        // leave leading rows empty. A non-empty row fills
+                        // until the module fits, with the last row accepting
+                        // overflow (D10).
+                        if row_empty
+                            || x + module.rect_mm.w_mm <= capacity
+                            || r + 1 >= spec.rows.len()
+                        {
                             break r;
                         }
                         r += 1;
@@ -1212,7 +1258,9 @@ mod tests {
         // (e.g. offset 0.4: module 0 = [0,4) while module 1 starts at 3).
         // Edge-rounded spans (`round(mm0×f)..round(mm1×f)`) share the
         // boundary value, so adjacent rects abut exactly.
-        let chain = two_module_chain(); // p2b8 + CV I/O: x 0..25.4, 25.9..66.54
+        // This test uses the old chain structure; create a custom chain for the test
+        let chain =
+            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
         let rack = RackLayout::pack(&chain, &spec(&[(3, 20.0)], &[]));
         let zooms = [0.75, 1.0, 1.5, 2.0];
         let offsets = [(0.0, 0.0), (0.4, 0.0), (-1.3, 0.7), (2.1, -0.9)];
@@ -1319,25 +1367,30 @@ mod tests {
         let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
         let layout = PhysicalLayout::build(&p);
 
+        // D5: Master faceplate at chain position 0 (replaces CV I/O group).
+        // The copy section's I1/O1 are CV I/O components, so they merge into
+        // the master faceplate — no separate CV I/O module exists anymore.
         assert_eq!(layout.modules.len(), 2);
         let first = &layout.modules[0];
-        assert_eq!(first.controller, "P2B8");
-        assert_eq!(first.module_instance, Some(1));
-        assert_eq!(first.geometry_key, "p2b8");
-        assert!(!first.is_fallback);
-        assert_eq!(first.he, 3);
+        assert_eq!(first.controller, "CV I/O");
+        assert_eq!(first.module_instance, None);
+        assert_eq!(first.geometry_key, "master");
         assert_close(first.rect_mm.x_mm, 0.0);
-        assert_close(first.rect_mm.w_mm, 25.4); // p2b8 = 5 HP
+        assert_close(first.rect_mm.w_mm, 40.64); // master = 8 HP
         assert_close(first.rect_mm.h_mm, 128.5); // 3 HE
+        assert_eq!(first.components.len(), 2, "I1 + O1 merged into master");
 
         let second = &layout.modules[1];
-        assert_eq!(second.controller, "CV I/O");
-        assert_eq!(second.module_instance, None);
-        assert_eq!(second.geometry_key, "master");
-        assert_close(second.rect_mm.x_mm, 25.9); // 25.4 + 0.5 gap
-        assert_close(second.rect_mm.w_mm, 40.64); // master = 8 HP
+        assert_eq!(second.controller, "P2B8");
+        assert_eq!(second.module_instance, Some(1));
+        assert_eq!(second.geometry_key, "p2b8");
+        assert!(!second.is_fallback);
+        assert_eq!(second.he, 3);
+        assert_close(second.rect_mm.x_mm, 41.14); // 40.64 + 0.5 gap
+        assert_close(second.rect_mm.w_mm, 25.4); // p2b8 = 5 HP
+        assert_close(second.rect_mm.h_mm, 128.5); // 3 HE
 
-        assert_close(layout.total_width_mm, 66.54);
+        assert_close(layout.total_width_mm, 66.54); // 40.64 + 0.5 + 25.4
         assert_close(layout.total_height_mm, 128.5);
         assert_close(layout.chain_gaps_mm.inter_module, 0.5);
     }
@@ -1347,22 +1400,28 @@ mod tests {
         let p = patch("[p2b8]\n[p2b8]\n");
         let layout = PhysicalLayout::build(&p);
 
-        assert_eq!(layout.modules.len(), 2);
-        assert_eq!(layout.modules[0].controller, "P2B8");
-        assert_eq!(layout.modules[0].module_instance, Some(1));
+        // Master at position 0, then two P2B8 instances
+        assert_eq!(layout.modules.len(), 3);
+        assert_eq!(layout.modules[0].controller, "CV I/O");
+        assert_eq!(layout.modules[0].module_instance, None);
+        assert_eq!(layout.modules[0].geometry_key, "master");
+
         assert_eq!(layout.modules[1].controller, "P2B8");
-        assert_eq!(layout.modules[1].module_instance, Some(2));
-        assert_eq!(layout.modules[0].geometry_key, "p2b8");
+        assert_eq!(layout.modules[1].module_instance, Some(1));
+        assert_eq!(layout.modules[2].controller, "P2B8");
+        assert_eq!(layout.modules[2].module_instance, Some(2));
         assert_eq!(layout.modules[1].geometry_key, "p2b8");
+        assert_eq!(layout.modules[2].geometry_key, "p2b8");
         // Both faceplates sit at the real p2b8 width (5 HP = 25.4 mm).
-        assert_close(layout.modules[0].rect_mm.w_mm, 25.4);
         assert_close(layout.modules[1].rect_mm.w_mm, 25.4);
-        assert_eq!(layout.modules[0].width_hp, 5.0);
+        assert_close(layout.modules[2].rect_mm.w_mm, 25.4);
         assert_eq!(layout.modules[1].width_hp, 5.0);
-        assert_eq!(layout.modules[0].key(), "P2B8 1");
-        assert_eq!(layout.modules[1].key(), "P2B8 2");
-        assert_close(layout.modules[1].rect_mm.x_mm, 25.9);
-        assert_close(layout.total_width_mm, 51.3);
+        assert_eq!(layout.modules[2].width_hp, 5.0);
+        assert_eq!(layout.modules[1].key(), "P2B8 1");
+        assert_eq!(layout.modules[2].key(), "P2B8 2");
+        // Master (40.64) + gap (0.5) + first P2B8 (25.4) + gap (0.5) = 67.04
+        assert_close(layout.modules[2].rect_mm.x_mm, 67.04);
+        assert_close(layout.total_width_mm, 92.44); // 40.64 + 0.5 + 25.4 + 0.5 + 25.4
 
         // Determinism: an identical patch yields an identical chain.
         let again = PhysicalLayout::build(&p);
@@ -1379,17 +1438,19 @@ mod tests {
         // the absent "P" family to "F" so P tokens render on their cells.
         let p = patch("[p8s8]\n");
         let layout = PhysicalLayout::build(&p);
-        let s1 = layout.cell_for(0, "P1.1").expect("P1.1 slider cell");
+        // Master at index 0, p8s8 at index 1
+        let s1 = layout.cell_for(1, "P1.1").expect("P1.1 slider cell");
         assert_eq!(s1.label, "P1.1");
         assert_eq!(s1.element, Some(1));
         assert_eq!(s1.family, "F", "slider cell lives in the F family");
-        let s8 = layout.cell_for(0, "P1.8").expect("P1.8 slider cell");
+        let s8 = layout.cell_for(1, "P1.8").expect("P1.8 slider cell");
         assert_eq!(s8.label, "P1.8");
-        assert!(layout.cell_for(0, "P1.9").is_none(), "8 sliders only");
+        assert!(layout.cell_for(1, "P1.9").is_none(), "8 sliders only");
 
         let p = patch("[m4]\n");
         let layout = PhysicalLayout::build(&p);
-        let f1 = layout.cell_for(0, "P1.2").expect("M4 fader cell");
+        // Master at index 0, m4 at index 1
+        let f1 = layout.cell_for(1, "P1.2").expect("M4 fader cell");
         assert_eq!(f1.family, "F");
         assert_eq!(f1.element, Some(2));
     }
@@ -1407,15 +1468,16 @@ mod tests {
             "[switch]\n    switch = S1.1\n    output = _OUT\n[switch]\n    switch = S1.2\n[faderbank]\n    pot = P1.1\n",
         );
         let layout = PhysicalLayout::build(&p);
-        assert_eq!(layout.modules.len(), 1);
-        assert_eq!(layout.modules[0].controller, "Faderbank");
-        let s1 = layout.cell_for(0, "S1.1").expect("S1.1 switch cell");
+        // Master at 0, Faderbank at 1
+        assert_eq!(layout.modules.len(), 2);
+        assert_eq!(layout.modules[1].controller, "Faderbank");
+        let s1 = layout.cell_for(1, "S1.1").expect("S1.1 switch cell");
         assert_eq!(s1.family, "S");
         assert_eq!(s1.element, Some(1));
-        let s2 = layout.cell_for(0, "S1.2").expect("S1.2 switch cell");
+        let s2 = layout.cell_for(1, "S1.2").expect("S1.2 switch cell");
         assert_eq!(s2.family, "S");
         assert_eq!(s2.element, Some(2));
-        let p1 = layout.cell_for(0, "P1.1").expect("P1.1 slider cell");
+        let p1 = layout.cell_for(1, "P1.1").expect("P1.1 slider cell");
         assert_eq!(
             p1.family, "F",
             "slider lives in the F family (P->F fallback)"
@@ -1425,13 +1487,14 @@ mod tests {
         // returns None instead of falling back to the same-numbered knob cell.
         let p = patch("[pot]\n    pot = P1.1\n[switch]\n    switch = S1.1\n");
         let layout = PhysicalLayout::build(&p);
-        assert_eq!(layout.modules.len(), 1);
-        assert_eq!(layout.modules[0].controller, "Pot");
+        // Master at 0, Pot at 1
+        assert_eq!(layout.modules.len(), 2);
+        assert_eq!(layout.modules[1].controller, "Pot");
         assert!(
-            layout.cell_for(0, "S1.1").is_none(),
+            layout.cell_for(1, "S1.1").is_none(),
             "no switch cell on Pot -> the switch is omitted"
         );
-        let knob = layout.cell_for(0, "P1.1").expect("P1.1 knob cell");
+        let knob = layout.cell_for(1, "P1.1").expect("P1.1 knob cell");
         assert_eq!(
             knob.label, "P1.1",
             "the knob cell stays a knob, not claimed by the omitted switch"
@@ -1444,16 +1507,18 @@ mod tests {
         // (L) and 8 switches (S) — all resolvable against the p8s8 geometry.
         let p = patch("[p8s8]\n");
         let layout = PhysicalLayout::build(&p);
-        assert_eq!(layout.modules.len(), 1);
-        assert_eq!(layout.modules[0].controller, "P8S8");
-        assert_eq!(layout.modules[0].module_instance, Some(1));
+        // D5: master faceplate at index 0, p8s8 faceplate at index 1.
+        assert_eq!(layout.modules.len(), 2);
+        assert_eq!(layout.modules[0].geometry_key, "master");
+        assert_eq!(layout.modules[1].controller, "P8S8");
+        assert_eq!(layout.modules[1].module_instance, Some(1));
         for i in 1..=8u32 {
             assert!(
-                layout.cell_for(0, &format!("P1.{i}")).is_some(),
+                layout.cell_for(1, &format!("P1.{i}")).is_some(),
                 "P1.{i} slider"
             );
-            assert!(layout.cell_for(0, &format!("L1.{i}")).is_some(), "L1.{i}");
-            assert!(layout.cell_for(0, &format!("S1.{i}")).is_some(), "S1.{i}");
+            assert!(layout.cell_for(1, &format!("L1.{i}")).is_some(), "L1.{i}");
+            assert!(layout.cell_for(1, &format!("S1.{i}")).is_some(), "S1.{i}");
         }
     }
 
@@ -1461,29 +1526,30 @@ mod tests {
     fn cell_lookup_resolves_per_token_family() {
         let p = patch("[p2b8]\n");
         let layout = PhysicalLayout::build(&p);
+        // D5: master faceplate at index 0, p2b8 faceplate at index 1.
 
-        let b3 = layout.cell_for(0, "B1.3").expect("B1.3 cell");
+        let b3 = layout.cell_for(1, "B1.3").expect("B1.3 cell");
         assert_eq!(b3.label, "B1.3");
         assert_eq!(b3.element, Some(3));
         assert_close(b3.rect_mm.x_mm, 3.5);
         assert_close(b3.rect_mm.w_mm, 8.0);
 
-        let p2 = layout.cell_for(0, "P1.2").expect("P1.2 cell");
+        let p2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
         assert_eq!(p2.label, "P1.2");
         assert_eq!(p2.family, "P");
         assert_eq!(p2.element, Some(2));
 
-        let l5 = layout.cell_for(0, "L1.5").expect("L1.5 cell");
+        let l5 = layout.cell_for(1, "L1.5").expect("L1.5 cell");
         assert_eq!(l5.label, "L1.5");
         assert_eq!(l5.family, "L");
         assert_eq!(l5.element, Some(5));
 
         assert!(
-            layout.cell_for(0, "B1.9").is_none(),
+            layout.cell_for(1, "B1.9").is_none(),
             "element beyond family range"
         );
         assert!(
-            layout.cell_for(0, "S1.1").is_none(),
+            layout.cell_for(1, "S1.1").is_none(),
             "p2b8 has no switch cells"
         );
     }
@@ -1518,7 +1584,8 @@ mod tests {
         let p = patch("[copy]\n    button = B5.1\n");
         let layout = PhysicalLayout::build(&p);
 
-        let m = &layout.modules[0];
+        // Master at 0, unknown controller at 1
+        let m = &layout.modules[1];
         assert!(m.is_fallback);
         assert_eq!(m.geometry_key, "");
         assert_eq!(m.controller, "Controller 5");
@@ -1526,7 +1593,7 @@ mod tests {
         assert_close(m.width_hp, 5.0); // the documented 5 HP fallback
         assert_close(m.rect_mm.h_mm, 128.5);
         assert!(
-            layout.cell_for(0, "B5.1").is_none(),
+            layout.cell_for(1, "B5.1").is_none(),
             "fallback module has no cells"
         );
     }
@@ -1557,11 +1624,20 @@ mod tests {
         assert_close(fb.fallback_width_mm(), 25.4);
         assert_close(fb.fallback_width_hp(), 5.0);
         assert_close(fb.fallback_height_mm(), 128.5);
-        assert_close(fb.chain_gap_mm(), 0.5);
-        // build() over the fallback source never panics for unknown controllers.
+        // A patch with an unknown controller yields a fallback module.
         let p = patch("[copy]\n    button = B7.1\n");
         let layout = PhysicalLayout::build(&p);
-        assert!(layout.modules[0].is_fallback);
+        assert_eq!(layout.modules.len(), 2); // master + fallback
+        let m = &layout.modules[1];
+        assert!(m.is_fallback);
+        assert_eq!(m.geometry_key, "");
+        assert_eq!(m.controller, "Controller 7");
+        assert_close(fb.chain_gap_mm(), 0.5);
+        // build() over the fallback source never panics for unknown
+        // controllers: module 0 is the master faceplate, the unknown
+        // controller follows at module 1 with the fallback width.
+        assert!(!layout.modules[0].is_fallback);
+        assert!(layout.modules[1].is_fallback);
     }
 
     #[test]
@@ -1654,20 +1730,24 @@ mod tests {
         // last cell of the 4x8 grid; button 33 is out of range.
         let p = patch("[notebuttons]\n    button = B1.1\n");
         let layout = PhysicalLayout::build(&p);
-        assert_eq!(layout.modules[0].geometry_key, "b32");
-        let last = layout.cell_for(0, "B1.32").expect("B1.32 on the 4x8 grid");
+        // D5: master faceplate at index 0, b32 faceplate at index 1.
+        assert_eq!(layout.modules[0].geometry_key, "master");
+        assert_eq!(layout.modules[1].geometry_key, "b32");
+        let last = layout.cell_for(1, "B1.32").expect("B1.32 on the 4x8 grid");
         assert_eq!(last.label, "B1.32");
         assert!(
-            layout.cell_for(0, "B1.33").is_none(),
+            layout.cell_for(1, "B1.33").is_none(),
             "33rd button is out of the 4x8 grid"
         );
     }
 
     // ---- rack model (task 2.3) ----
 
-    /// p2b8 (5 HP, 25.4 mm) + CV I/O master (8 HP, 40.64 mm).
-    fn two_module_chain() -> PhysicalLayout {
-        PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"))
+    /// Master (8 HP, 40.64 mm) + p2b8 (5 HP, 25.4 mm) + b32 (10 HP, 50.8 mm).
+    fn three_module_chain() -> PhysicalLayout {
+        PhysicalLayout::build(&patch(
+            "[p2b8]\n[b32]\n[copy]\n    input = I1\n    output = O1\n",
+        ))
     }
 
     fn spec(rows: &[(u32, f64)], assign: &[(&str, usize)]) -> RackSpec {
@@ -1688,49 +1768,59 @@ mod tests {
 
     #[test]
     fn module_key_format_is_controller_plus_instance() {
-        let chain = two_module_chain();
-        assert_eq!(chain.modules[0].key(), "P2B8 1");
-        assert_eq!(chain.modules[1].key(), "CV I/O");
+        let chain = three_module_chain();
+        assert_eq!(chain.modules[0].key(), "CV I/O");
+        assert_eq!(chain.modules[1].key(), "P2B8 1");
+        assert_eq!(chain.modules[2].key(), "B32 2");
     }
 
     #[test]
     fn auto_pack_fills_row_0_then_overflows_to_row_1() {
-        let chain = two_module_chain();
+        let chain = three_module_chain();
         let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[]));
         assert_eq!(rack.rows.len(), 2);
+        // Row capacity is 10 HP = 50.8 mm. Master (40.64) fits row 0.
+        // P2B8 1 (25.4) would need 41.14 + 25.4 = 66.54 > 50.8, so it starts
+        // row 1, where B32 2 (50.8) overflows after it (last row accepts).
         assert_eq!(rack.rows[0].modules.len(), 1);
-        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
+        assert_eq!(rack.rows[0].modules[0].key, "CV I/O");
         assert_close(rack.rows[0].modules[0].rect_mm.x_mm, 0.0);
         assert!(!rack.rows[0].modules[0].overridden);
-        assert_eq!(rack.rows[1].modules.len(), 1);
-        assert_eq!(rack.rows[1].modules[0].key, "CV I/O");
+        assert_eq!(rack.rows[1].modules.len(), 2);
+        assert_eq!(rack.rows[1].modules[0].key, "P2B8 1");
         assert_close(rack.rows[1].modules[0].rect_mm.x_mm, 0.0);
-        assert_close(rack.rows[0].fill_width_mm, 25.4);
-        assert_close(rack.rows[1].fill_width_mm, 40.64);
+        assert_eq!(rack.rows[1].modules[1].key, "B32 2");
+        assert_close(rack.rows[1].modules[1].rect_mm.x_mm, 25.9);
+        assert_close(rack.rows[0].fill_width_mm, 40.64);
+        assert_close(rack.rows[1].fill_width_mm, 76.7); // 25.4 + 0.5 + 50.8
     }
 
     #[test]
     fn default_single_row_holds_whole_chain() {
-        let chain = two_module_chain();
+        let chain = three_module_chain();
         let rack = RackLayout::pack(&chain, &RackSpec::default());
         assert_eq!(rack.rows.len(), 1);
         let row = &rack.rows[0];
         assert_eq!(row.he, 3);
-        assert_close(row.hp, 14.0); // ceil(66.54 / 5.08)
-        assert_eq!(row.modules.len(), 2);
-        assert_eq!(row.modules[0].key, "P2B8 1");
-        assert_eq!(row.modules[1].key, "CV I/O");
-        assert_close(row.modules[1].rect_mm.x_mm, 25.9);
-        assert_close(row.fill_width_mm, 66.54);
-        assert_close(rack.total_width_mm, 71.12); // 14 HP case
+        // Master (40.64) + gap (0.5) + P2B8 1 (25.4) + gap (0.5) + B32 2 (50.8)
+        // = 117.84 mm; ceil(117.84 / 5.08) = 24 HP.
+        assert_close(row.hp, 24.0);
+        assert_eq!(row.modules.len(), 3);
+        assert_eq!(row.modules[0].key, "CV I/O");
+        assert_eq!(row.modules[1].key, "P2B8 1");
+        assert_eq!(row.modules[2].key, "B32 2");
+        assert_close(row.modules[1].rect_mm.x_mm, 41.14);
+        assert_close(row.modules[2].rect_mm.x_mm, 67.04);
+        assert_close(row.fill_width_mm, 117.84);
+        assert_close(rack.total_width_mm, 121.92); // 24 HP case
         assert!(rack.fold_bars.is_empty());
     }
 
     #[test]
     fn override_places_module_into_row_regardless_of_fit() {
-        let chain = two_module_chain();
+        let chain = three_module_chain();
         let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 1)]));
-        // p2b8 forced to row 1; master auto-packs row 0 (cursor unaffected).
+        // P2B8 forced to row 1; master auto-packs row 0 (cursor unaffected).
         assert_eq!(rack.rows[0].modules[0].key, "CV I/O");
         assert_eq!(rack.rows[1].modules[0].key, "P2B8 1");
         assert!(rack.rows[1].modules[0].overridden);
@@ -1739,22 +1829,34 @@ mod tests {
 
     #[test]
     fn out_of_range_override_falls_back_to_auto_pack() {
-        let chain = two_module_chain();
-        let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 5)]));
-        assert_eq!(rack.rows[0].modules.len(), 1);
-        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
+        let chain = three_module_chain();
+        let rack = RackLayout::pack(
+            &chain,
+            &spec(&[(3, 10.0), (3, 10.0), (3, 10.0)], &[("P2B8 1", 5)]),
+        );
+        // Row 5 does not exist, so the P2B8 override is ignored and normal
+        // auto-pack applies: master row 0, P2B8 1 row 1 (41.14 + 25.4 > 50.8),
+        // B32 2 row 2.
+        assert_eq!(rack.rows.len(), 3);
+        assert_eq!(rack.rows[0].modules[0].key, "CV I/O");
         assert!(!rack.rows[0].modules[0].overridden);
-        assert_eq!(rack.rows[1].modules[0].key, "CV I/O");
+        assert_eq!(rack.rows[1].modules[0].key, "P2B8 1");
+        assert!(!rack.rows[1].modules[0].overridden);
+        assert_eq!(rack.rows[2].modules[0].key, "B32 2");
+        assert!(!rack.rows[2].modules[0].overridden);
     }
 
     #[test]
     fn fold_lines_at_row_boundaries() {
-        let chain = two_module_chain();
+        let chain =
+            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
         let rack = RackLayout::pack(&chain, &spec(&[(3, 5.0), (3, 5.0), (3, 5.0)], &[]));
-        // p2b8 fits row 0 exactly (25.4 == 25.4); master (40.64) overflows to row 2.
-        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
-        assert!(rack.rows[1].modules.is_empty());
-        assert_eq!(rack.rows[2].modules[0].key, "CV I/O");
+        // The chain is master (40.64) + P2B8 1 (25.4) with 5 HP = 25.4 mm
+        // rows: master takes the empty row 0 (an empty row always accepts its
+        // first module), P2B8 starts row 1, row 2 stays empty.
+        assert_eq!(rack.rows[0].modules[0].key, "CV I/O");
+        assert_eq!(rack.rows[1].modules[0].key, "P2B8 1");
+        assert!(rack.rows[2].modules.is_empty());
         assert_eq!(rack.fold_bars.len(), 2);
         let b0 = &rack.fold_bars[0];
         assert_eq!(b0.after_row, 0);
@@ -1772,7 +1874,8 @@ mod tests {
 
     #[test]
     fn mounts_attach_as_regions() {
-        let chain = two_module_chain();
+        let chain =
+            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
         let mut s = spec(&[(3, 10.0)], &[]);
         s.top_mount_te = 2.0;
         s.side_mount_te = 1.0;
@@ -1793,7 +1896,8 @@ mod tests {
 
     #[test]
     fn rack_packing_is_deterministic() {
-        let chain = two_module_chain();
+        let chain =
+            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
         let s = spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 1)]);
         let a = RackLayout::pack(&chain, &s);
         let b = RackLayout::pack(&chain, &s);

@@ -456,6 +456,13 @@ pub struct GraphDrag {
 pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
 pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
 
+/// Graph-minimap world↔panel mapping published by the renderer for
+/// click-to-navigate: `(bx, by, bw, bh, ix, iy, sx, sy)` — world bounds
+/// origin/size, the inner-panel origin in canvas points, and the per-axis
+/// scale factors (see `gui::graph::minimap_layout`). The handler inverts it
+/// as `world = bx + (rel - ix) / sx`.
+pub type GraphMinimapTransform = (f32, f32, f32, f32, f32, f32, f32, f32);
+
 /// Cached influence-induced subgraph solve (quad-view FILTERED pane): the
 /// influenced nodes and their internal edges solved as their own compact
 /// layout, recomputed whenever influence recomputes so the pane never
@@ -486,12 +493,12 @@ pub enum SourceViewMode {
 
 /// Right-column view slot kind (change `tiled-window-manager`, D1); the
 /// module UI is a view too (`Panels`, change `pane-class-layout`, D2).
+/// Panels is retired (change `module-ui-physical`); Physical is the module UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewType {
     Graph,
     SourceViewer,
     Physical,
-    Panels,
     Optimizer,
 }
 
@@ -519,9 +526,9 @@ pub enum QuadFocus {
 }
 
 /// Carousel order for `cycle_view_in_slot` per pane class (change
-/// `pane-class-layout`, 1.4): big panes cycle graph, module UI, physical;
+/// `pane-class-layout`, 1.4): big panes cycle graph and physical;
 /// small panes cycle source viewer and the optimizer.
-const BIG_CAROUSEL: [ViewType; 3] = [ViewType::Graph, ViewType::Panels, ViewType::Physical];
+const BIG_CAROUSEL: [ViewType; 2] = [ViewType::Graph, ViewType::Physical];
 const SMALL_CAROUSEL: [ViewType; 2] = [ViewType::SourceViewer, ViewType::Optimizer];
 
 /// Right-column view stack (change `tiled-window-manager`, D1): the new home
@@ -707,6 +714,14 @@ pub struct App {
     /// Geometry of the minimap column published by the renderer each frame
     /// (like `component_rects`). Used for click-to-scroll hit testing.
     pub minimap_rect: Option<Rect>,
+    /// Geometry of the graph minimap panel published by the renderer each frame
+    /// (like `component_rects`). Used for click-to-navigate hit testing (terminal cells).
+    pub graph_minimap_rect: Option<Rect>,
+    /// Graph minimap panel rect in egui points (canvas-relative), for native window hit testing.
+    pub graph_minimap_panel_egui: Option<egui::Rect>,
+    /// Graph minimap transform for click-to-world conversion: (bx, by, bw, bh, ix, iy, sx, sy)
+    /// Published by renderer each frame alongside `graph_minimap_rect`.
+    pub graph_minimap_transform: Option<GraphMinimapTransform>,
     /// Full geometry of the embedded source pane published by the renderer
     /// each frame while the viewer is open. Used to route bare source-pane
     /// clicks to `ViewerFocus::Source` without side effects.
@@ -934,6 +949,9 @@ impl App {
             occurrence_cursor: 0,
             source_scroll: 0,
             minimap_rect: None,
+            graph_minimap_rect: None,
+            graph_minimap_panel_egui: None,
+            graph_minimap_transform: None,
             source_pane_rect: None,
             scale_factor: 1.0,
             viewer_split_ratio: 0.6,
@@ -1478,7 +1496,6 @@ impl App {
     /// already-open view only takes focus; otherwise the view opens in a pane
     /// of its class, replacing that pane's current view, and takes focus.
     pub fn open_view(&mut self, view: ViewType) {
-        self.reconcile_from_mirror();
         if let Some(id) = self.pane_holding(view) {
             self.set_focus(id);
             return;
@@ -1577,11 +1594,6 @@ impl App {
             self.open_optimizer();
             return;
         }
-        match next {
-            ViewType::Physical => self.close_view_named(ViewType::Panels),
-            ViewType::Panels => self.close_view_named(ViewType::Physical),
-            _ => {}
-        }
         self.close_view_state(current);
         self.layout.pane_mut(id).view = Some(next);
         if next == ViewType::Graph {
@@ -1609,13 +1621,15 @@ impl App {
     }
 
     /// Re-derive the compat mirrors from the layout: `tile_stack` slots/focus,
-    /// the `showing_*` bools, and the legacy split-ratio fields. Panels stays
-    /// the implicit left pane in the mirror, so it never appears in `slots`.
+    /// the `showing_*` bools, and the legacy split-ratio fields. Physical
+    /// (the module UI) is the implicit left pane in the mirror, so it never
+    /// appears in `slots`.
     fn sync_mirror(&mut self) {
         let mut slots = Vec::new();
         for id in self.pane_order() {
             if let Some(view) = self.layout.pane(id).view {
-                if view != ViewType::Panels {
+                // Physical is the module UI and is the implicit left pane
+                if view != ViewType::Physical {
                     slots.push(view);
                 }
             }
@@ -1628,14 +1642,14 @@ impl App {
         self.viewer_split_ratio = self.main_split_ratio;
     }
 
-    /// The mirror focus the current layout projects to: `Panels` when the
-    /// focused pane is empty or holds the module UI, else the slot of its
+    /// The mirror focus the current layout projects to: module UI (Physical)
+    /// when the focused pane is empty or holds the module UI, else the slot of its
     /// view. Shared by `sync_mirror` and `reconcile_from_mirror` so an empty
-    /// focused pane's `Panels` projection is not mistaken for a deliberate
+    /// focused pane's projection is not mistaken for a deliberate
     /// external focus write.
     fn projected_focus(&self) -> FocusSlot {
         match self.layout.pane(self.layout.focus).view {
-            Some(ViewType::Panels) | None => FocusSlot::Panels,
+            Some(ViewType::Physical) | None => FocusSlot::Panels,
             Some(view) => self
                 .tile_stack
                 .slots
@@ -1677,7 +1691,8 @@ impl App {
             PaneId::SmallBottom,
         ] {
             if let Some(view) = self.layout.pane(id).view {
-                if view != ViewType::Panels && !mirror_views.contains(&view) {
+                // Physical is the module UI (implicit left pane), never close it via mirror reconciliation
+                if view != ViewType::Physical && !mirror_views.contains(&view) {
                     self.close_view_state(view);
                     self.layout.pane_mut(id).view = None;
                 }
@@ -1709,18 +1724,10 @@ impl App {
                 self.hovered_graph_node = None;
             }
             ViewType::SourceViewer => self.showing_viewer = false,
-            ViewType::Physical | ViewType::Panels => {}
+            ViewType::Physical => {}
             ViewType::Optimizer => self.drop_optimizer_state(),
         }
         self.quad_note_view_closed(view);
-    }
-
-    /// Close `view` wherever it is shown (the Physical/Panels partner close).
-    fn close_view_named(&mut self, view: ViewType) {
-        if let Some(id) = self.pane_holding(view) {
-            self.close_view_state(view);
-            self.layout.pane_mut(id).view = None;
-        }
     }
 
     /// Pane a view of `view.class()` opens in (spec "Window classes route
@@ -1754,10 +1761,9 @@ impl App {
         if self.pane_holding(view).is_some() {
             return;
         }
-        match view {
-            ViewType::Physical => self.close_view_named(ViewType::Panels),
-            ViewType::Panels => self.close_view_named(ViewType::Physical),
-            _ => {}
+        // Panels is retired; Physical is the module UI
+        if view == ViewType::Physical {
+            // No partner to close
         }
         // D5: a small-class open repurposes the right half — the big view
         // there closes and the right half splits. Reported in the status line.
@@ -1839,7 +1845,7 @@ impl App {
             .iter()
             .filter_map(|(id, rect)| {
                 let slot = match self.layout.pane(*id).view {
-                    Some(ViewType::Panels) => FocusSlot::Panels,
+                    Some(ViewType::Physical) => FocusSlot::Panels,
                     Some(view) => {
                         FocusSlot::Slot(self.tile_stack.slots.iter().position(|v| *v == view)?)
                     }
@@ -2219,12 +2225,13 @@ impl App {
     /// the required zoom-out floor (design D4). `+`/`-` apply the ratio about
     /// the canvas centre so the visible content stays anchored and the pane
     /// never empties (task 2.3).
-    pub const GRAPH_ZOOM_PRESETS: [f32; 9] =
-        [0.03125, 0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+    pub const GRAPH_ZOOM_PRESETS: [f32; 13] = [
+        0.0078125, 0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0, 8.0,
+    ];
     /// Index of the `1.0` (fitted-zoom) entry in `GRAPH_ZOOM_PRESETS`. Reset
     /// sites and tests route through this constant instead of a literal index
     /// so a preset-list edit cannot silently shift which entry is the fit.
-    pub const GRAPH_ZOOM_FIT_INDEX: usize = 6;
+    pub const GRAPH_ZOOM_FIT_INDEX: usize = 8;
     /// One wheel/arrow pan step of the graph camera in pixels, mirroring
     /// `PHYSICAL_PAN_STEP`; the handler gating on overflow reuses this step.
     pub const GRAPH_PAN_STEP_PX: f32 = 24.0;
@@ -2438,6 +2445,12 @@ impl App {
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
+            // D7: Fit-width seeding will be done by the renderer when it has
+            // the pane size (ADR 35 pattern, like graph_canvas_px).
+            // Reset zoom to 1.0 as a starting point; the renderer will
+            // compute and apply the fit-width zoom on the next frame.
+            self.physical_zoom = 1.0;
+            self.physical_viewport = None;
             self.disabled_circuits.clear();
             self.editing = None;
             self.current_patch_path = None;
@@ -2569,6 +2582,12 @@ impl App {
             self.processing_paused = false;
             self.physical_show_skeleton = false;
             self.physical_offset = (0.0, 0.0);
+            self.physical_zoom = 1.0;
+            self.physical_viewport = None;
+            // D7: Fit-width seeding will be done by the renderer when it has
+            // the pane size (ADR 35 pattern, like graph_canvas_px).
+            // Reset zoom to 1.0 as a starting point; the renderer will
+            // compute and apply the fit-width zoom on the next frame.
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
             self.disabled_circuits.clear();
@@ -3807,13 +3826,9 @@ impl App {
         self.sync_mirror();
     }
 
-    /// Whether an exchange of `a` and `b` would leave the mutually exclusive
-    /// Physical and module UI open together (spec "Physical view and module
-    /// UI are mutually exclusive").
-    fn swap_creates_pair(a: Option<ViewType>, b: Option<ViewType>) -> bool {
-        let has_physical = a == Some(ViewType::Physical) || b == Some(ViewType::Physical);
-        let has_panels = a == Some(ViewType::Panels) || b == Some(ViewType::Panels);
-        has_physical && has_panels
+    /// Panels is retired; Physical is the module UI. No mutual exclusion.
+    fn swap_creates_pair(_a: Option<ViewType>, _b: Option<ViewType>) -> bool {
+        false
     }
 
     /// `Alt+b`: exchange the focused pane's view with the big pane that is not
@@ -4089,16 +4104,18 @@ mod tests {
     }
 
     #[test]
-    fn graph_zoom_presets_have_two_x_zoom_out_floor() {
-        // The preset list carries the required zoom-out headroom: 0.03125 is
-        // exactly 2x below the old 0.0625 minimum, and the fit index follows
-        // the 1.0 entry rather than a hardcoded position (design D4).
-        assert_eq!(App::GRAPH_ZOOM_PRESETS.len(), 9);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS[0], 0.03125);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS[1], 0.0625);
+    fn graph_zoom_presets_have_extreme_zoom_range() {
+        // The preset list carries extended zoom range: 0.0078125 is 4x below
+        // the old 0.03125 minimum, and 8.0 is 4x above the old 2.0 maximum.
+        // The fit index follows the 1.0 entry rather than a hardcoded position.
+        assert_eq!(App::GRAPH_ZOOM_PRESETS.len(), 13);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[0], 0.0078125);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[1], 0.015625);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[2], 0.03125);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[3], 0.0625);
         // Compile-time invariant: the fit index points at the 1.0 entry.
         const _: () = assert!(App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] == 1.0);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS.last(), Some(&2.0));
+        assert_eq!(App::GRAPH_ZOOM_PRESETS.last(), Some(&8.0));
         let app = App::new();
         assert_eq!(
             app.graph_zoom_preset as usize,
@@ -4428,7 +4445,7 @@ mod tests {
         // Startup configuration (spec "Startup pane configuration"): module
         // UI in the left big pane, source viewer in a small pane.
         assert!(app.showing_viewer, "startup opens the source viewer");
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert_eq!(app.layout.small_bottom.view, None);
         assert_eq!(app.layout.focus, PaneId::BigLeft);
@@ -5799,7 +5816,7 @@ mod tests {
         let mut app = App::new();
         // Startup: module UI in the left big pane, source viewer in a small
         // pane (spec "Startup pane configuration").
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         // Big-class view: replaces the module UI in the left big pane.
         app.open_view(ViewType::Graph);
@@ -5811,12 +5828,11 @@ mod tests {
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert!(!app.showing_graph);
         // The source viewer stays in its small pane; tree-order mirror.
+        // Physical is the module UI (implicit left pane), so it doesn't appear in slots.
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
-        assert_eq!(
-            app.tile_stack.slots,
-            vec![ViewType::Physical, ViewType::SourceViewer]
-        );
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
+        // Physical is the module UI (implicit left pane), so focus projects to Panels
+        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
     }
 
     #[test]
@@ -5848,29 +5864,14 @@ mod tests {
         app.open_view(ViewType::Physical);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert!(!app.showing_graph);
+        // Physical is the module UI (implicit left pane), not in tile_stack.slots
         assert_eq!(
             app.tile_stack.slots,
-            vec![
-                ViewType::Physical,
-                ViewType::SourceViewer,
-                ViewType::Optimizer
-            ]
+            vec![ViewType::SourceViewer, ViewType::Optimizer]
         );
     }
 
-    #[test]
-    fn physical_and_module_ui_are_mutually_exclusive() {
-        let mut app = App::new();
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        // Opening physical closes the module UI wherever it is shown.
-        app.open_view(ViewType::Physical);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(app.pane_holding(ViewType::Panels).is_none());
-        // Opening the module UI closes physical and takes the big pane.
-        app.open_view(ViewType::Panels);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        assert!(app.pane_holding(ViewType::Physical).is_none());
-    }
+    // Physical IS the module UI now - no separate Panels view
 
     #[test]
     fn close_focused_view_removes_slot_and_mirrors_flags() {
@@ -6127,11 +6128,9 @@ mod tests {
         let mut app = App::new();
         // Graph opens in BigLeft and takes focus.
         app.open_view(ViewType::Graph);
-        app.cycle_view_in_slot(true); // graph -> module UI
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        assert!(!app.showing_graph);
-        app.cycle_view_in_slot(true); // module UI -> physical
+        app.cycle_view_in_slot(true); // graph -> physical (module UI)
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
+        assert!(!app.showing_graph);
         app.cycle_view_in_slot(true); // physical -> graph
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert!(app.showing_graph);
@@ -6152,7 +6151,7 @@ mod tests {
         // already open in BigLeft: focus jumps instead of duplicating.
         app.cycle_view_in_slot(true);
         assert_eq!(app.layout.focus, PaneId::BigLeft);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.big_right.view, Some(ViewType::Graph));
     }
 
@@ -6300,7 +6299,7 @@ mod tests {
         app.set_focus(PaneId::BigLeft);
         app.swap_big();
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert_eq!(app.layout.big_right.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_right.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::BigLeft, "focus preserved");
     }
 
@@ -6323,7 +6322,7 @@ mod tests {
         app.set_focus(PaneId::SmallTop);
         app.swap_big();
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert_eq!(app.layout.small_top.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::SmallTop, "focus preserved");
     }
 
@@ -6364,28 +6363,7 @@ mod tests {
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::SourceViewer));
     }
 
-    #[test]
-    fn swap_never_creates_physical_module_ui_coexistence() {
-        let mut app = App::new();
-        // Module UI left, physical right: swap_big refuses.
-        app.layout.big_right.view = Some(ViewType::Physical);
-        app.layout.small_top.view = None;
-        app.set_focus(PaneId::BigLeft);
-        app.swap_big();
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        assert_eq!(app.layout.big_right.view, Some(ViewType::Physical));
-        assert!(app.status_message.contains("blocked"));
-        // The same guard applies to swap_small once views live in both small
-        // panes.
-        app.layout.big_right.view = None;
-        app.layout.small_top.view = Some(ViewType::Panels);
-        app.layout.small_bottom.view = Some(ViewType::Physical);
-        app.sync_mirror();
-        app.swap_small();
-        assert_eq!(app.layout.small_top.view, Some(ViewType::Panels));
-        assert_eq!(app.layout.small_bottom.view, Some(ViewType::Physical));
-        assert!(app.status_message.contains("blocked"));
-    }
+    // Physical IS the module UI - no mutual exclusion needed
 
     #[test]
     fn toggle_left_split_flips_without_touching_ratio() {

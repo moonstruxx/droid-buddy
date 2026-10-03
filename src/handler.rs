@@ -214,7 +214,7 @@ pub(crate) fn handle_panels_frame(frame: PanelsFrame, app: &mut crate::app::App)
             }
             app.select_component(token);
         }
-        app.open_view(crate::app::ViewType::Panels);
+        app.open_view(crate::app::ViewType::Physical);
     }
     if let Some(delta) = frame.scroll {
         if let Some(idx) = frame.hovered {
@@ -783,13 +783,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     }
     if key.code == KeyCode::Esc && key.modifiers.is_none() {
         // Spec "Esc closes the focused view": a view pane (graph, optimizer,
-        // source viewer, physical) closes, leaving its pane empty. The module
-        // UI / empty pane keeps the modifier-wash meaning: a held shift group
-        // or latched modifier clears first, otherwise the module UI closes.
+        // source viewer) closes, leaving its pane empty. The module UI is the
+        // physical rack view (module-ui design D1) and keeps the old Panels
+        // modifier-wash meaning: a held shift group or latched modifier clears
+        // first, otherwise the module UI closes like any other view.
         match focused_view(app) {
-            Some(
-                ViewType::Graph | ViewType::Optimizer | ViewType::SourceViewer | ViewType::Physical,
-            ) => {
+            Some(ViewType::Graph | ViewType::Optimizer | ViewType::SourceViewer) => {
                 let closed_viewer = focused_view(app) == Some(ViewType::SourceViewer);
                 app.close_focused_view();
                 if closed_viewer {
@@ -1780,6 +1779,37 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            // Check for minimap click first
+            if let Some(minimap_rect) = app.graph_minimap_rect {
+                if rect_contains(&minimap_rect, mouse.column, mouse.row) {
+                    // Minimap click: pan camera to clicked world position.
+                    // `graph_minimap_rect` is the outer panel in cell space;
+                    // `(ix, iy)` is the inner-panel origin in canvas space, so
+                    // invert `minimap_layout`'s `map` directly (no hardcoded
+                    // inset): world = bx + (click - ix) / sx.
+                    if let Some(transform) = app.graph_minimap_transform {
+                        let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
+                        if sx > 0.0 && sy > 0.0 {
+                            let world_x = bx + (mouse.column as f32 - ix) / sx;
+                            let world_y = by + (mouse.row as f32 - iy) / sy;
+                            // Pan camera to center on world position
+                            if let Some(mut camera) = app.graph_camera {
+                                let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
+                                camera.pan = (
+                                    world_x * camera.zoom - vw / 2.0,
+                                    world_y * camera.zoom - vh / 2.0,
+                                );
+                                app.graph_camera = Some(camera);
+                                app.status_message = format!(
+                                    "Minimap click: pan to ({:.0}, {:.0})",
+                                    world_x, world_y
+                                );
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
             let hit = app
                 .graph_node_rects
                 .iter()
@@ -2017,6 +2047,43 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     }
 
     if frame.primary_pressed {
+        // Check for minimap click first
+        if let (Some(pointer), Some(panel_egui)) = (frame.pointer, app.graph_minimap_panel_egui) {
+            // panel_egui is canvas-relative; graph pane origin is (ox, oy)
+            let panel_window = egui::Rect::from_min_size(
+                egui::pos2(panel_egui.min.x + ox, panel_egui.min.y + oy),
+                panel_egui.size(),
+            );
+            if panel_window.contains(egui::pos2(pointer.0, pointer.1)) {
+                // Minimap click: pan camera to clicked world position
+                if let Some(transform) = app.graph_minimap_transform {
+                    let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
+                    // `(ix, iy)` is the inner-panel origin in canvas space (the
+                    // outer panel inset by MINIMAP_INSET). Shift it by the pane
+                    // origin to match the window-space pointer, then invert
+                    // `minimap_layout`'s `map`: world = bx + (rel - ix) / sx.
+                    // Guard the scale factors: a zero extent would divide by 0.
+                    if sx > 0.0 && sy > 0.0 {
+                        let rel_x = pointer.0 - (ix + ox);
+                        let rel_y = pointer.1 - (iy + oy);
+                        let world_x = bx + rel_x / sx;
+                        let world_y = by + rel_y / sy;
+                        // Pan camera to center on world position
+                        if let Some(mut camera) = app.graph_camera {
+                            let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
+                            camera.pan = (
+                                world_x * camera.zoom - vw / 2.0,
+                                world_y * camera.zoom - vh / 2.0,
+                            );
+                            app.graph_camera = Some(camera);
+                            app.status_message =
+                                format!("Minimap click: pan to ({:.0}, {:.0})", world_x, world_y);
+                        }
+                    }
+                }
+                return;
+            }
+        }
         let Some(node_index) = hit else {
             app.hovered_graph_node = None;
             return;
@@ -2510,8 +2577,8 @@ mod tests {
     #[test]
     fn arrow_pan_pans_toward_pressed_direction_when_rack_overflows() {
         let mut app = app_with_overflowing_rack();
-        // Focus the physical pane so arrows route to its pan.
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        // Physical is the module UI and holds focus at startup (design D1), so
+        // arrows already route to its pan — no `s` needed to focus it.
         // Right/Down pan positive (screen content shifts opposite, D5);
         // Left/Up reverse. Panning must not move the keyboard cursor.
         handle_event(key(KeyCode::Right), &mut app);
@@ -2547,18 +2614,26 @@ mod tests {
     #[test]
     fn arrow_pan_only_when_the_physical_pane_is_focused() {
         let mut app = app_with_overflowing_rack();
-        // Module UI pane focused: arrows keep panel navigation (no pan).
-        handle_event(key(KeyCode::Right), &mut app);
-        assert_eq!(app.physical_offset, (0.0, 0.0));
-        handle_event(key(KeyCode::Down), &mut app);
-        assert_eq!(app.hovered_component, Some(1));
-
-        // Open and focus the physical pane: arrows pan the overflowing rack.
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        // Physical IS the module UI and is focused at startup: arrows pan the overflowing rack.
         handle_event(key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (8.0, 0.0));
-        handle_event(key(KeyCode::Left), &mut app);
-        assert_eq!(app.physical_offset, (0.0, 0.0));
+        handle_event(key(KeyCode::Down), &mut app);
+        assert_eq!(app.physical_offset, (8.0, 8.0));
+
+        // Switch focus to a small pane: arrows should NOT pan (source viewer
+        // focused), so the offset stays exactly where the physical pane left it.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane (SmallTop)
+        handle_event(key(KeyCode::Right), &mut app);
+        assert_eq!(
+            app.physical_offset,
+            (8.0, 8.0),
+            "physical offset should not change when viewer focused"
+        );
+
+        // Switch back to Physical: arrows pan again, from the unchanged offset.
+        handle_event(key(KeyCode::Tab), &mut app); // -> Physical pane (BigLeft)
+        handle_event(key(KeyCode::Right), &mut app);
+        assert_eq!(app.physical_offset, (16.0, 8.0));
     }
 
     #[test]
@@ -2938,7 +3013,7 @@ mod tests {
         handle_event(key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none());
         assert_eq!(app.status_message, "Layout restored");
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
     }
 
     #[test]
@@ -2996,7 +3071,7 @@ mod tests {
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::SourceViewer));
-        assert_eq!(app.layout.small_top.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::SmallTop, "focus is preserved");
     }
 
@@ -3007,7 +3082,7 @@ mod tests {
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.status_message, "No swap applies");
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
     }
 
@@ -3051,7 +3126,7 @@ mod tests {
         handle_event(key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none(), "help eats z");
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         handle_event(alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
     }
@@ -3078,7 +3153,7 @@ mod tests {
         handle_event(key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none(), "validation eats z");
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         handle_event(alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert!(app.showing_validation, "the modal stays open");
@@ -3095,7 +3170,7 @@ mod tests {
         handle_event(key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none(), "label overlay eats z");
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         handle_event(alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert!(app.editing.is_some(), "the overlay stays open");
@@ -3118,7 +3193,7 @@ mod tests {
 
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert_eq!(app.layout.big_right.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_right.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::BigLeft, "focus preserved");
     }
 
@@ -3139,21 +3214,21 @@ mod tests {
             "'+' zooms in one preset: {z0} -> {z1}"
         );
         // Presets are multipliers of the fitted zoom: 1.0 is
-        // GRAPH_ZOOM_FIT_INDEX (6), one '+' lands on 1.5 (index 7).
+        // GRAPH_ZOOM_FIT_INDEX (8), one '+' lands on 1.5 (index 9).
         assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8 + 1);
         assert!(app.status_message.contains("Graph zoom"));
 
-        // Wrap at the top preset (200%) back to the bottom (3.125%): the
-        // deep zoom-out steps exist so a fitted camera can reach the true
-        // fit of a large patch (bug droid_tui-ttz).
-        handle_event(key(KeyCode::Char('+')), &mut app);
-        let z2 = app.graph_camera.unwrap().zoom;
-        assert!((z2 - z1 * (2.0 / 1.5)).abs() < 1e-2);
-        handle_event(key(KeyCode::Char('+')), &mut app);
-        let z3 = app.graph_camera.unwrap().zoom;
+        // Wrap at the top preset (800%) back to the bottom (0.78125%):
+        // the deep zoom-out steps exist so a fitted camera can reach the
+        // true fit of a large patch.
+        // Step through: 1.5 -> 2.0 -> 4.0 -> 8.0 -> wrap to 0.0078125
+        for _ in 0..4 {
+            handle_event(key(KeyCode::Char('+')), &mut app);
+        }
+        let z_wrapped = app.graph_camera.unwrap().zoom;
         assert!(
-            (z3 - z2 * (0.03125 / 2.0)).abs() < 1e-2,
-            "wrap from 200% to 3.125%: {z2} -> {z3}"
+            (z_wrapped - 0.0078125).abs() < 1e-2,
+            "wrap from 800% to 0.78125%: {z0} -> {z_wrapped}"
         );
         assert_eq!(app.graph_zoom_preset, 0);
     }
@@ -4482,19 +4557,21 @@ mod tests {
     #[test]
     fn r_rotates_the_focused_pane_view_within_its_class() {
         // Big pane holding the module UI: `r` cycles the big carousel
-        // graph → module UI → physical → graph. `cycle_view_in_slot` opens the
+        // graph → module UI → graph (module-ui design D1 retires Panels, so
+        // BIG_CAROUSEL is [Graph, Physical]). `cycle_view_in_slot` opens the
         // next view in the same pane.
         let mut app = app_with_source_navigation();
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        handle_event(key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         handle_event(key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert!(app.showing_graph);
         handle_event(key(KeyCode::Char('r')), &mut app);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert!(!app.showing_graph);
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
+        assert!(app.showing_graph);
         // The pane keeps focus through the rotation.
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
     }
@@ -4539,13 +4616,8 @@ mod tests {
     #[test]
     fn s_opens_and_focuses_the_physical_pane_and_toggles_skeleton_inside() {
         let mut app = app_with_fixture();
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        // `s` opens the Physical view in a big pane (replacing the module UI)
-        // and focuses it.
-        handle_event(key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        // While the physical pane holds focus, `s` toggles the skeleton.
+        // `s` toggles the skeleton inside the already-open physical pane.
         assert!(!app.physical_show_skeleton);
         handle_event(key(KeyCode::Char('s')), &mut app);
         assert!(app.physical_show_skeleton);
@@ -4585,7 +4657,7 @@ mod tests {
         // Back to the module UI pane: Esc closes it, viewer stays open.
         handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         let sel = app.selected_component.clone();
         handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.showing_viewer);
@@ -5331,6 +5403,97 @@ mod tests {
         assert!(
             app.tile_stack.is_open(ViewType::SourceViewer),
             "window press opens a tiled viewer slot"
+        );
+    }
+
+    #[test]
+    fn graph_window_minimap_click_pans_camera_to_clicked_world_point() {
+        use crate::gui::WindowFrame;
+        // Build the published minimap geometry exactly as `minimap_layout`
+        // does: panel = (px, py, mw, mh), inner = (px+4, py+4, mw-8, mh-8),
+        // sx = inner_w / bw, sy = inner_h / bh, and world = bx + (rel-ix)/sx.
+        let mut app = app_with_graph_window();
+        let (px, py, mw, mh) = (10.0f32, 100.0f32, 180.0f32, 120.0f32);
+        let (bx, by, bw, bh) = (0.0f32, 0.0f32, 1000.0f32, 500.0f32);
+        let (ix, iy) = (px + 4.0, py + 4.0);
+        let (sx, sy) = ((mw - 8.0) / bw, (mh - 8.0) / bh);
+        app.graph_minimap_panel_egui = Some(egui::Rect::from_min_size(
+            egui::pos2(px, py),
+            egui::vec2(mw, mh),
+        ));
+        app.graph_minimap_transform = Some((bx, by, bw, bh, ix, iy, sx, sy));
+        // Canvas (used for centering) and identity camera.
+        app.graph_canvas_px = Some((190.0, 400.0));
+        app.graph_camera = Some(crate::graph_render::GraphCamera::new());
+
+        // Click the minimap at the world point (500, 250), forward-mapped to
+        // canvas space, then shifted into window space by the pane origin.
+        let (ox, oy) = graph_pane_origin(&app);
+        let click_x = ix + 500.0 * sx + ox;
+        let click_y = iy + 250.0 * sy + oy;
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((click_x, click_y)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+
+        // The camera centers that world point in the published canvas:
+        // pan = world * zoom - canvas/2 (zoom 1 here).
+        let camera = app.graph_camera.expect("camera stays seeded");
+        assert!(
+            (camera.pan.0 - (500.0 - 190.0 / 2.0)).abs() < 0.5,
+            "pan.x: {}",
+            camera.pan.0
+        );
+        assert!(
+            (camera.pan.1 - (250.0 - 400.0 / 2.0)).abs() < 0.5,
+            "pan.y: {}",
+            camera.pan.1
+        );
+        assert!(
+            app.status_message
+                .starts_with("Minimap click: pan to (500, 250)"),
+            "status: {}",
+            app.status_message
+        );
+        // A minimap click must not start a node drag or change the selection.
+        assert!(app.graph_drag.is_none());
+        assert!(app.selected_circuit().is_none());
+    }
+
+    #[test]
+    fn graph_window_click_outside_minimap_falls_through_to_node_hit() {
+        use crate::gui::WindowFrame;
+        // A press outside the published minimap panel must reach node
+        // hit-testing: the minimap branch returns early only on a real hit.
+        let mut app = app_with_graph_window();
+        let (px, py, mw, mh) = (10.0f32, 100.0f32, 180.0f32, 120.0f32);
+        app.graph_minimap_panel_egui = Some(egui::Rect::from_min_size(
+            egui::pos2(px, py),
+            egui::vec2(mw, mh),
+        ));
+        app.graph_minimap_transform = Some((0.0, 0.0, 1000.0, 500.0, 14.0, 104.0, 0.172, 0.224));
+        let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        let (x, y) = app.graph_positions[0];
+        let (ox, oy) = graph_pane_origin(&app);
+        // Node 0 sits near the world origin, far above the bottom-left panel.
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((x + 5.0 + ox, y + 5.0 + oy)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.selected_circuit(), Some(&node_id));
+        assert!(
+            app.graph_drag.is_some(),
+            "outside the minimap a node drag starts"
         );
     }
 

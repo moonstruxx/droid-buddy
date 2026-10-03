@@ -276,6 +276,8 @@ pub(super) fn panels_spec(app: &App, focused: bool, pane: Rect) -> PanelsSpec {
                         .then(|| crate::theme::modifier_hue(tok))
                 }),
                 dimmed: modifier.is_some() && !wash_tokens.contains(comp.id.as_str()),
+                led_state: None,
+                led_rgb: None,
             });
         }
         x += block_w + PANEL_CELL_GAP;
@@ -351,6 +353,8 @@ mod tests {
             modifier_wash: None,
             dimmed: false,
             kind,
+            led_state: None,
+            led_rgb: None,
         }
     }
 
