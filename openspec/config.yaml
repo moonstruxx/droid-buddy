@@ -3,9 +3,14 @@ schema: spec-driven
 # Project context (optional)
 # This is shown to AI when creating artifacts.
 context: |
-  Tech stack: Rust 2021, single-crate ratatui 0.29 + crossterm 0.28 TUI for DROID hardware patch files (.ini).
-  Layered monolith: main (entry/terminal) -> app (state) -> handler (input) -> patch (domain + parser) -> ui (rendering).
-  One-way dependencies: ui/handler depend on app/patch; patch never imports app/handler/ui.
+  Tech stack: Rust 2021, single-crate native desktop app (winit 0.30 + egui 0.36 + wgpu) for DROID
+  hardware patch files (.ini). There is no terminal/crossterm stack.
+  Layered monolith: main (entry/winit event loop) -> app (state) -> handler (input) -> patch (domain +
+  parser) -> gui (egui rendering).
+  One-way dependencies: gui/handler depend on app/patch; patch never imports app/handler/gui.
+  The main band is a class-based pane layout (src/panes.rs: PaneClass Big/Small, PaneLayout; App.layout is
+  the source of truth). The module UI (ViewType::Physical) is the app's only hardware surface - the Panels
+  view is retired.
   The app is a patch viewer/simulator, NOT a hardware bridge (no MIDI, no network).
 
   Semantic anchors (repo-wide principles; every change must honor them):
@@ -15,10 +20,10 @@ context: |
     artifacts - regenerate with /make-*, never hand-edit.
   - CodeAsDoc: names carry domain meaning (DROID vocabulary); doc comments explain non-obvious invariants and
     reasons, never restate code; OpenSpec specs are the behavior contract, code is the executable spec.
-  - TDD London (mockist, outside-in): test through public entry points (handle_event, render); prefer real
-    fixtures for cheap deterministic collaborators (local filesystem, terminal); mock only genuinely costly or
-    unreliable boundaries - the app has none today; the renderer->handler geometry handoff (component_rects)
-    is the one true collaboration contract and must stay tested.
+  - TDD London (mockist, outside-in): test through public entry points (handle_event, the gui paint
+    routines); prefer real fixtures for cheap deterministic collaborators (local filesystem); mock only
+    genuinely costly or unreliable boundaries - the app has none today; the renderer->handler geometry
+    handoff (component_rects) is the one true collaboration contract and must stay tested.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
