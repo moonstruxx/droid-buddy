@@ -96,6 +96,11 @@ const NODE_ESTIMATE_PORT_WIDTH: f32 = 14.0;
 /// (graph-zoom-node-scaling, design decision 1).
 pub const NODE_WORLD_H: f32 = 80.0;
 
+// Compile-time invariant: the node body must leave a visible gap on a
+// vertical slot. Checked at compile time so a constants change fails the build
+// instead of tripping `clippy::assertions_on_constants` in a runtime test.
+const _: () = assert!(NODE_WORLD_H < VERTICAL_SPACING);
+
 /// Default iteration cap for a damped local re-settle (fewer than a solve).
 pub const LOCAL_ITERATIONS: usize = 40;
 /// Default radius around the moved node that participates in a re-settle.
@@ -2276,11 +2281,8 @@ mod tests {
             );
         }
 
-        // The body height must leave a visible gap on a vertical slot.
-        assert!(
-            NODE_WORLD_H < VERTICAL_SPACING,
-            "NODE_WORLD_H ({NODE_WORLD_H}) must be below VERTICAL_SPACING ({VERTICAL_SPACING})"
-        );
+        // The body height must leave a visible gap on a vertical slot; the
+        // invariant itself is asserted at compile time beside `NODE_WORLD_H`.
     }
 
     #[test]

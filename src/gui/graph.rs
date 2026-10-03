@@ -23,6 +23,81 @@ fn clamp01(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
+/// Legibility floor for labels, port markers, and cluster titles: below this
+/// frame height a node renders as a bare frame with no text or markers, so a
+/// zoomed-out graph is not a wall of overlapping text
+/// (graph-zoom-node-scaling, design decision 3).
+const LOD_MIN_NODE_H: f32 = 12.0;
+/// Smallest label font the painter will use; below it the label is omitted.
+const MIN_LABEL_PX: f32 = 7.0;
+/// Monospace advance as a fraction of the font size (egui's monospace face is
+/// close to 0.6 em), used to derive a width-fitting font size.
+const MONO_ADVANCE: f32 = 0.6;
+/// Cluster title font at zoom 1.0; scales with the derived zoom.
+const CLUSTER_TITLE_PX: f32 = 12.0;
+/// Minimap node dot floor (raised from 1 px so dots stay visible when the
+/// scene is tiny).
+const MINIMAP_DOT_MIN: f32 = 2.0;
+
+/// The camera zoom the scene was built with, derived back from the projected
+/// node height (`h = layout::NODE_WORLD_H × zoom`). The scene spec carries no
+/// zoom field, and every node shares the same world height, so one node is
+/// enough; an empty or malformed scene falls back to 1.0. This is what lets
+/// the painter apply minimum clamps and level-of-detail thresholds
+/// (graph-zoom-node-scaling, decisions 2/3).
+fn spec_zoom(spec: &SceneSpec) -> f32 {
+    spec.nodes
+        .first()
+        .map(|n| n.h / crate::layout::NODE_WORLD_H)
+        .filter(|z| z.is_finite() && *z > 0.0)
+        .unwrap_or(1.0)
+}
+
+/// Shrink-then-ellipsize a label to its node frame (design decision 3): pick
+/// the font as the smaller of the frame-height size and the width-derived size
+/// (`w / (advance × chars)`), then ellipsize to the characters that fit at that
+/// font. `None` when the frame is below the legibility threshold or even the
+/// minimum font cannot hold one character, so the caller omits the label.
+fn fit_label(label: &str, w: f32, h: f32) -> Option<(String, f32)> {
+    if h < LOD_MIN_NODE_H || w <= 0.0 || label.is_empty() {
+        return None;
+    }
+    let chars = label.chars().count().max(1) as f32;
+    let font_by_height = h * 0.42;
+    // Reserve one ellipsis cell when the title does not fit at the frame font,
+    // so the width-derived font is computed against `chars + 1` and the
+    // resulting text always fits with the ellipsis appended.
+    let base_font = font_by_height.min(w / (MONO_ADVANCE * chars));
+    let overflows = base_font < font_by_height - 1e-3;
+    let font = if overflows {
+        font_by_height.min(w / (MONO_ADVANCE * (chars + 1.0)))
+    } else {
+        base_font
+    };
+    if font < MIN_LABEL_PX {
+        return None;
+    }
+    let max_chars = (w / (MONO_ADVANCE * font)).floor().max(1.0) as usize;
+    let fitted = if overflows {
+        ellipsize_to(label, max_chars)
+    } else {
+        label.to_string()
+    };
+    Some((fitted, font))
+}
+
+/// Ellipsize `s` so the result fits `max_chars`: keeps `max_chars - 1`
+/// characters and appends `…`, so the total never exceeds the budget.
+fn ellipsize_to(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let keep = max_chars.saturating_sub(1).max(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('\u{2026}');
+    out
+}
+
 /// Draw one scene frame into the window canvas (design D3/D5): opaque
 /// background, cluster containers, then cables with direction arrows, then
 /// node frames with ports and titles. The spec is pixel-space output of the
@@ -62,6 +137,10 @@ pub(crate) fn paint_scene_in(
     let clipped = painter.with_clip_rect(canvas);
     let painter = &clipped;
 
+    // Camera zoom derived from the projected node height, so chrome scales and
+    // level-of-detail thresholds see the same zoom the scene was built at.
+    let zoom = spec_zoom(spec);
+
     for cluster in &spec.clusters {
         let rect = egui::Rect::from_min_size(
             egui::pos2(cluster.x, cluster.y),
@@ -74,12 +153,15 @@ pub(crate) fn paint_scene_in(
             egui::Stroke::new(1.0, rgb(cluster.border)),
             egui::StrokeKind::Inside,
         );
-        if !cluster.title.is_empty() {
+        // Cluster titles scale with the zoom and are omitted when so small
+        // they would not be legible (design decision 3).
+        let title_px = (CLUSTER_TITLE_PX * zoom).clamp(MIN_LABEL_PX, 40.0);
+        if !cluster.title.is_empty() && title_px >= MIN_LABEL_PX {
             painter.text(
                 rect.left_top() + egui::vec2(6.0, 3.0),
                 egui::Align2::LEFT_TOP,
                 &cluster.title,
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(title_px),
                 rgb(cluster.title_color),
             );
         }
@@ -107,7 +189,7 @@ pub(crate) fn paint_scene_in(
             egui::Color32::TRANSPARENT,
             egui::Stroke::new(edge.width, rgb(edge.color)),
         ));
-        paint_arrow(painter, edge);
+        paint_arrow(painter, edge, zoom);
     }
 
     for node in &spec.nodes {
@@ -130,22 +212,23 @@ pub(crate) fn paint_scene_in(
                 egui::StrokeKind::Middle,
             );
         }
-        // Port markers on the left (input) / right (output) edge midpoint,
-        // like the terminal tile's ◉ / ●; drawn in the frame's border color.
-        let port_r = (node.h * 0.16).clamp(3.0, 8.0);
+        // Port markers and labels are level-of-detail chrome: below the
+        // legibility threshold the node renders as a bare frame (design
+        // decision 3).
+        let show_chrome = node.h >= LOD_MIN_NODE_H;
+        let port_r = (node.h * 0.16).clamp(1.0, 8.0);
         let mid_y = node.y + node.h / 2.0;
-        if node.input_port {
+        if show_chrome && node.input_port {
             painter.circle_filled(egui::pos2(node.x, mid_y), port_r, rgb(node.border));
         }
-        if node.output_port {
+        if show_chrome && node.output_port {
             painter.circle_filled(egui::pos2(node.x + node.w, mid_y), port_r, rgb(node.border));
         }
-        if !node.label.is_empty() {
-            let px = (node.h * 0.42).clamp(8.0, 40.0);
+        if let Some((text, px)) = fit_label(&node.label, node.w, node.h) {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                &node.label,
+                &text,
                 egui::FontId::monospace(px),
                 rgb(node.label_color),
             );
@@ -162,8 +245,10 @@ pub(crate) fn paint_scene_in(
 }
 
 /// Fill the direction arrow at an edge's `end`, following the scene spec's
-/// curve: tangent `B'(1) = 2·(end − ctrl)`, triangle sized from the width.
-fn paint_arrow(painter: &egui::Painter, edge: &EdgeSpec) {
+/// curve: tangent `B'(1) = 2·(end − ctrl)`, triangle sized from the width and
+/// the camera zoom, with small minimums so the direction stays visible at the
+/// zoom floor (graph-zoom-node-scaling, design decision 2).
+fn paint_arrow(painter: &egui::Painter, edge: &EdgeSpec, zoom: f32) {
     let (tx, ty) = (
         2.0 * (edge.end.0 - edge.ctrl.0),
         2.0 * (edge.end.1 - edge.ctrl.1),
@@ -174,8 +259,8 @@ fn paint_arrow(painter: &egui::Painter, edge: &EdgeSpec) {
     }
     let (ux, uy) = (tx / len, ty / len);
     let (nx, ny) = (-uy, ux);
-    let arrow_len = (8.0 + edge.width * 2.0).min(16.0);
-    let half = (4.0 + edge.width).min(8.0);
+    let arrow_len = ((8.0 + edge.width * 2.0) * zoom).clamp(2.0, 16.0);
+    let half = ((4.0 + edge.width) * zoom).clamp(1.0, 8.0);
     let base = egui::pos2(edge.end.0 - ux * arrow_len, edge.end.1 - uy * arrow_len);
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -612,7 +697,10 @@ fn paint_minimap(
     );
     for &(x, y, w, h) in &minimap.nodes {
         painter.rect_filled(
-            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w.max(1.0), h.max(1.0))),
+            egui::Rect::from_min_size(
+                egui::pos2(x, y),
+                egui::vec2(w.max(MINIMAP_DOT_MIN), h.max(MINIMAP_DOT_MIN)),
+            ),
             egui::CornerRadius::same(1),
             rgb(accent),
         );
@@ -2070,6 +2158,39 @@ mod window_paint_tests {
     /// shape, and node borders draw with a transparent fill, so matching the
     /// scene frames isolates the bodies at any zoom (node size is world × zoom
     /// since graph-zoom-node-scaling).
+    // ── graph-zoom-node-scaling: level of detail (task 2.2) ─────────────────
+
+    #[test]
+    fn fit_label_shrinks_to_frame_and_ellipsizes() {
+        // A title wider than its frame at the frame-derived font shrinks the
+        // font to fit the width, then ellipsizes the characters that still do
+        // not fit (design decision 3).
+        let (text, font) = fit_label("resonant_filter", 100.0, 80.0).expect("fits");
+        assert!(
+            font < 80.0 * 0.42,
+            "width-driven font must beat the height font: {font}"
+        );
+        assert!(text.ends_with('\u{2026}'), "ellipsized: {text:?}");
+        assert!(
+            text.chars().count() as f32 * MONO_ADVANCE * font <= 100.0 + 1e-3,
+            "ellipsized text fits the frame width: {text:?} at {font} px"
+        );
+
+        // A title that fits is returned unchanged at the height-derived font.
+        let (text, font) = fit_label("osc", 400.0, 80.0).expect("fits");
+        assert_eq!(text, "osc");
+        assert_eq!(font, 80.0 * 0.42);
+    }
+
+    #[test]
+    fn fit_label_hidden_below_legibility_threshold() {
+        // A frame below the legibility threshold paints no label; nor does one
+        // too small to hold even the minimum font.
+        assert!(fit_label("osc", 200.0, LOD_MIN_NODE_H - 1.0).is_none());
+        assert!(fit_label("osc", 0.0, 80.0).is_none());
+        assert!(fit_label("", 200.0, 80.0).is_none());
+    }
+
     fn node_origins(out: &PaintOutput, scene: &SceneSpec) -> Vec<f32> {
         let mut xs: Vec<f32> = scene
             .nodes
@@ -2106,19 +2227,28 @@ mod window_paint_tests {
         .expect("scene present");
         let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
 
+        // graph-zoom-node-scaling design decision 3: every label is fitted to
+        // its frame (shrunk, then ellipsized), so a short-title node may paint
+        // "o…" at the fit zoom. Assert the painted labels carry the identity
+        // prefixes rather than exact full names.
         assert!(
-            out.labels.iter().any(|l| l.contains("clocktool")),
+            out.labels.iter().any(|l| l.starts_with("clockto")),
             "clocktool label: {:?}",
             out.labels
         );
         assert!(
-            out.labels.iter().any(|l| l.contains("osc")),
+            out.labels.iter().any(|l| l.starts_with('o')),
             "osc label: {:?}",
             out.labels
         );
         assert_eq!(out.beziers, 1, "one cable edge");
         assert_eq!(out.polygons, 1, "one direction arrow");
         assert_eq!(out.circles, 2, "output + input port markers");
+
+        // graph-zoom-node-scaling design decision 3: a label fitted to its
+        // frame may be ellipsized (the fit camera's zoom leaves the long title
+        // shorter than its raw form), so assert containment rather than
+        // equality.
 
         let origins = node_origins(&out, &scene);
         assert_eq!(origins.len(), 2, "both node bodies drawn: {origins:?}");
@@ -2165,9 +2295,24 @@ mod window_paint_tests {
             .iter()
             .filter(|l| l.contains("clocktool"))
             .count();
+        // graph-zoom-node-scaling decision 3: the node label is fitted to its
+        // frame and may be ellipsized, so the identity check matches on the
+        // label prefix rather than the full name.
         assert!(
-            hits >= 2,
-            "node label + tooltip, got {hits}: {:?}",
+            out.labels.iter().any(|l| l.starts_with("clockto")),
+            "node label painted (possibly ellipsized): {:?}",
+            out.labels
+        );
+        assert!(
+            out.labels
+                .iter()
+                .any(|l| l.contains("clocktool") && l != "clockto…"),
+            "tooltip carries the full circuit name: {:?}",
+            out.labels
+        );
+        assert!(
+            hits >= 1,
+            "clocktool text painted: {hits}: {:?}",
             out.labels
         );
         // The tooltip card is a dialog backdrop: no rect in this frame may be
@@ -2273,6 +2418,188 @@ mod window_paint_tests {
             (zoom_gap - 2.0 * id_gap).abs() < 0.5,
             "zoom doubles spacing: {id_gap} -> {zoom_gap}"
         );
+    }
+
+    /// A node frame below the legibility threshold paints as a bare frame: no
+    /// label text and no port markers (graph-zoom-node-scaling design decision
+    /// 3 / spec "Labels hidden when frames are too small").
+    #[test]
+    fn window_paint_omits_label_and_ports_below_threshold() {
+        // Bare NodeSpec at a sub-threshold frame height, with both ports set,
+        // so only the LOD rule can suppress them.
+        let small = NodeSpec {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: LOD_MIN_NODE_H - 1.0,
+            radius: 1.0,
+            fill: (20, 20, 20),
+            border: (200, 200, 200),
+            border_width: 1.0,
+            label: "visible_title".into(),
+            label_color: (255, 255, 255),
+            circuit: "osc".into(),
+            instance_index: 0,
+            input_port: true,
+            output_port: true,
+        };
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![small],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let out = paint(Some(&scene), egui::vec2(400.0, 200.0));
+        assert!(
+            out.labels.is_empty(),
+            "no label below the threshold: {:?}",
+            out.labels
+        );
+        assert_eq!(out.circles, 0, "no port markers below the threshold");
+
+        // The same node above the threshold paints both.
+        let mut large = scene.clone();
+        large.nodes[0].h = LOD_MIN_NODE_H * 2.0;
+        let out = paint(Some(&large), egui::vec2(400.0, 200.0));
+        assert!(out.labels.iter().any(|l| l.contains("visible_title")));
+        assert_eq!(out.circles, 2, "both ports above the threshold");
+    }
+
+    /// Minimap node dots keep a ≥ 2 px floor even for a tiny scene
+    /// (graph-zoom-node-scaling task 2.2).
+    #[test]
+    fn window_paint_minimap_dots_have_two_px_floor() {
+        // A spread of tiny node frames that overflows a small canvas, so the
+        // minimap draws and every dot shrinks below the floor.
+        let node = |x: f32| NodeSpec {
+            x,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+            radius: 0.0,
+            fill: (20, 20, 20),
+            border: (200, 200, 200),
+            border_width: 1.0,
+            label: String::new(),
+            label_color: (255, 255, 255),
+            circuit: String::new(),
+            instance_index: 0,
+            input_port: false,
+            output_port: false,
+        };
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![node(0.0), node(500.0), node(1000.0)],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let canvas = egui::vec2(200.0, 150.0);
+        let minimap = minimap_layout(&scene, egui::Rect::from_min_size(egui::Pos2::ZERO, canvas))
+            .expect("scene overflows the canvas");
+        let out = paint(Some(&scene), canvas);
+
+        // The mapped node rects are sub-pixel; every painted dot must still be
+        // at least 2 px on both axes.
+        for &(_, _, w, _) in &minimap.nodes {
+            assert!(w < MINIMAP_DOT_MIN, "dot width is tiny: {w}");
+        }
+        // Node fills draw before the dots, so compare against the raw minimap
+        // mapping rather than a scene-frame match: the dots are the rects that
+        // grew to the floor.
+        for &(_, _, w, _) in &minimap.nodes {
+            let painted = out.rects.iter().any(|r| {
+                (r.rect.width() - w.max(MINIMAP_DOT_MIN)).abs() < 0.5
+                    && r.fill != egui::Color32::TRANSPARENT
+            });
+            assert!(
+                painted,
+                "node dot {w} px wide painted at the {MINIMAP_DOT_MIN} px floor"
+            );
+        }
+    }
+
+    /// Arrow dimensions shrink with zoom, floored so the direction stays
+    /// visible (graph-zoom-node-scaling design decision 2).
+    #[test]
+    fn paint_arrow_shrinks_with_zoom() {
+        // The arrow triangle's apex is the edge end; its base is `arrow_len`
+        // back along the tangent. A horizontal edge makes the base offset the
+        // triangle's leftmost x, so the painted polygon width measures it.
+        let edge = EdgeSpec {
+            start: (0.0, 0.0),
+            end: (200.0, 0.0),
+            ctrl: (100.0, 0.0),
+            color: (0, 255, 0),
+            width: 2.0,
+            kind: CableKind::Audio,
+            error: false,
+            dim: false,
+            diff: None,
+            latency: None,
+        };
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![],
+            edges: vec![edge],
+            clusters: vec![],
+        };
+        let arrow_width = |zoom: f32| {
+            let mut s = scene.clone();
+            // A single node marks the zoom (`h = NODE_WORLD_H × zoom`); it is
+            // off-canvas so it does not disturb the arrow measurement.
+            s.nodes.push(NodeSpec {
+                x: -1000.0,
+                y: -1000.0,
+                w: 10.0,
+                h: crate::layout::NODE_WORLD_H * zoom,
+                radius: 0.0,
+                fill: (20, 20, 20),
+                border: (200, 200, 200),
+                border_width: 1.0,
+                label: String::new(),
+                label_color: (255, 255, 255),
+                circuit: String::new(),
+                instance_index: 0,
+                input_port: false,
+                output_port: false,
+            });
+            let out = paint(Some(&s), egui::vec2(400.0, 200.0));
+            assert_eq!(out.polygons, 1, "one arrow polygon");
+            // Derive the triangle width from the emitted path bounds.
+            let mut minx = f32::INFINITY;
+            let mut maxx = f32::NEG_INFINITY;
+            let ctx = egui::Context::default();
+            let mut full = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 200.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| paint_scene(ui, egui::vec2(400.0, 200.0), Some(&s), &[]),
+            );
+            for cs in &full.shapes {
+                if let egui::epaint::Shape::Path(p) = &cs.shape {
+                    for pt in &p.points {
+                        minx = minx.min(pt.x);
+                        maxx = maxx.max(pt.x);
+                    }
+                }
+            }
+            full.textures_delta.clear();
+            assert!(minx.is_finite() && maxx.is_finite(), "arrow path emitted");
+            maxx - minx
+        };
+
+        let wide = arrow_width(1.0);
+        let narrow = arrow_width(0.2);
+        assert!(
+            wide > narrow + 1.0,
+            "arrow shrinks with zoom: {wide} -> {narrow}"
+        );
+        // Never below the visibility floor (2 px length along the tangent).
+        assert!(arrow_width(0.001) >= 2.0 - 1e-3);
     }
 }
 #[cfg(test)]
