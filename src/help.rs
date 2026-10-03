@@ -395,6 +395,239 @@ mod tests {
         );
     }
 
+    /// Every `(key, description)` pair the help modal can ever show, and the
+    /// surface that owns it. Used by `module_ui_table_matches_handler` to
+    /// catch un-documented rows and renamed descriptions in one assertion.
+    const ALL_KNOWN_ROWS: &[(&str, &str)] = &[
+        // Band / pane-layout keys (any pane view, both classes).
+        ("z", "maximize focused pane"),
+        ("Alt+b", "swap big pane view"),
+        ("Alt+s", "swap small panes"),
+        ("r", "cycle view in focused pane"),
+        ("[/]", "adjust pane split"),
+        ("Alt+[/Alt+]", "adjust small-pane split"),
+        ("Tab/Shift+Tab", "cycle pane focus"),
+        // Module UI (the physical faceplate surface).
+        ("+/-", "zoom presets"),
+        ("arrows/wheel", "pan rack on overflow"),
+        ("arrows", "pan rack on overflow"),
+        ("j/k", "navigate"),
+        ("Enter/Space", "toggle component"),
+        ("s", "toggle skeleton presentation"),
+        ("m", "latch modifier on hovered component"),
+        ("e", "edit label / validation modal"),
+        ("1-4", "shift groups"),
+        ("Esc", "close Module UI view"),
+        // Graph surface.
+        ("x", "toggle circuit processing"),
+        ("p", "pin/unpin node"),
+        ("c", "center graph"),
+        ("Shift+c", "fit and center graph"),
+        ("e", "edit label"),
+        ("d", "diff overlay"),
+        ("h", "toggle column/force layout"),
+        ("f", "dependency filter"),
+        ("i", "influence filter"),
+        ("+/-", "camera zoom"),
+        ("arrows", "pan camera"),
+        ("click minimap", "pan camera to clicked position"),
+        ("Alt+[/Alt+]", "cable tension"),
+        ("Esc", "close graph"),
+        // Source viewer.
+        ("j/k", "scroll source"),
+        ("Up/Down", "navigate occurrences"),
+        ("Home/End", "jump to first/last occurrence"),
+        ("t", "toggle raw/prettified"),
+        ("Esc", "close viewer"),
+        // Validation modal.
+        ("j/k", "navigate issues"),
+        ("Enter", "jump to source"),
+        ("e", "toggle close"),
+        ("Esc", "close"),
+        // Optimizer pane.
+        ("j/k", "navigate candidates"),
+        ("Enter", "preview"),
+        ("r", "restore original order"),
+        ("s", "export"),
+        ("[/]", "adjust weight"),
+        ("0/1", "snap weight"),
+        // Picker overlay.
+        ("j/k/arrows", "navigate"),
+        ("Enter", "select"),
+        ("f/F", "toggle favourite"),
+        ("Ctrl+f", "toggle filter"),
+        ("0-9", "fast-select favourite slot"),
+        ("q", "end filter"),
+        ("Backspace", "remove filter char"),
+        ("type", "filter entries"),
+        // Global keys present on most views.
+        ("?", "show this help"),
+        ("l", "open file picker"),
+        ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+        ("g s", "open select-state menu"),
+        ("g c", "toggle latency coloring"),
+        ("d", "toggle diff overlay"),
+        ("p", "pause processing"),
+        ("q", "quit"),
+        ("Ctrl+c", "quit"),
+    ];
+
+    #[test]
+    fn module_ui_table_matches_handler() {
+        // `retire-panels-surface` task 3.1: the Module UI table must name the
+        // keys the handler actually dispatches for the module-UI surface, and
+        // nothing else. `panels_focused` routes the plain (non-prefix) dispatch
+        // when neither graph, optimizer, nor viewer owns focus, so the exact
+        // set below is the handler's Module UI contract (src/handler.rs).
+        //
+        // The merged table must contain every row the retired Panels and
+        // Physical tables carried. Rows retired from the help content are the
+        // ones that name surfaces the handler no longer dispatches: `\` split,
+        // the `g q` quad chord, and the legacy `Panels`/`Physical Rack` titles.
+        let table: Vec<(&str, &str)> = keybindings(HelpView::ModuleUi);
+        let keys: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
+
+        for (key, desc) in [
+            // Navigation, zoom, skeleton, select-state, focus (task 3.1 scope).
+            ("j/k", "navigate"),
+            ("+/-", "zoom presets"),
+            ("s", "toggle skeleton presentation"),
+            ("g s", "open select-state menu"),
+            ("Tab/Shift+Tab", "cycle pane focus"),
+            // Component interaction and modifier/shift family.
+            ("Enter/Space", "toggle component"),
+            ("arrows/wheel", "pan rack on overflow"),
+            ("m", "latch modifier on hovered component"),
+            ("e", "edit label / validation modal"),
+            ("1-4", "shift groups"),
+            // Band and view management.
+            ("z", "maximize focused pane"),
+            ("Alt+b", "swap big pane view"),
+            ("Alt+s", "swap small panes"),
+            ("r", "cycle view in focused pane"),
+            ("Esc", "close Module UI view"),
+            // Global keys.
+            ("?", "show this help"),
+            ("l", "open file picker"),
+            ("q", "quit"),
+            ("Ctrl+c", "quit"),
+        ] {
+            assert!(
+                table.contains(&(key, desc)),
+                "Module UI table must name the handler-dispatched key {key:?}"
+            );
+        }
+
+        // Every row is a known key; a new row must be added to ALL_KNOWN_ROWS
+        // (and justified against the handler) or removed.
+        for (key, desc) in table.iter() {
+            assert!(
+                ALL_KNOWN_ROWS.contains(&(*key, *desc)),
+                "Module UI row {key:?} => {desc:?} is not a known handler binding"
+            );
+        }
+
+        // Retired surfaces: the tiled left-pane split is gone (proposal
+        // non-goal aside, the handler stretches to neither) and the quad chord
+        // was retired with the tiling model.
+        assert!(
+            !keys.contains(&"\\"),
+            "the tiled left-pane split must not remain in the Module UI table"
+        );
+        assert!(
+            !keys.contains(&"g q"),
+            "the quad view chord must not remain in the Module UI table"
+        );
+    }
+
+    #[test]
+    fn module_ui_table_has_exact_key_set() {
+        // The Module UI table is the one place a key can be described for the
+        // module-UI surface; an exact-set assertion makes an accidental drop or
+        // an un-documented addition a hard failure. The set is derived from the
+        // handler's plain dispatch plus the shared band/global keys.
+        let mut keys: Vec<&str> = keybindings(HelpView::ModuleUi)
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "+/-",
+            "1-4",
+            "?",
+            "Alt+b",
+            "Alt+s",
+            "Ctrl+c",
+            "Enter/Space",
+            "Esc",
+            "Tab/Shift+Tab",
+            "arrows/wheel",
+            "d",
+            "e",
+            "g",
+            "g c",
+            "g s",
+            "j/k",
+            "l",
+            "m",
+            "p",
+            "q",
+            "r",
+            "s",
+            "z",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "Module UI key set drifted from the handler");
+    }
+
+    #[test]
+    fn module_ui_surface_rows_name_real_handler_keys() {
+        // Spec scenario "Panels table lists split, select-state, and focus
+        // keys" (rewritten for the collapsed surface): the module-UI table
+        // names the select-state chord and focus cycling. The split key is a
+        // proposal-documented drift: the spec's scenario still names it, but
+        // the handler no longer dispatches `\`, so the table must not carry it
+        // and this test records that explicit decision.
+        let table = keybindings(HelpView::ModuleUi);
+        assert!(table.contains(&("g s", "open select-state menu")));
+        assert!(table.contains(&("Tab/Shift+Tab", "cycle pane focus")));
+        assert!(
+            !table.iter().any(|(key, _)| *key == "\\"),
+            "`\\` is not a handler binding, so it must not be documented"
+        );
+    }
+
+    #[test]
+    fn module_ui_physical_rows_are_merged_not_duplicated() {
+        // `retire-panels-surface` 2.1 merges the old Panels and Physical tables
+        // into one: each key appears at most once, and no row is left over from
+        // a surface that no longer exists.
+        let table = keybindings(HelpView::ModuleUi);
+        let mut seen: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
+        seen.sort_unstable();
+        let mut dedup = seen.clone();
+        dedup.dedup();
+        assert_eq!(seen, dedup, "Module UI table repeats a key");
+
+        // No `Panels`/`Physical Rack` title survives in any describable view.
+        for view in all_views() {
+            assert_ne!(view.title(), "Panels");
+            assert_ne!(view.title(), "Panels / Physical");
+            assert_ne!(view.title(), "Physical Rack");
+        }
+    }
+
+    fn all_views() -> [HelpView; 6] {
+        [
+            HelpView::ModuleUi,
+            HelpView::Viewer,
+            HelpView::Graph,
+            HelpView::Validation,
+            HelpView::Optimizer,
+            HelpView::Picker,
+        ]
+    }
+
     #[test]
     fn every_view_has_a_title() {
         for view in [
