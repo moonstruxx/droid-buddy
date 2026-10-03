@@ -1426,6 +1426,11 @@ mod tests {
         // legacy mirror pane's origin, so the bounds center landed off by the
         // origin delta ("nodes move but are not centered"). In the two-pane
         // arrangement the y origin was wrong by half the band height.
+        //
+        // graph-zoom-node-scaling task 1.3: `c` centers the drawn CONTENT
+        // center — the position-bounds center plus half the node world extent,
+        // since node positions are top-left corners — so the drawn node BOXES,
+        // not just their top-left corners, sit on the pane center.
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
@@ -1437,35 +1442,81 @@ mod tests {
         // Realistic flow: the paint publishes the real pane size, then `c`.
         app.graph_camera = None;
         app.fit_graph_camera((real.width(), real.height()));
+        let zoom_before = app.graph_camera.unwrap().zoom;
         assert!(
             app.center_graph_camera(),
             "center succeeds with a camera + canvas"
         );
+        assert_eq!(
+            app.graph_camera.unwrap().zoom,
+            zoom_before,
+            "centering must not change zoom"
+        );
 
         let pane = graph_pane_rect(&app, win).expect("graph pane open");
         assert_eq!(pane, real);
+
+        // Expectation derived from the app's own positions and extent: the
+        // content center is `(min + max + extent) / 2` per axis. No dependency
+        // filter is active here, so the drawn positions are `graph_positions`.
+        let positions = app.graph_positions.clone();
+        let bounds = crate::graph_render::WorldBounds::from_positions(&positions);
+        let (nw, nh) = app.graph_fit_node_world();
+        assert!(nw > 0.0 && nh > 0.0, "fixture graph has node extents");
+        let (ccx, ccy) = (
+            (bounds.min_x + bounds.max_x + nw) / 2.0,
+            (bounds.min_y + bounds.max_y + nh) / 2.0,
+        );
+        // `build_scene_spec` re-bases the camera pan by the pane origin, so the
+        // scene-space pixel is `world_to_pixel + pane.min`.
+        let cam = app.graph_camera.unwrap();
+        let (ccx_px, ccy_px) = cam.world_to_pixel(ccx, ccy);
+        let (ccx_px, ccy_px) = (ccx_px + pane.min.x, ccy_px + pane.min.y);
+        assert!(
+            (ccx_px - real.center().x).abs() < 1e-2 && (ccy_px - real.center().y).abs() < 1e-2,
+            "content center must map to the pane center: ({ccx_px},{ccy_px}) vs {:?}",
+            real.center()
+        );
+
         let scene = build_scene_spec(&app, crate::theme::active(), pane).expect("scene built");
-        // Node spec x/y is the node's top-left at the mapped solver position;
-        // the bounding box of those mapped positions must sit on the pane center.
-        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        assert!(!scene.nodes.is_empty(), "fixture graph has nodes");
+        // The scene-observable form of the same contract: the CONTENT center —
+        // the bounding box of the drawn node top-lefts (spec x/y) plus half the
+        // per-axis node extent at this zoom — must sit on the pane center.
+        let (mut smin_x, mut smin_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut smax_x, mut smax_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let (mut box_w, mut box_h) = (0.0_f32, 0.0_f32);
         for n in &scene.nodes {
-            min_x = min_x.min(n.x);
-            max_x = max_x.max(n.x);
-            min_y = min_y.min(n.y);
-            max_y = max_y.max(n.y);
+            smin_x = smin_x.min(n.x);
+            smax_x = smax_x.max(n.x);
+            smin_y = smin_y.min(n.y);
+            smax_y = smax_y.max(n.y);
+            box_w = box_w.max(n.w);
+            box_h = box_h.max(n.h);
         }
-        let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
-        assert!(
-            (center.x - real.center().x).abs() < 1.0,
-            "graph centered horizontally in the pane: {center:?} vs {:?}",
-            real.center()
+        let (scx, scy) = (
+            (smin_x + smax_x + box_w) / 2.0,
+            (smin_y + smax_y + box_h) / 2.0,
         );
         assert!(
-            (center.y - real.center().y).abs() < 1.0,
-            "graph centered vertically in the pane: {center:?} vs {:?}",
+            (scx - real.center().x).abs() < 1e-2 && (scy - real.center().y).abs() < 1e-2,
+            "content center must map to the pane center: ({scx},{scy}) vs {:?}",
             real.center()
         );
+        // Centering must not push any node frame outside the pane.
+        for n in &scene.nodes {
+            assert!(
+                n.x >= real.min.x - 1e-2
+                    && n.y >= real.min.y - 1e-2
+                    && n.x + n.w <= real.max.x + 1e-2
+                    && n.y + n.h <= real.max.y + 1e-2,
+                "node frame off-pane: ({},{})-({},{})",
+                n.x,
+                n.y,
+                n.x + n.w,
+                n.y + n.h
+            );
+        }
     }
 
     /// Run the full base + overlay paint (`paint_panes` then `paint_overlays`)
