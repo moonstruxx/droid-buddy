@@ -2,7 +2,7 @@
 
 ## 1. World geometry and camera math
 
-- [ ] 1.1 Add world-space node sizing to the layout model: a `NODE_WORLD_H` constant (≤ `VERTICAL_SPACING`) and `node_world_sizes(graph)` whose widths come from `estimated_widths`; verify with a unit test asserting each width equals the estimator and never exceeds its column pitch <!-- agent: layout-designer-engineer.build, depends_on: [], touches: [src/layout.rs] -->
+- [x] 1.1 Add world-space node sizing to the layout model: a `NODE_WORLD_H` constant (≤ `VERTICAL_SPACING`) and `node_world_sizes(graph)` whose widths come from `estimated_widths`; verify with a unit test asserting each width equals the estimator and never exceeds its column pitch <!-- agent: layout-designer-engineer.build, depends_on: [], touches: [src/layout.rs] -->
 - [ ] 1.2 Extend `GraphCamera::fit_to_world` to take the node world extent and frame whole node bodies (node-pixel floor reinterpretation, existing `floor_frames` guard preserved); update the in-file fit tests and verify `cargo test --lib graph_render` passes <!-- agent: rusty-engineer.build, depends_on: [1.1], touches: [src/graph_render.rs] -->
 - [ ] 1.3 Redefine the graph node-size constants as world units and the fit floor as a node-pixel floor in `src/app.rs`; update `App::fit_graph_camera` and `center_graph_camera` (half-node offset) to pass node extents and verify the app fit tests pass <!-- agent: rusty-engineer.build, depends_on: [1.2], touches: [src/app.rs] -->
 
