@@ -993,7 +993,7 @@ mod tests {
         });
 
         assert_dialog_text_readable("help modal", size, |p, c, _ctx| {
-            paint_help(p, c, crate::help::HelpView::Panels);
+            paint_help(p, c, crate::help::HelpView::ModuleUi);
         });
     }
 

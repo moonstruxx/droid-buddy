@@ -11,14 +11,14 @@ use crate::app::{App, ViewType};
 /// Which surface's keybindings the help modal shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpView {
-    /// Main panels / physical view.
-    Panels,
+    /// Module UI — the physical faceplate view (`ViewType::Physical`), the
+    /// app's only hardware surface since `module-ui-physical` retired the
+    /// Panels view.
+    ModuleUi,
     /// Embedded source viewer (`g v`).
     Viewer,
     /// Signal-flow graph surface (`g g`).
     Graph,
-    /// Physical rack tile (`s`).
-    Physical,
     /// Validation modal (`e`).
     Validation,
     /// Optimizer menu (`g o`).
@@ -31,10 +31,9 @@ impl HelpView {
     /// Short title shown in the modal's border, mirroring the surface name.
     pub fn title(self) -> &'static str {
         match self {
-            HelpView::Panels => "Panels / Physical",
+            HelpView::ModuleUi => "Module UI",
             HelpView::Viewer => "Source Viewer",
             HelpView::Graph => "Signal-flow Graph",
-            HelpView::Physical => "Physical Rack",
             HelpView::Validation => "Validation",
             HelpView::Optimizer => "Optimizer",
             HelpView::Picker => "File Picker",
@@ -49,7 +48,7 @@ impl HelpView {
 /// view resolves from the pane that holds it (`App.layout.focus`), so the
 /// help modal describes the pane the user is actually working in — including
 /// the optimizer, which is a small pane rather than an overlay modality. An
-/// empty focused pane and the module UI both report `Panels`.
+/// empty focused pane and the module UI both report `ModuleUi`.
 pub fn active_view(app: &App) -> HelpView {
     if app.showing_picker {
         HelpView::Picker
@@ -59,9 +58,9 @@ pub fn active_view(app: &App) -> HelpView {
         match app.layout.pane(app.layout.focus).view {
             Some(ViewType::Graph) => HelpView::Graph,
             Some(ViewType::SourceViewer) => HelpView::Viewer,
-            Some(ViewType::Physical) => HelpView::Physical,
+            Some(ViewType::Physical) => HelpView::ModuleUi,
             Some(ViewType::Optimizer) => HelpView::Optimizer,
-            None => HelpView::Physical,
+            None => HelpView::ModuleUi,
         }
     }
 }
@@ -69,29 +68,28 @@ pub fn active_view(app: &App) -> HelpView {
 /// The keybinding rows for a view: `(key, description)` pairs.
 pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
     match view {
-        HelpView::Panels => vec![
-            ("l", "open file picker"),
-            ("g v", "open source viewer"),
-            ("g g", "open signal-flow graph"),
-            ("g d", "diff against another patch"),
-            ("g o", "open latency optimizer"),
-            ("g c", "toggle latency coloring"),
-            ("g s", "open select-state menu"),
-            ("d", "toggle diff overlay"),
+        HelpView::ModuleUi => vec![
+            ("+/-", "zoom presets"),
+            ("arrows/wheel", "pan rack on overflow"),
+            ("j/k", "navigate"),
+            ("Enter/Space", "toggle component"),
+            ("s", "toggle skeleton presentation"),
+            ("m", "latch modifier on hovered component"),
+            ("e", "edit label / validation modal"),
+            ("1-4", "shift groups"),
             ("Tab/Shift+Tab", "cycle pane focus"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
             ("Alt+s", "swap small panes"),
             ("r", "cycle view in focused pane"),
-            ("?", "show this help"),
-            ("1-4", "shift groups"),
-            ("+/-", "scale presets"),
-            ("s", "open Physical pane / toggle skeleton"),
-            ("arrows/wheel", "pan when rack overflows"),
-            ("Enter/Space", "toggle component"),
-            ("e", "edit label / validation modal"),
-            ("m", "latch modifier on hovered component"),
+            ("Esc", "close Module UI view"),
+            ("l", "open file picker"),
+            ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+            ("g s", "open select-state menu"),
+            ("g c", "toggle latency coloring"),
+            ("d", "toggle diff overlay"),
             ("p", "pause processing"),
+            ("?", "show this help"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
         ],
@@ -140,27 +138,6 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Esc", "close graph"),
             ("?", "show this help"),
             ("l", "open file picker"),
-            ("q", "quit"),
-            ("Ctrl+c", "quit"),
-        ],
-        HelpView::Physical => vec![
-            ("+/-", "zoom presets"),
-            ("arrows/wheel", "pan rack on overflow"),
-            ("j/k", "navigate"),
-            ("s", "toggle skeleton presentation"),
-            ("z", "maximize focused pane"),
-            ("Alt+b", "swap big pane view"),
-            ("Alt+s", "swap small panes"),
-            ("r", "cycle view in focused pane"),
-            ("Esc", "close Physical view"),
-            ("?", "show this help"),
-            ("l", "open file picker"),
-            ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
-            ("p", "pause processing"),
-            ("1-4", "shift groups"),
-            ("m", "latch modifier"),
-            ("d", "toggle diff overlay"),
-            ("e", "edit label"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
         ],
@@ -213,12 +190,12 @@ mod tests {
     }
 
     #[test]
-    fn active_view_defaults_to_physical() {
+    fn active_view_defaults_to_module_ui() {
         // Startup layout (spec "Startup pane configuration"): focus starts on
-        // the left big pane, which holds the module UI (Physical), so `?` reports Physical.
+        // the left big pane, which holds the module UI (Physical), so `?` reports ModuleUi.
         let a = app();
         assert_eq!(a.layout.focus, crate::panes::PaneId::BigLeft);
-        assert_eq!(active_view(&a), HelpView::Physical);
+        assert_eq!(active_view(&a), HelpView::ModuleUi);
     }
 
     #[test]
@@ -242,7 +219,7 @@ mod tests {
 
         let mut a = app();
         a.open_view(ViewType::Physical);
-        assert_eq!(active_view(&a), HelpView::Physical);
+        assert_eq!(active_view(&a), HelpView::ModuleUi);
 
         // The optimizer is a small pane, not an overlay: opening it focuses
         // that pane and `?` describes it.
@@ -267,10 +244,9 @@ mod tests {
     #[test]
     fn keybindings_non_empty_per_view() {
         for view in [
-            HelpView::Panels,
+            HelpView::ModuleUi,
             HelpView::Viewer,
             HelpView::Graph,
-            HelpView::Physical,
             HelpView::Validation,
             HelpView::Optimizer,
             HelpView::Picker,
@@ -294,12 +270,7 @@ mod tests {
         // pane view; the full-surface overlays (validation) and the picker do
         // not hold a pane. The optimizer's own table owns `r` (restore).
         let row = ("r", "cycle view in focused pane");
-        for view in [
-            HelpView::Panels,
-            HelpView::Viewer,
-            HelpView::Graph,
-            HelpView::Physical,
-        ] {
+        for view in [HelpView::ModuleUi, HelpView::Viewer, HelpView::Graph] {
             assert!(
                 keybindings(view).contains(&row),
                 "view {view:?} must document the r carousel key"
@@ -327,10 +298,9 @@ mod tests {
         let alt_b = ("Alt+b", "swap big pane view");
         let alt_s = ("Alt+s", "swap small panes");
         for view in [
-            HelpView::Panels,
+            HelpView::ModuleUi,
             HelpView::Viewer,
             HelpView::Graph,
-            HelpView::Physical,
             HelpView::Optimizer,
         ] {
             let rows = keybindings(view);
@@ -361,39 +331,40 @@ mod tests {
             "latency coloring must not remain on bare c in the graph table"
         );
 
-        let panels = keybindings(HelpView::Panels);
-        assert!(panels.contains(&("g c", "toggle latency coloring")));
+        let module_ui = keybindings(HelpView::ModuleUi);
+        assert!(module_ui.contains(&("g c", "toggle latency coloring")));
     }
 
     #[test]
-    fn keybindings_reflect_physical_surface() {
-        // Change `help-keybinding-parity` task 1.3: the Physical table
-        // documents the zoom presets, overflow pan (arrows + wheel), and the
-        // j/k navigation the surface really binds.
-        let physical = keybindings(HelpView::Physical);
-        assert!(physical.contains(&("+/-", "zoom presets")));
-        assert!(physical.contains(&("arrows/wheel", "pan rack on overflow")));
-        assert!(physical.contains(&("j/k", "navigate")));
-        assert!(physical.contains(&("s", "toggle skeleton presentation")));
-        assert!(physical.contains(&("Esc", "close Physical view")));
+    fn keybindings_reflect_module_ui_surface() {
+        // Change `help-keybinding-parity` task 1.3 + `retire-panels-surface`:
+        // the Module UI table documents the zoom presets, overflow pan (arrows
+        // + wheel), the j/k navigation the surface really binds, the skeleton
+        // toggle, and Esc closing the view.
+        let module_ui = keybindings(HelpView::ModuleUi);
+        assert!(module_ui.contains(&("+/-", "zoom presets")));
+        assert!(module_ui.contains(&("arrows/wheel", "pan rack on overflow")));
+        assert!(module_ui.contains(&("j/k", "navigate")));
+        assert!(module_ui.contains(&("s", "toggle skeleton presentation")));
+        assert!(module_ui.contains(&("Esc", "close Module UI view")));
     }
 
     #[test]
-    fn keybindings_reflect_panels_surface() {
-        // Change `help-keybinding-parity` task 1.1 + `pane-class-layout` 3.3:
-        // the Panels table lists the select-state chord, pane-focus cycling,
-        // and the pane-layout keys. The tiled left-pane split and the quad
-        // chord are retired with the tiling model.
-        let panels = keybindings(HelpView::Panels);
-        assert!(panels.contains(&("g s", "open select-state menu")));
-        assert!(panels.contains(&("Tab/Shift+Tab", "cycle pane focus")));
-        assert!(panels.contains(&("z", "maximize focused pane")));
+    fn keybindings_reflect_module_ui_pane_keys() {
+        // Change `help-keybinding-parity` task 1.1 + `pane-class-layout` 3.3 +
+        // `retire-panels-surface`: the Module UI table lists the select-state
+        // chord, pane-focus cycling, and the pane-layout keys. The tiled
+        // left-pane split and the quad chord are retired with the tiling model.
+        let module_ui = keybindings(HelpView::ModuleUi);
+        assert!(module_ui.contains(&("g s", "open select-state menu")));
+        assert!(module_ui.contains(&("Tab/Shift+Tab", "cycle pane focus")));
+        assert!(module_ui.contains(&("z", "maximize focused pane")));
         assert!(
-            !panels.contains(&("\\", "toggle left-pane vertical split")),
+            !module_ui.contains(&("\\", "toggle left-pane vertical split")),
             "the tiled left-pane split is retired"
         );
         assert!(
-            !panels.iter().any(|(key, _)| *key == "g q"),
+            !module_ui.iter().any(|(key, _)| *key == "g q"),
             "the quad view is retired"
         );
     }
@@ -427,10 +398,9 @@ mod tests {
     #[test]
     fn every_view_has_a_title() {
         for view in [
-            HelpView::Panels,
+            HelpView::ModuleUi,
             HelpView::Viewer,
             HelpView::Graph,
-            HelpView::Physical,
             HelpView::Validation,
             HelpView::Optimizer,
             HelpView::Picker,
