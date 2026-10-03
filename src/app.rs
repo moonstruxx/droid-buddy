@@ -2117,29 +2117,6 @@ impl App {
         self.validation_cursor = 0;
     }
 
-    /// Replace `validation_issues` with `issues`, update modal flag and cursor,
-    /// and dispatch `ValidationCompleted`. Callers that gate on `Error` should
-    /// check severity before deciding whether to replace `self.patch`.
-    pub fn set_validation(&mut self, issues: Vec<ValidationIssue>) {
-        let error_count = issues
-            .iter()
-            .filter(|i| i.severity == Severity::Error)
-            .count();
-        let count = issues.len();
-        self.validation_issues = issues;
-        if self.validation_issues.is_empty() {
-            self.showing_validation = false;
-            self.validation_cursor = 0;
-        } else {
-            self.showing_validation = true;
-            if self.validation_cursor >= self.validation_issues.len() {
-                self.validation_cursor = 0;
-            }
-        }
-        self.events
-            .dispatch(&Event::ValidationCompleted { count, error_count });
-    }
-
     /// Load a patch into the app and reset source-navigation state ready for
     /// BOF: no selection, cursor 0, scroll 0, raw mode, focus Panels, no
     /// minimap/source-pane geometry yet (renderer will publish on next frame).
@@ -2150,8 +2127,9 @@ impl App {
     /// kept (or stays `None`), `validation_issues` + `showing_validation` are
     /// set, `ValidationCompleted` is dispatched, and the method returns `false`.
     /// Otherwise the patch replaces the current one, warnings/hints are stored,
-    /// the modal is shown only when there is at least one issue, and `true` is
-    /// returned. Return value is `#[must_use]`-free so existing call sites that
+    /// and the modal stays closed; a Warning/Hint-only load reports its finding
+    /// count with the `e` hint in the status bar, and `true` is returned.
+    /// Return value is `#[must_use]`-free so existing call sites that
     /// ignore it keep compiling.
     /// True when the rack overflows `area` on each axis (design D5): the
     /// wheel then pans instead of adjusting knob/fader values. Uses the rack
@@ -2551,6 +2529,8 @@ impl App {
         let error_count = 0;
         let count = issues.len();
         self.validation_issues = issues;
+        // Warnings/Hints never auto-open the modal: report the count with the
+        // `e` hint and let the user open the list on demand.
         self.showing_validation = false;
         self.validation_cursor = 0;
         self.events
@@ -2563,6 +2543,8 @@ impl App {
                 .unwrap_or_default();
             if name.is_empty() {
                 "Ready".to_string()
+            } else if count > 0 {
+                format!("Loaded {name} \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
             } else {
                 format!("Loaded {name}")
             }
@@ -2688,6 +2670,8 @@ impl App {
         let error_count = 0;
         let count = issues.len();
         self.validation_issues = issues;
+        // Warnings/Hints never auto-open the modal: report the count with the
+        // `e` hint and let the user open the list on demand.
         self.showing_validation = false;
         self.validation_cursor = 0;
         self.events
@@ -2700,6 +2684,8 @@ impl App {
                 .unwrap_or_default();
             if name.is_empty() {
                 "Ready".to_string()
+            } else if count > 0 {
+                format!("Loaded {name} \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
             } else {
                 format!("Loaded {name}")
             }
@@ -6592,6 +6578,83 @@ mod tests {
         assert!(app.select_state.is_some());
         assert!(app.load_patch(select_fixture()));
         assert!(app.select_state.is_none(), "select state reset on load");
+    }
+
+    /// A patch whose only findings are Warning/Hint: `copy` is a real circuit
+    /// and `bogus` is an unknown param (`Warning`), so the load is not gated
+    /// yet still carries findings.
+    fn warnings_only_fixture() -> Patch {
+        let content = "[p2b8]\n[copy]\n    input = 0\n    bogus = 0\n";
+        Patch::from_ini_str(content, String::from("warn_only")).unwrap()
+    }
+
+    /// A patch with zero findings: `copy` is real, both params are known, the
+    /// essential `output` is present, and it writes a real output jack (no
+    /// cable to leave unused).
+    fn clean_fixture() -> Patch {
+        let content = "[p2b8]\n[copy]\n    input = 0\n    output = O1\n";
+        Patch::from_ini_str(content, String::from("clean_patch")).unwrap()
+    }
+
+    #[test]
+    fn load_patch_warnings_only_reports_hint_and_keeps_modal_closed() {
+        let mut app = App::new();
+        assert!(app.load_patch(warnings_only_fixture()));
+        assert!(app.patch.is_some(), "warnings do not gate the load");
+        assert!(
+            !app.validation_issues.is_empty(),
+            "findings are stored for on-demand viewing"
+        );
+        assert!(
+            !app.showing_validation,
+            "the modal stays closed for Warning/Hint-only loads"
+        );
+        let count = app.validation_issues.len();
+        assert_eq!(
+            app.status_message,
+            format!("Loaded warn_only \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
+        );
+    }
+
+    #[test]
+    fn load_patch_at_warnings_only_reports_hint_and_keeps_modal_closed() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let patch_path = dir.path().join("warn_only.ini");
+        std::fs::write(
+            &patch_path,
+            "[p2b8]\n[copy]\n    input = 0\n    bogus = 0\n",
+        )
+        .unwrap();
+        let mut app = App::new();
+        assert!(app.load_patch_at(&patch_path, warnings_only_fixture()));
+        assert!(app.patch.is_some(), "warnings do not gate the load");
+        assert!(
+            !app.validation_issues.is_empty(),
+            "findings are stored for on-demand viewing"
+        );
+        assert!(
+            !app.showing_validation,
+            "the modal stays closed for Warning/Hint-only loads"
+        );
+        let count = app.validation_issues.len();
+        assert_eq!(
+            app.status_message,
+            format!("Loaded warn_only \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
+        );
+    }
+
+    #[test]
+    fn load_patch_clean_load_keeps_plain_status() {
+        let mut app = App::new();
+        assert!(app.load_patch(clean_fixture()));
+        assert!(
+            app.validation_issues.is_empty(),
+            "the clean fixture has no findings: {:?}",
+            app.validation_issues
+        );
+        assert!(!app.showing_validation);
+        assert_eq!(app.status_message, "Loaded clean_patch");
     }
 
     #[test]

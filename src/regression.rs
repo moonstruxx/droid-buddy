@@ -1432,3 +1432,128 @@ fn regression_module_ui_help_view_resolves_and_has_table() {
         );
     }
 }
+
+// ── validation-modal-error-only (task 2.1): warnings-only loads stay closed ─
+//
+// The modified `patch-validation` requirement: a Warning/Hint-only load must
+// load *without* opening the modal, report its finding count in the status bar
+// with an `e` hint, and keep normal key handling (the `g g` app chord) working
+// until the user opens the list on demand. `fixtures/validation/unused_cable.ini`
+// is the smallest fixture that takes this path: a bare `[p2b8]` plus a `[copy]`
+// section whose `_UNUSED` output nobody consumes, yielding exactly one `Hint`
+// and zero Errors (any Error would take the gating path this rule does not cover).
+
+/// A Hint-only load leaves the modal closed and the status reports the count
+/// with the `e` hint; `e` opens the modal; `g g` still opens the graph.
+#[test]
+fn regression_warnings_only_load_hints_and_defers_modal() {
+    let patch = Patch::from_ini_file(Path::new("fixtures/validation/unused_cable.ini")).unwrap();
+    let mut app = App::new();
+    let loaded = app.load_patch(patch);
+
+    assert!(loaded, "a Warning/Hint-only patch must load");
+    assert!(app.patch.is_some(), "the patch is installed");
+    assert!(
+        !app.showing_validation,
+        "a warnings-only load must not auto-open the modal"
+    );
+    assert!(
+        !app.validation_issues.is_empty(),
+        "the finding is still recorded for the on-demand list"
+    );
+    assert!(
+        app.validation_issues
+            .iter()
+            .all(|i| i.severity != crate::validation::Severity::Error),
+        "the fixture must not produce Errors (it would take the gating path)"
+    );
+
+    // Status names the count and the `e` key — same `press 'e' to view` phrasing
+    // as the Error path, so the findings are discoverable without a modal.
+    let status = app.status_message.clone();
+    assert!(
+        status.contains("warnings/hints"),
+        "status must report the finding count: {status:?}"
+    );
+    assert!(
+        status.contains(&format!("{} warnings/hints", app.validation_issues.len())),
+        "status must name the exact count: {status:?}"
+    );
+    assert!(
+        status.contains("press 'e' to view"),
+        "status must hint that `e` opens the list: {status:?}"
+    );
+
+    // App chords keep working while the modal stays closed: `g g` opens the graph.
+    handle_event(key(KeyCode::Char('g')), &mut app);
+    handle_event(key(KeyCode::Char('g')), &mut app);
+    assert!(
+        app.showing_graph,
+        "`g g` must still open the graph on a warnings-only load"
+    );
+    assert!(
+        !app.showing_validation,
+        "the graph chord must not have opened the modal"
+    );
+
+    // `e` opens the modal on demand with the list intact.
+    handle_event(key(KeyCode::Char('e')), &mut app);
+    assert!(
+        app.showing_validation,
+        "`e` must open the validation modal on demand"
+    );
+    assert_eq!(
+        app.validation_issues.len(),
+        1,
+        "the modal lists the single Hint finding"
+    );
+    assert_eq!(
+        app.validation_cursor, 0,
+        "the cursor starts at the first issue"
+    );
+
+    // Closing with `e` again leaves the patch loaded and everything else intact.
+    handle_event(key(KeyCode::Char('e')), &mut app);
+    assert!(
+        !app.showing_validation,
+        "`e` toggles the modal closed again"
+    );
+    assert!(
+        app.patch.is_some(),
+        "closing the modal does not unload the patch"
+    );
+}
+
+/// A clean load (zero findings) keeps the plain `Loaded <name>` status — no
+/// zero-count hint, no `e` affordance. Uses an in-memory `[copy]` patch whose
+/// only section declares a known param and a consumed jack, so validation is
+/// genuinely empty (the `fixtures/validation/*.ini` files each plant one finding).
+#[test]
+fn regression_clean_load_keeps_plain_status() {
+    let patch =
+        Patch::from_ini_str("[copy]\ninput = I1\noutput = O1\n", String::from("clean")).unwrap();
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "a clean patch loads");
+
+    assert!(
+        app.validation_issues.is_empty(),
+        "a clean patch must produce no findings, got: {:?}",
+        app.validation_issues
+            .iter()
+            .map(|i| i.code.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !app.showing_validation,
+        "a clean load never opens the modal"
+    );
+    let status = app.status_message.clone();
+    assert!(
+        !status.contains("warnings/hints"),
+        "a clean load must not emit the finding-count hint: {status:?}"
+    );
+    assert!(
+        !status.contains("press 'e'"),
+        "a clean load must not advertise the empty modal: {status:?}"
+    );
+}
