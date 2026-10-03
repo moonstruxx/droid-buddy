@@ -88,6 +88,19 @@ const NODE_ESTIMATE_PADDING: f32 = 16.0;
 /// Width reserved per input/output port marker in the size estimator.
 const NODE_ESTIMATE_PORT_WIDTH: f32 = 14.0;
 
+/// World-space (solver-unit) body height of a graph node — **not pixels**.
+/// The renderer projects it through the graph camera (`pixel = world × zoom`),
+/// so a node's drawn frame scales with the zoom instead of staying a fixed
+/// pixel size. Deliberately below [`VERTICAL_SPACING`] so nodes stacked in one
+/// column keep a visible gap between their bodies at every zoom
+/// (graph-zoom-node-scaling, design decision 1).
+pub const NODE_WORLD_H: f32 = 80.0;
+
+// Compile-time invariant: the node body must leave a visible gap on a
+// vertical slot. Checked at compile time so a constants change fails the build
+// instead of tripping `clippy::assertions_on_constants` in a runtime test.
+const _: () = assert!(NODE_WORLD_H < VERTICAL_SPACING);
+
 /// Default iteration cap for a damped local re-settle (fewer than a solve).
 pub const LOCAL_ITERATIONS: usize = 40;
 /// Default radius around the moved node that participates in a re-settle.
@@ -467,6 +480,21 @@ fn estimate_node_width(graph: &Graph, i: usize) -> f32 {
 pub fn estimated_widths(graph: &Graph) -> Vec<f32> {
     (0..graph.nodes.len())
         .map(|i| estimate_node_width(graph, i))
+        .collect()
+}
+
+/// World-space body size `(width, height)` of every node
+/// (graph-zoom-node-scaling, design decision 1): the width is this node's
+/// [`estimated_widths`] entry — the same estimate the column arrangement
+/// reserves per node, so a drawn frame always fits the space the solver gave
+/// it — and the height is the fixed [`NODE_WORLD_H`]. The renderer multiplies
+/// these by the camera zoom, which is what makes node bodies scale with zoom
+/// and keeps the column arrangement overlap-free at any zoom. Parallel to
+/// `graph.nodes`; pure and deterministic.
+pub fn node_world_sizes(graph: &Graph) -> Vec<(f32, f32)> {
+    estimated_widths(graph)
+        .into_iter()
+        .map(|w| (w, NODE_WORLD_H))
         .collect()
 }
 
@@ -2191,6 +2219,122 @@ mod tests {
         let widths = estimated_widths(&graph);
         let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
         assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    // ── graph-zoom-node-scaling: world-space node sizing (task 1.1) ──────────
+
+    /// Mixed-title graph reused by the world-size tests: wide and narrow blocks
+    /// together, plus a repeated-instance pair so the estimator's suffix path
+    /// is exercised.
+    fn world_size_graph() -> Graph {
+        Graph {
+            nodes: vec![
+                node("osc", 0),
+                node("mixer", 1),
+                node("clocktool", 2),
+                node("p8s8", 3),
+                node("resonant_filter", 4),
+                node("copy", 5),
+                instance_node("copy", 1, 6),
+            ],
+            edges: vec![
+                GraphEdge {
+                    cable: "_CLK".to_string(),
+                    source: NodeId::circuit("clocktool", 0),
+                    sink: NodeId::circuit("osc", 0),
+                },
+                GraphEdge {
+                    cable: "_OSC".to_string(),
+                    source: NodeId::circuit("osc", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+                GraphEdge {
+                    cable: "_P".to_string(),
+                    source: NodeId::circuit("p8s8", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+                GraphEdge {
+                    cable: "_F".to_string(),
+                    source: NodeId::circuit("resonant_filter", 0),
+                    sink: NodeId::circuit("mixer", 0),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn node_world_sizes_mirror_estimator_widths() {
+        let graph = world_size_graph();
+        let widths = estimated_widths(&graph);
+        let sizes = node_world_sizes(&graph);
+
+        assert_eq!(sizes.len(), graph.nodes.len(), "one size per node");
+        for (i, &(w, h)) in sizes.iter().enumerate() {
+            assert_eq!(
+                w, widths[i],
+                "node {i} world width must be the estimator value"
+            );
+            assert_eq!(
+                h, NODE_WORLD_H,
+                "node {i} world height must be NODE_WORLD_H"
+            );
+        }
+
+        // The body height must leave a visible gap on a vertical slot; the
+        // invariant itself is asserted at compile time beside `NODE_WORLD_H`.
+    }
+
+    #[test]
+    fn node_world_sizes_fit_reserved_column_blocks() {
+        // The world width must never exceed the horizontal space the column
+        // arrangement reserves for the node's column, so a drawn frame stays
+        // inside its block and nodes cannot overlap at any zoom
+        // (graph-zoom-node-scaling, design decision 1).
+        let graph = world_size_graph();
+        let widths = estimated_widths(&graph);
+        let sizes = node_world_sizes(&graph);
+        let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
+
+        // The solver's own reserved block width per column: widest member,
+        // snapped up to 2·GRID_SNAP so block centers land on the grid.
+        let depth = circuit_depth(&graph);
+        let (cols, ncols) = assign_columns(&graph, &depth);
+        let block_units = 2.0 * GRID_SNAP;
+        let mut reserved = vec![0.0f32; ncols];
+        for i in 0..graph.nodes.len() {
+            reserved[cols[i]] = reserved[cols[i]].max(widths[i]);
+        }
+        for bw in &mut reserved {
+            *bw = (*bw / block_units).ceil() * block_units;
+        }
+
+        for (i, &(w, _)) in sizes.iter().enumerate() {
+            assert!(
+                w <= reserved[cols[i]] + 1e-3,
+                "node {i} world width {w} exceeds its column's reserved block {}",
+                reserved[cols[i]]
+            );
+        }
+
+        // Stronger check against the solver's real output: the drawn world rects
+        // (centered on the solved positions) are pairwise non-overlapping.
+        for a in 0..graph.nodes.len() {
+            for b in (a + 1)..graph.nodes.len() {
+                let (aw, ah) = sizes[a];
+                let (bw, bh) = sizes[b];
+                let overlap_x = (positions[a].0 - positions[b].0).abs() < (aw + bw) / 2.0 - 1e-3;
+                let overlap_y = (positions[a].1 - positions[b].1).abs() < (ah + bh) / 2.0 - 1e-3;
+                assert!(
+                    !(overlap_x && overlap_y),
+                    "nodes {a} and {b} overlap: positions {:?} / {:?}, sizes {:?} / {:?}",
+                    positions[a],
+                    positions[b],
+                    sizes[a],
+                    sizes[b]
+                );
+            }
+        }
     }
 
     // ── graph-column-layout: fixed outer columns (task 2.3) ─────────────────

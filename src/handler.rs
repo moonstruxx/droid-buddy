@@ -2009,18 +2009,30 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         camera = crate::gui::camera_zoom_about(&camera, factor, (ax - ox, ay - oy));
     }
     app.graph_camera = Some(camera);
-    // The node's pixel rect is `world × zoom − pan` at a fixed pixel size, so
-    // its world size is the fixed size divided by the zoom (mirrors how the
-    // terminal derives node cell rects from fixed node cell dims).
-    let nw = crate::app::GRAPH_WINDOW_NODE_W / camera.zoom;
-    let nh = crate::app::GRAPH_WINDOW_NODE_H / camera.zoom;
+    // Hit-test against each node's world-space extent (graph-zoom-node-scaling,
+    // design decision 5): the drawn frame *is* the node's world rect projected
+    // through the camera, so testing in world units is exact at every zoom and
+    // needs no `/ zoom` conversion. `node_world_sizes` gives each node its own
+    // world `(width, height)` (node positions are the box's top-left corner).
+    // A minimum hit size keeps a node selectable when its drawn frame is only a
+    // few pixels, expanding the world test rect symmetrically. First match wins.
+    let world = app
+        .graph
+        .as_ref()
+        .map(crate::layout::node_world_sizes)
+        .unwrap_or_default();
+    let min_w = App::GRAPH_MIN_HIT_PX / camera.zoom;
+    let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;
     let hit = frame.pointer.and_then(|(px, py)| {
         let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
         app.graph_positions
             .iter()
             .enumerate()
             .find_map(|(i, &(x, y))| {
-                (wx >= x && wx < x + nw && wy >= y && wy < y + nh).then_some(i)
+                let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
+                let hw = (w.max(min_w) - w) / 2.0;
+                let hh = (h.max(min_h) - h) / 2.0;
+                (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
             })
     });
     app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
@@ -2982,10 +2994,12 @@ mod tests {
 
     fn seed_graph_camera(app: &mut App) {
         use crate::graph_render::{GraphCamera, WorldBounds};
-        app.graph_camera = Some(GraphCamera::fit_to_world(
+        let node_world = app.graph_fit_node_world();
+        app.graph_camera = Some(GraphCamera::fit_to_world_with_nodes(
             WorldBounds::from_positions(&app.graph_positions),
+            node_world,
             (960.0, 480.0),
-            2.2, // GRAPH_MIN_NODE_PX (a literal suffices for camera math)
+            App::GRAPH_MIN_NODE_PX,
         ));
         app.graph_canvas_px = Some((960.0, 480.0));
     }
@@ -5896,19 +5910,29 @@ mod tests {
         app
     }
 
-    /// Pointer just inside `target`'s top-left corner, accepted only when no
-    /// earlier node's rect also claims it (hit-testing takes the first match),
+    /// Pointer just inside `target`'s drawn world box, accepted only when no
+    /// earlier node's box also claims it (hit-testing takes the first match),
     /// so the sample deterministically hits `target`.
     fn clean_sample_point(app: &App, target: usize) -> Option<(f32, f32)> {
+        let world = node_world_sizes_of(app);
         let (px, py) = app.graph_positions[target];
         let (sx, sy) = (px + 5.0, py + 5.0);
-        let nw = crate::app::GRAPH_WINDOW_NODE_W;
-        let nh = crate::app::GRAPH_WINDOW_NODE_H;
+        let (tw, th) = world[target];
         let claims = |i: usize| {
             let (nx, ny) = app.graph_positions[i];
-            sx >= nx && sx < nx + nw && sy >= ny && sy < ny + nh
+            let (w, h) = world[i];
+            let _ = (tw, th);
+            sx >= nx && sx < nx + w && sy >= ny && sy < ny + h
         };
         (claims(target) && !(0..target).any(claims)).then_some((sx, sy))
+    }
+
+    /// Per-node world extents of the app's current graph (empty without one).
+    fn node_world_sizes_of(app: &App) -> Vec<(f32, f32)> {
+        app.graph
+            .as_ref()
+            .map(crate::layout::node_world_sizes)
+            .unwrap_or_default()
     }
 
     #[test]
@@ -5924,11 +5948,13 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.hovered_graph_node, Some(0));
-        // A pointer beyond every node's right edge misses all rects.
+        // A pointer beyond every node's drawn right edge misses all boxes.
+        let world = node_world_sizes_of(&app);
         let max_right = app
             .graph_positions
             .iter()
-            .map(|&(nx, _)| nx + crate::app::GRAPH_WINDOW_NODE_W)
+            .enumerate()
+            .map(|(i, &(nx, _))| nx + world[i].0)
             .fold(f32::MIN, f32::max);
         handle_graph_window_frame(
             &WindowFrame {
@@ -5941,6 +5967,88 @@ mod tests {
         // Leaving the window clears hover too.
         handle_graph_window_frame(&WindowFrame::default(), &mut app);
         assert_eq!(app.hovered_graph_node, None);
+    }
+
+    #[test]
+    fn graph_window_hit_test_uses_world_extents_at_zoom_2() {
+        // At zoom 2 the minimum hit size does not bind: a click inside the
+        // drawn frame selects the node, a click in the gap selects nothing.
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph();
+        let (ox, oy) = graph_pane_origin(&app);
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+        });
+        app.graph_canvas_px = Some((960.0, 480.0));
+        let world = node_world_sizes_of(&app);
+        let (x, y) = app.graph_positions[0];
+        let (w, h) = world[0];
+        // World point just inside the frame → pixel = world * 2, plus the pane
+        // origin for the window-space pointer.
+        let (px, py) = ((x + w / 2.0) * 2.0 + ox, (y + h / 2.0) * 2.0 + oy);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((px, py)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, Some(0));
+        // A point half a node height below the box is outside every drawn
+        // frame: the world height is 80 > GRAPH_MIN_HIT_PX / zoom (6), so no
+        // node claims it.
+        let gap_y = ((y + h + 20.0) * 2.0) + oy;
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((px, gap_y)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.hovered_graph_node, None,
+            "a click in the gap between frames selects nothing"
+        );
+    }
+
+    #[test]
+    fn graph_window_hit_test_minimum_size_at_zoom_0_1() {
+        // At zoom 0.1 a node's drawn frame is only a few pixels, so the minimum
+        // hit size (`GRAPH_MIN_HIT_PX / zoom` in world units) must still make a
+        // click near the node's center land on it.
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph();
+        let (ox, oy) = graph_pane_origin(&app);
+        app.graph_camera = Some(crate::graph_render::GraphCamera {
+            zoom: 0.1,
+            pan: (0.0, 0.0),
+        });
+        app.graph_canvas_px = Some((960.0, 480.0));
+        let world = node_world_sizes_of(&app);
+        let (x, y) = app.graph_positions[0];
+        let (w, h) = world[0];
+        // World point at the node center; with zoom 0.1 the drawn frame is
+        // w * 0.1 × h * 0.1 pixels. The minimum hit rect is GRAPH_MIN_HIT_PX
+        // (=12) pixels wide in world units = 120 world units, so even a point
+        // offset beyond the drawn frame hits centroid proximity. Test the exact
+        // center here: it must land, and the node must be selected on press.
+        let (wx, wy) = (x + w / 2.0, y + h / 2.0);
+        let (px, py) = (wx * 0.1 + ox, wy * 0.1 + oy);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((px, py)),
+                primary_pressed: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, Some(0));
+        let expected = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        assert_eq!(app.selected_circuit(), Some(&expected));
+        // Sanity: the world hit rect is min_h / zoom across — far larger than
+        // the drawn frame, which is why a low-zoom click still lands.
+        assert!(App::GRAPH_MIN_HIT_PX / 0.1 > w);
     }
 
     #[test]
@@ -6001,10 +6109,11 @@ mod tests {
                 store.borrow_mut().push(event.clone());
             }
         });
+        let (ox, oy) = graph_pane_origin(&app);
         let (x, y) = app.graph_positions[0];
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 5.0, y + 5.0)),
+                pointer: Some((x + 5.0 + ox, y + 5.0 + oy)),
                 primary_pressed: true,
                 primary_down: true,
                 ..Default::default()
@@ -6013,7 +6122,7 @@ mod tests {
         );
         handle_graph_window_frame(
             &WindowFrame {
-                pointer: Some((x + 35.0, y + 25.0)),
+                pointer: Some((x + 35.0 + ox, y + 25.0 + oy)),
                 primary_down: true,
                 ..Default::default()
             },

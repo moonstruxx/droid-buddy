@@ -245,6 +245,7 @@ mod windowed {
                         };
                         self.app.graph_camera = Some(gui::graph_window_fit_camera(
                             &fit,
+                            self.app.graph_fit_node_world(),
                             (pane.width(), pane.height()),
                         ));
                     }

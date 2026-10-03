@@ -18,7 +18,8 @@ use crate::app::{App, SourceViewMode, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphOptions};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
-    local_resettle, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS, LOCAL_RADIUS,
+    local_resettle, node_world_sizes, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS,
+    LOCAL_RADIUS,
 };
 use crate::patch::{Patch, ShiftGroup};
 
@@ -997,5 +998,363 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
     assert_ne!(
         free_moved[tip], drop,
         "unpinned dragged node should re-flow off its drop"
+    );
+}
+// ── graph-zoom-node-scaling (tasks 4.1 / 4.3) ──────────────────────────────
+// Cross-layer regression over the scale anchor for the four requirements of
+// `graph-node-scaling`: zoom-proportional node geometry (no overlap at any
+// preset, world width ≤ the column block width), level of detail at extreme
+// zoom (labels, ports, and cluster titles omitted below the threshold and
+// present at the fit zoom), and hit-testing aligned with the drawn geometry at
+// low and high zoom.
+//
+// Task 4.3 consolidation: the 129 KB / 532-section anchor parses and solves in
+// ~6 s (debug), so it is loaded ONCE through `anchor_graph` and every
+// assertion runs against that single fixture.
+
+/// The scale anchor loaded once per test binary (task 4.3): the parsed graph
+/// plus its solved column positions. Immutable, so every assertion clones them
+/// into a lightweight `App` — no re-parse, no re-solve, no pane side effects.
+struct AnchorGraph {
+    graph: Graph,
+    positions: Vec<(f32, f32)>,
+}
+
+/// The shared anchor fixture. `open_graph()` runs the same build + solve the
+/// app runs on `g g`, so the positions under test are the real column
+/// arrangement's, not a hand-rolled substitute.
+fn anchor_graph() -> &'static AnchorGraph {
+    static ANCHOR: std::sync::OnceLock<AnchorGraph> = std::sync::OnceLock::new();
+    ANCHOR.get_or_init(|| {
+        const ANCHOR_PATH: &str = "fixtures/droid_mpfs5melody2.ini";
+        let patch = Patch::from_ini_file(Path::new(ANCHOR_PATH)).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.showing_graph, "open_graph must open the graph pane");
+        assert!(
+            app.graph.as_ref().is_some_and(|g| !g.nodes.is_empty()),
+            "scale anchor must build a non-empty graph"
+        );
+        AnchorGraph {
+            graph: app.graph.expect("anchor graph built"),
+            positions: app.graph_positions,
+        }
+    })
+}
+
+/// A lightweight `App` over the shared anchor graph at `zoom`: the graph and
+/// its solved positions are cloned in and the camera is set. No pane is
+/// opened — `build_scene_spec` reads only the graph, positions, and camera.
+fn anchor_app(zoom: f32) -> App {
+    let anchor = anchor_graph();
+    let mut app = App::new();
+    app.graph = Some(anchor.graph.clone());
+    app.graph_positions = anchor.positions.clone();
+    app.graph_camera = Some(preset_camera(zoom));
+    app
+}
+
+/// A camera at a preset zoom with a zero pan. Overlap and LOD are pan-invariant,
+/// so the pan carries no information for these assertions.
+fn preset_camera(zoom: f32) -> crate::graph_render::GraphCamera {
+    crate::graph_render::GraphCamera {
+        zoom,
+        pan: (0.0, 0.0),
+    }
+}
+
+/// Strict AABB overlap between two drawn node frames, in spec pixels.
+/// A zero-area touch (shared edge) does not count as overlap.
+fn frames_overlap(a: &crate::graph_render::NodeSpec, b: &crate::graph_render::NodeSpec) -> bool {
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+/// Headless paint output reduced to the two shape kinds the LOD assertions
+/// need: text labels and port-marker circles.
+fn painted_labels_and_ports(scene: &crate::graph_render::SceneSpec) -> (Vec<String>, usize) {
+    use egui::epaint::Shape;
+    use egui::RawInput;
+
+    let ctx = egui::Context::default();
+    let canvas = egui::vec2(1280.0, 800.0);
+    let mut out = ctx.run_ui(
+        RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            ..Default::default()
+        },
+        |ui| {
+            crate::gui::paint_scene(ui, canvas, Some(scene), &[]);
+        },
+    );
+    let mut labels = Vec::new();
+    let mut circles = 0usize;
+    for cs in &out.shapes {
+        match &cs.shape {
+            Shape::Text(t) => labels.push(t.galley.text().to_string()),
+            Shape::Circle(_) => circles += 1,
+            _ => {}
+        }
+    }
+    out.textures_delta.clear();
+    (labels, circles)
+}
+
+/// Cross-layer regression over the scale anchor: zoom-proportional node
+/// geometry (task 4.1; the anchor is loaded once through [`anchor_graph`] by
+/// task 4.3). Each test reads the shared fixture, so the ~5 s anchor parse +
+/// solve is paid once per test binary and the tests still run in parallel.
+#[test]
+fn regression_graph_anchor_no_overlap_at_every_zoom() {
+    let anchor = anchor_graph();
+    let graph = &anchor.graph;
+    let sizes = node_world_sizes(graph);
+    let widths = crate::layout::estimated_widths(graph);
+    let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+    // ── Block 1: zoom-proportional node geometry ──────────────────────────
+    // 1a. World width is the layout's own per-node estimate.
+    assert_eq!(sizes.len(), widths.len(), "one world size per node");
+    for (i, (world, &est)) in sizes.iter().zip(widths.iter()).enumerate() {
+        assert_eq!(
+            world.0, est,
+            "node {i} world width must be the reserved column estimate"
+        );
+        assert!(
+            world.0 > 0.0 && world.1 > 0.0,
+            "node {i} has positive extent"
+        );
+    }
+
+    // 1b. Each node's world width fits its reserved column block. The block is
+    // the max estimate in the node's column, snapped to 2·GRID_SNAP exactly as
+    // `solve_columns_pinned` does; both the node and the block scale by the
+    // zoom, so this holds at every preset.
+    let block_units = 2.0 * crate::layout::GRID_SNAP;
+    let mut reserved: Vec<(f32, f32)> = Vec::new();
+    for (i, &(x, _)) in anchor.positions.iter().enumerate() {
+        match reserved.iter_mut().find(|(rx, _)| (*rx - x).abs() < 1e-3) {
+            Some((_, bw)) => *bw = bw.max(widths[i]),
+            None => reserved.push((x, widths[i])),
+        }
+    }
+    for (_, bw) in reserved.iter_mut() {
+        *bw = (*bw / block_units).ceil() * block_units;
+    }
+    for (i, &(x, _)) in anchor.positions.iter().enumerate() {
+        let bw = reserved
+            .iter()
+            .find(|(rx, _)| (*rx - x).abs() < 1e-3)
+            .map(|(_, bw)| *bw)
+            .expect("node column reserved");
+        assert!(
+            widths[i] <= bw + 1e-3,
+            "node {i} world width {} exceeds its reserved block {bw}",
+            widths[i]
+        );
+    }
+
+    // 1c. Non-overlap at every zoom preset, on the drawn scene.
+    for &zoom in App::GRAPH_ZOOM_PRESETS.iter() {
+        let app = anchor_app(zoom);
+        let scene = crate::gui::build_scene_spec(&app, crate::theme::active(), pane)
+            .expect("scene present at every preset");
+        assert_eq!(
+            scene.nodes.len(),
+            graph.nodes.len(),
+            "every node drawn at zoom {zoom}"
+        );
+        // The drawn frame is exactly world × zoom (never clamped above), which
+        // is what makes the reserved-width argument hold at every zoom.
+        for (i, n) in scene.nodes.iter().enumerate() {
+            assert!(
+                (n.w - widths[i] * zoom).abs() < 1e-3,
+                "node {i} drawn width must be world × zoom at {zoom}: {} vs {}",
+                n.w,
+                widths[i] * zoom
+            );
+            assert!(
+                (n.h - crate::layout::NODE_WORLD_H * zoom).abs() < 1e-3,
+                "node {i} drawn height must be world × zoom at {zoom}"
+            );
+        }
+        for i in 0..scene.nodes.len() {
+            for j in (i + 1)..scene.nodes.len() {
+                assert!(
+                    !frames_overlap(&scene.nodes[i], &scene.nodes[j]),
+                    "column arrangement: nodes {i} and {j} overlap at zoom {zoom}: {:?} vs {:?}",
+                    scene.nodes[i],
+                    scene.nodes[j]
+                );
+            }
+        }
+    }
+}
+
+/// Level of detail: node titles, port markers, and cluster titles are omitted
+/// below the legibility threshold and present at the fit zoom (task 4.1).
+#[test]
+fn regression_graph_anchor_lod_omits_text_below_threshold() {
+    let anchor = anchor_graph();
+    let graph = &anchor.graph;
+    let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+    // A preset whose node frames fall below `LOD_MIN_NODE_H` (12.0 px):
+    // NODE_WORLD_H is 80, so any zoom below 0.15 does.
+    const ZOOM_OUT: f32 = 0.0625;
+    const ZOOM_FIT: f32 = 1.0;
+    // ── Block 2: level of detail ──────────────────────────────────────────
+    // The threshold guard is a compile-time property of the two constants, so
+    // assert it in a const block (also keeps the preset choice honest).
+    const { assert!(crate::layout::NODE_WORLD_H * ZOOM_OUT < 12.0) };
+    let node_title_prefixes: Vec<&str> = graph
+        .nodes
+        .iter()
+        .map(|n| n.circuit.as_str())
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    // 2a. Below the threshold: no node title, no port markers, no cluster title.
+    let low_scene =
+        crate::gui::build_scene_spec(&anchor_app(ZOOM_OUT), crate::theme::active(), pane)
+            .expect("scene present at the zoom-out preset");
+    assert!(
+        !low_scene.clusters.is_empty(),
+        "the scale anchor has banner clusters to gate"
+    );
+    let (low_labels, low_circles) = painted_labels_and_ports(&low_scene);
+    assert_eq!(
+        low_circles, 0,
+        "no port markers below the legibility threshold"
+    );
+    for painted in &low_labels {
+        let is_node_title = node_title_prefixes
+            .iter()
+            .any(|c| painted.starts_with(&c[..c.len().min(6)]));
+        assert!(
+            !is_node_title,
+            "node title painted below the legibility threshold: {painted:?}"
+        );
+        let is_cluster_title = low_scene
+            .clusters
+            .iter()
+            .any(|cl| !cl.title.is_empty() && cl.title == *painted);
+        assert!(
+            !is_cluster_title,
+            "cluster title painted below the legibility threshold: {painted:?}"
+        );
+    }
+
+    // 2b. At the fit zoom: node titles and port markers paint.
+    let fit_scene =
+        crate::gui::build_scene_spec(&anchor_app(ZOOM_FIT), crate::theme::active(), pane)
+            .expect("scene present at the fit zoom");
+    let (fit_labels, fit_circles) = painted_labels_and_ports(&fit_scene);
+    assert!(
+        fit_circles > 0,
+        "port markers present at the fit zoom (frames are NODE_WORLD_H tall)"
+    );
+    assert!(
+        fit_labels.iter().any(|l| node_title_prefixes
+            .iter()
+            .any(|c| l.starts_with(&c[..c.len().min(4)]))),
+        "at least one painted label carries a node title prefix: {fit_labels:?}"
+    );
+}
+
+/// Hit-testing follows the zoomed geometry: a click on a node selects at low
+/// and high zoom, a gap click selects nothing (task 4.1).
+#[test]
+fn regression_graph_anchor_hit_testing_low_and_high_zoom() {
+    let anchor = anchor_graph();
+    let graph = &anchor.graph;
+    let sizes = node_world_sizes(graph);
+    // The fit zoom, at which the drawn frame is the full world extent.
+    const ZOOM_FIT: f32 = 1.0;
+    // ── Block 3: hit-testing follows the zoomed geometry ──────────────────
+    use crate::gui::WindowFrame;
+    use crate::handler::handle_graph_window_frame;
+
+    let mut app = anchor_app(ZOOM_FIT);
+    // The first node, whose extent and neighbours are known.
+    let (x, y) = app.graph_positions[0];
+    let (w, h) = sizes[0];
+    let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+    // Pane origin as the renderer publishes it: the graph in BigLeft at (0,0),
+    // so the window-space pointer equals the pane-space pointer.
+    app.pane_hit_rects = vec![(crate::panes::PaneId::BigLeft, Rect::new(0, 0, 120, 40))];
+    let (ox, oy) = (0.0_f32, 0.0_f32);
+
+    // 3a. Low zoom: the drawn frame is a few pixels, so the minimum hit size
+    // (GRAPH_MIN_HIT_PX / zoom in world units) is what makes the click land.
+    const LOW_ZOOM: f32 = 0.1;
+    app.graph_camera = Some(preset_camera(LOW_ZOOM));
+    app.graph_canvas_px = Some((960.0, 480.0));
+    let (wx, wy) = (x + w / 2.0, y + h / 2.0);
+    let (px, py) = (wx * LOW_ZOOM + ox, wy * LOW_ZOOM + oy);
+    assert!(
+        App::GRAPH_MIN_HIT_PX / LOW_ZOOM > w,
+        "minimum hit rect must exceed the drawn frame at low zoom"
+    );
+    handle_graph_window_frame(
+        &WindowFrame {
+            pointer: Some((px, py)),
+            primary_pressed: true,
+            ..Default::default()
+        },
+        &mut app,
+    );
+    assert_eq!(
+        app.hovered_graph_node,
+        Some(0),
+        "low-zoom click on the drawn center must hover node 0"
+    );
+    assert_eq!(
+        app.selected_circuit(),
+        Some(&node_id),
+        "low-zoom click must select the node's circuit"
+    );
+
+    // 3b. High zoom: a click inside the drawn frame selects; a click in the gap
+    // between frames selects nothing. At 2.0 the minimum hit size does not bind,
+    // so the drawn frame is the hit rect.
+    const HIGH_ZOOM: f32 = 2.0;
+    app.graph_camera = Some(preset_camera(HIGH_ZOOM));
+    app.hovered_graph_node = None;
+    app.selected_circuit = None;
+    let (hx, hy) = ((x + w / 2.0) * HIGH_ZOOM, (y + h / 2.0) * HIGH_ZOOM);
+    handle_graph_window_frame(
+        &WindowFrame {
+            pointer: Some((hx, hy)),
+            primary_pressed: true,
+            ..Default::default()
+        },
+        &mut app,
+    );
+    assert_eq!(
+        app.hovered_graph_node,
+        Some(0),
+        "high-zoom click inside the drawn frame must hover node 0"
+    );
+    assert_eq!(
+        app.selected_circuit(),
+        Some(&node_id),
+        "high-zoom click inside the drawn frame must select the node's circuit"
+    );
+
+    // 3c. The gap: 20 world units below the frame's bottom is outside
+    // `GRAPH_MIN_HIT_PX / zoom` (=6 world units) at zoom 2.
+    let gap_world_x = x + w / 2.0;
+    let gap_y_world = y + h + 20.0;
+    app.hovered_graph_node = None;
+    let gap_screen = (gap_world_x * HIGH_ZOOM + ox, gap_y_world * HIGH_ZOOM + oy);
+    handle_graph_window_frame(
+        &WindowFrame {
+            pointer: Some(gap_screen),
+            ..Default::default()
+        },
+        &mut app,
+    );
+    assert_eq!(
+        app.hovered_graph_node, None,
+        "a click in the gap between two node frames selects nothing"
     );
 }
