@@ -20,14 +20,14 @@ Node bodies SHALL be sized in world units and projected through the camera, so a
 - **WHEN** the user zooms in
 - **THEN** node frames, their corner radius, borders, and port markers render larger in proportion, and cable strokes scale with them.
 
-#### Scenario: Column arrangement never overlaps at the fit zoom and above
+#### Scenario: Column arrangement never overlaps at any zoom
 
-- **WHEN** a graph with many circuits is displayed on the column arrangement at the fit zoom or any zoom above it
-- **THEN** no two node frames overlap, because each node's world width does not exceed the width the column arrangement reserved for it.
+- **WHEN** a graph with many circuits is displayed on the column arrangement at any zoom preset
+- **THEN** no two node frames overlap, because each node's world width does not exceed the width the column arrangement reserved for it and frames are never clamped above their proportional size.
 
 ### Requirement: Level of detail at extreme zoom
 
-Node labels SHALL be laid out to fit their frame: the font SHALL shrink to fit the frame width, and text that still does not fit SHALL be ellipsized. Labels, port markers, and cluster titles SHALL be omitted when a node's frame falls below a legibility threshold, so a zoomed-out graph does not render overlapping text. Node frames and cable strokes SHALL keep a minimum render size (a non-vanishing floor of about one pixel) so the graph never disappears at the zoom floor; below that floor the frames read as dense marks rather than distinguishable boxes.
+Node labels SHALL be laid out to fit their frame: the font SHALL shrink to fit the frame width, and text that still does not fit SHALL be ellipsized. Labels, port markers, and cluster titles SHALL be omitted when a node's frame falls below a legibility threshold, so a zoomed-out graph does not render overlapping text. Node frames SHALL scale linearly with the camera zoom and SHALL NOT be clamped to a minimum size, so frames never overlap at any zoom; cable strokes, borders, arrows, and cluster chrome SHALL keep a minimum render size so the graph structure stays visible at the zoom floor.
 
 #### Scenario: Labels hidden when frames are too small
 
@@ -39,10 +39,10 @@ Node labels SHALL be laid out to fit their frame: the font SHALL shrink to fit t
 - **WHEN** a node's title is wider than its frame at the base font size
 - **THEN** the rendered font shrinks to fit the frame and the text is ellipsized rather than overflowing the frame.
 
-#### Scenario: Frames stay visible at the zoom floor
+#### Scenario: Structure stays visible at the zoom floor
 
 - **WHEN** the user zooms to the minimum preset
-- **THEN** node frames and cable edges still render at a non-vanishing minimum size rather than disappearing, even though the whole graph reads as a dense structure at that scale.
+- **THEN** node frames scale down to sub-pixel marks without overlapping, and cable strokes, borders, and cluster chrome stay at their minimum render size so the graph structure remains visible.
 
 ### Requirement: Fit frames whole node bodies
 

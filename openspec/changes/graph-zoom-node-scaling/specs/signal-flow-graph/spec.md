@@ -31,7 +31,7 @@ Nodes shall render as rounded frames with a title bar; left-side input ports and
 #### Scenario: Node frames scale with zoom
 
 - **WHEN** the graph is displayed and the user zooms out or in
-- **THEN** every node frame, its corner radius, borders, and ports scale with the zoom, so nodes never overlap on the column arrangement at the fit zoom and above and never drift apart as undersized frames.
+- **THEN** every node frame, its corner radius, borders, and ports scale with the zoom, so nodes never overlap on the column arrangement at any zoom and never drift apart as undersized frames.
 
 #### Scenario: Title fits the frame
 

@@ -719,7 +719,11 @@ fn publish_window_canvas(app: &mut App, canvas_px: (f32, f32)) {
                 .map(|&i| app.graph_positions[i])
                 .collect()
         };
-        app.graph_camera = Some(graph_window_fit_camera(&fit, canvas_px));
+        app.graph_camera = Some(graph_window_fit_camera(
+            &fit,
+            app.graph_fit_node_world(),
+            canvas_px,
+        ));
     }
 }
 

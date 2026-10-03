@@ -326,25 +326,22 @@ pub fn camera_zoom_about(cam: &GraphCamera, factor: f32, anchor_px: (f32, f32)) 
 /// window opened black). Reused afterwards through the `camera_pan` /
 /// `camera_zoom_about` mappings, so user pan/zoom survives. Dependency-filter
 /// aware via the caller's positions slice. `viewport` is the visible pane
-/// size in points (design D2), replacing the fixed design viewport; one node
-/// frame is subtracted so edge nodes never clip. Pure and window-free.
-pub fn graph_window_fit_camera(positions: &[(f32, f32)], viewport: (f32, f32)) -> GraphCamera {
-    let node_w = crate::app::GRAPH_WINDOW_NODE_W;
-    let node_h = crate::app::GRAPH_WINDOW_NODE_H;
-    let avail_w = (viewport.0 - node_w).max(1.0);
-    let avail_h = (viewport.1 - node_h).max(1.0);
-    GraphCamera::fit_to_world(
+/// size in points (design D2); `node_world` is the drawn graph's per-axis max
+/// node body (`App::graph_fit_node_world`) passed through the shared
+/// extent-aware fit, so the whole body of edge nodes stays framed rather than
+/// only their top-left position. Pure and window-free.
+pub fn graph_window_fit_camera(
+    positions: &[(f32, f32)],
+    node_world: (f32, f32),
+    viewport: (f32, f32),
+) -> GraphCamera {
+    GraphCamera::fit_to_world_with_nodes(
         WorldBounds::from_positions(positions),
-        (avail_w, avail_h),
-        WINDOW_FIT_MIN_NODE_PX,
+        node_world,
+        viewport,
+        crate::app::App::GRAPH_MIN_NODE_PX,
     )
 }
-
-/// Fit-zoom floor, preserved from the old window builder's
-/// `GRAPH_NODE_WIDTH as f32 * GRAPH_CELL_W_PX / 80.0` (22 × 8 / 80): a tiny
-/// ceiling that only keeps the fit from collapsing zoom below legibility on
-/// very large graphs.
-const WINDOW_FIT_MIN_NODE_PX: f32 = 2.2;
 
 /// Index of the `scene` node whose pixel frame contains `(px, py)`, first
 /// match wins (mirrors the terminal handler's hit-testing over the spec's own
@@ -2217,6 +2214,7 @@ mod window_paint_tests {
         let mut app = chain_app();
         app.graph_camera = Some(graph_window_fit_camera(
             &app.graph_positions,
+            app.graph_fit_node_world(),
             (1280.0, 800.0),
         ));
         let scene = build_scene_spec(
@@ -2349,6 +2347,7 @@ mod window_paint_tests {
         let mut app = chain_app();
         app.graph_camera = Some(graph_window_fit_camera(
             &app.graph_positions,
+            app.graph_fit_node_world(),
             (1280.0, 800.0),
         ));
         let scene = build_scene_spec(
@@ -2606,13 +2605,70 @@ mod window_paint_tests {
 // Small fit test: the camera frames a spread world and carries a finite
 // zoom, so the seeded scene is visible in the window.
 mod fit_tests {
+    use crate::graph_render::GraphCamera;
+
+    /// `(width, height)` of a representative node body: the widest estimated
+    /// node plus the fixed world height, mirroring `App::graph_fit_node_world`.
+    const NODE_WORLD: (f32, f32) = (200.0, 80.0);
+
     #[test]
     fn graph_window_fit_camera_frames_a_spread_world() {
         let positions = vec![(0.0, 0.0), (160.0, 0.0), (320.0, 120.0)];
-        let camera = super::graph_window_fit_camera(&positions, (1280.0, 800.0));
+        let camera = super::graph_window_fit_camera(&positions, NODE_WORLD, (1280.0, 800.0));
         assert!(camera.zoom.is_finite());
         assert!(camera.zoom > 0.0);
         assert!(camera.pan.0.is_finite() && camera.pan.1.is_finite());
+    }
+
+    /// The node extent must widen the framed span so the whole box of an edge
+    /// node (position + extent) stays inside the viewport, not only its
+    /// top-left position.
+    #[test]
+    fn graph_window_fit_camera_frames_whole_node_bodies() {
+        let positions = vec![(0.0, 0.0), (320.0, 120.0)];
+        let viewport = (1280.0, 800.0);
+        let camera = super::graph_window_fit_camera(&positions, NODE_WORLD, viewport);
+
+        // Each node's box: top-left is its position, extent NODE_WORLD;
+        // every corner must project inside the viewport.
+        for &(wx, wy) in &positions {
+            let corners = [
+                (wx, wy),
+                (wx + NODE_WORLD.0, wy),
+                (wx, wy + NODE_WORLD.1),
+                (wx + NODE_WORLD.0, wy + NODE_WORLD.1),
+            ];
+            for &(cx, cy) in &corners {
+                let (px, py) = camera.world_to_pixel(cx, cy);
+                assert!(
+                    px >= -0.5 && px <= viewport.0 + 0.5,
+                    "corner x {px} inside 0..{}",
+                    viewport.0
+                );
+                assert!(
+                    py >= -0.5 && py <= viewport.1 + 0.5,
+                    "corner y {py} inside 0..{}",
+                    viewport.1
+                );
+            }
+        }
+    }
+
+    /// A larger node extent yields a zoom no greater than a tiny extent's, so
+    /// the framed span strictly accounts for the node body.
+    #[test]
+    fn graph_window_fit_camera_widens_span_for_larger_extent() {
+        let positions = vec![(0.0, 0.0), (320.0, 120.0)];
+        let viewport = (1280.0, 800.0);
+        let small = super::graph_window_fit_camera(&positions, (10.0, 10.0), viewport);
+        let large = super::graph_window_fit_camera(&positions, (200.0, 80.0), viewport);
+        assert!(
+            large.zoom <= small.zoom,
+            "larger extent frames a wider span: {} <= {}",
+            large.zoom,
+            small.zoom
+        );
+        let _ = GraphCamera::default();
     }
 }
 

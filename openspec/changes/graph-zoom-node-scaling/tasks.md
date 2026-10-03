@@ -8,13 +8,13 @@
 
 ## 2. Scene geometry and paint
 
-- [ ] 2.1 `build_scene`: size node w/h as world size × camera zoom; scale radius, border width, port markers, cable width, arrow dimensions, and cluster padding/title with minimum clamps; add a spec-level test asserting node pixel size scales with zoom <!-- agent: api-engineer.build, depends_on: [1.1], touches: [src/gui/graph.rs] -->
-- [ ] 2.2 `paint_scene_in` / `paint_arrow` / `paint_minimap`: apply the minimum clamps, fit labels to the frame (shrink font, then ellipsize), omit labels, port markers, and cluster titles below the legibility threshold, and raise minimap node dots to a ≥ 2 px floor; verify the shape/label tests pass <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/gui/graph.rs] -->
-- [ ] 2.3 `graph_window_fit_camera` passes the node world extent through the shared fit math; update the fit call sites in `src/main.rs` and `src/gui/mod.rs` and the fit tests; verify `cargo test --lib gui::graph` passes <!-- agent: api-engineer.build, depends_on: [1.2, 2.1], touches: [src/gui/graph.rs, src/gui/mod.rs, src/main.rs] -->
+- [x] 2.1 `build_scene`: size node w/h as world size × camera zoom; scale radius, border width, port markers, cable width, arrow dimensions, and cluster padding/title with minimum clamps; add a spec-level test asserting node pixel size scales with zoom <!-- agent: api-engineer.build, depends_on: [1.1], touches: [src/gui/graph.rs] -->
+- [x] 2.2 `paint_scene_in` / `paint_arrow` / `paint_minimap`: apply the minimum clamps, fit labels to the frame (shrink font, then ellipsize), omit labels, port markers, and cluster titles below the legibility threshold, and raise minimap node dots to a ≥ 2 px floor; verify the shape/label tests pass <!-- agent: layout-designer-engineer.build, depends_on: [2.1], touches: [src/gui/graph.rs] -->
+- [x] 2.3 `graph_window_fit_camera` passes the node world extent through the shared fit math; update the fit call sites in `src/main.rs` and `src/gui/mod.rs` and the fit tests; verify `cargo test --lib gui::graph` passes <!-- agent: api-engineer.build, depends_on: [1.2, 2.1], touches: [src/gui/graph.rs, src/gui/mod.rs, src/main.rs] -->
 
 ## 3. Interaction
 
-- [ ] 3.1 `handle_graph_window_frame`: hit-test against world-space node extents (drop the `/ zoom` conversion) plus a minimum pixel hit size; update the `seed_graph_camera` literal; verify handler tests cover clicks at zoom 0.1 and zoom 2.0 <!-- agent: rusty-engineer.build, depends_on: [1.2, 1.3], touches: [src/handler.rs] -->
+- [x] 3.1 `handle_graph_window_frame`: hit-test against world-space node extents (drop the `/ zoom` conversion) plus a minimum pixel hit size; update the `seed_graph_camera` literal; verify handler tests cover clicks at zoom 0.1 and zoom 2.0 <!-- agent: rusty-engineer.build, depends_on: [1.2, 1.3], touches: [src/handler.rs] -->
 
 ## 4. Regression coverage
 
