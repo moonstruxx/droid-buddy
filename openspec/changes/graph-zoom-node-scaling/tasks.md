@@ -19,9 +19,9 @@
 ## 4. Regression coverage
 
 - [x] 4.1 Cross-layer regression over the scale anchor: no node overlap at every zoom preset on the column arrangement, labels omitted below the legibility threshold, and hit-testing at low and high zoom; verify `cargo test` passes <!-- agent: horst-engineer.build, depends_on: [2.1, 2.2, 2.3, 3.1], touches: [src/regression.rs] -->
-- [ ] 4.2 Fix the cluster-title legibility gate: `paint_scene_in` clamps the title font up to the legibility floor, so a title still paints when every frame is below the threshold; omit the title below the threshold and verify the 4.1 reproducer (`regression_graph_cluster_titles_omitted_below_legibility_threshold`) passes <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/gui/graph.rs] -->
-- [ ] 4.3 Un-ignore the cluster-title regression test and consolidate the anchor-loading regression tests so the scale anchor is loaded once, then verify the full `cargo test --locked` suite passes <!-- agent: horst-engineer.build, depends_on: [4.2], touches: [src/regression.rs] -->
-- [ ] 4.4 Update `gui::tests::center_graph_camera_centers_nodes_in_the_real_pane` (src/gui/mod.rs) to the extent-aware centering contract introduced by task 1.3 and verify `cargo test --lib gui` passes <!-- agent: api-engineer.build, depends_on: [1.3], touches: [src/gui/mod.rs] -->
+- [x] 4.2 Fix the cluster-title legibility gate: `paint_scene_in` clamps the title font up to the legibility floor, so a title still paints when every frame is below the threshold; omit the title below the threshold and verify the 4.1 reproducer (`regression_graph_cluster_titles_omitted_below_legibility_threshold`) passes <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/gui/graph.rs] -->
+- [x] 4.3 Un-ignore the cluster-title regression test and consolidate the anchor-loading regression tests so the scale anchor is loaded once, then verify the full `cargo test --locked` suite passes <!-- agent: horst-engineer.build, depends_on: [4.2], touches: [src/regression.rs] -->
+- [x] 4.4 Update `gui::tests::center_graph_camera_centers_nodes_in_the_real_pane` (src/gui/mod.rs) to the extent-aware centering contract introduced by task 1.3 and verify `cargo test --lib gui` passes <!-- agent: api-engineer.build, depends_on: [1.3], touches: [src/gui/mod.rs] -->
 
 ## 5. Verification
 
