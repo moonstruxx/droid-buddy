@@ -8,7 +8,7 @@ use winit::keyboard::NamedKey;
 #[cfg(test)]
 use crate::gui::{camera_zoom_about, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 #[cfg(test)]
-use crate::gui::{PanelsFrame, PhysicalFrame, PickerFrame, ViewerFrame};
+use crate::gui::{PhysicalFrame, PickerFrame, ViewerFrame};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyCode {
@@ -192,46 +192,6 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
         let _ = ZOOM_SENSITIVITY;
     }
     let _ = WindowEvent::RedrawRequested;
-}
-
-#[cfg(test)]
-pub(crate) fn handle_panels_frame(frame: PanelsFrame, app: &mut crate::app::App) {
-    app.hovered_component = frame.hovered;
-    if let Some(idx) = frame.clicked {
-        let token = app
-            .patch
-            .as_ref()
-            .and_then(|p| p.hw_components.get(idx))
-            .map(|c| c.id.clone());
-        if let Some(token) = token {
-            if !app.processing_paused {
-                if let Some(patch) = &mut app.patch {
-                    if let Some(comp) = patch.hw_components.get_mut(idx) {
-                        toggle_component(comp);
-                        app.status_message = format!("Toggled: {}", comp.label);
-                    }
-                }
-            }
-            app.select_component(token);
-        }
-        app.open_view(crate::app::ViewType::Physical);
-    }
-    if let Some(delta) = frame.scroll {
-        if let Some(idx) = frame.hovered {
-            if !app.processing_paused {
-                if let Some(patch) = &mut app.patch {
-                    if let Some(comp) = patch.hw_components.get_mut(idx) {
-                        let delta_val = delta * ZOOM_SENSITIVITY * 10.0;
-                        if let crate::patch::ComponentState::Value(v) = comp.state {
-                            comp.state = crate::patch::ComponentState::Value(
-                                (v + delta_val).clamp(0.0, 1.0),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -7322,70 +7282,6 @@ mod tests {
             &mut app
         ));
         assert!(app.prefix.is_none(), "Esc cancels the armed prefix");
-    }
-
-    #[test]
-    fn panels_frame_hover_sets_hovered_component() {
-        let mut app = app_with_fixture();
-        handle_panels_frame(
-            PanelsFrame {
-                hovered: Some(1),
-                ..PanelsFrame::default()
-            },
-            &mut app,
-        );
-        assert_eq!(app.hovered_component, Some(1));
-    }
-
-    #[test]
-    fn panels_frame_click_toggles_and_selects() {
-        let mut app = app_with_fixture();
-        assert!(matches!(
-            app.patch.as_ref().unwrap().hw_components[0].state,
-            ComponentState::Off
-        ));
-        handle_panels_frame(
-            PanelsFrame {
-                clicked: Some(0),
-                ..PanelsFrame::default()
-            },
-            &mut app,
-        );
-        assert!(matches!(
-            app.patch.as_ref().unwrap().hw_components[0].state,
-            ComponentState::On
-        ));
-        assert_eq!(
-            app.status_message,
-            format!(
-                "Toggled: {}",
-                app.patch.as_ref().unwrap().hw_components[0].label
-            )
-        );
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
-    }
-
-    #[test]
-    fn panels_frame_scroll_adjusts_knob_value() {
-        let content = "[pot]\n    pot = P1.1\n    output = _X\n";
-        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        let mut app = App::new();
-        app.patch = Some(patch);
-        app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
-
-        let expected_delta = 1.0 * ZOOM_SENSITIVITY * 10.0;
-        handle_panels_frame(
-            PanelsFrame {
-                hovered: Some(0),
-                scroll: Some(1.0),
-                ..PanelsFrame::default()
-            },
-            &mut app,
-        );
-        match app.patch.as_ref().unwrap().hw_components[0].state {
-            ComponentState::Value(v) => assert!((v - expected_delta).abs() < 1e-6),
-            _ => panic!("expected Value state"),
-        }
     }
 
     #[test]

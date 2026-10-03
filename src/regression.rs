@@ -14,7 +14,7 @@ use crate::handler::key_modifiers;
 use crate::handler::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::Rect;
-use crate::app::{App, SourceViewMode, ViewerFocus};
+use crate::app::{App, SourceViewMode, ViewType, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphOptions};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
@@ -1357,4 +1357,78 @@ fn regression_graph_anchor_hit_testing_low_and_high_zoom() {
         app.hovered_graph_node, None,
         "a click in the gap between two node frames selects nothing"
     );
+}
+
+// ── retire-panels-surface (task 3.2): no Panels surface remains ───────────
+//
+// The compile-time half of this guard is the deletion itself: `src/gui/panels.rs`
+// and its wiring (`mod panels;` + the `PanelsFrame` re-export) are gone, and
+// `handle_panels_frame` with the `PanelsFrame` import is gone from
+// `src/handler.rs`. Those are unobservable at runtime — a reintroduced module
+// or handler is caught by the build (`-D warnings` turns the resulting
+// dead-code / unused-import lints into failures), not by an `assert!`. What a
+// *runtime* regression can pin is the help surface, which is what this test
+// covers.
+
+/// Re-introducing a `Panels`/`Physical` `HelpView` variant (or dropping
+/// `ModuleUi`) must fail to compile: this match has no wildcard arm, so any
+/// change to the variant set breaks the build rather than silently passing.
+#[test]
+fn regression_no_panels_help_view_variants() {
+    use crate::help::HelpView;
+
+    let variants = [
+        HelpView::ModuleUi,
+        HelpView::Viewer,
+        HelpView::Graph,
+        HelpView::Validation,
+        HelpView::Optimizer,
+        HelpView::Picker,
+    ];
+
+    // Exhaustive, wildcard-free: the match below is the compile-time tripwire.
+    for view in variants {
+        let title = match view {
+            HelpView::ModuleUi => view.title(),
+            HelpView::Viewer => view.title(),
+            HelpView::Graph => view.title(),
+            HelpView::Validation => view.title(),
+            HelpView::Optimizer => view.title(),
+            HelpView::Picker => view.title(),
+        };
+        assert!(!title.is_empty(), "every help view has a border title");
+    }
+
+    // The module UI is the single merged hardware view: `Panels`/`Physical` no
+    // longer exist as separate variants, so no title may resurface the retired
+    // "Panels" surface name.
+    assert_eq!(HelpView::ModuleUi.title(), "Module UI");
+}
+
+/// The module-UI pane resolves to `HelpView::ModuleUi`, and that view carries
+/// a non-empty keybinding table including the pane-management keys — so the
+/// help modal describes the surface the user is actually in (startup focuses
+/// the module UI in the left big pane).
+#[test]
+fn regression_module_ui_help_view_resolves_and_has_table() {
+    use crate::help::{active_view, keybindings, HelpView};
+
+    // Startup default: module UI (`ViewType::Physical`) in `BigLeft`, focused.
+    let app = App::new();
+    assert_eq!(
+        app.layout.pane(app.layout.focus).view,
+        Some(ViewType::Physical)
+    );
+    assert_eq!(active_view(&app), HelpView::ModuleUi);
+
+    let table = keybindings(HelpView::ModuleUi);
+    assert!(!table.is_empty(), "module-ui help table must not be empty");
+
+    // Pane-management keys must survive the merge from the deleted panels view.
+    for expected in ["Tab/Shift+Tab", "z", "Alt+b", "Alt+s", "r", "Esc"] {
+        assert!(
+            table.iter().any(|(k, _)| *k == expected),
+            "module-ui help table must document the `{expected}` pane key"
+        );
+    }
 }

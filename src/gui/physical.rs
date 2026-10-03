@@ -433,8 +433,7 @@ pub(crate) fn paint_physical(
 /// face (a bottom-up vertical LED strip with the label and percentage right
 /// of the track), mirroring `ui.rs::render_physical_cell` /
 /// `render_fader_track` / the skeleton cell rendering. Shared with the
-/// panels pane (`panels::paint_panels`), which draws the same cells inside
-/// its bordered container.
+/// module UI's faceplate cells.
 pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, paused: bool) {
     let rect = cell.rect;
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
