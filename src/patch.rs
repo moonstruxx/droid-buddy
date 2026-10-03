@@ -613,6 +613,54 @@ impl Patch {
         Self::derived_label(token)
     }
 
+    /// Pure explicit HW label lookup: stored label at the effective shift layer
+    /// (falling back to layer 1), then the preamble label — with NO derived
+    /// fallback. Returns `None` when neither exists, so callers (e.g. the
+    /// signal-flow label guess) can distinguish explicitly labeled tokens from
+    /// derived ones (label-guess-and-screen-scale 1.1).
+    pub fn explicit_hw_label(
+        &self,
+        token: &str,
+        shift: u8,
+        layers_enabled: bool,
+        max_shift_layer: u8,
+        hw_store: &HashMap<String, BTreeMap<u8, String>>,
+    ) -> Option<String> {
+        let effective = Self::effective_shift(shift, layers_enabled, max_shift_layer);
+        if let Some(per_token) = hw_store.get(token) {
+            if let Some(v) = per_token.get(&effective).and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            }) {
+                return Some(v);
+            }
+            if effective != 1 {
+                if let Some(v) = per_token.get(&1).and_then(|s| {
+                    let t = s.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                }) {
+                    return Some(v);
+                }
+            }
+        }
+        self.preamble_labels.get(token).and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+    }
+
     /// Pure circuit label lookup: stored per-instance override if present and
     /// non-empty, otherwise `None` (caller falls back to circuit name).
     pub fn circuit_label(

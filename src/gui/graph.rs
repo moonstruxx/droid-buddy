@@ -23,15 +23,23 @@ fn clamp01(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
-/// Legibility floor for labels, port markers, and cluster titles: below this
-/// frame height a node renders as a bare frame with no text or markers, so a
-/// zoomed-out graph is not a wall of overlapping text
-/// (graph-zoom-node-scaling, design decision 3).
+/// Legibility floor for port markers: below this frame height a node paints
+/// without its ports, so a zoomed-out graph is not a wall of overlapping
+/// chrome (graph-zoom-node-scaling, design decision 3). Node labels use their
+/// own rule — see [`fit_label`] and [`NODE_LABEL_SIZE`]
+/// (label-guess-and-screen-scale, design decision 4).
 const LOD_MIN_NODE_H: f32 = 12.0;
-/// Smallest label font the painter will use; below it the label is omitted.
+/// Fixed screen-space font size (points) for node labels, independent of the
+/// camera zoom: the label never shrinks when zooming out nor grows when
+/// zooming in (label-guess-and-screen-scale, design decision 4). Matches the
+/// cluster-title base size, so a zoomed-in graph keeps today's appearance.
+const NODE_LABEL_SIZE: f32 = 12.0;
+/// Cluster-title legibility floor: below the zoom-derived size the cluster
+/// title is omitted (graph-zoom-node-scaling, design decision 3).
 const MIN_LABEL_PX: f32 = 7.0;
 /// Monospace advance as a fraction of the font size (egui's monospace face is
-/// close to 0.6 em), used to derive a width-fitting font size.
+/// close to 0.6 em), used to budget the characters that fit a frame at the
+/// fixed [`NODE_LABEL_SIZE`] font.
 const MONO_ADVANCE: f32 = 0.6;
 /// Cluster title font at zoom 1.0; scales with the derived zoom.
 const CLUSTER_TITLE_PX: f32 = 12.0;
@@ -53,46 +61,36 @@ fn spec_zoom(spec: &SceneSpec) -> f32 {
         .unwrap_or(1.0)
 }
 
-/// Shrink-then-ellipsize a label to its node frame (design decision 3): pick
-/// the font as the smaller of the frame-height size and the width-derived size
-/// (`w / (advance × chars)`), then ellipsize to the characters that fit at that
-/// font. `None` when the frame is below the legibility threshold or even the
-/// minimum font cannot hold one character, so the caller omits the label.
-fn fit_label(label: &str, w: f32, h: f32) -> Option<(String, f32)> {
-    if h < LOD_MIN_NODE_H || w <= 0.0 || label.is_empty() {
+/// Fit a node label to its frame at the fixed [`NODE_LABEL_SIZE`] font
+/// (label-guess-and-screen-scale, design decision 4): the font never scales
+/// with the camera zoom, text wider than the frame is ellipsized to the
+/// characters that fit at that fixed size, and a frame narrower than one
+/// character of the font yields `None` so the caller omits the label.
+/// `None` also for an empty label or a non-positive width.
+fn fit_label(label: &str, w: f32) -> Option<(String, f32)> {
+    if w <= 0.0 || label.is_empty() {
         return None;
     }
-    let chars = label.chars().count().max(1) as f32;
-    let font_by_height = h * 0.42;
-    // Reserve one ellipsis cell when the title does not fit at the frame font,
-    // so the width-derived font is computed against `chars + 1` and the
-    // resulting text always fits with the ellipsis appended.
-    let base_font = font_by_height.min(w / (MONO_ADVANCE * chars));
-    let overflows = base_font < font_by_height - 1e-3;
-    let font = if overflows {
-        font_by_height.min(w / (MONO_ADVANCE * (chars + 1.0)))
-    } else {
-        base_font
-    };
-    if font < MIN_LABEL_PX {
-        return None;
+    let char_w = MONO_ADVANCE * NODE_LABEL_SIZE;
+    if w < char_w {
+        return None; // narrower than one character of the label font
     }
-    let max_chars = (w / (MONO_ADVANCE * font)).floor().max(1.0) as usize;
-    let fitted = if overflows {
-        ellipsize_to(label, max_chars)
+    let max_chars = (w / char_w).floor() as usize;
+    if label.chars().count() <= max_chars {
+        Some((label.to_string(), NODE_LABEL_SIZE))
     } else {
-        label.to_string()
-    };
-    Some((fitted, font))
+        Some((ellipsize_to(label, max_chars), NODE_LABEL_SIZE))
+    }
 }
 
 /// Ellipsize `s` so the result fits `max_chars`: keeps `max_chars - 1`
-/// characters and appends `…`, so the total never exceeds the budget.
+/// characters and appends `…`, so the total never exceeds the budget. A
+/// one-character budget is the ellipsis alone.
 fn ellipsize_to(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    let keep = max_chars.saturating_sub(1).max(1);
+    let keep = max_chars - 1;
     let mut out: String = s.chars().take(keep).collect();
     out.push('\u{2026}');
     out
@@ -216,9 +214,11 @@ pub(crate) fn paint_scene_in(
                 egui::StrokeKind::Middle,
             );
         }
-        // Port markers and labels are level-of-detail chrome: below the
-        // legibility threshold the node renders as a bare frame (design
-        // decision 3).
+        // Port markers are level-of-detail chrome: below the legibility
+        // threshold the node paints without them (design decision 3). Labels
+        // follow their own rule — fixed font, ellipsized to the frame,
+        // hidden below one character of width (label-guess-and-screen-scale,
+        // design decision 4).
         let show_chrome = node.h >= LOD_MIN_NODE_H;
         let port_r = (node.h * 0.16).clamp(1.0, 8.0);
         let mid_y = node.y + node.h / 2.0;
@@ -228,7 +228,7 @@ pub(crate) fn paint_scene_in(
         if show_chrome && node.output_port {
             painter.circle_filled(egui::pos2(node.x + node.w, mid_y), port_r, rgb(node.border));
         }
-        if let Some((text, px)) = fit_label(&node.label, node.w, node.h) {
+        if let Some((text, px)) = fit_label(&node.label, node.w) {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -884,10 +884,14 @@ fn build_scene(
                 || report.changed_nodes.iter().any(|c| c.id == node.id)
         });
 
+        // Label chain (label-guess-and-screen-scale 1.3): stored label →
+        // tree-derived guess (the `guessed_labels` cache — never a per-frame
+        // walk) → raw circuit name / numbered instance title.
         let title = circuit_store
             .get(&node.id)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .or_else(|| app.guessed_labels.get(&node.id).cloned())
             .unwrap_or_else(|| {
                 if node.kind == NodeKind::Circuit {
                     instance_title(
@@ -1692,6 +1696,36 @@ mod scene_builder_tests {
     }
 
     #[test]
+    fn scene_labels_render_guessed_label_without_store_entry() {
+        // label-guess-and-screen-scale 1.3: with no stored label, the node
+        // title comes from the `guessed_labels` cache. The cache entry is
+        // primed directly (no walk runs here), proving the scene build reads
+        // the cache instead of walking the graph per frame.
+        let mut app = chain_app();
+        app.guessed_labels
+            .insert(NodeId::circuit("osc", 0), "Guessed Osc".into());
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].label, "Guessed Osc");
+        // The unlabeled, unguessed node keeps its raw circuit name.
+        assert_eq!(s.nodes[0].label, "clocktool");
+    }
+
+    #[test]
+    fn scene_labels_stored_label_beats_guessed_label() {
+        // Chain order: a stored label always wins over a cached guess.
+        let mut app = chain_app();
+        app.current_patch_path = Some(Path::new("fixture.ini").to_path_buf());
+        app.label_store
+            .patch_labels_mut(Path::new("fixture.ini"))
+            .circuits
+            .insert(LabelStore::encode_node_id("osc", 0), "Stored Osc".into());
+        app.guessed_labels
+            .insert(NodeId::circuit("osc", 0), "Guessed Osc".into());
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].label, "Stored Osc");
+    }
+
+    #[test]
     fn scene_node_kind_frames_use_kind_tokens() {
         let graph = Graph {
             nodes: vec![
@@ -2161,6 +2195,8 @@ mod window_paint_tests {
     /// edges, arrowheads, minimap) without depending on egui mesh internals.
     struct PaintOutput {
         labels: Vec<String>,
+        /// The `FontId` each label was painted with, parallel to `labels`.
+        label_fonts: Vec<egui::FontId>,
         rects: Vec<egui::epaint::RectShape>,
         circles: usize,
         beziers: usize,
@@ -2206,13 +2242,26 @@ mod window_paint_tests {
             paint_scene(ui, canvas, scene, &[]);
         });
         let mut labels = Vec::new();
+        let mut label_fonts = Vec::new();
         let mut rects = Vec::new();
         let mut circles = 0usize;
         let mut beziers = 0usize;
         let mut polygons = 0usize;
         for cs in &full_output.shapes {
             match &cs.shape {
-                egui::epaint::Shape::Text(t) => labels.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Text(t) => {
+                    labels.push(t.galley.text().to_string());
+                    // The painter lays every label out as a single-section
+                    // `LayoutJob`, so the section format carries the FontId.
+                    label_fonts.push(
+                        t.galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|s| s.format.font_id.clone())
+                            .unwrap_or_default(),
+                    );
+                }
                 egui::epaint::Shape::Rect(r) => rects.push(r.clone()),
                 egui::epaint::Shape::Circle(_) => circles += 1,
                 egui::epaint::Shape::CubicBezier(_) => beziers += 1,
@@ -2223,6 +2272,7 @@ mod window_paint_tests {
         full_output.textures_delta.clear();
         PaintOutput {
             labels,
+            label_fonts,
             rects,
             circles,
             beziers,
@@ -2239,34 +2289,146 @@ mod window_paint_tests {
     // ── graph-zoom-node-scaling: level of detail (task 2.2) ─────────────────
 
     #[test]
-    fn fit_label_shrinks_to_frame_and_ellipsizes() {
-        // A title wider than its frame at the frame-derived font shrinks the
-        // font to fit the width, then ellipsizes the characters that still do
-        // not fit (design decision 3).
-        let (text, font) = fit_label("resonant_filter", 100.0, 80.0).expect("fits");
-        assert!(
-            font < 80.0 * 0.42,
-            "width-driven font must beat the height font: {font}"
-        );
+    fn fit_label_fixed_font_ellipsizes_wider_titles() {
+        // A title wider than its frame is ellipsized to the characters that fit
+        // at the fixed NODE_LABEL_SIZE font — the font never shrinks to fit
+        // (spec "Level of detail at extreme zoom").
+        let (text, font) = fit_label("resonant_filter", 100.0).expect("fits");
+        assert_eq!(font, NODE_LABEL_SIZE);
         assert!(text.ends_with('\u{2026}'), "ellipsized: {text:?}");
         assert!(
             text.chars().count() as f32 * MONO_ADVANCE * font <= 100.0 + 1e-3,
-            "ellipsized text fits the frame width: {text:?} at {font} px"
+            "ellipsized text fits the frame width: {text:?} at {font} pt"
         );
 
-        // A title that fits is returned unchanged at the height-derived font.
-        let (text, font) = fit_label("osc", 400.0, 80.0).expect("fits");
+        // A title that fits is returned unchanged at the same fixed font.
+        let (text, font) = fit_label("osc", 400.0).expect("fits");
         assert_eq!(text, "osc");
-        assert_eq!(font, 80.0 * 0.42);
+        assert_eq!(font, NODE_LABEL_SIZE);
     }
 
     #[test]
-    fn fit_label_hidden_below_legibility_threshold() {
-        // A frame below the legibility threshold paints no label; nor does one
-        // too small to hold even the minimum font.
-        assert!(fit_label("osc", 200.0, LOD_MIN_NODE_H - 1.0).is_none());
-        assert!(fit_label("osc", 0.0, 80.0).is_none());
-        assert!(fit_label("", 200.0, 80.0).is_none());
+    fn fit_label_hidden_below_one_character_width() {
+        // A frame narrower than one character of the fixed font paints no
+        // label; nor does a zero width or an empty label.
+        let char_w = MONO_ADVANCE * NODE_LABEL_SIZE;
+        assert!(fit_label("osc", char_w * 0.9).is_none());
+        assert!(fit_label("osc", 0.0).is_none());
+        assert!(fit_label("", 400.0).is_none());
+        // Exactly one character of budget: the ellipsis alone fills it.
+        let (text, font) = fit_label("osc", char_w).expect("one character shows");
+        assert_eq!(text, "\u{2026}");
+        assert_eq!(font, NODE_LABEL_SIZE);
+    }
+
+    /// Spec "Label size independent of zoom": every painted node label uses the
+    /// same fixed font at camera zoom 0.125, 1.0, and 2.0 — node frames scale
+    /// with the camera, the label font does not.
+    #[test]
+    fn node_label_font_size_is_identical_across_zoom() {
+        for &zoom in &[0.125_f32, 1.0, 2.0] {
+            let mut app = chain_app();
+            app.graph_camera = Some(GraphCamera {
+                zoom,
+                pan: (0.0, 0.0),
+            });
+            let scene = build_scene_spec(
+                &app,
+                theme(),
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+            )
+            .expect("scene present");
+            let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+            assert!(
+                !out.labels.is_empty(),
+                "a label paints at zoom {zoom}: {:?}",
+                out.labels
+            );
+            assert_eq!(out.labels.len(), out.label_fonts.len());
+            for (label, font) in out.labels.iter().zip(&out.label_fonts) {
+                assert_eq!(
+                    *font,
+                    egui::FontId::monospace(NODE_LABEL_SIZE),
+                    "zoom {zoom}: label {label:?} must paint at the fixed font"
+                );
+            }
+        }
+    }
+
+    /// Spec "Long label fits its frame": a title wider than its frame is
+    /// ellipsized to the frame, and the font stays at the fixed size.
+    #[test]
+    fn node_label_ellipsizes_at_medium_frame() {
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![NodeSpec {
+                x: 10.0,
+                y: 10.0,
+                w: 100.0,
+                h: 40.0,
+                radius: 1.0,
+                fill: (20, 20, 20),
+                border: (200, 200, 200),
+                border_width: 1.0,
+                label: "resonant_filter".into(),
+                label_color: (255, 255, 255),
+                circuit: "resonant_filter".into(),
+                instance_index: 0,
+                input_port: false,
+                output_port: false,
+            }],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let out = paint(Some(&scene), egui::vec2(400.0, 200.0));
+        assert_eq!(out.labels.len(), 1, "one node label: {:?}", out.labels);
+        let text = &out.labels[0];
+        assert!(
+            text.ends_with('\u{2026}'),
+            "ellipsized rather than overflowing: {text:?}"
+        );
+        assert_eq!(
+            out.label_fonts[0],
+            egui::FontId::monospace(NODE_LABEL_SIZE),
+            "fitting never changes the font size"
+        );
+        assert!(
+            text.chars().count() as f32 * MONO_ADVANCE * NODE_LABEL_SIZE <= 100.0 + 1e-3,
+            "painted text fits the frame: {text:?}"
+        );
+    }
+
+    /// Spec "Labels hidden when frames are too small": a frame narrower than
+    /// one character of the fixed font renders with no title text.
+    #[test]
+    fn node_label_hidden_at_one_character_frame() {
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![NodeSpec {
+                x: 10.0,
+                y: 10.0,
+                w: MONO_ADVANCE * NODE_LABEL_SIZE * 0.9,
+                h: 40.0,
+                radius: 1.0,
+                fill: (20, 20, 20),
+                border: (200, 200, 200),
+                border_width: 1.0,
+                label: "osc".into(),
+                label_color: (255, 255, 255),
+                circuit: "osc".into(),
+                instance_index: 0,
+                input_port: false,
+                output_port: false,
+            }],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let out = paint(Some(&scene), egui::vec2(400.0, 200.0));
+        assert!(
+            out.labels.is_empty(),
+            "no label below one character: {:?}",
+            out.labels
+        );
     }
 
     fn node_origins(out: &PaintOutput, scene: &SceneSpec) -> Vec<f32> {
@@ -2306,10 +2468,10 @@ mod window_paint_tests {
         .expect("scene present");
         let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
 
-        // graph-zoom-node-scaling design decision 3: every label is fitted to
-        // its frame (shrunk, then ellipsized), so a short-title node may paint
-        // "o…" at the fit zoom. Assert the painted labels carry the identity
-        // prefixes rather than exact full names.
+        // label-guess-and-screen-scale design decision 4: labels paint at a
+        // fixed font and are ellipsized only when wider than the frame, so a
+        // title may paint "o…" at the fit zoom. Assert the painted labels carry
+        // the identity prefixes rather than exact full names.
         assert!(
             out.labels.iter().any(|l| l.starts_with("clockto")),
             "clocktool label: {:?}",
@@ -2324,10 +2486,8 @@ mod window_paint_tests {
         assert_eq!(out.polygons, 1, "one direction arrow");
         assert_eq!(out.circles, 2, "output + input port markers");
 
-        // graph-zoom-node-scaling design decision 3: a label fitted to its
-        // frame may be ellipsized (the fit camera's zoom leaves the long title
-        // shorter than its raw form), so assert containment rather than
-        // equality.
+        // A label wider than its frame at the fixed font may be ellipsized, so
+        // the label assertions above match prefixes rather than full names.
 
         let origins = node_origins(&out, &scene);
         assert_eq!(origins.len(), 2, "both node bodies drawn: {origins:?}");
@@ -2374,9 +2534,9 @@ mod window_paint_tests {
             .iter()
             .filter(|l| l.contains("clocktool"))
             .count();
-        // graph-zoom-node-scaling decision 3: the node label is fitted to its
-        // frame and may be ellipsized, so the identity check matches on the
-        // label prefix rather than the full name.
+        // label-guess-and-screen-scale decision 4: the node label keeps the
+        // fixed font and may be ellipsized to its frame, so the identity check
+        // matches on the label prefix rather than the full name.
         assert!(
             out.labels.iter().any(|l| l.starts_with("clockto")),
             "node label painted (possibly ellipsized): {:?}",
@@ -2500,13 +2660,15 @@ mod window_paint_tests {
         );
     }
 
-    /// A node frame below the legibility threshold paints as a bare frame: no
-    /// label text and no port markers (graph-zoom-node-scaling design decision
-    /// 3 / spec "Labels hidden when frames are too small").
+    /// Port markers drop below the legibility threshold (graph-zoom-node-scaling
+    /// design decision 3); node labels follow their own rule — painted at the
+    /// fixed font whenever the frame is at least one character wide, hidden
+    /// below it (label-guess-and-screen-scale design decision 4 / spec "Labels
+    /// hidden when frames are too small").
     #[test]
-    fn window_paint_omits_label_and_ports_below_threshold() {
-        // Bare NodeSpec at a sub-threshold frame height, with both ports set,
-        // so only the LOD rule can suppress them.
+    fn window_paint_omits_ports_below_threshold_and_labels_below_one_char() {
+        // Bare NodeSpec below the port threshold with both ports set: the wide
+        // frame still carries its label — labels no longer gate on height.
         let small = NodeSpec {
             x: 0.0,
             y: 0.0,
@@ -2531,13 +2693,25 @@ mod window_paint_tests {
         };
         let out = paint(Some(&scene), egui::vec2(400.0, 200.0));
         assert!(
-            out.labels.is_empty(),
-            "no label below the threshold: {:?}",
+            out.labels.iter().any(|l| l.contains("visible_title")),
+            "labels gate on width, not height: {:?}",
             out.labels
         );
         assert_eq!(out.circles, 0, "no port markers below the threshold");
 
-        // The same node above the threshold paints both.
+        // Narrower than one character of the fixed font: no label at all,
+        // even with a frame height above the port threshold.
+        let mut narrow = scene.clone();
+        narrow.nodes[0].w = MONO_ADVANCE * NODE_LABEL_SIZE * 0.9;
+        narrow.nodes[0].h = LOD_MIN_NODE_H * 2.0;
+        let out = paint(Some(&narrow), egui::vec2(400.0, 200.0));
+        assert!(
+            out.labels.is_empty(),
+            "no label below one character: {:?}",
+            out.labels
+        );
+
+        // The same node above the port threshold with a wide frame paints both.
         let mut large = scene.clone();
         large.nodes[0].h = LOD_MIN_NODE_H * 2.0;
         let out = paint(Some(&large), egui::vec2(400.0, 200.0));
@@ -2832,9 +3006,27 @@ mod kittest_tests {
 
         // Repaint and resolve a graph node by its AccessKit label. `get_by_label`
         // panics when the label is absent, so a clean return proves the repaint
-        // exposed the node.
+        // exposed the node. The arpeggio circuit carries no stored label, so
+        // since label-guess-and-screen-scale its title is the cached
+        // tree-derived guess (a preamble port label upstream), not the raw
+        // circuit name — derive the expected label from the same chain.
+        let arpeggio = app
+            .graph
+            .as_ref()
+            .expect("graph open")
+            .nodes
+            .iter()
+            .find(|n| n.circuit == "arpeggio")
+            .expect("arpeggio node")
+            .id
+            .clone();
+        let want = app
+            .guessed_labels
+            .get(&arpeggio)
+            .cloned()
+            .unwrap_or_else(|| "arpeggio".to_string());
         let harness = render_graph_queryable(&app);
-        harness.get_by_label("arpeggio");
+        harness.get_by_label(&want);
     }
 
     #[test]

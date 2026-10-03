@@ -5,7 +5,7 @@
 //! plus caller-supplied banner clusters into a graph the renderer can draw and
 //! the layout solver can position.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
 use crate::geometry::{BindingFeatures, RackGeometry, WiringContext, WiringOutlierScorer};
@@ -412,6 +412,137 @@ impl Graph {
         out
     }
 
+    /// Derive display labels for unlabeled circuits from the signal-flow tree
+    /// (label-guess-and-screen-scale 1.1): for each circuit node without a
+    /// stored label, walk upstream (root excluded) in deterministic BFS order
+    /// and return the first explicit label found — a stored label of an
+    /// upstream circuit, or the stored-or-preamble label of the port token on
+    /// the register edge (`_REG:{token}` cable) reaching an upstream
+    /// controller/jack node. Derived names never count: circuits without a
+    /// store entry and tokens without a stored-or-preamble label are skipped.
+    /// Nodes with no explicit label upstream are absent from the map; callers
+    /// fall back to the raw circuit name (chain: store → guess → raw name).
+    ///
+    /// The walk mirrors `upstream_dependencies` (controller/input-jack leaves
+    /// are never expanded: their incoming LED-write edges are not
+    /// dependencies), so visit order matches it. Cycle-safe (visited-once)
+    /// and deterministic: the reverse adjacency is built once and producers
+    /// are sorted by (node index, cable). Cost is one BFS per circuit node —
+    /// milliseconds at DROID scale — and callers cache the map per graph
+    /// build, never per frame.
+    pub fn guess_labels(
+        &self,
+        patch: &Patch,
+        circuit_store: &HashMap<NodeId, String>,
+        hw_store: &HashMap<String, BTreeMap<u8, String>>,
+        shift: u8,
+        layers_enabled: bool,
+        max_shift_layer: u8,
+    ) -> HashMap<NodeId, String> {
+        // Reverse adjacency, built once: sink index -> (source index, cable).
+        let mut node_index: HashMap<&NodeId, usize> = HashMap::new();
+        for (i, node) in self.nodes.iter().enumerate() {
+            node_index.entry(&node.id).or_insert(i);
+        }
+        let mut incoming: HashMap<usize, Vec<(usize, &str)>> = HashMap::new();
+        for edge in &self.edges {
+            let (Some(&src), Some(&sink)) =
+                (node_index.get(&edge.source), node_index.get(&edge.sink))
+            else {
+                continue;
+            };
+            incoming
+                .entry(sink)
+                .or_default()
+                .push((src, edge.cable.as_str()));
+        }
+        for producers in incoming.values_mut() {
+            producers.sort_unstable();
+            producers.dedup();
+        }
+
+        let mut out = HashMap::new();
+        let roots: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.kind == NodeKind::Circuit)
+            .map(|(i, _)| i)
+            .collect();
+        for root in roots {
+            // A stored label always wins: guessed entries only cover circuits
+            // without one.
+            if patch
+                .circuit_label(&self.nodes[root].id, circuit_store)
+                .is_some()
+            {
+                continue;
+            }
+            // BFS over (node, discovery cable): the cable is the register
+            // edge a controller/jack node was reached through, carrying its
+            // port token (`_REG:{token}`). The root carries none.
+            let mut visited: HashSet<usize> = HashSet::new();
+            let mut queue: VecDeque<(usize, Option<&str>)> = VecDeque::new();
+            visited.insert(root);
+            queue.push_back((root, None));
+            let mut found: Option<String> = None;
+            while let Some((idx, via)) = queue.pop_front() {
+                if idx != root {
+                    let node = &self.nodes[idx];
+                    let hit = match node.kind {
+                        NodeKind::Circuit => patch.circuit_label(&node.id, circuit_store),
+                        _ => via
+                            .and_then(|cable| cable.strip_prefix(REG_EDGE_PREFIX))
+                            .and_then(|token| {
+                                patch.explicit_hw_label(
+                                    token,
+                                    shift,
+                                    layers_enabled,
+                                    max_shift_layer,
+                                    hw_store,
+                                )
+                            })
+                            // Defensive fallback for hand-built graphs whose
+                            // non-circuit nodes are reached via cable edges:
+                            // a jack node carries its own token.
+                            .or_else(|| match &node.id {
+                                NodeId::Jack(tok) => patch.explicit_hw_label(
+                                    tok,
+                                    shift,
+                                    layers_enabled,
+                                    max_shift_layer,
+                                    hw_store,
+                                ),
+                                _ => None,
+                            }),
+                    };
+                    if let Some(label) = hit {
+                        found = Some(label);
+                        break;
+                    }
+                }
+                if matches!(
+                    self.nodes[idx].kind,
+                    NodeKind::Controller | NodeKind::InputJack
+                ) {
+                    // Controller/input-jack leaf: never follow incoming edges.
+                    continue;
+                }
+                if let Some(producers) = incoming.get(&idx) {
+                    for &(src, cable) in producers {
+                        if visited.insert(src) {
+                            queue.push_back((src, Some(cable)));
+                        }
+                    }
+                }
+            }
+            if let Some(label) = found {
+                out.insert(self.nodes[root].id.clone(), label);
+            }
+        }
+        out
+    }
+
     /// Edge indices whose endpoints are both in `members` (a node-index set) -
     /// the internal edges of a subgraph (change D task 1.1).
     pub fn internal_edges(&self, members: &HashSet<usize>) -> Vec<usize> {
@@ -596,6 +727,11 @@ fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<Graph
     edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
     edges
 }
+
+/// Cable prefix of register edges (`_REG:{token}`); the token after the prefix
+/// is the port token a controller/jack node was reached through
+/// (label-guess-and-screen-scale 1.1).
+const REG_EDGE_PREFIX: &str = "_REG:";
 
 /// Controller-register prefix letters that map to on-controller register
 /// families (buttons, pots/faders, encoders, switches, LEDs, R). Letters
@@ -1645,6 +1781,156 @@ mod tests {
             .iter()
             .map(|&i| graph.nodes[i].id.clone())
             .collect()
+    }
+
+    // ── label-guess-and-screen-scale 1.1: guess_labels ──────────────────────
+
+    fn hw_store(pairs: &[(&str, u8, &str)]) -> HashMap<String, BTreeMap<u8, String>> {
+        let mut out: HashMap<String, BTreeMap<u8, String>> = HashMap::new();
+        for (token, layer, label) in pairs {
+            out.entry(token.to_string())
+                .or_default()
+                .insert(*layer, label.to_string());
+        }
+        out
+    }
+
+    fn circuit_store(pairs: &[(&str, usize, &str)]) -> HashMap<NodeId, String> {
+        pairs
+            .iter()
+            .map(|(name, idx, label)| (NodeId::circuit(name, *idx), label.to_string()))
+            .collect()
+    }
+
+    /// envelope reads pulser's `_CLK` cable and the `B1.1` button register;
+    /// pulser itself has no register refs, so only envelope can guess.
+    fn guess_patch() -> Patch {
+        Patch::from_ini_str(
+            "# I1: Master In\n\
+             [p2b8]\n\
+             [pulser]\n    output = _CLK\n\
+             [envelope]\n    input = _CLK\n    button = B1.1\n",
+            String::from("t"),
+        )
+        .unwrap()
+    }
+
+    fn guess_graph(patch: &Patch) -> Graph {
+        Graph::build_from_patch(patch, &[], &CostModel::default(), &GraphOptions::default())
+    }
+
+    #[test]
+    fn guess_labels_derives_port_label_through_unlabeled_circuit() {
+        // Spec scenario: envelope is driven through the unlabeled pulser by
+        // controller token B1.1 (stored `[RATC]`) → envelope displays it.
+        // pulser has no upstream, so it stays absent from the map.
+        let patch = guess_patch();
+        let graph = guess_graph(&patch);
+        let hw = hw_store(&[("B1.1", 1, "[RATC]")]);
+        let map = graph.guess_labels(&patch, &HashMap::new(), &hw, 1, true, 4);
+        assert_eq!(
+            map.get(&NodeId::circuit("envelope", 0)).map(String::as_str),
+            Some("[RATC]")
+        );
+        assert!(!map.contains_key(&NodeId::circuit("pulser", 0)));
+    }
+
+    #[test]
+    fn guess_labels_respects_effective_shift_layer() {
+        // The guess reads the stored HW label at the effective layer.
+        let patch = guess_patch();
+        let graph = guess_graph(&patch);
+        let hw = hw_store(&[("B1.1", 1, "[RATC]"), ("B1.1", 2, "[RATC2]")]);
+        let layer1 = graph.guess_labels(&patch, &HashMap::new(), &hw, 1, true, 4);
+        assert_eq!(
+            layer1
+                .get(&NodeId::circuit("envelope", 0))
+                .map(String::as_str),
+            Some("[RATC]")
+        );
+        let layer2 = graph.guess_labels(&patch, &HashMap::new(), &hw, 2, true, 4);
+        assert_eq!(
+            layer2
+                .get(&NodeId::circuit("envelope", 0))
+                .map(String::as_str),
+            Some("[RATC2]")
+        );
+    }
+
+    #[test]
+    fn guess_labels_prefers_nearer_circuit_store_label() {
+        // pulser's stored `Mid` is one hop from envelope; the port label is
+        // two hops away → nearest-first wins.
+        let patch = guess_patch();
+        let graph = guess_graph(&patch);
+        let hw = hw_store(&[("B1.1", 1, "[RATC]")]);
+        let circuits = circuit_store(&[("pulser", 0, "Mid")]);
+        let map = graph.guess_labels(&patch, &circuits, &hw, 1, true, 4);
+        assert_eq!(
+            map.get(&NodeId::circuit("envelope", 0)).map(String::as_str),
+            Some("Mid")
+        );
+    }
+
+    #[test]
+    fn guess_labels_skips_circuits_with_own_store_label() {
+        // A stored label always wins: labeled circuits carry no guess entry.
+        let patch = guess_patch();
+        let graph = guess_graph(&patch);
+        let hw = hw_store(&[("B1.1", 1, "[RATC]")]);
+        let circuits = circuit_store(&[("envelope", 0, "Env"), ("pulser", 0, "Clock")]);
+        let map = graph.guess_labels(&patch, &circuits, &hw, 1, true, 4);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn guess_labels_ignores_derived_names() {
+        // No stored or preamble label anywhere upstream → empty map, so the
+        // caller falls back to raw circuit names (never `Button B1.1`).
+        let patch = Patch::from_ini_str(
+            "[p2b8]\n[pulser]\n    output = _CLK\n\
+             [envelope]\n    input = _CLK\n    button = B1.1\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let graph = guess_graph(&patch);
+        let map = graph.guess_labels(&patch, &HashMap::new(), &HashMap::new(), 1, true, 4);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn guess_labels_uses_preamble_port_label() {
+        // The `# I1: Master In` preamble line labels the jack token, which a
+        // circuit reading `I1` picks up through its `_REG:I1` edge.
+        let patch = Patch::from_ini_str(
+            "# I1: Master In\n[p2b8]\n[jackreader]\n    input = I1\n",
+            String::from("t"),
+        )
+        .unwrap();
+        let graph = guess_graph(&patch);
+        let map = graph.guess_labels(&patch, &HashMap::new(), &HashMap::new(), 1, true, 4);
+        assert_eq!(
+            map.get(&NodeId::circuit("jackreader", 0))
+                .map(String::as_str),
+            Some("Master In")
+        );
+    }
+
+    #[test]
+    fn guess_labels_cycle_safe_and_deterministic() {
+        // The hand-built dependency graph has a root↔c cycle and a controller
+        // reached via `_REG:B1.1`; the walk terminates and repeats identically.
+        let graph = dependency_graph();
+        let patch = guess_patch();
+        let hw = hw_store(&[("B1.1", 1, "[RATC]")]);
+        let first = graph.guess_labels(&patch, &HashMap::new(), &hw, 1, true, 4);
+        let second = graph.guess_labels(&patch, &HashMap::new(), &hw, 1, true, 4);
+        assert_eq!(first, second);
+        // root reaches the controller through ledw; each node resolves once.
+        assert_eq!(
+            first.get(&NodeId::circuit("root", 0)).map(String::as_str),
+            Some("[RATC]")
+        );
     }
 
     /// The walk covers a linear chain (feed → ledw → root), a fork (ledw and

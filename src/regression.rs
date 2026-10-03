@@ -8,6 +8,7 @@
 //! to click hit-testing, plus `[`/`]` split adjustment through handler,
 //! App state, and the rendered layout.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::handler::key_modifiers;
@@ -21,7 +22,7 @@ use crate::layout::{
     local_resettle, node_world_sizes, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS,
     LOCAL_RADIUS,
 };
-use crate::patch::{Patch, ShiftGroup};
+use crate::patch::{NodeId, Patch, ShiftGroup};
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -1018,6 +1019,10 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
 struct AnchorGraph {
     graph: Graph,
     positions: Vec<(f32, f32)>,
+    patch: Patch,
+    /// Tree-derived circuit labels from the anchor's own open (empty stores +
+    /// preamble port labels — label-guess-and-screen-scale 3.1).
+    guessed: HashMap<NodeId, String>,
 }
 
 /// The shared anchor fixture. `open_graph()` runs the same build + solve the
@@ -1039,6 +1044,8 @@ fn anchor_graph() -> &'static AnchorGraph {
         AnchorGraph {
             graph: app.graph.expect("anchor graph built"),
             positions: app.graph_positions,
+            guessed: app.guessed_labels,
+            patch: app.patch.expect("anchor patch loaded"),
         }
     })
 }
@@ -1557,5 +1564,179 @@ fn regression_clean_load_keeps_plain_status() {
     assert!(
         !status.contains("press 'e'"),
         "a clean load must not advertise the empty modal: {status:?}"
+    );
+}
+
+// ── label-guess-and-screen-scale (task 3.1) ─────────────────────────────────
+// Cross-layer story over the scale anchor: an unlabeled circuit shows its
+// nearest explicit upstream label once the graph is built (the anchor's `#
+// I1:`-style preamble port labels seed guesses with empty stores), and both
+// surfaces render labels at a constant font size across zoom presets.
+
+/// A lightweight `App` over the shared anchor graph with the cached guesses
+/// installed and the camera set — the same scene/viewer inputs the real
+/// `g g` path produces, without re-parsing or re-solving.
+fn anchor_guess_app(zoom: f32) -> App {
+    let anchor = anchor_graph();
+    let mut app = App::new();
+    app.patch = Some(anchor.patch.clone());
+    app.graph = Some(anchor.graph.clone());
+    app.graph_positions = anchor.positions.clone();
+    app.guessed_labels = anchor.guessed.clone();
+    app.graph_camera = Some(preset_camera(zoom));
+    app
+}
+
+fn anchor_pane() -> egui::Rect {
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))
+}
+
+#[test]
+fn regression_anchor_guessed_label_reaches_scene_and_viewer() {
+    let anchor = anchor_graph();
+    assert!(
+        !anchor.guessed.is_empty(),
+        "anchor must guess at least one circuit label from preamble port labels"
+    );
+    // Deterministic pick: HashMap iteration order is per-process random.
+    let mut ids: Vec<&NodeId> = anchor.guessed.keys().collect();
+    ids.sort();
+    let id = ids[0];
+    let want = anchor.guessed[id].clone();
+    let (name, idx) = match id {
+        NodeId::Circuit(name, idx) => (name.clone(), *idx),
+        other => panic!("guesses only cover circuits, got {other:?}"),
+    };
+
+    // Graph surface: the scene node carries the guessed title.
+    let app = anchor_guess_app(1.0);
+    let scene = crate::gui::build_scene_spec(&app, crate::theme::active(), anchor_pane())
+        .expect("scene present");
+    let node = scene
+        .nodes
+        .iter()
+        .find(|n| n.circuit == name && n.instance_index == idx)
+        .expect("guessed circuit is drawn");
+    assert_eq!(node.label, want, "scene shows the guessed label");
+
+    // Source surface: sidebar row and prettified header agree.
+    let vspec = crate::gui::viewer_spec(&app);
+    let sidebar = vspec.sidebar.as_ref().expect("sidebar present");
+    assert!(
+        sidebar.names.iter().any(|n| n.contains(&want)),
+        "sidebar shows the guessed label: {:?}",
+        sidebar.names
+    );
+    let mut app = app;
+    app.source_view_mode = SourceViewMode::Prettified;
+    let vspec = crate::gui::viewer_spec(&app);
+    assert!(
+        vspec.lines.iter().any(|l| l.text.contains(&want)),
+        "prettified header shows the guessed label"
+    );
+}
+
+/// Monospace font sizes painted for a graph scene: node labels render in the
+/// monospace face while cluster titles use their own chrome sizing.
+fn painted_graph_label_sizes(scene: &crate::graph_render::SceneSpec) -> Vec<f32> {
+    use egui::epaint::Shape;
+    use egui::RawInput;
+
+    let ctx = egui::Context::default();
+    let canvas = egui::vec2(1280.0, 800.0);
+    let mut out = ctx.run_ui(
+        RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            ..Default::default()
+        },
+        |ui| {
+            crate::gui::paint_scene(ui, canvas, Some(scene), &[]);
+        },
+    );
+    let mut sizes = Vec::new();
+    for cs in &out.shapes {
+        if let Shape::Text(t) = &cs.shape {
+            let font = t
+                .galley
+                .job
+                .sections
+                .first()
+                .map(|s| s.format.font_id.clone())
+                .unwrap_or_default();
+            if font.family == egui::FontFamily::Monospace {
+                sizes.push(font.size);
+            }
+        }
+    }
+    out.textures_delta.clear();
+    sizes
+}
+
+#[test]
+fn regression_anchor_graph_label_fonts_constant_across_zoom() {
+    let mut sizes = Vec::new();
+    for zoom in [1.0f32, 2.0] {
+        let app = anchor_guess_app(zoom);
+        let scene = crate::gui::build_scene_spec(&app, crate::theme::active(), anchor_pane())
+            .expect("scene present");
+        sizes.extend(painted_graph_label_sizes(&scene));
+    }
+    assert!(!sizes.is_empty(), "anchor paints node labels");
+    assert!(
+        sizes.iter().all(|&s| s == sizes[0]),
+        "one label font at every zoom: {sizes:?}"
+    );
+}
+
+/// Monospace font sizes painted for a module-UI spec at one physical zoom.
+fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
+    use egui::epaint::Shape;
+    use egui::RawInput;
+
+    let anchor = anchor_graph();
+    let mut app = App::new();
+    app.patch = Some(anchor.patch.clone());
+    app.physical_zoom = zoom;
+    let pane = anchor_pane();
+    let spec = crate::gui::physical_spec(&app, pane).expect("physical spec present");
+    let ctx = egui::Context::default();
+    let mut out = ctx.run_ui(
+        RawInput {
+            screen_rect: Some(pane),
+            ..Default::default()
+        },
+        |ui| {
+            crate::gui::paint_physical(ui, pane, Some(&spec));
+        },
+    );
+    let mut sizes = Vec::new();
+    for cs in &out.shapes {
+        if let Shape::Text(t) = &cs.shape {
+            let font = t
+                .galley
+                .job
+                .sections
+                .first()
+                .map(|s| s.format.font_id.clone())
+                .unwrap_or_default();
+            if font.family == egui::FontFamily::Monospace {
+                sizes.push(font.size);
+            }
+        }
+    }
+    out.textures_delta.clear();
+    sizes
+}
+
+#[test]
+fn regression_anchor_module_ui_label_fonts_constant_across_zoom() {
+    let mut sizes = Vec::new();
+    for zoom in [0.75f32, 1.0, 1.5, 2.0] {
+        sizes.extend(painted_physical_label_sizes(zoom));
+    }
+    assert!(!sizes.is_empty(), "anchor module UI paints cell labels");
+    assert!(
+        sizes.iter().all(|&s| s == sizes[0]),
+        "one cell-label font at every zoom preset: {sizes:?}"
     );
 }
