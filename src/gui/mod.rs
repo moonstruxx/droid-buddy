@@ -38,7 +38,7 @@ mod viewer;
 pub use graph::graph_window_fit_camera;
 pub(crate) use graph::{camera_pan, camera_zoom_about};
 #[cfg(test)]
-pub(crate) use graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
+pub(crate) use graph::{paint_scene, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 #[allow(unused_imports)]
 pub(crate) use panels::PanelsFrame;
 #[allow(unused_imports)]
