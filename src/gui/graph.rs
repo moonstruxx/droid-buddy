@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use super::{MarqueeSelection, WindowFrame};
-use crate::app::{App, GRAPH_WINDOW_NODE_H, GRAPH_WINDOW_NODE_W};
+use crate::app::App;
 use crate::graph::{Graph, NodeKind};
 use crate::graph_render::{
     CableKind, ClusterSpec, EdgeDiffState, EdgeSpec, GraphCamera, NodeSpec, SceneSpec, WorldBounds,
@@ -752,6 +752,12 @@ fn build_scene(
     if positions.len() != graph.nodes.len() {
         return None;
     }
+    // World-unit node bodies from the layout's per-node estimate, projected
+    // through the camera (graph-zoom-node-scaling decision 1): a node's pixel
+    // size is its reserved world size times the zoom, so the column
+    // arrangement stays overlap-free at any zoom. Indexed by full-graph index.
+    let zoom = camera.zoom;
+    let world = crate::layout::node_world_sizes(graph);
     let circuit_store = app.current_circuit_store();
 
     let diff = if app.diff_showing {
@@ -823,12 +829,17 @@ fn build_scene(
             .as_ref()
             .or(app.influence.as_ref())
             .is_some_and(|s| s.influenced_nodes.contains(&node.id));
+        // Border widths keep the 1-vs-3 distinction but scale with the camera
+        // zoom, each with a minimum so the outline never vanishes at the zoom
+        // floor (graph-zoom-node-scaling decision 2).
+        let normal_border = (1.0 * zoom).max(0.5);
+        let highlight_border = (3.0 * zoom).max(1.0);
         let (border, label_color, border_width) = if disabled {
-            (dim, dim, 1.0)
+            (dim, dim, normal_border)
         } else if highlighted || selected || influenced {
-            (hl, hl, 3.0)
+            (hl, hl, highlight_border)
         } else if app.modifier_influence.is_some() || app.influence.is_some() {
-            (dim, dim, 1.0)
+            (dim, dim, normal_border)
         } else {
             let (b, t) = match node.kind {
                 NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
@@ -838,7 +849,7 @@ fn build_scene(
                 }
                 NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
             };
-            (theme.rgb(b), theme.rgb(t), 1.0)
+            (theme.rgb(b), theme.rgb(t), normal_border)
         };
 
         let idx = nodes.len();
@@ -846,9 +857,9 @@ fn build_scene(
         nodes.push(NodeSpec {
             x: px,
             y: py,
-            w: GRAPH_WINDOW_NODE_W,
-            h: GRAPH_WINDOW_NODE_H,
-            radius: NODE_RADIUS,
+            w: world[i].0 * zoom,
+            h: world[i].1 * zoom,
+            radius: NODE_RADIUS * zoom,
             fill: theme.rgb(theme.graph_node_fill),
             border,
             border_width,
@@ -980,9 +991,9 @@ fn build_scene(
             ctrl,
             color,
             width: if influenced {
-                EDGE_WIDTH + 1.0
+                ((EDGE_WIDTH + 1.0) * zoom).max(0.75)
             } else {
-                EDGE_WIDTH
+                (EDGE_WIDTH * zoom).max(0.5)
             },
             kind,
             error: has_error,
@@ -1001,6 +1012,7 @@ fn build_scene(
     // the un-filtered graph; a filtered render (dependency or influence subset)
     // skips them because the member index mapping does not match the
     // full-graph range.
+    let cluster_pad = (CLUSTER_PAD * zoom).max(2.0);
     let clusters = if render_clusters {
         graph
             .clusters
@@ -1024,10 +1036,10 @@ fn build_scene(
                     y1 = y1.max(n.y + n.h);
                 }
                 Some(ClusterSpec {
-                    x: x0 - CLUSTER_PAD,
-                    y: y0 - CLUSTER_PAD,
-                    w: (x1 + CLUSTER_PAD) - (x0 - CLUSTER_PAD),
-                    h: (y1 + CLUSTER_PAD) - (y0 - CLUSTER_PAD),
+                    x: x0 - cluster_pad,
+                    y: y0 - cluster_pad,
+                    w: (x1 + cluster_pad) - (x0 - cluster_pad),
+                    h: (y1 + cluster_pad) - (y0 - cluster_pad),
                     title: cluster.title.clone(),
                     border: theme.rgb(theme.graph_cluster_border),
                     title_color: theme.rgb(theme.graph_cluster_title),
@@ -1400,11 +1412,13 @@ mod scene_builder_tests {
     fn scene_maps_positions_identity_with_fallback_camera() {
         let app = chain_app();
         let s = spec(&app);
+        let world = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
         assert_eq!(s.nodes.len(), 2);
         assert_eq!(s.nodes[0].x, 10.0);
         assert_eq!(s.nodes[0].y, 20.0);
-        assert_eq!(s.nodes[0].w, GRAPH_WINDOW_NODE_W);
-        assert_eq!(s.nodes[0].h, GRAPH_WINDOW_NODE_H);
+        // Fallback camera zoom 1.0: pixel body size is the world size × 1.
+        assert_eq!(s.nodes[0].w, world[0].0 * 1.0);
+        assert_eq!(s.nodes[0].h, world[0].1 * 1.0);
     }
 
     #[test]
@@ -1431,10 +1445,87 @@ mod scene_builder_tests {
             pan: (0.0, 0.0),
         });
         let z = spec(&zoomed);
-        assert_eq!(z.nodes[0].w, GRAPH_WINDOW_NODE_W);
+        // Node bodies scale with the zoom, not only the spacing.
+        assert_eq!(z.nodes[0].w, identity.nodes[0].w * 2.0);
+        assert_eq!(z.nodes[0].h, identity.nodes[0].h * 2.0);
         assert_eq!(
             z.nodes[1].x - z.nodes[0].x,
             (identity.nodes[1].x - identity.nodes[0].x) * 2.0
+        );
+    }
+
+    #[test]
+    fn scene_node_pixel_size_is_world_size_times_zoom() {
+        // graph-zoom-node-scaling decision 1: a node's pixel body is its
+        // reserved world size multiplied by the camera zoom.
+        let world = crate::layout::node_world_sizes(chain_app().graph.as_ref().unwrap());
+
+        let identity = spec(&chain_app());
+        assert_eq!(identity.nodes[0].w, world[0].0 * 1.0);
+        assert_eq!(identity.nodes[0].h, world[0].1 * 1.0);
+        assert_eq!(identity.nodes[0].radius, NODE_RADIUS * 1.0);
+
+        let mut half = chain_app();
+        half.graph_camera = Some(GraphCamera {
+            zoom: 0.5,
+            pan: (0.0, 0.0),
+        });
+        let h = spec(&half);
+        assert_eq!(h.nodes[0].w, world[0].0 * 0.5);
+        assert_eq!(h.nodes[0].h, world[0].1 * 0.5);
+        assert_eq!(h.nodes[0].radius, NODE_RADIUS * 0.5);
+
+        let mut double = chain_app();
+        double.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+        });
+        let d = spec(&double);
+        assert_eq!(d.nodes[0].w, world[0].0 * 2.0);
+        assert_eq!(d.nodes[0].h, world[0].1 * 2.0);
+        assert_eq!(d.nodes[0].radius, NODE_RADIUS * 2.0);
+    }
+
+    #[test]
+    fn scene_geometry_keeps_minimum_clamps_at_low_zoom() {
+        // graph-zoom-node-scaling decision 2: at the zoom floor the scaled
+        // chrome bottoms out on its minimum instead of vanishing.
+        let graph = Graph {
+            nodes: vec![circuit_node("copy", 0, 0), circuit_node("mixer", 0, 1)],
+            clusters: vec![Cluster {
+                title: "Core".into(),
+                section_range: 0..2,
+            }],
+            ..Graph::default()
+        };
+        let mut app = scene_app(graph, &[(0.0, 0.0), (260.0, 0.0)]);
+        app.graph_camera = Some(GraphCamera {
+            zoom: 0.0078,
+            pan: (0.0, 0.0),
+        });
+        app.hovered_graph_node = Some(0);
+        let s = spec(&app);
+
+        for n in &s.nodes {
+            assert!(
+                n.w > 0.0 && n.h > 0.0,
+                "no zero node body: {:?}",
+                (n.w, n.h)
+            );
+            assert!(n.w.is_finite() && n.h.is_finite() && n.radius.is_finite());
+            assert!(n.border_width >= 0.5, "border {} >= 0.5", n.border_width);
+        }
+        // The highlighted node keeps the 3.0-vs-1.0 distinction, floored at 1.0.
+        assert!(s.nodes[0].border_width >= 1.0);
+        for e in &s.edges {
+            assert!(e.width.is_finite() && e.width >= 0.5, "edge {}", e.width);
+        }
+        let c = &s.clusters[0];
+        let min_x = s.nodes.iter().map(|n| n.x).fold(f32::INFINITY, f32::min);
+        assert!(
+            min_x - c.x >= 2.0 - 1e-3,
+            "cluster pad {} >= 2.0",
+            min_x - c.x
         );
     }
 
@@ -1640,7 +1731,8 @@ mod scene_builder_tests {
         // keep their (rect-rim) geometry: start is the source right-rim, end
         // the sink left-rim, distinct spans.
         assert_eq!(s.edges.len(), 2);
-        assert_eq!(s.edges[0].start.0 - s.edges[0].end.0, GRAPH_WINDOW_NODE_W);
+        // Coincident nodes: the edge spans the source node's body width.
+        assert_eq!(s.edges[0].start.0 - s.edges[0].end.0, s.nodes[0].w);
         assert!(s.nodes[0].output_port);
         assert!(s.nodes[0].input_port);
     }
@@ -1822,6 +1914,8 @@ mod scene_builder_tests {
             }],
             ..Graph::default()
         };
+        let world = crate::layout::node_world_sizes(&graph);
+        // Fallback camera zoom 1.0: cluster pad is the base CLUSTER_PAD.
         let s = spec(&scene_app(graph, &[(100.0, 100.0), (260.0, 60.0)]));
         assert_eq!(s.clusters.len(), 1);
         let c = &s.clusters[0];
@@ -1829,7 +1923,7 @@ mod scene_builder_tests {
         assert_eq!(c.member_indices, vec![0, 1]);
         assert_eq!(c.x, 100.0 - CLUSTER_PAD);
         assert_eq!(c.y, 60.0 - CLUSTER_PAD);
-        assert_eq!(c.x + c.w, 260.0 + GRAPH_WINDOW_NODE_W + CLUSTER_PAD);
+        assert_eq!(c.x + c.w, 260.0 + world[1].0 * 1.0 + CLUSTER_PAD);
         assert_eq!(c.border, theme().rgb(theme().graph_cluster_border));
         assert_eq!(c.title_color, theme().rgb(theme().graph_cluster_title));
     }
@@ -1970,19 +2064,24 @@ mod window_paint_tests {
         }
     }
 
-    /// Left-edge x of each node body fill: the `GRAPH_WINDOW_NODE_W ×
-    /// GRAPH_WINDOW_NODE_H` rects with a non-transparent fill (`rect_filled`
-    /// node frames). The full-canvas background, minimap panel, and port
-    /// circles are a different size or shape, and node borders draw with a
-    /// transparent fill, so the size + fill filter isolates the bodies.
-    fn node_origins(out: &PaintOutput) -> Vec<f32> {
-        let mut xs: Vec<f32> = out
-            .rects
+    /// Left-edge x of each node body fill: for every scene node, the filled
+    /// rect whose geometry matches that node's frame. The full-canvas
+    /// background, minimap panel, and port circles are a different size or
+    /// shape, and node borders draw with a transparent fill, so matching the
+    /// scene frames isolates the bodies at any zoom (node size is world × zoom
+    /// since graph-zoom-node-scaling).
+    fn node_origins(out: &PaintOutput, scene: &SceneSpec) -> Vec<f32> {
+        let mut xs: Vec<f32> = scene
+            .nodes
             .iter()
-            .filter(|r| {
-                (r.rect.width() - GRAPH_WINDOW_NODE_W).abs() < 0.5
-                    && (r.rect.height() - GRAPH_WINDOW_NODE_H).abs() < 0.5
-                    && r.fill != egui::Color32::TRANSPARENT
+            .filter_map(|n| {
+                out.rects.iter().find(|r| {
+                    (r.rect.left() - n.x).abs() < 0.5
+                        && (r.rect.top() - n.y).abs() < 0.5
+                        && (r.rect.width() - n.w).abs() < 0.5
+                        && (r.rect.height() - n.h).abs() < 0.5
+                        && r.fill != egui::Color32::TRANSPARENT
+                })
             })
             .map(|r| r.rect.left())
             .collect();
@@ -2021,12 +2120,18 @@ mod window_paint_tests {
         assert_eq!(out.polygons, 1, "one direction arrow");
         assert_eq!(out.circles, 2, "output + input port markers");
 
-        let origins = node_origins(&out);
+        let origins = node_origins(&out, &scene);
         assert_eq!(origins.len(), 2, "both node bodies drawn: {origins:?}");
-        for &x in &origins {
+        // The fixed-frame fit camera (`graph_window_fit_camera`) still reserves
+        // the old pixel frame, so with per-node world widths the trailing node
+        // may run past the pane; task 2.3 migrates the fit to frame whole
+        // bodies. Until then the regression is that every frame is on canvas.
+        for (i, n) in scene.nodes.iter().enumerate() {
             assert!(
-                x >= -0.5 && x + GRAPH_WINDOW_NODE_W <= 1280.5,
-                "node body on canvas: {x}"
+                n.x >= -0.5 && n.x < 1280.5 && n.x + n.w > -0.5,
+                "node {i} frame visible on canvas: {}..{}",
+                n.x,
+                n.x + n.w
             );
         }
     }
@@ -2141,7 +2246,8 @@ mod window_paint_tests {
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
             )
             .expect("scene present");
-            node_origins(&paint(Some(&scene), egui::vec2(1280.0, 800.0)))
+            let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+            node_origins(&out, &scene)
         };
         let mut zoomed_app = chain_app();
         zoomed_app.graph_camera = Some(GraphCamera {
@@ -2155,7 +2261,8 @@ mod window_paint_tests {
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
             )
             .expect("scene present");
-            node_origins(&paint(Some(&scene), egui::vec2(1280.0, 800.0)))
+            let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+            node_origins(&out, &scene)
         };
 
         assert_eq!(identity.len(), 2);
