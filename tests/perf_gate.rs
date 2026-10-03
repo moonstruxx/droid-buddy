@@ -30,6 +30,17 @@ pub const PARSE_RENDER_BUDGET: Duration = Duration::from_secs(10);
 // it while a slow CI runner and debug overhead stay green.
 pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(10);
 
+// Measured release baseline 2026-10-03: melody2 `layout::node_world_sizes`
+// (the renderer's per-frame node-size estimate, called twice per frame — scene
+// build + pointer hit-testing) ~0.4 ms after the O(n + e) rewrite; 100 calls
+// are ~0.04 s. It was ~155 ms per call with the previous per-node O(n·(n + e))
+// recomputation, so 100 calls took ~15 s and the window froze on large patches
+// (the graph settle animation forces continuous redraws). The 10 s budget also
+// covers the debug-mode `build_from_patch` setup the watchdog times (the other
+// graph phases use the same figure); the quadratic path took minutes there, so
+// it still trips the gate while CI noise stays green.
+pub const SCENE_WIDTHS_BUDGET: Duration = Duration::from_secs(10);
+
 // Measured release baseline 2026-09-12: melody2 optimizer candidate generation sub-second.
 pub const OPTIMIZER_BUDGET: Duration = Duration::from_secs(10);
 
@@ -121,6 +132,38 @@ fn phase_graph_solve() {
     assert!(
         elapsed <= GRAPH_SOLVE_BUDGET,
         "phase_graph_solve took {elapsed:?}, budget {GRAPH_SOLVE_BUDGET:?}"
+    );
+}
+
+#[test]
+fn phase_scene_widths() {
+    let elapsed = budgeted("phase_scene_widths", SCENE_WIDTHS_BUDGET, || {
+        let patch = Patch::from_ini_file(Path::new(SCALE_ANCHOR)).unwrap();
+        // Mirrors app::clusters_from_patch, which is private to the crate.
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|group| Cluster {
+                title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
+                section_range: group.section_range.clone(),
+            })
+            .collect();
+        let cost = CostModel::default();
+        let options = graph::GraphOptions::default();
+        let g = graph::Graph::build_from_patch(&patch, &clusters, &cost, &options);
+        // 100 frames of the per-frame estimate the renderer makes twice per
+        // frame (scene + hit-test): ~0.04 s after the rewrite, ~15 s before.
+        let start = Instant::now();
+        for _ in 0..100 {
+            let sizes = layout::node_world_sizes(&g);
+            std::hint::black_box(sizes.len());
+        }
+        start.elapsed()
+    });
+    eprintln!("phase_scene_widths elapsed: {elapsed:.3?}");
+    assert!(
+        elapsed <= SCENE_WIDTHS_BUDGET,
+        "phase_scene_widths took {elapsed:?}, budget {SCENE_WIDTHS_BUDGET:?}"
     );
 }
 

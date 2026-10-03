@@ -446,40 +446,52 @@ fn estimated_title(name: &str, index: usize, repeats: Option<usize>) -> String {
     }
 }
 
-/// Estimated rendered width of node `i` (graph-column-layout D3, task 1.3):
-/// title characters at [`NODE_ESTIMATE_CHAR_WIDTH`] each, frame padding
-/// ([`NODE_ESTIMATE_PADDING`]), plus a fixed marker width per input/output
-/// port the node has edges for ([`NODE_ESTIMATE_PORT_WIDTH`]) — the same
-/// inputs the renderer uses (title from `instance_title`, port presence from
-/// incidence). Non-circuit nodes (controllers/jacks) have no instance suffix,
-/// mirroring the renderer.
-fn estimate_node_width(graph: &Graph, i: usize) -> f32 {
-    let node = &graph.nodes[i];
-    let title = if node.kind == NodeKind::Circuit {
-        let repeats = graph
-            .nodes
-            .iter()
-            .filter(|o| o.kind == NodeKind::Circuit && o.circuit == node.circuit)
-            .count();
-        estimated_title(&node.circuit, node.instance_index, Some(repeats))
-    } else {
-        node.circuit.clone()
-    };
-    let title_w = title.chars().count() as f32 * NODE_ESTIMATE_CHAR_WIDTH;
-    let index = node_index(graph);
-    let edges = edge_pairs(graph, &index);
-    let has_in = edges.iter().any(|&(_, v)| v == i);
-    let has_out = edges.iter().any(|&(u, _)| u == i);
-    let ports_w = NODE_ESTIMATE_PORT_WIDTH * (usize::from(has_in) + usize::from(has_out)) as f32;
-    title_w + NODE_ESTIMATE_PADDING + ports_w
-}
-
 /// Estimated width of every node (graph-column-layout D3, task 1.3): the
 /// renderer-input sizes that feed the column placement, so wide nodes widen
-/// their column. Deterministic; rendering remains size-authoritative.
+/// their column. Each width is title characters at
+/// [`NODE_ESTIMATE_CHAR_WIDTH`] each, frame padding ([`NODE_ESTIMATE_PADDING`]),
+/// plus a fixed marker width per input/output port the node has edges for
+/// ([`NODE_ESTIMATE_PORT_WIDTH`]) — the same inputs the renderer uses (title
+/// from `instance_title`, port presence from incidence). Non-circuit nodes
+/// (controllers/jacks) have no instance suffix, mirroring the renderer.
+/// Deterministic; rendering remains size-authoritative.
+///
+/// O(n + e): the node index, edge incidence, and per-circuit instance counts
+/// are each computed once for the whole graph. The renderer calls this on
+/// every frame (scene build plus pointer hit-testing), so the previous
+/// per-node recomputation — which rebuilt the node index and scanned every
+/// node and edge for each node, O(n·(n+e)) — froze the window on large
+/// patches. Output is unchanged.
 pub fn estimated_widths(graph: &Graph) -> Vec<f32> {
-    (0..graph.nodes.len())
-        .map(|i| estimate_node_width(graph, i))
+    let n = graph.nodes.len();
+    let index = node_index(graph);
+    let edges = edge_pairs(graph, &index);
+    let mut has_in = vec![false; n];
+    let mut has_out = vec![false; n];
+    for &(u, v) in &edges {
+        has_out[u] = true;
+        has_in[v] = true;
+    }
+    let mut repeats: HashMap<&str, usize> = HashMap::new();
+    for node in &graph.nodes {
+        if node.kind == NodeKind::Circuit {
+            *repeats.entry(node.circuit.as_str()).or_default() += 1;
+        }
+    }
+    (0..n)
+        .map(|i| {
+            let node = &graph.nodes[i];
+            let title = if node.kind == NodeKind::Circuit {
+                let count = repeats.get(node.circuit.as_str()).copied().unwrap_or(0);
+                estimated_title(&node.circuit, node.instance_index, Some(count))
+            } else {
+                node.circuit.clone()
+            };
+            let title_w = title.chars().count() as f32 * NODE_ESTIMATE_CHAR_WIDTH;
+            let ports_w = NODE_ESTIMATE_PORT_WIDTH
+                * (usize::from(has_in[i]) + usize::from(has_out[i])) as f32;
+            title_w + NODE_ESTIMATE_PADDING + ports_w
+        })
         .collect()
 }
 
