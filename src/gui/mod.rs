@@ -9,7 +9,7 @@
 //!
 //! Surface dispatch: [`EguiSurface::paint`] is the one-frame entry point that
 //! delegates to the per-surface draw routines; the graph canvas lives in
-//! [`graph`]. Later surface ports (physical, panels, viewer, picker, overlays,
+//! [`graph`]. Later surface ports (physical, viewer, picker, overlays,
 //! tasks 2.1-2.5) add their own draw routines alongside `graph::paint_scene`
 //! without touching this shell.
 
@@ -17,13 +17,11 @@ mod graph;
 
 pub use graph::{build_scene_spec, graph_pane_rect};
 
-// Surface ports (physical, panels, viewer, picker, overlays — tasks 2.1-2.5)
+// Surface ports (physical, viewer, picker, overlays — tasks 2.1-2.5)
 // are runtime surfaces: the shell dispatches to them in `EguiSurface::paint`
 // and headless egui shape/label tests exercise the same draw routines.
 #[allow(dead_code, unused_imports)]
 mod overlays;
-#[allow(dead_code, unused_imports)]
-mod panels;
 #[allow(dead_code, unused_imports)]
 mod physical;
 #[allow(dead_code, unused_imports)]
@@ -39,8 +37,6 @@ pub use graph::graph_window_fit_camera;
 pub(crate) use graph::{camera_pan, camera_zoom_about};
 #[cfg(test)]
 pub(crate) use graph::{paint_scene, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
-#[allow(unused_imports)]
-pub(crate) use panels::PanelsFrame;
 #[allow(unused_imports)]
 pub(crate) use physical::PhysicalFrame;
 #[allow(unused_imports)]
@@ -519,7 +515,7 @@ fn to_cell_rect(r: egui::Rect) -> crate::app::Rect {
 
 /// Pane frame (tiled-window-manager D6): the border stroke carries the focus
 /// token when the pane is focused and the unfocused token otherwise, plus the
-/// pane title in the same color. Panels, viewer, and graph tiles draw their
+/// pane title in the same color. Viewer and graph tiles draw their
 /// pane chrome through this one source.
 pub(crate) fn draw_pane_frame(
     painter: &egui::Painter,
@@ -552,7 +548,7 @@ pub(crate) fn draw_pane_frame(
 }
 
 /// Whether the band has anything to paint: a maximized pane, or at least one
-/// pane holding a view. Panels counts here — the module UI is a view in the
+/// pane holding a view. The module UI counts here — it is a view in the
 /// class layout (design D2), not a permanent left pane, so a band showing only
 /// the module UI still paints through `paint_panes` instead of falling back to
 /// the empty-band graph canvas.
@@ -569,8 +565,8 @@ fn band_has_views(app: &App, band: crate::app::Rect) -> bool {
 /// plus either a second big pane or two small panes, and the maximize override
 /// that collapses the band to the focused pane) paints its view into its cell.
 /// Each pane's border carries the `pane_focus_border` token when it holds
-/// `App.layout.focus` and `pane_unfocused_border` otherwise; the panels and
-/// viewer surfaces draw their own frame, the graph, physical, and optimizer
+/// `App.layout.focus` and `pane_unfocused_border` otherwise; the viewer
+/// surface draws its own frame, the graph, physical, and optimizer
 /// panes get one here. An empty pane stays a bare background. Publishes
 /// `pane_hit_rects` (the drawn geometry, ADR 35) and the legacy `FocusSlot`
 /// mirror `pane_rects` for handler/main compat via `App::refresh_hit_geometry`.
@@ -633,7 +629,7 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                     app.graph_minimap_transform = None;
                 }
                 // The graph scene paints no pane chrome of its own, so the
-                // pane frame marks it like the panels and viewer panes.
+                // pane frame marks it like the physical and viewer panes.
                 let painter = ui.painter().with_clip_rect(rect);
                 draw_pane_frame(&painter, rect, focused, "", t);
             }
@@ -737,7 +733,7 @@ impl EguiSurface {
     /// publishes `pane_rects` (renderer-owns-geometry contract).
     ///
     /// Surface dispatch: every pane of the layout arrangement paints its view
-    /// (Panels, source viewer, physical, graph, optimizer); with no view open
+    /// (module UI, source viewer, physical, graph, optimizer); with no view open
     /// in any pane the whole window is the bare graph canvas via
     /// [`graph::paint_scene`].
     fn paint(
@@ -828,7 +824,7 @@ impl EguiSurface {
             // ADR 35: the arrangement decides the paint. With nothing open
             // (no view in any pane and no maximize) the whole window is the
             // bare graph canvas; otherwise every pane of the arrangement
-            // paints. Panels is a view, so it counts like any other (D2).
+            // paints. The module UI is a view, so it counts like any other (D2).
             if band_has_views(app, band) {
                 paint_panes(app, ui, scene, selected);
             } else {
@@ -1167,7 +1163,7 @@ mod tests {
         assert_eq!(
             app.pane_rects.len(),
             2,
-            "panels + source viewer are hit-testable"
+            "module UI + source viewer are hit-testable"
         );
         // Geometry: left big pane 0..400, the right half split into two
         // quarter small panes top and bottom (main and small ratios at 0.5).
@@ -1377,7 +1373,7 @@ mod tests {
         // equal-height slots) instead of the class layout's `pane_geometry`, so
         // the scene origin, the first-frame fit, and the mouse origin disagreed
         // with the pane `paint_panes` actually draws the graph in. Here the
-        // startup arrangement (Panels big-left + SourceViewer small-top) gets the
+        // startup arrangement (module UI big-left + SourceViewer small-top) gets the
         // Graph view opened into the left big pane (0,0,400,600); the mirror
         // formula would instead return the top-right small pane (400,0,400,300).
         let mut app = App::new();
