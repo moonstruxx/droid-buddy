@@ -2005,6 +2005,10 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         app.hovered_graph_node = None;
         return;
     };
+    // Hover hit-tests must match what is drawn: while a settle animation runs
+    // the drawn nodes are the interpolated positions, not the solved ones.
+    // Equal to `graph_positions` when no settle is active.
+    let display = app.graph_display_positions();
     // The scene is painted as absolute window coordinates from the graph pane's
     // origin (the egui painter has no translate; the scene builder shifts the
     // camera by the pane origin), but this shared camera is pane-relative. The
@@ -2039,15 +2043,12 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;
     let hit = frame.pointer.and_then(|(px, py)| {
         let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
-        app.graph_positions
-            .iter()
-            .enumerate()
-            .find_map(|(i, &(x, y))| {
-                let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
-                let hw = (w.max(min_w) - w) / 2.0;
-                let hh = (h.max(min_h) - h) / 2.0;
-                (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
-            })
+        display.iter().enumerate().find_map(|(i, &(x, y))| {
+            let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
+            let hw = (w.max(min_w) - w) / 2.0;
+            let hh = (h.max(min_h) - h) / 2.0;
+            (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
+        })
     });
     app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
 
@@ -2123,6 +2124,9 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         let Some((px, py)) = frame.pointer else {
             return;
         };
+        // A grab ends the animation: the drag must start from the final solved
+        // layout, not the animated position under the cursor.
+        app.cancel_graph_settle();
         let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
         if let Some((nx, ny)) = app.graph_positions.get(node_index).copied() {
             // Grab offset in world units so the node follows the pointer
@@ -6047,6 +6051,42 @@ mod tests {
         // Leaving the window clears hover too.
         handle_graph_window_frame(&WindowFrame::default(), &mut app);
         assert_eq!(app.hovered_graph_node, None);
+    }
+
+    #[test]
+    fn graph_window_hover_uses_animated_positions_during_settle() {
+        // While a settle runs the drawn nodes are the interpolated positions,
+        // so hover must hit-test the same positions. Build a wide solved layout
+        // whose compact seed sits far from every solved node: a pointer at the
+        // animated node can only land if the handler reads the display list.
+        use crate::gui::WindowFrame;
+        let mut app = app_with_graph_window();
+        let n = app.graph_positions.len();
+        app.graph_positions = (0..n).map(|i| (i as f32 * 500.0, 0.0)).collect();
+        let seed = vec![(5000.0_f32, 0.0_f32); n];
+        // Start the settle in the future so progress clamps to exactly 0: the
+        // drawn positions are the seed, deterministic and drift-free for the
+        // duration of the test (a real clock would move between the snapshot
+        // below and the handler's own display computation).
+        app.graph_settle = Some(crate::graph_anim::GraphSettle::with_started_at(
+            seed,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        ));
+        assert!(app.graph_settle_active());
+        let display = app.graph_display_positions();
+        let (ox, oy) = graph_pane_origin(&app);
+        let (ax, ay) = display[0];
+        let (w, h) = node_world_sizes_of(&app)[0];
+        // The animated node 0 is far from its solved position (0, 0).
+        assert!((ax - app.graph_positions[0].0).abs() > 1000.0);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((ax + w / 2.0 + ox, ay + h / 2.0 + oy)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, Some(0));
     }
 
     #[test]

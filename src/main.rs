@@ -219,6 +219,11 @@ mod windowed {
                         egui::Pos2::ZERO,
                         egui::vec2(w as f32 / scale, h as f32 / scale),
                     );
+                    // A fresh graph open queues a settle animation; start it
+                    // before the scene build so this frame draws the seed. The
+                    // camera fit below still uses the solved `graph_positions`
+                    // (the final layout), so it does not chase the animation.
+                    self.app.begin_graph_settle();
                     // The rect the graph scene will be painted into this frame:
                     // the graph tile slot (or the quad FULL pane) when one is
                     // open, else the whole window — the same mirror as the
@@ -258,6 +263,12 @@ mod windowed {
                     // publishes `pane_rects`.
                     if let Some(frame) = self.window.fill_placeholder(&mut self.app) {
                         handler::handle_graph_window_frame(&frame, &mut self.app);
+                    }
+                    // Keep painting while the settle runs: each frame schedules
+                    // the next until it finishes. The loop already polls, so
+                    // this is the only redraw driver the animation needs.
+                    if self.app.graph_settle_active() {
+                        self.window.request_redraw();
                     }
                 }
                 // Every other event feeds the egui input pipeline so pointer

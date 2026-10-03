@@ -6,6 +6,7 @@ pub mod expression;
 pub mod favorites;
 pub mod geometry;
 pub mod graph;
+pub mod graph_anim;
 pub mod graph_render;
 pub mod gui;
 pub mod handler;

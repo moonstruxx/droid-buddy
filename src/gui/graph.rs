@@ -791,12 +791,16 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     let dep_filtered = !app.dependency_nodes.is_empty();
     let inf_filtered = app.influence_filter_active;
     let filtered = dep_filtered || inf_filtered;
+    // Draw the animated (settling) positions when a settle is running; equal to
+    // the solved `graph_positions` otherwise. Owned locally so the borrow lives
+    // through the scene build.
+    let display = app.graph_display_positions();
     build_scene(
         app,
         theme,
         SceneInput {
             graph,
-            positions: &app.graph_positions,
+            positions: &display,
             camera,
             render_clusters: !filtered,
         },
@@ -1495,6 +1499,38 @@ mod scene_builder_tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, 0.0))
         )
         .is_none());
+    }
+
+    #[test]
+    fn scene_reflects_active_settle_positions() {
+        // While a settle animation runs the scene must draw the interpolated
+        // seed positions, not the solved layout. Build the settled scene, then
+        // the same scene with the settle cleared, and assert node 0 moved.
+        let mut app = chain_app();
+        // Distinct y so both axes contract; the compact seed is then strictly
+        // inside the solved layout on both axes.
+        app.graph_positions = vec![(10.0, 20.0), (260.0, 90.0)];
+        let solved = spec(&app);
+        let seed = crate::graph_anim::compact_seed(
+            &app.graph_positions,
+            crate::graph_anim::SETTLE_SEED_SCALE,
+        );
+        // Start in the future so progress clamps to 0 and the drawn positions
+        // are exactly the seed (deterministic, no wall-clock drift).
+        app.graph_settle = Some(crate::graph_anim::GraphSettle::with_started_at(
+            seed,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        ));
+        let animated = spec(&app);
+        assert_ne!(
+            animated.nodes[0].x, solved.nodes[0].x,
+            "an active settle shifts the drawn node"
+        );
+        assert_ne!(animated.nodes[0].y, solved.nodes[0].y);
+        app.cancel_graph_settle();
+        let restored = spec(&app);
+        assert_eq!(restored.nodes[0].x, solved.nodes[0].x);
+        assert_eq!(restored.nodes[0].y, solved.nodes[0].y);
     }
 
     #[test]

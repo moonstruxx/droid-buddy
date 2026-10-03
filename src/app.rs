@@ -666,6 +666,17 @@ pub struct App {
     /// The kitty image's pixel size `(pw, ph)` at the last graph render, so the
     /// handler can anchor zoom and gate pan on overflow. `None` until rendered.
     pub graph_canvas_px: Option<(f32, f32)>,
+    /// Display-time settle animation of the drawn graph (`None` = draw the
+    /// solved positions directly). Started by the window loop's
+    /// [`App::begin_graph_settle`] after a fresh open; the renderer and pointer
+    /// hit-tester read [`App::graph_display_positions`], which interpolates the
+    /// seed toward `graph_positions` without ever mutating them.
+    pub graph_settle: Option<crate::graph_anim::GraphSettle>,
+    /// Set by a fresh solve (`build_graph_state`) and consumed by
+    /// [`App::begin_graph_settle`] in the window loop. Kept separate from
+    /// `graph_settle` so the animation starts on a painted frame with a real
+    /// clock, not inside the solve.
+    graph_settle_pending: bool,
     /// Pending native-window request: queued at startup, consumed by the
     /// windowed run-loop in `main.rs` via [`App::take_graph_window_request`]
     /// each frame. See [`GraphWindowRequest`].
@@ -937,6 +948,8 @@ impl App {
             graph_camera: None,
             graph_zoom_preset: Self::GRAPH_ZOOM_FIT_INDEX as u8,
             graph_canvas_px: None,
+            graph_settle: None,
+            graph_settle_pending: false,
             tension: crate::layout::DEFAULT_TENSION,
             layout_mode: crate::config::DEFAULT_LAYOUT_MODE,
             layout_ordering: crate::config::DEFAULT_LAYOUT_ORDERING,
@@ -3062,6 +3075,68 @@ impl App {
         }
     }
 
+    /// Start a settle animation for a freshly opened graph, if one is pending.
+    /// Called once per painted frame by the window loop before the scene build.
+    /// No-op unless [`App::build_graph_state`] queued one; a degenerate layout
+    /// (< 2 nodes, or a sub-unit extent) skips the animation rather than
+    /// collapsing a single point.
+    pub fn begin_graph_settle(&mut self) {
+        if !self.graph_settle_pending {
+            return;
+        }
+        self.graph_settle_pending = false;
+        if self.graph_positions.len() < 2 {
+            return;
+        }
+        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &(x, y) in &self.graph_positions {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        if (max_x - min_x).max(max_y - min_y) < 1.0 {
+            return;
+        }
+        let seed = crate::graph_anim::compact_seed(
+            &self.graph_positions,
+            crate::graph_anim::SETTLE_SEED_SCALE,
+        );
+        self.graph_settle = Some(crate::graph_anim::GraphSettle::new(seed));
+    }
+
+    /// Whether a settle animation is running and still relevant to the current
+    /// layout (a length change invalidates it). The window loop keeps
+    /// requesting redraws while this is true.
+    pub fn graph_settle_active(&self) -> bool {
+        match &self.graph_settle {
+            Some(settle) => {
+                settle.from().len() == self.graph_positions.len() && !settle.is_done(Instant::now())
+            }
+            None => false,
+        }
+    }
+
+    /// Drop any running settle, restoring direct rendering of the solved
+    /// positions. Called when the user grabs a node mid-settle so the drag
+    /// starts from the final layout, not the animated one.
+    pub fn cancel_graph_settle(&mut self) {
+        self.graph_settle = None;
+    }
+
+    /// The positions the renderer and pointer hit-tester must use: the animated
+    /// interpolation while a length-matched settle is running, otherwise the
+    /// solved `graph_positions` unchanged. Never mutates the layout.
+    pub fn graph_display_positions(&self) -> Vec<(f32, f32)> {
+        match &self.graph_settle {
+            Some(settle) if settle.from().len() == self.graph_positions.len() => {
+                settle.positions(&self.graph_positions, Instant::now())
+            }
+            _ => self.graph_positions.clone(),
+        }
+    }
+
     pub fn build_graph_state(&mut self) {
         let graph = match &self.patch {
             Some(patch) => {
@@ -3098,6 +3173,11 @@ impl App {
         self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = None;
         self.emit_graph_built();
+        // A fresh open animates: clear any prior settle and let the window loop
+        // start one on its next painted frame (`begin_graph_settle`). Rebuilds
+        // and resets stay instant, so only an open settles.
+        self.graph_settle = None;
+        self.graph_settle_pending = true;
     }
 
     pub fn open_graph(&mut self) {
@@ -3193,6 +3273,10 @@ impl App {
         self.graph_cluster_rects.clear();
         self.graph_node_rects.clear();
         self.graph_drag = None;
+        // Rebuilds (tension/pin/select/processing) stay instant: no settle is
+        // started and any running one is dropped.
+        self.graph_settle = None;
+        self.graph_settle_pending = false;
         // hover stays as-is (still valid index) but will be re-resolved
         // on next mouse move; keep it so `x` status can reference it.
         self.emit_graph_built();
@@ -3578,6 +3662,8 @@ impl App {
         self.graph_camera = None;
         self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = None;
+        self.graph_settle = None;
+        self.graph_settle_pending = false;
         // Manual pins are per-patch graph state: cleared on every load so a
         // new patch re-seeds its own tip on the next open (design D3/D7).
         self.pinned.clear();
@@ -4203,6 +4289,113 @@ mod tests {
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
         assert!(app.graph_cluster_rects.is_empty());
+        assert!(app.graph_settle.is_none());
+        assert!(!app.graph_settle_pending);
+    }
+
+    /// A fixture app with arpeggio1 loaded and the graph open.
+    fn app_with_open_graph() -> App {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app
+    }
+
+    #[test]
+    fn open_graph_queues_settle_without_starting_it() {
+        // The pending flag is consumed only by `begin_graph_settle` (window
+        // loop), so a test that opens a graph and renders must still see the
+        // solved positions.
+        let app = app_with_open_graph();
+        assert!(app.graph_settle_pending, "a fresh open queues a settle");
+        assert!(app.graph_settle.is_none(), "the loop starts the settle");
+        assert_eq!(
+            app.graph_display_positions(),
+            app.graph_positions,
+            "display equals solved positions until the settle starts"
+        );
+    }
+
+    #[test]
+    fn begin_graph_settle_starts_compact_animation() {
+        let mut app = app_with_open_graph();
+        app.begin_graph_settle();
+        assert!(!app.graph_settle_pending, "begin consumes the flag");
+        let settle = app.graph_settle.as_ref().expect("settle started");
+        assert_eq!(settle.from().len(), app.graph_positions.len());
+        let display = app.graph_display_positions();
+        assert_eq!(display.len(), app.graph_positions.len());
+        assert_ne!(
+            display, app.graph_positions,
+            "at t≈0 the drawn positions are the compact seed, not the solved layout"
+        );
+        assert!(app.graph_settle_active());
+        // The seed is compact: its extent is far smaller than the solved one.
+        let extent = |ps: &[(f32, f32)]| {
+            let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+            let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+            for &(x, y) in ps {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+            (max_x - min_x).max(max_y - min_y)
+        };
+        assert!(extent(settle.from()) < extent(&app.graph_positions));
+    }
+
+    #[test]
+    fn finished_settle_displays_solved_positions_and_is_inactive() {
+        let mut app = app_with_open_graph();
+        let seed = crate::graph_anim::compact_seed(
+            &app.graph_positions,
+            crate::graph_anim::SETTLE_SEED_SCALE,
+        );
+        let started = Instant::now()
+            - std::time::Duration::from_millis(crate::graph_anim::SETTLE_DURATION_MS + 50);
+        app.graph_settle = Some(crate::graph_anim::GraphSettle::with_started_at(
+            seed, started,
+        ));
+        assert!(
+            !app.graph_settle_active(),
+            "past the duration the settle is done"
+        );
+        assert_eq!(app.graph_display_positions(), app.graph_positions);
+    }
+
+    #[test]
+    fn cancel_graph_settle_restores_direct_display() {
+        let mut app = app_with_open_graph();
+        app.begin_graph_settle();
+        assert!(app.graph_settle.is_some());
+        app.cancel_graph_settle();
+        assert!(app.graph_settle.is_none());
+        assert_eq!(app.graph_display_positions(), app.graph_positions);
+        assert!(!app.graph_settle_active());
+    }
+
+    #[test]
+    fn rebuild_graph_does_not_start_a_settle() {
+        let mut app = app_with_open_graph();
+        app.begin_graph_settle();
+        assert!(app.graph_settle.is_some());
+        app.rebuild_graph();
+        assert!(!app.graph_settle_pending, "rebuilds stay instant");
+        assert!(app.graph_settle.is_none(), "a running settle is dropped");
+        assert_eq!(app.graph_display_positions(), app.graph_positions);
+    }
+
+    #[test]
+    fn reset_graph_state_clears_settle() {
+        let mut app = app_with_open_graph();
+        app.begin_graph_settle();
+        assert!(app.graph_settle.is_some());
+        app.reset_graph_state();
+        assert!(app.graph_settle.is_none());
+        assert!(!app.graph_settle_pending);
+        assert!(app.graph_positions.is_empty());
     }
 
     #[test]
