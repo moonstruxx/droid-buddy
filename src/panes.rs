@@ -50,7 +50,7 @@ impl ViewType {
     /// to panes").
     pub fn class(self) -> PaneClass {
         match self {
-            ViewType::Graph | ViewType::Panels | ViewType::Physical => PaneClass::Big,
+            ViewType::Graph | ViewType::Physical => PaneClass::Big,
             ViewType::Optimizer | ViewType::SourceViewer => PaneClass::Small,
         }
     }
@@ -84,12 +84,12 @@ impl PaneLayout {
 
 impl Default for PaneLayout {
     /// Startup arrangement (spec "Startup pane configuration"): the module UI
-    /// in the left big pane and the source viewer in a small pane.
+    /// (Physical) in the left big pane and the source viewer in a small pane.
     fn default() -> Self {
         PaneLayout {
             big_left: Pane {
                 class: PaneClass::Big,
-                view: Some(ViewType::Panels),
+                view: Some(ViewType::Physical),
             },
             big_right: Pane {
                 class: PaneClass::Big,
@@ -152,7 +152,6 @@ mod tests {
     #[test]
     fn every_view_has_its_window_class() {
         assert_eq!(ViewType::Graph.class(), PaneClass::Big);
-        assert_eq!(ViewType::Panels.class(), PaneClass::Big);
         assert_eq!(ViewType::Physical.class(), PaneClass::Big);
         assert_eq!(ViewType::Optimizer.class(), PaneClass::Small);
         assert_eq!(ViewType::SourceViewer.class(), PaneClass::Small);
@@ -161,7 +160,7 @@ mod tests {
     #[test]
     fn default_layout_starts_in_small_arrangement() {
         let layout = PaneLayout::default();
-        assert_eq!(layout.big_left.view, Some(ViewType::Panels));
+        assert_eq!(layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(layout.small_top.view, Some(ViewType::SourceViewer));
         assert_eq!(layout.big_right.view, None);
         assert_eq!(layout.small_bottom.view, None);
@@ -358,7 +357,7 @@ mod tests {
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
         assert_eq!(
             app.layout.big_left.view,
-            Some(ViewType::Panels),
+            Some(ViewType::Physical),
             "the left big pane keeps its view"
         );
         assert_eq!(
@@ -395,7 +394,7 @@ mod tests {
         app.open_view(ViewType::Graph);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert!(
-            app.pane_holding(ViewType::Panels).is_none(),
+            app.pane_holding(ViewType::Physical).is_none(),
             "the module UI is replaced, not shown twice"
         );
     }
@@ -415,39 +414,11 @@ mod tests {
 
     // ── Physical and module UI are mutually exclusive ──
 
-    #[test]
-    fn opening_physical_closes_the_module_ui() {
-        let mut app = App::new();
-        app.open_view(ViewType::Physical);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(app.pane_holding(ViewType::Panels).is_none());
-    }
+    // Physical IS the module UI now - no separate Panels view
 
-    #[test]
-    fn opening_the_module_ui_closes_the_physical_view() {
-        let mut app = App::new();
-        app.open_view(ViewType::Physical);
-        app.open_view(ViewType::Panels);
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Panels));
-        assert!(app.pane_holding(ViewType::Physical).is_none());
-    }
+    // Physical IS the module UI now - no separate Panels view
 
-    #[test]
-    fn swap_does_not_create_physical_and_module_ui_coexistence() {
-        let mut app = App::new();
-        // Two big panes: module UI left, graph right. Seed the compat mirror
-        // by hand (`sync_mirror` is private to `app`): the viewer is gone and
-        // the graph is the graph's only slot.
-        app.layout.big_right.view = Some(ViewType::Graph);
-        app.layout.small_top.view = None;
-        app.tile_stack.slots = vec![ViewType::Graph];
-        app.layout.focus = PaneId::BigRight;
-        app.tile_stack.focus = FocusSlot::Slot(0);
-        app.swap_big();
-        assert!(app.pane_holding(ViewType::Physical).is_none());
-        assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert_eq!(app.layout.big_right.view, Some(ViewType::Panels));
-    }
+    // Physical IS the module UI - no coexistence issue possible
 
     // ── Arrangement transitions ──
 
@@ -550,7 +521,7 @@ mod tests {
         app.tile_stack.focus = FocusSlot::Slot(0);
         app.swap_big();
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert_eq!(app.layout.big_right.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.big_right.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::BigRight, "focus preserved");
     }
 
@@ -561,7 +532,7 @@ mod tests {
         assert_eq!(app.layout.focus, PaneId::SmallTop);
         app.swap_big();
         assert_eq!(app.layout.big_left.view, Some(ViewType::SourceViewer));
-        assert_eq!(app.layout.small_top.view, Some(ViewType::Panels));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::SmallTop, "focus preserved");
     }
 

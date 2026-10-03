@@ -61,7 +61,7 @@ pub fn active_view(app: &App) -> HelpView {
             Some(ViewType::SourceViewer) => HelpView::Viewer,
             Some(ViewType::Physical) => HelpView::Physical,
             Some(ViewType::Optimizer) => HelpView::Optimizer,
-            Some(ViewType::Panels) | None => HelpView::Panels,
+            None => HelpView::Physical,
         }
     }
 }
@@ -77,6 +77,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g o", "open latency optimizer"),
             ("g c", "toggle latency coloring"),
             ("g s", "open select-state menu"),
+            ("d", "toggle diff overlay"),
             ("Tab/Shift+Tab", "cycle pane focus"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
@@ -85,20 +86,21 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("?", "show this help"),
             ("1-4", "shift groups"),
             ("+/-", "scale presets"),
-            ("s", "open Physical pane"),
+            ("s", "open Physical pane / toggle skeleton"),
             ("arrows/wheel", "pan when rack overflows"),
             ("Enter/Space", "toggle component"),
             ("e", "edit label / validation modal"),
             ("m", "latch modifier on hovered component"),
             ("p", "pause processing"),
             ("q", "quit"),
+            ("Ctrl+c", "quit"),
         ],
         HelpView::Viewer => vec![
             ("j/k", "scroll source"),
             ("Up/Down", "navigate occurrences"),
             ("Home/End", "jump to first/last occurrence"),
             ("t", "toggle raw/prettified"),
-            ("Tab", "switch pane focus"),
+            ("Tab/Shift+Tab", "cycle pane focus"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
             ("Alt+s", "swap small panes"),
@@ -107,6 +109,14 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("e", "edit label"),
             ("Esc", "close viewer"),
             ("?", "show this help"),
+            ("l", "open file picker"),
+            ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+            ("p", "pause processing"),
+            ("1-4", "shift groups"),
+            ("m", "latch modifier"),
+            ("d", "toggle diff overlay"),
+            ("q", "quit"),
+            ("Ctrl+c", "quit"),
         ],
         HelpView::Graph => vec![
             ("x", "toggle circuit processing"),
@@ -121,6 +131,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g s", "open select-state menu"),
             ("+/-", "camera zoom"),
             ("arrows", "pan camera"),
+            ("click minimap", "pan camera to clicked position"),
             ("Alt+[/Alt+]", "cable tension"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
@@ -128,6 +139,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("r", "cycle view in focused pane"),
             ("Esc", "close graph"),
             ("?", "show this help"),
+            ("l", "open file picker"),
+            ("q", "quit"),
+            ("Ctrl+c", "quit"),
         ],
         HelpView::Physical => vec![
             ("+/-", "zoom presets"),
@@ -140,6 +154,15 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("r", "cycle view in focused pane"),
             ("Esc", "close Physical view"),
             ("?", "show this help"),
+            ("l", "open file picker"),
+            ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+            ("p", "pause processing"),
+            ("1-4", "shift groups"),
+            ("m", "latch modifier"),
+            ("d", "toggle diff overlay"),
+            ("e", "edit label"),
+            ("q", "quit"),
+            ("Ctrl+c", "quit"),
         ],
         HelpView::Validation => vec![
             ("j/k", "navigate issues"),
@@ -160,12 +183,20 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Alt+s", "swap small panes"),
             ("Esc", "close"),
             ("?", "show this help"),
+            ("l", "open file picker"),
+            ("q", "quit"),
+            ("Ctrl+c", "quit"),
+            ("p", "pause processing"),
         ],
         HelpView::Picker => vec![
             ("j/k/arrows", "navigate"),
             ("Enter", "select"),
-            ("f", "toggle favourite"),
+            ("f/F", "toggle favourite"),
             ("Ctrl+f", "toggle filter"),
+            ("0-9", "fast-select favourite slot"),
+            ("q", "end filter"),
+            ("Backspace", "remove filter char"),
+            ("type", "filter entries"),
             ("Esc", "close"),
             ("?", "show this help"),
         ],
@@ -182,12 +213,12 @@ mod tests {
     }
 
     #[test]
-    fn active_view_defaults_to_panels() {
+    fn active_view_defaults_to_physical() {
         // Startup layout (spec "Startup pane configuration"): focus starts on
-        // the left big pane, which holds the module UI, so `?` reports Panels.
+        // the left big pane, which holds the module UI (Physical), so `?` reports Physical.
         let a = app();
         assert_eq!(a.layout.focus, crate::panes::PaneId::BigLeft);
-        assert_eq!(active_view(&a), HelpView::Panels);
+        assert_eq!(active_view(&a), HelpView::Physical);
     }
 
     #[test]

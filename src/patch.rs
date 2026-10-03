@@ -200,6 +200,15 @@ pub struct ControllerDecl {
     pub ordinal: u32,
 }
 
+/// LED colour capability per controller type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LedCapability {
+    /// Full RGB colour (set from colour registers)
+    Rgb,
+    /// White-only (brightness levels 0-3)
+    White,
+}
+
 /// A hardware component from the patch (button, CV in/out, knob, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HwComponent {
@@ -215,6 +224,8 @@ pub struct HwComponent {
     /// Set during `from_ini_str` parsing when a `led = L.N` entry
     /// appears in the same section as the component.
     pub led: Option<String>,
+    /// LED capability of this component's controller (RGB or white-only)
+    pub led_capability: Option<LedCapability>,
 }
 
 impl HwComponent {
@@ -246,6 +257,11 @@ pub enum ComponentState {
     On,
     Value(f32),
     Active,
+    /// LED state with optional RGB colour (for devices that support it)
+    Led {
+        value: f32,
+        rgb: Option<[u8; 3]>,
+    },
 }
 
 /// Horizontal Pin width for modules in a DROID patch.
@@ -381,6 +397,7 @@ impl Module {
                     state: ComponentState::Off,
                     controller,
                     led: None,
+                    led_capability: None,
                 });
         }
 
@@ -438,6 +455,7 @@ impl Patch {
                     state: ComponentState::Off,
                     controller: "P2B8".into(),
                     led: None,
+                    led_capability: Some(LedCapability::Rgb),
                 },
                 HwComponent {
                     id: "btn_2".into(),
@@ -447,6 +465,7 @@ impl Patch {
                     state: ComponentState::Off,
                     controller: "P2B8".into(),
                     led: None,
+                    led_capability: Some(LedCapability::Rgb),
                 },
                 HwComponent {
                     id: "cv_in_1".into(),
@@ -456,6 +475,7 @@ impl Patch {
                     state: ComponentState::Value(0.0),
                     controller: "CV I/O".into(),
                     led: None,
+                    led_capability: None,
                 },
                 HwComponent {
                     id: "cv_out_1".into(),
@@ -465,6 +485,7 @@ impl Patch {
                     state: ComponentState::Value(0.0),
                     controller: "CV I/O".into(),
                     led: None,
+                    led_capability: None,
                 },
                 HwComponent {
                     id: "knob_1".into(),
@@ -474,6 +495,7 @@ impl Patch {
                     state: ComponentState::Value(0.5),
                     controller: "P2B8".into(),
                     led: None,
+                    led_capability: Some(LedCapability::Rgb),
                 },
                 HwComponent {
                     id: "led_1".into(),
@@ -483,6 +505,7 @@ impl Patch {
                     state: ComponentState::On,
                     controller: "P2B8".into(),
                     led: None,
+                    led_capability: Some(LedCapability::Rgb),
                 },
             ],
             shift_groups: vec![
@@ -929,11 +952,24 @@ impl Patch {
                     }
                 },
             };
-            // Per-controller device-default LED wiring (task 3.1): only when
+            // Per-controller device-default LED wiring (task 1.3): only when
             // the section yielded no explicit `led`/`ledN` association.
             if comp.led.is_none() {
                 comp.led = device_default_led(&comp.controller, &comp.id);
             }
+            // Assign LED capability based on controller type
+            comp.led_capability = match comp.controller.to_ascii_lowercase().as_str() {
+                "b32" | "notebuttons" => Some(LedCapability::White),
+                "p2b8" | "p4b2" => Some(LedCapability::Rgb),
+                "m4" | "motorfader" => Some(LedCapability::Rgb),
+                "e4" | "encoder" => Some(LedCapability::Rgb),
+                "p8s8" | "faderbank" => Some(LedCapability::Rgb),
+                "master" | "cv i/o" => Some(LedCapability::Rgb),
+                "g8" => Some(LedCapability::Rgb),
+                "x7" => Some(LedCapability::Rgb),
+                "master18" => Some(LedCapability::Rgb),
+                _ => None,
+            };
         }
 
         // Assign shift groups from modules (if modules have shift group info)
@@ -1744,6 +1780,119 @@ fn device_default_led(controller: &str, id: &str) -> Option<String> {
             None
         }
         // B32 and every other controller: white-only, no RGB default.
+        _ => None,
+    }
+}
+
+/// Pure LED→element resolver: given a controller type and an element token,
+/// return the list of LED tokens that belong to that element by positional
+/// default. Explicit patch pairing (led/ledN) takes precedence and is handled
+/// separately in `from_ini_str`.
+///
+/// Returns LED tokens in the same order as the geometry's LED grid.
+pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec<String> {
+    let ctrl = controller.to_ascii_lowercase();
+    let element_kind = element_token.chars().next().unwrap_or('?');
+    let element_num = element_token
+        .chars()
+        .skip(1)
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u32>()
+        .unwrap_or(1);
+
+    match ctrl.as_str() {
+        // B32: 32 buttons, 32 LEDs, 1:1 mapping (white-only)
+        "b32" | "notebuttons" => {
+            if element_kind == 'B' {
+                vec![format!("L{}", element_num)]
+            } else {
+                vec![]
+            }
+        }
+        // P2B8: 8 buttons, 8 LEDs, 1:1 mapping (RGB)
+        "p2b8" => {
+            if element_kind == 'B' {
+                vec![format!("L1.{}", element_num)]
+            } else {
+                vec![]
+            }
+        }
+        // P4B2: 2 buttons, 2 LEDs, 1:1 mapping (RGB)
+        "p4b2" => {
+            if element_kind == 'B' {
+                vec![format!("L1.{}", element_num)]
+            } else {
+                vec![]
+            }
+        }
+        // M4: 4 faders with touch plates, each has RGB LED (L state + R color)
+        "m4" | "motorfader" => {
+            if element_kind == 'B' {
+                vec![format!("L1.{}", element_num)]
+            } else {
+                vec![]
+            }
+        }
+        // E4: 4 encoders, 128 LEDs total (32 per encoder ring)
+        "e4" | "encoder" => {
+            if element_kind == 'E' {
+                let start = (element_num - 1) * 32 + 1;
+                (start..start + 32).map(|n| format!("L{}", n)).collect()
+            } else {
+                vec![]
+            }
+        }
+        // P8S8: 8 sliders with LEDs inside each slider cap
+        "p8s8" | "faderbank" => {
+            if element_kind == 'F' || element_kind == 'P' {
+                vec![format!("L1.{}", element_num)]
+            } else {
+                vec![]
+            }
+        }
+        // Master: 16 CV jacks with 16 RGB LEDs (4x4 grid)
+        "master" | "cv i/o" => {
+            if matches!(element_kind, 'I' | 'O') {
+                vec![format!("R{}", element_num)]
+            } else {
+                vec![]
+            }
+        }
+        // G8: 8 gate jacks with 8 RGB LEDs (one above each jack)
+        "g8" => {
+            if element_kind == 'G' {
+                vec![format!("R{}", element_num + 16)] // R17-R24 for first G8
+            } else {
+                vec![]
+            }
+        }
+        // X7: 4 gate outputs with 8 LEDs
+        "x7" => {
+            if element_kind == 'G' {
+                vec![format!("R{}", element_num + 48)] // R49-R56 for first X7
+            } else {
+                vec![]
+            }
+        }
+        // Master18: no LEDs documented
+        "master18" => vec![],
+        _ => vec![],
+    }
+}
+
+/// Get the LED capability for a controller type.
+pub fn led_capability_for_controller(controller: &str) -> Option<LedCapability> {
+    match controller.to_ascii_lowercase().as_str() {
+        "b32" | "notebuttons" => Some(LedCapability::White),
+        "p2b8" | "p4b2" => Some(LedCapability::Rgb),
+        "m4" | "motorfader" => Some(LedCapability::Rgb),
+        "e4" | "encoder" => Some(LedCapability::Rgb),
+        "p8s8" | "faderbank" => Some(LedCapability::Rgb),
+        "master" | "cv i/o" => Some(LedCapability::Rgb),
+        "g8" => Some(LedCapability::Rgb),
+        "x7" => Some(LedCapability::Rgb),
+        "master18" => Some(LedCapability::Rgb),
         _ => None,
     }
 }
@@ -2607,6 +2756,7 @@ fn add_component(
         // Filled in by the controller-panel assignment pass in from_ini_str.
         controller: String::new(),
         led: None,
+        led_capability: None,
     });
     true
 }

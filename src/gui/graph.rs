@@ -358,13 +358,16 @@ fn scene_bounds(scene: &SceneSpec) -> (f32, f32, f32, f32) {
 /// Minimap layout: the bottom-left panel rect, the scaled viewport box (the
 /// whole canvas in scene space), and each node's scaled frame. Pure geometry
 /// so it tests without a window.
-struct Minimap {
-    panel: (f32, f32, f32, f32),
-    viewport: (f32, f32, f32, f32),
-    nodes: Vec<(f32, f32, f32, f32)>,
+pub(crate) struct Minimap {
+    pub(crate) panel: (f32, f32, f32, f32),
+    pub(crate) viewport: (f32, f32, f32, f32),
+    pub(crate) nodes: Vec<(f32, f32, f32, f32)>,
+    /// World bounds (bx, by, bw, bh) and inner panel origin (ix, iy) + scale (sx, sy)
+    /// for click-to-world conversion: world_x = bx + (click_x - ix) / sx
+    pub(crate) transform: (f32, f32, f32, f32, f32, f32, f32, f32),
 }
 
-fn minimap_layout(scene: &SceneSpec, canvas: egui::Rect) -> Option<Minimap> {
+pub(crate) fn minimap_layout(scene: &SceneSpec, canvas: egui::Rect) -> Option<Minimap> {
     if scene.nodes.is_empty() {
         return None;
     }
@@ -412,6 +415,7 @@ fn minimap_layout(scene: &SceneSpec, canvas: egui::Rect) -> Option<Minimap> {
         panel,
         viewport,
         nodes,
+        transform: (bx, by, bw, bh, ix, iy, sx, sy),
     })
 }
 

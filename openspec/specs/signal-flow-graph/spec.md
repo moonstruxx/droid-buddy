@@ -230,7 +230,7 @@ When the terminal does not support kitty graphics (or the feature is off), the g
 
 ### Requirement: Pan and zoom navigation
 
-The graph surface SHALL provide pan and zoom so the user can inspect a large layout at a legible scale. Zoom SHALL be driven by the mouse wheel (`+`/`-` step a preset scale) and pan by arrow keys or wheel-scroll on an overflowing layout, reusing the existing physical-view camera model (zoom preset + pan offset). The initial camera SHALL fit the graph against the actual visible pane (the graph slot rect in the tiled layout, the window canvas in the graph window), preserving aspect ratio and preferring to fill the canvas width, such that the smallest node renders at a readable width. The zoom presets SHALL extend at least 2× below the fitted zoom, so zooming out from the fit reaches at least half the fitted scale. A zoom step SHALL be anchored at the visible pane's center.
+The graph surface SHALL provide pan and zoom so the user can inspect a large layout at a legible scale. Zoom SHALL be driven by the mouse wheel (`+`/`-` step a preset scale) and pan by arrow keys, wheel-scroll on an overflowing layout, **or clicking the minimap**, reusing the existing physical-view camera model (zoom preset + pan offset). The initial camera SHALL fit the graph against the actual visible pane (the graph slot rect in the class layout, the window canvas in the graph window), preserving aspect ratio and preferring to fill the canvas width, such that the smallest node renders at a readable width. The zoom presets SHALL extend at least 2× below the fitted zoom, so zooming out from the fit reaches at least half the fitted scale. A zoom step SHALL be anchored at the visible pane's center.
 
 #### Scenario: Zoom to legible scale
 
@@ -256,6 +256,11 @@ The graph surface SHALL provide pan and zoom so the user can inspect a large lay
 
 - **WHEN** the graph pane is smaller than the app window and the user presses `+` or `-`
 - **THEN** the zoom is anchored at the graph pane's center, not the app window's center or the world origin
+
+#### Scenario: Minimap click pans camera to clicked location
+
+- **WHEN** graph pane is open and minimap is visible, AND user left-clicks inside the minimap panel
+- **THEN** graph camera pans so the clicked minimap position maps to the world center of the visible viewport, preserving current zoom level
 
 ### Requirement: Center and fit-and-center keys
 

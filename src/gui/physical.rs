@@ -73,6 +73,10 @@ pub(crate) struct CellSpec {
     /// Component kind: lets the input layer tell knobs/encoders apart for
     /// wheel-over-component semantics.
     pub kind: crate::patch::ComponentKind,
+    /// LED state folded into this element (if any)
+    pub led_state: Option<f32>,
+    /// LED RGB colour folded into this element (if any)
+    pub led_rgb: Option<[u8; 3]>,
 }
 
 /// A DB8E OLED display band (`db8e-oled-display-placeholder`): the bordered
@@ -150,24 +154,126 @@ pub(crate) fn physical_spec(app: &App) -> Option<PhysicalSpec> {
     );
     let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
     let mut cells = Vec::new();
+
+    // Track which LED tokens are folded into elements (so we don't render them standalone)
+    let mut folded_leds: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Build a mapping from element token to its LED tokens for each module
+    let mut element_leds: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for module in chain.modules.iter() {
+        for comp in &module.components {
+            if let Some(led_token) = &comp.led {
+                element_leds
+                    .entry(comp.id.clone())
+                    .or_default()
+                    .push(led_token.clone());
+                folded_leds.insert(led_token.clone());
+            }
+            // Also add positional LEDs from the resolver
+            let positional =
+                crate::patch::positional_leds_for_element(&module.controller, &comp.id);
+            for led in positional {
+                element_leds
+                    .entry(comp.id.clone())
+                    .or_default()
+                    .push(led.clone());
+                folded_leds.insert(led);
+            }
+        }
+    }
+
+    // Render all element cells from geometry (including unused ones)
     for &(mi, ci, rect, mark) in &geom.cells {
-        let comp = &chain.modules[mi].components[ci];
-        let (glyph, state_text, color) = cell_visuals(comp, false, false);
+        let module = &chain.modules[mi];
+
+        // ci might be out of bounds for patch components if it's an unused element
+        // In that case, we still render the cell but dimmed and unlabelled
+        let (glyph, state_text, color, label, kind, is_fader, fader_value, led_state, led_rgb) =
+            if ci < module.components.len() {
+                let comp = &module.components[ci];
+                let (glyph, state_text, color) = cell_visuals(comp, false, false);
+                // Check if this component has associated LEDs
+                let leds = element_leds.get(&comp.id).cloned().unwrap_or_default();
+                let led_state = leds.first().and_then(|led| {
+                    module
+                        .components
+                        .iter()
+                        .find(|c| c.id == *led)
+                        .and_then(|c| match &c.state {
+                            crate::patch::ComponentState::Value(v) => Some(*v),
+                            crate::patch::ComponentState::On => Some(1.0),
+                            crate::patch::ComponentState::Off => Some(0.0),
+                            _ => None,
+                        })
+                });
+                let led_rgb = leds.first().and_then(|led| {
+                    module
+                        .components
+                        .iter()
+                        .find(|c| c.id == *led)
+                        .and_then(|c| match &c.state {
+                            crate::patch::ComponentState::Led { value: _, rgb } => *rgb,
+                            _ => None,
+                        })
+                });
+                // Use shift-aware label resolver
+                let shift = app.active_shift.map_or(1, |g| g as u8);
+                let layers_enabled = app.labels.layers_enabled;
+                let max_shift_layer = app.labels.max_shift_layer;
+                let hw_store = app.current_hw_store();
+                let label = patch.display_label(
+                    &comp.id,
+                    shift,
+                    layers_enabled,
+                    max_shift_layer,
+                    &hw_store,
+                );
+                (
+                    glyph, state_text, color, label, comp.kind, false, 0.0, led_state, led_rgb,
+                )
+            } else {
+                // Unused element - render dimmed and unlabelled
+                let family = match mark {
+                    crate::gui::physical::PortMark::PortIn => "CV",
+                    crate::gui::physical::PortMark::PortOut => "CV",
+                    _ => "B", // default
+                };
+                let (glyph, state_text, color) = match family {
+                    "CV" => ("\u{25C0}".into(), "".into(), crate::theme::active().cv_in),
+                    _ => ("\u{00B7}".into(), "".into(), crate::theme::active().muted),
+                };
+                (
+                    glyph,
+                    state_text,
+                    color,
+                    "".into(),
+                    crate::patch::ComponentKind::Button,
+                    false,
+                    0.0,
+                    None,
+                    None,
+                )
+            };
+
+        let is_dimmed = label.is_empty(); // unused elements are dimmed
         cells.push(CellSpec {
             rect,
             glyph,
-            label: comp.label.clone(),
+            label,
             state_text,
             color,
-            is_fader: false,
-            fader_value: 0.0,
+            is_fader,
+            fader_value,
             global_index: ci,
             mark,
             highlighted: false,
             shift_color: None,
             modifier_wash: None,
-            dimmed: false,
-            kind: comp.kind,
+            dimmed: is_dimmed,
+            kind,
+            led_state,
+            led_rgb,
         });
     }
     let modules = geom
@@ -372,6 +478,25 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     if cell.is_fader {
         paint_fader(painter, cell, base, paused);
         return;
+    }
+
+    // Render LED inside the element if present
+    if let Some(led_value) = cell.led_state {
+        let led_color = if let Some(rgb) = cell.led_rgb {
+            // Use the RGB colour from the patch
+            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+        } else {
+            // White-only LED: brightness maps to white intensity
+            let intensity = (led_value.clamp(0.0, 1.0) * 255.0) as u8;
+            egui::Color32::from_rgb(intensity, intensity, intensity)
+        };
+        // Draw LED indicator in the top-right corner of the cell
+        let led_size = (rect.height() * 0.3).clamp(4.0, 10.0);
+        let led_rect = Rect::from_min_size(
+            Pos2::new(rect.max.x - led_size - 2.0, rect.min.y + 2.0),
+            Vec2::new(led_size, led_size),
+        );
+        painter.rect_filled(led_rect, led_size * 0.3, led_color);
     }
 
     // Compact cell: state glyph always; the label joins the first row when
@@ -834,6 +959,7 @@ mod tests {
                         state: ComponentState::On,
                         controller: "P2B8".into(),
                         led: None,
+                        led_capability: Some(crate::patch::LedCapability::Rgb),
                     },
                     HwComponent {
                         id: "P1.1".into(),
@@ -843,6 +969,7 @@ mod tests {
                         state: ComponentState::Value(0.5),
                         controller: "P2B8".into(),
                         led: None,
+                        led_capability: Some(crate::patch::LedCapability::Rgb),
                     },
                 ],
             }],
@@ -946,6 +1073,7 @@ mod tests {
                         state: ComponentState::On,
                         controller: "DB8E".into(),
                         led: None,
+                        led_capability: Some(crate::patch::LedCapability::Rgb),
                     },
                     HwComponent {
                         id: "B1.2".into(),
@@ -955,6 +1083,7 @@ mod tests {
                         state: ComponentState::Off,
                         controller: "DB8E".into(),
                         led: None,
+                        led_capability: Some(crate::patch::LedCapability::Rgb),
                     },
                 ],
             }],
@@ -1046,6 +1175,8 @@ mod tests {
                 modifier_wash: None,
                 dimmed: false,
                 kind: comp.kind,
+                led_state: None,
+                led_rgb: None,
             });
         }
         let modules = geom
@@ -1125,6 +1256,7 @@ mod tests {
             state: ComponentState::On,
             controller: "P2B8".into(),
             led: None,
+            led_capability: Some(crate::patch::LedCapability::Rgb),
         };
         let (g, s, c) = cell_visuals(&on, false, false);
         assert_eq!(g, "\u{25CF}");

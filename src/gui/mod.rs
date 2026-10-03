@@ -593,11 +593,16 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
         // previous frame through.
         ui.painter().with_clip_rect(rect).rect_filled(rect, 0.0, bg);
         match app.layout.pane(id).view {
-            Some(crate::app::ViewType::Panels) => {
+            Some(crate::app::ViewType::Physical) => {
                 // Module UI: real hw components grouped by controller. The
-                // surface draws its own focus frame from `spec.focused`.
-                let spec = panels::panels_spec(app, focused, rect);
-                let _ = panels::paint_panels(ui, rect, Some(&spec));
+                // physical surface paints the rack, not its own pane chrome, so
+                // this pane draws the shared focus frame like the graph and
+                // optimizer panes (spec pane-class-layout: every pane border
+                // carries the focus/unfocused token).
+                let spec = physical::physical_spec(app);
+                let _ = physical::paint_physical(ui, rect, spec.as_ref());
+                let painter = ui.painter().with_clip_rect(rect);
+                draw_pane_frame(&painter, rect, focused, " Module UI ", t);
             }
             Some(crate::app::ViewType::Graph) => {
                 // The pane is the visible graph canvas: publish its size and
@@ -607,6 +612,26 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                     app.fit_graph_camera((rect.width(), rect.height()));
                 }
                 graph::paint_scene_in(ui, rect, scene, selected);
+                // Publish graph minimap rect and transform for click-to-navigate hit testing.
+                if let Some(spec) = scene {
+                    if let Some(minimap) = graph::minimap_layout(spec, rect) {
+                        let panel_egui = egui::Rect::from_min_size(
+                            egui::pos2(minimap.panel.0, minimap.panel.1),
+                            egui::vec2(minimap.panel.2, minimap.panel.3),
+                        );
+                        app.graph_minimap_rect = Some(to_cell_rect(panel_egui));
+                        app.graph_minimap_panel_egui = Some(panel_egui);
+                        app.graph_minimap_transform = Some(minimap.transform);
+                    } else {
+                        app.graph_minimap_rect = None;
+                        app.graph_minimap_panel_egui = None;
+                        app.graph_minimap_transform = None;
+                    }
+                } else {
+                    app.graph_minimap_rect = None;
+                    app.graph_minimap_panel_egui = None;
+                    app.graph_minimap_transform = None;
+                }
                 // The graph scene paints no pane chrome of its own, so the
                 // pane frame marks it like the panels and viewer panes.
                 let painter = ui.painter().with_clip_rect(rect);
@@ -616,14 +641,6 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 let painter = ui.painter().with_clip_rect(rect);
                 let spec = viewer::viewer_spec(app);
                 let _ = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
-            }
-            Some(crate::app::ViewType::Physical) => {
-                let spec = physical::physical_spec(app);
-                let _ = physical::paint_physical(ui, rect, spec.as_ref());
-                // The physical surface paints no pane chrome of its own;
-                // frame the pane like the graph tile.
-                let painter = ui.painter().with_clip_rect(rect);
-                draw_pane_frame(&painter, rect, focused, "", t);
             }
             Some(crate::app::ViewType::Optimizer) => {
                 // The optimizer lives in its own small pane (spec "Optimizer
@@ -1094,9 +1111,14 @@ mod tests {
             ..Default::default()
         };
         let scene = scene_for(app, win);
-        ctx.run_ui(raw, |ui| {
+        let mut out = ctx.run_ui(raw, |ui| {
             paint_panes(app, ui, scene.as_ref(), &[]);
-        })
+        });
+        // Drop the delta here, not at the end of each test: epaint panics when
+        // a FullOutput with unapplied deltas drops, which turns one failed
+        // assertion below into a process abort that hides every other result.
+        out.textures_delta.clear();
+        out
     }
 
     fn text_labels(out: &egui::FullOutput) -> Vec<String> {
@@ -1126,8 +1148,8 @@ mod tests {
         let mut out = run_paint_panes(&mut app);
         let labels = text_labels(&out);
         assert!(
-            labels.iter().any(|l| l.contains("Panels")),
-            "panels title missing: {labels:?}"
+            labels.iter().any(|l| l.contains("Module UI")),
+            "module UI title missing: {labels:?}"
         );
         assert!(
             labels.iter().any(|l| l.contains("Source")),
@@ -1452,14 +1474,17 @@ mod tests {
             ..Default::default()
         };
         let scene = scene_for(app, win);
-        ctx.run_ui(raw, |ui| {
+        let mut out = ctx.run_ui(raw, |ui| {
             paint_panes(app, ui, scene.as_ref(), &[]);
             paint_overlays(app, ui);
-        })
+        });
+        // See `run_paint_panes`: release the delta before any assertion can run.
+        out.textures_delta.clear();
+        out
     }
 
     #[test]
-    fn panels_paint_as_a_pane_view_headless() {
+    fn physical_paint_as_a_pane_view_headless() {
         // 2.3: the module UI is a view, not a permanent left pane. A band
         // showing only the module UI still has something to paint and must not
         // fall through to the empty-band graph canvas.
@@ -1484,8 +1509,14 @@ mod tests {
         let mut out = run_paint_panes(&mut app);
         let labels = text_labels(&out);
         assert!(
-            labels.iter().any(|l| l.contains("Panels")),
-            "panels paint as a pane view: {labels:?}"
+            labels.iter().any(|l| l.contains("Module UI")),
+            "module UI pane title missing: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("P2B8") || l.contains("CV I/O")),
+            "module UI faceplates rendered: {labels:?}"
         );
         assert_eq!(
             app.pane_rects.len(),

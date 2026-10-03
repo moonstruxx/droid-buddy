@@ -28,7 +28,7 @@ The main band SHALL render a big pane on the left half at full height. The right
 
 ### Requirement: Window classes route views to panes
 
-Every view SHALL belong to a window class. The Big class SHALL contain the signal-flow graph, the module UI (panels), and the physical rack view. The Small class SHALL contain the latency optimizer and the source viewer. A view SHALL open only in a pane of its own class. Opening a small-class view while the right half holds a big-class view SHALL close that big-class view and split the right half into the two small panes.
+Every view SHALL belong to a window class. The Big class SHALL contain the signal-flow graph and the module UI (the physical rack view). The Small class SHALL contain the latency optimizer and the source viewer. A view SHALL open only in a pane of its own class. Opening a small-class view while the right half holds a big-class view SHALL close that big-class view and split the right half into the two small panes.
 
 #### Scenario: Big-class view opens in a big pane
 - **WHEN** the user opens the graph with `g g`
@@ -50,25 +50,13 @@ Every view SHALL belong to a window class. The Big class SHALL contain the signa
 - **WHEN** two big panes are shown, the right one holds the graph, and the user opens the optimizer with `g o`
 - **THEN** the graph closes, the right half splits into two small panes, and the optimizer occupies one of them
 
-### Requirement: Physical view and module UI are mutually exclusive
-
-The physical rack view and the module UI SHALL NOT be open at the same time. Opening either SHALL close the other wherever it is shown. A swap SHALL NOT leave both open.
-
-#### Scenario: Opening physical closes module UI
-- **WHEN** the module UI is open and the user opens the physical view
-- **THEN** the module UI closes and the physical view takes its pane
-
-#### Scenario: Opening module UI closes physical
-- **WHEN** the physical view is open and the user opens the module UI
-- **THEN** the physical view closes and the module UI takes its pane
-
-#### Scenario: Swap does not create coexistence
-- **WHEN** only the module UI of the pair is open and the user swaps panes
-- **THEN** the physical view stays closed and only the module UI is shown
+#### Scenario: Big carousel has two views
+- **WHEN** a big pane is focused and the user presses `r` repeatedly
+- **THEN** the pane alternates between the graph and the module UI
 
 ### Requirement: Startup pane configuration
 
-On startup the layout SHALL open with the module UI in the left big pane and the source viewer in a small pane, so the band starts in the arrangement with two small panes.
+On startup the layout SHALL open with the module UI (the physical rack view) in the left big pane and the source viewer in a small pane, so the band starts in the arrangement with two small panes.
 
 #### Scenario: Startup layout
 - **WHEN** the application starts with a patch loaded
