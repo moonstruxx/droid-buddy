@@ -447,12 +447,12 @@ pub struct GraphDrag {
     pub offset_y: f32,
 }
 
-/// Fixed pixel size of one node in the GPU graph window (task 3.1). The window
-/// hit-test derives node world rects from this at the current camera zoom
-/// (`pixel → world → node index`), mirroring how the terminal surface derives
-/// cell rects from fixed node cell dims. The window scene builder (task 3.2)
-/// must construct [`crate::graph_render::NodeSpec`]s at the same size so clicks
-/// line up with what is drawn.
+/// Legacy fixed-pixel node size (task 3.1), retained for the pre-migration fit
+/// path: `src/gui/graph.rs` still derives node geometry from these until it
+/// migrates. Superseded by world-space node sizing — `layout::node_world_sizes`
+/// gives each node its own world `(width, height)`, projected through the
+/// camera zoom. The values are frozen: the not-yet-migrated window path reads
+/// them.
 pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
 pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
 
@@ -2235,11 +2235,16 @@ impl App {
     /// One wheel/arrow pan step of the graph camera in pixels, mirroring
     /// `PHYSICAL_PAN_STEP`; the handler gating on overflow reuses this step.
     pub const GRAPH_PAN_STEP_PX: f32 = 24.0;
-    /// Fit-zoom floor for the camera, shared with the window fit's
-    /// `WINDOW_FIT_MIN_NODE_PX`: only keeps the fit from collapsing zoom below
-    /// legibility on very large graphs; it never frames fewer nodes than the
-    /// pure fit (the `fit_to_world` floor-frames guard decides).
-    pub const GRAPH_FIT_MIN_NODE_PX: f32 = 2.2;
+    /// Minimum DRAWN node pixel size (graph-zoom-node-scaling): a non-vanishing
+    /// render floor so a zoomed-out node body never disappears. The fit's floor
+    /// parameter cannot raise the zoom above the pure fit —
+    /// `fit_to_world_with_nodes` preserves the `floor_frames` guard, so the
+    /// floor is guard-inert — so this minimum is enforced at render time; the
+    /// fit only consumes it as its floor argument.
+    pub const GRAPH_MIN_NODE_PX: f32 = 1.0;
+    /// Minimum pointer hit size for graph nodes (task 3.1): a node whose drawn
+    /// frame is only a few pixels stays selectable.
+    pub const GRAPH_MIN_HIT_PX: f32 = 12.0;
 
     /// The graph canvas centre in world coordinates, for anchoring zoom. Falls
     /// back to the world origin when the canvas size has not been published.
@@ -2327,10 +2332,40 @@ impl App {
         }
     }
 
-    /// Center the drawn graph in the visible pane: pan so the bounds' center
-    /// maps to the canvas center, zoom unchanged (design D3 `c`). Silent no-op
-    /// until the renderer has published both the camera and the canvas size,
-    /// or when there are no positions to center.
+    /// Per-axis MAXIMUM node world size over the currently drawn graph
+    /// (graph-zoom-node-scaling): the dependency-filtered subset when the `f`
+    /// filter is active (its indices are full-graph indices), else every node.
+    /// The fit frames this conservative extent so every drawn box — not only
+    /// its top-left corner — is fully visible. `(0.0, 0.0)` without a graph.
+    pub fn graph_fit_node_world(&self) -> (f32, f32) {
+        let Some(graph) = self.graph.as_ref() else {
+            return (0.0, 0.0);
+        };
+        let sizes = crate::layout::node_world_sizes(graph);
+        let mut max_w = 0.0_f32;
+        let mut max_h = 0.0_f32;
+        if self.dependency_nodes.is_empty() {
+            for &(w, h) in &sizes {
+                max_w = max_w.max(w);
+                max_h = max_h.max(h);
+            }
+        } else {
+            for &i in &self.dependency_nodes {
+                if let Some(&(w, h)) = sizes.get(i) {
+                    max_w = max_w.max(w);
+                    max_h = max_h.max(h);
+                }
+            }
+        }
+        (max_w, max_h)
+    }
+
+    /// Center the drawn graph in the visible pane: pan so the CONTENT center —
+    /// the position-bounds center plus half the node world extent (node
+    /// positions are top-left corners) — maps to the canvas center, zoom
+    /// unchanged (design D3 `c`). Silent no-op until the renderer has published
+    /// both the camera and the canvas size, or when there are no positions to
+    /// center.
     pub fn center_graph_camera(&mut self) -> bool {
         let Some(cam) = self.graph_camera else {
             return false;
@@ -2343,9 +2378,10 @@ impl App {
             return false;
         }
         let bounds = WorldBounds::from_positions(&positions);
+        let (nw, nh) = self.graph_fit_node_world();
         let (cx, cy) = (
-            (bounds.min_x + bounds.max_x) / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
+            (bounds.min_x + bounds.max_x + nw) / 2.0,
+            (bounds.min_y + bounds.max_y + nh) / 2.0,
         );
         // Inverse of `pixel = world * zoom - pan`: pan = center * zoom -
         // canvas / 2, mirroring `fit_to_world`'s centered pan exactly.
@@ -2358,15 +2394,17 @@ impl App {
     }
 
     /// Full refit of the drawn graph against `viewport` (design D3 `Shift+c`):
-    /// a fresh width-first `fit_to_world` over the dependency-filter-aware
-    /// bounds, the zoom preset reset to the fitted-zoom entry, and the canvas
-    /// size re-published so later center/zoom/pan anchor on the new viewport.
+    /// a fresh width-first extent-aware fit over the dependency-filter-aware
+    /// bounds, framing whole node bodies via [`Self::graph_fit_node_world`], the
+    /// zoom preset reset to the fitted-zoom entry, and the canvas size
+    /// re-published so later center/zoom/pan anchor on the new viewport.
     pub fn fit_graph_camera(&mut self, viewport: (f32, f32)) {
         let positions = self.graph_fit_positions();
-        self.graph_camera = Some(GraphCamera::fit_to_world(
+        self.graph_camera = Some(GraphCamera::fit_to_world_with_nodes(
             WorldBounds::from_positions(&positions),
+            self.graph_fit_node_world(),
             viewport,
-            Self::GRAPH_FIT_MIN_NODE_PX,
+            Self::GRAPH_MIN_NODE_PX,
         ));
         self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = Some(viewport);
@@ -4204,6 +4242,83 @@ mod tests {
         assert!(
             x0 >= 0.0 && y0 >= 0.0 && x1 <= viewport.0 && y1 <= viewport.1,
             "bounds must be framed by the viewport: corners ({x0},{y0}) and ({x1},{y1})"
+        );
+    }
+
+    #[test]
+    fn fit_graph_camera_frames_whole_node_boxes() {
+        // The extent-aware fit frames the position bounds expanded by the
+        // largest node world extent, so every node's full box (position +
+        // extent), not only its top-left corner, lands inside the viewport.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+
+        let viewport = (640.0, 300.0);
+        app.fit_graph_camera(viewport);
+        let cam = app.graph_camera.unwrap();
+        let graph = app.graph.as_ref().unwrap();
+        let sizes = layout::node_world_sizes(graph);
+        assert!(!sizes.is_empty());
+        for (i, &(x, y)) in app.graph_positions.iter().enumerate() {
+            let (w, h) = sizes[i];
+            let (px0, py0) = cam.world_to_pixel(x, y);
+            let (px1, py1) = cam.world_to_pixel(x + w, y + h);
+            assert!(
+                px0 >= -1e-2
+                    && py0 >= -1e-2
+                    && px1 <= viewport.0 + 1e-2
+                    && py1 <= viewport.1 + 1e-2,
+                "node {i} box off-canvas: ({px0},{py0})-({px1},{py1})"
+            );
+        }
+    }
+
+    #[test]
+    fn center_graph_camera_accounts_for_node_extent() {
+        // Centering targets the CONTENT center (position-bounds center + half
+        // the node world extent), not the position-bounds center itself.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.graph_camera = Some(GraphCamera {
+            zoom: 1.5,
+            pan: (0.0, 0.0),
+        });
+        app.graph_canvas_px = Some((640.0, 300.0));
+
+        assert!(app.center_graph_camera());
+        let cam = app.graph_camera.unwrap();
+        assert_eq!(cam.zoom, 1.5, "centering must not change zoom");
+
+        let positions = app.graph_fit_positions();
+        let bounds = WorldBounds::from_positions(&positions);
+        let (nw, nh) = app.graph_fit_node_world();
+        assert!(
+            nw > 0.0 && nh > 0.0,
+            "the fixture graph must have node extents"
+        );
+        let (ccx, ccy) = (
+            (bounds.min_x + bounds.max_x + nw) / 2.0,
+            (bounds.min_y + bounds.max_y + nh) / 2.0,
+        );
+        let (px, py) = cam.world_to_pixel(ccx, ccy);
+        assert!(
+            (px - 320.0).abs() < 1e-2 && (py - 150.0).abs() < 1e-2,
+            "content center must map to the canvas center: ({px},{py})"
+        );
+        // The position-bounds center is deliberately NOT the canvas center once
+        // the extent is non-zero.
+        let (bcx, bcy) = (
+            (bounds.min_x + bounds.max_x) / 2.0,
+            (bounds.min_y + bounds.max_y) / 2.0,
+        );
+        let (bpx, bpy) = cam.world_to_pixel(bcx, bcy);
+        assert!(
+            (bpx - 320.0).abs() > 1e-3 || (bpy - 150.0).abs() > 1e-3,
+            "bounds center must differ from the content center when extent > 0"
         );
     }
 
