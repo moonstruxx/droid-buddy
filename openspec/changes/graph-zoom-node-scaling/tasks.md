@@ -25,5 +25,5 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Four gates all exit 0: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` <!-- agent: devops-engineer.fast, depends_on: [4.1], touches: [] -->
-- [ ] 5.2 Live-screen proof: load the scale-anchor patch, open the graph, capture fit / two zoom-out steps / zoom-in showing node frames shrinking and labels dropping out, and compare against the pre-change captures <!-- agent: devops-engineer.fast, depends_on: [5.1], touches: [] -->
+- [x] 5.1 Four gates all exit 0: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked` <!-- agent: devops-engineer.fast, depends_on: [4.1], touches: [] -->
+- [x] 5.2 Live-screen proof: load the scale-anchor patch, open the graph, capture fit / two zoom-out steps / zoom-in showing node frames shrinking and labels dropping out, and compare against the pre-change captures <!-- agent: devops-engineer.fast, depends_on: [5.1], touches: [] -->
