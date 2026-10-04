@@ -11,4 +11,4 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Run the full gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`) and verify all four exit 0 <!-- agent: horst-engineer.fast, depends_on: [1.1, 1.2, 2.1], touches: [] -->
+- [x] 3.1 Run the full gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`) and verify all four exit 0 <!-- agent: horst-engineer.fast, depends_on: [1.1, 1.2, 2.1], touches: [] -->
