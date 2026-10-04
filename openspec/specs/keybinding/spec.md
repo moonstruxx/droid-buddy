@@ -421,6 +421,15 @@ The system SHALL bind `z` to toggle the maximize of the focused pane, `Alt+b` to
 - **WHEN** the user opens help with `?`
 - **THEN** the table lists `z`, `Alt+b`, and `Alt+s`
 
+### Requirement: Performance-view keybindings
+
+The Physical pane SHALL bind `p` (no modifiers) to opening the performance view and provide a reset key restoring element states; `Esc` SHALL leave the performance view. All other panes keep their existing `p` meaning.
+
+#### Scenario: Help documents the keys
+
+- WHEN the user opens the module-UI help view
+- THEN the key table lists `p` with its performance-view meaning and the reset key with its restore meaning.
+
 ## Design Decisions
 
 - Decision 1: Lazy timeout check (no background timer). Rationale: the app is event-driven; checking expiry on the next keypress avoids threading complexity and keeps the event loop simple. A stale prefix that nobody presses is harmless.
