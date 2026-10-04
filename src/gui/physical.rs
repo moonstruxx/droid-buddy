@@ -425,10 +425,10 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     let rows = crate::physical::PHYSICAL_ROWS_PER_MM;
     let pane_w = pane.width() as f64 / PHYSICAL_CELL_SCALE as f64;
     let pane_h = pane.height() as f64 / PHYSICAL_CELL_SCALE as f64;
-    if !(pane_w > 0.0) || !(pane_h > 0.0) {
+    if pane_w <= 0.0 || pane_h <= 0.0 {
         return None;
     }
-    if !(rack.total_width_mm > 0.0) || !(rack.total_height_mm > 0.0) {
+    if rack.total_width_mm <= 0.0 || rack.total_height_mm <= 0.0 {
         return None;
     }
     let fit = (pane_w / (rack.total_width_mm * cols)).min(pane_h / (rack.total_height_mm * rows));
@@ -486,27 +486,33 @@ pub(crate) fn owning_circuit_node(patch: &crate::patch::Patch, token: &str) -> O
 /// guessed → derived. `fallback` is the `display_label` result, which equals
 /// the derived token exactly when no explicit label exists, so it doubles as
 /// the derived step without re-resolving the chain.
-pub(crate) fn performance_headline(
-    patch: &crate::patch::Patch,
-    app: &App,
-    token: &str,
+/// Resolution inputs for [`performance_headline`], bundled so the helper
+/// stays under the argument-count lint without an allow attribute.
+pub(crate) struct HeadlineCtx<'a> {
+    patch: &'a crate::patch::Patch,
+    app: &'a App,
     shift: u8,
     layers_enabled: bool,
     max_shift_layer: u8,
-    hw_store: &std::collections::HashMap<String, std::collections::BTreeMap<u8, String>>,
-    circuit_store: &std::collections::HashMap<NodeId, String>,
-    fallback: &str,
-) -> String {
-    if let Some(explicit) =
-        patch.explicit_hw_label(token, shift, layers_enabled, max_shift_layer, hw_store)
-    {
+    hw_store: &'a std::collections::HashMap<String, std::collections::BTreeMap<u8, String>>,
+    circuit_store: &'a std::collections::HashMap<NodeId, String>,
+}
+
+pub(crate) fn performance_headline(ctx: &HeadlineCtx, token: &str, fallback: &str) -> String {
+    if let Some(explicit) = ctx.patch.explicit_hw_label(
+        token,
+        ctx.shift,
+        ctx.layers_enabled,
+        ctx.max_shift_layer,
+        ctx.hw_store,
+    ) {
         return explicit;
     }
-    if let Some(node) = owning_circuit_node(patch, token) {
-        if let Some(stored) = patch.circuit_label(&node, circuit_store) {
+    if let Some(node) = owning_circuit_node(ctx.patch, token) {
+        if let Some(stored) = ctx.patch.circuit_label(&node, ctx.circuit_store) {
             return stored;
         }
-        if let Some(guess) = app.guessed_labels.get(&node) {
+        if let Some(guess) = ctx.app.guessed_labels.get(&node) {
             return guess.clone();
         }
     }
@@ -546,17 +552,16 @@ pub(crate) fn performance_overlay(
         let Some(comp) = patch.hw_components.get(hw_idx) else {
             continue;
         };
-        let headline = performance_headline(
+        let ctx = HeadlineCtx {
             patch,
             app,
-            &comp.id,
             shift,
             layers_enabled,
             max_shift_layer,
-            &hw_store,
-            &circuit_store,
-            &cell.label,
-        );
+            hw_store: &hw_store,
+            circuit_store: &circuit_store,
+        };
+        let headline = performance_headline(&ctx, &comp.id, &cell.label);
         let (w, h) = callout_size(&headline, &cell.state_text);
         inputs.push(crate::performance::LabelInput {
             host_id: inputs.len(),
@@ -2371,17 +2376,16 @@ mod tests {
             |app: &App,
              hw: &std::collections::HashMap<String, std::collections::BTreeMap<u8, String>>,
              fallback: &str| {
-                performance_headline(
-                    &patch,
+                let ctx = HeadlineCtx {
+                    patch: &patch,
                     app,
-                    "B1.1",
-                    1,
-                    true,
-                    4,
-                    hw,
-                    &circuit_store,
-                    fallback,
-                )
+                    shift: 1,
+                    layers_enabled: true,
+                    max_shift_layer: 4,
+                    hw_store: hw,
+                    circuit_store: &circuit_store,
+                };
+                performance_headline(&ctx, "B1.1", fallback)
             };
         let fallback = patch.display_label("B1.1", 1, true, 4, &hw_store);
         // No store, no guess → derived fallback.
@@ -2400,20 +2404,16 @@ mod tests {
         assert_eq!(resolve(&app, &hw, &fallback), "Cut");
         // A token with no occurrence falls back to derived.
         let derived = patch.display_label("B9.9", 1, true, 4, &hw_store);
-        assert_eq!(
-            performance_headline(
-                &patch,
-                &app,
-                "B9.9",
-                1,
-                true,
-                4,
-                &hw_store,
-                &circuit_store,
-                &derived
-            ),
-            derived
-        );
+        let ctx = HeadlineCtx {
+            patch: &patch,
+            app: &app,
+            shift: 1,
+            layers_enabled: true,
+            max_shift_layer: 4,
+            hw_store: &hw_store,
+            circuit_store: &circuit_store,
+        };
+        assert_eq!(performance_headline(&ctx, "B9.9", &derived), derived);
     }
 
     fn painted_line_count(spec: &PhysicalSpec) -> usize {

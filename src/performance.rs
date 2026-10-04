@@ -256,7 +256,8 @@ fn stack_side(
             band_out += band_thickness + LABEL_GAP;
             cursor = 0.0;
             band_thickness = 0.0;
-            band_started = false;
+            // No `band_started = false`: the current label is placed into the
+            // fresh band immediately below, so the band is non-empty.
         }
         let label_rect = if horizontal {
             let y = if outward < 0.0 {

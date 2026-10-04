@@ -786,7 +786,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn performance_leader_resolves_per_palette() {
         // Performance-view leader lines (performance-view 1.3): bright
         // cyan in classic (distinct from Cyan control cables and White
