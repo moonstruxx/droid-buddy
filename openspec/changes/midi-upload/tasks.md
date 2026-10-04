@@ -3,7 +3,7 @@
 ## 1. Upload core
 
 - [x] 1.1 SysEx payload builder (pure `src/sysex.rs`: memory patch → stripped 7-bit text → `F0 00 66 66 50 … F7` framing per the `droidpatch` rules) and verify the framing tests pass <!-- agent: dermannmitdermachine-engineer.build, depends_on: [], touches: [src/sysex.rs] -->
-- [ ] 1.2 Confirm modal + `U` key + transport detect + background send with waiting bar and verdict (preflight probe, `y`/`n`/`Esc`, child reaped on quit) and verify the flow tests pass <!-- agent: rusty-engineer.build, depends_on: [1.1], touches: [src/app.rs, src/handler.rs, src/gui/overlays.rs] -->
+- [x] 1.2 Confirm modal + `U` key + transport detect + background send with waiting bar and verdict (preflight probe, `y`/`n`/`Esc`, child reaped on quit) and verify the flow tests pass <!-- agent: rusty-engineer.build, depends_on: [1.1], touches: [src/app.rs, src/handler.rs, src/gui/overlays.rs] -->
 
 ## 2. Docs
 

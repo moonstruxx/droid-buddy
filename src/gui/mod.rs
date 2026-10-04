@@ -695,6 +695,12 @@ fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     if let Some(spec) = overlays::validation_spec_for(app) {
         let _ = overlays::paint_validation_modal(painter, canvas, ctx, Some(&spec));
     }
+    if let Some(spec) = overlays::upload_confirm_spec(app) {
+        let _ = overlays::paint_upload_confirm(painter, canvas, ctx, Some(&spec));
+    }
+    if let Some(spec) = overlays::upload_progress_spec(app) {
+        let _ = overlays::paint_upload_progress(painter, canvas, ctx, Some(&spec));
+    }
     if let Some(spec) = overlays::select_menu_spec(app) {
         overlays::paint_select_menu(painter, canvas, ctx, Some(&spec));
     }

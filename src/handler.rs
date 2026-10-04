@@ -419,6 +419,9 @@ fn open_embedded_viewer(app: &mut App) {
 /// Handle keyboard input. Returns true if the app should quit.
 /// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
+    // Reap a finished background upload first (non-blocking `try_wait`): the
+    // verdict lands in the status line on the next event after completion.
+    app.poll_upload();
     // Inline label-edit overlay eats all keys (highest priority: overlay > picker > prefix > graph > source > panels).
     if app.editing.is_some() {
         match key.code {
@@ -531,6 +534,29 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     app.open_view(ViewType::SourceViewer);
                     sync_viewer_focus_from_tiles(app);
                     app.showing_validation = false;
+                }
+                return false;
+            }
+            _ => return false,
+        }
+    }
+    // Upload confirm modal (change `midi-upload`, task 1.2): an overlay like
+    // the validation modal — while open it eats all keys; `y` sends when a
+    // transport path exists (else the status names what's missing and the
+    // modal stays), `n`/`Esc` cancel silently (no process, rack untouched).
+    if app.upload_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.cancel_upload_modal();
+                return false;
+            }
+            KeyCode::Char('n') => {
+                app.cancel_upload_modal();
+                return false;
+            }
+            KeyCode::Char('y') => {
+                if let Err(e) = app.start_upload_send() {
+                    app.status_message = format!("Upload blocked: {e}");
                 }
                 return false;
             }
@@ -1325,8 +1351,22 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     }
 
     match key.code {
-        KeyCode::Char('q') => true,
-        KeyCode::Char('c') if key.modifiers.ctrl => true,
+        KeyCode::Char('q') => {
+            // Quitting never orphans a background send: reap the child now
+            // (window-close quits are covered by `UploadSend`'s `Drop`).
+            app.abort_upload_send();
+            true
+        }
+        KeyCode::Char('c') if key.modifiers.ctrl => {
+            app.abort_upload_send();
+            true
+        }
+        KeyCode::Char('U') => {
+            // `U` (Shift+u, like `R`/`Shift+c`) opens the upload confirm
+            // modal for the in-memory patch; `y`/`n` inside it send/cancel.
+            app.open_upload_modal();
+            false
+        }
         KeyCode::Char('l') => {
             // Opens the picker whether or not a patch is already loaded,
             // so a loaded patch can be swapped for a different one.
@@ -1998,6 +2038,9 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// `main.rs` owns both the window and the `App`, so it calls this once per
 /// painted frame (D6: the loop acts on what it owns).
 pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
+    // Reap a finished background upload (same non-blocking poll as the key
+    // path, so mouse-only frames still land the verdict).
+    app.poll_upload();
     // Module UI (Physical pane) pointer routing. The window frame is the only
     // live pointer path, and the module UI has no graph: handle hover/click on
     // the rack before the graph-camera gate so it works with no graph open.
@@ -2798,6 +2841,103 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, key_modifiers::NONE)
+    }
+
+    // MIDI upload (change `midi-upload`, task 1.2): `U` (Shift+u) opens the
+    // confirm modal for the in-memory patch; `y` sends when a path exists,
+    // `n`/`Esc` cancel silently; `q` aborts a running send.
+
+    fn upload_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('U'), key_modifiers::SHIFT)
+    }
+
+    fn blocked_transport() -> crate::app::UploadTransport {
+        crate::app::UploadTransport {
+            amidi: false,
+            sendmidi: false,
+            droid_port: None,
+            other_ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn big_u_without_patch_reports_and_opens_nothing() {
+        let mut app = App::new();
+        let quit = handle_event(upload_key(), &mut app);
+        assert!(!quit);
+        assert!(app.upload_modal.is_none());
+        assert!(app.status_message.contains("No patch loaded"));
+    }
+
+    #[test]
+    fn big_u_with_patch_opens_modal_with_byte_count() {
+        let mut app = app_with_fixture();
+        let expected = app.upload_payload().expect("fixture renders").len();
+        let quit = handle_event(upload_key(), &mut app);
+        assert!(!quit);
+        let confirm = app.upload_modal.as_ref().expect("modal opens");
+        assert_eq!(confirm.byte_count, expected);
+    }
+
+    #[test]
+    fn modal_cancel_keys_are_silent() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut app = app_with_fixture();
+            handle_event(upload_key(), &mut app);
+            assert!(app.upload_modal.is_some());
+            app.status_message = String::from("steady");
+            let quit = handle_event(key(code), &mut app);
+            assert!(!quit);
+            assert!(app.upload_modal.is_none());
+            assert!(app.upload_send.is_none(), "cancel spawns no process");
+            assert_eq!(app.status_message, "steady", "cancel is silent");
+        }
+    }
+
+    #[test]
+    fn modal_y_without_path_keeps_modal_and_names_missing() {
+        let mut app = app_with_fixture();
+        app.open_upload_modal_with(64, blocked_transport());
+        let quit = handle_event(key(KeyCode::Char('y')), &mut app);
+        assert!(!quit);
+        assert!(app.upload_modal.is_some(), "modal stays for retry/cancel");
+        assert!(app.upload_send.is_none(), "no process spawns");
+        assert!(app.status_message.contains("Upload blocked"));
+        assert!(app.status_message.contains("amidi"));
+    }
+
+    #[test]
+    fn modal_eats_other_keys() {
+        let mut app = app_with_fixture();
+        app.open_upload_modal_with(64, blocked_transport());
+        let quit = handle_event(key(KeyCode::Char('l')), &mut app);
+        assert!(!quit);
+        assert!(!app.showing_picker, "picker must not open under the modal");
+        assert!(app.upload_modal.is_some());
+    }
+
+    #[test]
+    fn big_u_blocked_while_send_in_flight() {
+        let mut app = app_with_fixture();
+        let payload = app.upload_payload().expect("fixture renders");
+        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
+            .expect("spawn sleep");
+        let quit = handle_event(upload_key(), &mut app);
+        assert!(!quit);
+        assert!(app.upload_modal.is_none());
+        assert_eq!(app.status_message, "Upload already in progress");
+        app.abort_upload_send();
+    }
+
+    #[test]
+    fn quit_aborts_running_send() {
+        let mut app = app_with_fixture();
+        let payload = app.upload_payload().expect("fixture renders");
+        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
+            .expect("spawn sleep");
+        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(quit);
+        assert!(app.upload_send.is_none());
     }
 
     // Task 3.1: help modal (`?`).
