@@ -38,7 +38,7 @@ enabled = true
 Palette name (`classic`, `terminal`, `mono`, …). Every rendered color
 comes from theme tokens — no hardcoded RGB.
 
-### `[labels]` {#labels}
+### `[labels]`
 
 - `layers_enabled` (bool, default `true`): per-shift-group label
   layers. Off coerces display to layer 1 while preserving 2–N.
@@ -65,7 +65,7 @@ Module-UI presentation defaults (zoom, pan origin) plus the optional
 rack/case row definition. Omit `[physical.rack]` for the auto-packed
 default case. `+`/`-` adjust zoom at runtime.
 
-### `[plugins]` {#plugins}
+### `[plugins]`
 
 - `enabled` (bool, default `true`): user-supplied circuit definitions
   (`[[circuit]]` TOML files) extending the embedded schema.
