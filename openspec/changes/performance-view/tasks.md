@@ -9,7 +9,7 @@
 
 ## 2. Docs
 
-- [ ] 2.1 Add the module-UI help-table rows (`p`, reset) and verify the help test passes <!-- agent: rusty-engineer.fast, depends_on: [1.1, 1.4], touches: [src/help.rs] -->
+- [x] 2.1 Add the module-UI help-table rows (`p`, reset) and verify the help test passes <!-- agent: rusty-engineer.fast, depends_on: [1.1, 1.4], touches: [src/help.rs] -->
 
 ## 3. Verification
 

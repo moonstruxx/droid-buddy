@@ -89,7 +89,8 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g s", "open select-state menu"),
             ("g c", "toggle latency coloring"),
             ("d", "toggle diff overlay"),
-            ("p", "pause processing"),
+            ("p", "open performance view"),
+            ("R", "reset element states"),
             ("?", "show this help"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
@@ -429,6 +430,8 @@ mod tests {
         ("e", "edit label / validation modal"),
         ("1-4", "shift groups"),
         ("Esc", "close Module UI view"),
+        ("p", "open performance view"),
+        ("R", "reset element states"),
         // Graph surface.
         ("x", "toggle circuit processing"),
         ("p", "pin/unpin node"),
@@ -583,6 +586,7 @@ mod tests {
             "g s",
             "j/k",
             "l",
+            "R",
             "m",
             "p",
             "q",
@@ -609,6 +613,16 @@ mod tests {
             !table.iter().any(|(key, _)| *key == "\\"),
             "`\\` is not a handler binding, so it must not be documented"
         );
+    }
+
+    #[test]
+    fn module_ui_table_names_performance_view_keys() {
+        // `performance-view` 2.1: the Module UI table names the view-scoped
+        // `p` (the shared `pause processing` row no longer applies on this
+        // surface) and the `R` element-state reset.
+        let table = keybindings(HelpView::ModuleUi);
+        assert!(table.contains(&("p", "open performance view")));
+        assert!(table.contains(&("R", "reset element states")));
     }
 
     #[test]
