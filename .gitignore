@@ -8,3 +8,10 @@ thoughts
 .slim/worktrees/
 .slim/worktrees.json
 # END oh-my-opencode-slim worktrees
+
+# Untracked local-only paths (kept on disk, never committed)
+.bt/
+.cortexkit/
+.codegraph/
+.opencode/harness-run.json
+.opencode/opencode-quota/

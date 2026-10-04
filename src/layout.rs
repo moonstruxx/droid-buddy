@@ -1699,12 +1699,12 @@ mod tests {
 
     #[test]
     fn real_patch_solve_settles_quickly() {
-        // A real patch (arpeggio1.ini) must stay within the bounded refinement
+        // A real patch (own_buttons.ini) must stay within the bounded refinement
         // budget: the layered seed is the primary arrangement (design gv5), so
         // the relaxation is a short refinement, not a full energy convergence.
         // The energy-threshold early exit still fires when the graph settles
         // sooner (e.g. cable_banner_combos.ini converges well under the cap).
-        let graph = graph_from_fixture("fixtures/arpeggio1.ini");
+        let graph = graph_from_fixture("fixtures/own_buttons.ini");
         assert!(graph.nodes.len() >= 10, "fixture must be non-trivial");
         let count = solve_iteration_count(&graph);
         assert!(
@@ -1721,7 +1721,7 @@ mod tests {
         // within the local budget, so the interactive drag stays bounded and
         // responsive. Asserted via the iteration count, not wall-clock timing:
         // the re-settle is capped at LOCAL_ITERATIONS and deterministic.
-        let graph = graph_from_fixture("fixtures/arpeggio1.ini");
+        let graph = graph_from_fixture("fixtures/own_buttons.ini");
         let mut positions = solve(&graph, &[], DEFAULT_TENSION);
         let moved = graph.nodes[0].id.clone();
         positions[0] = (positions[0].0 + 60.0, positions[0].1 + 40.0);

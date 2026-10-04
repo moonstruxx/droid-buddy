@@ -2287,7 +2287,7 @@ mod tests {
     }
 
     fn perf_spec() -> PhysicalSpec {
-        let mut app = app_with_patch("fixtures/arpeggio1.ini");
+        let mut app = app_with_patch("fixtures/own_buttons.ini");
         app.showing_performance = true;
         physical_spec(&app, perf_pane()).expect("performance spec")
     }
@@ -2298,7 +2298,7 @@ mod tests {
 
     #[test]
     fn performance_overlay_absent_by_default_and_placed_clear_when_flag_on() {
-        let app = app_with_patch("fixtures/arpeggio1.ini");
+        let app = app_with_patch("fixtures/own_buttons.ini");
         let plain = physical_spec(&app, perf_pane()).expect("plain spec");
         assert!(plain.performance.is_none(), "no overlay without the flag");
         let spec = perf_spec();
@@ -2459,7 +2459,7 @@ mod tests {
 
     #[test]
     fn performance_callout_state_follows_live_component_state() {
-        let mut app = app_with_patch("fixtures/arpeggio1.ini");
+        let mut app = app_with_patch("fixtures/own_buttons.ini");
         app.showing_performance = true;
         // First resting button, matched by host-cell anchor (headline text
         // need not be unique across elements).

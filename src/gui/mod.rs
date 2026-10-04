@@ -1739,7 +1739,7 @@ mod tests {
         ));
         let mut app = App::new();
         let patch =
-            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         // Close the startup source viewer and clear the second small pane so
         // the module UI is the only view open.
@@ -1790,7 +1790,7 @@ mod tests {
         // never emit the legacy overlay card over the band.
         let mut app = App::new();
         let patch =
-            crate::patch::Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+            crate::patch::Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.open_view(crate::app::ViewType::Optimizer);
         assert_eq!(

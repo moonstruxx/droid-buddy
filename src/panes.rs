@@ -128,7 +128,7 @@ mod tests {
     /// sections to optimize).
     fn app_with_patch() -> App {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         app
     }
@@ -198,7 +198,7 @@ mod tests {
         // SmallTop -> SmallBottom (spec "Tab cycles focus with two small
         // panes").
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.open_view(ViewType::Optimizer); // -> SmallBottom, focused
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));

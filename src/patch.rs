@@ -2963,19 +2963,13 @@ mod tests {
         // matrixmixer addresses buttons and LEDs by a shared matrix-position
         // suffix: button11 = B1.1 pairs with led11 = L1.1 (droid_tui-abt).
         // The ledN VALUE is authoritative for the LED token.
-        let content = std::fs::read_to_string("fixtures/alg27_2.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("alg27_2")).unwrap();
+        let content = std::fs::read_to_string("fixtures/numbered_led_pairs.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("numbered_led_pairs")).unwrap();
         let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
         // button11 = B1.1 / led11 = L1.1
         assert_eq!(find("B1.1").led.as_deref(), Some("L1.1"));
         // button12 = B1.2 / led12 = L1.2
         assert_eq!(find("B1.2").led.as_deref(), Some("L1.2"));
-        // button13 = B2.1 / led13 = L2.1
-        assert_eq!(find("B2.1").led.as_deref(), Some("L2.1"));
-        // button21 = B1.3 / led21 = L1.3
-        assert_eq!(find("B1.3").led.as_deref(), Some("L1.3"));
-        // button43 = B2.7 / led43 = L2.7
-        assert_eq!(find("B2.7").led.as_deref(), Some("L2.7"));
     }
 
     #[test]
@@ -3186,10 +3180,10 @@ mod tests {
     }
 
     #[test]
-    fn arpeggio1_button_led_associations() {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        // arpeggio1 wires each of the 8 P2B8 buttons to its LED (B1.N -> L1.N).
+    fn own_buttons_button_led_associations() {
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
+        // own_buttons wires each of the 8 P2B8 buttons to its LED (B1.N -> L1.N).
         for i in 1..=8u32 {
             let btn = patch
                 .hw_components
@@ -3208,29 +3202,29 @@ mod tests {
 
     #[test]
     fn parses_arpeggio_fixture() {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        assert_eq!(patch.name, "arpeggio1");
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
+        assert_eq!(patch.name, "own_buttons");
 
-        // 18 P2B8 tokens (8 buttons, 8 leds, 2 knobs) plus I1, O1, O3, O4
-        // found while scanning circuit values.
-        assert_eq!(patch.hw_components.len(), 22);
+        // 16 button/led tokens (8 buttons + 8 leds) plus the 2 pots the bare
+        // [p2b8] synthesizes (P1.1, P1.2) plus O1 found while scanning
+        // circuit values.
+        assert_eq!(patch.hw_components.len(), 19);
 
         let has = |id: &str| patch.hw_components.iter().any(|c| c.id == id);
         assert!(has("B1.1"));
         assert!(has("B1.8"));
         assert!(has("L1.1"));
         assert!(has("P1.1"));
-        assert!(has("O4"));
-        assert!(has("I1"));
+        assert!(has("O1"));
 
         let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
         assert_eq!(b1_1.kind, ComponentKind::Button);
         assert_eq!(b1_1.controller, "P2B8");
 
-        let o4 = patch.hw_components.iter().find(|c| c.id == "O4").unwrap();
-        assert_eq!(o4.kind, ComponentKind::CvOut);
-        assert_eq!(o4.controller, "CV I/O");
+        let o1 = patch.hw_components.iter().find(|c| c.id == "O1").unwrap();
+        assert_eq!(o1.kind, ComponentKind::CvOut);
+        assert_eq!(o1.controller, "CV I/O");
     }
 
     #[test]
@@ -3512,11 +3506,11 @@ mod tests {
 
     #[test]
     fn bare_p10_at_chain_position_three_pins_its_tokens_to_p10() {
-        // droid_tui-26q: alg27_2.ini has two bare [p2b8] sections followed by
-        // a bare [p10] at chain position 3, so it synthesizes P3.1..P3.10 on a
-        // P10 panel instead of falling back to "Controller 3".
-        let content = std::fs::read_to_string("fixtures/alg27_2.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("alg27_2")).unwrap();
+        // droid_tui-26q: two bare [p2b8] sections followed by a bare [p10]
+        // at chain position 3, so it synthesizes P3.1..P3.10 on a P10 panel
+        // instead of falling back to "Controller 3".
+        let content = "[p2b8]\n[p2b8]\n[p10]\n";
+        let patch = Patch::from_ini_str(content, String::from("p10_chain")).unwrap();
         for i in 1..=10 {
             let p = patch
                 .hw_components
@@ -3536,8 +3530,8 @@ mod tests {
 
     #[test]
     fn module_types_lists_sorted_unique_controllers() {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
         let types = patch.module_types();
         assert!(types.contains(&String::from("P2B8")));
         assert!(types.contains(&String::from("CV I/O")));
@@ -3548,17 +3542,17 @@ mod tests {
 
     #[test]
     fn needs_by_type_counts_components_per_controller() {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
         let needs = patch.needs_by_type();
         assert_eq!(needs.get("P2B8"), Some(&18));
-        assert_eq!(needs.get("CV I/O"), Some(&4));
+        assert_eq!(needs.get("CV I/O"), Some(&1));
     }
 
     #[test]
     fn master_requirement_is_master_for_patch_within_eight_cv_jacks() {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
         assert_eq!(patch.master_requirement(), MasterRequirement::Master);
     }
 
@@ -3576,22 +3570,23 @@ mod tests {
 
     #[test]
     fn viewer_circuits_maps_sections() {
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        assert_eq!(patch.sections.len(), 14);
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        assert_eq!(patch.sections.len(), 10);
         let circuits = patch.viewer_circuits();
-        assert_eq!(circuits.len(), 14);
+        assert_eq!(circuits.len(), 10);
         // Bare `[p2b8]` declaration carries no key-value pairs.
         assert_eq!(circuits[0].name, "p2b8");
         assert!(circuits[0].entries.is_empty());
         // Repeated section names are preserved as separate circuits.
-        assert_eq!(circuits[2].name, "copy");
-        assert_eq!(circuits[3].name, "copy");
+        assert_eq!(circuits[1].name, "button");
+        assert_eq!(circuits[2].name, "button");
         // Entries keep file order with values exactly as parsed.
         assert_eq!(
             circuits[1].entries,
             vec![
-                (String::from("hz"), String::from("40 * P1.1")),
-                (String::from("square"), String::from("N1")),
+                (String::from("button"), String::from("B1.1")),
+                (String::from("led"), String::from("L1.1")),
+                (String::from("output"), String::from("_OWN_A")),
             ]
         );
     }
@@ -3977,23 +3972,25 @@ mod tests {
     }
 
     #[test]
-    fn cable_index_alg27_fixture_fanout_and_comment_exclusion() {
-        // Real fixture: [clocktool] output = _PULSARCLOCK fans out to 12 real
-        // sinks (2x [copy] input, 10x clock) across the patch; commented
-        // _MIDIC / _PULSARCLOCKPITCH maps must not leak.
-        let content = std::fs::read_to_string("fixtures/alg27_2.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("alg27_2")).unwrap();
-        let entry = patch.cable_index.get("_PULSARCLOCK").unwrap();
-        assert_eq!(entry.sources, vec![String::from("clocktool")]);
-        assert_eq!(entry.sink_refs.len(), 12);
-        // Every real sink is a `input` or `clock` param, none from comments.
-        assert!(entry
-            .sink_refs
-            .iter()
-            .all(|(_, sk)| sk == "input" || sk == "clock"));
-        assert!(!patch.cable_index.contains_key("_MIDIC"));
-        assert!(!patch.cable_index.contains_key("_PULSARCLOCKPITCH"));
-        assert!(!patch.cable_index.contains_key("_TRIGGER_CLOCKCHECK"));
+    fn cable_index_own_two_ctrl_chain_and_comment_exclusion() {
+        // Real fixture: [lfo] square = _OWN_CLK feeds one [copy] input,
+        // which in turn produces _OWN_MID for the second [copy]; no
+        // commented-out maps exist so nothing extra may leak.
+        let content = std::fs::read_to_string("fixtures/own_two_ctrl.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_two_ctrl")).unwrap();
+        let entry = patch.cable_index.get("_OWN_CLK").unwrap();
+        assert_eq!(entry.sources, vec![String::from("lfo")]);
+        assert_eq!(
+            entry.sink_refs,
+            vec![(String::from("copy"), String::from("input"))]
+        );
+        let mid = patch.cable_index.get("_OWN_MID").unwrap();
+        assert_eq!(mid.sources, vec![String::from("copy")]);
+        assert_eq!(
+            mid.sink_refs,
+            vec![(String::from("copy"), String::from("input"))]
+        );
+        assert!(!patch.cable_index.contains_key("_GHOST"));
     }
 
     // --- banner-range grouping (task 1.2) ---
@@ -4107,21 +4104,22 @@ button = B1.3
     // --- real-fixture integration: extraction + grouping together (task 1.3) ---
 
     #[test]
-    fn cable_index_arpeggio_fixture_one_source_many_sinks() {
+    fn cable_index_own_buttons_fixture_one_source_many_sinks() {
         // Real fixture: each `[button]` circuit produces a cable via `output =`.
-        // `_SCALE` fans out 1 → n: one producer, four `selectN` sinks.
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
-        let scale = patch.cable_index.get("_SCALE").unwrap();
-        assert_eq!(scale.sources, vec![String::from("button")]);
-        assert_eq!(scale.sink_refs.len(), 4);
-        assert!(scale.sink_refs.iter().all(|(sec, _)| sec == "arpeggio"));
-        // A single-consumer cable: `_DIRECTION` is produced once, consumed once.
-        let dir = patch.cable_index.get("_DIRECTION").unwrap();
-        assert_eq!(dir.sources, vec![String::from("button")]);
+        // All eight _OWN_* cables are registered with a single button source;
+        // `_OWN_A` is consumed once by the trailing [copy].
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
+        for cable in [
+            "_OWN_A", "_OWN_B", "_OWN_C", "_OWN_D", "_OWN_E", "_OWN_F", "_OWN_G", "_OWN_H",
+        ] {
+            let entry = patch.cable_index.get(cable).unwrap();
+            assert_eq!(entry.sources, vec![String::from("button")]);
+        }
+        let a = patch.cable_index.get("_OWN_A").unwrap();
         assert_eq!(
-            dir.sink_refs,
-            vec![(String::from("arpeggio"), String::from("direction"))]
+            a.sink_refs,
+            vec![(String::from("copy"), String::from("input"))]
         );
     }
 
@@ -4922,7 +4920,7 @@ button = B1.3
     fn write_round_trip_crlf_source() {
         use tempfile::TempDir;
         let dir = TempDir::new().unwrap();
-        let content = String::from_utf8(fixture_bytes("alg27_2.ini")).unwrap();
+        let content = String::from_utf8(fixture_bytes("own_two_ctrl.ini")).unwrap();
         let src = temp_source(&dir, &content, "source.ini");
         let patch = Patch::from_ini_file(&src).unwrap();
         let dest = dir.path().join("out.ini");

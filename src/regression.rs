@@ -824,13 +824,35 @@ fn solver_dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 
 #[test]
 fn regression_solver_single_axis_on_real_multi_banner_patch() {
-    // Spec-scale real fixture (164 sections, 46 banners, 97 cable outputs).
-    // The solver must converge along the x-axis — a wide horizontal pipeline
-    // (width-first) — not a vertical stack of banner bands.
-    let (_patch, graph) = solver_fixture("fixtures/alg27_2.ini");
+    // Long synthetic cable chain (70 chained [copy] sections): the solver
+    // must converge along the x-axis — a wide horizontal pipeline
+    // (width-first) — not a vertical stack of banner bands. Synthetic
+    // because the small own fixtures cannot exercise the axis property.
+    let mut content = String::from("[p2b8]\n[lfo]\n    hz = 2\n    square = _C0\n");
+    for i in 0..70 {
+        content.push_str(&format!(
+            "[copy]\n    input = _C{i}\n    output = _C{}\n",
+            i + 1
+        ));
+    }
+    let patch = Patch::from_ini_str(&content, String::from("chain")).unwrap();
+    let clusters: Vec<crate::graph::Cluster> = patch
+        .banner_groups
+        .iter()
+        .map(|g| crate::graph::Cluster {
+            title: g.banner.clone().unwrap_or_default(),
+            section_range: g.section_range.clone(),
+        })
+        .collect();
+    let graph = crate::graph::Graph::build_from_patch(
+        &patch,
+        &clusters,
+        &crate::latency::CostModel::default(),
+        &crate::graph::GraphOptions::default(),
+    );
     assert!(
         graph.nodes.len() >= 60,
-        "fixture should be spec-scale, got {} nodes",
+        "chain should be spec-scale, got {} nodes",
         graph.nodes.len()
     );
     let positions = solve(&graph, &[], DEFAULT_TENSION);
@@ -1031,7 +1053,7 @@ struct AnchorGraph {
 fn anchor_graph() -> &'static AnchorGraph {
     static ANCHOR: std::sync::OnceLock<AnchorGraph> = std::sync::OnceLock::new();
     ANCHOR.get_or_init(|| {
-        const ANCHOR_PATH: &str = "fixtures/droid_mpfs5melody2.ini";
+        const ANCHOR_PATH: &str = "fixtures/own_scale.ini";
         let patch = Patch::from_ini_file(Path::new(ANCHOR_PATH)).unwrap();
         let mut app = App::new();
         app.load_patch(patch);

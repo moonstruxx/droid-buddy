@@ -2611,8 +2611,8 @@ mod tests {
     }
 
     fn app_with_fixture() -> App {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
         let mut app = App::new();
         app.patch = Some(patch);
         // Place component 0 (B1.1) at (0,0)-(16,2) and component 1 (L1.1) at (16,0)-(32,2).
@@ -3953,7 +3953,7 @@ mod tests {
     fn optimizer_weight_keys_step_snap_and_clamp() {
         // source_navigation.ini is weight-sensitive: its best ordering under
         // the weighted objective differs from the pure MinSum one, so stepping
-        // w must change the candidate summaries (arpeggio1 ties everywhere).
+        // w must change the candidate summaries (own_buttons ties everywhere).
         let mut app = app_with_source_navigation();
         open_optimizer(&mut app);
         // Starts at the MinSum endpoint.
@@ -4334,7 +4334,7 @@ mod tests {
         // The picker closes on a gated load so the validation modal is reachable.
         assert!(!app.showing_picker);
         // Gate keeps the previously loaded patch.
-        assert_eq!(app.patch.as_ref().unwrap().name, "arpeggio1");
+        assert_eq!(app.patch.as_ref().unwrap().name, "own_buttons");
         assert!(app.showing_validation);
         assert!(app.validation_issues.iter().any(|i| {
             i.severity == crate::validation::Severity::Error && i.code != "unknown_param"
@@ -6140,8 +6140,8 @@ mod tests {
         // and its reset — always runs here.
         let mut fresh = App::new();
         fresh.showing_performance = true;
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
         fresh.load_patch(patch);
         assert!(
             !fresh.showing_performance,
@@ -6200,8 +6200,8 @@ mod tests {
     }
 
     fn app_with_graph() -> App {
-        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
         let mut app = App::new();
         app.load_patch(patch);
         app.open_graph();

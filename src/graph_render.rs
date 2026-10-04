@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn fit_frames_a_tall_graph_even_with_a_legibility_floor() {
-        // A tall fan-out graph (like arpeggio1: many buttons stacked vertically
+        // A tall fan-out graph (like own_buttons: many buttons stacked vertically
         // feeding one circuit) must stay framed even when `min_node_px` is set.
         // The floor applies only when the width constraint binds; here the
         // height binds, so the pure fit wins and no node is pushed off-canvas.

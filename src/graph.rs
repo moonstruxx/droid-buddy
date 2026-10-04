@@ -2051,16 +2051,16 @@ mod fixture_tests {
     }
 
     #[test]
-    fn arpeggio_model_shape_matches_circuit_instances() {
-        // 14 sections → 14 nodes; repeated [button] (8) and [copy] (2) names
-        // are distinct instances with zero-based indices.
-        let graph = fixture_graph("arpeggio1.ini");
+    fn own_buttons_model_shape_matches_circuit_instances() {
+        // 10 sections → 10 nodes; repeated [button] (8) names are distinct
+        // instances with zero-based indices.
+        let graph = fixture_graph("own_buttons.ini");
         let circuit_nodes: Vec<&GraphNode> = graph
             .nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Circuit)
             .collect();
-        assert_eq!(circuit_nodes.len(), 14);
+        assert_eq!(circuit_nodes.len(), 10);
 
         let buttons: Vec<&GraphNode> = circuit_nodes
             .iter()
@@ -2077,9 +2077,8 @@ mod fixture_tests {
             .filter(|n| n.circuit == "copy")
             .copied()
             .collect();
+        assert_eq!(copies.len(), 1);
         assert_eq!(copies[0].instance_index, 0);
-        assert_eq!(copies[1].instance_index, 1);
-        assert_ne!(copies[0].id, copies[1].id);
 
         // Canonical circuit set (single occurrence of each distinct name).
 
@@ -2087,121 +2086,95 @@ mod fixture_tests {
         let mut circuits: Vec<&str> = circuit_nodes.iter().map(|n| n.circuit.as_str()).collect();
         circuits.sort();
         circuits.dedup();
-        assert_eq!(
-            circuits,
-            vec!["arpeggio", "button", "contour", "copy", "lfo", "p2b8"]
-        );
+        assert_eq!(circuits, vec!["button", "copy", "p2b8"]);
     }
 
     #[test]
-    fn arpeggio_edge_directions_run_from_button_sources_to_arpeggio() {
-        // Each virtual cable is produced by a [button] and consumed by the
-        // [arpeggio] section; _SCALE fans out to four select params.
-        let graph = fixture_graph("arpeggio1.ini");
+    fn own_buttons_edge_directions_run_from_button_sources_to_copy() {
+        // Only _OWN_A is consumed (by the trailing [copy]); the other seven
+        // _OWN_* cables are produced-but-unused, which is valid and yields
+        // no edges.
+        let graph = fixture_graph("own_buttons.ini");
         let cable_edges: Vec<&GraphEdge> = graph
             .edges
             .iter()
             .filter(|e| !e.cable.starts_with("_REG:"))
             .collect();
-        assert_eq!(cable_edges.len(), 11);
-
-        for e in &cable_edges {
-            assert_eq!(
-                e.source,
-                NodeId::circuit("button", 0),
-                "cable {} must be produced by the first button instance",
-                e.cable
-            );
-            assert_eq!(
-                e.sink,
-                NodeId::circuit("arpeggio", 0),
-                "cable {} must be consumed by the arpeggio section",
-                e.cable
-            );
-        }
-
-        // _SCALE reaches four arpeggio select params (fan-out within the patch).
-        let scale_edges: Vec<&GraphEdge> = cable_edges
-            .iter()
-            .filter(|e| e.cable == "_SCALE")
-            .copied()
-            .collect();
-        assert_eq!(scale_edges.len(), 4);
-        for e in &scale_edges {
-            assert_eq!(e.sink, NodeId::circuit("arpeggio", 0));
-        }
+        assert_eq!(cable_edges.len(), 1);
+        assert_eq!(cable_edges[0].cable, "_OWN_A");
+        assert_eq!(cable_edges[0].source, NodeId::circuit("button", 0));
+        assert_eq!(cable_edges[0].sink, NodeId::circuit("copy", 0));
     }
 
     #[test]
-    fn alg27_model_shape_matches_164_sections_with_repeated_instances() {
-        // 164 sections across 22 distinct circuit names; repeated names get
+    fn own_two_ctrl_model_shape_matches_repeated_instances() {
+        // 5 sections (2 bare [p2b8], [lfo], 2 [copy]); repeated names get
         // unique ids rather than colliding.
-        let graph = fixture_graph("alg27_2.ini");
+        let graph = fixture_graph("own_two_ctrl.ini");
         let circuit_nodes: Vec<&GraphNode> = graph
             .nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Circuit)
             .collect();
-        assert_eq!(circuit_nodes.len(), 164);
+        assert_eq!(circuit_nodes.len(), 5);
 
         let mut section_indices: Vec<usize> =
             circuit_nodes.iter().map(|n| n.section_index).collect();
         section_indices.sort_unstable();
-        assert_eq!(section_indices, (0..164).collect::<Vec<_>>());
+        assert_eq!(section_indices, (0..5).collect::<Vec<_>>());
 
-        let clocktools: Vec<&GraphNode> = graph
-            .nodes
-            .iter()
-            .filter(|n| n.circuit == "clocktool")
-            .collect();
-        assert_eq!(clocktools.len(), 11);
-        let ids: std::collections::HashSet<&NodeId> = clocktools.iter().map(|n| &n.id).collect();
-        assert_eq!(
-            ids.len(),
-            11,
-            "each clocktool instance must have a distinct id"
-        );
-        for (i, ct) in clocktools.iter().enumerate() {
+        let controllers: Vec<&GraphNode> =
+            graph.nodes.iter().filter(|n| n.circuit == "p2b8").collect();
+        assert_eq!(controllers.len(), 2);
+        let ids: std::collections::HashSet<&NodeId> = controllers.iter().map(|n| &n.id).collect();
+        assert_eq!(ids.len(), 2, "each p2b8 instance must have a distinct id");
+        for (i, ct) in controllers.iter().enumerate() {
             assert_eq!(ct.instance_index, i);
         }
     }
 
     #[test]
-    fn alg27_pulsarclock_fans_out_twelve_edges_from_clocktool() {
-        // [clocktool] output = _PULSARCLOCK reaches 12 real sinks: the two
-        // [copy] inputs and the ten [clocktool] clock params (which resolve by
-        // name back to the first clocktool instance → self loops).
-        let graph = fixture_graph("alg27_2.ini");
+    fn own_two_ctrl_clock_chain_runs_lfo_to_copy_to_copy() {
+        // [lfo] square = _OWN_CLK reaches the first [copy] input, whose
+        // output = _OWN_MID reaches the second [copy] input: a two-link
+        // producer chain with first-instance resolution.
+        let graph = fixture_graph("own_two_ctrl.ini");
         let clk: Vec<&GraphEdge> = graph
             .edges
             .iter()
-            .filter(|e| e.cable == "_PULSARCLOCK")
+            .filter(|e| e.cable == "_OWN_CLK")
             .collect();
-        assert_eq!(clk.len(), 12);
-        for e in &clk {
-            assert_eq!(e.source, NodeId::circuit("clocktool", 0));
-        }
-        let sinks: std::collections::HashSet<&NodeId> = clk.iter().map(|e| &e.sink).collect();
-        assert_eq!(sinks.len(), 2, "sinks resolve to copy and clocktool only");
-        assert!(sinks.contains(&NodeId::circuit("clocktool", 0)));
-        assert!(sinks.contains(&NodeId::circuit("copy", 0)));
+        assert_eq!(clk.len(), 1);
+        assert_eq!(clk[0].source, NodeId::circuit("lfo", 0));
+        assert_eq!(clk[0].sink, NodeId::circuit("copy", 0));
+        let mid: Vec<&GraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.cable == "_OWN_MID")
+            .collect();
+        assert_eq!(mid.len(), 1);
+        assert_eq!(mid[0].source, NodeId::circuit("copy", 0));
+        // Cable attribution is by section name, so the sink resolves to the
+        // first [copy] instance (self loop) — instance-accurate attribution
+        // is the topology pass's concern.
+        assert_eq!(mid[0].sink, NodeId::circuit("copy", 0));
     }
 
     #[test]
-    fn alg27_matrixsel_fans_out_seven_edges_from_pot_to_matrixmixer() {
-        // `output = _MATRIXSEL` lives in a [pot] section; it is consumed by
-        // seven [matrixmixer] select params → one source, seven directed edges.
-        let graph = fixture_graph("alg27_2.ini");
+    fn own_two_ctrl_copy_produces_mid_cable_for_second_copy() {
+        // `output = _OWN_MID` lives in a [copy] section (a non-`output`-key
+        // producer via the circuit catalog); it is consumed by the second
+        // [copy] input → one source, one directed edge.
+        let graph = fixture_graph("own_two_ctrl.ini");
         let mx: Vec<&GraphEdge> = graph
             .edges
             .iter()
-            .filter(|e| e.cable == "_MATRIXSEL")
+            .filter(|e| e.cable == "_OWN_MID")
             .collect();
-        assert_eq!(mx.len(), 7);
-        for e in &mx {
-            assert_eq!(e.source, NodeId::circuit("pot", 0));
-            assert_eq!(e.sink, NodeId::circuit("matrixmixer", 0));
-        }
+        assert_eq!(mx.len(), 1);
+        assert_eq!(mx[0].source, NodeId::circuit("copy", 0));
+        // Same first-instance resolution as above: the sink is copy(0).
+        assert_eq!(mx[0].sink, NodeId::circuit("copy", 0));
     }
 
     #[test]
@@ -2209,7 +2182,11 @@ mod fixture_tests {
         // Real fixtures carry no named banners, so each yields one implicit
         // unnamed group spanning all sections; every node's section_index must
         // land inside some cluster's range (membership derivable from the model).
-        for name in ["arpeggio1.ini", "alg27_2.ini", "source_navigation.ini"] {
+        for name in [
+            "own_buttons.ini",
+            "own_two_ctrl.ini",
+            "source_navigation.ini",
+        ] {
             let graph = fixture_graph(name);
             assert_eq!(graph.clusters.len(), 1, "{name} has no named banners");
             for node in &graph.nodes {
@@ -2283,44 +2260,52 @@ mod fixture_tests {
     #[test]
     fn arpeggio_fixture_is_topologically_valid() {
         // All eight real cables have exactly one source → no validation issues.
-        let graph = fixture_graph("arpeggio1.ini");
+        let graph = fixture_graph("own_buttons.ini");
         assert!(
             graph.validation.is_empty(),
-            "arpeggio1.ini must be valid, got {:?}",
+            "own_buttons.ini must be valid, got {:?}",
             graph.validation
         );
     }
 
     #[test]
-    fn alg27_fixture_flags_dangling_cable_as_warning() {
-        // `_CHANSEL` is consumed in real params but produced by no `output =`:
-        // a genuine dangling reference (externally sourced in the real patch).
-        // Cables with exactly one source (_PULSARCLOCK, _MATRIXSEL, _MATRIXEDIT)
-        // are not flagged by the topology (dangling/n→1) channel. `_MATRIXSEL`
-        // additionally carries the per-token influence second opinion (design
-        // D4): its root var pot P3.2 reaches 7 circuits, an extreme outlier for
-        // kind P (mean 0.055, std 0.76) — a Warning that never gates loading.
-        let graph = fixture_graph("alg27_2.ini");
-        let by_cable: HashMap<&str, TopologySeverity> = graph
+    fn own_two_ctrl_fixture_flags_dangling_cable_as_warning() {
+        // own_two_ctrl.ini is fully wired (every consumed cable has exactly
+        // one source), so the topology channel stays silent on the fixture.
+        // The dangling-reference → Warning path is exercised on a synthetic
+        // patch: `_GHOST` is consumed but produced by no `output =`.
+        let graph = fixture_graph("own_two_ctrl.ini");
+        assert!(
+            graph.validation.is_empty(),
+            "own_two_ctrl.ini must be valid, got {:?}",
+            graph.validation
+        );
+        let content = "[p2b8]\n[copy]\n    input = _GHOST\n    output = O1\n";
+        let patch = Patch::from_ini_str(content, String::from("dangling")).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        let ghost = Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
+        let by_cable: HashMap<&str, TopologySeverity> = ghost
             .validation
             .iter()
             .map(|i| (i.cable.as_str(), i.severity))
             .collect();
         assert_eq!(
-            by_cable.get("_CHANSEL"),
+            by_cable.get("_GHOST"),
             Some(&TopologySeverity::Warning),
-            "dangling _CHANSEL must be a warning"
+            "dangling _GHOST must be a warning"
         );
-        assert_eq!(by_cable.get("_PULSARCLOCK"), None);
-        assert_eq!(by_cable.get("_MATRIXEDIT"), None);
-        // _MATRIXSEL: the dangling channel stays silent, the influence
-        // second opinion fires (P3.2 → _MATRIXSEL, z≈9.1 > 3.0 band).
-        let matr = graph.validation.iter().find(|i| i.cable == "_MATRIXSEL");
-        assert!(
-            matr.is_some() && matr.unwrap().message.contains("influence outlier"),
-            "_MATRIXSEL carries the P3.2 influence-outlier finding"
-        );
-        assert_eq!(matr.unwrap().severity, TopologySeverity::Warning);
     }
 
     #[test]

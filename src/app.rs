@@ -4712,10 +4712,10 @@ mod tests {
         assert!(!app.graph_settle_pending);
     }
 
-    /// A fixture app with arpeggio1 loaded and the graph open.
+    /// A fixture app with own_buttons loaded and the graph open.
     fn app_with_open_graph() -> App {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         app
@@ -4927,7 +4927,7 @@ mod tests {
         // largest node world extent, so every node's full box (position +
         // extent), not only its top-left corner, lands inside the viewport.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
 
@@ -4956,7 +4956,7 @@ mod tests {
         // Centering targets the CONTENT center (position-bounds center + half
         // the node world extent), not the position-bounds center itself.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         app.graph_camera = Some(GraphCamera {
@@ -5001,7 +5001,7 @@ mod tests {
     #[test]
     fn open_graph_builds_and_solves_a_loaded_patch() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
 
@@ -5022,7 +5022,7 @@ mod tests {
         let mut app = App::new();
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         // load_patch leaves the arrangement preference untouched: a fresh app
         // stays on the default column mode after a load.
@@ -5042,7 +5042,7 @@ mod tests {
     fn force_layout_mode_dispatches_through_force_solver() {
         let mut app = App::new();
         app.layout_mode = crate::config::LayoutMode::Force;
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let graph = app.graph.as_ref().unwrap();
@@ -5058,7 +5058,7 @@ mod tests {
         // position, then rebuild: the pin must hold it there instead of the
         // solver re-placing it at its natural slot.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let natural = app.graph_positions[0];
@@ -5080,7 +5080,7 @@ mod tests {
         // circuit) and rebuild: the seeded tip pin must hold the tip's OWN
         // previous position at its new index.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let tip_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
@@ -5112,7 +5112,7 @@ mod tests {
         // `refit_viewport` — a stale/`None` canvas (left by the optimizer pane
         // reshuffle) never skips the fit.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         assert!(app.open_optimizer(), "optimizer needs sections");
@@ -5145,7 +5145,7 @@ mod tests {
             !app.apply_arrangement(),
             "silent no-op without a built graph"
         );
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         assert!(app.apply_arrangement());
@@ -5249,7 +5249,7 @@ mod tests {
     #[test]
     fn load_patch_resets_graph_state() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         assert!(app.showing_graph);
@@ -5278,7 +5278,7 @@ mod tests {
         // Tension is a force-path control: the column arrangement ignores it
         // (graph-column-layout D5), so this test runs the force solver.
         app.layout_mode = crate::config::LayoutMode::Force;
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         assert_eq!(app.tension, crate::layout::DEFAULT_TENSION);
@@ -5306,7 +5306,7 @@ mod tests {
     #[test]
     fn adjust_tension_clamps_at_bounds_without_resolving() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         // Clamp/status reporting is force-path behavior; column mode is a
@@ -5372,7 +5372,7 @@ mod tests {
         app.minimap_rect = Some(Rect::new(0, 0, 10, 10));
         app.hovered_component = Some(2);
 
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
 
         assert!(
@@ -5501,7 +5501,7 @@ mod tests {
     #[test]
     fn select_component_with_unknown_token_keeps_scroll() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.source_scroll = 7;
         app.select_component(String::from("B99.99"));
@@ -5529,7 +5529,7 @@ mod tests {
     #[test]
     fn select_circuit_jumps_source_and_opens_viewer() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
@@ -5559,7 +5559,7 @@ mod tests {
     #[test]
     fn select_circuit_unknown_node_selects_without_moving_scroll() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         app.source_scroll = 7;
@@ -5576,7 +5576,7 @@ mod tests {
     #[test]
     fn clear_circuit_selection_keeps_scroll() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
@@ -5590,7 +5590,7 @@ mod tests {
     #[test]
     fn select_circuit_re_select_is_idempotent() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
@@ -5614,7 +5614,7 @@ mod tests {
     #[test]
     fn circuit_hw_token_indices_covers_section_hardware() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         // A node whose section declares a hardware token in its values
@@ -5631,7 +5631,7 @@ mod tests {
                     .iter()
                     .any(|(_, v)| v.contains("B1.1"))
             })
-            .expect("arpeggio1 has a button section with B1.1")
+            .expect("own_buttons has a button section with B1.1")
             .id
             .clone();
         app.select_circuit(node);
@@ -5653,7 +5653,7 @@ mod tests {
     #[test]
     fn circuit_hw_token_indices_empty_without_selection() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         assert!(app.circuit_hw_token_indices().is_empty());
@@ -5665,7 +5665,7 @@ mod tests {
         // switches (including closing the graph view) instead of living in
         // the window.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
@@ -5677,7 +5677,7 @@ mod tests {
     #[test]
     fn load_patch_resets_circuit_selection() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].id.clone();
@@ -5735,9 +5735,9 @@ mod tests {
     #[test]
     fn load_patch_populates_patch_name() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
-        assert_eq!(app.patch.as_ref().unwrap().name, "arpeggio1");
+        assert_eq!(app.patch.as_ref().unwrap().name, "own_buttons");
     }
 
     #[test]
@@ -5807,7 +5807,7 @@ mod tests {
         let mut app = App::new();
         app.toggle_processing_pause();
         assert!(app.processing_paused);
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         assert!(!app.processing_paused, "pause reset on load");
     }
@@ -5817,7 +5817,7 @@ mod tests {
         // The latch names a token of the previous patch: loading a fresh patch
         // drops it, so no stale wash or all-cell dim survives onto the new patch.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         let token = app
             .patch
@@ -5862,7 +5862,7 @@ mod tests {
         let mut app = App::new();
         app.toggle_latency_coloring();
         assert!(!app.latency_coloring);
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         assert!(!app.latency_coloring, "view preference kept across loads");
     }
@@ -5905,7 +5905,7 @@ mod tests {
     #[test]
     fn load_patch_clears_disabled_circuits() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         assert!(app.toggle_circuit_processing("arpeggio", 0));
         assert_eq!(app.disabled_circuits.len(), 1);
@@ -5925,7 +5925,7 @@ mod tests {
         // seed position. (The column path anchors it at the block center
         // instead, so this assertion runs the force solver.)
         app.layout_mode = crate::config::LayoutMode::Force;
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let graph = app.graph.as_ref().unwrap();
@@ -5941,7 +5941,7 @@ mod tests {
     #[test]
     fn load_patch_clears_pinned() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         assert!(!app.pinned.is_empty(), "tip seeded by default");
@@ -5954,7 +5954,7 @@ mod tests {
     #[test]
     fn toggle_pin_toggles_membership() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let (id, tip_id) = {
@@ -5979,7 +5979,7 @@ mod tests {
     #[test]
     fn pinned_indices_skip_ids_not_in_graph() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let ghost = NodeId::circuit("ghost", 99);
@@ -6776,10 +6776,10 @@ mod tests {
     #[test]
     fn load_patch_never_blocked_by_render_outlier() {
         // A patch whose render is degraded at every common terminal width
-        // (arpeggio1 wants 228 cols) must still load: the render-outlier hint
+        // (own_buttons wants 228 cols) must still load: the render-outlier hint
         // is an advisory status-channel span, never a gating error.
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(
             app.load_patch(patch),
             "degraded render must not block load_patch"
@@ -6827,7 +6827,7 @@ mod tests {
     #[test]
     fn open_view_occupies_class_pane_replacing_its_view() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.open_view(ViewType::Graph);
         // Small view: the source viewer already fills SmallTop, so the
@@ -7047,7 +7047,7 @@ mod tests {
     #[test]
     fn first_small_view_open_repurposes_the_right_big_pane() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         // Two big panes: module UI left, graph right, no small panes.
         app.layout.big_right.view = Some(ViewType::Graph);
@@ -7209,7 +7209,7 @@ mod tests {
     #[test]
     fn swap_small_exchanges_the_two_small_panes() {
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.open_view(ViewType::Optimizer); // -> SmallBottom, focused
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));

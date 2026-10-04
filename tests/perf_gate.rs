@@ -16,21 +16,23 @@ use droid_tui::patch::Patch;
 use droid_tui::schema::load_schema;
 use droid_tui::validation::validate_patch;
 
-// Measured release baseline 2026-09-12: melody2 parse + validate well under 1 s.
+// Measured release baseline 2026-09-12: own_scale parse + validate well under 1 s.
+// 2026-10-04 on own_scale (509 sections): phase_parse_render ~14 ms.
 // (The terminal render phase was removed with the native-egui teardown; the
 // egui paint path is covered by the gui-module shape/label tests.)
 pub const PARSE_RENDER_BUDGET: Duration = Duration::from_secs(10);
 
-// Measured release baseline 2026-09-14: melody2 graph build + full solve
+// Measured release baseline 2026-09-14: own_scale graph build + full solve
 // ~0.4 s (phase_graph_solve 28.35 s before the topology precompute fix:
 // validate_topology's per-token influence walk rescanned every section per
 // popped cable; it now walks a precomputed cable-sink index, and the wiring
 // scan shares one precomputed token context; layout::solve itself is ~13 ms).
 // Budget = ~25x the release worst case: the old ~28 s quadratic scan trips
 // it while a slow CI runner and debug overhead stay green.
+// 2026-10-04 on own_scale (509 sections): phase_graph_solve ~166 ms.
 pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(10);
 
-// Measured release baseline 2026-10-03: melody2 `layout::node_world_sizes`
+// Measured release baseline 2026-10-03: own_scale `layout::node_world_sizes`
 // (the renderer's per-frame node-size estimate, called twice per frame — scene
 // build + pointer hit-testing) ~0.4 ms after the O(n + e) rewrite; 100 calls
 // are ~0.04 s. It was ~155 ms per call with the previous per-node O(n·(n + e))
@@ -39,9 +41,11 @@ pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(10);
 // covers the debug-mode `build_from_patch` setup the watchdog times (the other
 // graph phases use the same figure); the quadratic path took minutes there, so
 // it still trips the gate while CI noise stays green.
+// 2026-10-04 on own_scale (509 sections): 100 calls ~19 ms.
 pub const SCENE_WIDTHS_BUDGET: Duration = Duration::from_secs(10);
 
-// Measured release baseline 2026-09-12: melody2 optimizer candidate generation sub-second.
+// Measured release baseline 2026-09-12: own_scale optimizer candidate generation sub-second.
+// 2026-10-04 on own_scale (509 sections): phase_optimizer ~12 ms.
 pub const OPTIMIZER_BUDGET: Duration = Duration::from_secs(10);
 
 /// Run `f` on a worker thread under a wall-clock ceiling. If `f` returns within
@@ -86,7 +90,7 @@ fn budgeted_returns_result_in_time() {
 
 // The scale anchor (design D4): the largest real patch in the corpus, so the
 // measured worst case for every gated phase.
-const SCALE_ANCHOR: &str = "fixtures/droid_mpfs5melody2.ini";
+const SCALE_ANCHOR: &str = "fixtures/own_scale.ini";
 
 #[test]
 fn phase_parse_render() {

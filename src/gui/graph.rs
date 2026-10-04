@@ -3179,7 +3179,7 @@ mod kittest_tests {
     fn window_key_event_drives_quit_and_graph_repaint_exposes_node_labels() {
         use egui_kittest::kittest::Queryable;
 
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
 
         // `q` pressed through the winit seam returns the quit signal end to end.
         let quit = winit_key(&winit::keyboard::Key::Character("q".into()), &mut app);
@@ -3192,32 +3192,32 @@ mod kittest_tests {
 
         // Repaint and resolve a graph node by its AccessKit label. `get_by_label`
         // panics when the label is absent, so a clean return proves the repaint
-        // exposed the node. The arpeggio circuit carries no stored label, so
+        // exposed the node. The copy circuit carries no stored label, so
         // since label-guess-and-screen-scale its title is the cached
         // tree-derived guess (a preamble port label upstream), not the raw
         // circuit name — derive the expected label from the same chain.
-        let arpeggio = app
+        let copy = app
             .graph
             .as_ref()
             .expect("graph open")
             .nodes
             .iter()
-            .find(|n| n.circuit == "arpeggio")
-            .expect("arpeggio node")
+            .find(|n| n.circuit == "copy")
+            .expect("copy node")
             .id
             .clone();
         let want = app
             .guessed_labels
-            .get(&arpeggio)
+            .get(&copy)
             .cloned()
-            .unwrap_or_else(|| "arpeggio".to_string());
+            .unwrap_or_else(|| "copy".to_string());
         let harness = render_graph_queryable(&app);
         harness.get_by_label(&want);
     }
 
     #[test]
     fn graph_renders_without_panic() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
         assert!(app.showing_graph);
@@ -3226,7 +3226,7 @@ mod kittest_tests {
 
     #[test]
     fn graph_has_nodes_after_open() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
         let graph = app.graph.as_ref().unwrap();
@@ -3236,7 +3236,7 @@ mod kittest_tests {
 
     #[test]
     fn graph_close_and_reopen() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
         assert!(app.showing_graph);
@@ -3253,7 +3253,7 @@ mod kittest_tests {
 
     #[test]
     fn prefix_g_v_opens_source_viewer() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         // The startup pane config (task 1.2) already opens the source viewer in
         // a small pane, so `g v` routes focus to that pane instead of opening a
         // second copy.
@@ -3273,7 +3273,7 @@ mod kittest_tests {
 
     #[test]
     fn esc_closes_source_viewer() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
         assert!(app.showing_viewer);
@@ -3283,7 +3283,7 @@ mod kittest_tests {
 
     #[test]
     fn shift_group_toggle() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         assert!(app.active_shift.is_none());
         key(&mut app, KeyCode::Char('1'));
         assert!(app.active_shift.is_some());
@@ -3293,12 +3293,12 @@ mod kittest_tests {
 
     #[test]
     fn reload_patch_resets_graph_state() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
         assert!(app.showing_graph);
 
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         assert!(!app.showing_graph);
     }
@@ -3307,7 +3307,7 @@ mod kittest_tests {
 
     #[test]
     fn journey_graph_open_close_reopen() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         // Open graph via keyboard (g g)
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
@@ -3327,7 +3327,7 @@ mod kittest_tests {
 
     #[test]
     fn journey_source_viewer_open_close() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         // Open source viewer via g v
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
@@ -3343,7 +3343,7 @@ mod kittest_tests {
 
     #[test]
     fn journey_physical_skeleton_toggle() {
-        let mut app = setup("arpeggio1.ini");
+        let mut app = setup("own_buttons.ini");
         // Skeleton is off by default
         assert!(!app.physical_show_skeleton, "skeleton off by default");
         // Toggle on
@@ -3359,7 +3359,7 @@ mod kittest_tests {
 
     #[test]
     fn journey_optimizer_basic_flow() {
-        let app = setup("arpeggio1.ini");
+        let app = setup("own_buttons.ini");
         // The optimizer requires a loaded patch with sections
         assert!(app.patch.is_some(), "patch should be loaded");
         let patch = app.patch.as_ref().unwrap();
@@ -3380,7 +3380,7 @@ mod zz_throwaway_dump {
     fn dump_arpeggio_node_kinds_and_positions() {
         theme::init(theme::Theme::classic());
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         let g = app.graph.as_ref().unwrap();
@@ -3428,7 +3428,7 @@ mod zz_throwaway_dump2 {
     fn build() -> App {
         theme::init(theme::Theme::classic());
         let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
         app

@@ -68,7 +68,7 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
 /// Bundled demo patch shown when no `argv[1]` path is given. `Patch::sample()`
 /// has no circuit sections, so its signal-flow graph is empty and the window
 /// would paint only its clear color; this fixture is a real patch with circuits.
-const DEMO_PATCH: &str = include_str!("../fixtures/arpeggio1.ini");
+const DEMO_PATCH: &str = include_str!("../fixtures/own_buttons.ini");
 
 /// Load the patch the window opens with: the `argv[1]` path when one is given,
 /// else the bundled demo. A real patch is always installed so `open_graph` can
@@ -378,12 +378,12 @@ mod tests {
         let mut app = App::new();
         load_initial_patch(
             &mut app,
-            Some(std::path::Path::new("fixtures/arpeggio1.ini")),
+            Some(std::path::Path::new("fixtures/own_buttons.ini")),
         );
         assert!(app.patch.is_some());
         assert_eq!(
             app.patch.as_ref().map(|p| p.name.as_str()),
-            Some("arpeggio1")
+            Some("own_buttons")
         );
     }
 
