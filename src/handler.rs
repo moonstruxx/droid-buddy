@@ -1036,6 +1036,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
+            KeyCode::Char('a') => {
+                // graph-arrange-cycle 2.2: `a` applies the active arrangement
+                // (rebuild + refit) and cycles layouts on repeat presses.
+                // Graph-pane-only, like `h`/`c` above.
+                app.apply_arrangement();
+                return false;
+            }
             KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph
@@ -4494,6 +4501,30 @@ mod tests {
         assert_eq!(
             app.graph_positions, expected,
             "column→force toggle re-solves with the force solver"
+        );
+    }
+
+    #[test]
+    fn graph_a_applies_arrangement_and_reports_it() {
+        // graph-arrange-cycle 2.2: `a` on the focused graph pane applies the
+        // active arrangement (rebuild + refit) and names it in the status;
+        // the stored selection advances so repeat presses cycle layouts.
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+
+        handle_event(key(KeyCode::Char('a')), &mut app);
+
+        assert_eq!(app.status_message, "Arrangement: column-strict");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        assert!(
+            app.graph_camera.is_some(),
+            "apply refits the camera against the live pane"
         );
     }
 

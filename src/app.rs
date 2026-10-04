@@ -1418,10 +1418,12 @@ impl App {
         self.rebuild_graph();
         // Refresh the view: refit the camera to the re-solved layout so the
         // reorder is visible without requiring a click (the graph camera was
-        // stale after the rebuild). Reuses the `Shift+c` fit against the
-        // published pane size; a first open frames the new layout.
-        if let Some(viewport) = self.graph_canvas_px {
-            self.fit_graph_camera(viewport);
+        // stale after the rebuild). Unconditional against the live pane rect
+        // (graph-arrange-cycle 1.2): the optimizer reshuffle can leave the
+        // published canvas stale/`None`, so `refit_viewport` prefers the live
+        // `pane_hit_rects` geometry and never skips.
+        if self.graph.is_some() {
+            self.fit_graph_camera(self.refit_viewport());
         }
         // Cross-view focus (optimizer-click-focus): select the first node whose
         // forward-loop latency changed, so the source pane jumps to it and the
@@ -2278,6 +2280,74 @@ impl App {
         (max_w, max_h)
     }
 
+    /// Live viewport of the graph pane in pixels (graph-arrange-cycle 1.2):
+    /// the class-layout pane currently holding the Graph view, sized from the
+    /// per-frame published `pane_hit_rects` (ADR 35 single source) — never the
+    /// possibly-stale `graph_canvas_px`. `None` when no pane holds the graph
+    /// or geometry was never published (headless/tests).
+    fn live_graph_viewport(&self) -> Option<(f32, f32)> {
+        let id = self.pane_holding(ViewType::Graph)?;
+        let (_, rect) = self.pane_hit_rects.iter().find(|(pid, _)| *pid == id)?;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        Some((rect.width as f32, rect.height as f32))
+    }
+
+    /// Viewport the next graph refit must frame (graph-arrange-cycle 1.2):
+    /// the live pane rect when a graph pane is laid out, else the last
+    /// published canvas size, else a sane default so a refit never silently
+    /// skips (the optimizer reshuffle can leave the canvas stale/`None`).
+    fn refit_viewport(&self) -> (f32, f32) {
+        self.live_graph_viewport()
+            .or(self.graph_canvas_px)
+            .unwrap_or((1280.0, 800.0))
+    }
+
+    /// Apply the active arrangement and cycle to the next one
+    /// (graph-arrange-cycle 2.1): re-solves under the current
+    /// `layout_mode`/`layout_ordering`, refits unconditionally, reports the
+    /// APPLIED arrangement in the status line, then advances the stored
+    /// selection so repeat presses walk `Column-Strict → Column-Barycenter →
+    /// Force → Column-Strict …`. The first press from `Column-Strict` thus
+    /// re-applies `column-strict` (the manual escape hatch from the proposal
+    /// Why), the second moves to `column-barycenter`, the third to `force`.
+    /// Reuses the existing fields so `h`, config seeding, and
+    /// `solve_graph_positions` keep working unchanged. Silent no-op (false)
+    /// without a built graph.
+    pub fn apply_arrangement(&mut self) -> bool {
+        if self.graph.is_none() {
+            return false;
+        }
+        let applied = match (self.layout_mode, self.layout_ordering) {
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Strict) => {
+                "column-strict"
+            }
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => {
+                "column-barycenter"
+            }
+            (crate::config::LayoutMode::Force, _) => "force",
+        };
+        self.rebuild_graph();
+        self.fit_graph_camera(self.refit_viewport());
+        (self.layout_mode, self.layout_ordering) = match (self.layout_mode, self.layout_ordering) {
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Strict) => (
+                crate::config::LayoutMode::Column,
+                crate::config::LayoutOrdering::Barycenter,
+            ),
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => (
+                crate::config::LayoutMode::Force,
+                crate::config::LayoutOrdering::Barycenter,
+            ),
+            (crate::config::LayoutMode::Force, _) => (
+                crate::config::LayoutMode::Column,
+                crate::config::LayoutOrdering::Strict,
+            ),
+        };
+        self.status_message = format!("Arrangement: {applied}");
+        true
+    }
+
     /// Center the drawn graph in the visible pane: pan so the CONTENT center —
     /// the position-bounds center plus half the node world extent (node
     /// positions are top-left corners) — maps to the canvas center, zoom
@@ -2977,14 +3047,23 @@ impl App {
     fn solve_graph_positions(&self, g: &Graph, pins: &[usize]) -> Vec<(f32, f32)> {
         match self.layout_mode {
             crate::config::LayoutMode::Column => {
-                // Pins anchor at their current position (the previous solve's
-                // output): the tip pin is seeded on build, and every pinned
-                // node keeps its position while the rest arrange around it.
-                // On the first solve `graph_positions` is empty, so there is
-                // nothing to anchor yet and the pin set is naturally seeded.
+                // Pins anchor by circuit identity (graph-arrange-cycle 1.1):
+                // `pins` are indices into the NEW graph `g`, but
+                // `self.graph_positions` parallels the PREVIOUS graph
+                // (`self.graph`, still unreplaced at every call site), so a
+                // same-index lookup scrambles anchors across section reorders
+                // (optimizer preview). Map each pinned new index to its
+                // NodeId, find that id in the previous graph, and anchor at
+                // ITS previous position. Pins whose id vanished (or a first
+                // solve with no previous graph) simply anchor nothing.
                 let anchored: Vec<(usize, (f32, f32))> = pins
                     .iter()
-                    .filter_map(|&i| self.graph_positions.get(i).map(|&pos| (i, pos)))
+                    .filter_map(|&new_idx| {
+                        let id = g.nodes.get(new_idx)?.id.clone();
+                        let old_idx = self.graph.as_ref()?.nodes.iter().position(|n| n.id == id)?;
+                        let pos = *self.graph_positions.get(old_idx)?;
+                        Some((new_idx, pos))
+                    })
                     .collect();
                 layout::solve_columns_pinned(
                     g,
@@ -4583,6 +4662,109 @@ mod tests {
         assert_eq!(
             app.graph_positions[0], anchored,
             "pinned tip must keep its anchored position across a rebuild"
+        );
+    }
+
+    #[test]
+    fn pinned_anchor_follows_node_id_across_section_reorder() {
+        // graph-arrange-cycle 1.1: pin anchors are NodeId-based, so an
+        // optimizer-style section reorder never maps a pinned node to another
+        // node's previous position. Reverse the file order (moving every
+        // circuit) and rebuild: the seeded tip pin must hold the tip's OWN
+        // previous position at its new index.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let tip_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        assert!(app.pinned.contains(&tip_id), "the tip is pinned by default");
+        let old_pos = app.graph_positions[0];
+        let n = app.patch.as_ref().unwrap().sections.len();
+        assert!(n > 1, "fixture needs reorderable sections");
+        app.apply_section_order(&(0..n).rev().collect::<Vec<_>>());
+        app.rebuild_graph();
+        let graph = app.graph.as_ref().unwrap();
+        let new_idx = graph
+            .nodes
+            .iter()
+            .position(|nd| nd.id == tip_id)
+            .expect("pinned circuit survives the reorder");
+        assert_ne!(
+            new_idx, 0,
+            "the reorder must move the pinned node for a meaningful test"
+        );
+        assert_eq!(
+            app.graph_positions[new_idx], old_pos,
+            "pinned NodeId keeps its own previous position across a reorder"
+        );
+    }
+
+    #[test]
+    fn optimizer_preview_refits_without_published_canvas() {
+        // graph-arrange-cycle 1.2: preview refits unconditionally via
+        // `refit_viewport` — a stale/`None` canvas (left by the optimizer pane
+        // reshuffle) never skips the fit.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.open_optimizer(), "optimizer needs sections");
+        assert!(
+            !app.optimizer.as_ref().unwrap().candidates.is_empty(),
+            "optimizer must propose a candidate to preview"
+        );
+        app.graph_canvas_px = None;
+        app.graph_camera = None;
+        app.optimizer_preview(0);
+        assert!(
+            app.graph_camera.is_some(),
+            "preview must refit even with canvas None"
+        );
+        assert!(
+            app.graph_canvas_px.is_some(),
+            "refit republishes the canvas size"
+        );
+    }
+
+    #[test]
+    fn apply_arrangement_cycles_strict_barycenter_force() {
+        // graph-arrange-cycle 2.1: repeat presses walk Column-Strict →
+        // Column-Barycenter → Force → Column-Strict …, each reporting the
+        // APPLIED arrangement in the status line.
+        let mut app = App::new();
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
+        assert!(
+            !app.apply_arrangement(),
+            "silent no-op without a built graph"
+        );
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-strict");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-barycenter");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
+        assert!(app.apply_arrangement());
+        assert_eq!(
+            app.status_message, "Arrangement: column-strict",
+            "fourth press returns to column-strict"
+        );
+        let graph = app.graph.as_ref().unwrap();
+        assert_eq!(
+            app.graph_positions.len(),
+            graph.nodes.len(),
+            "every cycle step rebuilds positions for the fresh graph"
         );
     }
 

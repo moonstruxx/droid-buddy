@@ -125,6 +125,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("e", "edit label"),
             ("d", "diff overlay"),
             ("h", "toggle column/force layout"),
+            ("a", "apply arrangement / cycle layouts"),
             ("f", "dependency filter"),
             ("i", "influence filter"),
             ("g s", "open select-state menu"),
@@ -396,6 +397,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keybindings_reflect_graph_arrange_key() {
+        // Change `graph-arrange-cycle` task 2.2: the graph table documents
+        // the `a` arrange key (apply + cycle) next to the `h` layout toggle.
+        let graph = keybindings(HelpView::Graph);
+        assert!(graph.contains(&("a", "apply arrangement / cycle layouts")));
+    }
+
     /// Every `(key, description)` pair the help modal can ever show, and the
     /// surface that owns it. Used by `module_ui_table_matches_handler` to
     /// catch un-documented rows and renamed descriptions in one assertion.
@@ -428,6 +437,7 @@ mod tests {
         ("e", "edit label"),
         ("d", "diff overlay"),
         ("h", "toggle column/force layout"),
+        ("a", "apply arrangement / cycle layouts"),
         ("f", "dependency filter"),
         ("i", "influence filter"),
         ("+/-", "camera zoom"),
