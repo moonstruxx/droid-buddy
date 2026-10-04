@@ -296,6 +296,8 @@ impl Rect {
 use crate::layout;
 use crate::optimize::{CandidateOrdering, OptimizeScope};
 use crate::panes::{PaneClass, PaneId, PaneLayout};
+use crate::patch::ComponentKind;
+use crate::patch::ComponentState;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
 use crate::schema::load_schema;
@@ -751,6 +753,12 @@ pub struct App {
     /// default main view since 4.2. Reset on patch load like
     /// `processing_paused`.
     pub physical_show_skeleton: bool,
+    /// True when the Physical pane shows the performance view (change
+    /// `performance-view`): the rack renders compact and centered while
+    /// every element label renders big in the field around it. Presentation
+    /// switch of the Physical pane, default OFF. Reset on patch load like
+    /// `physical_show_skeleton`.
+    pub showing_performance: bool,
     /// Screen rects the skeleton renderer published last frame, keyed by
     /// (module index, cell index = position of the element in the module's
     /// `components` in declaration order). Rebuilt every frame; the D5
@@ -962,6 +970,7 @@ impl App {
             events: EventBus::default(),
             processing_paused: false,
             physical_show_skeleton: false,
+            showing_performance: false,
             physical_skeleton_rects: Vec::new(),
             physical_full_rects: Vec::new(),
             physical_offset: (0.0, 0.0),
@@ -2511,6 +2520,7 @@ impl App {
             self.source_pane_rect = None;
             self.processing_paused = false;
             self.physical_show_skeleton = false;
+            self.showing_performance = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
@@ -2573,6 +2583,7 @@ impl App {
         self.source_pane_rect = None;
         self.processing_paused = false;
         self.physical_show_skeleton = false;
+        self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
         self.physical_viewport = None;
@@ -2654,6 +2665,7 @@ impl App {
             self.source_pane_rect = None;
             self.processing_paused = false;
             self.physical_show_skeleton = false;
+            self.showing_performance = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
@@ -2714,6 +2726,7 @@ impl App {
         self.source_pane_rect = None;
         self.processing_paused = false;
         self.physical_show_skeleton = false;
+        self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
         self.physical_viewport = None;
@@ -3916,6 +3929,29 @@ impl App {
             self.status_message = String::from("Processing paused (p to resume)");
         } else {
             self.status_message = String::from("Processing enabled (p to pause)");
+        }
+    }
+
+    /// Restore every hardware component state to rest (change
+    /// `performance-view`, task 1.4): discrete kinds (`Button`, `Switch`,
+    /// `Led`) return to `Off`, continuous kinds (`Knob`, `CvIn`, `CvOut`,
+    /// `Encoder`) to `Value(0.0)` — the same rest values the parser assigns
+    /// new components. Touches states only: selection, focus, and shift are
+    /// left untouched. The live callouts need no extra state: paint reads
+    /// `ComponentState` directly, so the next frame already shows rest.
+    pub fn reset_element_states(&mut self) {
+        if let Some(patch) = self.patch.as_mut() {
+            for comp in patch.hw_components.iter_mut() {
+                comp.state = match comp.kind {
+                    ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
+                        ComponentState::Off
+                    }
+                    ComponentKind::Knob
+                    | ComponentKind::CvIn
+                    | ComponentKind::CvOut
+                    | ComponentKind::Encoder => ComponentState::Value(0.0),
+                };
+            }
         }
     }
 

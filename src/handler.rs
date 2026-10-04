@@ -708,6 +708,16 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         return false;
     }
 
+    // Performance-view Esc handling (change `performance-view`, task 1.1):
+    // Esc leaves the performance view before the pane-close Esc below, so
+    // the Physical pane stays open.
+    if matches!(key.code, KeyCode::Esc) && app.showing_performance {
+        app.showing_performance = false;
+        app.status_message = String::from("Performance view closed");
+        app.prefix = None;
+        return false;
+    }
+
     // Class-layout pane keys (change `pane-class-layout`, task 3.1). Priority
     // is overlay (help / validation / label editor) > picker > armed `g`
     // prefix > these keys > the per-view routing below, so `z`, `Alt+b`, and
@@ -1287,6 +1297,30 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     return false;
                 }
             }
+        }
+    }
+
+    // Performance view (change `performance-view`, task 1.1): `p` with the
+    // Physical pane focused opens the performance view. View-scoped — `p` on
+    // every other pane keeps its exact current meaning (global processing
+    // pause, pin/unpin on the graph pane), which the arms above and below
+    // still own. Unhandled keys fall through to the shared dispatch.
+    if physical_slot_focused(app) {
+        match key.code {
+            KeyCode::Char('p') => {
+                app.showing_performance = true;
+                app.status_message = String::from("Performance view \u{2014} Esc to exit");
+                return false;
+            }
+            KeyCode::Char('R') => {
+                // Task 1.4: `R` (Shift+r) restores every element state to
+                // rest without touching selection/focus/shift. Precedent:
+                // Shift+c for fit; plain `r` stays the class carousel below.
+                app.reset_element_states();
+                app.status_message = String::from("Element states reset");
+                return false;
+            }
+            _ => {}
         }
     }
 
@@ -5799,6 +5833,9 @@ mod tests {
     #[test]
     fn p_toggles_processing_pause_with_status() {
         let mut app = app_with_fixture();
+        // `p` on the Physical pane opens the performance view (change
+        // `performance-view`), so pause via `p` from the viewer pane.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused);
         assert_eq!(app.status_message, "Processing paused (p to resume)");
@@ -5850,6 +5887,9 @@ mod tests {
     fn enter_and_space_do_not_mutate_while_paused() {
         let mut app = app_with_fixture();
         app.hovered_component = Some(0);
+        // Focus off the Physical pane: `p` there opens the performance
+        // view instead of pausing (change `performance-view`).
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_event(key(KeyCode::Enter), &mut app);
@@ -5871,6 +5911,10 @@ mod tests {
     #[test]
     fn mouse_click_toggle_blocked_while_paused() {
         let mut app = app_with_fixture();
+        // Focus off the Physical pane: `p` there opens the performance
+        // view instead of pausing (change `performance-view`). The mouse
+        // toggle path is focus-independent, so the rest is unchanged.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_mouse_event(
@@ -5894,6 +5938,9 @@ mod tests {
         let mut app = App::new();
         app.patch = Some(patch);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        // Focus off the Physical pane: `p` there opens the performance
+        // view instead of pausing (change `performance-view`).
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
@@ -5915,6 +5962,101 @@ mod tests {
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused, "p live in the source pane");
         assert_eq!(app.status_message, "Processing paused (p to resume)");
+    }
+
+    // ── performance-view tasks 1.1 + 1.4 ──
+
+    #[test]
+    fn p_opens_performance_view_on_physical_pane_only_and_esc_exits() {
+        let mut app = app_with_fixture();
+        // Startup focus is the Physical pane (BigLeft).
+        assert!(physical_slot_focused(&app));
+        assert!(!app.showing_performance);
+        handle_event(key(KeyCode::Char('p')), &mut app);
+        assert!(
+            app.showing_performance,
+            "p opens the performance view on the Physical pane"
+        );
+        assert!(
+            !app.processing_paused,
+            "p must not pause on the Physical pane"
+        );
+        assert_eq!(app.status_message, "Performance view \u{2014} Esc to exit");
+        // Esc leaves the view; the pane stays open.
+        handle_event(key(KeyCode::Esc), &mut app);
+        assert!(!app.showing_performance);
+        assert_eq!(app.status_message, "Performance view closed");
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
+        // `p` on any other pane keeps its exact meaning: pause on the viewer.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(key(KeyCode::Char('p')), &mut app);
+        assert!(
+            app.processing_paused,
+            "p still pauses off the Physical pane"
+        );
+        assert!(!app.showing_performance);
+        // The flag resets on patch load like other transient view state.
+        // A fresh app never gates the first load, so the install path —
+        // and its reset — always runs here.
+        let mut fresh = App::new();
+        fresh.showing_performance = true;
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        fresh.load_patch(patch);
+        assert!(
+            !fresh.showing_performance,
+            "load_patch resets the performance view"
+        );
+    }
+
+    #[test]
+    fn shift_r_resets_element_states_keeping_selection_focus_shift() {
+        let mut app = app_with_fixture();
+        // Disturb every component state away from rest.
+        {
+            let patch = app.patch.as_mut().unwrap();
+            assert!(!patch.hw_components.is_empty(), "fixture needs components");
+            for comp in patch.hw_components.iter_mut() {
+                comp.state = match comp.kind {
+                    ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
+                        ComponentState::On
+                    }
+                    ComponentKind::Knob
+                    | ComponentKind::CvIn
+                    | ComponentKind::CvOut
+                    | ComponentKind::Encoder => ComponentState::Value(0.9),
+                };
+            }
+        }
+        // Navigation state the reset must not touch.
+        app.selected_component = Some(String::from("B1.1"));
+        let focus_before = app.layout.focus;
+        app.active_shift = Some(ShiftGroup::Group2);
+        assert!(physical_slot_focused(&app));
+        // `R` is Shift+r: plain `r` stays the class carousel.
+        handle_event(key(KeyCode::Char('R')), &mut app);
+        // Every state is back at rest ...
+        for comp in &app.patch.as_ref().unwrap().hw_components {
+            let expected = match comp.kind {
+                ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
+                    ComponentState::Off
+                }
+                ComponentKind::Knob
+                | ComponentKind::CvIn
+                | ComponentKind::CvOut
+                | ComponentKind::Encoder => ComponentState::Value(0.0),
+            };
+            assert_eq!(comp.state, expected, "reset restores {}", comp.id);
+        }
+        // ... while navigation state survives.
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.layout.focus, focus_before);
+        assert_eq!(app.active_shift, Some(ShiftGroup::Group2));
+        assert_eq!(app.status_message, "Element states reset");
+        assert!(
+            !app.showing_performance,
+            "R must not open the performance view"
+        );
     }
 
     fn app_with_graph() -> App {
