@@ -570,6 +570,175 @@ fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
 }
 
+// ── MIDI upload (confirm modal + waiting bar) ───────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UploadConfirmSpec {
+    pub title: String,
+    pub bytes_line: String,
+    pub transport_line: String,
+    pub missing: Vec<String>,
+    pub can_send: bool,
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UploadFrame {
+    pub hovered: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UploadProgressSpec {
+    pub title: String,
+    pub status_line: String,
+    pub spinner: char,
+    pub elapsed: std::time::Duration,
+    pub hint: String,
+}
+
+/// Indeterminate waiting-bar block position: a triangle wave over `width`
+/// cells at 5 cells/s, so the block bounces instead of wrapping (MIDI yields
+/// no progress bytes, so a determinate fill would be theater).
+pub fn waiting_bar_pos(elapsed: std::time::Duration, width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    let period = (width.max(1) * 2) as u128;
+    let phase = (elapsed.as_millis() / 200) % period.max(1);
+    let pos = if phase < width as u128 {
+        phase
+    } else {
+        period - 1 - phase
+    };
+    pos as usize
+}
+
+fn upload_card_rect(canvas: Vec2) -> Rect {
+    let cw = (canvas.x * 0.60).clamp(24.0 * 6.0, 80.0 * 6.0);
+    let ch: f32 = 9.0 * 12.0;
+    Rect::from_center_size(
+        Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
+        Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
+    )
+}
+
+pub(crate) fn paint_upload_confirm(
+    painter: &Painter,
+    canvas: Vec2,
+    _ctx: &Context,
+    spec: Option<&UploadConfirmSpec>,
+) -> UploadFrame {
+    let frame = UploadFrame { hovered: None };
+    let Some(spec) = spec else {
+        return frame;
+    };
+    let t = crate::theme::active();
+    let rect = upload_card_rect(canvas);
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
+    painter.rect(
+        rect,
+        8.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.min + egui::vec2(8.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        &spec.title,
+        egui::FontId::proportional(12.0),
+        rgb(t.text),
+    );
+    let mut y = rect.min.y + 28.0;
+    for line in std::iter::once(&spec.bytes_line)
+        .chain(std::iter::once(&spec.transport_line))
+        .chain(spec.missing.iter())
+    {
+        if y + 14.0 > rect.max.y - 18.0 {
+            break;
+        }
+        painter.text(
+            Pos2::new(rect.min.x + 8.0, y),
+            egui::Align2::LEFT_TOP,
+            line,
+            egui::FontId::monospace(11.0),
+            rgb(t.text),
+        );
+        y += 14.0;
+    }
+    painter.text(
+        rect.min + egui::vec2(8.0, rect.height() - 14.0),
+        egui::Align2::LEFT_TOP,
+        &spec.hint,
+        egui::FontId::proportional(10.0),
+        rgb(t.text),
+    );
+    frame
+}
+
+pub(crate) fn paint_upload_progress(
+    painter: &Painter,
+    canvas: Vec2,
+    _ctx: &Context,
+    spec: Option<&UploadProgressSpec>,
+) -> UploadFrame {
+    let frame = UploadFrame { hovered: None };
+    let Some(spec) = spec else {
+        return frame;
+    };
+    let t = crate::theme::active();
+    let rect = upload_card_rect(canvas);
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
+    painter.rect(
+        rect,
+        8.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.min + egui::vec2(8.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        &spec.title,
+        egui::FontId::proportional(12.0),
+        rgb(t.text),
+    );
+    painter.text(
+        Pos2::new(rect.min.x + 8.0, rect.min.y + 28.0),
+        egui::Align2::LEFT_TOP,
+        format!("{} {}", spec.spinner, spec.status_line),
+        egui::FontId::monospace(11.0),
+        rgb(t.text),
+    );
+    // Indeterminate waiting bar: outline + one bouncing block.
+    let bar = Rect::from_min_size(
+        Pos2::new(rect.min.x + 8.0, rect.min.y + 48.0),
+        Vec2::new((rect.width() - 16.0).max(24.0), 10.0),
+    );
+    painter.rect(
+        bar,
+        2.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, rgb(t.text)),
+        egui::StrokeKind::Inside,
+    );
+    let cells = ((bar.width() - 4.0) / 8.0).floor().max(1.0) as usize;
+    let pos = waiting_bar_pos(spec.elapsed, cells);
+    let block = Rect::from_min_size(
+        Pos2::new(bar.min.x + 2.0 + pos as f32 * 8.0, bar.min.y + 2.0),
+        Vec2::new(6.0, bar.height() - 4.0),
+    );
+    painter.rect_filled(block, 1.0, rgb(t.text));
+    painter.text(
+        rect.min + egui::vec2(8.0, rect.height() - 14.0),
+        egui::Align2::LEFT_TOP,
+        &spec.hint,
+        egui::FontId::proportional(10.0),
+        rgb(t.text),
+    );
+    frame
+}
+
 // ── App → Spec builders (window-shell dispatch contract) ─────────────────────
 //
 // These resolve live `App` state into the same fully-formed payloads the
@@ -708,6 +877,54 @@ pub(crate) fn optimizer_spec(app: &crate::app::App) -> Option<OptimizerSpec> {
         hint,
         rows,
         empty_message: None,
+    })
+}
+
+/// Upload-confirm payload, `None` while the modal is closed. The `y` hint
+/// is offered only when the probed transport has a send path; otherwise the
+/// spec carries the missing reasons instead.
+pub(crate) fn upload_confirm_spec(app: &crate::app::App) -> Option<UploadConfirmSpec> {
+    let confirm = app.upload_modal.as_ref()?;
+    let can_send = confirm.transport.can_send();
+    let hint = if can_send {
+        " y:send n/Esc:cancel ".to_string()
+    } else {
+        " n/Esc:cancel ".to_string()
+    };
+    Some(UploadConfirmSpec {
+        title: " Upload patch to DROID ".to_string(),
+        bytes_line: format!(
+            "{} bytes (in-memory patch, SysEx framed)",
+            confirm.byte_count
+        ),
+        transport_line: confirm.transport.transport_line(),
+        missing: if can_send {
+            Vec::new()
+        } else {
+            confirm.transport.missing_reasons()
+        },
+        can_send,
+        hint,
+    })
+}
+
+/// Upload-progress payload, `None` while no send is in flight. Elapsed +
+/// spinner: `amidi` yields no progress bytes, so the bar stays indeterminate.
+pub(crate) fn upload_progress_spec(app: &crate::app::App) -> Option<UploadProgressSpec> {
+    let send = app.upload_send.as_ref()?;
+    let elapsed = send.started.elapsed();
+    Some(UploadProgressSpec {
+        title: " Uploading patch \u{2026} ".to_string(),
+        status_line: format!(
+            "{} bytes via {} ({}) \u{2014} {:.1}s elapsed",
+            send.byte_count,
+            send.port,
+            send.tool,
+            elapsed.as_secs_f32()
+        ),
+        spinner: crate::app::spinner_char(elapsed),
+        elapsed,
+        hint: " transfer runs in the background \u{2014} keep working ".to_string(),
     })
 }
 
@@ -1324,6 +1541,178 @@ mod tests {
             validation_spec_for(&app).expect("modal shown").rows.len(),
             1
         );
+    }
+
+    // MIDI upload (change `midi-upload`, task 1.2): confirm spec gates on the
+    // modal, offers `y` only with a send path, and names what's missing;
+    // progress spec gates on the in-flight send with elapsed + spinner; the
+    // waiting bar bounces instead of wrapping.
+
+    fn upload_blocked_transport() -> crate::app::UploadTransport {
+        crate::app::UploadTransport {
+            amidi: false,
+            sendmidi: false,
+            droid_port: None,
+            other_ports: Vec::new(),
+        }
+    }
+
+    fn upload_good_transport() -> crate::app::UploadTransport {
+        crate::app::UploadTransport {
+            amidi: true,
+            sendmidi: false,
+            droid_port: Some("hw:2,0,0".to_string()),
+            other_ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn upload_confirm_spec_gates_on_modal() {
+        let app = crate::app::App::new();
+        assert!(upload_confirm_spec(&app).is_none());
+    }
+
+    #[test]
+    fn upload_confirm_spec_offers_send_only_with_path() {
+        let mut app = crate::app::App::new();
+        app.upload_modal = Some(crate::app::UploadConfirm {
+            byte_count: 1234,
+            transport: upload_good_transport(),
+        });
+        let spec = upload_confirm_spec(&app).expect("modal open");
+        assert!(spec.can_send);
+        assert!(spec.bytes_line.contains("1234"));
+        assert!(spec.transport_line.contains("hw:2,0,0"));
+        assert!(spec.missing.is_empty());
+        assert!(spec.hint.contains("y:send"));
+    }
+
+    #[test]
+    fn upload_confirm_spec_blocked_names_missing() {
+        let mut app = crate::app::App::new();
+        app.upload_modal = Some(crate::app::UploadConfirm {
+            byte_count: 64,
+            transport: upload_blocked_transport(),
+        });
+        let spec = upload_confirm_spec(&app).expect("modal open");
+        assert!(!spec.can_send);
+        assert_eq!(spec.missing.len(), 2);
+        assert!(!spec.hint.contains("y:send"));
+        assert!(spec.hint.contains("n/Esc"));
+    }
+
+    #[test]
+    fn upload_progress_spec_gates_on_send() {
+        let app = crate::app::App::new();
+        assert!(upload_progress_spec(&app).is_none());
+    }
+
+    #[test]
+    fn upload_progress_spec_carries_elapsed_and_spinner() {
+        let mut app = crate::app::App::new();
+        // Fork a harmless child: the spec gates on the send state, not on
+        // child liveness, so no polling race affects it.
+        app.spawn_upload("true", &[], &[0xF0, 0xF7], "hw:2,0,0")
+            .expect("spawn true");
+        let spec = upload_progress_spec(&app).expect("send in flight");
+        assert!(spec.status_line.contains("2 bytes"));
+        assert!(spec.status_line.contains("hw:2,0,0"));
+        assert!(crate::app::UPLOAD_SPINNER.contains(&spec.spinner));
+        app.abort_upload_send();
+        assert!(upload_progress_spec(&app).is_none());
+    }
+
+    #[test]
+    fn waiting_bar_pos_bounces_within_width() {
+        use std::time::Duration;
+        assert_eq!(waiting_bar_pos(Duration::from_millis(0), 0), 0);
+        let w = 10;
+        for ms in (0..4000).step_by(200) {
+            let pos = waiting_bar_pos(Duration::from_millis(ms), w);
+            assert!(pos < w, "pos {pos} within width {w} at {ms}ms");
+        }
+        // Triangle wave with a doubled peak: climbs 0..w-1, holds the peak
+        // one frame, descends back to 0, then repeats.
+        assert_eq!(waiting_bar_pos(Duration::from_millis(0), w), 0);
+        assert_eq!(waiting_bar_pos(Duration::from_millis(200), w), 1);
+        assert_eq!(
+            waiting_bar_pos(Duration::from_millis((w as u64 - 1) * 200), w),
+            w - 1
+        );
+        assert_eq!(
+            waiting_bar_pos(Duration::from_millis(w as u64 * 200), w),
+            w - 1,
+            "peak holds one frame"
+        );
+        assert_eq!(
+            waiting_bar_pos(Duration::from_millis((w as u64 * 2 - 1) * 200), w),
+            0
+        );
+        assert_eq!(
+            waiting_bar_pos(Duration::from_millis(w as u64 * 2 * 200), w),
+            0,
+            "wave repeats"
+        );
+    }
+
+    /// A centered modal card must be fully opaque (no translucent wash), like
+    /// `assert_opaque_card` but without its cover-the-top-left rule: centered
+    /// modals (validation precedent) paint no full-screen dimmer.
+    fn assert_opaque_centered_card(
+        fills: &[(egui::Rect, egui::Color32)],
+        center: egui::Pos2,
+        what: &str,
+    ) {
+        assert!(
+            fills.iter().all(|(_, f)| f.a() == 255 || f.a() == 0),
+            "{what} must not paint a translucent background: {fills:?}"
+        );
+        assert!(
+            fills
+                .iter()
+                .any(|(r, f)| f.a() == 255 && r.contains(center)),
+            "{what} must paint an opaque card over the center"
+        );
+    }
+
+    #[test]
+    fn upload_confirm_paints_an_opaque_card() {
+        let spec = UploadConfirmSpec {
+            title: " Upload patch to DROID ".into(),
+            bytes_line: "1234 bytes (in-memory patch, SysEx framed)".into(),
+            transport_line: "USB-MIDI hw:2,0,0 via amidi".into(),
+            missing: Vec::new(),
+            can_send: true,
+            hint: " y:send n/Esc:cancel ".into(),
+        };
+        let fills = painted_rect_fills(Vec2::new(400.0, 300.0), |p, c, ctx| {
+            paint_upload_confirm(p, c, ctx, Some(&spec));
+        });
+        assert_opaque_centered_card(&fills, Pos2::new(200.0, 150.0), "upload confirm");
+        let labels = painted_labels(Vec2::new(400.0, 300.0), |p, c, ctx| {
+            paint_upload_confirm(p, c, ctx, Some(&spec));
+        });
+        assert!(labels.iter().any(|l| l.contains("1234")));
+        assert!(labels.iter().any(|l| l.contains("hw:2,0,0")));
+    }
+
+    #[test]
+    fn upload_progress_paints_an_opaque_card() {
+        let spec = UploadProgressSpec {
+            title: " Uploading patch \u{2026} ".into(),
+            status_line: "512 bytes via hw:2,0,0 (amidi) \u{2014} 1.5s elapsed".into(),
+            spinner: '|',
+            elapsed: std::time::Duration::from_millis(1500),
+            hint: " transfer runs in the background \u{2014} keep working ".into(),
+        };
+        let fills = painted_rect_fills(Vec2::new(400.0, 300.0), |p, c, ctx| {
+            paint_upload_progress(p, c, ctx, Some(&spec));
+        });
+        assert_opaque_centered_card(&fills, Pos2::new(200.0, 150.0), "upload progress");
+        let labels = painted_labels(Vec2::new(400.0, 300.0), |p, c, ctx| {
+            paint_upload_progress(p, c, ctx, Some(&spec));
+        });
+        assert!(labels.iter().any(|l| l.contains("512")));
     }
 
     #[test]
