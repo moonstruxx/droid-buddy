@@ -327,6 +327,15 @@ The graph surface SHALL bind `c` to center the graph (pan so the drawn content's
 - **WHEN** the g-prefix is armed and the user presses a key other than the known chords
 - **THEN** the prefix is cleared and the key processes as a normal key event, so `g c` is the only way bare `c` toggles latency coloring while the chord list includes it
 
+### Requirement: Upload keybindings
+
+The app SHALL bind `U` (Shift+u) to opening the upload confirm modal, `y` / `n` to send / cancel inside it, and document all three in help.
+
+#### Scenario: Help documents the keys
+
+- **WHEN** the user opens the help view
+- **THEN** the key table lists `U` with its upload meaning and the modal keys.
+
 ### Requirement: Help modal keybinding
 
 The system SHALL open a floating help modal on `?` showing the keybindings for the current active view. The modal SHALL close on `Esc`, on `q` (without quitting the app), or on a mouse click outside the modal.
