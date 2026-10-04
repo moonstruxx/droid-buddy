@@ -1951,18 +1951,25 @@ pub fn led_capability_for_controller(controller: &str) -> Option<LedCapability> 
 /// digit and not preceded by an alphanumeric/underscore character, so that
 /// e.g. `_ENV1_DECAY_POT` (letter preceded by another letter) is not
 /// mistaken for a token. See design.md Decision 2.
-pub(crate) fn scan_hw_tokens(value: &str) -> Vec<String> {
+/// Hardware-token letters for the graph/geometry views: the parser set plus `R`
+/// and `G`. The parser canonical (`scan_hw_tokens`, 8 letters) stays narrower
+/// on purpose — graph topology and wiring-outlier scans need the wider set.
+const HW_TOKEN_LETTERS_WIDE: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M', 'R', 'G'];
+
+/// Like `scan_hw_tokens` but also matches `R`/`G`-led tokens. Shared by the
+/// graph topology scan and the wiring-outlier context so the wide letter set
+/// lives in exactly one place.
+fn scan_hw_tokens_with_letters(value: &str, letters: &[char]) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
-        let starts_token = HW_TOKEN_LETTERS.contains(&c)
+        let starts_token = letters.contains(&c)
             && i + 1 < chars.len()
             && chars[i + 1].is_ascii_digit()
             && boundary_ok;
-
         if starts_token {
             let start = i;
             i += 1;
@@ -1989,6 +1996,14 @@ pub(crate) fn scan_hw_tokens(value: &str) -> Vec<String> {
         i += 1;
     }
     tokens
+}
+
+pub(crate) fn scan_hw_tokens_wide(value: &str) -> Vec<String> {
+    scan_hw_tokens_with_letters(value, &HW_TOKEN_LETTERS_WIDE)
+}
+
+pub(crate) fn scan_hw_tokens(value: &str) -> Vec<String> {
+    scan_hw_tokens_with_letters(value, &HW_TOKEN_LETTERS)
 }
 
 /// Like `scan_hw_tokens` but returns spans (line + column range) for each hit.

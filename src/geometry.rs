@@ -255,14 +255,6 @@ impl RackGeometry {
         let d = Self::distance(a, b);
         (d - 1.0).abs() < 1e-6
     }
-
-    /// Token-level adjacency.
-    pub fn token_adjacent(&self, a: &str, b: &str) -> bool {
-        match (self.resolve(a), self.resolve(b)) {
-            (Some(pa), Some(pb)) => Self::is_adjacent(pa, pb),
-            _ => false,
-        }
-    }
 }
 
 // Free helpers for callers that already have positions
@@ -647,47 +639,6 @@ impl WiringOutlierScorer {
 // cable_hops — via Patch.cable_index + circuit_outputs graph traversal
 // ---------------------------------------------------------------------------
 
-const HW_TOKEN_LETTERS: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M', 'R', 'G'];
-
-fn scan_hw_tokens_local(value: &str) -> Vec<String> {
-    let chars: Vec<char> = value.chars().collect();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
-        let starts_token = HW_TOKEN_LETTERS.contains(&c)
-            && i + 1 < chars.len()
-            && chars[i + 1].is_ascii_digit()
-            && boundary_ok;
-        if starts_token {
-            let start = i;
-            i += 1;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < chars.len()
-                && chars[i] == '.'
-                && i + 1 < chars.len()
-                && chars[i + 1].is_ascii_digit()
-            {
-                i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let clean_end = i >= chars.len()
-                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
-            if clean_end {
-                tokens.push(chars[start..i].iter().collect());
-            }
-            continue;
-        }
-        i += 1;
-    }
-    tokens
-}
-
 fn scan_internal_tokens_local(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut out = Vec::new();
@@ -718,10 +669,11 @@ fn scan_internal_tokens_local(value: &str) -> Vec<String> {
 }
 
 fn section_contains_token(section: &crate::patch::IniSection, token: &str) -> bool {
-    section
-        .entries
-        .iter()
-        .any(|(_, v)| scan_hw_tokens_local(v).iter().any(|t| t == token))
+    section.entries.iter().any(|(_, v)| {
+        crate::patch::scan_hw_tokens_wide(v)
+            .iter()
+            .any(|t| t == token)
+    })
 }
 
 fn section_consumes_cable(section: &crate::patch::IniSection, cable: &str) -> bool {
@@ -831,13 +783,13 @@ pub(crate) struct WiringContext {
 impl WiringContext {
     /// One pass over sections for containment and cable adjacency, then
     /// resolve/controller lookups per distinct token. `token_sections` uses
-    /// `scan_hw_tokens_local` so membership matches `section_contains_token`.
+    /// `scan_hw_tokens_wide` so membership matches `section_contains_token`.
     pub(crate) fn new(patch: &Patch, geometry: &RackGeometry) -> Self {
         let mut token_sections: HashMap<String, Vec<usize>> = HashMap::new();
         for (idx, section) in patch.sections.iter().enumerate() {
             let mut section_seen: HashSet<String> = HashSet::new();
             for (_, value) in &section.entries {
-                for tok in scan_hw_tokens_local(value) {
+                for tok in crate::patch::scan_hw_tokens_wide(value) {
                     if section_seen.insert(tok.clone()) {
                         token_sections.entry(tok).or_default().push(idx);
                     }

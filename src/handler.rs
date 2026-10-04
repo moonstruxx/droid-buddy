@@ -1444,16 +1444,6 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             cycle_panel_scale(app, matches!(key.code, KeyCode::Char('+')));
             false
         }
-        KeyCode::Char('\\') => {
-            // Left-pane vertical split toggle (D3).
-            app.toggle_left_split();
-            app.status_message = if app.left_split_active {
-                String::from("Left split on")
-            } else {
-                String::from("Left split off")
-            };
-            false
-        }
         KeyCode::Enter | KeyCode::Char(' ') => {
             if let Some(idx) = app.hovered_component {
                 // Capture token id before mutating patch to avoid borrow conflict.
@@ -2847,13 +2837,8 @@ mod tests {
         handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "? must open help over the optimizer");
 
-        // Panels: `\` toggles the left-pane split, `g s` opens the select
-        // menu, and Tab/Shift+Tab cycle pane focus while a slot is open.
-        let mut app = App::new();
-        handle_event(key(KeyCode::Char('\\')), &mut app);
-        assert!(app.left_split_active, "\\ toggles the left split");
-        assert_eq!(app.status_message, "Left split on");
-
+        // Panels: `g s` opens the select menu, and Tab/Shift+Tab cycle pane
+        // focus while a slot is open.
         let mut app = app_with_select_patch();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('s')), &mut app);
@@ -3708,6 +3693,82 @@ mod tests {
     }
 
     #[test]
+    fn optimizer_preview_arms_baseline_and_focuses_affected_circuit() {
+        // Task 4.1 (optimizer-click-focus): `g o` captures the file-order
+        // latency baseline, `Enter` previews + focuses the first affected
+        // circuit across views, `r` clears the diff baseline.
+        let mut app = app_with_fixture();
+        app.open_graph();
+        assert!(app.graph.is_some());
+        open_optimizer(&mut app);
+        let base_len = app
+            .optimizer_diff_state
+            .as_ref()
+            .expect("baseline captured on open")
+            .before_cable
+            .len();
+        assert_eq!(base_len, app.graph.as_ref().unwrap().edges.len());
+
+        handle_event(key(KeyCode::Enter), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().previewing, Some(0));
+        assert!(
+            app.optimizer_diff_state.is_some(),
+            "preview keeps the baseline"
+        );
+        // Focus consistency: selected iff some edge latency moved vs baseline
+        // (mirrors `first_affected_node` without calling it).
+        let state = app.optimizer_diff_state.as_ref().unwrap();
+        let graph = app.graph.as_ref().unwrap();
+        let mut changed = false;
+        if let Some(lat) = graph.latency.as_ref() {
+            for (i, edge) in graph.edges.iter().enumerate() {
+                if i >= state.before_latency.len() || state.before_cable.get(i) != Some(&edge.cable)
+                {
+                    continue;
+                }
+                let current = lat
+                    .edges
+                    .iter()
+                    .find(|l| l.edge_index == i)
+                    .map(|l| l.latency)
+                    .unwrap_or(0.0);
+                if (current - state.before_latency[i]).abs() > 1e-6 {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            app.selected_circuit.is_some(),
+            changed,
+            "cross-view focus follows the latency delta"
+        );
+
+        // `r` restores the file order and clears the diff baseline.
+        handle_event(key(KeyCode::Char('r')), &mut app);
+        assert_eq!(app.optimizer.as_ref().unwrap().previewing, None);
+        assert!(app.optimizer_diff_state.is_none());
+    }
+
+    #[test]
+    fn optimizer_row_at_maps_rows_and_rejects_chrome() {
+        // Task 4.1 (optimizer-click-focus): row hit-testing — 24px header,
+        // 16px rows, 12-row cap, pane bounds.
+        let pane = Rect::new(10, 20, 200, 300);
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24, 3), Some(0));
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 16, 3), Some(1));
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 2 * 16, 3), Some(2));
+        // Header zone, past the last row, outside the pane, no rows.
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 10, 3), None);
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 3 * 16, 3), None);
+        assert_eq!(optimizer_row_at(&pane, 5, 20 + 24, 3), None);
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24, 0), None);
+        // 12-row cap governs beyond 12 rows.
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 11 * 16, 20), Some(11));
+        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 12 * 16, 20), None);
+    }
+
+    #[test]
     fn optimizer_weight_keys_step_snap_and_clamp() {
         // source_navigation.ini is weight-sensitive: its best ordering under
         // the weighted objective differs from the pure MinSum one, so stepping
@@ -4509,18 +4570,6 @@ mod tests {
     }
 
     #[test]
-    fn backslash_toggles_left_split() {
-        let mut app = App::new();
-        assert!(!app.left_split_active);
-        handle_event(key(KeyCode::Char('\\')), &mut app);
-        assert!(app.left_split_active);
-        assert_eq!(app.status_message, "Left split on");
-        handle_event(key(KeyCode::Char('\\')), &mut app);
-        assert!(!app.left_split_active);
-        assert_eq!(app.status_message, "Left split off");
-    }
-
-    #[test]
     fn viewer_esc_closes_keeping_selection_and_scroll() {
         let mut app = app_with_source_navigation();
         app.select_component(String::from("B1.1"));
@@ -4752,7 +4801,6 @@ mod tests {
         let slots_before = app.tile_stack.slots.clone();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('q')), &mut app);
-        assert!(!app.is_quad());
         assert!(app.prefix.is_none());
         assert_eq!(app.tile_stack.slots, slots_before);
     }

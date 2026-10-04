@@ -11,7 +11,8 @@ use std::ops::Range;
 use crate::geometry::{BindingFeatures, RackGeometry, WiringContext, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
 use crate::patch::{
-    scan_internal_tokens, scan_register_refs, InfluenceContext, InfluenceSubtree, Patch,
+    scan_hw_tokens_wide, scan_internal_tokens, scan_register_refs, InfluenceContext,
+    InfluenceSubtree, Patch,
 };
 use crate::schema::load_schema;
 
@@ -920,7 +921,7 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
         let mut tokens: Vec<String> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (_, value) in &section.entries {
-            for tok in scan_hw_tokens_for_graph(value) {
+            for tok in scan_hw_tokens_wide(value) {
                 if seen.insert(tok.clone()) {
                     // Only consider tokens the geometry can resolve
                     if geometry.resolve(&tok).is_some() {
@@ -1010,47 +1011,6 @@ fn validate_influence_outliers(patch: &Patch) -> Vec<TopologyIssue> {
         });
     }
     issues
-}
-
-const HW_TOKEN_LETTERS_GRAPH: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M', 'R', 'G'];
-
-fn scan_hw_tokens_for_graph(value: &str) -> Vec<String> {
-    let chars: Vec<char> = value.chars().collect();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
-        let starts_token = HW_TOKEN_LETTERS_GRAPH.contains(&c)
-            && i + 1 < chars.len()
-            && chars[i + 1].is_ascii_digit()
-            && boundary_ok;
-        if starts_token {
-            let start = i;
-            i += 1;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < chars.len()
-                && chars[i] == '.'
-                && i + 1 < chars.len()
-                && chars[i + 1].is_ascii_digit()
-            {
-                i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let clean_end = i >= chars.len()
-                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
-            if clean_end {
-                tokens.push(chars[start..i].iter().collect());
-            }
-            continue;
-        }
-        i += 1;
-    }
-    tokens
 }
 
 #[cfg(test)]

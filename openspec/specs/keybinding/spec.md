@@ -280,13 +280,13 @@ The system SHALL provide `Tab` and `Shift+Tab` to cycle views through the right-
 - **WHEN** the right column contains the source viewer and the user presses `Shift+Tab`
 - **THEN** the source viewer slot is replaced with the graph view
 
-### Requirement: Vertical split toggle
+### Requirement: Vertical split toggle (retired)
 
-The `\` key SHALL toggle an optional vertical split inside the left panel pane, replacing the quad view (`g q`) binding.
+The `\` split and the quad view (`g q`) were retired with the class-based pane layout: `\` is unbound and the split was never painted (it only flipped a flag nothing read). This requirement is retained as history and SHALL NOT be reimplemented without a new change proposal.
 
-#### Scenario: Toggle vertical split
+#### Scenario: Backslash is unbound
 - **WHEN** the user presses `\`
-- **THEN** the left pane splits vertically into panels (top) and a secondary view (bottom)
+- **THEN** nothing happens (no split, no status message)
 
 ### Requirement: Zoom family keys
 

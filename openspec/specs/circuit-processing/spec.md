@@ -26,7 +26,7 @@ The system SHALL support a global processing pause toggle (`p` key) that freezes
 
 ### Requirement: Per-circuit processing toggle
 
-The system SHALL support toggling processing for a single circuit instance via the `x` key in the graph surface (and the quad-view GraphFull pane), acting on the circuit of the hovered graph node. The disabled state SHALL be keyed by `(circuit name, instance index)`, SHALL persist for the patch lifetime, SHALL render the circuit's graph node and its edges dimmed (overriding influence highlight), and SHALL make the circuit a dead end in the influence walk (its sinks stay marked influenced, but its outputs do not propagate). Toggling SHALL rebuild the graph and recompute influence, and SHALL produce a status message naming the circuit.
+The system SHALL support toggling processing for a single circuit instance via the `x` key in the graph surface, acting on the circuit of the hovered graph node. The disabled state SHALL be keyed by `(circuit name, instance index)`, SHALL persist for the patch lifetime, SHALL render the circuit's graph node and its edges dimmed (overriding influence highlight), and SHALL make the circuit a dead end in the influence walk (its sinks stay marked influenced, but its outputs do not propagate). Toggling SHALL rebuild the graph and recompute influence, and SHALL produce a status message naming the circuit.
 
 #### Scenario: Toggle hovered circuit in graph
 

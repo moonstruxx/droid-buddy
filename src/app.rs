@@ -465,15 +465,6 @@ pub struct GraphDrag {
     pub offset_y: f32,
 }
 
-/// Legacy fixed-pixel node size (task 3.1), retained for the pre-migration fit
-/// path: `src/gui/graph.rs` still derives node geometry from these until it
-/// migrates. Superseded by world-space node sizing — `layout::node_world_sizes`
-/// gives each node its own world `(width, height)`, projected through the
-/// camera zoom. The values are frozen: the not-yet-migrated window path reads
-/// them.
-pub const GRAPH_WINDOW_NODE_W: f32 = 200.0;
-pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
-
 /// Graph-minimap world↔panel mapping published by the renderer for
 /// click-to-navigate: `(bx, by, bw, bh, ix, iy, sx, sy)` — world bounds
 /// origin/size, the inner-panel origin in canvas points, and the per-axis
@@ -481,7 +472,7 @@ pub const GRAPH_WINDOW_NODE_H: f32 = 80.0;
 /// as `world = bx + (rel - ix) / sx`.
 pub type GraphMinimapTransform = (f32, f32, f32, f32, f32, f32, f32, f32);
 
-/// Cached influence-induced subgraph solve (quad-view FILTERED pane): the
+/// Cached influence-induced subgraph solve (influence FILTERED view): the
 /// influenced nodes and their internal edges solved as their own compact
 /// layout, recomputed whenever influence recomputes so the pane never
 /// re-solves per frame. `nodes`/`edges` are full-graph indices (subset order),
@@ -527,20 +518,6 @@ pub enum FocusSlot {
     #[default]
     Panels,
     Slot(usize),
-}
-
-/// Quad focus targets (change `quad-view`, App-state lane): the four
-/// co-visible panes. `GraphFull` is the full topology with influence
-/// highlight/dim; `GraphFiltered` is the dependency subset compact re-solve
-/// (`dependency_nodes`/`dependency_edges` via `f`). Both map to the single
-/// `ViewType::Graph` slot until the paint lane renders them side by side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum QuadFocus {
-    #[default]
-    Panels,
-    Source,
-    GraphFull,
-    GraphFiltered,
 }
 
 /// Carousel order for `cycle_view_in_slot` per pane class (change
@@ -624,16 +601,6 @@ pub struct App {
     /// of truth. `tile_stack` and the `showing_*` bools are compat mirrors
     /// derived from it until handler/ui migrate (tasks 2.x/3.x).
     pub layout: PaneLayout,
-    /// Quad configuration on top of `tile_stack` (change `quad-view`,
-    /// App-state lane only): when true the layout shows Panels + Source +
-    /// Graph FULL + Graph FILTERED concurrently. Not a separate surface;
-    /// `left_split_active` carries the FULL vs FILTERED split and the two
-    /// graph panes share the single `ViewType::Graph` slot until paint lands.
-    pub quad_active: bool,
-    /// Focused quad pane while `quad_active` (Tab order Panels -> Source ->
-    /// GraphFull -> GraphFiltered). Independent of `tile_stack.focus`, which
-    /// still tracks the underlying slot for non-quad routing.
-    pub quad_focus: QuadFocus,
     /// Tiled-pane rects published by `render_tiled_main` each frame, keyed by
     /// focused-pane identity (`Panels` = left pane). Hit-testing input for
     /// focus routing; rebuilt every frame like `component_rects`.
@@ -772,11 +739,6 @@ pub struct App {
     /// renamed, view-agnostic `viewer_split_ratio`. Kept equal to it until
     /// handler migrates (task 4.2).
     pub main_split_ratio: f32,
-    /// Left-pane vertical sub-split (0.3 to 0.7), default 0.5. `\` toggles it.
-    pub left_split_ratio: f32,
-    /// Whether the `\` vertical split is active in the left pane: panels on
-    /// top, secondary view below at `left_split_ratio`.
-    pub left_split_active: bool,
     /// Synchronous observer event bus (design D6). Re-solve triggers and
     /// topology errors are emitted here for subscribers (renderer, status).
     pub events: EventBus,
@@ -842,8 +804,8 @@ pub struct App {
     pub modifier_influence: Option<crate::patch::InfluenceSubtree>,
     /// Forward influence result for the active modifier, if any.
     pub influence: Option<crate::patch::InfluenceSubtree>,
-    /// Cached induced-subgraph solve of the influence set (quad-view FILTERED
-    /// pane). `None` with no influence or no graph; recomputed by
+    /// Cached induced-subgraph solve of the influence set (influence FILTERED
+    /// view). `None` with no influence or no graph; recomputed by
     /// `recompute_influence`, cleared with the influence state.
     pub influence_subset: Option<InfluenceSubset>,
     /// Circuits whose processing is disabled, keyed by `(circuit name,
@@ -963,8 +925,6 @@ impl App {
             component_rects: Vec::new(),
             layout: PaneLayout::default(),
             tile_stack: TileStack::default(),
-            quad_active: false,
-            quad_focus: QuadFocus::Panels,
             pane_rects: Vec::new(),
             pane_hit_rects: Vec::new(),
             showing_graph: false,
@@ -999,8 +959,6 @@ impl App {
             scale_factor: 1.0,
             viewer_split_ratio: 0.6,
             main_split_ratio: 0.6,
-            left_split_ratio: 0.5,
-            left_split_active: false,
             events: EventBus::default(),
             processing_paused: false,
             physical_show_skeleton: false,
@@ -1467,9 +1425,14 @@ impl App {
         }
         // Cross-view focus (optimizer-click-focus): select the first node whose
         // forward-loop latency changed, so the source pane jumps to it and the
-        // module UI highlights it alongside the graph.
+        // module UI highlights it alongside the graph. `select_circuit` opens
+        // + focuses the source viewer, so hand focus back to the optimizer -
+        // the j/k/r/Enter flow must keep working after a preview (REQ-6).
         if let Some(node) = self.first_affected_node() {
             self.select_circuit(node);
+            if let Some(id) = self.pane_holding(ViewType::Optimizer) {
+                self.set_focus(id);
+            }
         }
         self.status_message = format!("Preview: {label}");
     }
@@ -1582,16 +1545,6 @@ impl App {
                 None
             }
         }
-    }
-
-    /// Close the optimizer menu (`Esc`): restore the file order if a preview
-    /// is active, then drop the menu state.
-    pub fn optimizer_close(&mut self) {
-        self.drop_optimizer_state();
-        if let Some(id) = self.pane_holding(ViewType::Optimizer) {
-            self.layout.pane_mut(id).view = None;
-        }
-        self.sync_mirror();
     }
 
     /// Drop optimizer menu state, restoring file order after a preview. The
@@ -1851,7 +1804,6 @@ impl App {
             ViewType::Physical => {}
             ViewType::Optimizer => self.drop_optimizer_state(),
         }
-        self.quad_note_view_closed(view);
     }
 
     /// Pane a view of `view.class()` opens in (spec "Window classes route
@@ -1980,129 +1932,6 @@ impl App {
             .collect();
     }
 
-    /// Toggle the `\` vertical split in the left pane.
-    pub fn toggle_left_split(&mut self) {
-        self.left_split_active = !self.left_split_active;
-    }
-
-    /// Quad configuration active (App-state lane): Panels + Source + Graph
-    /// FULL + Graph FILTERED concurrently on top of `tile_stack`.
-    pub fn is_quad(&self) -> bool {
-        self.quad_active
-    }
-
-    /// Enter the quad configuration: open SourceViewer + Graph (the graph in
-    /// the second small pane so the module UI keeps the left big pane), enable
-    /// `left_split_active` for the FULL (influence highlight) vs FILTERED
-    /// (dependency subset compact re-solve via `f`) split, and recompute
-    /// influence. Preserves the hardware selection and source scroll; focus
-    /// starts on Panels. The quad state is legacy — its paint and key routing
-    /// are removed by tasks 2.x/3.x — so it rides the compat mirror.
-    pub fn enter_quad(&mut self) -> bool {
-        let Some(_) = self.patch.as_ref() else {
-            self.status_message = String::from("No patch loaded. Press 'l' to load.");
-            return false;
-        };
-        self.reconcile_from_mirror();
-        // SourceViewer must be open (the startup default; reopen if closed).
-        if self.pane_holding(ViewType::SourceViewer).is_none() {
-            self.place_view(ViewType::SourceViewer);
-        }
-        // The graph opens in the second small pane so the quad's panels pane
-        // keeps the module UI in the left big pane (quad painting reads the
-        // mirror slots for the viewer and graph panes).
-        if self.pane_holding(ViewType::Graph).is_none() {
-            self.build_graph_state();
-            self.showing_graph = true;
-            if let Some(existing) = self.layout.small_bottom.view {
-                self.close_view_state(existing);
-            }
-            self.layout.small_bottom.view = Some(ViewType::Graph);
-        }
-        self.left_split_active = true;
-        self.recompute_influence();
-        self.quad_active = true;
-        self.quad_focus = QuadFocus::Panels;
-        self.set_focus(PaneId::BigLeft);
-        self.viewer_focus = ViewerFocus::Panels;
-        self.status_message =
-            String::from("Quad: Panels/Source/Graph FULL/FILTERED (Tab cycle, Esc exit)");
-        true
-    }
-
-    /// Exit the quad configuration, preserving selection, scroll, and the
-    /// open views. Clears the dependency filter presentation but keeps
-    /// `selected_component` and influence intact.
-    pub fn exit_quad(&mut self) {
-        if !self.quad_active {
-            return;
-        }
-        self.quad_active = false;
-        self.quad_focus = QuadFocus::Panels;
-        self.left_split_active = false;
-        if self.dependency_root.is_some() {
-            self.clear_dependency_filter();
-        }
-        self.set_focus(PaneId::BigLeft);
-        self.viewer_focus = ViewerFocus::Panels;
-        self.status_message = String::from("Quad closed (selection kept)");
-    }
-
-    /// Cycle quad focus Panels -> Source -> GraphFull -> GraphFiltered.
-    /// Maps onto the underlying pane focus so non-quad routing keeps working:
-    /// Source targets the viewer pane, both graph panes the graph pane.
-    pub fn cycle_quad_focus(&mut self, forward: bool) {
-        if !self.quad_active {
-            return;
-        }
-        const ORDER: [QuadFocus; 4] = [
-            QuadFocus::Panels,
-            QuadFocus::Source,
-            QuadFocus::GraphFull,
-            QuadFocus::GraphFiltered,
-        ];
-        let pos = ORDER
-            .iter()
-            .position(|f| *f == self.quad_focus)
-            .unwrap_or(0);
-        let next = if forward {
-            ORDER[(pos + 1) % ORDER.len()]
-        } else {
-            ORDER[(pos + ORDER.len() - 1) % ORDER.len()]
-        };
-        self.quad_focus = next;
-        match next {
-            QuadFocus::Panels => {
-                self.set_focus(PaneId::BigLeft);
-                self.viewer_focus = ViewerFocus::Panels;
-            }
-            QuadFocus::Source => {
-                if let Some(id) = self.pane_holding(ViewType::SourceViewer) {
-                    self.set_focus(id);
-                }
-                self.viewer_focus = ViewerFocus::Source;
-            }
-            QuadFocus::GraphFull | QuadFocus::GraphFiltered => {
-                if let Some(id) = self.pane_holding(ViewType::Graph) {
-                    self.set_focus(id);
-                }
-                self.viewer_focus = ViewerFocus::Panels;
-            }
-        }
-    }
-
-    /// Deactivate quad when a required view goes away (keeps selection).
-    fn quad_note_view_closed(&mut self, view: ViewType) {
-        if !self.quad_active {
-            return;
-        }
-        if matches!(view, ViewType::Graph | ViewType::SourceViewer) {
-            self.quad_active = false;
-            self.quad_focus = QuadFocus::Panels;
-            self.left_split_active = false;
-        }
-    }
-
     /// Open the `?` help modal. Works from any view; the modal is a top-level
     /// surface that eats all keys except `Esc`/`q` until closed.
     pub fn open_help(&mut self) {
@@ -2112,12 +1941,6 @@ impl App {
     /// Close the `?` help modal (`Esc`/`q`/click-outside).
     pub fn close_help(&mut self) {
         self.showing_help = false;
-        self.help_modal_rect = None;
-    }
-
-    /// Clear the renderer-published help modal rect each frame, mirroring how
-    /// `graph_node_rects` is rebuilt per draw.
-    pub fn clear_help_modal_rect(&mut self) {
         self.help_modal_rect = None;
     }
 
@@ -2232,13 +2055,6 @@ impl App {
         Some(format!(
             "Select state: {s} selected / {u} unselected / {k} unknown"
         ))
-    }
-
-    /// Clear validation state (no issues, modal hidden, cursor 0).
-    pub fn clear_validation(&mut self) {
-        self.validation_issues.clear();
-        self.showing_validation = false;
-        self.validation_cursor = 0;
     }
 
     /// Load a patch into the app and reset source-navigation state ready for
@@ -2860,13 +2676,6 @@ impl App {
         true
     }
 
-    /// Reload the XDG label store from disk (warn-once, empty fallback).
-    /// Useful when the file was mutated externally; `current_patch_path` bucket
-    /// lookup reflects the refreshed store on next `current_hw_store` call.
-    pub fn reload_label_store(&mut self) {
-        self.label_store = LabelStore::load();
-    }
-
     /// HW bucket for the currently loaded patch, if any (cloned, empty when no
     /// patch path or no bucket). Suitable for `Patch::display_label` fallback chain.
     pub fn current_hw_store(&self) -> HashMap<String, BTreeMap<u8, String>> {
@@ -3380,7 +3189,6 @@ impl App {
             self.layout.pane_mut(id).view = None;
         }
         self.hovered_graph_node = None;
-        self.quad_note_view_closed(ViewType::Graph);
         self.sync_mirror();
     }
 
@@ -3430,7 +3238,7 @@ impl App {
                 graph.highlighted_edges = sub.influenced_edges.clone();
             }
         }
-        // A rebuild keeps the quad FILTERED-pane subset in sync with the
+        // A rebuild keeps the influence FILTERED-view subset in sync with the
         // fresh graph; no influence means no subset.
         if self.influence.is_some() {
             self.recompute_influence_subset();
@@ -3480,12 +3288,6 @@ impl App {
     /// open, mirroring how `component_rects` is rebuilt per draw.
     pub fn clear_graph_cluster_rects(&mut self) {
         self.graph_cluster_rects.clear();
-    }
-
-    /// Clear the renderer-published node rects each frame while the graph is
-    /// open, mirroring `clear_graph_cluster_rects`.
-    pub fn clear_graph_node_rects(&mut self) {
-        self.graph_node_rects.clear();
     }
 
     /// Step cable tension by `dir` (±1) on the graph surface: `[` lowers it,
@@ -3825,11 +3627,6 @@ impl App {
         self.influence_nodes.clear();
         self.influence_edges.clear();
         self.influence_filter_active = false;
-        // Quad is per-patch configuration on top of the slots: a new patch
-        // reverts to the plain tiled layout (change `quad-view`, App-state).
-        self.quad_active = false;
-        self.quad_focus = QuadFocus::Panels;
-        self.left_split_active = false;
         self.sync_mirror();
     }
 
@@ -3907,8 +3704,8 @@ impl App {
         self.events.dispatch(&Event::InfluenceRecomputed(subtree));
     }
 
-    /// Recompute the influence-induced subgraph solve for the FILTERED pane
-    /// (quad-view): the influenced nodes plus their internal edges, solved as
+    /// Recompute the influence-induced subgraph solve for the FILTERED view:
+    /// the influenced nodes plus their internal edges, solved as
     /// their own compact layout with subset-relative pins (mirrors
     /// `apply_dependency_subset`). `None` with no influence or no graph.
     /// Deterministic: node indices sorted, edge indices in graph order.
@@ -4115,11 +3912,6 @@ impl App {
             (self.layout.small_split_ratio + delta as f64).clamp(0.3, 0.7);
     }
 
-    /// Legacy alias for `adjust_main_split_ratio` (pre-pane model name).
-    pub fn adjust_viewer_split_ratio(&mut self, delta: f32) {
-        self.adjust_main_split_ratio(delta);
-    }
-
     /// Toggle the non-latching maximize on the focused pane (the `z` key;
     /// task 3.1 wires it): press again to restore, and focus change or `Esc`
     /// clears it (spec "Non-latching maximize").
@@ -4196,11 +3988,6 @@ impl App {
         self.layout.small_top.view = b;
         self.layout.small_bottom.view = a;
         self.sync_mirror();
-    }
-
-    /// Adjust the left-pane vertical sub-split by `delta`, clamped to [0.3, 0.7].
-    pub fn adjust_left_split_ratio(&mut self, delta: f32) {
-        self.left_split_ratio = (self.left_split_ratio + delta).clamp(0.3, 0.7);
     }
 
     pub fn load_sample_patch(&mut self) {
@@ -6547,115 +6334,17 @@ mod tests {
     }
 
     #[test]
-    fn quad_enter_opens_slots_enables_split_keeps_selection() {
-        let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        assert!(app.load_patch(patch));
-        app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
-        assert!(app.is_quad());
-        assert_eq!(app.quad_focus, QuadFocus::Panels);
-        assert!(app.tile_stack.is_open(ViewType::SourceViewer));
-        assert!(app.tile_stack.is_open(ViewType::Graph));
-        assert!(app.tile_stack.slots.len() <= 3);
-        assert!(app.left_split_active);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
-        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
-    }
-
-    #[test]
-    fn quad_enter_without_patch_fails_closed() {
-        let mut app = App::new();
-        assert!(!app.enter_quad());
-        assert!(!app.is_quad());
-        // No graph or optimizer opens on a failed entry; the startup viewer
-        // remains the only view.
-        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
-    }
-
-    #[test]
-    fn quad_focus_cycle_walks_four_panes_and_back() {
-        let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        assert!(app.load_patch(patch));
-        assert!(app.enter_quad());
-        let viewer_slot = app
-            .tile_stack
-            .slots
-            .iter()
-            .position(|v| *v == ViewType::SourceViewer)
-            .unwrap();
-        let graph_slot = app
-            .tile_stack
-            .slots
-            .iter()
-            .position(|v| *v == ViewType::Graph)
-            .unwrap();
-        app.cycle_quad_focus(true);
-        assert_eq!(app.quad_focus, QuadFocus::Source);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(viewer_slot));
-        app.cycle_quad_focus(true);
-        assert_eq!(app.quad_focus, QuadFocus::GraphFull);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(graph_slot));
-        app.cycle_quad_focus(true);
-        assert_eq!(app.quad_focus, QuadFocus::GraphFiltered);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(graph_slot));
-        app.cycle_quad_focus(true);
-        assert_eq!(app.quad_focus, QuadFocus::Panels);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
-        app.cycle_quad_focus(false);
-        assert_eq!(app.quad_focus, QuadFocus::GraphFiltered);
-    }
-
-    #[test]
-    fn quad_exit_keeps_selection_slots_and_clears_split() {
-        let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        assert!(app.load_patch(patch));
-        app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
-        app.cycle_quad_focus(true);
-        app.exit_quad();
-        assert!(!app.is_quad());
-        assert_eq!(app.quad_focus, QuadFocus::Panels);
-        assert!(!app.left_split_active);
-        assert!(app.tile_stack.is_open(ViewType::SourceViewer));
-        assert!(app.tile_stack.is_open(ViewType::Graph));
-        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
-    }
-
-    #[test]
-    fn quad_deactivates_when_graph_closes() {
-        let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        assert!(app.load_patch(patch));
-        assert!(app.enter_quad());
-        app.close_graph();
-        assert!(!app.is_quad());
-        assert!(!app.left_split_active);
-    }
-
-    #[test]
-    fn quad_resets_on_patch_load() {
-        let mut app = App::new();
-        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
-        assert!(app.load_patch(patch));
-        assert!(app.enter_quad());
-        let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
-        assert!(app.load_patch(second));
-        assert!(!app.is_quad());
-        assert!(!app.left_split_active);
-    }
-
-    #[test]
     fn influence_subset_solved_compactly_with_internal_edges() {
         let mut app = App::new();
         let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
-        let subset = app.influence_subset.as_ref().expect("subset after quad");
+        app.open_graph();
+        app.recompute_influence();
+        let subset = app
+            .influence_subset
+            .as_ref()
+            .expect("subset after graph open");
         assert!(!subset.nodes.is_empty());
         assert_eq!(subset.nodes.len(), subset.positions.len());
         assert!(
@@ -6682,7 +6371,7 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         assert!(app.load_patch(patch));
         // Selection drives influence, but with no graph open the subset cannot
-        // be solved (quad opens the graph; this mirrors that gate).
+        // be solved (opening the graph solves it; this mirrors that gate).
         app.select_component(String::from("B1.1"));
         assert!(app.influence.is_some());
         assert!(app.influence_subset.is_none());
@@ -6694,7 +6383,8 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
+        app.open_graph();
+        app.recompute_influence();
         assert!(app.influence_subset.is_some());
         app.toggle_processing_pause();
         assert!(app.influence.is_none());
@@ -6707,7 +6397,8 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         assert!(app.load_patch(patch));
         app.select_component(String::from("B1.1"));
-        assert!(app.enter_quad());
+        app.open_graph();
+        app.recompute_influence();
         assert!(app.influence_subset.is_some());
         app.rebuild_graph();
         let after = app
@@ -6964,17 +6655,6 @@ mod tests {
     }
 
     // Physical IS the module UI - no mutual exclusion needed
-
-    #[test]
-    fn toggle_left_split_flips_without_touching_ratio() {
-        let mut app = App::new();
-        assert!(!app.left_split_active);
-        app.toggle_left_split();
-        assert!(app.left_split_active);
-        assert!((app.left_split_ratio - 0.5).abs() < f32::EPSILON);
-        app.toggle_left_split();
-        assert!(!app.left_split_active);
-    }
 
     #[test]
     fn open_view_graph_applies_selection_influence() {
