@@ -336,6 +336,15 @@ The graph pane SHALL bind `a` (no modifiers) to the arrange action: apply the ac
 - **WHEN** the user opens the graph help view
 - **THEN** the key table lists `a` with its arrange/cycle meaning.
 
+### Requirement: Upload keybindings
+
+The app SHALL bind `U` (Shift+u) to opening the upload confirm modal, `y` / `n` to send / cancel inside it, and document all three in help.
+
+#### Scenario: Help documents the keys
+
+- **WHEN** the user opens the help view
+- **THEN** the key table lists `U` with its upload meaning and the modal keys.
+
 ### Requirement: Help modal keybinding
 
 The system SHALL open a floating help modal on `?` showing the keybindings for the current active view. The modal SHALL close on `Esc`, on `q` (without quitting the app), or on a mouse click outside the modal.
