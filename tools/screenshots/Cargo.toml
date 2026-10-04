@@ -1,0 +1,29 @@
+[package]
+name = "screenshots"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic README screenshot harness for droid_tui (change readme-docs, task 1.1). Tools-only crate: it reuses the app sources in place via path shadows, so the renders always track the real paint path."
+
+[[bin]]
+name = "screenshots"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned (=) to the versions in the workspace Cargo.lock so the harness
+# compiles the exact same dependency tree the app tests use.
+egui = "=0.36.1"
+egui-wgpu = "=0.36.1"
+egui-winit = "=0.36.1"
+winit = "=0.30.13"
+wgpu = "=30.0.1"
+egui_kittest = { version = "=0.36.1", features = ["snapshot", "wgpu"] }
+# default-features off like egui_kittest does (its `image/png` only): the full
+# default set pulls ravif/rav1e, which no longer resolves offline.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+toml = "=0.9.12"
+
+[profile.release]
+# Screenshots do not need app-release optimization; keep the harness build fast.
+opt-level = 1
