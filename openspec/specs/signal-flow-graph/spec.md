@@ -403,6 +403,11 @@ The system SHALL let the user pin circuit nodes so manual placements survive the
 - **WHEN** the column arrangement recomputes while a node is pinned
 - **THEN** the pinned node keeps its fixed position and the remaining nodes arrange around it.
 
+#### Scenario: Pinned anchors survive section reorder
+
+- **WHEN** a preview reorders sections and rebuilds the graph
+- **THEN** every still-present pinned circuit keeps its own previous position as its anchor (carried by circuit identity, never by index), and unpinned nodes arrange around those anchors.
+
 ### Requirement: GPU window surface
 
 When the `gui` feature is enabled, the signal-flow graph SHALL also be renderable in a GPU-accelerated window that shows the same graph model, solver positions, and camera as the terminal tile. Every existing graph interaction (node drag with re-settle and `NodeMoved`, hover, `x` disable, `p` pin, `e` label overlay, diff and latency coloring, topology-error highlighting) SHALL behave identically in the window.
