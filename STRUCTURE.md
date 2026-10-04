@@ -7,7 +7,7 @@ droid_tui/
 ├── src/                        # All Rust source (single crate: lib + bin)
 │   ├── main.rs                 # binary entry — winit event loop + egui paint
 │   ├── lib.rs                  # library root — module wiring (pub mod …)
-│   ├── app.rs                  # App state struct + tile stack + helpers
+│   ├── app.rs                  # App state struct + class-based pane layout + helpers
 │   ├── handler.rs              # keyboard + mouse event handling
 │   ├── patch.rs                # domain model + hand-rolled .ini parser
 │   ├── schema.rs               # embedded DROID circuit schema + jack table
@@ -15,12 +15,16 @@ droid_tui/
 │   ├── diff.rs                 # pure patch-diff model (DiffReport)
 │   ├── graph.rs                # signal-flow graph model + topology validation
 │   ├── layout.rs               # column arrangement (default) + force solver
+│   ├── graph_anim.rs           # pure settle-animation driver (open-animation)
 │   ├── graph_render.rs         # backend-neutral SceneSpec types
 │   ├── geometry.rs             # rack-geometry model + wiring-outlier scorer
 │   ├── physical.rs             # physical 1:1 layout model (mm grid)
 │   ├── expression.rs           # Droid expression evaluator
 │   ├── latency.rs              # forward-loop latency metric + CostModel
 │   ├── optimize.rs             # latency-optimized patch generation
+│   ├── panes.rs                # class-based pane layout model (PaneLayout/PaneId)
+│   ├── performance.rs          # pure side-bound callout layout (performance view)
+│   ├── sysex.rs                # pure MIDI SysEx payload builder
 │   ├── config.rs               # XDG config.toml load/save
 │   ├── favorites.rs            # FavoritesStore (XDG favourites.toml)
 │   ├── plugin.rs               # plugin-circuit TOML discovery + parse
@@ -30,20 +34,20 @@ droid_tui/
 │   ├── rendermetrics.rs        # render-feature extractor + scorer
 │   ├── regression.rs           # cross-layer model/story regression tests (cfg(test))
 │   └── gui/                    # egui surfaces (window shell dispatch)
-│       ├── mod.rs              # surface dispatch + SurfaceCtx + WindowFrame
-│       ├── panels.rs           # controller panels (hardware components)
-│       ├── physical.rs         # 1:1 rack view
+│       ├── mod.rs              # surface dispatch + pane dispatch + WindowFrame
+│       ├── physical.rs         # 1:1 rack view (module UI, the only hardware surface)
 │       ├── viewer.rs           # source pane + minimap
 │       ├── picker.rs           # file picker + favourites overlay
 │       ├── overlays.rs         # validation modal / select menu / labels / diff / optimizer
 │       └── graph.rs            # signal-flow canvas + minimap + tooltip
 ├── tests/
-│   └── perf_gate.rs            # profiling gate: budgeted watchdog over the scale anchor
+│   └── perf_gate.rs            # profiling gate: budgeted watchdog phases over the scale anchor
 ├── fixtures/                   # test fixtures: *.ini patches, plugins/, picker_test/,
-│                               #   validation/*.ini (9-check matrix), ui_review/, pdfs
+│                               #   validation/*.ini (9-check matrix)
 ├── corpus/                     # patch corpus + analysis CSVs (features.csv, rendermetrics.csv)
+│                               #   + good/*.ini curated gold patches (generator variants removed)
 ├── tools/                      # developer analysis tools (Python fit/build scripts + artifacts)
-├── scripts/                    # developer scripts (profile-gate.sh, regenerate.sh, verify-native-change.sh)
+├── scripts/                    # developer scripts (profile-gate.sh, gen_own_scale.py)
 ├── assets/                     # JetBrainsMono-Regular.ttf (UI font)
 ├── ext/droid-lsp/              # vendored git submodule — schema/validation source of truth
 ├── patches_remote/             # remote DROID patch files (reference .ini patches + Generators/)
@@ -58,7 +62,7 @@ droid_tui/
 ├── rack_geometry.json          # rack layout read by geometry::load()
 ├── ARCHITECTURE.md             # architecture, data flows, abstractions, ADRs
 ├── DESIGN.md                   # UI and design-system decisions
-└── target/                     # build artifacts (partially tracked — see ARCHITECTURE.md §15)
+└── target/                     # build artifacts (untracked, gitignored; `cargo clean` reclaimable)
 ```
 
 ## Directory Purposes
@@ -69,23 +73,23 @@ droid_tui/
 - Key files: `src/lib.rs` (module wiring), `src/main.rs` (event loop), `src/app.rs` (state), `src/handler.rs` (input), `src/patch.rs` (parser).
 
 **`src/gui/`:**
-- Purpose: every egui surface — the tiled main band (panels + right-column slots) and centered overlays.
-- Contains: paint routines that emit `egui::Shape` and publish per-frame geometry (`component_rects`, `graph_node_rects`, `pane_rects`, `graph_canvas_px`) back to `App`.
-- Key files: `mod.rs` (dispatch + `SurfaceCtx` + `WindowFrame`), `panels.rs`, `graph.rs`, `physical.rs`, `viewer.rs`, `picker.rs`, `overlays.rs`.
+- Purpose: every egui surface — the class-based pane band (big/small panes) and centered overlays.
+- Contains: paint routines that emit `egui::Shape` and publish per-frame geometry (`component_rects`, `graph_node_rects`, `pane_hit_rects`, `graph_canvas_px`) back to `App`.
+- Key files: `mod.rs` (dispatch + `WindowFrame`), `physical.rs`, `graph.rs`, `viewer.rs`, `picker.rs`, `overlays.rs`.
 
 **`tests/`:**
 - Purpose: integration tests that need the full crate.
-- Contains: `perf_gate.rs` — three budgeted pure phases over the scale anchor `fixtures/droid_mpfs5melody2.ini`.
+- Contains: `perf_gate.rs` — budgeted pure phases over the scale anchor `fixtures/own_scale.ini`.
 - Key files: `perf_gate.rs`.
 
 **`fixtures/`:**
 - Purpose: `.ini` patch files and supporting data exercising every parser/graph/validation/physical path.
-- Contains: concrete patches (single-purpose and multi-feature), `plugins/*.toml` for the plugin loader, `validation/*.ini` for the 9-check matrix, `picker_test/`, `ui_review/`, and reference PDFs.
-- Key files: `droid_mpfs5melody2.ini` (the scale anchor), `validation/*.ini`.
+- Contains: concrete patches (single-purpose and multi-feature), `plugins/*.toml` for the plugin loader, `validation/*.ini` for the 9-check matrix, `picker_test/`.
+- Key files: `own_scale.ini` (the scale anchor), `validation/*.ini`.
 
 **`corpus/`:**
 - Purpose: patch corpus plus the feature CSVs that drive the offline outlier-model fits.
-- Contains: `features.csv`, `rendermetrics.csv`, and `good/*.ini` gold patches.
+- Contains: `features.csv`, `rendermetrics.csv`, and `good/*.ini` curated gold patches (deterministic generator variants removed; regenerate via `tools/build_features.py`).
 - Key files: `features.csv` (input to `tools/fit_outlier_model.py`).
 
 **`tools/`:**
