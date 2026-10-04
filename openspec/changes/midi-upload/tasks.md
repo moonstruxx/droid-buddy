@@ -7,7 +7,7 @@
 
 ## 2. Docs
 
-- [ ] 2.1 Add the help-table rows (`U`, modal keys) and verify the help test passes <!-- agent: rusty-engineer.fast, depends_on: [1.2], touches: [src/help.rs] -->
+- [x] 2.1 Add the help-table rows (`U`, modal keys) and verify the help test passes <!-- agent: rusty-engineer.fast, depends_on: [1.2], touches: [src/help.rs] -->
 
 ## 3. Verification
 

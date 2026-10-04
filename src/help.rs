@@ -90,6 +90,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g c", "toggle latency coloring"),
             ("d", "toggle diff overlay"),
             ("p", "pause processing"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
             ("?", "show this help"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
@@ -114,6 +117,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("1-4", "shift groups"),
             ("m", "latch modifier"),
             ("d", "toggle diff overlay"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
         ],
@@ -124,6 +130,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Shift+c", "fit and center graph"),
             ("e", "edit label"),
             ("d", "diff overlay"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
             ("h", "toggle column/force layout"),
             ("a", "apply arrangement / cycle layouts"),
             ("f", "dependency filter"),
@@ -166,6 +175,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("q", "quit"),
             ("Ctrl+c", "quit"),
             ("p", "pause processing"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
         ],
         HelpView::Picker => vec![
             ("j/k/arrows", "navigate"),
@@ -288,6 +300,40 @@ mod tests {
         let optimizer = keybindings(HelpView::Optimizer);
         assert!(optimizer.contains(&("r", "restore original order")));
         assert!(!optimizer.contains(&row));
+    }
+
+    #[test]
+    fn keybindings_include_upload_keys() {
+        // Change `midi-upload` task 2.1 (keybinding spec "The app SHALL bind
+        // `U` ... and document all three in help"): `U` opens the upload
+        // confirm modal from any pane view, and `y`/`n` send/cancel inside
+        // it — so every pane view's table lists all three. The centered
+        // overlays (picker, validation) never see the modal keys.
+        let rows = [
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
+        ];
+        for view in [
+            HelpView::ModuleUi,
+            HelpView::Viewer,
+            HelpView::Graph,
+            HelpView::Optimizer,
+        ] {
+            for row in rows {
+                assert!(
+                    keybindings(view).contains(&row),
+                    "view {view:?} must document the upload key {}",
+                    row.0
+                );
+            }
+        }
+        for view in [HelpView::Validation, HelpView::Picker] {
+            assert!(
+                !keybindings(view).iter().any(|(k, _)| *k == "U"),
+                "view {view:?} must not document the U upload key"
+            );
+        }
     }
 
     #[test]
@@ -480,6 +526,9 @@ mod tests {
         ("g c", "toggle latency coloring"),
         ("d", "toggle diff overlay"),
         ("p", "pause processing"),
+        ("U", "upload patch to DROID (confirm modal)"),
+        ("y", "send upload (confirm modal)"),
+        ("n", "cancel upload (confirm modal)"),
         ("q", "quit"),
         ("Ctrl+c", "quit"),
     ];
@@ -524,6 +573,11 @@ mod tests {
             ("l", "open file picker"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
+            // MIDI upload (change `midi-upload`, task 2.1): `U` opens the
+            // confirm modal from any pane view; `y`/`n` send/cancel in it.
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
         ] {
             assert!(
                 table.contains(&(key, desc)),
@@ -584,10 +638,13 @@ mod tests {
             "j/k",
             "l",
             "m",
+            "U",
+            "n",
             "p",
             "q",
             "r",
             "s",
+            "y",
             "z",
         ];
         expected.sort_unstable();
