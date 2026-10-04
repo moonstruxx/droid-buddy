@@ -8,4 +8,4 @@
 
 ## 2. Verification
 
-- [ ] 2.1 Verify (dead-link check over README + docs, screenshots fresh, full gate green) <!-- agent: horst-engineer.fast, depends_on: [1.2, 1.3], touches: [] -->
+- [x] 2.1 Verify (dead-link check over README + docs, screenshots fresh, full gate green) <!-- agent: horst-engineer.fast, depends_on: [1.2, 1.3], touches: [] -->
