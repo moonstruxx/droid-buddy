@@ -89,7 +89,11 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g s", "open select-state menu"),
             ("g c", "toggle latency coloring"),
             ("d", "toggle diff overlay"),
-            ("p", "pause processing"),
+            ("p", "open performance view"),
+            ("R", "reset element states"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
             ("?", "show this help"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
@@ -114,6 +118,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("1-4", "shift groups"),
             ("m", "latch modifier"),
             ("d", "toggle diff overlay"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
         ],
@@ -124,7 +131,11 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Shift+c", "fit and center graph"),
             ("e", "edit label"),
             ("d", "diff overlay"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
             ("h", "toggle column/force layout"),
+            ("a", "apply arrangement / cycle layouts"),
             ("f", "dependency filter"),
             ("i", "influence filter"),
             ("g s", "open select-state menu"),
@@ -165,6 +176,9 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("q", "quit"),
             ("Ctrl+c", "quit"),
             ("p", "pause processing"),
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
         ],
         HelpView::Picker => vec![
             ("j/k/arrows", "navigate"),
@@ -290,6 +304,40 @@ mod tests {
     }
 
     #[test]
+    fn keybindings_include_upload_keys() {
+        // Change `midi-upload` task 2.1 (keybinding spec "The app SHALL bind
+        // `U` ... and document all three in help"): `U` opens the upload
+        // confirm modal from any pane view, and `y`/`n` send/cancel inside
+        // it — so every pane view's table lists all three. The centered
+        // overlays (picker, validation) never see the modal keys.
+        let rows = [
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
+        ];
+        for view in [
+            HelpView::ModuleUi,
+            HelpView::Viewer,
+            HelpView::Graph,
+            HelpView::Optimizer,
+        ] {
+            for row in rows {
+                assert!(
+                    keybindings(view).contains(&row),
+                    "view {view:?} must document the upload key {}",
+                    row.0
+                );
+            }
+        }
+        for view in [HelpView::Validation, HelpView::Picker] {
+            assert!(
+                !keybindings(view).iter().any(|(k, _)| *k == "U"),
+                "view {view:?} must not document the U upload key"
+            );
+        }
+    }
+
+    #[test]
     fn keybindings_include_pane_layout_keys() {
         // Change `pane-class-layout` task 3.3 (keybinding spec "The help modal
         // tables SHALL list all three keys"): `z`, `Alt+b`, and `Alt+s` act on
@@ -396,6 +444,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keybindings_reflect_graph_arrange_key() {
+        // Change `graph-arrange-cycle` task 2.2: the graph table documents
+        // the `a` arrange key (apply + cycle) next to the `h` layout toggle.
+        let graph = keybindings(HelpView::Graph);
+        assert!(graph.contains(&("a", "apply arrangement / cycle layouts")));
+    }
+
     /// Every `(key, description)` pair the help modal can ever show, and the
     /// surface that owns it. Used by `module_ui_table_matches_handler` to
     /// catch un-documented rows and renamed descriptions in one assertion.
@@ -420,6 +476,8 @@ mod tests {
         ("e", "edit label / validation modal"),
         ("1-4", "shift groups"),
         ("Esc", "close Module UI view"),
+        ("p", "open performance view"),
+        ("R", "reset element states"),
         // Graph surface.
         ("x", "toggle circuit processing"),
         ("p", "pin/unpin node"),
@@ -428,6 +486,7 @@ mod tests {
         ("e", "edit label"),
         ("d", "diff overlay"),
         ("h", "toggle column/force layout"),
+        ("a", "apply arrangement / cycle layouts"),
         ("f", "dependency filter"),
         ("i", "influence filter"),
         ("+/-", "camera zoom"),
@@ -470,6 +529,9 @@ mod tests {
         ("g c", "toggle latency coloring"),
         ("d", "toggle diff overlay"),
         ("p", "pause processing"),
+        ("U", "upload patch to DROID (confirm modal)"),
+        ("y", "send upload (confirm modal)"),
+        ("n", "cancel upload (confirm modal)"),
         ("q", "quit"),
         ("Ctrl+c", "quit"),
     ];
@@ -514,6 +576,11 @@ mod tests {
             ("l", "open file picker"),
             ("q", "quit"),
             ("Ctrl+c", "quit"),
+            // MIDI upload (change `midi-upload`, task 2.1): `U` opens the
+            // confirm modal from any pane view; `y`/`n` send/cancel in it.
+            ("U", "upload patch to DROID (confirm modal)"),
+            ("y", "send upload (confirm modal)"),
+            ("n", "cancel upload (confirm modal)"),
         ] {
             assert!(
                 table.contains(&(key, desc)),
@@ -573,11 +640,15 @@ mod tests {
             "g s",
             "j/k",
             "l",
+            "R",
             "m",
+            "U",
+            "n",
             "p",
             "q",
             "r",
             "s",
+            "y",
             "z",
         ];
         expected.sort_unstable();
@@ -599,6 +670,16 @@ mod tests {
             !table.iter().any(|(key, _)| *key == "\\"),
             "`\\` is not a handler binding, so it must not be documented"
         );
+    }
+
+    #[test]
+    fn module_ui_table_names_performance_view_keys() {
+        // `performance-view` 2.1: the Module UI table names the view-scoped
+        // `p` (the shared `pause processing` row no longer applies on this
+        // surface) and the `R` element-state reset.
+        let table = keybindings(HelpView::ModuleUi);
+        assert!(table.contains(&("p", "open performance view")));
+        assert!(table.contains(&("R", "reset element states")));
     }
 
     #[test]

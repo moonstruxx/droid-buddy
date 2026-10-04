@@ -18,7 +18,7 @@
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
 use crate::app::App;
-use crate::patch::{ComponentKind, ComponentState, ShiftGroup};
+use crate::patch::{ComponentKind, ComponentState, NodeId, ShiftGroup};
 use crate::physical::{PhysicalLayout, RackLayout, RackSpec, ScreenMapping};
 use crate::theme::Color;
 
@@ -90,6 +90,35 @@ pub(crate) struct CellSpec {
     pub led_rgb: Option<[u8; 3]>,
 }
 
+/// Fixed screen-space font (points) for a performance-view callout headline:
+/// big next to the 10 pt in-cell labels, so the exploded field reads at a
+/// glance (performance-view 1.3). Painted monospace so the measured callout
+/// size (via [`MONO_ADVANCE`]) matches what egui draws.
+const CALLOUT_LABEL_SIZE: f32 = 14.0;
+/// Padding inside a callout rect, in points.
+const CALLOUT_PAD: f32 = 4.0;
+
+/// One exploded element label for painting: the placed rect outside the rack
+/// rect, the leader-line anchor on the host cell edge, the resolved headline
+/// (store → guess → derived), the live state line, and the element color.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CalloutSpec {
+    pub label_rect: Rect,
+    pub anchor: Pos2,
+    pub label: String,
+    pub state_text: String,
+    pub color: Color,
+    pub highlighted: bool,
+}
+
+/// The performance-view overlay payload for one frame: the screen-space rack
+/// bounds the placement kept clear of, plus one callout per labelled element.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PerformanceOverlay {
+    pub rack_rect: Rect,
+    pub callouts: Vec<CalloutSpec>,
+}
+
 /// A DB8E OLED display band (`db8e-oled-display-placeholder`): the bordered
 /// upper-band rect above the B-grid plus the centered state text derived
 /// from the patch. Decorative only; it carries no `CellSpec`, so it never
@@ -118,6 +147,9 @@ pub(crate) struct PhysicalSpec {
     /// `ScreenMapping` (mm→cells), used to convert pointer pan deltas back
     /// into cell units for `App::physical_offset`.
     pub cell_scale: f32,
+    /// Performance-view overlay (compact rack + exploded callouts), present
+    /// exactly when `App.showing_performance` was on at spec-build time.
+    pub performance: Option<PerformanceOverlay>,
     /// Skeleton presentation: module outlines + cell markers only.
     pub skeleton: bool,
     /// Global processing pause: everything renders dimmed.
@@ -166,16 +198,25 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     let rack = RackLayout::pack(&chain, &rack_spec);
     // `mm_to_screen` returns screen cells and `rack_geometry` scales them to
     // points, so the pane origin is folded into the offset in cell units
-    // (offset is subtracted: `screen = mm·factor·zoom − offset`).
+    // (offset is subtracted: `screen = mm·factor·zoom − offset`). The
+    // performance view ignores the user pan/zoom and centers a compact
+    // (~1/4-area) rack instead; the overlay keeps label rects clear of it.
     let pane_dx = pane.min.x as f64 / PHYSICAL_CELL_SCALE as f64;
     let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
-    let m = ScreenMapping::new(
-        crate::physical::PHYSICAL_COLS_PER_MM,
-        crate::physical::PHYSICAL_ROWS_PER_MM,
-        app.physical_zoom as f64,
-        app.physical_offset.0 as f64 - pane_dx,
-        app.physical_offset.1 as f64 - pane_dy,
-    );
+    let normal_mapping = || {
+        ScreenMapping::new(
+            crate::physical::PHYSICAL_COLS_PER_MM,
+            crate::physical::PHYSICAL_ROWS_PER_MM,
+            app.physical_zoom as f64,
+            app.physical_offset.0 as f64 - pane_dx,
+            app.physical_offset.1 as f64 - pane_dy,
+        )
+    };
+    let m = if app.showing_performance {
+        performance_mapping(&rack, pane).unwrap_or_else(normal_mapping)
+    } else {
+        normal_mapping()
+    };
     let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
     let mut cells = Vec::new();
 
@@ -347,7 +388,13 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             state: crate::physical::db8e_display_state_for_layout(&chain),
         })
         .collect();
+    let performance = if app.showing_performance {
+        Some(performance_overlay(patch, app, geom.case_rect, &cells))
+    } else {
+        None
+    };
     Some(PhysicalSpec {
+        performance,
         background: crate::theme::active().graph_canvas_bg,
         case_rect: geom.case_rect,
         mounts: geom.mounts,
@@ -366,6 +413,198 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         skeleton: app.physical_show_skeleton,
         paused: app.processing_paused,
     })
+}
+
+/// Centered compact mapping for the performance view (performance-view 1.3):
+/// the rack renders at half the fit zoom — half-linear in each dimension, so
+/// ~1/4 of the pane area — centered on the pane, ignoring the user pan/zoom.
+/// `None` on degenerate input (empty pane or rack); the caller falls back to
+/// the normal mapping. Pure math, no App dependency, so tests drive it headless.
+pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option<ScreenMapping> {
+    let cols = crate::physical::PHYSICAL_COLS_PER_MM;
+    let rows = crate::physical::PHYSICAL_ROWS_PER_MM;
+    let pane_w = pane.width() as f64 / PHYSICAL_CELL_SCALE as f64;
+    let pane_h = pane.height() as f64 / PHYSICAL_CELL_SCALE as f64;
+    if pane_w <= 0.0 || pane_h <= 0.0 {
+        return None;
+    }
+    if rack.total_width_mm <= 0.0 || rack.total_height_mm <= 0.0 {
+        return None;
+    }
+    let fit = (pane_w / (rack.total_width_mm * cols)).min(pane_h / (rack.total_height_mm * rows));
+    if !fit.is_finite() || fit <= 0.0 {
+        return None;
+    }
+    let zoom = fit * 0.5;
+    // Pane-relative cells center on the pane middle; the pane origin folds in
+    // exactly like the normal mapping so points land window-absolute.
+    let pane_dx = pane.min.x as f64 / PHYSICAL_CELL_SCALE as f64;
+    let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
+    let offset_x = (rack.total_width_mm * 0.5) * cols * zoom - pane_dx - pane_w * 0.5;
+    let offset_y = (rack.total_height_mm * 0.5) * rows * zoom - pane_dy - pane_h * 0.5;
+    Some(ScreenMapping::new(cols, rows, zoom, offset_x, offset_y))
+}
+
+/// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
+/// the wider line sets the width, one or two text lines plus padding set the
+/// height. Pure so the placement tests budget honest rects.
+fn callout_size(headline: &str, state: &str) -> (f32, f32) {
+    let chars = headline.chars().count().max(state.chars().count()).max(1);
+    let w = chars as f32 * MONO_ADVANCE * CALLOUT_LABEL_SIZE + 2.0 * CALLOUT_PAD;
+    let lines = if state.is_empty() { 1 } else { 2 };
+    let h = lines as f32 * CALLOUT_LABEL_SIZE * 1.25 + 2.0 * CALLOUT_PAD;
+    (w, h)
+}
+
+/// The circuit section owning a token occurrence: the last section whose
+/// header line precedes the occurrence line (preamble occurrences have no
+/// owner). The instance index counts earlier same-name sections, matching
+/// the `NodeId::circuit(name, instance)` convention the graph build uses.
+pub(crate) fn owning_circuit_node(patch: &crate::patch::Patch, token: &str) -> Option<NodeId> {
+    for span in patch.occurrences_for(token) {
+        let mut owner: Option<(usize, &str)> = None;
+        for (idx, section) in patch.sections.iter().enumerate() {
+            if section.header_span.line <= span.line {
+                owner = Some((idx, section.name.as_str()));
+            } else {
+                break;
+            }
+        }
+        let Some((owner_idx, name)) = owner else {
+            continue;
+        };
+        let instance = patch.sections[..owner_idx]
+            .iter()
+            .filter(|s| s.name == name)
+            .count();
+        return Some(NodeId::circuit(name, instance));
+    }
+    None
+}
+
+/// Performance callout headline (performance-view 1.3): store-defined →
+/// guessed → derived. `fallback` is the `display_label` result, which equals
+/// the derived token exactly when no explicit label exists, so it doubles as
+/// the derived step without re-resolving the chain.
+/// Resolution inputs for [`performance_headline`], bundled so the helper
+/// stays under the argument-count lint without an allow attribute.
+pub(crate) struct HeadlineCtx<'a> {
+    patch: &'a crate::patch::Patch,
+    app: &'a App,
+    shift: u8,
+    layers_enabled: bool,
+    max_shift_layer: u8,
+    hw_store: &'a std::collections::HashMap<String, std::collections::BTreeMap<u8, String>>,
+    circuit_store: &'a std::collections::HashMap<NodeId, String>,
+}
+
+pub(crate) fn performance_headline(ctx: &HeadlineCtx, token: &str, fallback: &str) -> String {
+    if let Some(explicit) = ctx.patch.explicit_hw_label(
+        token,
+        ctx.shift,
+        ctx.layers_enabled,
+        ctx.max_shift_layer,
+        ctx.hw_store,
+    ) {
+        return explicit;
+    }
+    if let Some(node) = owning_circuit_node(ctx.patch, token) {
+        if let Some(stored) = ctx.patch.circuit_label(&node, ctx.circuit_store) {
+            return stored;
+        }
+        if let Some(guess) = ctx.app.guessed_labels.get(&node) {
+            return guess.clone();
+        }
+    }
+    fallback.to_string()
+}
+
+/// Build the performance overlay from resolved cells: one callout per labelled
+/// (real, non-unused) element, placed by `place_labels` clear of the rack
+/// rect. Headlines resolve store → guess → derived; state/color/highlight
+/// ride the live cell so activation and reset show immediately.
+pub(crate) fn performance_overlay(
+    patch: &crate::patch::Patch,
+    app: &App,
+    rack_rect: Rect,
+    cells: &[CellSpec],
+) -> PerformanceOverlay {
+    let shift = app.active_shift.map_or(1, |g| g as u8);
+    let layers_enabled = app.labels.layers_enabled;
+    let max_shift_layer = app.labels.max_shift_layer;
+    let hw_store = app.current_hw_store();
+    let circuit_store = app.current_circuit_store();
+    let rack = crate::performance::Rect::new(
+        rack_rect.min.x,
+        rack_rect.min.y,
+        rack_rect.width(),
+        rack_rect.height(),
+    );
+    let mut inputs = Vec::new();
+    let mut meta: Vec<(String, String, Color, bool)> = Vec::new();
+    for cell in cells {
+        let Some(hw_idx) = cell.component_index else {
+            continue;
+        };
+        if cell.label.is_empty() {
+            continue;
+        }
+        let Some(comp) = patch.hw_components.get(hw_idx) else {
+            continue;
+        };
+        let ctx = HeadlineCtx {
+            patch,
+            app,
+            shift,
+            layers_enabled,
+            max_shift_layer,
+            hw_store: &hw_store,
+            circuit_store: &circuit_store,
+        };
+        let headline = performance_headline(&ctx, &comp.id, &cell.label);
+        let (w, h) = callout_size(&headline, &cell.state_text);
+        inputs.push(crate::performance::LabelInput {
+            host_id: inputs.len(),
+            host_rect: crate::performance::Rect::new(
+                cell.rect.min.x,
+                cell.rect.min.y,
+                cell.rect.width(),
+                cell.rect.height(),
+            ),
+            label_w: w,
+            label_h: h,
+        });
+        meta.push((
+            headline,
+            cell.state_text.clone(),
+            cell.color,
+            cell.highlighted,
+        ));
+    }
+    let mut callouts: Vec<CalloutSpec> = crate::performance::place_labels(rack, &inputs)
+        .into_iter()
+        .map(|placed| {
+            let (label, state_text, color, highlighted) = meta[placed.host_id].clone();
+            CalloutSpec {
+                label_rect: Rect::from_min_size(
+                    Pos2::new(placed.label_rect.x, placed.label_rect.y),
+                    Vec2::new(placed.label_rect.w, placed.label_rect.h),
+                ),
+                anchor: Pos2::new(placed.anchor.x, placed.anchor.y),
+                label,
+                state_text,
+                color,
+                highlighted,
+            }
+        })
+        .collect();
+    // `place_labels` emits host-id order, which is insertion order here, but
+    // sort explicitly so the paint order never depends on that guarantee.
+    callouts.sort_by_key(|c| (c.label_rect.min.y * 4096.0) as i32);
+    PerformanceOverlay {
+        rack_rect,
+        callouts,
+    }
 }
 
 /// Paint the physical 1:1 view into `pane`. `None` draws nothing.
@@ -478,6 +717,14 @@ pub(crate) fn paint_physical(
             egui::FontId::proportional(11.0),
             color,
         );
+    }
+
+    // Performance view (performance-view 1.3): exploded callouts over the
+    // compact rack — leader line from the host cell edge to the placed label
+    // rect, then the big resolved headline plus the live state line.
+    // Decorative like the DB8E bands: no hit rects, the cells keep hit-testing.
+    if let Some(overlay) = &spec.performance {
+        paint_performance(&painter, overlay, spec.paused);
     }
 
     drop(painter);
@@ -605,6 +852,56 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
             state_font,
             dim(rgb(crate::theme::active().muted), paused),
         );
+    }
+}
+
+/// Draw the performance overlay: one leader line plus a boxed big-label
+/// callout per placed element. Headlines paint at [`CALLOUT_LABEL_SIZE`]
+/// monospace (the size [`callout_size`] budgets); the state line paints
+/// smaller and muted like the in-cell state text.
+fn paint_performance(painter: &Painter, overlay: &PerformanceOverlay, paused: bool) {
+    let leader = rgb(crate::theme::active().performance_leader);
+    let headline_font = egui::FontId::monospace(CALLOUT_LABEL_SIZE);
+    let state_font = egui::FontId::proportional((CALLOUT_LABEL_SIZE * 0.8).max(9.0));
+    for callout in &overlay.callouts {
+        let rect = callout.label_rect;
+        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+            continue;
+        }
+        // Leader line: host-cell edge anchor to the nearest point of the
+        // placed label rect (its edge facing the host cell).
+        let edge = Pos2::new(
+            callout.anchor.x.clamp(rect.min.x, rect.max.x),
+            callout.anchor.y.clamp(rect.min.y, rect.max.y),
+        );
+        painter.line_segment([callout.anchor, edge], egui::Stroke::new(1.0, leader));
+        if callout.highlighted {
+            let mut bg = rgb(crate::theme::active().muted);
+            bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 90);
+            painter.rect_filled(rect, 0.0, bg);
+        }
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, leader),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.min + egui::vec2(CALLOUT_PAD, CALLOUT_PAD),
+            egui::Align2::LEFT_TOP,
+            &callout.label,
+            headline_font.clone(),
+            dim(rgb(callout.color), paused),
+        );
+        if !callout.state_text.is_empty() {
+            painter.text(
+                rect.min + egui::vec2(CALLOUT_PAD, CALLOUT_PAD + CALLOUT_LABEL_SIZE * 1.25),
+                egui::Align2::LEFT_TOP,
+                &callout.state_text,
+                state_font.clone(),
+                dim(rgb(crate::theme::active().muted), paused),
+            );
+        }
     }
 }
 
@@ -1310,6 +1607,7 @@ mod tests {
             db8e_bands,
             grid_lines: mm_grid_lines(&m, 10.0, rack.total_width_mm, rack.total_height_mm, 20.0),
             cell_scale: 10.0,
+            performance: None,
             skeleton,
             paused,
         }
@@ -1980,5 +2278,249 @@ mod tests {
         assert!(factor > 1.0, "wheel-up zooms in: {factor}");
         assert_eq!(anchor, (120.0, 110.0));
         assert!(frame.skeleton_toggle, "plain `s` toggles the skeleton");
+    }
+
+    // -- performance view (performance-view 1.3) ---------------------------
+
+    fn perf_pane() -> Rect {
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))
+    }
+
+    fn perf_spec() -> PhysicalSpec {
+        let mut app = app_with_patch("fixtures/arpeggio1.ini");
+        app.showing_performance = true;
+        physical_spec(&app, perf_pane()).expect("performance spec")
+    }
+
+    fn rects_disjoint(a: &Rect, b: &Rect) -> bool {
+        a.min.x >= b.max.x || b.min.x >= a.max.x || a.min.y >= b.max.y || b.min.y >= a.max.y
+    }
+
+    #[test]
+    fn performance_overlay_absent_by_default_and_placed_clear_when_flag_on() {
+        let app = app_with_patch("fixtures/arpeggio1.ini");
+        let plain = physical_spec(&app, perf_pane()).expect("plain spec");
+        assert!(plain.performance.is_none(), "no overlay without the flag");
+        let spec = perf_spec();
+        let overlay = spec.performance.as_ref().expect("overlay when flag on");
+        assert!(
+            !overlay.callouts.is_empty(),
+            "every labelled element gets a callout"
+        );
+        for c in &overlay.callouts {
+            assert!(
+                rects_disjoint(&c.label_rect, &overlay.rack_rect),
+                "callout '{}' enters the rack rect: {:?}",
+                c.label,
+                c.label_rect
+            );
+        }
+        for (i, a) in overlay.callouts.iter().enumerate() {
+            for b in &overlay.callouts[i + 1..] {
+                assert!(
+                    rects_disjoint(&a.label_rect, &b.label_rect),
+                    "callouts '{}' and '{}' overlap",
+                    a.label,
+                    b.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn performance_rack_is_compact_and_centered() {
+        let spec = perf_spec();
+        // Half-linear fit → at most half the pane in each dimension (~1/4 area).
+        assert!(
+            spec.case_rect.width() <= 400.0 + 1.0,
+            "rack width compact: {}",
+            spec.case_rect.width()
+        );
+        assert!(
+            spec.case_rect.height() <= 300.0 + 1.0,
+            "rack height compact: {}",
+            spec.case_rect.height()
+        );
+        let center = spec.case_rect.center();
+        assert!(
+            (center.x - 400.0).abs() <= 2.0 && (center.y - 300.0).abs() <= 2.0,
+            "rack centered on the pane: {center:?}"
+        );
+    }
+
+    fn nav_patch() -> crate::patch::Patch {
+        crate::patch::Patch::from_ini_file(std::path::Path::new("fixtures/source_navigation.ini"))
+            .unwrap()
+    }
+
+    #[test]
+    fn owning_circuit_node_resolves_first_occurrence_section() {
+        let patch = nav_patch();
+        // B1.1 first occurs in the first [button] section (instance 0).
+        assert_eq!(
+            owning_circuit_node(&patch, "B1.1"),
+            Some(NodeId::circuit("button", 0))
+        );
+        assert_eq!(owning_circuit_node(&patch, "B9.9"), None);
+    }
+
+    #[test]
+    fn performance_headline_resolves_store_then_guess_then_derived() {
+        let patch = nav_patch();
+        let mut app = App::new();
+        let hw_store: std::collections::HashMap<String, std::collections::BTreeMap<u8, String>> =
+            std::collections::HashMap::new();
+        let circuit_store: std::collections::HashMap<NodeId, String> =
+            std::collections::HashMap::new();
+        let resolve =
+            |app: &App,
+             hw: &std::collections::HashMap<String, std::collections::BTreeMap<u8, String>>,
+             fallback: &str| {
+                let ctx = HeadlineCtx {
+                    patch: &patch,
+                    app,
+                    shift: 1,
+                    layers_enabled: true,
+                    max_shift_layer: 4,
+                    hw_store: hw,
+                    circuit_store: &circuit_store,
+                };
+                performance_headline(&ctx, "B1.1", fallback)
+            };
+        let fallback = patch.display_label("B1.1", 1, true, 4, &hw_store);
+        // No store, no guess → derived fallback.
+        assert_eq!(resolve(&app, &hw_store, &fallback), fallback);
+        // Guess wins over derived.
+        app.guessed_labels
+            .insert(NodeId::circuit("button", 0), "DirKey".into());
+        assert_eq!(resolve(&app, &hw_store, &fallback), "DirKey");
+        // Explicit store wins over guess.
+        let mut hw: std::collections::HashMap<String, std::collections::BTreeMap<u8, String>> =
+            std::collections::HashMap::new();
+        hw.insert(
+            "B1.1".to_string(),
+            [(1u8, "Cut".to_string())].into_iter().collect(),
+        );
+        assert_eq!(resolve(&app, &hw, &fallback), "Cut");
+        // A token with no occurrence falls back to derived.
+        let derived = patch.display_label("B9.9", 1, true, 4, &hw_store);
+        let ctx = HeadlineCtx {
+            patch: &patch,
+            app: &app,
+            shift: 1,
+            layers_enabled: true,
+            max_shift_layer: 4,
+            hw_store: &hw_store,
+            circuit_store: &circuit_store,
+        };
+        assert_eq!(performance_headline(&ctx, "B9.9", &derived), derived);
+    }
+
+    fn painted_line_count(spec: &PhysicalSpec) -> usize {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            paint_physical(ui, ui.max_rect(), Some(spec));
+        });
+        let n = full_output
+            .shapes
+            .iter()
+            .filter(|cs| matches!(cs.shape, egui::epaint::Shape::LineSegment { .. }))
+            .count();
+        full_output.textures_delta.clear();
+        n
+    }
+
+    #[test]
+    fn performance_paint_draws_leader_lines_and_big_headlines() {
+        let spec = perf_spec();
+        let overlay = spec.performance.as_ref().expect("overlay");
+        // One leader line per callout (fold bars add a few more).
+        assert!(
+            painted_line_count(&spec) >= overlay.callouts.len(),
+            "each callout gets a leader line"
+        );
+        let texts = painted_texts(&spec);
+        for c in &overlay.callouts {
+            assert!(
+                texts.iter().any(|(t, font, _)| t == &c.label
+                    && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)),
+                "headline '{}' paints big",
+                c.label
+            );
+        }
+    }
+
+    #[test]
+    fn performance_callout_state_follows_live_component_state() {
+        let mut app = app_with_patch("fixtures/arpeggio1.ini");
+        app.showing_performance = true;
+        // First resting button, matched by host-cell anchor (headline text
+        // need not be unique across elements).
+        let token = {
+            let patch = app.patch.as_ref().expect("patch");
+            patch
+                .hw_components
+                .iter()
+                .find(|c| c.kind == ComponentKind::Button && matches!(c.state, ComponentState::Off))
+                .map(|c| c.id.clone())
+                .expect("a resting button")
+        };
+        // Headline doubles as the matcher: with no store override and no
+        // open graph (no guesses) it equals the plain display label, unique
+        // per token in this fixture; the anchor check pins the host cell.
+        let headline = {
+            let patch = app.patch.as_ref().expect("patch");
+            patch.display_label(&token, 1, true, 4, &app.current_hw_store())
+        };
+        let state_of = |app: &App| -> String {
+            let spec = physical_spec(app, perf_pane()).expect("spec");
+            let overlay = spec.performance.expect("overlay");
+            let hw_idx = app
+                .patch
+                .as_ref()
+                .expect("patch")
+                .hw_components
+                .iter()
+                .position(|c| c.id == token)
+                .expect("token");
+            let cell_rect = spec
+                .cells
+                .iter()
+                .find(|c| c.component_index == Some(hw_idx))
+                .expect("cell")
+                .rect;
+            overlay
+                .callouts
+                .iter()
+                .find(|c| {
+                    c.label == headline
+                        && c.anchor.x >= cell_rect.min.x
+                        && c.anchor.x <= cell_rect.max.x
+                        && c.anchor.y >= cell_rect.min.y
+                        && c.anchor.y <= cell_rect.max.y
+                })
+                .unwrap_or_else(|| panic!("callout for {token}"))
+                .state_text
+                .clone()
+        };
+        let before = state_of(&app);
+        app.patch
+            .as_mut()
+            .expect("patch")
+            .hw_components
+            .iter_mut()
+            .find(|c| c.id == token)
+            .expect("token")
+            .state = ComponentState::On;
+        let after = state_of(&app);
+        assert_ne!(before, after, "callout state reads live ComponentState");
+        assert!(after.contains("ON"), "On state shows: {after}");
     }
 }

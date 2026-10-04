@@ -419,6 +419,9 @@ fn open_embedded_viewer(app: &mut App) {
 /// Handle keyboard input. Returns true if the app should quit.
 /// Handle keyboard input. Returns true if the app should quit.
 pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
+    // Reap a finished background upload first (non-blocking `try_wait`): the
+    // verdict lands in the status line on the next event after completion.
+    app.poll_upload();
     // Inline label-edit overlay eats all keys (highest priority: overlay > picker > prefix > graph > source > panels).
     if app.editing.is_some() {
         match key.code {
@@ -531,6 +534,29 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     app.open_view(ViewType::SourceViewer);
                     sync_viewer_focus_from_tiles(app);
                     app.showing_validation = false;
+                }
+                return false;
+            }
+            _ => return false,
+        }
+    }
+    // Upload confirm modal (change `midi-upload`, task 1.2): an overlay like
+    // the validation modal — while open it eats all keys; `y` sends when a
+    // transport path exists (else the status names what's missing and the
+    // modal stays), `n`/`Esc` cancel silently (no process, rack untouched).
+    if app.upload_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.cancel_upload_modal();
+                return false;
+            }
+            KeyCode::Char('n') => {
+                app.cancel_upload_modal();
+                return false;
+            }
+            KeyCode::Char('y') => {
+                if let Err(e) = app.start_upload_send() {
+                    app.status_message = format!("Upload blocked: {e}");
                 }
                 return false;
             }
@@ -704,6 +730,16 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     // filter before the tiled Esc that would close the focused view.
     if matches!(key.code, KeyCode::Esc) && app.dependency_root.is_some() {
         app.clear_dependency_filter();
+        app.prefix = None;
+        return false;
+    }
+
+    // Performance-view Esc handling (change `performance-view`, task 1.1):
+    // Esc leaves the performance view before the pane-close Esc below, so
+    // the Physical pane stays open.
+    if matches!(key.code, KeyCode::Esc) && app.showing_performance {
+        app.showing_performance = false;
+        app.status_message = String::from("Performance view closed");
         app.prefix = None;
         return false;
     }
@@ -1036,6 +1072,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 }
                 return false;
             }
+            KeyCode::Char('a') => {
+                // graph-arrange-cycle 2.2: `a` applies the active arrangement
+                // (rebuild + refit) and cycles layouts on repeat presses.
+                // Graph-pane-only, like `h`/`c` above.
+                app.apply_arrangement();
+                return false;
+            }
             KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph
@@ -1283,9 +1326,47 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
     }
 
+    // Performance view (change `performance-view`, task 1.1): `p` with the
+    // Physical pane focused opens the performance view. View-scoped — `p` on
+    // every other pane keeps its exact current meaning (global processing
+    // pause, pin/unpin on the graph pane), which the arms above and below
+    // still own. Unhandled keys fall through to the shared dispatch.
+    if physical_slot_focused(app) {
+        match key.code {
+            KeyCode::Char('p') => {
+                app.showing_performance = true;
+                app.status_message = String::from("Performance view \u{2014} Esc to exit");
+                return false;
+            }
+            KeyCode::Char('R') => {
+                // Task 1.4: `R` (Shift+r) restores every element state to
+                // rest without touching selection/focus/shift. Precedent:
+                // Shift+c for fit; plain `r` stays the class carousel below.
+                app.reset_element_states();
+                app.status_message = String::from("Element states reset");
+                return false;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
-        KeyCode::Char('q') => true,
-        KeyCode::Char('c') if key.modifiers.ctrl => true,
+        KeyCode::Char('q') => {
+            // Quitting never orphans a background send: reap the child now
+            // (window-close quits are covered by `UploadSend`'s `Drop`).
+            app.abort_upload_send();
+            true
+        }
+        KeyCode::Char('c') if key.modifiers.ctrl => {
+            app.abort_upload_send();
+            true
+        }
+        KeyCode::Char('U') => {
+            // `U` (Shift+u, like `R`/`Shift+c`) opens the upload confirm
+            // modal for the in-memory patch; `y`/`n` inside it send/cancel.
+            app.open_upload_modal();
+            false
+        }
         KeyCode::Char('l') => {
             // Opens the picker whether or not a patch is already loaded,
             // so a loaded patch can be swapped for a different one.
@@ -1957,6 +2038,9 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// `main.rs` owns both the window and the `App`, so it calls this once per
 /// painted frame (D6: the loop acts on what it owns).
 pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
+    // Reap a finished background upload (same non-blocking poll as the key
+    // path, so mouse-only frames still land the verdict).
+    app.poll_upload();
     // Module UI (Physical pane) pointer routing. The window frame is the only
     // live pointer path, and the module UI has no graph: handle hover/click on
     // the rack before the graph-camera gate so it works with no graph open.
@@ -2757,6 +2841,103 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, key_modifiers::NONE)
+    }
+
+    // MIDI upload (change `midi-upload`, task 1.2): `U` (Shift+u) opens the
+    // confirm modal for the in-memory patch; `y` sends when a path exists,
+    // `n`/`Esc` cancel silently; `q` aborts a running send.
+
+    fn upload_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('U'), key_modifiers::SHIFT)
+    }
+
+    fn blocked_transport() -> crate::app::UploadTransport {
+        crate::app::UploadTransport {
+            amidi: false,
+            sendmidi: false,
+            droid_port: None,
+            other_ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn big_u_without_patch_reports_and_opens_nothing() {
+        let mut app = App::new();
+        let quit = handle_event(upload_key(), &mut app);
+        assert!(!quit);
+        assert!(app.upload_modal.is_none());
+        assert!(app.status_message.contains("No patch loaded"));
+    }
+
+    #[test]
+    fn big_u_with_patch_opens_modal_with_byte_count() {
+        let mut app = app_with_fixture();
+        let expected = app.upload_payload().expect("fixture renders").len();
+        let quit = handle_event(upload_key(), &mut app);
+        assert!(!quit);
+        let confirm = app.upload_modal.as_ref().expect("modal opens");
+        assert_eq!(confirm.byte_count, expected);
+    }
+
+    #[test]
+    fn modal_cancel_keys_are_silent() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut app = app_with_fixture();
+            handle_event(upload_key(), &mut app);
+            assert!(app.upload_modal.is_some());
+            app.status_message = String::from("steady");
+            let quit = handle_event(key(code), &mut app);
+            assert!(!quit);
+            assert!(app.upload_modal.is_none());
+            assert!(app.upload_send.is_none(), "cancel spawns no process");
+            assert_eq!(app.status_message, "steady", "cancel is silent");
+        }
+    }
+
+    #[test]
+    fn modal_y_without_path_keeps_modal_and_names_missing() {
+        let mut app = app_with_fixture();
+        app.open_upload_modal_with(64, blocked_transport());
+        let quit = handle_event(key(KeyCode::Char('y')), &mut app);
+        assert!(!quit);
+        assert!(app.upload_modal.is_some(), "modal stays for retry/cancel");
+        assert!(app.upload_send.is_none(), "no process spawns");
+        assert!(app.status_message.contains("Upload blocked"));
+        assert!(app.status_message.contains("amidi"));
+    }
+
+    #[test]
+    fn modal_eats_other_keys() {
+        let mut app = app_with_fixture();
+        app.open_upload_modal_with(64, blocked_transport());
+        let quit = handle_event(key(KeyCode::Char('l')), &mut app);
+        assert!(!quit);
+        assert!(!app.showing_picker, "picker must not open under the modal");
+        assert!(app.upload_modal.is_some());
+    }
+
+    #[test]
+    fn big_u_blocked_while_send_in_flight() {
+        let mut app = app_with_fixture();
+        let payload = app.upload_payload().expect("fixture renders");
+        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
+            .expect("spawn sleep");
+        let quit = handle_event(upload_key(), &mut app);
+        assert!(!quit);
+        assert!(app.upload_modal.is_none());
+        assert_eq!(app.status_message, "Upload already in progress");
+        app.abort_upload_send();
+    }
+
+    #[test]
+    fn quit_aborts_running_send() {
+        let mut app = app_with_fixture();
+        let payload = app.upload_payload().expect("fixture renders");
+        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
+            .expect("spawn sleep");
+        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
+        assert!(quit);
+        assert!(app.upload_send.is_none());
     }
 
     // Task 3.1: help modal (`?`).
@@ -4498,6 +4679,30 @@ mod tests {
     }
 
     #[test]
+    fn graph_a_applies_arrangement_and_reports_it() {
+        // graph-arrange-cycle 2.2: `a` on the focused graph pane applies the
+        // active arrangement (rebuild + refit) and names it in the status;
+        // the stored selection advances so repeat presses cycle layouts.
+        let mut app = app_with_fixture();
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+
+        handle_event(key(KeyCode::Char('a')), &mut app);
+
+        assert_eq!(app.status_message, "Arrangement: column-strict");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        assert!(
+            app.graph_camera.is_some(),
+            "apply refits the camera against the live pane"
+        );
+    }
+
+    #[test]
     fn graph_h_toggles_layout_mode_force_to_column_and_resolves() {
         // Same toggle in reverse: a force-layout graph flips to the column
         // arrangement, re-solved with the active ordering. The tip stays
@@ -5768,6 +5973,9 @@ mod tests {
     #[test]
     fn p_toggles_processing_pause_with_status() {
         let mut app = app_with_fixture();
+        // `p` on the Physical pane opens the performance view (change
+        // `performance-view`), so pause via `p` from the viewer pane.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused);
         assert_eq!(app.status_message, "Processing paused (p to resume)");
@@ -5819,6 +6027,9 @@ mod tests {
     fn enter_and_space_do_not_mutate_while_paused() {
         let mut app = app_with_fixture();
         app.hovered_component = Some(0);
+        // Focus off the Physical pane: `p` there opens the performance
+        // view instead of pausing (change `performance-view`).
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_event(key(KeyCode::Enter), &mut app);
@@ -5840,6 +6051,10 @@ mod tests {
     #[test]
     fn mouse_click_toggle_blocked_while_paused() {
         let mut app = app_with_fixture();
+        // Focus off the Physical pane: `p` there opens the performance
+        // view instead of pausing (change `performance-view`). The mouse
+        // toggle path is focus-independent, so the rest is unchanged.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_mouse_event(
@@ -5863,6 +6078,9 @@ mod tests {
         let mut app = App::new();
         app.patch = Some(patch);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        // Focus off the Physical pane: `p` there opens the performance
+        // view instead of pausing (change `performance-view`).
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
         handle_event(key(KeyCode::Char('p')), &mut app);
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
@@ -5884,6 +6102,101 @@ mod tests {
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused, "p live in the source pane");
         assert_eq!(app.status_message, "Processing paused (p to resume)");
+    }
+
+    // ── performance-view tasks 1.1 + 1.4 ──
+
+    #[test]
+    fn p_opens_performance_view_on_physical_pane_only_and_esc_exits() {
+        let mut app = app_with_fixture();
+        // Startup focus is the Physical pane (BigLeft).
+        assert!(physical_slot_focused(&app));
+        assert!(!app.showing_performance);
+        handle_event(key(KeyCode::Char('p')), &mut app);
+        assert!(
+            app.showing_performance,
+            "p opens the performance view on the Physical pane"
+        );
+        assert!(
+            !app.processing_paused,
+            "p must not pause on the Physical pane"
+        );
+        assert_eq!(app.status_message, "Performance view \u{2014} Esc to exit");
+        // Esc leaves the view; the pane stays open.
+        handle_event(key(KeyCode::Esc), &mut app);
+        assert!(!app.showing_performance);
+        assert_eq!(app.status_message, "Performance view closed");
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
+        // `p` on any other pane keeps its exact meaning: pause on the viewer.
+        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(key(KeyCode::Char('p')), &mut app);
+        assert!(
+            app.processing_paused,
+            "p still pauses off the Physical pane"
+        );
+        assert!(!app.showing_performance);
+        // The flag resets on patch load like other transient view state.
+        // A fresh app never gates the first load, so the install path —
+        // and its reset — always runs here.
+        let mut fresh = App::new();
+        fresh.showing_performance = true;
+        let content = std::fs::read_to_string("fixtures/arpeggio1.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("arpeggio1")).unwrap();
+        fresh.load_patch(patch);
+        assert!(
+            !fresh.showing_performance,
+            "load_patch resets the performance view"
+        );
+    }
+
+    #[test]
+    fn shift_r_resets_element_states_keeping_selection_focus_shift() {
+        let mut app = app_with_fixture();
+        // Disturb every component state away from rest.
+        {
+            let patch = app.patch.as_mut().unwrap();
+            assert!(!patch.hw_components.is_empty(), "fixture needs components");
+            for comp in patch.hw_components.iter_mut() {
+                comp.state = match comp.kind {
+                    ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
+                        ComponentState::On
+                    }
+                    ComponentKind::Knob
+                    | ComponentKind::CvIn
+                    | ComponentKind::CvOut
+                    | ComponentKind::Encoder => ComponentState::Value(0.9),
+                };
+            }
+        }
+        // Navigation state the reset must not touch.
+        app.selected_component = Some(String::from("B1.1"));
+        let focus_before = app.layout.focus;
+        app.active_shift = Some(ShiftGroup::Group2);
+        assert!(physical_slot_focused(&app));
+        // `R` is Shift+r: plain `r` stays the class carousel.
+        handle_event(key(KeyCode::Char('R')), &mut app);
+        // Every state is back at rest ...
+        for comp in &app.patch.as_ref().unwrap().hw_components {
+            let expected = match comp.kind {
+                ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
+                    ComponentState::Off
+                }
+                ComponentKind::Knob
+                | ComponentKind::CvIn
+                | ComponentKind::CvOut
+                | ComponentKind::Encoder => ComponentState::Value(0.0),
+            };
+            assert_eq!(comp.state, expected, "reset restores {}", comp.id);
+        }
+        // ... while navigation state survives.
+        assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
+        assert_eq!(app.layout.focus, focus_before);
+        assert_eq!(app.active_shift, Some(ShiftGroup::Group2));
+        assert_eq!(app.status_message, "Element states reset");
+        assert!(
+            !app.showing_performance,
+            "R must not open the performance view"
+        );
     }
 
     fn app_with_graph() -> App {

@@ -749,7 +749,7 @@ impl Patch {
     /// Reconstruct the full `.ini` text from `raw_lines` in the current section
     /// order: preamble first, then each section's block, joined with the
     /// source's line ending and re-appended trailing terminator.
-    fn render_ini(&self) -> Result<String, String> {
+    pub(crate) fn render_ini(&self) -> Result<String, String> {
         // Defensive: a deserialized `Patch` could carry header spans outside
         // `raw_lines`; refuse instead of indexing out of bounds.
         if let Some(bad) = self

@@ -16,10 +16,12 @@ pub mod layout;
 pub mod optimize;
 pub mod panes;
 pub mod patch;
+pub mod performance;
 pub mod physical;
 pub mod plugin;
 pub mod rendermetrics;
 pub mod schema;
+pub mod sysex;
 pub mod theme;
 pub mod validation;
 

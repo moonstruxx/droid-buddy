@@ -122,6 +122,10 @@ pub struct Theme {
     /// Physical skeleton reference (design D7): the module outline, drawn
     /// with its own token so the skeleton render stops borrowing graph tokens.
     pub physical_skeleton_module_outline: Color,
+    /// Performance-view leader lines (performance-view 1.3): the strokes
+    /// joining each exploded callout to its host cell edge. Its own token so
+    /// callout chrome stays distinct from cable edges and module outlines.
+    pub performance_leader: Color,
     pub validation_error: Color,
     pub validation_warning: Color,
     pub validation_hint: Color,
@@ -232,6 +236,9 @@ impl Theme {
             graph_edge_latency_4: Color::Red,
             graph_edge_latency_legend: Color::Blue,
             physical_skeleton_module_outline: Color::White,
+            // Bright cyan leader distinct from the Cyan control cables and
+            // the White module outlines.
+            performance_leader: Color::LightCyan,
             validation_error: Color::Red,
             validation_warning: Color::Yellow,
             validation_hint: Color::Cyan,
@@ -320,6 +327,8 @@ impl Theme {
             graph_edge_latency_4: Color::Reset,
             graph_edge_latency_legend: Color::Reset,
             physical_skeleton_module_outline: Color::Reset,
+            // Terminal defers every token to the user's terminal.
+            performance_leader: Color::Reset,
             validation_error: Color::Reset,
             validation_warning: Color::Reset,
             validation_hint: Color::Reset,
@@ -424,6 +433,9 @@ impl Theme {
             graph_edge_latency_4: Color::Reset,
             graph_edge_latency_legend: Color::Gray,
             physical_skeleton_module_outline: Color::White,
+            // Mid-gray callout chrome, tellable from the White headline
+            // text and the DarkGray dim chrome in the grayscale palette.
+            performance_leader: Color::Gray,
             validation_error: Color::White,
             validation_warning: Color::Gray,
             validation_hint: Color::DarkGray,
@@ -760,6 +772,7 @@ mod tests {
             // (diff needs distinguishability even in the colorless terminal
             // theme).
             t.physical_skeleton_module_outline,
+            t.performance_leader,
             t.pane_focus_border,
             t.pane_unfocused_border,
         ] {
@@ -770,6 +783,20 @@ mod tests {
         // default palette.
         assert_eq!(t.graph_edge_diff_added, Color::Gray);
         assert_eq!(t.graph_edge_diff_removed, Color::DarkGray);
+    }
+
+    #[test]
+    fn performance_leader_resolves_per_palette() {
+        // Performance-view leader lines (performance-view 1.3): bright
+        // cyan in classic (distinct from Cyan control cables and White
+        // outlines), deferred to the terminal in terminal, mid-gray in mono
+        // (tellable from the White headline text and DarkGray dim chrome).
+        assert_eq!(Theme::classic().performance_leader, Color::LightCyan);
+        assert_eq!(Theme::terminal().performance_leader, Color::Reset);
+        assert_eq!(Theme::mono().performance_leader, Color::Gray);
+        for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
+            assert_eq!(theme.egui_color(theme.performance_leader).a(), 255);
+        }
     }
 
     #[test]
@@ -991,6 +1018,7 @@ mod tests {
             t.graph_edge_latency_4,
             t.graph_edge_latency_legend,
             t.physical_skeleton_module_outline,
+            t.performance_leader,
             t.validation_error,
             t.validation_warning,
             t.validation_hint,

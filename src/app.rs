@@ -296,6 +296,8 @@ impl Rect {
 use crate::layout;
 use crate::optimize::{CandidateOrdering, OptimizeScope};
 use crate::panes::{PaneClass, PaneId, PaneLayout};
+use crate::patch::ComponentKind;
+use crate::patch::ComponentState;
 use crate::patch::Patch;
 use crate::patch::ShiftGroup;
 use crate::schema::load_schema;
@@ -570,6 +572,176 @@ pub enum GraphWindowRequest {
     Open,
 }
 
+/// MIDI upload transport probe result (change `midi-upload`, task 1.2).
+///
+/// `droid_port` is the `amidi -l` hardware port whose line names the DROID
+/// (USB-MIDI/X7); `other_ports` are the remaining listed ports (DIN MIDI
+/// candidates). `amidi`/`sendmidi` record tool presence on `PATH`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UploadTransport {
+    pub amidi: bool,
+    pub sendmidi: bool,
+    pub droid_port: Option<String>,
+    pub other_ports: Vec<String>,
+}
+
+impl UploadTransport {
+    /// A send path exists when a tool AND a port are both present: without a
+    /// listed port there is nothing to address, without a tool nothing to
+    /// send with. The modal offers `y` only under this gate.
+    pub fn can_send(&self) -> bool {
+        (self.amidi || self.sendmidi) && (self.droid_port.is_some() || !self.other_ports.is_empty())
+    }
+
+    /// Human reasons shown when [`UploadTransport::can_send`] is false, so a
+    /// blocked modal names what's missing instead of failing silently.
+    pub fn missing_reasons(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.amidi && !self.sendmidi {
+            out.push("no MIDI tool found (need `amidi` or `sendmidi`)".to_string());
+        }
+        if self.droid_port.is_none() && self.other_ports.is_empty() {
+            out.push("no MIDI port detected (`amidi -l` is empty)".to_string());
+        }
+        out
+    }
+
+    /// One-line transport description for the confirm modal.
+    pub fn transport_line(&self) -> String {
+        let tool = if self.amidi {
+            "amidi"
+        } else if self.sendmidi {
+            "sendmidi"
+        } else {
+            ""
+        };
+        if let Some(port) = self.droid_port.as_deref() {
+            if tool.is_empty() {
+                return format!("USB-MIDI {port} (no MIDI tool installed)");
+            }
+            return format!("USB-MIDI {port} via {tool}");
+        }
+        if let Some(port) = self.other_ports.first() {
+            if tool.is_empty() {
+                return format!("DIN MIDI {port} (no MIDI tool installed)");
+            }
+            return format!("DIN MIDI {port} via {tool}");
+        }
+        String::from("no transport detected")
+    }
+}
+
+/// Parse `amidi -l` output into `(droid_port, other_ports)` (pure seam: the
+/// impure [`detect_upload_transport`] runs the command, tests inject
+/// fixtures here). A port is the leading `hw:` token of a device line; the
+/// DROID matches when the line names it (`droid`/`x7`, case-insensitive —
+/// the USB-MIDI/X7 interface). Header lines carry no `hw:` token and are
+/// skipped; the first DROID match wins, extras fall through to others.
+pub fn parse_amidi_list(output: &str) -> (Option<String>, Vec<String>) {
+    let mut droid = None;
+    let mut others = Vec::new();
+    for line in output.lines() {
+        let Some(hw) = line
+            .split_whitespace()
+            .find_map(|tok| tok.strip_prefix("hw:"))
+        else {
+            continue;
+        };
+        let port = format!("hw:{hw}");
+        let lower = line.to_lowercase();
+        if droid.is_none() && (lower.contains("droid") || lower.contains("x7")) {
+            droid = Some(port);
+        } else {
+            others.push(port);
+        }
+    }
+    (droid, others)
+}
+
+/// Build the transport from probe parts (pure seam for tests: `amidi_list`
+/// is the stdout of `amidi -l`, the bools are tool presence on `PATH`).
+pub fn probe_upload_transport(
+    amidi_list: Option<&str>,
+    has_amidi: bool,
+    has_sendmidi: bool,
+) -> UploadTransport {
+    let (droid_port, other_ports) = amidi_list
+        .map(parse_amidi_list)
+        .unwrap_or((None, Vec::new()));
+    UploadTransport {
+        amidi: has_amidi,
+        sendmidi: has_sendmidi,
+        droid_port,
+        other_ports,
+    }
+}
+
+/// Tool presence on `PATH` (no `which` dependency).
+fn command_present(cmd: &str) -> bool {
+    env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(cmd).is_file()))
+}
+
+/// Run the preflight probe: `amidi -l` for ports plus tool presence. Never
+/// fails — an absent tool or command just yields `false`/`None`, which the
+/// modal reports as missing reasons.
+pub fn detect_upload_transport() -> UploadTransport {
+    let list = std::process::Command::new("amidi")
+        .arg("-l")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok());
+    probe_upload_transport(
+        list.as_deref(),
+        command_present("amidi"),
+        command_present("sendmidi"),
+    )
+}
+
+/// Open confirm-modal state (change `midi-upload`, task 1.2): the framed byte
+/// count over the in-memory patch plus the preflight transport probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadConfirm {
+    pub byte_count: usize,
+    pub transport: UploadTransport,
+}
+
+/// In-flight background send: the forked sender plus its snapshot metadata.
+/// `Drop` kills and reaps a still-running child and removes the staged
+/// payload file, so quitting on any path (`q`, Ctrl+C, window close) never
+/// orphans the sender or litters `/tmp`: the verdict simply never lands on
+/// a dead transfer.
+pub struct UploadSend {
+    pub started: Instant,
+    pub byte_count: usize,
+    pub port: String,
+    pub tool: String,
+    tmpfile: PathBuf,
+    child: Option<std::process::Child>,
+}
+
+impl Drop for UploadSend {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(&self.tmpfile);
+    }
+}
+
+/// Spinner frames for the indeterminate waiting bar (elapsed-driven: MIDI
+/// yields no progress bytes through `amidi`, so a determinate bar would be
+/// theater).
+pub const UPLOAD_SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+
+/// Spinner frame for an elapsed in-flight duration (200 ms per frame).
+pub fn spinner_char(elapsed: std::time::Duration) -> char {
+    let step = elapsed.as_millis() / 200;
+    UPLOAD_SPINNER[(step % UPLOAD_SPINNER.len() as u128) as usize]
+}
+
 /// Application state
 pub struct App {
     pub patch: Option<Patch>,
@@ -751,6 +923,12 @@ pub struct App {
     /// default main view since 4.2. Reset on patch load like
     /// `processing_paused`.
     pub physical_show_skeleton: bool,
+    /// True when the Physical pane shows the performance view (change
+    /// `performance-view`): the rack renders compact and centered while
+    /// every element label renders big in the field around it. Presentation
+    /// switch of the Physical pane, default OFF. Reset on patch load like
+    /// `physical_show_skeleton`.
+    pub showing_performance: bool,
     /// Screen rects the skeleton renderer published last frame, keyed by
     /// (module index, cell index = position of the element in the module's
     /// `components` in declaration order). Rebuilt every frame; the D5
@@ -906,6 +1084,14 @@ pub struct App {
     /// Select-state assumed values (change C 4.1). `None` when no assumed
     /// state is active; reset on `load_patch`.
     pub select_state: Option<SelectState>,
+    /// Open upload confirm modal (`U`, change `midi-upload` task 1.2). `None`
+    /// when closed; cleared on patch load (the byte count snapshots the old
+    /// patch) and on send/cancel.
+    pub upload_modal: Option<UploadConfirm>,
+    /// In-flight background send. `Some` from `y` in the modal until the
+    /// verdict lands via [`App::poll_upload`] or the send is aborted.
+    /// Survives patch loads (the payload is snapshotted to a temp file).
+    pub upload_send: Option<UploadSend>,
 }
 
 impl App {
@@ -962,6 +1148,7 @@ impl App {
             events: EventBus::default(),
             processing_paused: false,
             physical_show_skeleton: false,
+            showing_performance: false,
             physical_skeleton_rects: Vec::new(),
             physical_full_rects: Vec::new(),
             physical_offset: (0.0, 0.0),
@@ -1005,6 +1192,8 @@ impl App {
             showing_help: false,
             help_modal_rect: None,
             select_state: None,
+            upload_modal: None,
+            upload_send: None,
         };
         // The mirror fields (tile_stack, showing_*, split ratios) are derived
         // from the layout, so the constructor seeds them in one pass. The
@@ -1231,6 +1420,188 @@ impl App {
         None
     }
 
+    /// Serialize the in-memory patch to framed SysEx bytes (lossless writer
+    /// → `sysex::build_sysex`, task 1.1). `None` with no patch loaded or an
+    /// unrenderable patch — the modal and the send both gate on this.
+    pub fn upload_payload(&self) -> Option<Vec<u8>> {
+        let rendered = self.patch.as_ref()?.render_ini().ok()?;
+        Some(crate::sysex::build_sysex(&rendered))
+    }
+
+    /// Open the upload confirm modal (`U`, change `midi-upload` task 1.2):
+    /// byte count over the in-memory patch plus the preflight transport
+    /// probe. `false` (with a status hint) when no patch is loaded or a send
+    /// is already in flight. Test seam: [`App::open_upload_modal_with`]
+    /// injects the transport so tests never depend on real MIDI hardware.
+    pub fn open_upload_modal(&mut self) -> bool {
+        if self.upload_send.is_some() {
+            self.status_message = String::from("Upload already in progress");
+            return false;
+        }
+        let Some(payload) = self.upload_payload() else {
+            self.status_message = String::from("No patch loaded. Press 'l' to load.");
+            return false;
+        };
+        self.open_upload_modal_with(payload.len(), detect_upload_transport())
+    }
+
+    /// [`App::open_upload_modal`] with an injected transport (tests + any
+    /// future caller that already probed). Shared status/modal tail.
+    pub(crate) fn open_upload_modal_with(
+        &mut self,
+        byte_count: usize,
+        transport: UploadTransport,
+    ) -> bool {
+        if transport.can_send() {
+            self.status_message = format!(
+                "Upload {byte_count} bytes via {} \u{2014} y to send, n to cancel",
+                transport.transport_line()
+            );
+        } else {
+            self.status_message =
+                format!("Upload blocked: {}", transport.missing_reasons().join("; "));
+        }
+        self.upload_modal = Some(UploadConfirm {
+            byte_count,
+            transport,
+        });
+        true
+    }
+
+    /// Cancel the confirm modal without side effects (`n`/`Esc`): no process
+    /// spawns, the rack is untouched. Silent — the status line is left alone.
+    pub fn cancel_upload_modal(&mut self) {
+        self.upload_modal = None;
+    }
+
+    /// Send the confirmed payload in the background (`y` in the modal): pick
+    /// the sender from the probed transport (`amidi -p <port> -s` preferred,
+    /// `sendmidi dev <port> syf` fallback) and fork it via
+    /// [`App::spawn_upload`]. `Err` names the failure and leaves the modal
+    /// open so the user can retry or cancel.
+    pub fn start_upload_send(&mut self) -> Result<(), String> {
+        let confirm = self
+            .upload_modal
+            .clone()
+            .ok_or_else(|| String::from("no upload pending"))?;
+        if !confirm.transport.can_send() {
+            return Err(confirm.transport.missing_reasons().join("; "));
+        }
+        let payload = self
+            .upload_payload()
+            .ok_or_else(|| String::from("patch no longer renders"))?;
+        let port = confirm
+            .transport
+            .droid_port
+            .clone()
+            .or_else(|| confirm.transport.other_ports.first().cloned())
+            .unwrap_or_else(|| String::from("droid"));
+        if confirm.transport.amidi && confirm.transport.droid_port.is_some() {
+            let args = vec!["-p".to_string(), port.clone(), "-s".to_string()];
+            self.spawn_upload("amidi", &args, &payload, &port)
+        } else if confirm.transport.sendmidi {
+            let args = vec!["dev".to_string(), port.clone(), "syf".to_string()];
+            self.spawn_upload("sendmidi", &args, &payload, &port)
+        } else {
+            // DIN port via amidi (no DROID-named port, but a listed one).
+            let args = vec!["-p".to_string(), port.clone(), "-s".to_string()];
+            self.spawn_upload("amidi", &args, &payload, &port)
+        }
+    }
+
+    /// Fork the sender with the payload staged to a temp file (no async
+    /// runtime in this app: `std::process::Command` + per-frame
+    /// [`App::poll_upload`]). The payload file travels as the trailing
+    /// argument (`amidi -p <port> -s <file>`, `sendmidi dev <port> syf
+    /// <file>`), so tests inject harmless programs (`true`) here. On
+    /// success the modal closes and the status notes the in-flight send.
+    pub(crate) fn spawn_upload(
+        &mut self,
+        program: &str,
+        args: &[String],
+        payload: &[u8],
+        port: &str,
+    ) -> Result<(), String> {
+        let mut tmp = env::temp_dir();
+        tmp.push(format!("droid-tui-upload-{}.syx", std::process::id()));
+        fs::write(&tmp, payload)
+            .map_err(|e| format!("failed to stage upload file {}: {e}", tmp.display()))?;
+        match std::process::Command::new(program)
+            .args(args)
+            .arg(&tmp)
+            .spawn()
+        {
+            Ok(child) => {
+                let byte_count = payload.len();
+                self.upload_send = Some(UploadSend {
+                    started: Instant::now(),
+                    byte_count,
+                    port: port.to_string(),
+                    tool: program.to_string(),
+                    tmpfile: tmp,
+                    child: Some(child),
+                });
+                self.upload_modal = None;
+                self.status_message = format!("Uploading {byte_count} bytes via {port} \u{2026}");
+                Ok(())
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(format!("failed to start {program}: {e}"))
+            }
+        }
+    }
+
+    /// Reap a finished background send (called on every handled event and
+    /// window frame: a cheap non-blocking `try_wait`, so the loop never
+    /// freezes on the 15–20 s transfer). On completion the verdict lands in
+    /// the status line — success byte count or the named failure — and the
+    /// send state clears. Returns true when a verdict landed.
+    pub fn poll_upload(&mut self) -> bool {
+        let done = match self.upload_send.as_mut().and_then(|s| s.child.as_mut()) {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Some(status.success()),
+                Ok(None) => None,
+                Err(_) => Some(false),
+            },
+            None => None,
+        };
+        let Some(ok) = done else {
+            return false;
+        };
+        // `take` drops the `UploadSend`: `Drop` reaps the zombie and removes
+        // the staged payload file.
+        if let Some(send) = self.upload_send.take() {
+            self.status_message = if ok {
+                format!(
+                    "Sent in-memory patch, {} bytes via {} ({})",
+                    send.byte_count, send.port, send.tool
+                )
+            } else {
+                format!(
+                    "Upload failed: {} exited with an error ({} bytes via {})",
+                    send.tool, send.byte_count, send.port
+                )
+            };
+            return true;
+        }
+        false
+    }
+
+    /// Kill and reap a running send (quit path): the verdict never lands on a
+    /// dead transfer. No-op when idle. Window-close quits are covered by
+    /// `UploadSend`'s `Drop`; this reaps eagerly so no zombie survives.
+    pub fn abort_upload_send(&mut self) {
+        if self.upload_send.take().is_some() {
+            self.status_message = String::from("Upload aborted");
+        }
+    }
+
+    /// Elapsed time of the in-flight send, for the waiting-bar display.
+    pub fn upload_elapsed(&self) -> Option<std::time::Duration> {
+        self.upload_send.as_ref().map(|s| s.started.elapsed())
+    }
+
     pub fn load_diff_patch(&mut self, path: &Path) -> Result<(), String> {
         let new_patch = Patch::from_ini_file(path).map_err(|e| e.to_string())?;
         let report = if let Some(base) = &self.patch {
@@ -1418,10 +1789,12 @@ impl App {
         self.rebuild_graph();
         // Refresh the view: refit the camera to the re-solved layout so the
         // reorder is visible without requiring a click (the graph camera was
-        // stale after the rebuild). Reuses the `Shift+c` fit against the
-        // published pane size; a first open frames the new layout.
-        if let Some(viewport) = self.graph_canvas_px {
-            self.fit_graph_camera(viewport);
+        // stale after the rebuild). Unconditional against the live pane rect
+        // (graph-arrange-cycle 1.2): the optimizer reshuffle can leave the
+        // published canvas stale/`None`, so `refit_viewport` prefers the live
+        // `pane_hit_rects` geometry and never skips.
+        if self.graph.is_some() {
+            self.fit_graph_camera(self.refit_viewport());
         }
         // Cross-view focus (optimizer-click-focus): select the first node whose
         // forward-loop latency changed, so the source pane jumps to it and the
@@ -2278,6 +2651,74 @@ impl App {
         (max_w, max_h)
     }
 
+    /// Live viewport of the graph pane in pixels (graph-arrange-cycle 1.2):
+    /// the class-layout pane currently holding the Graph view, sized from the
+    /// per-frame published `pane_hit_rects` (ADR 35 single source) — never the
+    /// possibly-stale `graph_canvas_px`. `None` when no pane holds the graph
+    /// or geometry was never published (headless/tests).
+    fn live_graph_viewport(&self) -> Option<(f32, f32)> {
+        let id = self.pane_holding(ViewType::Graph)?;
+        let (_, rect) = self.pane_hit_rects.iter().find(|(pid, _)| *pid == id)?;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        Some((rect.width as f32, rect.height as f32))
+    }
+
+    /// Viewport the next graph refit must frame (graph-arrange-cycle 1.2):
+    /// the live pane rect when a graph pane is laid out, else the last
+    /// published canvas size, else a sane default so a refit never silently
+    /// skips (the optimizer reshuffle can leave the canvas stale/`None`).
+    fn refit_viewport(&self) -> (f32, f32) {
+        self.live_graph_viewport()
+            .or(self.graph_canvas_px)
+            .unwrap_or((1280.0, 800.0))
+    }
+
+    /// Apply the active arrangement and cycle to the next one
+    /// (graph-arrange-cycle 2.1): re-solves under the current
+    /// `layout_mode`/`layout_ordering`, refits unconditionally, reports the
+    /// APPLIED arrangement in the status line, then advances the stored
+    /// selection so repeat presses walk `Column-Strict → Column-Barycenter →
+    /// Force → Column-Strict …`. The first press from `Column-Strict` thus
+    /// re-applies `column-strict` (the manual escape hatch from the proposal
+    /// Why), the second moves to `column-barycenter`, the third to `force`.
+    /// Reuses the existing fields so `h`, config seeding, and
+    /// `solve_graph_positions` keep working unchanged. Silent no-op (false)
+    /// without a built graph.
+    pub fn apply_arrangement(&mut self) -> bool {
+        if self.graph.is_none() {
+            return false;
+        }
+        let applied = match (self.layout_mode, self.layout_ordering) {
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Strict) => {
+                "column-strict"
+            }
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => {
+                "column-barycenter"
+            }
+            (crate::config::LayoutMode::Force, _) => "force",
+        };
+        self.rebuild_graph();
+        self.fit_graph_camera(self.refit_viewport());
+        (self.layout_mode, self.layout_ordering) = match (self.layout_mode, self.layout_ordering) {
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Strict) => (
+                crate::config::LayoutMode::Column,
+                crate::config::LayoutOrdering::Barycenter,
+            ),
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => (
+                crate::config::LayoutMode::Force,
+                crate::config::LayoutOrdering::Barycenter,
+            ),
+            (crate::config::LayoutMode::Force, _) => (
+                crate::config::LayoutMode::Column,
+                crate::config::LayoutOrdering::Strict,
+            ),
+        };
+        self.status_message = format!("Arrangement: {applied}");
+        true
+    }
+
     /// Center the drawn graph in the visible pane: pan so the CONTENT center —
     /// the position-bounds center plus half the node world extent (node
     /// positions are top-left corners) — maps to the canvas center, zoom
@@ -2441,6 +2882,7 @@ impl App {
             self.source_pane_rect = None;
             self.processing_paused = false;
             self.physical_show_skeleton = false;
+            self.showing_performance = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
@@ -2452,6 +2894,9 @@ impl App {
             self.physical_viewport = None;
             self.disabled_circuits.clear();
             self.editing = None;
+            // A confirm modal snapshots the previous patch's byte count; drop it
+            // with the load. An in-flight send survives (payload is snapshotted).
+            self.upload_modal = None;
             self.current_patch_path = None;
             let error_count = issues
                 .iter()
@@ -2503,6 +2948,7 @@ impl App {
         self.source_pane_rect = None;
         self.processing_paused = false;
         self.physical_show_skeleton = false;
+        self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
         self.physical_viewport = None;
@@ -2584,6 +3030,7 @@ impl App {
             self.source_pane_rect = None;
             self.processing_paused = false;
             self.physical_show_skeleton = false;
+            self.showing_performance = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
@@ -2595,6 +3042,9 @@ impl App {
             self.physical_viewport = None;
             self.disabled_circuits.clear();
             self.editing = None;
+            // A confirm modal snapshots the previous patch's byte count; drop it
+            // with the load. An in-flight send survives (payload is snapshotted).
+            self.upload_modal = None;
             self.current_patch_path = Some(path.to_path_buf());
             let error_count = issues
                 .iter()
@@ -2644,11 +3094,15 @@ impl App {
         self.source_pane_rect = None;
         self.processing_paused = false;
         self.physical_show_skeleton = false;
+        self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
         self.physical_viewport = None;
         self.disabled_circuits.clear();
         self.editing = None;
+        // A confirm modal snapshots the previous patch's byte count; drop it
+        // with the load. An in-flight send survives (payload is snapshotted).
+        self.upload_modal = None;
         self.current_patch_path = Some(path.to_path_buf());
         let error_count = 0;
         let count = issues.len();
@@ -2977,14 +3431,23 @@ impl App {
     fn solve_graph_positions(&self, g: &Graph, pins: &[usize]) -> Vec<(f32, f32)> {
         match self.layout_mode {
             crate::config::LayoutMode::Column => {
-                // Pins anchor at their current position (the previous solve's
-                // output): the tip pin is seeded on build, and every pinned
-                // node keeps its position while the rest arrange around it.
-                // On the first solve `graph_positions` is empty, so there is
-                // nothing to anchor yet and the pin set is naturally seeded.
+                // Pins anchor by circuit identity (graph-arrange-cycle 1.1):
+                // `pins` are indices into the NEW graph `g`, but
+                // `self.graph_positions` parallels the PREVIOUS graph
+                // (`self.graph`, still unreplaced at every call site), so a
+                // same-index lookup scrambles anchors across section reorders
+                // (optimizer preview). Map each pinned new index to its
+                // NodeId, find that id in the previous graph, and anchor at
+                // ITS previous position. Pins whose id vanished (or a first
+                // solve with no previous graph) simply anchor nothing.
                 let anchored: Vec<(usize, (f32, f32))> = pins
                     .iter()
-                    .filter_map(|&i| self.graph_positions.get(i).map(|&pos| (i, pos)))
+                    .filter_map(|&new_idx| {
+                        let id = g.nodes.get(new_idx)?.id.clone();
+                        let old_idx = self.graph.as_ref()?.nodes.iter().position(|n| n.id == id)?;
+                        let pos = *self.graph_positions.get(old_idx)?;
+                        Some((new_idx, pos))
+                    })
                     .collect();
                 layout::solve_columns_pinned(
                     g,
@@ -3840,6 +4303,29 @@ impl App {
         }
     }
 
+    /// Restore every hardware component state to rest (change
+    /// `performance-view`, task 1.4): discrete kinds (`Button`, `Switch`,
+    /// `Led`) return to `Off`, continuous kinds (`Knob`, `CvIn`, `CvOut`,
+    /// `Encoder`) to `Value(0.0)` — the same rest values the parser assigns
+    /// new components. Touches states only: selection, focus, and shift are
+    /// left untouched. The live callouts need no extra state: paint reads
+    /// `ComponentState` directly, so the next frame already shows rest.
+    pub fn reset_element_states(&mut self) {
+        if let Some(patch) = self.patch.as_mut() {
+            for comp in patch.hw_components.iter_mut() {
+                comp.state = match comp.kind {
+                    ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
+                        ComponentState::Off
+                    }
+                    ComponentKind::Knob
+                    | ComponentKind::CvIn
+                    | ComponentKind::CvOut
+                    | ComponentKind::Encoder => ComponentState::Value(0.0),
+                };
+            }
+        }
+    }
+
     /// Toggle per-circuit processing for the circuit instance `(name,
     /// instance)`, returning the new disabled state. Influence is recomputed
     /// so the set immediately reflects the dead end. While globally paused
@@ -4583,6 +5069,109 @@ mod tests {
         assert_eq!(
             app.graph_positions[0], anchored,
             "pinned tip must keep its anchored position across a rebuild"
+        );
+    }
+
+    #[test]
+    fn pinned_anchor_follows_node_id_across_section_reorder() {
+        // graph-arrange-cycle 1.1: pin anchors are NodeId-based, so an
+        // optimizer-style section reorder never maps a pinned node to another
+        // node's previous position. Reverse the file order (moving every
+        // circuit) and rebuild: the seeded tip pin must hold the tip's OWN
+        // previous position at its new index.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        let tip_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
+        assert!(app.pinned.contains(&tip_id), "the tip is pinned by default");
+        let old_pos = app.graph_positions[0];
+        let n = app.patch.as_ref().unwrap().sections.len();
+        assert!(n > 1, "fixture needs reorderable sections");
+        app.apply_section_order(&(0..n).rev().collect::<Vec<_>>());
+        app.rebuild_graph();
+        let graph = app.graph.as_ref().unwrap();
+        let new_idx = graph
+            .nodes
+            .iter()
+            .position(|nd| nd.id == tip_id)
+            .expect("pinned circuit survives the reorder");
+        assert_ne!(
+            new_idx, 0,
+            "the reorder must move the pinned node for a meaningful test"
+        );
+        assert_eq!(
+            app.graph_positions[new_idx], old_pos,
+            "pinned NodeId keeps its own previous position across a reorder"
+        );
+    }
+
+    #[test]
+    fn optimizer_preview_refits_without_published_canvas() {
+        // graph-arrange-cycle 1.2: preview refits unconditionally via
+        // `refit_viewport` — a stale/`None` canvas (left by the optimizer pane
+        // reshuffle) never skips the fit.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.open_optimizer(), "optimizer needs sections");
+        assert!(
+            !app.optimizer.as_ref().unwrap().candidates.is_empty(),
+            "optimizer must propose a candidate to preview"
+        );
+        app.graph_canvas_px = None;
+        app.graph_camera = None;
+        app.optimizer_preview(0);
+        assert!(
+            app.graph_camera.is_some(),
+            "preview must refit even with canvas None"
+        );
+        assert!(
+            app.graph_canvas_px.is_some(),
+            "refit republishes the canvas size"
+        );
+    }
+
+    #[test]
+    fn apply_arrangement_cycles_strict_barycenter_force() {
+        // graph-arrange-cycle 2.1: repeat presses walk Column-Strict →
+        // Column-Barycenter → Force → Column-Strict …, each reporting the
+        // APPLIED arrangement in the status line.
+        let mut app = App::new();
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
+        assert!(
+            !app.apply_arrangement(),
+            "silent no-op without a built graph"
+        );
+        let patch = Patch::from_ini_file(Path::new("fixtures/arpeggio1.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-strict");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-barycenter");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
+        assert!(app.apply_arrangement());
+        assert_eq!(
+            app.status_message, "Arrangement: column-strict",
+            "fourth press returns to column-strict"
+        );
+        let graph = app.graph.as_ref().unwrap();
+        assert_eq!(
+            app.graph_positions.len(),
+            graph.nodes.len(),
+            "every cycle step rebuilds positions for the fresh graph"
         );
     }
 
@@ -6930,6 +7519,221 @@ mod tests {
         app.cycle_select_candidate(1);
         let text = app.select_status_text().unwrap();
         assert_eq!(text, "Select state: 3 selected / 1 unselected / 0 unknown");
+    }
+
+    // ── MIDI upload (change `midi-upload`, task 1.2) ──────────────────────
+
+    fn upload_test_patch() -> Patch {
+        Patch::from_ini_str("[button]\nbutton = B1.1\n", "upload".to_string()).unwrap()
+    }
+
+    fn upload_test_transport() -> UploadTransport {
+        UploadTransport {
+            amidi: true,
+            sendmidi: false,
+            droid_port: Some("hw:2,0,0".to_string()),
+            other_ports: Vec::new(),
+        }
+    }
+
+    fn upload_blocked_transport() -> UploadTransport {
+        UploadTransport {
+            amidi: false,
+            sendmidi: false,
+            droid_port: None,
+            other_ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parse_amidi_list_finds_droid_and_din_ports() {
+        let out = "Dir Device    Name\nhw:2,0,0  X7 MIDI 1\nhw:3,0,0  USB Audio MIDI 1\n";
+        let (droid, others) = super::parse_amidi_list(out);
+        assert_eq!(droid.as_deref(), Some("hw:2,0,0"));
+        assert_eq!(others, vec!["hw:3,0,0".to_string()]);
+    }
+
+    #[test]
+    fn parse_amidi_list_matches_droid_case_insensitively() {
+        let (droid, others) = super::parse_amidi_list("hw:1,0,0  Droid MIDI\n");
+        assert_eq!(droid.as_deref(), Some("hw:1,0,0"));
+        assert!(others.is_empty());
+    }
+
+    #[test]
+    fn parse_amidi_list_empty_yields_no_ports() {
+        let (droid, others) = super::parse_amidi_list("");
+        assert_eq!(droid, None);
+        assert!(others.is_empty());
+    }
+
+    #[test]
+    fn probe_transport_gate_needs_tool_and_port() {
+        assert!(upload_test_transport().can_send());
+        // Tool but no port: nothing to address.
+        let no_port = super::probe_upload_transport(Some(""), true, false);
+        assert!(!no_port.can_send());
+        // Port but no tool: nothing to send with.
+        let no_tool = super::probe_upload_transport(Some("hw:2,0,0  X7 MIDI 1\n"), false, false);
+        assert!(!no_tool.can_send());
+        // sendmidi + a listed DIN port is a path.
+        let din = super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), false, true);
+        assert!(din.can_send());
+    }
+
+    #[test]
+    fn probe_transport_missing_reasons_name_what_is_absent() {
+        let reasons = upload_blocked_transport().missing_reasons();
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons[0].contains("amidi"));
+        assert!(reasons[1].contains("amidi -l"));
+        assert!(upload_test_transport().missing_reasons().is_empty());
+    }
+
+    #[test]
+    fn probe_transport_line_describes_usb_and_din() {
+        assert_eq!(
+            upload_test_transport().transport_line(),
+            "USB-MIDI hw:2,0,0 via amidi"
+        );
+        let din = super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), true, false);
+        assert_eq!(din.transport_line(), "DIN MIDI hw:3,0,0 via amidi");
+        assert_eq!(
+            upload_blocked_transport().transport_line(),
+            "no transport detected"
+        );
+    }
+
+    #[test]
+    fn spinner_char_cycles_four_frames() {
+        use std::time::Duration;
+        assert_eq!(super::spinner_char(Duration::from_millis(0)), '|');
+        assert_eq!(super::spinner_char(Duration::from_millis(199)), '|');
+        assert_eq!(super::spinner_char(Duration::from_millis(200)), '/');
+        assert_eq!(super::spinner_char(Duration::from_millis(400)), '-');
+        assert_eq!(super::spinner_char(Duration::from_millis(600)), '\\');
+        assert_eq!(super::spinner_char(Duration::from_millis(800)), '|');
+    }
+
+    #[test]
+    fn upload_payload_frames_the_in_memory_patch() {
+        let mut app = App::new();
+        assert_eq!(app.upload_payload(), None);
+        app.patch = Some(upload_test_patch());
+        let payload = app.upload_payload().expect("patch renders");
+        assert_eq!(&payload[..5], &crate::sysex::SYSEX_HEADER);
+        assert_eq!(payload[payload.len() - 1], crate::sysex::SYSEX_FOOTER);
+        let body = &payload[5..payload.len() - 1];
+        assert!(crate::sysex::is_seven_bit_clean(body));
+    }
+
+    #[test]
+    fn open_upload_modal_with_blocked_transport_keeps_modal_but_no_path() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        assert!(app.open_upload_modal_with(128, upload_blocked_transport()));
+        let confirm = app.upload_modal.as_ref().expect("modal opens");
+        assert_eq!(confirm.byte_count, 128);
+        assert!(!confirm.transport.can_send());
+        assert!(app.status_message.contains("Upload blocked"));
+    }
+
+    #[test]
+    fn open_upload_modal_with_good_transport_reports_bytes_and_route() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        assert!(app.open_upload_modal_with(128, upload_test_transport()));
+        assert!(app.status_message.contains("128 bytes"));
+        assert!(app.status_message.contains("hw:2,0,0"));
+    }
+
+    #[test]
+    fn start_upload_send_blocked_leaves_modal_open() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        assert!(app.open_upload_modal_with(128, upload_blocked_transport()));
+        let err = app.start_upload_send().expect_err("no path");
+        assert!(err.contains("amidi"));
+        assert!(app.upload_modal.is_some());
+        assert!(app.upload_send.is_none());
+    }
+
+    #[test]
+    fn spawn_and_poll_round_trip_verdict() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        let payload = app.upload_payload().unwrap();
+        let n = payload.len();
+        app.spawn_upload("true", &[], &payload, "hw:2,0,0")
+            .expect("spawn true");
+        assert!(app.upload_modal.is_none());
+        assert!(app.status_message.contains("Uploading"));
+        // `true` exits immediately; poll until the verdict lands.
+        let mut landed = false;
+        for _ in 0..1000 {
+            if app.poll_upload() {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(landed, "verdict must land");
+        assert!(app.upload_send.is_none());
+        assert_eq!(
+            app.status_message,
+            format!("Sent in-memory patch, {n} bytes via hw:2,0,0 (true)")
+        );
+        // Polling again is a silent no-op.
+        assert!(!app.poll_upload());
+    }
+
+    #[test]
+    fn spawn_failure_reports_and_stages_nothing() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        let payload = app.upload_payload().unwrap();
+        let err = app
+            .spawn_upload("droid-tui-no-such-tool", &[], &payload, "hw:2,0,0")
+            .expect_err("missing tool");
+        assert!(err.contains("droid-tui-no-such-tool"));
+        assert!(app.upload_send.is_none());
+    }
+
+    #[test]
+    fn failing_child_lands_failure_verdict() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        let payload = app.upload_payload().unwrap();
+        app.spawn_upload("false", &[], &payload, "hw:2,0,0")
+            .expect("spawn false");
+        let mut landed = false;
+        for _ in 0..1000 {
+            if app.poll_upload() {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(landed, "verdict must land");
+        assert!(app.status_message.contains("Upload failed"));
+        assert!(app.status_message.contains("false"));
+    }
+
+    #[test]
+    fn abort_upload_send_kills_and_clears() {
+        let mut app = App::new();
+        app.patch = Some(upload_test_patch());
+        let payload = app.upload_payload().unwrap();
+        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
+            .expect("spawn sleep");
+        assert!(app.upload_send.is_some());
+        app.abort_upload_send();
+        assert!(app.upload_send.is_none());
+        assert_eq!(app.status_message, "Upload aborted");
+        assert!(!app.poll_upload());
+        // Aborting when idle is a silent no-op.
+        app.abort_upload_send();
+        assert_eq!(app.status_message, "Upload aborted");
     }
 
     #[test]
