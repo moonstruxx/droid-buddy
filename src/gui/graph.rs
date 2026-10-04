@@ -859,6 +859,21 @@ fn build_scene(
         None
     };
 
+    // Optimizer-preview diff active (optimizer-click-focus): the optimizer is
+    // open, a candidate is previewed, and the file-order latency baseline was
+    // captured. Reordering keeps the same node set, so the meaningful diff is
+    // the *latency* change — edges/nodes are colored by whether their
+    // forward-loop latency went up (worse) or down (better).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OptDir {
+        Worse,
+        Better,
+    }
+    let opt_diff_active = app
+        .optimizer
+        .as_ref()
+        .is_some_and(|s| s.previewing.is_some())
+        && app.optimizer_diff_state.is_some();
     // Repeated circuit instances get the numbered title suffix; non-circuit
     // nodes always render their plain name.
     let mut circuit_counts: HashMap<String, usize> = HashMap::new();
@@ -975,6 +990,11 @@ fn build_scene(
         None
     };
 
+    // Per-scene-node optimizer-diff direction, accumulated over incident
+    // edges in the loop below (worse beats better); applied to node borders
+    // after the loop. Sized to the built node vector.
+    let mut node_opt_dir: Vec<Option<OptDir>> = vec![None; nodes.len()];
+
     let mut edges = Vec::with_capacity(graph.edges.len());
     for (i, edge) in graph.edges.iter().enumerate() {
         if !edge_visible(i) {
@@ -1009,6 +1029,49 @@ fn build_scene(
             .any(|issue| issue.cable == edge.cable);
 
         let kind = crate::graph_render::cable_kind(graph, &edge.cable);
+        // Optimizer-preview diff direction for this edge (optimizer-click-focus):
+        // compare the current forward-loop latency against the captured file-order
+        // baseline by cable name. `None` when the diff is inactive or this edge
+        // is unchanged.
+        let opt_dir = if opt_diff_active {
+            let state = app.optimizer_diff_state.as_ref().unwrap();
+            if i < state.before_latency.len()
+                && state
+                    .before_cable
+                    .get(i)
+                    .map(|c| c == &edge.cable)
+                    .unwrap_or(false)
+            {
+                let current = graph
+                    .latency
+                    .as_ref()
+                    .and_then(|lat| lat.edges.iter().find(|l| l.edge_index == i))
+                    .map(|l| l.latency)
+                    .unwrap_or(0.0);
+                let delta = current - state.before_latency[i];
+                if delta > 1e-6 {
+                    Some(OptDir::Worse)
+                } else if delta < -1e-6 {
+                    Some(OptDir::Better)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(dir) = opt_dir {
+            for &j in [&si, &ti] {
+                match (node_opt_dir[j], dir) {
+                    (Some(OptDir::Worse), _) => {}
+                    (None, d) => node_opt_dir[j] = Some(d),
+                    (Some(OptDir::Better), OptDir::Worse) => node_opt_dir[j] = Some(OptDir::Worse),
+                    (Some(OptDir::Better), OptDir::Better) => {}
+                }
+            }
+        }
         let mut diff_state = None;
         if let Some(report) = &diff {
             if report.added_cables.contains(&edge.cable) {
@@ -1040,7 +1103,7 @@ fn build_scene(
             .as_ref()
             .or(app.influence.as_ref())
             .is_some_and(|s| s.influenced_edges.contains(&edge.cable));
-        let color = if has_error {
+        let mut color = if has_error {
             // Error red outranks influence (guardrails).
             theme.rgb(theme.graph_edge_error)
         } else if incident_disabled || incident_unselected {
@@ -1079,6 +1142,15 @@ fn build_scene(
                 CableKind::Unknown => theme.rgb(theme.graph_edge_unknown),
             }
         };
+        // Optimizer-preview diff overrides the kind/latency color (but sits
+        // below error/influence/disabled above): latency got worse = red,
+        // better = blue (optimizer-click-focus).
+        if let Some(dir) = opt_dir {
+            color = match dir {
+                OptDir::Worse => theme.rgb(theme.graph_edge_diff_before),
+                OptDir::Better => theme.rgb(theme.graph_edge_diff_after),
+            };
+        }
 
         nodes[si].output_port = true;
         nodes[ti].input_port = true;
@@ -1103,6 +1175,19 @@ fn build_scene(
                 back_edge,
             }),
         });
+    }
+
+    // Optimizer-preview diff: color each node's border by its aggregated
+    // direction (worse beats better). Unchanged nodes keep their resolved
+    // border (optimizer-click-focus).
+    for (j, node) in nodes.iter_mut().enumerate() {
+        if let Some(dir) = node_opt_dir[j] {
+            node.border = match dir {
+                OptDir::Worse => theme.rgb(theme.graph_node_diff_before),
+                OptDir::Better => theme.rgb(theme.graph_node_diff_after),
+            };
+            node.border_width = (3.0 * zoom).max(1.0);
+        }
     }
 
     // Cluster containers are padded unions of the kept member node rects in
@@ -1435,9 +1520,11 @@ mod scene_builder_tests {
     use std::path::Path;
 
     use crate::app::LabelStore;
+    use crate::app::{OptimizerDiffState, OptimizerState};
     use crate::diff::{ChangedCable, ChangedNode, DiffReport};
     use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
     use crate::latency::{EdgeLatency as ModelEdgeLatency, LatencyData, LatencySummary};
+    use crate::optimize::CandidateOrdering;
     use crate::patch::{InfluenceSubtree, NodeId};
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
@@ -1503,6 +1590,105 @@ mod scene_builder_tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, 0.0))
         )
         .is_none());
+    }
+
+    /// Arm the optimizer-preview diff on `chain_app`'s single `_CLK` edge:
+    /// set the current latency and the captured file-order baseline so the
+    /// edge's delta has the given direction (optimizer-click-focus).
+    fn arm_opt_diff(app: &mut App, before: f32, current: f32) {
+        let t = LatencySummary {
+            avg: current,
+            max: current,
+            back_edge_count: 0,
+        };
+        app.graph.as_mut().unwrap().latency = Some(LatencyData {
+            edges: vec![ModelEdgeLatency {
+                edge_index: 0,
+                latency: current,
+                is_back_edge: false,
+            }],
+            summary: t,
+        });
+        app.optimizer_diff_state = Some(OptimizerDiffState {
+            before_cable: vec!["_CLK".into()],
+            before_latency: vec![before],
+        });
+        app.optimizer = Some(OptimizerState {
+            candidates: vec![CandidateOrdering {
+                label: "test".into(),
+                order: vec![0, 1],
+                before: t,
+                after: t,
+            }],
+            cursor: 0,
+            previewing: Some(0),
+            original_order: vec![0, 1],
+            weight: 0.0,
+        });
+    }
+
+    #[test]
+    fn optimizer_diff_colors_edges_and_nodes_by_latency_direction() {
+        let t = theme();
+        // Current latency rose above the baseline → worse → red on the edge
+        // and on its endpoint nodes.
+        let mut worse = chain_app();
+        arm_opt_diff(&mut worse, 1.0, 5.0);
+        let s = spec(&worse);
+        assert_eq!(s.edges[0].color, t.rgb(t.graph_edge_diff_before));
+        assert!(
+            s.nodes
+                .iter()
+                .all(|n| n.border == t.rgb(t.graph_node_diff_before)),
+            "both endpoint nodes mark the worse edge"
+        );
+
+        // Current latency fell below the baseline → better → blue.
+        let mut better = chain_app();
+        arm_opt_diff(&mut better, 5.0, 1.0);
+        let s = spec(&better);
+        assert_eq!(s.edges[0].color, t.rgb(t.graph_edge_diff_after));
+        assert!(
+            s.nodes
+                .iter()
+                .all(|n| n.border == t.rgb(t.graph_node_diff_after)),
+            "both endpoint nodes mark the better edge"
+        );
+    }
+
+    #[test]
+    fn optimizer_diff_inactive_without_preview_keeps_kind_color() {
+        let t = theme();
+        let mut app = chain_app();
+        // Same latency delta as the diff test, but no preview armed → the
+        // diff must not color the edge (it keeps its cable-kind color).
+        app.graph.as_mut().unwrap().latency = Some(LatencyData {
+            edges: vec![ModelEdgeLatency {
+                edge_index: 0,
+                latency: 5.0,
+                is_back_edge: false,
+            }],
+            summary: LatencySummary {
+                avg: 5.0,
+                max: 5.0,
+                back_edge_count: 0,
+            },
+        });
+        app.optimizer_diff_state = Some(OptimizerDiffState {
+            before_cable: vec!["_CLK".into()],
+            before_latency: vec![1.0],
+        });
+        // No preview: optimizer is None → diff inactive.
+        // Disable the latency ramp so the edge shows its cable-kind color
+        // (a high latency would otherwise light the ramp red, which coincides
+        // with the diff token and would defeat the `assert_ne`).
+        app.latency_coloring = false;
+        let s = spec(&app);
+        assert_ne!(
+            s.edges[0].color,
+            t.rgb(t.graph_edge_diff_before),
+            "no preview ⇒ no diff color"
+        );
     }
 
     #[test]

@@ -134,6 +134,20 @@ pub struct Theme {
     /// weight the menu is scored on stays distinct from the muted candidate
     /// values.
     pub optimizer_weight: Color,
+    /// Optimizer-preview diff (optimizer-click-focus): a node/cable whose
+    /// forward-loop latency *increased* under the previewed reorder (worse) —
+    /// drawn red. A reorder keeps the same node set, so the meaningful diff is
+    /// the latency change, not a membership delta.
+    pub graph_node_diff_before: Color,
+    /// Optimizer-preview diff: a node whose forward-loop latency *decreased*
+    /// (better) — drawn blue.
+    pub graph_node_diff_after: Color,
+    /// Optimizer-preview diff: a cable whose forward-loop latency increased
+    /// (worse) — drawn red.
+    pub graph_edge_diff_before: Color,
+    /// Optimizer-preview diff: a cable whose forward-loop latency decreased
+    /// (better) — drawn blue.
+    pub graph_edge_diff_after: Color,
 }
 
 impl Theme {
@@ -219,6 +233,12 @@ impl Theme {
             // Same accent family as graph_node_title: the weight readout is an
             // accent value, not a muted statistic.
             optimizer_weight: Color::Yellow,
+            // Optimizer-preview diff (optimizer-click-focus): latency got
+            // worse = red, better = blue, on both nodes and cables.
+            graph_node_diff_before: Color::Red,
+            graph_node_diff_after: Color::Blue,
+            graph_edge_diff_before: Color::Red,
+            graph_edge_diff_after: Color::Blue,
         }
     }
 
@@ -296,6 +316,10 @@ impl Theme {
             pane_unfocused_border: Color::Reset,
             optimizer_selected_bg: Color::Reset,
             optimizer_weight: Color::Reset,
+            graph_node_diff_before: Color::Reset,
+            graph_node_diff_after: Color::Reset,
+            graph_edge_diff_before: Color::Reset,
+            graph_edge_diff_after: Color::Reset,
         }
     }
 
@@ -396,6 +420,12 @@ impl Theme {
             // Brightest gray so the weight span stays tellable against the
             // Black selected-row background in the grayscale palette.
             optimizer_weight: Color::White,
+            // Grayscale: brighter = worse, dimmer = better, distinct from the
+            // plain node dim.
+            graph_node_diff_before: Color::White,
+            graph_node_diff_after: Color::Gray,
+            graph_edge_diff_before: Color::LightYellow,
+            graph_edge_diff_after: Color::Gray,
             // Brightest gray so the key column stays tellable against the
             // Black selected-row background in the grayscale palette.
         }

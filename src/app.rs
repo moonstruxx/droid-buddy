@@ -370,6 +370,24 @@ pub struct OptimizerState {
     pub weight: f32,
 }
 
+/// Optimizer-preview diff baseline (change `optimizer-click-focus`): the
+/// per-edge forward-loop latency captured in file (before) order when the menu
+/// opens. A section *reorder* keeps the same node set, so a per-node
+/// before/after membership diff is a no-op — the meaningful signal is the
+/// *latency* change the reorder produces. The renderer compares each edge's
+/// current latency against its baseline here to color it red (worse) or blue
+/// (better). `before_cable`/`before_latency` are parallel to the file-order
+/// edge vector (edges sort deterministically by cable/source/sink, so a pure
+/// reorder keeps the same order); the cable-name guard makes the diff robust
+/// if that invariant ever breaks.
+#[derive(Debug, Clone)]
+pub(crate) struct OptimizerDiffState {
+    /// Cable name per before-order edge index.
+    pub(crate) before_cable: Vec<String>,
+    /// Forward-loop latency per before-order edge index.
+    pub(crate) before_latency: Vec<f32>,
+}
+
 /// Select-state assumed values for `select` signals (change C 4.1).
 #[derive(Debug, Clone)]
 pub struct SelectState {
@@ -914,6 +932,10 @@ pub struct App {
     pub validation_cursor: usize,
     /// Open `g o` optimizer menu state. `None` when the menu is closed.
     pub optimizer: Option<OptimizerState>,
+    /// Baseline per-edge forward-loop latency (file order) for the
+    /// optimizer-preview diff (change `optimizer-click-focus`). Captured when
+    /// the menu opens, cleared on restore/close/load. `None` = no diff.
+    pub(crate) optimizer_diff_state: Option<OptimizerDiffState>,
     /// True when the `?` help modal is shown.
     pub showing_help: bool,
     /// Renderer-published rect of the help modal, for click-outside hit-testing.
@@ -1021,6 +1043,7 @@ impl App {
             showing_validation: false,
             validation_cursor: 0,
             optimizer: None,
+            optimizer_diff_state: None,
             showing_help: false,
             help_modal_rect: None,
             select_state: None,
@@ -1305,6 +1328,10 @@ impl App {
             original_order,
             weight,
         });
+        // Capture the file-order (before) per-edge latency baseline for the
+        // preview diff. On a fresh open no preview is active, so the graph is
+        // in file order — the correct "before" (optimizer-click-focus).
+        self.optimizer_diff_state = Some(Self::capture_optimizer_baseline(self));
         // Place the optimizer in a small pane (spec "Window classes route
         // views to panes"), replacing the target's view, and focus it.
         if self.pane_holding(ViewType::Optimizer).is_none() {
@@ -1431,7 +1458,81 @@ impl App {
             state.previewing = Some(idx);
         }
         self.rebuild_graph();
+        // Refresh the view: refit the camera to the re-solved layout so the
+        // reorder is visible without requiring a click (the graph camera was
+        // stale after the rebuild). Reuses the `Shift+c` fit against the
+        // published pane size; a first open frames the new layout.
+        if let Some(viewport) = self.graph_canvas_px {
+            self.fit_graph_camera(viewport);
+        }
+        // Cross-view focus (optimizer-click-focus): select the first node whose
+        // forward-loop latency changed, so the source pane jumps to it and the
+        // module UI highlights it alongside the graph.
+        if let Some(node) = self.first_affected_node() {
+            self.select_circuit(node);
+        }
         self.status_message = format!("Preview: {label}");
+    }
+
+    /// The per-edge forward-loop latency of the current graph in file (before)
+    /// order — captured when the optimizer opens, used as the preview-diff
+    /// baseline (optimizer-click-focus). `None` graph yields empty vectors.
+    fn capture_optimizer_baseline(&self) -> OptimizerDiffState {
+        match &self.graph {
+            Some(g) => {
+                let mut before_latency = vec![0.0f32; g.edges.len()];
+                if let Some(lat) = &g.latency {
+                    for e in &lat.edges {
+                        if e.edge_index < g.edges.len() {
+                            before_latency[e.edge_index] = e.latency;
+                        }
+                    }
+                }
+                let before_cable: Vec<String> = g.edges.iter().map(|e| e.cable.clone()).collect();
+                OptimizerDiffState {
+                    before_cable,
+                    before_latency,
+                }
+            }
+            None => OptimizerDiffState {
+                before_cable: Vec::new(),
+                before_latency: Vec::new(),
+            },
+        }
+    }
+
+    /// The first node whose forward-loop latency changed under the previewed
+    /// reorder (optimizer-click-focus): scan the current graph's edges against
+    /// the captured baseline by cable name and return the sink of the first
+    /// edge whose latency moved beyond a small threshold. `None` when nothing
+    /// changed or there is no diff baseline.
+    fn first_affected_node(&self) -> Option<NodeId> {
+        let state = self.optimizer_diff_state.as_ref()?;
+        let graph = self.graph.as_ref()?;
+        let lat = graph.latency.as_ref()?;
+        for (i, edge) in graph.edges.iter().enumerate() {
+            if i >= state.before_latency.len() {
+                break;
+            }
+            if state
+                .before_cable
+                .get(i)
+                .map(|c| c != &edge.cable)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let current = lat
+                .edges
+                .iter()
+                .find(|l| l.edge_index == i)
+                .map(|l| l.latency)
+                .unwrap_or(0.0);
+            if (current - state.before_latency[i]).abs() > 1e-6 {
+                return Some(edge.sink.clone());
+            }
+        }
+        None
     }
 
     /// Restore the original section order (`r`), rebuilding the graph when a
@@ -1445,6 +1546,7 @@ impl App {
         if was_previewing {
             self.rebuild_graph();
         }
+        self.optimizer_diff_state = None;
         self.status_message = String::from("Original order restored");
     }
 
@@ -1505,6 +1607,7 @@ impl App {
             self.rebuild_graph();
         }
         self.optimizer = None;
+        self.optimizer_diff_state = None;
     }
 
     /// Compat: optimizer-open state from the tile stack (no `showing_optimizer`
@@ -3694,6 +3797,8 @@ impl App {
             self.layout.pane_mut(id).view = None;
         }
         self.graph = None;
+        // The optimizer-preview diff baseline is per-patch (optimizer-click-focus).
+        self.optimizer_diff_state = None;
         self.graph_positions.clear();
         self.graph_cluster_rects.clear();
         self.graph_node_rects.clear();
