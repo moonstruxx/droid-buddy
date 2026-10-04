@@ -43,6 +43,13 @@ pub struct Theme {
     /// fader marker stays distinguishable from knobs/encoders and from the
     /// plain `led` token (design D1).
     pub fader_led_bar: Color,
+    /// Fader slot outline on a fader module's faceplate: a tone brighter
+    /// than the unlit `muted` track so the slot reads as hardware at
+    /// value 0 (fader-led-contrast 1.2).
+    pub fader_slot: Color,
+    /// LED field ring on a faceplate cell: outline around the LED dot so
+    /// the field reads even when the LED is off (fader-led-contrast 2.1).
+    pub led_ring: Color,
     pub shift1: Color,
     pub shift2: Color,
     pub shift3: Color,
@@ -165,6 +172,11 @@ impl Theme {
             led: Color::Red,
             // ANSI-16 yellow reads as the fader strip's amber on most terminals.
             fader_led_bar: Color::Yellow,
+            // Mid gray: brighter than the muted track, distinct from the
+            // yellow strip.
+            fader_slot: Color::Gray,
+            // White ring reads against the red led core and dark cells.
+            led_ring: Color::White,
             shift1: Color::Yellow,
             shift2: Color::Cyan,
             shift3: Color::Magenta,
@@ -253,6 +265,8 @@ impl Theme {
             cv_out: Color::Reset,
             led: Color::Reset,
             fader_led_bar: Color::Reset,
+            fader_slot: Color::Reset,
+            led_ring: Color::Reset,
             shift1: Color::Reset,
             shift2: Color::Reset,
             shift3: Color::Reset,
@@ -338,6 +352,11 @@ impl Theme {
             // Mid-gray so the fader bar stays tellable from the White led and
             // knob tokens in the grayscale palette.
             fader_led_bar: Color::Gray,
+            // White slot outline stays distinct from the gray strip and the
+            // dark-gray track; the ring shares White with led/knob (shape
+            // distinguishes them, as it already does for led vs knob).
+            fader_slot: Color::White,
+            led_ring: Color::White,
             shift1: Color::Gray,
             shift2: Color::White,
             shift3: Color::DarkGray,
@@ -751,6 +770,26 @@ mod tests {
         // default palette.
         assert_eq!(t.graph_edge_diff_added, Color::Gray);
         assert_eq!(t.graph_edge_diff_removed, Color::DarkGray);
+    }
+
+    #[test]
+    fn fader_slot_and_led_ring_resolve_per_palette() {
+        // Fader slot outline + LED ring (fader-led-contrast 1.2/2.1):
+        // distinct from the strip/track/led tones in every palette.
+        let classic = Theme::classic();
+        assert_eq!(classic.fader_slot, Color::Gray);
+        assert_ne!(classic.fader_slot, classic.muted);
+        assert_ne!(classic.fader_slot, classic.fader_led_bar);
+        assert_eq!(classic.led_ring, Color::White);
+        assert_ne!(classic.led_ring, classic.led);
+        let terminal = Theme::terminal();
+        assert_eq!(terminal.fader_slot, Color::Reset);
+        assert_eq!(terminal.led_ring, Color::Reset);
+        let mono = Theme::mono();
+        assert_eq!(mono.fader_slot, Color::White);
+        assert_ne!(mono.fader_slot, mono.muted);
+        assert_ne!(mono.fader_slot, mono.fader_led_bar);
+        assert_eq!(mono.led_ring, Color::White);
     }
 
     #[test]

@@ -534,14 +534,19 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         return;
     }
 
-    // Render LED inside the element if present
+    // Render LED inside the element if present: outline ring plus inset
+    // core (fader-led-contrast 2.1). The ring is field chrome and stays
+    // full-bright (also while paused); the core carries the value with a
+    // brightness floor so an off-LED still shows its field.
     if let Some(led_value) = cell.led_state {
+        let level = led_value.clamp(0.0, 1.0).max(0.25);
         let led_color = if let Some(rgb) = cell.led_rgb {
-            // Use the RGB colour from the patch
-            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+            // Use the RGB colour from the patch, hue preserved
+            let scale = |c: u8| ((c as f32 * level).round().clamp(0.0, 255.0)) as u8;
+            egui::Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
         } else {
             // White-only LED: brightness maps to white intensity
-            let intensity = (led_value.clamp(0.0, 1.0) * 255.0) as u8;
+            let intensity = (level * 255.0) as u8;
             egui::Color32::from_rgb(intensity, intensity, intensity)
         };
         // Draw LED indicator in the top-right corner of the cell
@@ -550,7 +555,14 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
             Pos2::new(rect.max.x - led_size - 2.0, rect.min.y + 2.0),
             Vec2::new(led_size, led_size),
         );
-        painter.rect_filled(led_rect, led_size * 0.3, led_color);
+        painter.rect_stroke(
+            led_rect,
+            led_size * 0.3,
+            egui::Stroke::new(1.0, rgb(crate::theme::active().led_ring)),
+            egui::StrokeKind::Inside,
+        );
+        let core = led_rect.shrink(led_size * 0.25);
+        painter.rect_filled(core, led_size * 0.2, led_color);
     }
 
     // Compact cell: state glyph always; the label shares the first row at the
@@ -611,15 +623,35 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
             Pos2::new(track.min.x, track.max.y - fill_h),
             egui::vec2(track_w, fill_h),
         );
-        painter.rect_filled(
-            lit,
-            0.0,
-            dim(rgb(crate::theme::active().fader_led_bar), paused),
-        );
+        // The lit strip is a state indicator: it stays full-bright while
+        // paused (fader-led-contrast 1.1). Only the unlit track dims.
+        painter.rect_filled(lit, 0.0, rgb(crate::theme::active().fader_led_bar));
     }
     if rect.height() > fill_h {
         let empty = Rect::from_min_size(track.min, egui::vec2(track_w, rect.height() - fill_h));
         painter.rect_filled(empty, 0.0, dim(rgb(crate::theme::active().muted), paused));
+    }
+    // Slot outline + value marker (fader-led-contrast 1.2): the outline
+    // reads as hardware at value 0, the marker like a physical cap. Both
+    // are state chrome and stay full-bright while paused.
+    painter.rect_stroke(
+        track,
+        0.0,
+        egui::Stroke::new(1.0, rgb(crate::theme::active().fader_slot)),
+        egui::StrokeKind::Inside,
+    );
+    if fill_h > 0.0 {
+        let marker_h = if track_w >= 6.0 { 2.0 } else { 1.0 };
+        let marker_y =
+            (track.max.y - fill_h - marker_h / 2.0).clamp(track.min.y, track.max.y - marker_h);
+        painter.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(track.min.x, marker_y),
+                egui::vec2(track_w, marker_h),
+            ),
+            0.0,
+            rgb(crate::theme::active().fader_led_bar),
+        );
     }
 
     let text_x = rect.min.x + track_w + 3.0;
@@ -1565,6 +1597,123 @@ mod tests {
             let painter = ui.painter();
             paint_cell(painter, cell, false, false);
         })
+    }
+
+    /// Headless `paint_cell` rect shapes as `(rect, fill, stroke width,
+    /// stroke color)` so contrast-chrome tests can tell filled rects from
+    /// stroked outlines (fader-led-contrast 3.1).
+    fn painted_cell_rects(
+        cell: &CellSpec,
+        paused: bool,
+    ) -> Vec<(Rect, egui::Color32, f32, egui::Color32)> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            let painter = ui.painter();
+            paint_cell(painter, cell, false, paused);
+        });
+        let mut rects = Vec::new();
+        for cs in &full_output.shapes {
+            if let egui::epaint::Shape::Rect(r) = &cs.shape {
+                rects.push((r.rect, r.fill, r.stroke.width, r.stroke.color));
+            }
+        }
+        full_output.textures_delta.clear();
+        rects
+    }
+
+    /// A fader cell for the contrast tests: track + strip + marker + label.
+    fn fader_spec(value: f32) -> CellSpec {
+        CellSpec {
+            rect: Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 100.0)),
+            glyph: String::new(),
+            label: "F".to_string(),
+            state_text: "50%".to_string(),
+            color: crate::theme::active().knob,
+            is_fader: true,
+            fader_value: value,
+            component_index: Some(0),
+            mark: PortMark::Cell,
+            highlighted: false,
+            shift_color: None,
+            modifier_wash: None,
+            dimmed: false,
+            kind: ComponentKind::Knob,
+            led_state: None,
+            led_rgb: None,
+        }
+    }
+
+    #[test]
+    fn fader_paints_slot_outline_and_value_marker() {
+        let rects = painted_cell_rects(&fader_spec(0.5), false);
+        // Slot outline: 1 px stroke around the track (left edge strip).
+        assert!(
+            rects.iter().any(|(r, _, w, c)| *w == 1.0
+                && *c == rgb(crate::theme::active().fader_slot)
+                && r.min.x == 10.0),
+            "slot outline stroke present: {rects:?}"
+        );
+        // Value marker: thin filled rect in the strip tone at fill height.
+        assert!(
+            rects.iter().any(|(r, fill, w, _)| *w == 0.0
+                && *fill == rgb(crate::theme::active().fader_led_bar)
+                && r.height() <= 2.0
+                && r.height() >= 1.0),
+            "value marker fill present: {rects:?}"
+        );
+    }
+
+    #[test]
+    fn fader_strip_stays_bright_while_paused() {
+        let strip = rgb(crate::theme::active().fader_led_bar);
+        for paused in [false, true] {
+            let rects = painted_cell_rects(&fader_spec(0.5), paused);
+            assert!(
+                rects
+                    .iter()
+                    .any(|(_, fill, w, _)| *w == 0.0 && *fill == strip),
+                "lit strip full-bright (paused={paused}): {rects:?}"
+            );
+        }
+        // The unlit track still dims while paused.
+        let dimmed_track = dim(rgb(crate::theme::active().muted), true);
+        let rects = painted_cell_rects(&fader_spec(0.5), true);
+        assert!(
+            rects.iter().any(|(_, fill, _, _)| *fill == dimmed_track),
+            "unlit track dimmed while paused: {rects:?}"
+        );
+    }
+
+    #[test]
+    fn led_paints_ring_with_brightness_floor() {
+        let mut cell = cell_spec(
+            Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 40.0)),
+            "B",
+        );
+        cell.led_state = Some(0.0);
+        let rects = painted_cell_rects(&cell, false);
+        // Ring: 1 px stroke in the ring tone.
+        assert!(
+            rects
+                .iter()
+                .any(|(_, _, w, c)| *w == 1.0 && *c == rgb(crate::theme::active().led_ring)),
+            "LED ring stroke present: {rects:?}"
+        );
+        // Core: filled inset at the 25 % floor (63/255), not black.
+        let floor = egui::Color32::from_rgb(63, 63, 63);
+        assert!(
+            rects
+                .iter()
+                .any(|(_, fill, w, _)| *w == 0.0 && *fill == floor),
+            "LED core at brightness floor: {rects:?}"
+        );
     }
 
     /// A compact full-presentation button cell for the label tests: the
