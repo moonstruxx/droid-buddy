@@ -327,6 +327,15 @@ The graph surface SHALL bind `c` to center the graph (pan so the drawn content's
 - **WHEN** the g-prefix is armed and the user presses a key other than the known chords
 - **THEN** the prefix is cleared and the key processes as a normal key event, so `g c` is the only way bare `c` toggles latency coloring while the chord list includes it
 
+### Requirement: Graph arrange key
+
+The graph pane SHALL bind `a` (no modifiers) to the arrange action: apply the active arrangement and refit; repeat presses cycle the arrangement algorithms.
+
+#### Scenario: Help documents the key
+
+- **WHEN** the user opens the graph help view
+- **THEN** the key table lists `a` with its arrange/cycle meaning.
+
 ### Requirement: Help modal keybinding
 
 The system SHALL open a floating help modal on `?` showing the keybindings for the current active view. The modal SHALL close on `Esc`, on `q` (without quitting the app), or on a mouse click outside the modal.
