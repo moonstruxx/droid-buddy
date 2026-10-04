@@ -292,6 +292,26 @@ fn optimizer_slot_focused(app: &App) -> bool {
     focused_view(app) == Some(ViewType::Optimizer)
 }
 
+/// Map a window-space pointer to an optimizer candidate row (change
+/// `optimizer-click-focus`): rows start 24px below the pane top, are 16px
+/// tall, and there are at most 12. Returns `None` outside a row. The `Rect`
+/// and pointer are both in (truncated) point space, so the math matches the
+/// `paint_optimizer` layout.
+fn optimizer_row_at(pane: &Rect, col: u16, row: u16, row_count: usize) -> Option<usize> {
+    if col < pane.x || col >= pane.x + pane.width {
+        return None;
+    }
+    if row <= pane.y || row >= pane.y + pane.height {
+        return None;
+    }
+    let local_y = row - pane.y;
+    if local_y < 24 {
+        return None; // header zone
+    }
+    let r = (local_y - 24) / 16;
+    (r < row_count.min(12) as u16).then_some(r as usize)
+}
+
 /// True when keys should act on the Physical pane: the focused pane shows the
 /// rack view.
 fn physical_slot_focused(app: &App) -> bool {
@@ -2000,6 +2020,33 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         // Pointer is over a different pane: drop a stale module-UI hover, then
         // fall through to the graph logic unchanged.
         app.hovered_component = None;
+    }
+    // Optimizer pane pointer routing (optimizer-click-focus): a click on a
+    // candidate row previews it (the Enter-equivalent) — the preview recolors
+    // the graph by latency change and focuses the affected node across views.
+    // Handled before the graph-camera gate so it works even with no graph open.
+    if let Some((px, py)) = frame.pointer {
+        let col = px.round().max(0.0) as u16;
+        let row = py.round().max(0.0) as u16;
+        let in_optimizer = app.pane_hit_rects.iter().find(|(id, rect)| {
+            app.layout.pane(*id).view == Some(ViewType::Optimizer) && rect_contains(rect, col, row)
+        });
+        if let Some((_, rect)) = in_optimizer {
+            let row_count = app
+                .optimizer
+                .as_ref()
+                .map(|s| s.candidates.len())
+                .unwrap_or(0);
+            if let Some(ri) = optimizer_row_at(rect, col, row, row_count) {
+                if let Some(state) = app.optimizer.as_mut() {
+                    state.cursor = ri;
+                }
+                if frame.primary_pressed {
+                    app.optimizer_preview(ri);
+                }
+            }
+            return;
+        }
     }
     let Some(mut camera) = app.graph_camera else {
         app.hovered_graph_node = None;
