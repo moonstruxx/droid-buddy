@@ -47,6 +47,30 @@ The system SHALL highlight `.ini` files as selectable patch files and display no
 - **WHEN** a directory contains both subdirectories and `.ini` files
 - **THEN** the subdirectories (including `..` when not at root) sort before the `.ini` files
 
+### Requirement: Scroll the entry list viewport
+
+The file picker list SHALL window itself to the height available for entries: the highlighted entry SHALL always be visible, the list SHALL scroll to follow the highlight when it moves past a viewport edge, and the mouse wheel over the picker SHALL scroll the list while the picker is open. The list SHALL window around the highlighted entry rather than always starting at the first row, and hit-testing SHALL stay index-correct for the visible window, so a hover or click resolves the entry actually drawn under the pointer.
+
+#### Scenario: Highlighted entry stays visible
+
+- **WHEN** the picker lists more entries than fit in the overlay and the user moves the highlight past the bottom of the visible window
+- **THEN** the list scrolls so the highlighted entry is drawn inside the viewport
+
+#### Scenario: Wheel scrolls the list
+
+- **WHEN** the picker is open and the user scrolls the mouse wheel down (or up)
+- **THEN** the highlight moves one entry down (or up), clamped at the last (or first) entry, and the window follows so the highlight stays visible
+
+#### Scenario: Wheel and drag do not reach the surface below
+
+- **WHEN** the picker is open and the user scrolls the wheel or drags the pointer
+- **THEN** the surface beneath the overlay does not zoom, pan, or select
+
+#### Scenario: Resting pointer does not fight keyboard navigation
+
+- **WHEN** the pointer is stationary over an entry and the user moves the highlight with `j`/`k` or the arrows
+- **THEN** the keyboard highlight is kept, and the hovered row is only applied once the pointer actually moves or clicks
+
 ### Requirement: Load selected patch
 The system SHALL load the selected `.ini` file as a patch when the user presses Enter on it, closing the file picker and rendering the patch view.
 
@@ -92,7 +116,7 @@ The system SHALL support an inline filter in the file picker that narrows the vi
 #### Scenario: Filter string building
 
 - **WHEN** filter latching is active and the user types characters
-- **THEN** each non-digit character is appended to the filter string and the visible entries are filtered to those whose file name contains the filter string per the case rule; the filter line updates to `filter: <string>`
+- **THEN** each non-digit character is appended to the filter string and the visible entries are filtered to those whose file name contains the filter string per the case rule; the filter line updates to `filter: <string>`. While latching is active this includes `f`/`F`, which append like any other printable character; the favourite toggle applies only when latching is off.
 
 #### Scenario: Case rule
 
@@ -113,6 +137,18 @@ The system SHALL support an inline filter in the file picker that narrows the vi
 
 - **WHEN** the user presses `Esc`, `q`, or successfully selects a patch while filter latching is active
 - **THEN** filter latching is cleared and the filter string is reset to empty before closing/navigating
+
+#### Scenario: Auto-latch on typing
+
+- **WHEN** the filter is not latched and the user types a printable character with no Ctrl/Alt modifier that is not one of the picker's bound commands (`j`, `k`, `q`, `f`/`F`, `0`–`9`, `Backspace`, `Enter`, `Esc`, arrows)
+- **THEN** filter latching turns on with an empty string first, the typed character is appended as the filter's first character, and the visible entries are filtered
+
+#### Scenario: `f` appends while latched, toggles only when off
+
+- **WHEN** filter latching is active and the user presses `f` (or `F`)
+- **THEN** the character is appended to the filter string like any other non-digit character and the favourites store is not modified
+- **WHEN** filter latching is off and the user presses `f` (or `F`) with no modifier
+- **THEN** the highlighted entry's favourite status is toggled and the picker filter is neither latched nor appended
 
 #### Scenario: Parent entry always visible
 

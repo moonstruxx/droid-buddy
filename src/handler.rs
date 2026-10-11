@@ -8,7 +8,10 @@ use winit::keyboard::NamedKey;
 #[cfg(test)]
 use crate::gui::{camera_zoom_about, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 #[cfg(test)]
-use crate::gui::{PhysicalFrame, PickerFrame, ViewerFrame};
+use crate::gui::{PhysicalFrame, ViewerFrame};
+// Production: the picker overlay's input report is applied from the paint layer
+// (`gui::paint_overlays`), not from the window frame.
+use crate::gui::PickerFrame;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyCode {
@@ -206,10 +209,28 @@ pub(crate) fn handle_viewer_frame(frame: ViewerFrame, app: &mut crate::app::App)
     }
 }
 
-#[cfg(test)]
+/// Apply the picker overlay's per-frame input report (window/egui path). The
+/// wheel steps the selection (the stateless viewport follows it, so scrolled-to
+/// rows stay visible), a hovered row moves the cursor only while the pointer is
+/// actually moving — a resting pointer must not fight keyboard navigation — and
+/// a click opens the row through the same `open_picker_entry` semantics as
+/// Enter.
 pub(crate) fn handle_picker_frame(frame: PickerFrame, app: &mut crate::app::App) {
+    if frame.scroll != 0 {
+        let len = app.picker_entries.len();
+        if len > 0 {
+            let current = app.picker_index.min(len - 1);
+            app.picker_index = if frame.scroll > 0 {
+                current.saturating_add(frame.scroll as usize).min(len - 1)
+            } else {
+                current.saturating_sub((-frame.scroll) as usize)
+            };
+        }
+    }
     if let Some(hovered) = frame.hovered {
-        app.picker_index = hovered;
+        if frame.pointer_moved || frame.clicked.is_some() {
+            app.picker_index = hovered.min(app.picker_entries.len().saturating_sub(1));
+        }
     }
     if let Some(clicked) = frame.clicked {
         if let Some(path) = app.picker_entries.get(clicked).cloned() {
@@ -2041,6 +2062,13 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     // Reap a finished background upload (same non-blocking poll as the key
     // path, so mouse-only frames still land the verdict).
     app.poll_upload();
+    // The picker overlay owns window input while it is open: its own frame
+    // report (wheel/hover/click) is applied by the painter
+    // (`gui::paint_overlays` -> `handle_picker_frame`), so the graph beneath
+    // must not also drag, select, or zoom.
+    if app.showing_picker {
+        return;
+    }
     // Module UI (Physical pane) pointer routing. The window frame is the only
     // live pointer path, and the module UI has no graph: handle hover/click on
     // the rack before the graph-camera gate so it works with no graph open.
@@ -2420,10 +2448,11 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        KeyCode::Char('f') | KeyCode::Char('F') => {
-            // Favourites toggle for the highlighted picker entry (file-picker-favourites 3.1).
-            // Directories toggle like files; the pinned section shows both. Only the
-            // parent sentinel is excluded.
+        KeyCode::Char(c @ ('f' | 'F')) => {
+            // Precedence (file-picker spec): while the filter is latched, `f`
+            // appends like any printable character; the favourite toggle only
+            // applies while the filter is off. `Ctrl+f` is the latch toggle in
+            // both states, and Alt-modified keys do nothing.
             if key.modifiers.ctrl {
                 // Ctrl+F toggles the latching filter (spec scenario: Toggle
                 // filter with Ctrl+f). Second press while active turns it off
@@ -2443,32 +2472,12 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             if key.modifiers.alt {
                 return false;
             }
-            if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
-                if is_picker_parent_entry(&selected_path) {
-                    return false;
-                }
-                let target_key = crate::favorites::FavoritesStore::canonical_key(&selected_path);
-                let now_favourited = app.favorites.toggle(&selected_path);
-                let _ = app.favorites.save();
-                let label = selected_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| selected_path.to_string_lossy().to_string());
-                app.status_message = if now_favourited {
-                    format!("Favourited: {label}")
-                } else {
-                    format!("Unfavourited: {label}")
-                };
-                app.refresh_picker_entries();
-                if let Some(pos) = app
-                    .picker_entries
-                    .iter()
-                    .position(|p| crate::favorites::FavoritesStore::canonical_key(p) == target_key)
-                {
-                    app.picker_index = pos;
-                } else if app.picker_index >= app.picker_entries.len() {
-                    app.picker_index = app.picker_entries.len().saturating_sub(1);
-                }
+            if app.picker_filter_active {
+                append_picker_filter_char(app, c);
+                return false;
+            }
+            if key.modifiers.is_none() {
+                toggle_picker_favourite(app);
             }
             false
         }
@@ -2494,23 +2503,33 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             app.refresh_picker_entries();
             false
         }
+        // `q` with the filter off is a no-op, and explicitly not an auto-latch:
+        // it is one of the picker's bound commands.
+        KeyCode::Char('q') => false,
         KeyCode::Backspace if app.picker_filter_active => {
             app.picker_filter.pop();
             app.refresh_picker_entries();
             false
         }
-        KeyCode::Char(c) if app.picker_filter_active && !c.is_ascii_digit() => {
-            // Digits never land here: 0-9 must keep routing to the
-            // favourite-slot fast-select above while the filter is latched.
-            let previous = app.picker_index;
-            app.picker_filter.push(c);
-            app.refresh_picker_entries();
-            // The narrowing list may have dropped the previously selected
-            // entry; refresh clamps to the tail, so re-anchor at the top
-            // instead of leaving a stale position.
-            if previous >= app.picker_entries.len() {
-                app.picker_index = 0;
+        KeyCode::Char(c) if app.picker_filter_active => {
+            // Digits never land here: 0-9 keep routing to the favourite-slot
+            // fast-select above while the filter is latched. Ctrl/Alt-modified
+            // characters are never appended.
+            if !key.modifiers.ctrl && !key.modifiers.alt {
+                append_picker_filter_char(app, c);
             }
+            false
+        }
+        KeyCode::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => {
+            // Auto-latch on typing: a printable character that is not one of
+            // the bound commands above (`j`/`k`/`q`/`f`/`F`, `0`-`9`,
+            // Backspace, Enter, Esc, arrows) starts filtering. The latch opens
+            // with an empty string so the typed character is the filter's
+            // first, matching the spec's "every non-digit char appends".
+            app.picker_filter_active = true;
+            app.picker_filter.clear();
+            app.status_message = String::from("Filter: on (type to filter)");
+            append_picker_filter_char(app, c);
             false
         }
         KeyCode::Enter => {
@@ -2534,6 +2553,54 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         _ => false,
+    }
+}
+
+/// Append one character to the latched picker filter and re-filter the
+/// listing. The narrowing list may have dropped the previously selected entry;
+/// refresh clamps to the tail, so re-anchor at the top instead of leaving a
+/// stale position.
+fn append_picker_filter_char(app: &mut App, c: char) {
+    let previous = app.picker_index;
+    app.picker_filter.push(c);
+    app.refresh_picker_entries();
+    if previous >= app.picker_entries.len() {
+        app.picker_index = 0;
+    }
+}
+
+/// Toggle the highlighted picker entry as a favourite (the filter-off `f`
+/// binding, file-picker-favourites 3.1). Directories toggle like files; the
+/// pinned section shows both. Only the parent sentinel is excluded. The
+/// highlight follows the re-sorted list afterwards.
+fn toggle_picker_favourite(app: &mut App) {
+    let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() else {
+        return;
+    };
+    if is_picker_parent_entry(&selected_path) {
+        return;
+    }
+    let target_key = crate::favorites::FavoritesStore::canonical_key(&selected_path);
+    let now_favourited = app.favorites.toggle(&selected_path);
+    let _ = app.favorites.save();
+    let label = selected_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| selected_path.to_string_lossy().to_string());
+    app.status_message = if now_favourited {
+        format!("Favourited: {label}")
+    } else {
+        format!("Unfavourited: {label}")
+    };
+    app.refresh_picker_entries();
+    if let Some(pos) = app
+        .picker_entries
+        .iter()
+        .position(|p| crate::favorites::FavoritesStore::canonical_key(p) == target_key)
+    {
+        app.picker_index = pos;
+    } else if app.picker_index >= app.picker_entries.len() {
+        app.picker_index = app.picker_entries.len().saturating_sub(1);
     }
 }
 
@@ -7903,7 +7970,8 @@ mod tests {
         handle_picker_frame(
             PickerFrame {
                 hovered: Some(1),
-                clicked: None,
+                pointer_moved: true,
+                ..PickerFrame::default()
             },
             &mut app,
         );
@@ -7912,12 +7980,180 @@ mod tests {
         let idx = picker_index_of(&app, "patch_a.ini");
         handle_picker_frame(
             PickerFrame {
-                hovered: None,
                 clicked: Some(idx),
+                ..PickerFrame::default()
             },
             &mut app,
         );
         assert!(!app.showing_picker);
         assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
+    }
+
+    #[test]
+    fn picker_frame_hover_ignored_while_pointer_is_still() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.picker_index = 0;
+        // A resting pointer must not fight keyboard navigation.
+        handle_picker_frame(
+            PickerFrame {
+                hovered: Some(2),
+                pointer_moved: false,
+                ..PickerFrame::default()
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.picker_index, 0,
+            "still pointer does not move the cursor"
+        );
+        // A moving pointer (or a click) applies the hover.
+        handle_picker_frame(
+            PickerFrame {
+                hovered: Some(2),
+                pointer_moved: true,
+                ..PickerFrame::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.picker_index, 2);
+    }
+
+    #[test]
+    fn picker_frame_scroll_moves_cursor_within_bounds() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        let len = app.picker_entries.len();
+        assert!(len >= 2, "fixture listing: {:?}", app.picker_entries);
+        handle_picker_frame(
+            PickerFrame {
+                scroll: 1,
+                ..PickerFrame::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.picker_index, 1, "wheel down steps the cursor down");
+        for _ in 0..len + 3 {
+            handle_picker_frame(
+                PickerFrame {
+                    scroll: 1,
+                    ..PickerFrame::default()
+                },
+                &mut app,
+            );
+        }
+        assert_eq!(app.picker_index, len - 1, "clamped at the bottom");
+        handle_picker_frame(
+            PickerFrame {
+                scroll: -1,
+                ..PickerFrame::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.picker_index, len - 2);
+        for _ in 0..len + 3 {
+            handle_picker_frame(
+                PickerFrame {
+                    scroll: -1,
+                    ..PickerFrame::default()
+                },
+                &mut app,
+            );
+        }
+        assert_eq!(app.picker_index, 0, "clamped at the top");
+    }
+
+    #[test]
+    fn picker_f_appends_while_filter_latched_without_touching_favourites() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        // Highlight a real entry so a favourite toggle would have a target.
+        app.picker_index = picker_index_of(&app, "patch_a.ini");
+        let before = app.favorites.favourites.clone();
+        // `fader`/`filter` contain f and F: both must append, never toggle.
+        type_picker_chars(&mut app, "fFf");
+        assert_eq!(app.picker_filter, "fFf");
+        assert!(app.picker_filter_active);
+        assert_eq!(
+            app.favorites.favourites, before,
+            "f while latched must not touch the favourites store"
+        );
+        assert!(app.showing_picker, "appending never closes the picker");
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_f_toggles_favourite_while_filter_is_off() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let mut app = picker_app_at("fixtures/picker_test");
+        assert!(!app.picker_filter_active);
+        app.picker_index = picker_index_of(&app, "patch_a.ini");
+        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        assert!(!app.picker_filter_active, "f must not latch while off");
+        assert!(app.picker_filter.is_empty(), "f is not appended while off");
+        assert_eq!(app.favorites.favourites.len(), 1, "f toggles the entry");
+        assert!(
+            app.status_message.starts_with("Favourited"),
+            "status: {:?}",
+            app.status_message
+        );
+
+        match orig_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn picker_typing_with_filter_off_auto_latches_and_narrows() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        assert!(!app.picker_filter_active);
+        handle_picker_event(key(KeyCode::Char('p')), &mut app);
+        assert!(app.picker_filter_active, "typing auto-latches the filter");
+        assert_eq!(app.picker_filter, "p");
+        let names: Vec<String> = app
+            .picker_entries
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.ends_with("patch_a.ini")),
+            "matching entry kept: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.ends_with("readme.txt")),
+            "non-matching file narrowed out: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.ends_with("subdir")),
+            "non-matching dir narrowed out: {names:?}"
+        );
+        // The `..` sentinel stays visible for up-navigation.
+        assert!(app.picker_entries.iter().any(|p| is_picker_parent_entry(p)));
+    }
+
+    #[test]
+    fn picker_q_with_filter_off_neither_latches_nor_appends() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        let before = app.picker_entries.clone();
+        let quit = handle_picker_event(key(KeyCode::Char('q')), &mut app);
+        assert!(!quit, "q in the picker never quits");
+        assert!(!app.picker_filter_active, "q must not auto-latch");
+        assert!(app.picker_filter.is_empty(), "q must not be appended");
+        assert_eq!(app.picker_entries, before, "listing unchanged");
+        assert!(app.showing_picker);
     }
 }

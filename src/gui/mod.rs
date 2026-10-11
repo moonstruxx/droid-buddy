@@ -680,7 +680,7 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
 /// diff, validation, select, picker, label edit, help. Called after the base
 /// paint. The optimizer is NOT here — it lives in its own small pane
 /// (`paint_panes`).
-fn paint_overlays(app: &App, ui: &mut egui::Ui) {
+fn paint_overlays(app: &mut App, ui: &mut egui::Ui) {
     let painter = ui.painter();
     // Center overlays on the window, not on `ui.max_rect()`: the base paint
     // allocates graph-node rects in scene coordinates, and `allocate_rect`
@@ -706,7 +706,11 @@ fn paint_overlays(app: &App, ui: &mut egui::Ui) {
     }
     if app.showing_picker {
         let spec = picker::picker_spec(app);
-        let _ = picker::paint_picker(painter, canvas, ctx, Some(&spec));
+        // The picker owns window input while it is open: its own frame report
+        // (wheel/hover/click) is applied here, and `handle_graph_window_frame`
+        // early-returns so the graph beneath never drags/selects/zooms.
+        let frame = picker::paint_picker(painter, canvas, ctx, Some(&spec));
+        crate::handler::handle_picker_frame(frame, app);
     }
     if let Some(spec) = overlays::label_edit_spec(app) {
         overlays::paint_label_editor(painter, canvas, ctx, Some(&spec));
@@ -867,19 +871,24 @@ impl EguiSurface {
         // mutations (hit-testing happens in handler.rs against the shared
         // camera). `e` requires no modifiers, mirroring the terminal `e`;
         // `x`/`p` have no modifier guard there either.
+        //
+        // While the picker overlay is open it owns the wheel and the pointer
+        // drag (its own frame report above), so the graph camera must not also
+        // pan or zoom behind the modal.
+        let picker_open = app.showing_picker;
         let window_frame = self.context.input(|i| {
             let pointer = i.pointer.latest_pos().map(|p| (p.x, p.y));
             // Task 3.2/3.3: middle-drag pans the shared camera, wheel zooms
             // about the cursor, and an empty-canvas left drag selects nodes.
             // `smooth_scroll_delta.y` is positive when scrolling down (zoom
             // out), so the negation makes wheel-up zoom in.
-            let pan_delta = if i.pointer.middle_down() {
+            let pan_delta = if !picker_open && i.pointer.middle_down() {
                 let d = i.pointer.delta();
                 (d.x, d.y)
             } else {
                 (0.0, 0.0)
             };
-            let zoom = if i.smooth_scroll_delta.y.abs() > f32::EPSILON {
+            let zoom = if !picker_open && i.smooth_scroll_delta.y.abs() > f32::EPSILON {
                 let factor = ((-i.smooth_scroll_delta.y) * graph::ZOOM_SENSITIVITY).exp();
                 let factor = factor.clamp(1.0 / graph::MAX_ZOOM_STEP, graph::MAX_ZOOM_STEP);
                 pointer.map(|p| (factor, p))
@@ -1087,7 +1096,7 @@ mod tests {
                 "base paint expanded max_rect: {:?}",
                 ui.max_rect()
             );
-            paint_overlays(&app, ui);
+            paint_overlays(&mut app, ui);
         });
         let t = crate::theme::active();
         let border = t.egui_color(t.validation_modal_border);
@@ -1859,7 +1868,7 @@ mod tests {
             ..Default::default()
         };
         let mut full_output = ctx.run_ui(raw, |ui| {
-            paint_overlays(&app, ui);
+            paint_overlays(&mut app, ui);
         });
         let labels: Vec<String> = full_output
             .shapes

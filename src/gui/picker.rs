@@ -20,6 +20,13 @@ use egui::{Context, Painter, Pos2, Rect, Vec2};
 use crate::app::{is_picker_parent_entry, App};
 use crate::theme::Color;
 
+/// Wheel motion below this many points is treated as no scroll (trackpad
+/// jitter), so a deliberate wheel notch moves the list exactly one row.
+const PICKER_WHEEL_EPSILON: f32 = 0.5;
+/// Dim factor applied to non-selectable (non-`.ini`) file rows, matching the
+/// selected-row background's alpha-dim idiom.
+const PICKER_DIM_FACTOR: f32 = 0.55;
+
 /// One picker row for painting: the display label (★-prefixed for favourites,
 /// `..` sentinel untouched), its favourite/dir flags, and whether it is the
 /// current cursor.
@@ -29,6 +36,11 @@ pub(crate) struct PickerRow {
     pub is_favourite: bool,
     pub is_dir: bool,
     pub is_parent: bool,
+    /// True for `.ini` files — the selectable patch files.
+    pub is_ini: bool,
+    /// True when the row may be acted on (`.ini` files, directories, and the
+    /// `..` sentinel). Non-selectable file rows render dimmed.
+    pub is_selectable: bool,
 }
 
 /// The fully-resolved picker payload for one frame. Pure data: the shell
@@ -55,6 +67,13 @@ pub(crate) struct PickerFrame {
     pub hovered: Option<usize>,
     /// Row index primary-clicked this frame.
     pub clicked: Option<usize>,
+    /// Wheel row steps this frame: `+1` per notch down, `-1` per notch up, `0`
+    /// when no (or negligible) wheel motion arrived.
+    pub scroll: i32,
+    /// Whether the pointer moved this frame (egui's smoothed pointer velocity).
+    /// The hover is only applied while it did, so a resting pointer cannot
+    /// fight keyboard navigation.
+    pub pointer_moved: bool,
 }
 
 /// Build the display label for a picker entry, mirroring
@@ -88,17 +107,25 @@ pub(super) fn favourited_label(
 /// and verified by its unit tests. Here we only verify that the spec preserves
 /// the fav-pinned ordering and that the painted output inserts the separator
 /// at the right place.
+///
+/// `is_ini`/`is_selectable` come from the entry's label (the leaf file name by
+/// construction) plus the dir/parent flags: directories and the `..` sentinel
+/// are selectable, and a non-directory row is selectable exactly when it names
+/// a `.ini` file (the same extension rule `App::is_entry_selectable` applies).
 pub(super) fn ordered_entries(
     favs: Vec<(String, bool)>,
     listing: Vec<(String, bool, bool)>,
 ) -> Vec<PickerRow> {
     let mut rows = Vec::new();
     for (label, is_dir) in favs {
+        let is_ini = !is_dir && label.ends_with(".ini");
         rows.push(PickerRow {
             label: favourited_label(&label, true, is_dir, false),
             is_favourite: true,
             is_dir,
             is_parent: false,
+            is_ini,
+            is_selectable: is_dir || is_ini,
         });
     }
     for (label, is_dir, is_parent) in listing {
@@ -108,17 +135,36 @@ pub(super) fn ordered_entries(
                 is_favourite: false,
                 is_dir: false,
                 is_parent: true,
+                is_ini: false,
+                is_selectable: true,
             });
         } else {
+            let is_ini = !is_dir && label.ends_with(".ini");
             rows.push(PickerRow {
                 label,
                 is_favourite: false,
                 is_dir,
                 is_parent: false,
+                is_ini,
+                is_selectable: is_dir || is_ini,
             });
         }
     }
     rows
+}
+
+/// First visible row of a `capacity`-row viewport over `total` rows with row
+/// `selected` highlighted: `0` while the selection already fits, otherwise
+/// scrolled just far enough to keep it on the bottom edge, clamped so the
+/// window never starts past `total - capacity` (the last full window).
+pub(super) fn scroll_window(selected: usize, total: usize, capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    if selected < capacity {
+        return 0;
+    }
+    (selected + 1 - capacity).min(total.saturating_sub(capacity))
 }
 
 /// Build the fully-resolved picker payload for one frame (port of
@@ -248,13 +294,21 @@ pub(super) fn paint_picker(
     } else {
         inner.min.y + 30.0
     };
-    let mut y = content_top;
     let row_h = 16.0;
+    // Viewport scrolling: the list windows around the highlighted row so the
+    // selection is always visible, however long the directory listing is. One
+    // row is reserved for the favourites separator so it never pushes the last
+    // entry out of the viewport.
+    let capacity_raw = ((inner.max.y - content_top) / row_h).floor().max(0.0) as usize;
+    let separator = spec.has_favourites && spec.fav_count < spec.rows.len();
+    let capacity = capacity_raw.saturating_sub(usize::from(separator)).max(1);
+    let first = scroll_window(spec.selected, spec.rows.len(), capacity);
+    let mut y = content_top;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
 
-    for (idx, row) in spec.rows.iter().enumerate() {
+    for (idx, row) in spec.rows.iter().enumerate().skip(first).take(capacity) {
         // Separator between favourites and listing.
-        if spec.has_favourites && idx == spec.fav_count && y + row_h <= inner.max.y {
+        if separator && idx == spec.fav_count && y + row_h <= inner.max.y {
             painter.text(
                 Pos2::new(inner.min.x + 4.0, y),
                 egui::Align2::LEFT_TOP,
@@ -295,7 +349,14 @@ pub(super) fn paint_picker(
         } else {
             t.text
         };
-        let fg = rgb(base_fg);
+        // Non-selectable file rows (anything that is not a `.ini` or a
+        // directory) dim so the selectable patch files stand out; the same
+        // alpha-dim idiom as the selected-row background, and favourite
+        // colours are left untouched.
+        let mut fg = rgb(base_fg);
+        if !row.is_favourite && !row.is_selectable {
+            fg = fg.gamma_multiply(PICKER_DIM_FACTOR);
+        }
         // Selected keeps bold emphasis; favourite colour stays.
         let font = egui::FontId::proportional(11.0);
         painter.text(
@@ -305,28 +366,57 @@ pub(super) fn paint_picker(
             font,
             fg,
         );
+        // The real row index is recorded, not the on-screen position, so hover
+        // and click hit-testing stay index-correct while the list is windowed.
         row_rects.push((idx, rect));
         y += row_h;
     }
 
-    ctx.input(|i| picker_frame(i, &row_rects, spec.rows.len()))
+    ctx.input(|i| picker_frame(i, &row_rects))
 }
 
-fn picker_frame(i: &egui::InputState, row_rects: &[(usize, Rect)], _total: usize) -> PickerFrame {
-    let mut frame = PickerFrame::default();
-    let Some(pos) = i.pointer.latest_pos() else {
-        return frame;
+/// Raw wheel delta (points) accumulated from this frame's events. egui 0.36
+/// exposes no `raw_scroll_delta` and `smooth_scroll_delta` is low-pass
+/// filtered over several frames — reading it would step the list once per
+/// frame for a single notch — so the frame's `MouseWheel` deltas are summed
+/// directly. Only the sign is used, so unit normalization is not needed.
+fn raw_wheel_delta(i: &egui::InputState) -> f32 {
+    i.raw
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+            _ => None,
+        })
+        .sum()
+}
+
+fn picker_frame(i: &egui::InputState, row_rects: &[(usize, Rect)]) -> PickerFrame {
+    let wheel = raw_wheel_delta(i);
+    let scroll = if wheel > PICKER_WHEEL_EPSILON {
+        1
+    } else if wheel < -PICKER_WHEEL_EPSILON {
+        -1
+    } else {
+        0
     };
-    for (idx, rect) in row_rects {
-        if rect.contains(pos) {
-            frame.hovered = Some(*idx);
-            break;
-        }
+    let hovered = i.pointer.latest_pos().and_then(|pos| {
+        row_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(pos))
+            .map(|(idx, _)| *idx)
+    });
+    let clicked = if i.pointer.primary_clicked() {
+        hovered
+    } else {
+        None
+    };
+    PickerFrame {
+        hovered,
+        clicked,
+        scroll,
+        pointer_moved: i.pointer.is_moving(),
     }
-    if i.pointer.primary_clicked() {
-        frame.clicked = frame.hovered;
-    }
-    frame
 }
 
 fn rgb(color: Color) -> egui::Color32 {
@@ -362,31 +452,203 @@ mod tests {
         }
     }
 
-    fn painted_labels(spec: &PickerSpec) -> Vec<String> {
+    /// Run one headless picker frame over a 400x300 canvas with `events`, and
+    /// return every painted text (label, colour) plus the frame report.
+    fn run_picker(
+        spec: &PickerSpec,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Color32)>, PickerFrame) {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 Pos2::ZERO,
                 Vec2::new(400.0, 300.0),
             )),
+            events,
             ..Default::default()
         };
+        let mut frame = PickerFrame::default();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_picker(ui.painter(), ui.max_rect().size(), ui.ctx(), Some(spec));
+            frame = paint_picker(ui.painter(), ui.max_rect().size(), ui.ctx(), Some(spec));
         });
-        let labels: Vec<String> = full_output
+        let texts: Vec<(String, egui::Color32)> = full_output
             .shapes
             .iter()
-            .filter_map(|cs| {
-                if let egui::epaint::Shape::Text(t) = &cs.shape {
-                    Some(t.galley.text().to_string())
-                } else {
-                    None
+            .filter_map(|cs| match &cs.shape {
+                egui::epaint::Shape::Text(t) => {
+                    Some((t.galley.text().to_string(), t.fallback_color))
                 }
+                _ => None,
             })
             .collect();
         full_output.textures_delta.clear();
-        labels
+        (texts, frame)
+    }
+
+    fn painted_labels(spec: &PickerSpec) -> Vec<String> {
+        run_picker(spec, Vec::new())
+            .0
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /// Drive three headless frames with the pointer walking towards `target`.
+    /// egui derives `is_moving()` from a smoothed velocity that needs three
+    /// samples, so a single frame always reports the pointer as still; the
+    /// last frame's report is returned.
+    fn run_pointer_walk(spec: &PickerSpec, target: Pos2) -> PickerFrame {
+        let ctx = egui::Context::default();
+        let mut frame = PickerFrame::default();
+        for step in 1..=3 {
+            let back = 20.0 * (3 - step) as f32;
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(400.0, 300.0),
+                )),
+                events: vec![egui::Event::PointerMoved(Pos2::new(
+                    target.x - back,
+                    target.y - back,
+                ))],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw_input, |ui| {
+                frame = paint_picker(ui.painter(), ui.max_rect().size(), ui.ctx(), Some(spec));
+            });
+            out.textures_delta.clear();
+        }
+        frame
+    }
+
+    /// A spec of `count` `.ini` rows with no favourites and no dir-subtitle
+    /// line (so the content top, and therefore the viewport capacity, is
+    /// deterministic: 7 rows at 400x300).
+    fn spec_with_many_rows(count: usize, selected: usize) -> PickerSpec {
+        let listing: Vec<(String, bool, bool)> = (0..count)
+            .map(|i| (format!("file_{i:02}.ini"), false, false))
+            .collect();
+        PickerSpec {
+            title: " File Picker ".into(),
+            picker_dir: String::new(),
+            filter: None,
+            rows: ordered_entries(Vec::new(), listing),
+            selected,
+            has_favourites: false,
+            fav_count: 0,
+        }
+    }
+
+    #[test]
+    fn scroll_window_keeps_the_selection_visible() {
+        // The selection fits: the window starts at the top.
+        assert_eq!(scroll_window(0, 100, 10), 0);
+        assert_eq!(scroll_window(9, 100, 10), 0);
+        // Past the bottom edge the window scrolls to keep it there.
+        assert_eq!(scroll_window(10, 100, 10), 1);
+        assert_eq!(scroll_window(99, 100, 10), 90);
+        // Clamped to the last full window when the selection is beyond the end.
+        assert_eq!(scroll_window(300, 40, 10), 30);
+        assert_eq!(scroll_window(1000, 12, 5), 7);
+        // Degenerate capacities.
+        assert_eq!(scroll_window(5, 100, 0), 0);
+        assert_eq!(scroll_window(5, 100, 1), 5);
+    }
+
+    #[test]
+    fn paint_picker_windows_the_list_hit_testing_real_indices() {
+        // 40 rows, row 30 selected, 7-row capacity: the window is rows 24..=30.
+        let frame = run_pointer_walk(&spec_with_many_rows(40, 30), Pos2::new(100.0, 199.0));
+        assert!(frame.hovered.is_some(), "hovered: {frame:?}");
+        assert_eq!(
+            frame.hovered,
+            Some(30),
+            "hit-testing must report the real row index, not the on-screen slot"
+        );
+        assert!(frame.pointer_moved, "pointer moved during the walk");
+        assert_eq!(frame.scroll, 0, "no wheel motion: {frame:?}");
+
+        let labels = painted_labels(&spec_with_many_rows(40, 30));
+        assert!(
+            !labels.iter().any(|l| l.contains("file_00.ini")),
+            "top rows are outside the window: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("file_24.ini")),
+            "first windowed row: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("▶ file_30.ini")),
+            "highlighted row stays visible: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("file_31.ini")),
+            "rows below the window are dropped: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn paint_picker_dims_non_ini_rows() {
+        // Pin the palette so the assertions hold regardless of other tests.
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+        let listing = vec![
+            ("sub".to_string(), true, false),
+            ("patch.ini".to_string(), false, false),
+            ("notes.txt".to_string(), false, false),
+        ];
+        let spec = PickerSpec {
+            title: " File Picker ".into(),
+            picker_dir: String::new(),
+            filter: None,
+            rows: ordered_entries(Vec::new(), listing),
+            selected: 0,
+            has_favourites: false,
+            fav_count: 0,
+        };
+        let (texts, _) = run_picker(&spec, Vec::new());
+        let colour = |needle: &str| {
+            texts
+                .iter()
+                .find(|(l, _)| l.contains(needle))
+                .unwrap_or_else(|| panic!("missing row {needle:?}: {texts:?}"))
+                .1
+        };
+        let ini = colour("patch.ini");
+        let dir = colour("sub");
+        let txt = colour("notes.txt");
+        assert_ne!(txt, ini, "the non-.ini row must be dimmed");
+        assert!(
+            txt.r() < ini.r() && txt.g() < ini.g() && txt.b() < ini.b(),
+            "dim must darken every channel: {txt:?} vs {ini:?}"
+        );
+        assert_eq!(dir, ini, "directories stay at normal brightness");
+        // The flags backing the dim are exposed on the row model too.
+        assert!(spec.rows[0].is_selectable && !spec.rows[0].is_ini);
+        assert!(spec.rows[1].is_ini && spec.rows[1].is_selectable);
+        assert!(!spec.rows[2].is_ini && !spec.rows[2].is_selectable);
+        crate::theme::set_test_theme(None);
+    }
+
+    #[test]
+    fn picker_frame_reports_wheel_scroll_direction() {
+        let spec = spec_with_many_rows(40, 20);
+        let wheel = |dy: f32| {
+            run_picker(
+                &spec,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, dy),
+                    modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
+                }],
+            )
+            .1
+            .scroll
+        };
+        assert_eq!(wheel(40.0), 1, "wheel down scrolls down");
+        assert_eq!(wheel(-40.0), -1, "wheel up scrolls up");
+        assert_eq!(wheel(0.2), 0, "tiny deltas are ignored");
+        assert_eq!(wheel(0.0), 0);
     }
 
     #[test]
@@ -483,14 +745,10 @@ mod tests {
     #[test]
     fn picker_frame_reports_hover_and_click() {
         let spec = spec_with_favourites();
-        let ctx = egui::Context::default();
-        // Seed pointer inside second row (y ~ 60).
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(400.0, 300.0),
-            )),
-            events: vec![
+        // Pointer inside the second row (y ~ 132).
+        let (_, frame) = run_picker(
+            &spec,
+            vec![
                 egui::Event::PointerMoved(Pos2::new(150.0, 132.0)),
                 egui::Event::PointerButton {
                     pos: Pos2::new(150.0, 132.0),
@@ -505,15 +763,15 @@ mod tests {
                     modifiers: egui::Modifiers::default(),
                 },
             ],
-            ..Default::default()
-        };
-        let mut frame = PickerFrame::default();
-        let mut full_output = ctx.run_ui(raw_input, |ui| {
-            frame = paint_picker(ui.painter(), ui.max_rect().size(), ui.ctx(), Some(&spec));
-        });
-        full_output.textures_delta.clear();
-        assert!(frame.hovered.is_some(), "hovered: {frame:?}");
+        );
+        assert_eq!(frame.hovered, Some(1), "hovered: {frame:?}");
         assert_eq!(frame.clicked, frame.hovered);
+        assert_eq!(frame.scroll, 0, "no wheel motion reported: {frame:?}");
+        // A single frame of motion is below egui's velocity threshold.
+        assert!(
+            !frame.pointer_moved,
+            "one frame is not yet 'moving': {frame:?}"
+        );
     }
 
     #[test]
