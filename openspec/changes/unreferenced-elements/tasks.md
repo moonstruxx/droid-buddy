@@ -13,7 +13,7 @@
 ## 3. Visual artifacts
 
 - [x] 3.1 Add `fixtures/unreferenced_elements.ini` (151 dimmed-None count proves suppression) (partial B32 with 5 buttons, bare E4) and a `src/regression.rs` story asserting no `Error` finding, dimmed `None`-index cells for the 27 unused buttons and 124 ring segments, no standalone LED cell on fold-rule controllers, and no unaddressed token in the published hit rects. Verify with `cargo test regression::`. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [2.2], touches: [fixtures/unreferenced_elements.ini, src/regression.rs] -->
-- [ ] 3.2 Re-bless `docs/assets/*.png` via `tools/screenshots/render.sh --bless` (the rotary-stack shot gains 124 dimmed ring segments; partial faces fill out) and verify the full check passes; confirm the dimmed elements read as quiet, not noisy. <!-- agent: layout-designer-engineer.build, depends_on: [2.2, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
+- [x] 3.2 Re-bless `docs/assets/*.png` (new shot; rings complete on re-bless; 6 byte-identical) via `tools/screenshots/render.sh --bless` (the rotary-stack shot gains 124 dimmed ring segments; partial faces fill out) and verify the full check passes; confirm the dimmed elements read as quiet, not noisy. <!-- agent: layout-designer-engineer.build, depends_on: [2.2, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
 
 ## 4. Verification and closeout
 
