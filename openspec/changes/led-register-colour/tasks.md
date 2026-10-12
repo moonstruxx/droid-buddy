@@ -18,5 +18,5 @@
 
 ## 4. Verification and closeout
 
-- [ ] 4.1 Run the full gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`) plus the screenshot render check; every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.1, 2.2, 3.1, 3.2], touches: [] -->
+- [x] 4.1 Run the full gate (fmt/clippy/1229+12+5 tests/release/screenshots green after lint-fix re-wave) (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`) plus the screenshot render check; every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.1, 2.2, 3.1, 3.2], touches: [] -->
 - [x] 4.2 Close bead `droid_tui-2n4` (closed; follow-up `droid_tui-3wz` filed) with the change reference and file the hue-table hardware-verification follow-up bead (`discovered-from`, type task, P3). Verify with `bd list --json`. <!-- agent: devops-engineer.fast, depends_on: [2.1, 2.2], touches: [] -->
