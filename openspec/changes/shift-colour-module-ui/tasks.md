@@ -2,7 +2,7 @@
 
 ## 1. Regression tests first (expected red)
 
-- [ ] 1.1 Add shift-tint tests in `src/gui/physical.rs`: with Group2 active, a member button's spec carries the Group2 token (glyph colour and `shift_color` slot, composed ring base); a non-member spec is unchanged; with no shift every spec is byte-identical to today; unaddressed cells stay dim/`None` under shift. Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
+- [x] 1.1 Add shift-tint tests (2 red member tests + 3 green guards) in `src/gui/physical.rs`: with Group2 active, a member button's spec carries the Group2 token (glyph colour and `shift_color` slot, composed ring base); a non-member spec is unchanged; with no shift every spec is byte-identical to today; unaddressed cells stay dim/`None` under shift. Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
 
 ## 2. Shift wiring
 
