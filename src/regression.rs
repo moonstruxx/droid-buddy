@@ -2237,3 +2237,86 @@ fn regression_unreferenced_elements_render_dimmed_without_hit_rects() {
         );
     }
 }
+
+// ── shift-colour-module-ui (task 3.1): shift tint regression ───────────────
+// Cross-layer proof over `fixtures/button_led_composition.ini`, whose shift
+// groups are auto-assigned by instance number (patch.rs): B2.x are Group2
+// (members under Group2), B1.x Group1 and P1.1 Group1 (non-members). With
+// Group2 active the member cells tint in the Group2 token, everything else
+// matches the no-shift baseline, unaddressed cells stay dim/None, and
+// no-shift is byte-identical to the pre-change shape.
+#[test]
+fn regression_shift_colour_module_ui_tint_and_noop() {
+    let path = "fixtures/button_led_composition.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    let token_of = |app: &App, index: Option<usize>| -> String {
+        index
+            .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.clone())
+            .unwrap_or_default()
+    };
+
+    // No-shift baseline.
+    let mut app = App::new();
+    assert!(app.load_patch(patch.clone()), "the fixture patch must load");
+    let base =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    assert!(
+        base.cells.iter().all(|c| c.shift_color.is_none()),
+        "no-shift baseline must carry no shift tint"
+    );
+
+    // Group2 active: member tints, non-members match the baseline.
+    app.active_shift = Some(ShiftGroup::Group2);
+    let shifted =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    assert_eq!(shifted.cells.len(), base.cells.len());
+    let theme = crate::theme::active();
+    let (mut members, mut plain, mut bare) = (0, 0, 0);
+    for (s, b) in shifted.cells.iter().zip(base.cells.iter()) {
+        let token = token_of(&app, s.component_index);
+        assert_eq!(token_of(&app, b.component_index), token);
+        match token.as_str() {
+            t if t.starts_with("B2.") => {
+                members += 1;
+                assert_eq!(s.shift_color, Some(theme.shift2), "member must tint Group2");
+                assert_eq!(
+                    s.shift_color.unwrap_or(s.color),
+                    theme.shift2,
+                    "member rendered colour follows the group token"
+                );
+            }
+            _ if s.component_index.is_none() => {
+                bare += 1;
+                assert_eq!(s.shift_color, None, "unaddressed cell never tints");
+                assert!(s.dimmed, "unaddressed cell stays dim");
+                assert_eq!(s, b, "unaddressed cell unchanged");
+            }
+            _ => {
+                plain += 1;
+                assert_eq!(
+                    s, b,
+                    "non-member {token} renders exactly as with no shift active"
+                );
+            }
+        }
+    }
+
+    assert!(
+        members > 0,
+        "the story must exercise at least one member cell"
+    );
+    assert!(
+        plain > 0,
+        "the story must exercise at least one non-member cell"
+    );
+    // `bare` is intentionally not asserted: the fixture need not leave an
+    // unaddressed cell, but any such cell must stay dim/None (arm above).
+    let _ = bare;
+
+    // No shift is a no-op: byte-identical specs.
+    app.active_shift = None;
+    let again =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    assert_eq!(again.cells, base.cells, "no shift must be byte-identical");
+}

@@ -342,7 +342,10 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             } else {
                 None
             };
-            let (glyph, state_text, color) = cell_visuals(comp, false, false);
+            let is_shift_active = app
+                .active_shift
+                .is_some_and(|g| comp.shift_group == Some(g));
+            let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
             // The folded LED (if any) drives the inner fill.
             let folded = shape
                 .is_some()
@@ -422,6 +425,28 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             )
         };
 
+        // Shift slot mirrors the `cell_visuals` group→token match; unaddressed
+        // cells (`ci >= len`) are always `None` (D2).
+        let shift_color = if ci < module.components.len() {
+            let comp = &module.components[ci];
+            if app
+                .active_shift
+                .is_some_and(|g| comp.shift_group == Some(g))
+            {
+                let t = crate::theme::active();
+                match comp.shift_group {
+                    Some(ShiftGroup::Group1) => Some(t.shift1),
+                    Some(ShiftGroup::Group2) => Some(t.shift2),
+                    Some(ShiftGroup::Group3) => Some(t.shift3),
+                    Some(ShiftGroup::Group4) => Some(t.shift4),
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let is_dimmed = label.is_empty(); // unused elements are dimmed
         cells.push(CellSpec {
             rect,
@@ -438,7 +463,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                     || selected_circuit_cells.contains(&i)
                     || app.selected_component.as_deref() == Some(module.components[ci].id.as_str())
             }),
-            shift_color: None,
+            shift_color,
             modifier_wash: None,
             dimmed: is_dimmed,
             kind,
@@ -640,6 +665,8 @@ pub(crate) fn performance_overlay(
         // carries the state), so the callout resolves the live state text
         // from the component instead of going blank.
         let state_text = if cell.state_text.is_empty() {
+            // Label helper is detached from shift context (state text only,
+            // colour-independent); keep `false` per D1.
             cell_visuals(comp, false, false).1
         } else {
             cell.state_text.clone()
@@ -3193,5 +3220,144 @@ mod tests {
             baseline,
             "bare P2B8 spec cell count stable"
         );
+    }
+
+    fn app_with_shift(path: &str, group: crate::patch::ShiftGroup, member_id: &str) -> App {
+        let mut app = app_with_patch(path);
+        let patch = app.patch.as_mut().expect("patch");
+        let comp = patch
+            .hw_components
+            .iter_mut()
+            .find(|c| c.id == member_id)
+            .expect("member token in patch");
+        comp.shift_group = Some(group);
+        app.active_shift = Some(group);
+        app
+    }
+
+    #[test]
+    fn shift_member_composed_ring_base_and_slot_tint_group2() {
+        use crate::patch::ShiftGroup;
+        let app = app_with_shift("fixtures/own_buttons.ini", ShiftGroup::Group2, "B1.1");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let idx = patch
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("fixture declares B1.1");
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .expect("B1.1 cell")
+            .clone();
+        let t = crate::theme::active();
+        assert_eq!(
+            cell.shift_color,
+            Some(t.shift2),
+            "member slot carries Group2"
+        );
+        let shapes = painted_shapes(&cell, false);
+        let tint = rgb(t.shift2);
+        let ring_hit = shapes.iter().any(|s| match s {
+            egui::epaint::Shape::Circle(c) => {
+                let expected = cell.rect.center();
+                (c.center.x - expected.x).abs() < 0.5
+                    && (c.center.y - expected.y).abs() < 0.5
+                    && c.radius * 2.0 >= 0.8 * cell.rect.width().min(cell.rect.height())
+                    && c.stroke.color == tint
+            }
+            _ => false,
+        });
+        assert!(ring_hit, "composed ring stroke tints Group2: {shapes:?}");
+    }
+
+    #[test]
+    fn shift_member_glyph_colour_carries_group2_token() {
+        use crate::patch::ShiftGroup;
+        let ini = "[e4]\n\n[button]\n    button = B1.1\n    led = L1.1\n    output = _A\n\n[copy]\n    input = _A\n    output = O1\n";
+        let mut app = app_from_ini(ini);
+        app.patch
+            .as_mut()
+            .expect("patch")
+            .hw_components
+            .iter_mut()
+            .find(|c| c.id == "B1.1")
+            .expect("patch declares B1.1")
+            .shift_group = Some(ShiftGroup::Group2);
+        app.active_shift = Some(ShiftGroup::Group2);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let idx = patch
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("patch declares B1.1");
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .expect("B1.1 cell");
+        assert!(cell.shape.is_none(), "E4 button keeps the glyph face");
+        let t = crate::theme::active();
+        assert_eq!(cell.color, t.shift2, "member glyph colour is Group2 token");
+        assert_eq!(cell.shift_color, Some(t.shift2));
+    }
+
+    #[test]
+    fn shift_non_member_spec_unchanged() {
+        use crate::patch::ShiftGroup;
+        let app = app_with_shift("fixtures/own_buttons.ini", ShiftGroup::Group2, "B1.1");
+        let shifted = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let plain = app_with_patch("fixtures/own_buttons.ini");
+        let baseline = physical_spec(&plain, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let other_idx = patch
+            .hw_components
+            .iter()
+            .position(|c| c.id != "B1.1" && c.kind == ComponentKind::Button)
+            .expect("fixture has a second button");
+        let cell = shifted
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(other_idx))
+            .expect("non-member cell");
+        let base = baseline
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(other_idx))
+            .expect("baseline cell");
+        assert_eq!(cell.color, base.color, "non-member colour unchanged");
+        assert_eq!(cell.shift_color, None, "non-member slot stays None");
+        assert_eq!(cell.glyph, base.glyph);
+    }
+
+    #[test]
+    fn shift_no_shift_spec_byte_identical() {
+        let a = app_with_patch("fixtures/own_buttons.ini");
+        let b = app_with_patch("fixtures/own_buttons.ini");
+        let sa = physical_spec(&a, egui::Rect::ZERO).expect("spec");
+        let sb = physical_spec(&b, egui::Rect::ZERO).expect("spec");
+        assert_eq!(sa.cells, sb.cells, "no-shift specs byte-identical");
+        assert!(sa.cells.iter().all(|c| c.shift_color.is_none()));
+    }
+
+    #[test]
+    fn shift_unaddressed_cells_stay_dim_none() {
+        use crate::patch::ShiftGroup;
+        let ini = "[notebuttons]\n    button1 = B2.1\n    button2 = B2.2\n    led1 = L2.1\n    led2 = L2.2\n";
+        let mut app = app_from_ini(ini);
+        app.active_shift = Some(ShiftGroup::Group2);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let dimmed_none: Vec<&CellSpec> = spec
+            .cells
+            .iter()
+            .filter(|c| c.component_index.is_none() && c.dimmed)
+            .collect();
+        assert!(!dimmed_none.is_empty(), "partial B32 emits dimmed cells");
+        for c in dimmed_none {
+            assert_eq!(c.shift_color, None, "unaddressed cell never tints");
+        }
     }
 }

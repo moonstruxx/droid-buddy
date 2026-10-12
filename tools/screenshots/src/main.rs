@@ -143,6 +143,15 @@ fn setup_faceplate_stack(app: &mut App) {
     app.physical_zoom = 2.0;
 }
 
+/// The shift-tint arrangement (change `shift-colour-module-ui`, task 3.2):
+/// the 2x faceplate-stack zoom plus an active Group2, so member faces tint
+/// in the group token. A plain field write before paint — deterministic, no
+/// input — and the double-render check enforces it.
+fn setup_shift_colour(app: &mut App) {
+    setup_faceplate_stack(app);
+    app.active_shift = Some(patch::ShiftGroup::Group2);
+}
+
 fn setup_graph(app: &mut App) {
     // Two-big-pane arrangement (module UI left, graph right): close the
     // startup source viewer first — while a small-class view is open the
@@ -231,6 +240,16 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/unreferenced_elements.ini",
             setup: setup_faceplate_stack,
         },
+        // Shift-tint check (change `shift-colour-module-ui`, task 3.2):
+        // the composition fixture's B2.x buttons are Group2 members
+        // (shift groups assign by controller number), so with Group2 active
+        // their composed faces tint in the group token while Group1/Group3
+        // faces and dimmed unaddressed cells render exactly as unshifted.
+        Shot {
+            file: "shift-colour.png",
+            fixture: "fixtures/button_led_composition.ini",
+            setup: setup_shift_colour,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -306,7 +325,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -357,6 +376,7 @@ fn main() {
         "button-led-composition",
         "led-register-colour",
         "unreferenced-elements",
+        "shift-colour",
         "large-startup",
         "large-graph",
     ];
