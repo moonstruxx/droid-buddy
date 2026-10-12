@@ -18,7 +18,7 @@ The system SHALL display a file picker overlay when the user presses the `l` key
 - **THEN** the file picker overlay appears, allowing the user to load a different patch
 
 ### Requirement: Navigate directories
-The system SHALL allow the user to navigate up and down the directory tree using keyboard navigation (j/k or arrow keys) and select directories with Enter. When the picker is not at the filesystem root, the parent-directory entry SHALL render as the first entry labeled `..`; pressing Enter on it SHALL navigate to the parent directory without closing the picker. At the filesystem root, no `..` entry SHALL appear.
+The system SHALL allow the user to navigate up and down the directory tree using keyboard navigation (j/k or arrow keys) and select directories with Enter. When the picker is not at the filesystem root, the parent-directory entry SHALL render as the first entry labeled `..`; pressing Enter on it SHALL navigate to the parent directory without closing the picker. At the filesystem root, no `..` entry SHALL appear. A directory change SHALL reset the inline filter (see **Filter picker entries**): the latching is cleared and the filter string is emptied before the new directory's listing is shown, whichever way the directory was changed.
 
 #### Scenario: Navigate into subdirectory
 - **WHEN** the user highlights a directory and presses Enter
@@ -137,6 +137,11 @@ The system SHALL support an inline filter in the file picker that narrows the vi
 
 - **WHEN** the user presses `Esc`, `q`, or successfully selects a patch while filter latching is active
 - **THEN** filter latching is cleared and the filter string is reset to empty before closing/navigating
+
+#### Scenario: Directory change resets the filter
+
+- **WHEN** filter latching is active and the user changes the picker's directory — Enter on a highlighted directory, Enter on the `..` parent entry, a mouse click on a directory row, or a digit fast-select of a favourited directory
+- **THEN** filter latching is cleared and the filter string is reset to empty, the highlight returns to the first entry of the new directory, and the new listing is shown unfiltered
 
 #### Scenario: Auto-latch on typing
 

@@ -1256,6 +1256,24 @@ impl App {
         self.picker_filter.clear();
     }
 
+    /// Move the picker to `dir` and reset its listing state for the new
+    /// directory: the latching filter is cleared (a string typed against the
+    /// old listing describes nothing in the new one), the highlight returns to
+    /// the first entry, and the listing is refreshed. Every directory-change
+    /// path routes through here so none can leave a stale filter behind. A
+    /// filter that was latched reports `Filter: off (directory changed)`, so
+    /// the reset is not silent when it discards an active string.
+    pub fn enter_picker_dir(&mut self, dir: PathBuf) {
+        let had_filter = self.picker_filter_active || !self.picker_filter.is_empty();
+        self.picker_dir = dir;
+        self.reset_picker_filter();
+        if had_filter {
+            self.status_message = String::from("Filter: off (directory changed)");
+        }
+        self.picker_index = 0;
+        self.refresh_picker_entries();
+    }
+
     pub fn refresh_picker_entries(&mut self) {
         self.picker_entries.clear();
         // Pinned favourites section at the top. Favourited `.ini` files and
