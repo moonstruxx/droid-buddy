@@ -643,6 +643,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 if app.picker_dir.as_os_str().is_empty() {
                     app.picker_dir = std::env::current_dir().unwrap_or_default();
                 }
+                // Re-opening is not a directory change, but a filter latch must
+                // never outlive a close.
+                app.reset_picker_filter();
                 app.picker_index = 0;
                 app.refresh_picker_entries();
                 app.prefix = None;
@@ -1390,11 +1393,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         }
         KeyCode::Char('l') => {
             // Opens the picker whether or not a patch is already loaded,
-            // so a loaded patch can be swapped for a different one.
+            // so a loaded patch can be swapped for a different one. The dir
+            // enters through `enter_picker_dir` so the listing starts unfiltered.
             app.showing_picker = true;
-            app.picker_dir = std::env::current_dir().unwrap_or_default();
-            app.picker_index = 0;
-            app.refresh_picker_entries();
+            app.enter_picker_dir(std::env::current_dir().unwrap_or_default());
             false
         }
         KeyCode::Char('p') => {
@@ -2541,10 +2543,8 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                 // Handled before the metadata `is_dir` branch because a bare
                 // ".." path resolves against the process cwd, not picker_dir.
                 if is_picker_parent_entry(&selected_path) {
-                    if let Some(parent) = app.picker_dir.parent() {
-                        app.picker_dir = parent.to_path_buf();
-                        app.picker_index = 0;
-                        app.refresh_picker_entries();
+                    if let Some(parent) = app.picker_dir.parent().map(|p| p.to_path_buf()) {
+                        app.enter_picker_dir(parent);
                     }
                     return false;
                 }
@@ -2611,9 +2611,10 @@ fn toggle_picker_favourite(app: &mut App) {
 fn open_picker_entry(app: &mut App, path: PathBuf) {
     let is_dir = path.metadata().is_ok_and(|m| m.is_dir());
     if is_dir {
-        app.picker_dir = path;
-        app.picker_index = 0;
-        app.refresh_picker_entries();
+        // Directory change: `enter_picker_dir` moves the listing and resets
+        // the filter, since a filter string typed against the old listing
+        // describes nothing in the new one.
+        app.enter_picker_dir(path);
         return;
     }
     if app.diff_picker_active {
@@ -4297,6 +4298,119 @@ mod tests {
         // root listing, so check for a root entry that was filtered away.
         assert!(names.iter().any(|n| n.ends_with("patch_a.ini")));
         assert!(names.iter().any(|n| n.ends_with("subdir")));
+    }
+
+    /// Directory changes reset the latching filter: a string typed against the
+    /// old listing describes nothing in the new one.
+    #[test]
+    fn picker_enter_into_subdirectory_resets_filter() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "sub");
+        assert!(app.picker_filter_active);
+        app.picker_index = picker_index_of(&app, "subdir");
+        handle_picker_event(key(KeyCode::Enter), &mut app);
+
+        assert!(
+            app.showing_picker,
+            "directory navigation keeps the picker open"
+        );
+        assert_eq!(
+            app.picker_dir,
+            std::path::PathBuf::from("fixtures/picker_test/subdir")
+        );
+        assert!(!app.picker_filter_active, "navigating in clears the latch");
+        assert!(app.picker_filter.is_empty());
+        assert_eq!(app.status_message, "Filter: off (directory changed)");
+        assert_eq!(app.picker_index, 0, "highlight re-anchors at the top");
+        let names: Vec<String> = app
+            .picker_entries
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.ends_with("patch_b.ini")),
+            "the new listing is unfiltered: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n.ends_with("patch_a.ini")));
+    }
+
+    #[test]
+    fn picker_parent_entry_resets_filter() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "patch");
+        assert!(app.picker_filter_active);
+        app.picker_index = app
+            .picker_entries
+            .iter()
+            .position(|p| is_picker_parent_entry(p))
+            .expect("parent entry present below the filesystem root");
+        handle_picker_event(key(KeyCode::Enter), &mut app);
+
+        assert_eq!(app.picker_dir, std::path::PathBuf::from("fixtures"));
+        assert!(!app.picker_filter_active, "navigating up clears the latch");
+        assert!(app.picker_filter.is_empty());
+        assert_eq!(app.picker_index, 0);
+        assert!(
+            app.picker_entries
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == "picker_test")),
+            "the parent listing is unfiltered"
+        );
+    }
+
+    #[test]
+    fn picker_digit_favourite_directory_resets_filter() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.favorites = crate::favorites::FavoritesStore {
+            favourites: vec![String::from("fixtures/picker_test/subdir")],
+        };
+        app.refresh_picker_entries();
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "patch");
+        assert!(app.picker_filter_active);
+        // Slot 0 fast-selects the favourited directory; the digit never lands in
+        // the filter string and the directory change resets it.
+        handle_picker_event(key(KeyCode::Char('0')), &mut app);
+
+        assert!(
+            app.showing_picker,
+            "a favourite directory navigates in place"
+        );
+        assert_eq!(
+            app.picker_dir,
+            std::path::PathBuf::from("fixtures/picker_test/subdir")
+        );
+        assert!(!app.picker_filter_active);
+        assert!(app.picker_filter.is_empty());
+    }
+
+    #[test]
+    fn picker_frame_click_directory_resets_filter() {
+        let mut app = picker_app_at("fixtures/picker_test");
+        handle_picker_event(ctrl_f_key(), &mut app);
+        type_picker_chars(&mut app, "sub");
+        assert!(app.picker_filter_active);
+        let idx = picker_index_of(&app, "subdir");
+        handle_picker_frame(
+            PickerFrame {
+                clicked: Some(idx),
+                ..PickerFrame::default()
+            },
+            &mut app,
+        );
+
+        assert!(app.showing_picker);
+        assert_eq!(
+            app.picker_dir,
+            std::path::PathBuf::from("fixtures/picker_test/subdir")
+        );
+        assert!(
+            !app.picker_filter_active,
+            "a mouse click into a directory clears the latch"
+        );
+        assert!(app.picker_filter.is_empty());
     }
 
     #[test]
