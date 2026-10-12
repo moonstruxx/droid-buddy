@@ -2,9 +2,9 @@
 
 ## 1. Regression tests first (expected red)
 
-- [ ] 1.1 Add resolver regression tests in `src/patch.rs`: a literal `ledcolor`/`ledvalue` pair on a motorfader section resolves to the mapped rgb at the given value; a constant expression folds; a single-hop cable ref to a constant producer output resolves; a dynamic cable ref yields `None`; an LED with no source keeps `Off`; B32 drops a resolved colour (brightness only). Verify they FAIL with no production change. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/patch.rs] -->
-- [ ] 1.2 Add toggle-preservation tests in `src/handler.rs`: toggling a `Led { value, rgb }` component alternates value 0.0/1.0 with `rgb` intact across `Enter`, `Space`, and `Ctrl+Enter`; plain `Off`/`On` LEDs keep the old arms. Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/handler.rs] -->
-- [ ] 1.3 Add a painter test in `src/gui/physical.rs`: a composed cell whose folded LED carries `Led { value: 1.0, rgb: Some([r,g,b]) }` emits the fill in that rgb (not white). Verify it FAILS (fill renders white today). <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
+- [x] 1.1 Add resolver regression tests in `src/patch.rs`: a literal `ledcolor`/`ledvalue` pair on a motorfader section resolves to the mapped rgb at the given value; a constant expression folds; a single-hop cable ref to a constant producer output resolves; a dynamic cable ref yields `None`; an LED with no source keeps `Off`; B32 drops a resolved colour (brightness only). Verify they FAIL with no production change. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/patch.rs] -->
+- [x] 1.2 Add toggle-preservation tests in `src/handler.rs`: toggling a `Led { value, rgb }` component alternates value 0.0/1.0 with `rgb` intact across `Enter`, `Space`, and `Ctrl+Enter`; plain `Off`/`On` LEDs keep the old arms. Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/handler.rs] -->
+- [x] 1.3 Add a painter test in `src/gui/physical.rs`: a composed cell whose folded LED carries `Led { value: 1.0, rgb: Some([r,g,b]) }` emits the fill in that rgb (not white). Verify it FAILS (fill renders white today). <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
 
 ## 2. Resolution and preservation
 
