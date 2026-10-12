@@ -15,5 +15,5 @@
 
 ## 4. Verification and closeout
 
-- [ ] 4.1 Run the full gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`) plus the screenshot render check; every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.1, 3.1, 3.2], touches: [] -->
+- [x] 4.1 Run the full gate (fmt/clippy/1246+12+5 tests/release/screenshots green) (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`) plus the screenshot render check; every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.1, 3.1, 3.2], touches: [] -->
 - [x] 4.2 Close bead `droid_tui-cnb` (closed with change reference) with the change reference. Verify with `bd list --json`. <!-- agent: devops-engineer.fast, depends_on: [2.1], touches: [] -->
