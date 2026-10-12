@@ -11,8 +11,8 @@
 ## 3. Visual artifacts
 
 - [x] 3.1 Add `fixtures/faceplate_rotary_stack.ini` covering all six corrected controllers (bare `[p2b8]`, `[p10]`, `[s10]`, `[e4]`, explicit p4b2 entries, db8e button and encoder entries) plus a `src/regression.rs` story that loads it, asserts no `Error`-severity validation finding, and asserts a faceplate for all six controllers with their declared tokens attributable — presence and attribution only, never positions (task 1.1 owns those) <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [], touches: [fixtures/faceplate_rotary_stack.ini, src/regression.rs] -->
-- [ ] 3.2 Add the `faceplate-rotary-stack` shot to `tools/screenshots` (shot table + README row), re-bless `docs/assets/*.png`, and verify `render.sh` check-passes and that the P2B8 pot stack, the E4 encoder stack with its rings, and the DB8E encoder read correctly on the faceplate <!-- agent: layout-designer-engineer.build, depends_on: [2.1, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
+- [x] 3.2 Add the `faceplate-rotary-stack` shot to `tools/screenshots` (shot table + README row), re-bless `docs/assets/*.png`, and verify `render.sh` check-passes and that the P2B8 pot stack, the E4 encoder stack with its rings, and the DB8E encoder read correctly on the faceplate <!-- agent: layout-designer-engineer.build, depends_on: [2.1, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
 
 ## 4. Verification
 
-- [ ] 4.1 Run the full gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`), `python3 tools/acquire_geometry.py --check`, and `tools/screenshots/render.sh`, and verify every one exits 0 <!-- agent: horst-engineer.fast, depends_on: [2.1, 3.2], touches: [] -->
+- [x] 4.1 Run the full gate (`cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test`, `cargo build --release --locked`), `python3 tools/acquire_geometry.py --check`, and `tools/screenshots/render.sh`, and verify every one exits 0 <!-- agent: horst-engineer.fast, depends_on: [2.1, 3.2], touches: [] -->
