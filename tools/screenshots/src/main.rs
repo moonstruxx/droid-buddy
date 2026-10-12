@@ -131,6 +131,18 @@ struct Shot {
 
 fn setup_startup(_app: &mut App) {}
 
+/// The startup arrangement, zoomed so the module UI's rack fills its pane.
+/// The six-controller faceplate fixture draws a ~207 mm rack — wider than any
+/// other shot's — so at the default 1:1 zoom its faceplates are only ~38 px
+/// wide and the element stacks are hard to judge. 2x is the largest integer
+/// zoom that still keeps master plus all six controllers inside the
+/// half-width pane at 1280x800 (the drawn rack spans 620 x 766 px there);
+/// `setup_startup` runs first so the arrangement stays the startup one.
+fn setup_faceplate_stack(app: &mut App) {
+    setup_startup(app);
+    app.physical_zoom = 2.0;
+}
+
 fn setup_graph(app: &mut App) {
     // Two-big-pane arrangement (module UI left, graph right): close the
     // startup source viewer first — while a small-class view is open the
@@ -178,6 +190,17 @@ fn shots() -> Vec<Shot> {
             file: "optimizer.png",
             fixture: "fixtures/optimizer_latency.ini",
             setup: setup_optimizer,
+        },
+        // Faceplate fidelity check (change `controller-geometry-fidelity`,
+        // task 3.2): one patch declaring all six corrected controllers, so the
+        // P2B8/P4B2/P10 pot stacks, the S10 rotary stack, the E4 encoder stack
+        // with its 32-LED rings, and the DB8E encoder below its buttons all
+        // render in one startup frame. The startup band's half-width left pane
+        // holds the whole ~206 mm rack at the default zoom.
+        Shot {
+            file: "faceplate-rotary-stack.png",
+            fixture: "fixtures/faceplate_rotary_stack.ini",
+            setup: setup_faceplate_stack,
         },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
@@ -253,7 +276,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
-    eprintln!("  shots: module-ui, graph, source-viewer, optimizer, large-startup, large-graph");
+    eprintln!(
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, large-startup, large-graph"
+    );
     std::process::exit(2);
 }
 
@@ -299,6 +324,7 @@ fn main() {
         "graph",
         "source-viewer",
         "optimizer",
+        "faceplate-rotary-stack",
         "large-startup",
         "large-graph",
     ];

@@ -11,10 +11,27 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `graph.png` | `fixtures/own_buttons.ini` | + signal-flow graph (right big) |
 | `source-viewer.png` | `fixtures/source_navigation.ini` | source viewer maximized |
 | `optimizer.png` | `fixtures/optimizer_latency.ini` | + latency optimizer (small) |
+| `faceplate-rotary-stack.png` | `fixtures/faceplate_rotary_stack.ini` | startup: module UI (left big) + source viewer (small); all six corrected faceplates (P2B8, P4B2, P10, S10, E4, DB8E) in one frame |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
 never saved.
+
+`faceplate-rotary-stack.png` is the visual check for change
+`controller-geometry-fidelity` (task 3.2): its fixture declares all six
+controllers whose faceplate geometry moved to the measured panel arrangement,
+so every corrected element arrangement — the P2B8/P4B2/P10 pot stacks, the S10
+rotary stack, the E4 encoder stack, and the DB8E encoder below its buttons —
+reads in one 1280x800 frame. The module UI pane carries the startup
+arrangement and is zoomed to 2x (`setup_faceplate_stack`) so the ~207 mm rack
+of master plus six controllers fills the pane instead of rendering 38 px wide.
+
+Known gap in this shot: the E4 and DB8E 32-LED rings do not appear. The
+renderer paints a cell only for an element the patch declares, and this fixture
+declares no ring LED tokens (a bare `[e4]` synthesizes four LEDs, which land on
+the first four cells of ring 1), so the ring cells are unpainted and the
+ring-legibility risk is not exercised by this shot. The ring geometry itself is
+pinned by the `src/physical.rs` tests.
 
 ## How it works
 

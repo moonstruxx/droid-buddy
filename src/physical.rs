@@ -1531,8 +1531,11 @@ mod tests {
         let b3 = layout.cell_for(1, "B1.3").expect("B1.3 cell");
         assert_eq!(b3.label, "B1.3");
         assert_eq!(b3.element, Some(3));
-        assert_close(b3.rect_mm.x_mm, 3.5);
-        assert_close(b3.rect_mm.w_mm, 8.0);
+        // Measured P2B8 button cell (controller-geometry-fidelity, task 1.1):
+        // a 9 mm cell centred at x 7.1 mm -> x_mm 2.6 (was the old 8 mm cell
+        // at x_mm 3.5). Never relax this back to the old arrangement.
+        assert_close(b3.rect_mm.x_mm, 2.6);
+        assert_close(b3.rect_mm.w_mm, 9.0);
 
         let p2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
         assert_eq!(p2.label, "P1.2");
@@ -1975,5 +1978,502 @@ mod tests {
             db8e_display_state_for_layout(&mismatched),
             "configuration error"
         );
+    }
+
+    // ---- controller-geometry-fidelity measured arrangement (task 1.1) ----
+    //
+    // These assertions pin the manual-measured faceplate arrangement from
+    // openspec/changes/controller-geometry-fidelity/design.md ("Measured
+    // geometry"). The measurement ceiling is ±0.3 mm at this source
+    // resolution, so positions and pitches compare within 0.35 mm, never by
+    // exact equality; structure (column/row counts) is asserted as well as
+    // position. They are written before the data: they must FAIL until task
+    // 2.1 regenerates controller_geometry.json, and an assertion must never
+    // be relaxed to the old side-by-side arrangement to make it pass.
+
+    /// Measurement ceiling (±0.3 mm) plus a small guard band.
+    const GEOM_TOL_MM: f64 = 0.35;
+
+    fn assert_mm(actual: f64, expected: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() <= GEOM_TOL_MM,
+            "{what}: expected {expected} ±{GEOM_TOL_MM} mm, got {actual}"
+        );
+    }
+
+    /// Centre `(x + w/2, y + h/2)` of a raw cell entry, in mm.
+    fn cell_centre(c: &ElementCellEntry) -> (f64, f64) {
+        (c.x_mm + c.w_mm / 2.0, c.y_mm + c.h_mm / 2.0)
+    }
+
+    /// Distinct coordinates within the measurement tolerance, ascending.
+    fn distinct_mm(mut values: Vec<f64>) -> Vec<f64> {
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut out: Vec<f64> = Vec::new();
+        for v in values {
+            if out
+                .last()
+                .is_none_or(|&last| (v - last).abs() > GEOM_TOL_MM)
+            {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Distinct x centres of a family, ascending.
+    fn x_centres(cells: &[ElementCellEntry]) -> Vec<f64> {
+        distinct_mm(cells.iter().map(|c| cell_centre(c).0).collect())
+    }
+
+    /// Distinct y centres of a family, ascending.
+    fn y_centres(cells: &[ElementCellEntry]) -> Vec<f64> {
+        distinct_mm(cells.iter().map(|c| cell_centre(c).1).collect())
+    }
+
+    fn family_cells<'a>(
+        data: &'a ControllerGeometry,
+        key: &str,
+        family: &str,
+    ) -> &'a [ElementCellEntry] {
+        data.controller(key)
+            .unwrap_or_else(|| panic!("{key} entry missing"))
+            .element_cells
+            .get(family)
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| panic!("{key} family {family} missing"))
+    }
+
+    /// Elements with a label number in `1..=n` (family head).
+    fn head_cells(cells: &[ElementCellEntry], n: u32) -> Vec<ElementCellEntry> {
+        cells
+            .iter()
+            .filter(|c| matches!(label_element(&c.label).0, Some(e) if e <= n))
+            .cloned()
+            .collect()
+    }
+
+    /// Ring cells around a centre within the measured ~23.9 mm square.
+    fn ring_cells(cells: &[ElementCellEntry], cx: f64, cy: f64) -> Vec<&ElementCellEntry> {
+        cells
+            .iter()
+            .filter(|c| {
+                let (x, y) = cell_centre(c);
+                (x - cx).abs() <= 12.5 && (y - cy).abs() <= 12.5
+            })
+            .collect()
+    }
+
+    /// Structural ring assertions: 32 LEDs, 9 per side at 2.76 mm pitch,
+    /// 1.8 mm cells, spanning the measured ~23.9 mm square centred on the
+    /// encoder axis (deliberately independent of label ordering).
+    fn assert_ring(cells: &[&ElementCellEntry], cx: f64, cy: f64, what: &str) {
+        assert_eq!(cells.len(), 32, "{what}: a ring must carry 32 LEDs");
+        for c in cells {
+            assert_mm(c.w_mm, 1.8, &format!("{what}: LED cell width"));
+            assert_mm(c.h_mm, 1.8, &format!("{what}: LED cell height"));
+        }
+        let xs = distinct_mm(cells.iter().map(|c| c.x_mm + c.w_mm / 2.0).collect());
+        let ys = distinct_mm(cells.iter().map(|c| c.y_mm + c.h_mm / 2.0).collect());
+        assert_eq!(xs.len(), 9, "{what}: 9 LEDs per side (x)");
+        assert_eq!(ys.len(), 9, "{what}: 9 LEDs per side (y)");
+        assert_mm(xs[1] - xs[0], 2.76, &format!("{what}: ring pitch x"));
+        assert_mm(ys[1] - ys[0], 2.76, &format!("{what}: ring pitch y"));
+        let min_x = cells.iter().map(|c| c.x_mm).fold(f64::INFINITY, f64::min);
+        let max_x = cells
+            .iter()
+            .map(|c| c.x_mm + c.w_mm)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = cells.iter().map(|c| c.y_mm).fold(f64::INFINITY, f64::min);
+        let max_y = cells
+            .iter()
+            .map(|c| c.y_mm + c.h_mm)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_mm(max_x - min_x, 23.88, &format!("{what}: ring x extent"));
+        assert_mm(max_y - min_y, 23.88, &format!("{what}: ring y extent"));
+        assert_mm((min_x + max_x) / 2.0, cx, &format!("{what}: ring centre x"));
+        assert_mm((min_y + max_y) / 2.0, cy, &format!("{what}: ring centre y"));
+    }
+
+    #[test]
+    fn p2b8_pots_stack_in_one_measured_column() {
+        // Bullet: P2B8 pots — one centred column at ~24.8 mm pitch (was a
+        // two-cell row at 10 mm).
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let pots = family_cells(&data, "p2b8", "P");
+        assert_eq!(pots.len(), 2, "p2b8 carries two pots");
+        assert_eq!(x_centres(pots).len(), 1, "pots must share one column");
+        let ys = y_centres(pots);
+        assert_eq!(ys.len(), 2, "pots must occupy two rows");
+        assert_mm(ys[0], 19.1, "P1.1 y centre");
+        assert_mm(ys[1], 43.8, "P1.2 y centre");
+        assert_mm(ys[1] - ys[0], 24.7, "pot pitch y");
+        for c in pots {
+            assert_mm(cell_centre(c).0, 12.7, "pot centre x");
+            assert_mm(c.w_mm, 12.0, "pot cell width");
+            assert_mm(c.h_mm, 12.0, "pot cell height");
+        }
+
+        // Model path: both pots resolve onto the same column.
+        let layout = PhysicalLayout::build(&patch("[p2b8]\n"));
+        assert_eq!(layout.modules[1].geometry_key, "p2b8");
+        let p1 = layout.cell_for(1, "P1.1").expect("P1.1 cell");
+        let p2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
+        assert_eq!(p1.col, p2.col, "pots must share one column");
+        assert_ne!(p1.row, p2.row, "pots must be on separate rows");
+    }
+
+    #[test]
+    fn p2b8_buttons_use_measured_12_6_by_15_grid() {
+        // Bullet: P2B8 button pitch 12.6 × 15.0 (was 9.2 × 15.0), 9×9 cells
+        // (was 8×8), LEDs sharing the grid as 3×3 cells.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let buttons = family_cells(&data, "p2b8", "B");
+        assert_eq!(buttons.len(), 8, "p2b8 carries eight buttons");
+        let xs = x_centres(buttons);
+        let ys = y_centres(buttons);
+        assert_eq!(xs.len(), 2, "buttons must resolve to two columns");
+        assert_eq!(ys.len(), 4, "buttons must resolve to four rows");
+        assert_mm(xs[0], 7.1, "button col 0 x centre");
+        assert_mm(xs[1], 19.7, "button col 1 x centre");
+        assert_mm(xs[1] - xs[0], 12.6, "button pitch x");
+        assert_mm(ys[0], 68.5, "button row 0 y centre");
+        assert_mm(ys[1], 83.5, "button row 1 y centre");
+        assert_mm(ys[2], 98.4, "button row 2 y centre");
+        assert_mm(ys[3], 113.4, "button row 3 y centre");
+        assert_mm(ys[1] - ys[0], 15.0, "button pitch y");
+        for c in buttons {
+            assert_mm(c.w_mm, 9.0, "button cell width");
+            assert_mm(c.h_mm, 9.0, "button cell height");
+        }
+
+        let leds = family_cells(&data, "p2b8", "L");
+        assert_eq!(leds.len(), 8, "p2b8 carries eight LEDs");
+        let lx = x_centres(leds);
+        let ly = y_centres(leds);
+        assert_eq!(lx.len(), 2, "LEDs must resolve to two columns");
+        assert_eq!(ly.len(), 4, "LEDs must resolve to four rows");
+        assert_mm(lx[0], 7.1, "LED col 0 x centre");
+        assert_mm(lx[1], 19.7, "LED col 1 x centre");
+        for (got, want) in ly.iter().zip([68.5, 83.5, 98.4, 113.4]) {
+            assert_mm(*got, want, "LED row y centre");
+        }
+        for c in leds {
+            assert_mm(c.w_mm, 3.0, "LED cell width");
+            assert_mm(c.h_mm, 3.0, "LED cell height");
+        }
+    }
+
+    #[test]
+    fn p4b2_pots_stack_in_one_measured_column() {
+        // Bullet: P4B2 pots — one centred column at ~24.8 mm pitch (was two
+        // columns × two rows); the two buttons sit on one row at y 113.4.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let pots = family_cells(&data, "p4b2", "P");
+        assert_eq!(pots.len(), 4, "p4b2 carries four pots");
+        assert_eq!(x_centres(pots).len(), 1, "pots must share one column");
+        let ys = y_centres(pots);
+        assert_eq!(ys.len(), 4, "pots must occupy four rows");
+        for (got, want) in ys.iter().zip([19.1, 43.8, 68.7, 93.5]) {
+            assert_mm(*got, want, "P4B2 pot row y centre");
+        }
+        assert_mm(ys[1] - ys[0], 24.8, "P4B2 pot pitch y");
+        for c in pots {
+            assert_mm(cell_centre(c).0, 12.7, "P4B2 pot centre x");
+            assert_mm(c.w_mm, 12.0, "P4B2 pot cell width");
+            assert_mm(c.h_mm, 12.0, "P4B2 pot cell height");
+        }
+
+        let buttons = family_cells(&data, "p4b2", "B");
+        assert_eq!(buttons.len(), 2, "p4b2 carries two buttons");
+        let bxs = x_centres(buttons);
+        let bys = y_centres(buttons);
+        assert_eq!(bxs.len(), 2, "P4B2 buttons must be a two-column row");
+        assert_eq!(bys.len(), 1, "P4B2 buttons must be one row");
+        assert_mm(bxs[0], 7.1, "P4B2 button col 0 x centre");
+        assert_mm(bxs[1], 19.7, "P4B2 button col 1 x centre");
+        assert_mm(bxs[1] - bxs[0], 12.6, "P4B2 button pitch x");
+        assert_mm(bys[0], 113.4, "P4B2 button row y centre");
+
+        // Model path: p4b2 is not bare-synthesized, so an explicit token is
+        // needed to place the faceplate.
+        let layout = PhysicalLayout::build(&patch("[p4b2]\n    pot = P1.1\n"));
+        assert_eq!(layout.modules.len(), 2);
+        assert_eq!(layout.modules[1].geometry_key, "p4b2");
+        let p1 = layout.cell_for(1, "P1.1").expect("P1.1 cell");
+        let p2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
+        assert_eq!(p1.col, p2.col, "pots must share one column");
+    }
+
+    #[test]
+    fn p10_big_pots_stack_and_small_pots_keep_matrix() {
+        // Bullets: P10 big pots — one centred column at ~24.8 mm pitch; the
+        // eight small pots keep their declared 2-column × 4-row matrix at
+        // the measured 12.6 × 15.1 pitch.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let pots = family_cells(&data, "p10", "P");
+        assert_eq!(pots.len(), 10, "p10 carries ten pots");
+
+        let big = head_cells(pots, 2);
+        assert_eq!(big.len(), 2, "two big pots");
+        assert_eq!(x_centres(&big).len(), 1, "big pots must share one column");
+        let bys = y_centres(&big);
+        assert_eq!(bys.len(), 2, "big pots must occupy two rows");
+        assert_mm(bys[0], 19.3, "big pot 1 y centre");
+        assert_mm(bys[1], 44.1, "big pot 2 y centre");
+        assert_mm(bys[1] - bys[0], 24.8, "big pot pitch y");
+        for c in &big {
+            assert_mm(cell_centre(c).0, 12.7, "big pot centre x");
+            assert_mm(c.w_mm, 12.0, "big pot cell width");
+            assert_mm(c.h_mm, 12.0, "big pot cell height");
+        }
+
+        let small: Vec<ElementCellEntry> = pots
+            .iter()
+            .filter(|c| matches!(label_element(&c.label).0, Some(e) if e >= 3))
+            .cloned()
+            .collect();
+        assert_eq!(small.len(), 8, "eight small pots");
+        let sxs = x_centres(&small);
+        let sys = y_centres(&small);
+        assert_eq!(sxs.len(), 2, "small pots keep two columns");
+        assert_eq!(sys.len(), 4, "small pots keep four rows");
+        assert_mm(sxs[0], 6.9, "small pot col 0 x centre");
+        assert_mm(sxs[1], 19.5, "small pot col 1 x centre");
+        assert_mm(sxs[1] - sxs[0], 12.6, "small pot pitch x");
+        for (got, want) in sys.iter().zip([68.6, 83.7, 98.8, 113.9]) {
+            assert_mm(*got, want, "small pot row y centre");
+        }
+        assert_mm(sys[1] - sys[0], 15.1, "small pot pitch y");
+        for c in &small {
+            assert_mm(c.w_mm, 9.0, "small pot cell width");
+            assert_mm(c.h_mm, 9.0, "small pot cell height");
+        }
+
+        // Model path: big pots share a column; the small pots fill a complete
+        // 2-column × 4-row matrix (numbering-independent).
+        let layout = PhysicalLayout::build(&patch("[p10]\n"));
+        assert_eq!(layout.modules[1].geometry_key, "p10");
+        let b1 = layout.cell_for(1, "P1.1").expect("P1.1 cell");
+        let b2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
+        assert_eq!(b1.col, b2.col, "big pots must share one column");
+        let small_cells: Vec<&ElementCell> = (3..=10)
+            .map(|i| {
+                layout
+                    .cell_for(1, &format!("P1.{i}"))
+                    .expect("small pot cell")
+            })
+            .collect();
+        let cols: std::collections::BTreeSet<u32> = small_cells.iter().map(|c| c.col).collect();
+        let rows: std::collections::BTreeSet<u32> = small_cells.iter().map(|c| c.row).collect();
+        let pairs: std::collections::BTreeSet<(u32, u32)> =
+            small_cells.iter().map(|c| (c.col, c.row)).collect();
+        assert_eq!(cols.len(), 2, "small pots keep two columns");
+        assert_eq!(rows.len(), 4, "small pots keep four rows");
+        assert_eq!(pairs.len(), 8, "small pots fill a 2x4 matrix");
+    }
+
+    #[test]
+    fn s10_rotaries_stack_and_small_switches_keep_matrix() {
+        // Bullets: S10 rotary switches — one centred column at ~24.8 mm
+        // pitch, 12×12 cells; the eight small switches keep the same 2 × 4
+        // grid as the P10 small pots, as 8×12 cells.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let switches = family_cells(&data, "s10", "S");
+        assert_eq!(switches.len(), 10, "s10 carries ten switches");
+
+        let rotary = head_cells(switches, 2);
+        assert_eq!(rotary.len(), 2, "two rotary switches");
+        assert_eq!(
+            x_centres(&rotary).len(),
+            1,
+            "rotaries must share one column"
+        );
+        let rys = y_centres(&rotary);
+        assert_eq!(rys.len(), 2, "rotaries must occupy two rows");
+        assert_mm(rys[0], 18.5, "rotary 1 y centre");
+        assert_mm(rys[1], 43.3, "rotary 2 y centre");
+        assert_mm(rys[1] - rys[0], 24.8, "rotary pitch y");
+        for c in &rotary {
+            assert_mm(cell_centre(c).0, 12.7, "rotary centre x");
+            assert_mm(c.w_mm, 12.0, "rotary cell width");
+            assert_mm(c.h_mm, 12.0, "rotary cell height");
+        }
+
+        let small: Vec<ElementCellEntry> = switches
+            .iter()
+            .filter(|c| matches!(label_element(&c.label).0, Some(e) if e >= 3))
+            .cloned()
+            .collect();
+        assert_eq!(small.len(), 8, "eight small switches");
+        let sxs = x_centres(&small);
+        let sys = y_centres(&small);
+        assert_eq!(sxs.len(), 2, "small switches keep two columns");
+        assert_eq!(sys.len(), 4, "small switches keep four rows");
+        assert_mm(sxs[0], 6.9, "small switch col 0 x centre");
+        assert_mm(sxs[1], 19.5, "small switch col 1 x centre");
+        for (got, want) in sys.iter().zip([68.6, 83.7, 98.8, 113.9]) {
+            assert_mm(*got, want, "small switch row y centre");
+        }
+        for c in &small {
+            assert_mm(c.w_mm, 8.0, "small switch cell width");
+            assert_mm(c.h_mm, 12.0, "small switch cell height");
+        }
+
+        // Model path: rotaries share a column; small switches fill a complete
+        // 2-column × 4-row matrix (numbering-independent).
+        let layout = PhysicalLayout::build(&patch("[s10]\n"));
+        assert_eq!(layout.modules[1].geometry_key, "s10");
+        let r1 = layout.cell_for(1, "S1.1").expect("S1.1 cell");
+        let r2 = layout.cell_for(1, "S1.2").expect("S1.2 cell");
+        assert_eq!(r1.col, r2.col, "rotaries must share one column");
+        let small_cells: Vec<&ElementCell> = (3..=10)
+            .map(|i| {
+                layout
+                    .cell_for(1, &format!("S1.{i}"))
+                    .expect("small switch cell")
+            })
+            .collect();
+        let cols: std::collections::BTreeSet<u32> = small_cells.iter().map(|c| c.col).collect();
+        let rows: std::collections::BTreeSet<u32> = small_cells.iter().map(|c| c.row).collect();
+        let pairs: std::collections::BTreeSet<(u32, u32)> =
+            small_cells.iter().map(|c| (c.col, c.row)).collect();
+        assert_eq!(cols.len(), 2, "small switches keep two columns");
+        assert_eq!(rows.len(), 4, "small switches keep four rows");
+        assert_eq!(pairs.len(), 8, "small switches fill a 2x4 matrix");
+    }
+
+    #[test]
+    fn e4_encoders_stack_in_one_measured_column() {
+        // Bullet: E4 four-encoder stack at 27.8 mm pitch, one centred column
+        // at x 15.24 (was a four-cell row at 7 mm), with 3×3 shaft buttons.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let encoders = family_cells(&data, "e4", "E");
+        assert_eq!(encoders.len(), 4, "e4 carries four encoders");
+        assert_eq!(
+            x_centres(encoders).len(),
+            1,
+            "encoders must share one column"
+        );
+        let ys = y_centres(encoders);
+        assert_eq!(ys.len(), 4, "encoders must occupy four rows");
+        for (got, want) in ys.iter().zip([24.3, 52.1, 79.9, 107.7]) {
+            assert_mm(*got, want, "encoder row y centre");
+        }
+        assert_mm(ys[1] - ys[0], 27.8, "encoder pitch y");
+        for c in encoders {
+            assert_mm(cell_centre(c).0, 15.24, "encoder centre x");
+            assert_mm(c.w_mm, 7.0, "encoder cell width");
+            assert_mm(c.h_mm, 7.0, "encoder cell height");
+        }
+
+        let buttons = family_cells(&data, "e4", "B");
+        assert_eq!(buttons.len(), 4, "e4 carries four shaft buttons");
+        for c in buttons {
+            assert_mm(c.w_mm, 3.0, "shaft button cell width");
+            assert_mm(c.h_mm, 3.0, "shaft button cell height");
+        }
+        assert_eq!(
+            x_centres(buttons).len(),
+            1,
+            "shaft buttons share the encoder column"
+        );
+        assert_eq!(
+            y_centres(buttons).len(),
+            4,
+            "shaft buttons share the encoder rows"
+        );
+
+        // Model path.
+        let layout = PhysicalLayout::build(&patch("[e4]\n"));
+        assert_eq!(layout.modules[1].geometry_key, "e4");
+        let e1 = layout.cell_for(1, "E1.1").expect("E1.1 cell");
+        let e2 = layout.cell_for(1, "E1.2").expect("E1.2 cell");
+        assert_eq!(e1.col, e2.col, "encoders must share one column");
+        assert_ne!(e1.row, e2.row, "encoders must be on separate rows");
+    }
+
+    #[test]
+    fn db8e_encoder_sits_below_its_button_grid() {
+        // Bullet: DB8E encoder below its buttons — 2 × 4 button grid at
+        // x 7.9/23.1, rows y 41.4/56.6/71.6/86.8, encoder at (15.24, 108.1)
+        // (was beside the buttons at ~y 56).
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let buttons = family_cells(&data, "db8e", "B");
+        assert_eq!(buttons.len(), 8, "db8e carries eight buttons");
+        let bxs = x_centres(buttons);
+        let bys = y_centres(buttons);
+        assert_eq!(bxs.len(), 2, "buttons must be two columns");
+        assert_eq!(bys.len(), 4, "buttons must be four rows");
+        assert_mm(bxs[0], 7.9, "button col 0 x centre");
+        assert_mm(bxs[1], 23.1, "button col 1 x centre");
+        assert_mm(bxs[1] - bxs[0], 15.2, "button pitch x");
+        assert_mm(bys[0], 41.4, "button row 0 y centre");
+        assert_mm(bys[1], 56.6, "button row 1 y centre");
+        assert_mm(bys[2], 71.6, "button row 2 y centre");
+        assert_mm(bys[3], 86.8, "button row 3 y centre");
+        assert_mm(bys[1] - bys[0], 15.2, "button pitch y");
+        for c in buttons {
+            assert_mm(c.w_mm, 9.0, "button cell width");
+            assert_mm(c.h_mm, 9.0, "button cell height");
+        }
+
+        let encoders = family_cells(&data, "db8e", "E");
+        assert_eq!(encoders.len(), 1, "db8e carries one encoder");
+        let enc = &encoders[0];
+        let (ecx, ecy) = cell_centre(enc);
+        assert_mm(ecx, 15.24, "encoder centre x");
+        assert_mm(ecy, 108.1, "encoder centre y");
+        assert_mm(enc.w_mm, 7.0, "encoder cell width");
+        assert_mm(enc.h_mm, 7.0, "encoder cell height");
+        // Below the whole button grid, on the grid's centre axis.
+        let grid_bottom = buttons
+            .iter()
+            .map(|c| c.y_mm + c.h_mm)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            enc.y_mm > grid_bottom,
+            "encoder must sit below the button grid ({} vs {grid_bottom})",
+            enc.y_mm
+        );
+        assert_mm(
+            ecx,
+            (bxs[0] + bxs[1]) / 2.0,
+            "encoder centred under the grid",
+        );
+
+        // Model path: db8e is not bare-synthesized, so a token is required.
+        let layout = PhysicalLayout::build(&patch("[db8e]\n    button1 = B1.1\n"));
+        assert_eq!(layout.modules[1].geometry_key, "db8e");
+        let b1 = layout.cell_for(1, "B1.1").expect("B1.1 cell");
+        let e1 = layout.cell_for(1, "E1.1").expect("E1.1 cell");
+        assert!(
+            e1.rect_mm.y_mm > b1.rect_mm.y_mm + b1.rect_mm.h_mm,
+            "encoder must render below the buttons"
+        );
+    }
+
+    #[test]
+    fn e4_and_db8e_led_rings_span_the_measured_extent() {
+        // Bullet: E4/DB8E ring cell extents — each 32-LED ring is a ~23.9 mm
+        // square: 9 LEDs per side at 2.76 mm pitch with 1.8 mm cells (was a
+        // 1 mm cell / 9 mm ring). Assertions stay structural.
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+
+        let e_rings = family_cells(&data, "e4", "L");
+        assert_eq!(e_rings.len(), 128, "e4 carries four 32-LED rings");
+        let encoders = family_cells(&data, "e4", "E");
+        let centres: Vec<(f64, f64)> = encoders.iter().map(cell_centre).collect();
+        assert_eq!(centres.len(), 4);
+        for (i, &(cx, cy)) in centres.iter().enumerate() {
+            let ring = ring_cells(e_rings, cx, cy);
+            assert_ring(&ring, cx, cy, &format!("e4 ring {}", i + 1));
+        }
+
+        let d_rings = family_cells(&data, "db8e", "L");
+        assert_eq!(d_rings.len(), 32, "db8e carries one 32-LED ring");
+        let (dcx, dcy) = cell_centre(&family_cells(&data, "db8e", "E")[0]);
+        let ring = ring_cells(d_rings, dcx, dcy);
+        assert_ring(&ring, dcx, dcy, "db8e ring");
     }
 }
