@@ -16,6 +16,7 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `led-register-colour.png` | `fixtures/led_register_colour.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); lit coloured P2B8 button face and M4 touch plate beside the dynamic-cable and sourceless white fallbacks in one frame |
 | `unreferenced-elements.png` | `fixtures/unreferenced_elements.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); partial B32 (5 of 32 buttons, 27 dimmed) beside a bare E4 (124 dimmed ring segments) in one frame |
 | `shift-colour.png` | `fixtures/button_led_composition.ini` | 2x stack zoom plus active Group2 (`setup_shift_colour`): module UI (left big) + source viewer (small); Group2 member faces tinted in the group token beside unshifted Group1/Group3 faces in one frame |
+| `s10-switch-kinds.png` | `fixtures/s10_switch_kinds.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); bare S10 full front with rotary-round S1.1/S1.2 above toggle-square S1.3–S1.10 in one frame |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
@@ -75,6 +76,13 @@ in `setup_shift_colour` before paint — deterministic, no input — and the
 harness's double-render check enforces it. The no-shift no-op contract needs
 no shot: every other render paints with `active_shift == None`, so their
 byte-identical freshness is the proof.
+
+`s10-switch-kinds.png` is the visual check for change `s10-switch-glyphs`
+(task 3.2): a bare `[s10]` synthesizes the full 10-switch front whose S-family
+geometry annotates S1.1/S1.2 `rotary` and the rest toggle, so the round
+rotary glyphs read above the square toggle glyphs on one faceplate in a
+1280x800 startup frame at 2x. Unannotated-switch faces keep the toggle glyph
+by construction (the unannotated scenario), so no second shot is needed.
 
 ## How it works
 
