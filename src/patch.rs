@@ -2124,8 +2124,9 @@ fn resolve_led_initial(
     // whose value names the element token.
     let mut element_suffix: Option<String> = None;
     // Ranked candidate sections: (a) sections mentioning the element/LED
-    // token, (b) the LED's own controller section (bare synthesis), then
-    // (c) any other section carrying ledcolor/ledvalue params.
+    // token, then (b) the LED's own controller section (bare synthesis).
+    // Unrelated sections are never candidates: a sourceless LED must stay
+    // `Off`, never inherit a stranger's colour.
     let mut ranked: Vec<(u8, usize)> = Vec::new();
     for (i, section) in sections.iter().enumerate() {
         let mentions = |tok: &str| {
@@ -2145,17 +2146,6 @@ fn resolve_led_initial(
             || section.name.eq_ignore_ascii_case(&led.controller);
         if own_controller {
             ranked.push((1, i));
-            continue;
-        }
-        let has_led_params = section.entries.iter().any(|(k, _)| {
-            let kl = k.to_lowercase();
-            kl == "ledcolor"
-                || kl == "ledvalue"
-                || kl.starts_with("ledcolor")
-                || kl.starts_with("ledvalue")
-        });
-        if has_led_params {
-            ranked.push((2, i));
         }
     }
     ranked.sort();
@@ -2184,10 +2174,11 @@ fn resolve_led_initial(
         }
         let color = color_raw.and_then(|r| fold_led_static_value(r, sections, cable_index));
         let value = value_raw.and_then(|r| fold_led_static_value(r, sections, cable_index));
-        // A present-but-dynamic colour poisons the resolution (fallback
-        // rendering): a wire the patch drives live must not light statically.
+        // A present-but-dynamic colour poisons the whole resolution
+        // (fallback rendering): a wire the patch drives live must not light
+        // statically, nor fall through to a stranger's colour.
         if color_raw.is_some() && color.is_none() {
-            continue;
+            return None;
         }
         if color.is_none() && value.is_none() {
             continue;

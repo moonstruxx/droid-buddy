@@ -1991,3 +1991,112 @@ fn regression_button_led_composition_faces_render_and_leds_fold() {
         "the LED-less P1.1 must still render its cell, got {cell_tokens:?}"
     );
 }
+
+// ── led-register-colour (task 3.1): static LED colour resolution ──────────
+// One fixture (`fixtures/led_register_colour.ini`) covering the load-time
+// resolution matrix: a lit P2B8 button LED with a literal ledcolor/ledvalue
+// pair, an M4 touch-plate twin with a literal colour, a button LED whose
+// ledcolor rides a live cable (dynamic fallback), and a plain button+LED
+// pair with no colour params (sourceless fallback). This story asserts
+// presence and token attribution only — never positions — plus the resolved
+// LED states. The `button` circuit carries no ledcolor/ledvalue params, so
+// per-LED colours are owned by `[motorfader]` sections mentioning the
+// element token (rank-0 ownership).
+
+/// `(LED token, expected colour scalar)` for the statically resolved LEDs.
+/// Instance numbers are the fixture's own: [p2b8] is chain position 1,
+/// [m4] is chain position 2 (see the fixture header).
+const LED_REGISTER_STATIC: &[(&str, f64)] = &[("L1.1", 0.5), ("L2.1", 0.8)];
+
+/// LEDs that must keep the `Off` fallback: dynamic cable colour (L1.3) and
+/// no colour source at all (L1.4).
+const LED_REGISTER_OFF: &[&str] = &["L1.3", "L1.4"];
+
+/// The folded LEDs bound to buttons: explicit pairs (L1.1, L1.3, L1.4) and
+/// the M4 default RGB twin (L2.1, via B2.1 per device_led_defaults.ini).
+const LED_REGISTER_FOLDED: &[&str] = &["L1.1", "L1.3", "L1.4", "L2.1"];
+
+#[test]
+fn regression_led_register_colour_resolves_static_and_falls_back() {
+    use crate::patch::{ComponentState, Patch};
+
+    let path = "fixtures/led_register_colour.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    // (a) No Error-severity validation finding: the fixture is a valid patch,
+    // not a validation-case carrier. Hint/Warning findings (unused demo
+    // cables) are fine.
+    let schema = crate::schema::load_schema();
+    let issues = crate::validation::validate_patch(&patch, schema);
+    let errors: Vec<_> = issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{path} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    // (b) Static sources resolve at load: lit value plus the mapped colour.
+    let find = |id: &str| {
+        patch
+            .hw_components
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("no component {id} in fixture"))
+    };
+    for (led, scalar) in LED_REGISTER_STATIC {
+        assert_eq!(
+            find(led).state,
+            ComponentState::Led {
+                value: 1.0,
+                rgb: Some(crate::patch::led_colour_for_value(*scalar)),
+            },
+            "{led} must load lit in its resolved colour"
+        );
+    }
+
+    // (c) Dynamic and sourceless LEDs keep the Off fallback.
+    for led in LED_REGISTER_OFF {
+        assert_eq!(
+            find(led).state,
+            ComponentState::Off,
+            "{led} must keep the Off fallback"
+        );
+    }
+
+    // (d) Faceplate attribution: the buttons owning the fixture LEDs resolve
+    // to element cells on their plates. Presence and attribution only — no
+    // coordinate is read here.
+    let layout = crate::physical::PhysicalLayout::build(&patch);
+    for (plate_ix, button) in [("p2b8", "B1.1"), ("m4", "B2.1")] {
+        let ix = layout
+            .modules
+            .iter()
+            .position(|m| m.geometry_key == plate_ix)
+            .unwrap_or_else(|| panic!("no {plate_ix} faceplate"));
+        assert!(
+            layout.cell_for(ix, button).is_some(),
+            "{button} must resolve to an element cell on the {plate_ix} faceplate"
+        );
+    }
+
+    // (e) No folded LED publishes a cell or a hit rect: the published spec
+    // cells resolve to token ids via the global `patch.hw_components` index.
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    let spec =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    let cell_tokens: Vec<&str> = spec
+        .cells
+        .iter()
+        .filter_map(|c| c.component_index)
+        .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.as_str())
+        .collect();
+    for led in LED_REGISTER_FOLDED {
+        assert!(
+            !cell_tokens.contains(led),
+            "folded LED {led} must not publish a cell, got {cell_tokens:?}"
+        );
+    }
+}
