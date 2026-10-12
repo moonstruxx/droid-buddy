@@ -14,7 +14,7 @@
 ## 3. Visual artifacts
 
 - [x] 3.1 Add `fixtures/led_register_colour.ini` (P2B8 button with literal `ledcolor` + lit `ledvalue`, M4 touch plate with literal colour, one dynamic-cable LED for the fallback, one uncoloured LED) and a `src/regression.rs` story asserting no `Error` finding, resolved `Led { value, rgb }` states where expected, `Off` where not, and no folded LED published as a cell. Verify with `cargo test regression::`. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [2.1], touches: [fixtures/led_register_colour.ini, src/regression.rs] -->
-- [ ] 3.2 Re-bless `docs/assets/*.png` via `tools/screenshots/render.sh --bless` (the lit coloured faces change pixels) and verify the full check passes; confirm the new coloured faces read correctly on the module-ui shot. <!-- agent: layout-designer-engineer.build, depends_on: [2.1, 2.2, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
+- [x] 3.2 Re-bless `docs/assets/*.png` (new led-register-colour shot; existing PNGs byte-identical — their fixtures carry no colour sources) via `tools/screenshots/render.sh --bless` (the lit coloured faces change pixels) and verify the full check passes; confirm the new coloured faces read correctly on the module-ui shot. <!-- agent: layout-designer-engineer.build, depends_on: [2.1, 2.2, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
 
 ## 4. Verification and closeout
 

@@ -13,6 +13,7 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `optimizer.png` | `fixtures/optimizer_latency.ini` | + latency optimizer (small) |
 | `faceplate-rotary-stack.png` | `fixtures/faceplate_rotary_stack.ini` | startup: module UI (left big) + source viewer (small); all six corrected faceplates (P2B8, P4B2, P10, S10, E4, DB8E) in one frame |
 | `button-led-composition.png` | `fixtures/button_led_composition.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); P2B8 + B32 round button faces, M4 touch-plate rectangles, and one LED-less pot in one frame |
+| `led-register-colour.png` | `fixtures/led_register_colour.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); lit coloured P2B8 button face and M4 touch plate beside the dynamic-cable and sourceless white fallbacks in one frame |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
@@ -43,6 +44,16 @@ treatment — reads in one 1280x800 startup frame. All LEDs are `Off` at load
 (the harness renders static state only: no selection, no input, no toggle
 chord), so the shot proves the unlit faces plus the floor-fill core; the
 lit fill is pinned by the `src/regression.rs` level tests instead.
+
+`led-register-colour.png` is the visual check for change
+`led-register-colour` (task 3.2): its fixture resolves two LEDs to static
+colours at load (a P2B8 button LED and an M4 touch-plate LED, both at full
+brightness via literal `ledcolor`/`ledvalue`), so the lit coloured faces —
+the P2B8 state circle filled in its mapped colour, the M4 plate filled
+likewise — read beside the two fallbacks (dynamic-cable `ledcolor` and the
+plain pair with no colour params, both rendering the white floor fill) in
+one 1280x800 startup frame at 2x. Only two controllers, so the stack zoom
+fits with margin.
 
 ## How it works
 

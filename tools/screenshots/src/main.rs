@@ -211,6 +211,16 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/button_led_composition.ini",
             setup: setup_faceplate_stack,
         },
+        // Static LED-colour check (change `led-register-colour`, task 3.2):
+        // a lit P2B8 button face and a lit M4 touch plate in their resolved
+        // colours beside the dynamic-cable and sourceless white fallbacks,
+        // in one startup frame. Two controllers only, so the 2x stack zoom
+        // fits with margin (tighter zooms clipped the M4 plate last time).
+        Shot {
+            file: "led-register-colour.png",
+            fixture: "fixtures/led_register_colour.ini",
+            setup: setup_faceplate_stack,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -286,7 +296,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -335,6 +345,7 @@ fn main() {
         "optimizer",
         "faceplate-rotary-stack",
         "button-led-composition",
+        "led-register-colour",
         "large-startup",
         "large-graph",
     ];
