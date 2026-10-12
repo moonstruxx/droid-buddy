@@ -10,7 +10,7 @@
 
 ## 3. Visual artifacts
 
-- [ ] 3.1 Add a `src/regression.rs` story with an inline shift-group patch asserting member tint, non-member stability, and the no-shift byte-identical contract at spec level. Verify with `cargo test regression::`. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [2.1], touches: [src/regression.rs] -->
+- [x] 3.1 Add a `src/regression.rs` story (tint + no-op proof, 40 green) with an inline shift-group patch asserting member tint, non-member stability, and the no-shift byte-identical contract at spec level. Verify with `cargo test regression::`. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [2.1], touches: [src/regression.rs] -->
 - [ ] 3.2 Check `docs/assets/*.png` via `tools/screenshots/render.sh` (expect byte-identical without a seeded shift); add a seeded shift-active shot only if the harness can set `active_shift` reliably, else document the headless coverage and leave assets untouched. Verify with the render check. <!-- agent: layout-designer-engineer.build, depends_on: [2.1, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
 
 ## 4. Verification and closeout
