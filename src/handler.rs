@@ -1549,6 +1549,41 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
+            // LED chord (button-led-composition): Ctrl+Enter toggles the
+            // hovered element's folded LED, never the element itself. A
+            // silent no-op without a folded LED or while paused.
+            if key.modifiers.ctrl && matches!(key.code, KeyCode::Enter) {
+                if let Some(idx) = app.hovered_component {
+                    if !app.processing_paused {
+                        // Silent no-op unless task-3.1's resolver binds a folded
+                        // LED to the hovered element (explicit `led` pairing,
+                        // else the controller's positional default) — the same
+                        // binding the painter folds, so chord and face agree.
+                        let led_id = app
+                            .patch
+                            .as_ref()
+                            .and_then(|p| p.hw_components.get(idx))
+                            .and_then(crate::patch::folded_led_for_element);
+                        if let Some(led_id) = led_id {
+                            if let Some(patch) = &mut app.patch {
+                                if let Some(led_idx) =
+                                    patch.hw_components.iter().position(|c| c.id == led_id)
+                                {
+                                    if let Some(led) = patch.hw_components.get_mut(led_idx) {
+                                        toggle_component(led);
+                                        let state = match &led.state {
+                                            ComponentState::On => "On",
+                                            _ => "Off",
+                                        };
+                                        app.status_message = format!("LED {}: {}", led.id, state);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
             if let Some(idx) = app.hovered_component {
                 // Capture token id before mutating patch to avoid borrow conflict.
                 let token_id = app
@@ -4218,16 +4253,20 @@ mod tests {
 
     #[test]
     fn ctrl_enter_without_folded_led_is_silent_noop() {
+        // Hover the LED component itself: `folded_led_for_element` binds
+        // nothing to an `L` token (no stored pairing, no positional default
+        // for the L family), so the chord must be a silent no-op. A `B`
+        // element with its stored pairing cleared still resolves through the
+        // positional default and therefore still has a folded LED.
         let mut app = app_with_fixture();
-        let btn = idx_of(&app, "B1.1");
-        app.patch.as_mut().unwrap().hw_components[btn].led = None;
-        app.hovered_component = Some(btn);
+        let led = idx_of(&app, "L1.1");
+        app.hovered_component = Some(led);
         let before = app.status_message.clone();
         let quit = handle_event(ctrl_enter(), &mut app);
         assert!(!quit);
         let patch = app.patch.as_ref().unwrap();
         assert!(matches!(
-            patch.hw_components[btn].state,
+            patch.hw_components[led].state,
             ComponentState::Off
         ));
         assert_eq!(

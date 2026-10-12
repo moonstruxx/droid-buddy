@@ -74,6 +74,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("j/k", "navigate"),
             ("click", "focus element across source + graph"),
             ("Enter/Space", "toggle component"),
+            ("Ctrl+Enter", "toggle element LED"),
             ("s", "toggle skeleton presentation"),
             ("m", "latch modifier on hovered component"),
             ("e", "edit label / validation modal"),
