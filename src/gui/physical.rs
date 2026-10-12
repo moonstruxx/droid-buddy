@@ -2522,5 +2522,260 @@ mod tests {
         let after = state_of(&app);
         assert_ne!(before, after, "callout state reads live ComponentState");
         assert!(after.contains("ON"), "On state shows: {after}");
+        assert!(after.contains("ON"), "On state shows: {after}");
+    }
+
+    fn painted_shapes(cell: &CellSpec, paused: bool) -> Vec<egui::epaint::Shape> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            let painter = ui.painter();
+            paint_cell(painter, cell, false, paused);
+        });
+        let shapes: Vec<egui::epaint::Shape> = full_output
+            .shapes
+            .iter()
+            .map(|cs| cs.shape.clone())
+            .collect();
+        full_output.textures_delta.clear();
+        shapes
+    }
+
+    #[test]
+    fn composed_p2b8_button_face_is_state_outline_with_concentric_disc() {
+        let app = app_with_patch("fixtures/own_buttons.ini");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let idx = patch
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("fixture declares B1.1");
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .expect("B1.1 cell")
+            .clone();
+        assert!(
+            cell.glyph.is_empty(),
+            "composed face carries no glyph: {:?}",
+            cell.glyph
+        );
+        assert!(
+            cell.state_text.is_empty(),
+            "composed face carries no state-text row: {:?}",
+            cell.state_text
+        );
+        let shapes = painted_shapes(&cell, false);
+        let t = crate::theme::active();
+        let on_stroke = rgb(t.button);
+        let off_stroke = rgb(t.muted);
+        let hits: Vec<(Pos2, f32)> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) => Some((c.center, c.radius, c.stroke.color)),
+                _ => None,
+            })
+            .filter(|(center, radius, color)| {
+                let expected = cell.rect.center();
+                (center.x - expected.x).abs() < 0.5
+                    && (center.y - expected.y).abs() < 0.5
+                    && *radius * 2.0 >= 0.8 * cell.rect.width().min(cell.rect.height())
+                    && (*color == on_stroke || *color == off_stroke)
+            })
+            .map(|(center, radius, _)| (center, radius))
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "concentric state-outline circle: {shapes:?}"
+        );
+    }
+
+    #[test]
+    fn composed_led_fill_grows_with_level_and_stays_inside_ring() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 40.0));
+        let mut lo = cell_spec(rect, "B");
+        lo.led_state = Some(0.0);
+        let mut hi = cell_spec(rect, "B");
+        hi.led_state = Some(1.0);
+        let radius_of = |cell: &CellSpec| -> f32 {
+            painted_shapes(cell, false)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::epaint::Shape::Circle(c) => Some((c.center, c.radius)),
+                    _ => None,
+                })
+                .filter(|(center, _)| {
+                    (center.x - rect.center().x).abs() < 0.5
+                        && (center.y - rect.center().y).abs() < 0.5
+                })
+                .map(|(_, radius)| radius)
+                .fold(0.0f32, f32::max)
+        };
+        let r_lo = radius_of(&lo);
+        let r_hi = radius_of(&hi);
+        assert!(r_lo > 0.0, "off LED still shows its floor disc");
+        assert!(
+            r_hi > r_lo,
+            "full level fills further than the floor: {r_lo} vs {r_hi}"
+        );
+        assert!(
+            r_hi <= rect.width().min(rect.height()) / 2.0 + 0.5,
+            "inner disc never exceeds the ring: {r_hi}"
+        );
+    }
+
+    #[test]
+    fn composed_m4_touch_plate_is_rectangle_fill() {
+        let app = app_with_patch("fixtures/device_led_defaults.ini");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let button_idx = patch
+            .hw_components
+            .iter()
+            .position(|c| c.kind == ComponentKind::Button && c.controller == "M4")
+            .expect("M4 touch button");
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(button_idx))
+            .expect("M4 button cell")
+            .clone();
+        assert!(cell.glyph.is_empty(), "composed M4 face carries no glyph");
+        assert!(
+            cell.state_text.is_empty(),
+            "composed M4 face carries no state row"
+        );
+        let rects = painted_cell_rects(&cell, false);
+        let concentric_fill = rects.iter().any(|(r, fill, w, _)| {
+            *w == 0.0
+                && *fill != egui::Color32::TRANSPARENT
+                && (r.center().x - cell.rect.center().x).abs() < 0.5
+                && (r.center().y - cell.rect.center().y).abs() < 0.5
+                && r.width() >= 0.8 * cell.rect.width().min(cell.rect.height())
+        });
+        assert!(concentric_fill, "concentric M4 rectangle fill: {rects:?}");
+    }
+
+    fn assert_no_led_cells(app: &App, ctx: &str) {
+        let patch = app.patch.as_ref().expect("patch");
+        let spec = physical_spec(app, egui::Rect::ZERO).expect("spec");
+        let led_ids: Vec<usize> = patch
+            .hw_components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.kind == ComponentKind::Led)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!led_ids.is_empty(), "{ctx}: patch declares LEDs");
+        for i in led_ids {
+            let id = &patch.hw_components[i].id;
+            assert!(
+                !spec.cells.iter().any(|c| c.component_index == Some(i)),
+                "{ctx}: folded LED {id} publishes no cell"
+            );
+        }
+    }
+
+    #[test]
+    fn folded_leds_publish_no_cell_on_p2b8_b32_m4() {
+        let app = app_with_patch("fixtures/own_buttons.ini");
+        assert_no_led_cells(&app, "P2B8 own_buttons");
+        let app = app_with_patch("fixtures/device_led_defaults.ini");
+        {
+            let patch = app.patch.as_ref().expect("patch");
+            let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+            let led_ids: Vec<usize> = patch
+                .hw_components
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.kind == ComponentKind::Led && c.controller == "M4")
+                .map(|(i, _)| i)
+                .collect();
+            assert!(!led_ids.is_empty(), "fixture declares M4 LEDs");
+            for i in led_ids {
+                assert!(
+                    !spec.cells.iter().any(|c| c.component_index == Some(i)),
+                    "folded M4 LED publishes no cell"
+                );
+            }
+        }
+        let ini = "[b32]\n\n[button]\n    button = B2.1\n    led = L2.1\n    output = _X\n\n[copy]\n    input = _X\n    output = O1\n";
+        let patch = crate::patch::Patch::from_ini_str(ini, "inline-b32".to_string()).unwrap();
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        assert_no_led_cells(&app, "B32 inline bound LED");
+    }
+
+    #[test]
+    fn isotropic_mapping_maps_20x10mm_to_30x15pt() {
+        let (rack, chain) = fixture();
+        let geom = rack_geometry(&rack, &chain, &mapping(), 10.0);
+        let (_, _, rect, _) = geom.cells[0];
+        assert!((rect.width() - 30.0).abs() < 1e-3, "width: {:?}", rect);
+        assert!(
+            (rect.height() - 15.0).abs() < 1e-3,
+            "height is isotropic: {:?}",
+            rect
+        );
+    }
+
+    #[test]
+    fn mm_grid_pitch_is_isotropic_and_skeleton_matches_full() {
+        let lines = mm_grid_lines(&mapping(), 10.0, 200.0, 40.0, 20.0);
+        let mut xs: Vec<f32> = lines
+            .iter()
+            .filter(|(a, b)| a.x == b.x)
+            .map(|(a, _)| a.x)
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pitch = xs.windows(2).map(|w| w[1] - w[0]).fold(0.0f32, f32::max);
+        assert!(
+            (pitch - 30.0).abs() < 1e-3,
+            "vertical grid pitch isotropic: {xs:?}"
+        );
+        let mut ys: Vec<f32> = lines
+            .iter()
+            .filter(|(a, b)| a.y == b.y)
+            .map(|(a, _)| a.y)
+            .collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(!ys.is_empty(), "horizontal grid lines present");
+        if ys.len() >= 2 {
+            let hpitch = ys[1] - ys[0];
+            assert!(
+                (hpitch - 30.0).abs() < 1e-3,
+                "horizontal grid pitch isotropic: {ys:?}"
+            );
+        }
+        let app = app_with_patch("fixtures/own_buttons.ini");
+        let mut full = app;
+        full.physical_show_skeleton = false;
+        let mut skel = app_with_patch("fixtures/own_buttons.ini");
+        skel.physical_show_skeleton = true;
+        let full_spec = physical_spec(&full, egui::Rect::ZERO).expect("spec");
+        let skel_spec = physical_spec(&skel, egui::Rect::ZERO).expect("spec");
+        assert_eq!(
+            full_spec.cells.len(),
+            skel_spec.cells.len(),
+            "skeleton/full coincide"
+        );
+        let patch = full.patch.as_ref().expect("patch");
+        for cell in &full_spec.cells {
+            if let Some(i) = cell.component_index {
+                assert_ne!(
+                    patch.hw_components[i].kind,
+                    ComponentKind::Led,
+                    "no standalone LED cell"
+                );
+            }
+        }
     }
 }
