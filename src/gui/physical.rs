@@ -3040,4 +3040,96 @@ mod tests {
             }
         }
     }
+
+    fn app_from_ini(ini: &str) -> App {
+        let patch = crate::patch::Patch::from_ini_str(ini, "inline-test".to_string()).unwrap();
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        app
+    }
+
+    #[test]
+    fn unaddressed_partial_b32_emits_dimmed_none_cells_with_no_hit_rect() {
+        let ini = "[b32]\n\n[button]\n    button = B2.1\n    led = L2.1\n    output = _A\n\n[button]\n    button = B2.2\n    led = L2.2\n    output = _B\n\n[copy]\n    input = _A\n    output = O1\n\n[copy]\n    input = _B\n    output = O2\n";
+        let app = app_from_ini(ini);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let dimmed_none: Vec<&CellSpec> = spec
+            .cells
+            .iter()
+            .filter(|c| c.component_index.is_none() && c.dimmed)
+            .collect();
+        assert!(
+            !dimmed_none.is_empty(),
+            "partial B32: unused buttons emit dimmed None-index cells"
+        );
+        for c in &dimmed_none {
+            assert!(c.led_state.is_none(), "unaddressed cell folds no LED state");
+            assert!(c.led_rgb.is_none(), "unaddressed cell folds no LED rgb");
+            assert!(c.shape.is_none(), "unaddressed cell has no composed shape");
+        }
+        let published: Vec<usize> = spec
+            .cells
+            .iter()
+            .filter_map(|c| c.component_index)
+            .collect();
+        assert!(
+            published.len() < spec.cells.len(),
+            "dimmed None cells publish no hit rect (mirror of gui/mod.rs filter)"
+        );
+    }
+
+    #[test]
+    fn unaddressed_p2b8_led_emits_no_standalone_cell() {
+        // UNREFERENCED-1.2-GUARD: pins that 2.2 suppression must not add
+        // standalone L cells. Green today (LEDs without components never emit).
+        let ini = "[p2b8]\n\n[button]\n    button = B1.1\n    led = L1.1\n    output = _A\n\n[copy]\n    input = _A\n    output = O1\n";
+        let app = app_from_ini(ini);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let folded: Vec<String> = patch
+            .hw_components
+            .iter()
+            .filter(|c| c.kind == ComponentKind::Led)
+            .map(|c| c.id.clone())
+            .collect();
+        assert!(!folded.is_empty(), "patch declares LEDs");
+        for cell in &spec.cells {
+            assert!(
+                !cell.label.starts_with('L'),
+                "no standalone L cell beyond the fold: {}",
+                cell.label
+            );
+        }
+    }
+
+    #[test]
+    fn bare_e4_emits_all_128_ring_segments() {
+        let app = app_from_ini("[e4]\n");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        assert!(
+            spec.cells.len() >= 128,
+            "bare E4 contains all 128 ring segments, got {}",
+            spec.cells.len()
+        );
+    }
+
+    #[test]
+    fn bare_p2b8_spec_is_unchanged_no_unaddressed_cells() {
+        // UNREFERENCED-1.2-GUARD: bare P2B8 full front stays byte-identical.
+        // Green today; guards task 2.2.
+        let app = app_from_ini("[p2b8]\n");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        assert!(
+            spec.cells.iter().all(|c| c.component_index.is_some()),
+            "bare P2B8: no unaddressed cells"
+        );
+        let baseline = spec.cells.len();
+        let app2 = app_from_ini("[p2b8]\n");
+        let spec2 = physical_spec(&app2, egui::Rect::ZERO).expect("spec");
+        assert_eq!(
+            spec2.cells.len(),
+            baseline,
+            "bare P2B8 spec cell count stable"
+        );
+    }
 }
