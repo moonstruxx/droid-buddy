@@ -13,7 +13,7 @@
 ## 3. Visual artifacts
 
 - [x] 3.1 Add `fixtures/s10_switch_kinds.ini` (bare S10, 41 green) (S10 with rotary + toggle switches addressed) and a `src/regression.rs` story asserting no `Error` finding, rotary glyph on S1.1/S1.2 cells, toggle glyph on the rest, and unchanged state text. Verify with `cargo test regression::`. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [2.2], touches: [fixtures/s10_switch_kinds.ini, src/regression.rs] -->
-- [ ] 3.2 Re-bless `docs/assets/*.png` via `tools/screenshots/render.sh --bless` (S10 faces change glyphs; all other shots must stay byte-identical) and verify the full check passes. <!-- agent: layout-designer-engineer.build, depends_on: [2.2, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
+- [x] 3.2 Re-bless `docs/assets/*.png` (new S10 shot; S10-only re-bless; 8 identical) via `tools/screenshots/render.sh --bless` (S10 faces change glyphs; all other shots must stay byte-identical) and verify the full check passes. <!-- agent: layout-designer-engineer.build, depends_on: [2.2, 3.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
 
 ## 4. Verification and closeout
 
