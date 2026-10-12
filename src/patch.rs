@@ -3007,6 +3007,115 @@ mod tests {
         assert_eq!(folded_led_for_element(comp), None);
     }
 
+    fn led_register_colour_patch(body: &str) -> Patch {
+        let content = format!("[m4]\n{body}");
+        Patch::from_ini_str(&content, String::from("led_register_colour")).unwrap()
+    }
+
+    fn motorfader_params(patch: &Patch) -> Vec<(String, String)> {
+        patch
+            .sections
+            .iter()
+            .find(|s| s.name == "m4")
+            .map(|s| s.entries.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn led_colour_literal_pair_loads_off_until_resolver_lands() {
+        // Task 1.1 (red): literal ledcolor/ledvalue pair present in the
+        // section, but the LED component still loads as Off. Task 2.1 will
+        // extend this to assert the resolved (value, rgb).
+        let patch = led_register_colour_patch("    ledcolor = 1.1\n    ledvalue = 1\n");
+        let params = motorfader_params(&patch);
+        assert!(params.iter().any(|(k, v)| k == "ledcolor" && v == "1.1"));
+        assert!(params.iter().any(|(k, v)| k == "ledvalue" && v == "1"));
+        let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        assert_eq!(
+            led.state,
+            ComponentState::Off,
+            "resolver not wired yet: LED stays Off"
+        );
+    }
+
+    #[test]
+    fn led_colour_constant_expression_folds_but_state_stays_off() {
+        // Task 1.1 (red): constant expression source folds via the existing
+        // evaluator, but the LED state is still Off until the resolver lands.
+        let folded =
+            crate::expression::evaluate_droid_expr("0.4 + 0.4", &std::collections::HashMap::new());
+        assert!(folded.is_some(), "constant expression must fold");
+        let patch = led_register_colour_patch("    ledcolor = 0.4 + 0.4\n    ledvalue = 1\n");
+        let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        assert_eq!(
+            led.state,
+            ComponentState::Off,
+            "resolver not wired yet: LED stays Off"
+        );
+    }
+
+    #[test]
+    fn led_colour_single_hop_cable_ref_stays_off() {
+        // Task 1.1 (red): single-hop cable ref to a constant producer output
+        // is recorded in the cable index, but the LED still loads Off.
+        let content = "[m4]\n    ledcolor = _LED_C\n    ledvalue = 1\n[copy]\n    output = _LED_C\n    ledcolor = 0.4\n";
+        let patch = Patch::from_ini_str(content, String::from("led_cable_hop")).unwrap();
+        assert!(
+            patch.cable_index.contains_key("_LED_C"),
+            "cable index must record the ref"
+        );
+        let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        assert_eq!(
+            led.state,
+            ComponentState::Off,
+            "resolver not wired yet: LED stays Off"
+        );
+    }
+
+    #[test]
+    fn led_colour_dynamic_cable_ref_is_unresolvable() {
+        // Task 1.1 (red): dynamic cable ref (unknown token) yields None from
+        // the evaluator, and the LED keeps Off (fallback rendering).
+        let dyn_val = crate::expression::evaluate_droid_expr(
+            "_COLOR_DEGREE_FADER",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(dyn_val, None, "dynamic cable ref must not fold");
+        let patch =
+            led_register_colour_patch("    ledcolor = _COLOR_DEGREE_FADER\n    ledvalue = 1\n");
+        let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        assert_eq!(led.state, ComponentState::Off);
+    }
+
+    #[test]
+    fn led_without_source_keeps_off() {
+        // Task 1.1 (red): LED with no colour/brightness source keeps Off;
+        // 2.1 keeps this assertion as the no-source fallback pin.
+        let patch = led_register_colour_patch("");
+        let params = motorfader_params(&patch);
+        assert!(!params.iter().any(|(k, _)| k == "ledcolor"));
+        assert!(!params.iter().any(|(k, _)| k == "ledvalue"));
+        let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        assert_eq!(led.state, ComponentState::Off);
+    }
+
+    #[test]
+    fn led_b32_drops_colour_brightness_only() {
+        // Task 1.1: B32 stays White-only through the existing capability map,
+        // so a resolved colour is dropped by design (this part is green today).
+        assert_eq!(
+            led_capability_for_controller("b32"),
+            Some(LedCapability::White)
+        );
+        let content = "[b32]\n[m4]\n    ledcolor = 1.1\n    ledvalue = 1\n";
+        let patch = Patch::from_ini_str(content, String::from("b32_drop")).unwrap();
+        assert_eq!(
+            led_capability_for_controller("b32"),
+            Some(LedCapability::White)
+        );
+        let _ = patch;
+    }
+
     #[test]
     fn led_association_none_for_button_without_led() {
         let content = std::fs::read_to_string("fixtures/led_pairs.ini").unwrap();
