@@ -445,6 +445,64 @@ fn slice_index(graph: &Graph) -> Vec<usize> {
     slice
 }
 
+/// Section-hole anchor per node for sections mode (sections-black-hole-solver D2):
+/// for each banner group, compute the mean slice of its member circuits (using
+/// `slice_index`), then return the anchor at `(mean_slice * HORIZONTAL_SPACING, 0.0)`.
+/// Nodes not in any cluster get `None`. The anchor is the same for all members
+/// of a cluster (fixed black hole), so circuits in the same banner group are
+/// pulled toward the same horizontal position while distributing vertically via
+/// repulsion.
+///
+/// `slice_index` is the output of [`slice_index`] (patch order for circuits,
+/// fixed outer slices for controllers/jacks). Deterministic: same graph +
+/// same slice_index → identical anchors.
+pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option<(f32, f32)>> {
+    let n = graph.nodes.len();
+    let mut holes = vec![None; n];
+
+    if graph.clusters.is_empty() {
+        return holes;
+    }
+
+    // member_of[i] = cluster index for node i, or None
+    let member_of: Vec<Option<usize>> = (0..n)
+        .map(|i| graph.cluster_index_of(graph.nodes[i].section_index))
+        .collect();
+
+    // Collect member indices per cluster
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
+    for (i, cluster) in member_of.iter().enumerate() {
+        if let Some(c) = cluster {
+            members[*c].push(i);
+        }
+    }
+
+    // Compute mean slice per cluster (only circuit nodes contribute)
+    for (_c, list) in members.iter().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        let mut sum = 0usize;
+        let mut count = 0usize;
+        for &i in list {
+            if graph.nodes[i].kind == NodeKind::Circuit {
+                sum += slice_index[i];
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let mean_slice = sum as f32 / count as f32;
+        let anchor = (mean_slice * HORIZONTAL_SPACING, 0.0);
+        for &i in list {
+            holes[i] = Some(anchor);
+        }
+    }
+
+    holes
+}
+
 /// Column index per node and total column count (graph-column-layout D4): the
 /// left outer column (controllers + input jacks, index 0 when present), the
 /// dense-normalized circuit-depth columns, and the right outer column
@@ -1977,6 +2035,123 @@ mod tests {
         let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3)]);
         let slice = slice_index(&graph);
         assert_eq!(slice, vec![0, 1, 2, 3]);
+    }
+
+    // ── sections-black-hole-solver: section-hole anchor computation (task 1.3) ──
+
+    #[test]
+    fn compute_section_holes_two_banner_groups() {
+        // Build a graph with 2 banner groups (clusters):
+        // Cluster 0: circuits at section_index 0, 1 (nodes 0, 1)
+        // Cluster 1: circuits at section_index 3, 4, 5 (nodes 3, 4, 5)
+        // Nodes 2 and 6 are circuits not in any cluster (None expected)
+        // Node 7 is a controller (in cluster 0 via section_index 0, but not a circuit)
+        let nodes = vec![
+            node("c0", 0), // index 0: circuit, section_index 0, cluster 0
+            node("c1", 1), // index 1: circuit, section_index 1, cluster 0
+            node("c2", 2), // index 2: circuit, section_index 2, no cluster
+            node("c3", 3), // index 3: circuit, section_index 3, cluster 1
+            node("c4", 4), // index 4: circuit, section_index 4, cluster 1
+            node("c5", 5), // index 5: circuit, section_index 5, cluster 1
+            node("c6", 6), // index 6: circuit, section_index 6, no cluster
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 7: controller, section_index 0, cluster 0
+        ];
+        let clusters = vec![
+            Cluster {
+                title: "group_a".to_string(),
+                section_range: 0..2, // covers section_index 0, 1
+            },
+            Cluster {
+                title: "group_b".to_string(),
+                section_range: 3..6, // covers section_index 3, 4, 5
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let slice = slice_index(&graph);
+        let holes = compute_section_holes(&graph, &slice);
+
+        assert_eq!(holes.len(), 8);
+
+        // Cluster 0: circuits at indices 0, 1 with slices 0, 1
+        // Mean slice = (0 + 1) / 2 = 0.5
+        // Anchor = (0.5 * 80.0, 0.0) = (40.0, 0.0)
+        let expected_a = Some((0.5 * HORIZONTAL_SPACING, 0.0));
+        assert_eq!(holes[0], expected_a, "circuit 0 in cluster 0");
+        assert_eq!(holes[1], expected_a, "circuit 1 in cluster 0");
+        // Controller at index 7 is also in cluster 0 (section_index 0)
+        assert_eq!(holes[7], expected_a, "controller in cluster 0");
+
+        // Cluster 1: circuits at indices 3, 4, 5 with slices 3, 4, 5
+        // Mean slice = (3 + 4 + 5) / 3 = 4.0
+        // Anchor = (4.0 * 80.0, 0.0) = (320.0, 0.0)
+        let expected_b = Some((4.0 * HORIZONTAL_SPACING, 0.0));
+        assert_eq!(holes[3], expected_b, "circuit 3 in cluster 1");
+        assert_eq!(holes[4], expected_b, "circuit 4 in cluster 1");
+        assert_eq!(holes[5], expected_b, "circuit 5 in cluster 1");
+
+        // Nodes not in any cluster get None
+        assert_eq!(holes[2], None, "circuit 2 not in any cluster");
+        assert_eq!(holes[6], None, "circuit 6 not in any cluster");
+    }
+
+    #[test]
+    fn compute_section_holes_empty_clusters_returns_all_none() {
+        // Graph with no clusters: all nodes should get None
+        let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3)]);
+        let slice = slice_index(&graph);
+        let holes = compute_section_holes(&graph, &slice);
+        assert_eq!(holes, vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn compute_section_holes_cluster_with_no_circuits_returns_none_for_members() {
+        // Cluster that only contains non-circuit nodes (e.g. only controller)
+        // should result in None for those members (no circuits to average)
+        let nodes = vec![
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+            GraphNode {
+                id: NodeId::Jack("IN1".to_string()),
+                kind: NodeKind::InputJack,
+                circuit: "IN1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+        ];
+        let clusters = vec![Cluster {
+            title: "controllers".to_string(),
+            section_range: 0..1,
+        }];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let slice = slice_index(&graph);
+        let holes = compute_section_holes(&graph, &slice);
+        // No circuits in cluster, so members get None
+        assert_eq!(holes, vec![None, None]);
     }
 
     // ── graph-column-layout: pinned anchors on the column path (task 3.2) ──
