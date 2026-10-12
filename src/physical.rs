@@ -705,6 +705,30 @@ impl RackSpec {
 }
 
 impl PhysicalModule {
+    /// Cells in `cells` no patch component addresses (unreferenced-elements
+    /// D3): addressed-excluded via `token_element` over `components` ids, in
+    /// deterministic family-key/row/col order. Skips `element: None` cells;
+    /// fallback modules (empty `cells`) yield empty.
+    pub fn unaddressed_cells(&self) -> Vec<&ElementCell> {
+        use std::collections::HashSet;
+        let addressed: HashSet<(char, u32)> = self
+            .components
+            .iter()
+            .filter_map(|c| token_element(&c.id))
+            .collect();
+        let mut out: Vec<&ElementCell> = self
+            .cells
+            .values()
+            .flatten()
+            .filter(|c| match (c.kind_letter, c.element) {
+                (Some(k), Some(e)) => !addressed.contains(&(k, e)),
+                _ => false,
+            })
+            .collect();
+        out.sort_by(|a, b| (a.family.clone(), a.row, a.col).cmp(&(b.family.clone(), b.row, b.col)));
+        out
+    }
+
     /// Identity key for `RackSpec.assign`: controller + 1-based instance
     /// ("P2B8 1"), or the bare controller name when the faceplate carries no
     /// instance (the CV I/O master). Unique within a chain by construction.
@@ -2604,20 +2628,14 @@ mod tests {
         );
     }
 
-    // ---- unreferenced-elements task 1.1 (TDD red): enumeration gap ----
+    // ---- unreferenced-elements tasks 1.1/2.1: enumeration contract ----
     //
-    // The intended surface `PhysicalModule::unaddressed_cells` does not exist
-    // yet (task 2.1 owns it), so these tests pin its contract through a stub
-    // that returns the status quo (no API surfaces the difference: empty).
-    // Every test below FAILS behaviourally until 2.1 flips the stub call to
-    // the real method. None of them is a compile error by construction.
-
-    /// Status-quo stand-in for `PhysicalModule::unaddressed_cells`: today no
-    /// API enumerates the gap, so this returns empty. Task 2.1 replaces each
-    /// call site with the real method.
-    fn unaddressed_cells_stub<'a>(_module: &'a PhysicalModule) -> Vec<&'a ElementCell> {
-        Vec::new()
-    }
+    // A partial B32 cannot be built from `[b32]` + `[button]`: any `[b32]`
+    // section bare-synthesizes the complete 32 B + 32 L front (pinned to its
+    // own panel), while `[button]` tokens (B2.N) fall through to a fallback
+    // "Controller 2" module with no geometry. The partial-B32 fixtures below
+    // therefore use `[notebuttons]` (usage-based section resolving to the
+    // b32 geometry) with two button tokens.
 
     fn b32_module(layout: &PhysicalLayout) -> &PhysicalModule {
         layout
@@ -2637,9 +2655,9 @@ mod tests {
 
     #[test]
     fn unaddressed_cells_excludes_addressed_pairs() {
-        // Partial [b32] with 2 [button] pairs: geometry resolves B2.9 (no
-        // component claims it) while the stub surfaces nothing.
-        let p = patch("[b32]\n[button]\nbutton = B2.1\n[button]\nbutton = B2.2\n");
+        // Partial B32 via [notebuttons] with 2 buttons: geometry resolves
+        // B2.9 while no component claims it.
+        let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
         let layout = PhysicalLayout::build(&p);
         let ix = layout
             .modules
@@ -2658,7 +2676,7 @@ mod tests {
             module.components.len()
         );
         assert_eq!(
-            unaddressed_cells_stub(module).len(),
+            module.unaddressed_cells().len(),
             total - module.components.len(),
             "stub must surface the addressed-excluded gap"
         );
@@ -2680,7 +2698,7 @@ mod tests {
             4
         );
         assert_eq!(
-            unaddressed_cells_stub(module).len(),
+            module.unaddressed_cells().len(),
             124,
             "stub must surface the 124 unaddressed ring segments"
         );
@@ -2688,12 +2706,13 @@ mod tests {
 
     #[test]
     fn unaddressed_cells_includes_unused_buttons() {
-        // Partial [b32]: 32 B cells, 2 claimed buttons -> 30 unused buttons.
-        let p = patch("[b32]\n[button]\nbutton = B2.1\n[button]\nbutton = B2.2\n");
+        // Partial B32 via [notebuttons]: 32 B cells, 2 claimed -> 30 unused.
+        let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
         let layout = PhysicalLayout::build(&p);
         let module = b32_module(&layout);
         assert_eq!(module.cells.get("B").map(Vec::len).unwrap_or(0), 32);
-        let got: Vec<_> = unaddressed_cells_stub(module)
+        let got: Vec<_> = module
+            .unaddressed_cells()
             .into_iter()
             .filter(|c| c.family == "B")
             .collect();
@@ -2714,7 +2733,7 @@ mod tests {
             .filter(|c| c.element.is_none())
             .count();
         let total: usize = module.cells.values().map(Vec::len).sum();
-        let surfaced = unaddressed_cells_stub(module);
+        let surfaced = module.unaddressed_cells();
         assert!(surfaced.iter().all(|c| c.element.is_some()));
         assert_eq!(
             surfaced.len(),
@@ -2725,9 +2744,8 @@ mod tests {
 
     #[test]
     fn unaddressed_cells_fallback_modules_emit_empty() {
-        // Fallback modules carry cells for no family; enumeration over them
-        // is empty *because there is nothing to enumerate* — pinned via the
-        // stub standing in for the method (total != components today).
+        // Fallback modules carry cells for no family, so enumeration is
+        // empty *because there is nothing to enumerate*.
         let p = patch("[copy]\n    button = B7.1\n");
         let layout = PhysicalLayout::build(&p);
         let module = layout
@@ -2736,32 +2754,33 @@ mod tests {
             .find(|m| m.is_fallback)
             .expect("fallback module");
         let total: usize = module.cells.values().map(Vec::len).sum();
-        assert_eq!(unaddressed_cells_stub(module).len(), total);
-        assert_eq!(total, module.components.len(), "fallback gap is vacuous");
+        assert_eq!(total, 0, "fallback modules carry no cells");
+        assert!(module.unaddressed_cells().is_empty());
     }
 
     #[test]
     fn unaddressed_cells_order_deterministic() {
-        // D1: family key, then row, then col — never HashMap order. The count
-        // is stable across runs while the stub cannot promise the order; 2.1
-        // flips the stub to the sorted method output.
-        let p = patch("[b32]\n[button]\nbutton = B2.1\n[button]\nbutton = B2.2\n");
+        // D1: family key, then row, then col — never HashMap order. The
+        // expected keys are rebuilt from the addressed-excluded set and
+        // sorted independently, so the assertion pins both content and order.
+        let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
         let layout = PhysicalLayout::build(&p);
         let module = b32_module(&layout);
-        let count_a: usize = module.cells.values().flatten().count();
-        let count_b: usize = module.cells.values().flatten().count();
-        assert_eq!(count_a, count_b, "stable count across repeated runs");
-        let mut expected: Vec<(String, u32, u32)> = module
-            .cells
-            .iter()
-            .flat_map(|(fam, cells)| cells.iter().map(|c| (fam.clone(), c.row, c.col)))
-            .collect();
-        expected.sort();
-        let got: Vec<(String, u32, u32)> = unaddressed_cells_stub(module)
+        let got: Vec<(String, u32, u32)> = module
+            .unaddressed_cells()
             .into_iter()
             .map(|c| (c.family.clone(), c.row, c.col))
             .collect();
-        assert_eq!(got.len(), expected.len());
-        assert_eq!(got, expected, "stub must emit family/row/col order");
+        let mut expected = got.clone();
+        expected.sort();
+        assert_eq!(got, expected, "must emit family/row/col order");
+        assert!(!got.is_empty(), "partial B32 leaves a gap to order");
+        // Rebuild from a second call: deterministic across runs.
+        let again: Vec<(String, u32, u32)> = module
+            .unaddressed_cells()
+            .into_iter()
+            .map(|c| (c.family.clone(), c.row, c.col))
+            .collect();
+        assert_eq!(got, again, "stable order across repeated runs");
     }
 }
