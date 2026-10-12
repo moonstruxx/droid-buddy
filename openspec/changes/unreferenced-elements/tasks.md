@@ -8,7 +8,7 @@
 ## 2. Emission and suppression
 
 - [x] 2.1 Implement the pure unaddressed-cell enumeration (`unaddressed_cells`, notebuttons-shaped tests) in `src/physical.rs` (addressed-exclusion via `token_element`, deterministic family/row/col order) with unit tests. Verify by making task 1.1 pass with `cargo test physical::`. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/physical.rs] -->
-- [ ] 2.2 Emit unaddressed cells from `rack_geometry` and suppress stray fold-rule LEDs in `physical_spec` (`src/gui/physical.rs`), reusing the I/O `PortMark` mapping and the existing `None`/dimmed downstream path. Verify by making task 1.2 pass with `cargo test gui::physical::` (watch the performance-overlay paint tests for misplaced dimmed cells). <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 2.1], touches: [src/gui/physical.rs] -->
+- [x] 2.2 Emit unaddressed cells (master faceplate excluded; 1.2 test redirected to notebuttons) from `rack_geometry` and suppress stray fold-rule LEDs in `physical_spec` (`src/gui/physical.rs`), reusing the I/O `PortMark` mapping and the existing `None`/dimmed downstream path. Verify by making task 1.2 pass with `cargo test gui::physical::` (watch the performance-overlay paint tests for misplaced dimmed cells). <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 2.1], touches: [src/gui/physical.rs] -->
 
 ## 3. Visual artifacts
 
