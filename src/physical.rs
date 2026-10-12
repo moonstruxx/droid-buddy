@@ -113,6 +113,10 @@ pub struct ElementCellEntry {
     /// Jack direction for CV cells (`"in"` / `"out"`); informational.
     #[serde(default)]
     pub dir: Option<String>,
+    /// Faceplate annotation from the JSON (e.g. `"rotary"`, `"small"`,
+    /// `"touch"`); absent → `None`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +304,9 @@ pub struct ElementCell {
     /// Kind letter decoded from the label (`'B'`, `'I'`, `'O'`, ...). Used to
     /// break ties on CV cells where "I4" and "O4" share an element number.
     pub kind_letter: Option<char>,
+    /// Faceplate kind annotation carried from the JSON (`"rotary"`,
+    /// `"small"`, `"touch"`, ...); `None` when absent.
+    pub kind: Option<String>,
 }
 
 /// A faceplate in the physical chain: one (controller, module-instance) pair.
@@ -424,6 +431,7 @@ fn preprocess_cells(
                         label: c.label.clone(),
                         element,
                         kind_letter,
+                        kind: c.kind.clone(),
                     }
                 })
                 .collect();
@@ -2782,5 +2790,59 @@ mod tests {
             .map(|c| (c.family.clone(), c.row, c.col))
             .collect();
         assert_eq!(got, again, "stable order across repeated runs");
+    }
+
+    // s10-switch-glyphs task 1.1: loader surfaces the JSON `kind`
+    // annotation via the real field.
+    fn s10_s_cells() -> Vec<ElementCellEntry> {
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let s10 = data.controller("s10").expect("s10 entry");
+        s10.element_cells.get("S").expect("s10 S family").clone()
+    }
+
+    #[test]
+    fn s10_switch_kind_rotary_loads() {
+        let cells = s10_s_cells();
+        assert_eq!(cells.len(), 10, "s10 must carry 10 S entries");
+        let s11 = cells
+            .iter()
+            .find(|c| c.label == "S1.1")
+            .expect("S1.1 entry");
+        assert_eq!(s11.kind.as_deref(), Some("rotary"));
+    }
+
+    #[test]
+    fn s10_switch_kind_small_loads() {
+        let cells = s10_s_cells();
+        let s13 = cells
+            .iter()
+            .find(|c| c.label == "S1.3")
+            .expect("S1.3 entry");
+        assert_eq!(s13.kind.as_deref(), Some("small"));
+    }
+
+    #[test]
+    fn entry_without_kind_loads_none() {
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let p2b8 = data.controller("p2b8").expect("p2b8 entry");
+        let b = p2b8.element_cells.get("B").expect("p2b8 B family");
+        assert!(!b.is_empty(), "p2b8 must carry B entries");
+        for entry in b {
+            assert_eq!(
+                entry.kind.as_deref(),
+                None,
+                "{} has no kind annotation",
+                entry.label
+            );
+        }
+    }
+
+    #[test]
+    fn m4_touch_kind_rides_along() {
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let m4 = data.controller("m4").expect("m4 entry");
+        let b = m4.element_cells.get("B").expect("m4 B family");
+        let b11 = b.iter().find(|c| c.label == "B1.1").expect("B1.1 entry");
+        assert_eq!(b11.kind.as_deref(), Some("touch"));
     }
 }

@@ -2320,3 +2320,93 @@ fn regression_shift_colour_module_ui_tint_and_noop() {
         crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
     assert_eq!(again.cells, base.cells, "no shift must be byte-identical");
 }
+
+// ── s10-switch-glyphs (task 3.1): rotary vs toggle switch glyphs ─────────
+// One fixture (`fixtures/s10_switch_kinds.ini`) with a bare `[s10]`
+// synthesizing the full 10-switch front (S1.1..S1.10 at chain position 1).
+// This story asserts presence and token attribution only — never positions —
+// plus the kind-driven glyphs on the published spec cells.
+#[test]
+fn regression_s10_switch_kinds_glyphs() {
+    let path = "fixtures/s10_switch_kinds.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    // (a) No Error-severity validation finding: the fixture is a valid patch,
+    // not a validation-case carrier.
+    let schema = crate::schema::load_schema();
+    let issues = crate::validation::validate_patch(&patch, schema);
+    let errors: Vec<_> = issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{path} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    // (b) The s10 faceplate exists on its geometry entry and every S token
+    // lands on it. Presence and attribution only — no coordinate is read.
+    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let s10_ix = layout
+        .modules
+        .iter()
+        .position(|m| m.geometry_key == "s10")
+        .unwrap_or_else(|| panic!("no s10 faceplate"));
+    assert!(
+        !layout.modules[s10_ix].is_fallback,
+        "s10 faceplate must use its geometry entry, not the fallback"
+    );
+    for n in 1..=10u32 {
+        let token = format!("S1.{n}");
+        assert!(
+            layout.modules[s10_ix]
+                .components
+                .iter()
+                .any(|c| c.id == token),
+            "{token} must be attributed to the s10 faceplate"
+        );
+        assert!(
+            layout.cell_for(s10_ix, &token).is_some(),
+            "{token} must resolve to an element cell on the s10 faceplate"
+        );
+    }
+
+    // (c) Kind-driven glyphs on the published spec cells: rotary S1.1/S1.2
+    // render round (\u{25C9}/\u{25CB}), the eight toggles render square
+    // (\u{25A3}/\u{25A1}), and state text is unchanged across kinds.
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    let spec =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    let cell_for = |token: &str| {
+        let idx = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == token)
+            .unwrap_or_else(|| panic!("no component {token} in fixture"));
+        spec.cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .unwrap_or_else(|| panic!("{token} must publish a spec cell"))
+    };
+    for n in 1..=10u32 {
+        let token = format!("S1.{n}");
+        let cell = cell_for(&token);
+        let rotary = n <= 2;
+        assert!(
+            ["\u{25C9}", "\u{25CB}"].contains(&cell.glyph.as_str()) == rotary,
+            "{token} rotary={rotary} glyph must be round iff rotary, got {:?}",
+            cell.glyph
+        );
+        assert!(
+            ["\u{25A3}", "\u{25A1}"].contains(&cell.glyph.as_str()) == !rotary,
+            "{token} rotary={rotary} glyph must be square iff toggle, got {:?}",
+            cell.glyph
+        );
+    }
+    // State text stability: Off switches read OFF on both kinds.
+    assert_eq!(cell_for("S1.1").state_text, cell_for("S1.3").state_text);
+}

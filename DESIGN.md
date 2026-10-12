@@ -200,7 +200,8 @@ Glyphs by kind:
 | Kind | On / value | Off / idle |
 |---|---|---|
 | Button | `●` | `○` |
-| Switch | `▣` for ON, `◉` + percentage for a value | `□` |
+| Switch (toggle) | `▣` for ON, `◉` + percentage for a value | `□` |
+| Switch (rotary, S10) | `◉` for ON, `◉` + percentage for a value | `○` |
 | LED | `●` | `○` |
 | Knob / Encoder | `◉` + percentage | `◉` + `---` |
 | Fader | `▮` + track filled to value | `▮` + empty track |
@@ -333,3 +334,4 @@ Face correctness is proven by headless egui assertions: each surface's paint rou
 <!-- Last updated: 2026-10-13 · led-register-colour: static ledcolor/ledvalue sources resolve at load (literals, constant expressions, single-hop constant cables; dynamic falls back to white), B32 brightness-only, toggles preserve rgb; hue table documented as ours over the observed 0–1.2 corpus range pending hardware verification. -->
 <!-- Last updated: 2026-10-13 · unreferenced-elements: every geometry-declared element renders (dimmed, unlabelled, never hit); stray fold-rule LEDs stay suppressed; full E4/DB8E rings complete; master faceplate excluded from emission. -->
 <!-- Last updated: 2026-10-13 · shift-colour-module-ui: module-UI members tint ring/glyph in the active group token (shift_color slot + cell_visuals flag); non-members, unaddressed cells, and no-shift specs render exactly as before. -->
+<!-- Last updated: 2026-10-13 · s10-switch-glyphs: S10 rotary switches render round (ON/OFF), toggles square; kind annotations drive the distinction, unannotated switches keep the toggle glyph. -->

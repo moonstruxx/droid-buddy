@@ -250,6 +250,16 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/button_led_composition.ini",
             setup: setup_shift_colour,
         },
+        // Switch-kind glyph check (change `s10-switch-glyphs`, task 3.2):
+        // a bare S10 synthesizes the full 10-switch front whose geometry
+        // annotates S1.1/S1.2 rotary and the rest toggle, so both glyph arms
+        // read on one faceplate. Single controller, so the 2x stack zoom
+        // fits with margin.
+        Shot {
+            file: "s10-switch-kinds.png",
+            fixture: "fixtures/s10_switch_kinds.ini",
+            setup: setup_faceplate_stack,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -325,7 +335,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -377,6 +387,7 @@ fn main() {
         "led-register-colour",
         "unreferenced-elements",
         "shift-colour",
+        "s10-switch-kinds",
         "large-startup",
         "large-graph",
     ];
