@@ -308,6 +308,20 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             continue;
         }
 
+        // Fold suppression (unreferenced-elements D2): an unaddressed L cell
+        // on a fold-rule controller never renders standalone — its face (or
+        // dimmed unaddressed face) already shows the floor fill. Recover the
+        // token via the cell label and apply the same per-controller rule.
+        if ci >= module.components.len() {
+            let ordinal = ci - module.components.len();
+            if let Some(unaddr) = module.unaddressed_cells().get(ordinal) {
+                if unaddr.kind_letter == Some('L')
+                    && fold_shape_for_controller(&module.geometry_key).is_some()
+                {
+                    continue;
+                }
+            }
+        }
         // ci might be out of bounds for patch components if it's an unused element
         // In that case, we still render the cell but dimmed and unlabelled
         let (
@@ -1282,6 +1296,38 @@ pub(crate) fn rack_geometry(
                 });
                 cells.push((placed.module_index, cell_index, rect, mark));
             }
+            // Unaddressed cells (unreferenced-elements D1/D3): every
+            // geometry-declared cell no component addresses, in deterministic
+            // family/row/col order, with `ci = components.len() + ordinal` so
+            // the spec's `ci`-based branch renders them dimmed via the
+            // existing `None` path. Same `cell()` mapping as addressed cells.
+            // The auto-added master faceplate (`CV I/O`) is not a declared
+            // controller, so its unused jacks/matrix stay unrendered — this
+            // keeps bare full fronts byte-identical (D5).
+            if module.controller != "CV I/O" {
+                for (ordinal, unaddr) in module.unaddressed_cells().into_iter().enumerate() {
+                    if unaddr.element.is_none() {
+                        continue;
+                    }
+                    let mark = match unaddr.kind_letter {
+                        Some('I') => PortMark::PortIn,
+                        Some('O') => PortMark::PortOut,
+                        _ => PortMark::Cell,
+                    };
+                    let rect = cell(crate::physical::RectMm {
+                        x_mm: placed.rect_mm.x_mm + unaddr.rect_mm.x_mm,
+                        y_mm: abs_y_mm + unaddr.rect_mm.y_mm,
+                        w_mm: unaddr.rect_mm.w_mm,
+                        h_mm: unaddr.rect_mm.h_mm,
+                    });
+                    cells.push((
+                        placed.module_index,
+                        module.components.len() + ordinal,
+                        rect,
+                        mark,
+                    ));
+                }
+            }
 
             // DB8E OLED display placeholder (db8e-oled-display-placeholder):
             // the bordered upper-band rect above the B-grid. Band height
@@ -1820,21 +1866,32 @@ mod tests {
                 }
             }
         }
-        let expected: Vec<(usize, usize, egui::Rect)> = geom
+        let expected: Vec<(Option<usize>, egui::Rect)> = geom
             .cells
             .iter()
-            .filter(|(mi, ci, _, _)| !folded.contains(&chain.modules[*mi].components[*ci].id))
-            .map(|(mi, ci, rect, _)| (*mi, *ci, *rect))
+            .filter(|(mi, ci, _, _)| {
+                *ci >= chain.modules[*mi].components.len()
+                    || !folded.contains(&chain.modules[*mi].components[*ci].id)
+            })
+            .map(|(mi, ci, rect, _)| {
+                let global = if *ci < chain.modules[*mi].components.len() {
+                    let comp = &chain.modules[*mi].components[*ci];
+                    patch
+                        .hw_components
+                        .iter()
+                        .position(|c| c.id == comp.id)
+                        .expect("every chain component exists in the patch")
+                } else {
+                    // Unaddressed geometry cell: the spec renders it dimmed
+                    // with `component_index: None` (never hit-testable).
+                    return (None, *rect);
+                };
+                (Some(global), *rect)
+            })
             .collect();
         assert_eq!(spec.cells.len(), expected.len());
-        for (cell, (mi, ci, rect)) in spec.cells.iter().zip(expected.iter()) {
-            let comp = &chain.modules[*mi].components[*ci];
-            let expected = patch
-                .hw_components
-                .iter()
-                .position(|c| c.id == comp.id)
-                .expect("every chain component exists in the patch");
-            assert_eq!(cell.component_index, Some(expected), "cell {}", comp.id);
+        for (cell, (global, rect)) in spec.cells.iter().zip(expected.iter()) {
+            assert_eq!(cell.component_index, *global);
             assert_eq!(cell.rect, *rect);
         }
         // The second module's cells carry global indices past the first module's
@@ -1846,8 +1903,9 @@ mod tests {
                 .any(|c| c.component_index.is_some_and(|i| i >= first_module_len)),
             "the second module publishes global indices"
         );
-        // Published indices are distinct and in range; unused geometry cells are
-        // never published (they would carry `None`).
+        // Published indices are distinct and in range; unused geometry cells
+        // carry `None` and never publish a hit rect (mirror of the
+        // gui/mod.rs filter).
         let mut idx: Vec<usize> = spec
             .cells
             .iter()
@@ -3039,5 +3097,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn app_from_ini(ini: &str) -> App {
+        let patch = crate::patch::Patch::from_ini_str(ini, "inline-test".to_string()).unwrap();
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        app
+    }
+
+    #[test]
+    fn unaddressed_partial_b32_emits_dimmed_none_cells_with_no_hit_rect() {
+        // UNREFERENCED-2.2-REDIRECT: the `[b32]`+`[button]` form lands B2.N
+        // tokens on a fallback module (empty cells map), so no emission fix
+        // can turn it green. The `[notebuttons]` entry form binds to the b32
+        // geometry: 2 of 32 buttons addressed → 30 unused B cells dimmed.
+        let ini = "[notebuttons]\n    button1 = B2.1\n    button2 = B2.2\n    led1 = L2.1\n    led2 = L2.2\n";
+        let app = app_from_ini(ini);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let dimmed_none: Vec<&CellSpec> = spec
+            .cells
+            .iter()
+            .filter(|c| c.component_index.is_none() && c.dimmed)
+            .collect();
+        assert!(
+            !dimmed_none.is_empty(),
+            "partial B32: unused buttons emit dimmed None-index cells"
+        );
+        for c in &dimmed_none {
+            assert!(c.led_state.is_none(), "unaddressed cell folds no LED state");
+            assert!(c.led_rgb.is_none(), "unaddressed cell folds no LED rgb");
+            assert!(c.shape.is_none(), "unaddressed cell has no composed shape");
+        }
+        let published: Vec<usize> = spec
+            .cells
+            .iter()
+            .filter_map(|c| c.component_index)
+            .collect();
+        assert!(
+            published.len() < spec.cells.len(),
+            "dimmed None cells publish no hit rect (mirror of gui/mod.rs filter)"
+        );
+    }
+
+    #[test]
+    fn unaddressed_p2b8_led_emits_no_standalone_cell() {
+        // UNREFERENCED-1.2-GUARD: pins that 2.2 suppression must not add
+        // standalone L cells. Green today (LEDs without components never emit).
+        let ini = "[p2b8]\n\n[button]\n    button = B1.1\n    led = L1.1\n    output = _A\n\n[copy]\n    input = _A\n    output = O1\n";
+        let app = app_from_ini(ini);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let folded: Vec<String> = patch
+            .hw_components
+            .iter()
+            .filter(|c| c.kind == ComponentKind::Led)
+            .map(|c| c.id.clone())
+            .collect();
+        assert!(!folded.is_empty(), "patch declares LEDs");
+        for cell in &spec.cells {
+            assert!(
+                !cell.label.starts_with('L'),
+                "no standalone L cell beyond the fold: {}",
+                cell.label
+            );
+        }
+    }
+
+    #[test]
+    fn bare_e4_emits_all_128_ring_segments() {
+        let app = app_from_ini("[e4]\n");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        assert!(
+            spec.cells.len() >= 128,
+            "bare E4 contains all 128 ring segments, got {}",
+            spec.cells.len()
+        );
+    }
+
+    #[test]
+    fn bare_p2b8_spec_is_unchanged_no_unaddressed_cells() {
+        // UNREFERENCED-1.2-GUARD: bare P2B8 full front stays byte-identical.
+        // Green today; guards task 2.2.
+        let app = app_from_ini("[p2b8]\n");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        assert!(
+            spec.cells.iter().all(|c| c.component_index.is_some()),
+            "bare P2B8: no unaddressed cells"
+        );
+        let baseline = spec.cells.len();
+        let app2 = app_from_ini("[p2b8]\n");
+        let spec2 = physical_spec(&app2, egui::Rect::ZERO).expect("spec");
+        assert_eq!(
+            spec2.cells.len(),
+            baseline,
+            "bare P2B8 spec cell count stable"
+        );
     }
 }

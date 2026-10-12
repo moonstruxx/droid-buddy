@@ -2100,3 +2100,140 @@ fn regression_led_register_colour_resolves_static_and_falls_back() {
         );
     }
 }
+
+// ── unreferenced elements (unreferenced-elements 3.1) ──────────────────────
+// One fixture (`fixtures/unreferenced_elements.ini`) declaring a partial B32
+// (5 of 32 buttons via `[notebuttons]`) and a bare `[e4]`. This story asserts
+// presence and token attribution only: no Error finding, the 27 unused B32
+// buttons and 124 E4 ring segments render as dimmed unlabelled `None` cells,
+// no standalone LED cell renders on the fold-rule B32, and no unaddressed
+// token reaches the published hit rects. Positions belong to tasks 1.1/1.2
+// and are never read here.
+
+/// The five buttons the fixture addresses on the partial B32.
+const UNREFERENCED_B32_BUTTONS: &[&str] = &["B3.1", "B3.2", "B3.3", "B3.4", "B3.5"];
+
+#[test]
+fn regression_unreferenced_elements_render_dimmed_without_hit_rects() {
+    let path = "fixtures/unreferenced_elements.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    // (a) No Error-severity validation finding: the fixture is a valid patch,
+    // not a validation-case carrier.
+    let schema = crate::schema::load_schema();
+    let issues = crate::validation::validate_patch(&patch, schema);
+    let errors: Vec<_> = issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{path} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    // (b) Both faceplates exist on their geometry entries and render their
+    // declared tokens: each token is attributed to its faceplate and
+    // resolves to a cell. The `[notebuttons]` section binds to the b32
+    // faceplate (never the fallback); the bare `[e4]` synthesizes its front.
+    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let b32_ix = layout
+        .modules
+        .iter()
+        .position(|m| m.geometry_key == "b32")
+        .unwrap_or_else(|| panic!("no b32 faceplate"));
+    assert!(
+        !layout.modules[b32_ix].is_fallback,
+        "b32 faceplate must use its geometry entry, not the fallback"
+    );
+    for token in UNREFERENCED_B32_BUTTONS {
+        assert!(
+            layout.modules[b32_ix]
+                .components
+                .iter()
+                .any(|c| c.id == *token),
+            "{token} must be attributed to the b32 faceplate"
+        );
+        assert!(
+            layout.cell_for(b32_ix, token).is_some(),
+            "{token} must resolve to an element cell on the b32 faceplate"
+        );
+    }
+    let e4_ix = layout
+        .modules
+        .iter()
+        .position(|m| m.geometry_key == "e4")
+        .unwrap_or_else(|| panic!("no e4 faceplate"));
+
+    // (c) Unaddressed geometry: 27 unused B32 buttons and 124 E4 ring
+    // segments (128 registers minus the 4 synthesized LEDs).
+    let b32_unused = layout.modules[b32_ix]
+        .unaddressed_cells()
+        .into_iter()
+        .filter(|c| c.kind_letter == Some('B'))
+        .count();
+    assert_eq!(
+        b32_unused, 27,
+        "partial B32 must leave 27 buttons unaddressed"
+    );
+    let e4_unused_rings = layout.modules[e4_ix]
+        .unaddressed_cells()
+        .into_iter()
+        .filter(|c| c.kind_letter == Some('L'))
+        .count();
+    assert_eq!(
+        e4_unused_rings, 124,
+        "bare E4 must leave 124 ring segments unaddressed"
+    );
+
+    // (d) The published spec renders every unaddressed cell dimmed and
+    // unlabelled via the `None`-index path, and no standalone LED cell
+    // survives on the fold-rule B32 — so exactly 27 + 124 `None` cells
+    // publish (the suppressed B32 LEDs never render).
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    let spec =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    let none_cells: Vec<_> = spec
+        .cells
+        .iter()
+        .filter(|c| c.component_index.is_none())
+        .collect();
+    assert_eq!(
+        none_cells.len(),
+        27 + 124,
+        "spec must render 27 dimmed buttons + 124 dimmed ring segments, got {}",
+        none_cells.len()
+    );
+    for cell in &none_cells {
+        assert!(cell.dimmed, "unaddressed cell must render dimmed");
+        assert!(
+            cell.label.is_empty(),
+            "unaddressed cell must render unlabelled"
+        );
+    }
+
+    // (e) Hit publication (`gui/mod.rs` filter: only `Some`-index cells are
+    // hit-testable) carries no unaddressed token: every published token is
+    // one the patch addresses.
+    let addressed: std::collections::HashSet<&str> = layout
+        .modules
+        .iter()
+        .flat_map(|m| m.components.iter().map(|c| c.id.as_str()))
+        .collect();
+    let hit_tokens: Vec<&str> = spec
+        .cells
+        .iter()
+        .filter_map(|c| c.component_index)
+        .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.as_str())
+        .collect();
+    assert!(
+        !hit_tokens.is_empty(),
+        "the fixture must publish hit rects for its addressed elements"
+    );
+    for token in &hit_tokens {
+        assert!(
+            addressed.contains(token),
+            "published hit rect {token} must belong to an addressed element"
+        );
+    }
+}

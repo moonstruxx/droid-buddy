@@ -705,6 +705,30 @@ impl RackSpec {
 }
 
 impl PhysicalModule {
+    /// Cells in `cells` no patch component addresses (unreferenced-elements
+    /// D3): addressed-excluded via `token_element` over `components` ids, in
+    /// deterministic family-key/row/col order. Skips `element: None` cells;
+    /// fallback modules (empty `cells`) yield empty.
+    pub fn unaddressed_cells(&self) -> Vec<&ElementCell> {
+        use std::collections::HashSet;
+        let addressed: HashSet<(char, u32)> = self
+            .components
+            .iter()
+            .filter_map(|c| token_element(&c.id))
+            .collect();
+        let mut out: Vec<&ElementCell> = self
+            .cells
+            .values()
+            .flatten()
+            .filter(|c| match (c.kind_letter, c.element) {
+                (Some(k), Some(e)) => !addressed.contains(&(k, e)),
+                _ => false,
+            })
+            .collect();
+        out.sort_by_key(|a| (a.family.clone(), a.row, a.col));
+        out
+    }
+
     /// Identity key for `RackSpec.assign`: controller + 1-based instance
     /// ("P2B8 1"), or the bare controller name when the faceplate carries no
     /// instance (the CV I/O master). Unique within a chain by construction.
@@ -2602,5 +2626,161 @@ mod tests {
             sy1 - (sy0 + p0.h_mm * m.cells_per_mm),
             FOLD_BAR_HEIGHT_MM * m.cells_per_mm,
         );
+    }
+
+    // ---- unreferenced-elements tasks 1.1/2.1: enumeration contract ----
+    //
+    // A partial B32 cannot be built from `[b32]` + `[button]`: any `[b32]`
+    // section bare-synthesizes the complete 32 B + 32 L front (pinned to its
+    // own panel), while `[button]` tokens (B2.N) fall through to a fallback
+    // "Controller 2" module with no geometry. The partial-B32 fixtures below
+    // therefore use `[notebuttons]` (usage-based section resolving to the
+    // b32 geometry) with two button tokens.
+
+    fn b32_module(layout: &PhysicalLayout) -> &PhysicalModule {
+        layout
+            .modules
+            .iter()
+            .find(|m| m.geometry_key == "b32")
+            .expect("b32 faceplate")
+    }
+
+    fn e4_module(layout: &PhysicalLayout) -> &PhysicalModule {
+        layout
+            .modules
+            .iter()
+            .find(|m| m.geometry_key == "e4")
+            .expect("e4 faceplate")
+    }
+
+    #[test]
+    fn unaddressed_cells_excludes_addressed_pairs() {
+        // Partial B32 via [notebuttons] with 2 buttons: geometry resolves
+        // B2.9 while no component claims it.
+        let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
+        let layout = PhysicalLayout::build(&p);
+        let ix = layout
+            .modules
+            .iter()
+            .position(|m| m.geometry_key == "b32")
+            .unwrap();
+        assert!(
+            layout.cell_for(ix, "B2.9").is_some(),
+            "geometry resolves B2.9, no component claims it"
+        );
+        let module = b32_module(&layout);
+        let total: usize = module.cells.values().map(Vec::len).sum();
+        assert!(
+            total > module.components.len(),
+            "gap exists: {total} cells vs {} components",
+            module.components.len()
+        );
+        assert_eq!(
+            module.unaddressed_cells().len(),
+            total - module.components.len(),
+            "stub must surface the addressed-excluded gap"
+        );
+    }
+
+    #[test]
+    fn unaddressed_cells_includes_ring_segments() {
+        // Bare [e4]: 128 L-family ring cells vs 4 synthesized L components.
+        let layout = PhysicalLayout::build(&patch("[e4]\n"));
+        let module = e4_module(&layout);
+        let rings = module.cells.get("L").map(Vec::len).unwrap_or(0);
+        assert_eq!(rings, 128, "E4 L-family carries 128 ring segments");
+        assert_eq!(
+            module
+                .components
+                .iter()
+                .filter(|c| c.id.starts_with('L'))
+                .count(),
+            4
+        );
+        assert_eq!(
+            module.unaddressed_cells().len(),
+            124,
+            "stub must surface the 124 unaddressed ring segments"
+        );
+    }
+
+    #[test]
+    fn unaddressed_cells_includes_unused_buttons() {
+        // Partial B32 via [notebuttons]: 32 B cells, 2 claimed -> 30 unused.
+        let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
+        let layout = PhysicalLayout::build(&p);
+        let module = b32_module(&layout);
+        assert_eq!(module.cells.get("B").map(Vec::len).unwrap_or(0), 32);
+        let got: Vec<_> = module
+            .unaddressed_cells()
+            .into_iter()
+            .filter(|c| c.family == "B")
+            .collect();
+        assert_eq!(got.len(), 30, "stub must surface the 30 unused buttons");
+    }
+
+    #[test]
+    fn unaddressed_cells_skips_element_none_cells() {
+        // Cells with `element: None` (e.g. "USB") never match a token pair
+        // and must be skipped: the surfaced set must equal total minus
+        // addressed minus element-less cells.
+        let layout = PhysicalLayout::build(&patch("[e4]\n"));
+        let module = e4_module(&layout);
+        let noneless: usize = module
+            .cells
+            .values()
+            .flatten()
+            .filter(|c| c.element.is_none())
+            .count();
+        let total: usize = module.cells.values().map(Vec::len).sum();
+        let surfaced = module.unaddressed_cells();
+        assert!(surfaced.iter().all(|c| c.element.is_some()));
+        assert_eq!(
+            surfaced.len(),
+            total - module.components.len() - noneless,
+            "stub must skip element-less cells"
+        );
+    }
+
+    #[test]
+    fn unaddressed_cells_fallback_modules_emit_empty() {
+        // Fallback modules carry cells for no family, so enumeration is
+        // empty *because there is nothing to enumerate*.
+        let p = patch("[copy]\n    button = B7.1\n");
+        let layout = PhysicalLayout::build(&p);
+        let module = layout
+            .modules
+            .iter()
+            .find(|m| m.is_fallback)
+            .expect("fallback module");
+        let total: usize = module.cells.values().map(Vec::len).sum();
+        assert_eq!(total, 0, "fallback modules carry no cells");
+        assert!(module.unaddressed_cells().is_empty());
+    }
+
+    #[test]
+    fn unaddressed_cells_order_deterministic() {
+        // D1: family key, then row, then col — never HashMap order. The
+        // expected keys are rebuilt from the addressed-excluded set and
+        // sorted independently, so the assertion pins both content and order.
+        let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
+        let layout = PhysicalLayout::build(&p);
+        let module = b32_module(&layout);
+        let got: Vec<(String, u32, u32)> = module
+            .unaddressed_cells()
+            .into_iter()
+            .map(|c| (c.family.clone(), c.row, c.col))
+            .collect();
+        let mut expected = got.clone();
+        expected.sort();
+        assert_eq!(got, expected, "must emit family/row/col order");
+        assert!(!got.is_empty(), "partial B32 leaves a gap to order");
+        // Rebuild from a second call: deterministic across runs.
+        let again: Vec<(String, u32, u32)> = module
+            .unaddressed_cells()
+            .into_iter()
+            .map(|c| (c.family.clone(), c.row, c.col))
+            .collect();
+        assert_eq!(got, again, "stable order across repeated runs");
     }
 }
