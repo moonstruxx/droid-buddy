@@ -1929,7 +1929,18 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
     }
 }
 
-/// Get the LED capability for a controller type.
+/// Single source of truth for the element-to-LED binding (button-led-composition D3).
+/// Returns the parser-recorded `led` pairing (explicit entry, else the
+/// device-default synthesis in `from_ini_str`) when present, otherwise the
+/// controller's first positional default, else `None`. Pure and read-only over `comp`.
+pub fn folded_led_for_element(comp: &HwComponent) -> Option<String> {
+    if let Some(led) = comp.led.as_ref() {
+        return Some(led.clone());
+    }
+    positional_leds_for_element(&comp.controller, &comp.id)
+        .into_iter()
+        .next()
+}
 pub fn led_capability_for_controller(controller: &str) -> Option<LedCapability> {
     match controller.to_ascii_lowercase().as_str() {
         "b32" | "notebuttons" => Some(LedCapability::White),
@@ -2940,6 +2951,39 @@ mod tests {
         let patch = Patch::from_ini_str(&content, String::from("led_pairs")).unwrap();
         let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
         assert_eq!(b1_1.led, Some(String::from("L1.1")));
+    }
+
+    #[test]
+    fn folded_led_explicit_pairing_wins_over_positional_default() {
+        let content = "[p2b8]\n\n[button]\n    button = B1.1\n    led = L1.7\n";
+        let patch = Patch::from_ini_str(content, String::from("explicit_wins")).unwrap();
+        let comp = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
+        assert_eq!(comp.led.as_deref(), Some("L1.7"));
+        assert_eq!(folded_led_for_element(comp).as_deref(), Some("L1.7"));
+    }
+
+    #[test]
+    fn folded_led_falls_back_to_positional_default() {
+        let content = std::fs::read_to_string("fixtures/device_led_defaults.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("device_led_defaults")).unwrap();
+        let comp = patch.hw_components.iter().find(|c| c.id == "B2.1").unwrap();
+        assert_eq!(comp.led, None);
+        assert_eq!(
+            folded_led_for_element(comp),
+            positional_leds_for_element(&comp.controller, &comp.id)
+                .into_iter()
+                .next()
+        );
+        assert!(folded_led_for_element(comp).is_some());
+    }
+
+    #[test]
+    fn folded_led_none_when_no_binding() {
+        let content = "[p2b8]\n\n[pot]\n    pot = P1.1\n";
+        let patch = Patch::from_ini_str(content, String::from("no_binding")).unwrap();
+        let comp = patch.hw_components.iter().find(|c| c.id == "P1.1").unwrap();
+        assert_eq!(comp.led, None);
+        assert_eq!(folded_led_for_element(comp), None);
     }
 
     #[test]
