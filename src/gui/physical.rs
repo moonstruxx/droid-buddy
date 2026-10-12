@@ -60,6 +60,19 @@ pub(crate) struct ModuleSpec {
 /// (hover/circuit highlight, shift color, paused dim). `component_index` is the
 /// component's index into `patch.hw_components` (`None` for unused geometry
 /// cells), so the window can hit-test the module UI against `component_rects`.
+///
+/// A button-kind cell on a controller whose LED lights the button face
+/// (button-led-composition D2) carries a `shape` instead of a glyph: the
+/// outline carries the button state and the folded LED is the inner fill.
+/// `None` keeps today's glyph path for every other element kind and
+/// controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellShape {
+    /// Round face (P2B8, B32): circle outline + concentric disc fill.
+    Round,
+    /// Rectangular face (M4 touch plate): rect outline + inner rect fill.
+    Rect,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CellSpec {
     pub rect: Rect,
@@ -88,6 +101,9 @@ pub(crate) struct CellSpec {
     pub led_state: Option<f32>,
     /// LED RGB colour folded into this element (if any)
     pub led_rgb: Option<[u8; 3]>,
+    /// Composed-face discriminant (button-led-composition D2): `Some` on
+    /// button-kind cells of P2B8/B32 (round) and M4 (rect), `None` elsewhere.
+    pub shape: Option<CellShape>,
 }
 
 /// Fixed screen-space font (points) for a performance-view callout headline:
@@ -174,6 +190,19 @@ pub(crate) struct PhysicalFrame {
 /// production pane and the headless paint tests share one geometry.
 const PHYSICAL_CELL_SCALE: f32 = 10.0;
 
+/// The fold is a per-controller rule (button-led-composition D2): only
+/// button-kind cells on P2B8/B32 (round face) and M4 (rect touch plate)
+/// fold their LED into the face. Every other controller keeps the glyph
+/// rendering and standalone LED cells.
+fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
+    match controller.to_ascii_lowercase().as_str() {
+        "p2b8" => Some(CellShape::Round),
+        "b32" | "notebuttons" => Some(CellShape::Round),
+        "m4" | "motorfader" => Some(CellShape::Rect),
+        _ => None,
+    }
+}
+
 /// The app-driven physical spec: build the controller chain from the loaded
 /// patch (`PhysicalLayout::build`), pack it into the configured rack (or the
 /// default case when none is set), and resolve cells/geometry under the
@@ -241,27 +270,19 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // Track which LED tokens are folded into elements (so we don't render them standalone)
     let mut folded_leds: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Build a mapping from element token to its LED tokens for each module
-    let mut element_leds: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    // One binding source (button-led-composition D3): the shared
+    // `folded_led_for_element` resolver feeds both the fill and the
+    // suppression, so painter and handler cannot disagree.
     for module in chain.modules.iter() {
         for comp in &module.components {
-            if let Some(led_token) = &comp.led {
-                element_leds
-                    .entry(comp.id.clone())
-                    .or_default()
-                    .push(led_token.clone());
-                folded_leds.insert(led_token.clone());
+            if comp.kind != crate::patch::ComponentKind::Button {
+                continue;
             }
-            // Also add positional LEDs from the resolver
-            let positional =
-                crate::patch::positional_leds_for_element(&module.controller, &comp.id);
-            for led in positional {
-                element_leds
-                    .entry(comp.id.clone())
-                    .or_default()
-                    .push(led.clone());
-                folded_leds.insert(led);
+            if fold_shape_for_controller(&comp.controller).is_none() {
+                continue;
+            }
+            if let Some(led_token) = crate::patch::folded_led_for_element(comp) {
+                folded_leds.insert(led_token);
             }
         }
     }
@@ -278,74 +299,114 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             None
         };
 
+        // Suppression (button-led-composition D4): a folded LED publishes no
+        // cell, so it is neither painted nor hit-testable. The skeleton and
+        // the full render share this filter, so they stay coincident — and
+        // `paint_panes` republishes `component_rects` from these cells, so
+        // the LED hit rects drop with no second change.
+        if ci < module.components.len() && folded_leds.contains(&module.components[ci].id) {
+            continue;
+        }
+
         // ci might be out of bounds for patch components if it's an unused element
         // In that case, we still render the cell but dimmed and unlabelled
-        let (glyph, state_text, color, label, kind, is_fader, fader_value, led_state, led_rgb) =
-            if ci < module.components.len() {
-                let comp = &module.components[ci];
-                let (glyph, state_text, color) = cell_visuals(comp, false, false);
-                // Check if this component has associated LEDs
-                let leds = element_leds.get(&comp.id).cloned().unwrap_or_default();
-                let led_state = leds.first().and_then(|led| {
-                    module
-                        .components
-                        .iter()
-                        .find(|c| c.id == *led)
-                        .and_then(|c| match &c.state {
-                            crate::patch::ComponentState::Value(v) => Some(*v),
-                            crate::patch::ComponentState::On => Some(1.0),
-                            crate::patch::ComponentState::Off => Some(0.0),
-                            _ => None,
-                        })
-                });
-                let led_rgb = leds.first().and_then(|led| {
-                    module
-                        .components
-                        .iter()
-                        .find(|c| c.id == *led)
-                        .and_then(|c| match &c.state {
-                            crate::patch::ComponentState::Led { value: _, rgb } => *rgb,
-                            _ => None,
-                        })
-                });
-                // Use shift-aware label resolver
-                let shift = app.active_shift.map_or(1, |g| g as u8);
-                let layers_enabled = app.labels.layers_enabled;
-                let max_shift_layer = app.labels.max_shift_layer;
-                let hw_store = app.current_hw_store();
-                let label = patch.display_label(
-                    &comp.id,
-                    shift,
-                    layers_enabled,
-                    max_shift_layer,
-                    &hw_store,
-                );
-                (
-                    glyph, state_text, color, label, comp.kind, false, 0.0, led_state, led_rgb,
-                )
+        let (
+            glyph,
+            state_text,
+            color,
+            label,
+            kind,
+            is_fader,
+            fader_value,
+            led_state,
+            led_rgb,
+            shape,
+        ) = if ci < module.components.len() {
+            let comp = &module.components[ci];
+            let shape = if comp.kind == crate::patch::ComponentKind::Button {
+                fold_shape_for_controller(&comp.controller)
             } else {
-                // Unused element - render dimmed and unlabelled
-                let family = match mark {
-                    crate::gui::physical::PortMark::PortIn => "CV",
-                    crate::gui::physical::PortMark::PortOut => "CV",
-                    _ => "B", // default
-                };
-                let (glyph, state_text, color) = match family {
-                    "CV" => ("\u{25C0}".into(), "".into(), crate::theme::active().cv_in),
-                    _ => ("\u{00B7}".into(), "".into(), crate::theme::active().muted),
+                None
+            };
+            let (glyph, state_text, color) = cell_visuals(comp, false, false);
+            // The folded LED (if any) drives the inner fill.
+            let folded = shape
+                .is_some()
+                .then(|| crate::patch::folded_led_for_element(comp))
+                .flatten();
+            let folded_comp = folded
+                .as_deref()
+                .and_then(|led| module.components.iter().find(|c| c.id == *led));
+            let led_state = folded_comp.map(|c| match &c.state {
+                crate::patch::ComponentState::Value(v) => *v,
+                crate::patch::ComponentState::On => 1.0,
+                crate::patch::ComponentState::Off => 0.0,
+                crate::patch::ComponentState::Led { value, .. } => *value,
+                crate::patch::ComponentState::Active => 1.0,
+            });
+            let led_rgb = folded_comp.and_then(|c| match &c.state {
+                crate::patch::ComponentState::Led { value: _, rgb } => *rgb,
+                _ => None,
+            });
+            // Use shift-aware label resolver
+            let shift = app.active_shift.map_or(1, |g| g as u8);
+            let layers_enabled = app.labels.layers_enabled;
+            let max_shift_layer = app.labels.max_shift_layer;
+            let hw_store = app.current_hw_store();
+            let label =
+                patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store);
+            // A composed face carries the state on its outline (D6), so
+            // the glyph and the state-text row go away; the outline color
+            // is the state channel (off `muted`, on the button token).
+            if shape.is_some() {
+                let on = matches!(comp.state, crate::patch::ComponentState::On);
+                let outline = if on {
+                    color
+                } else {
+                    crate::theme::active().muted
                 };
                 (
-                    glyph,
-                    state_text,
-                    color,
-                    "".into(),
-                    crate::patch::ComponentKind::Button,
+                    String::new(),
+                    String::new(),
+                    outline,
+                    label,
+                    comp.kind,
                     false,
                     0.0,
-                    None,
-                    None,
+                    led_state,
+                    led_rgb,
+                    shape,
                 )
+            } else {
+                (
+                    glyph, state_text, color, label, comp.kind, false, 0.0, led_state, led_rgb,
+                    shape,
+                )
+            }
+        } else {
+            // Unused element - render dimmed and unlabelled
+            let family = match mark {
+                crate::gui::physical::PortMark::PortIn => "CV",
+                crate::gui::physical::PortMark::PortOut => "CV",
+                _ => "B", // default
             };
+            let (glyph, state_text, color) = match family {
+                "CV" => ("\u{25C0}".into(), "".into(), crate::theme::active().cv_in),
+                _ => ("\u{00B7}".into(), "".into(), crate::theme::active().muted),
+            };
+            (
+                glyph,
+                state_text,
+                color,
+                "".into(),
+                crate::patch::ComponentKind::Button,
+                false,
+                0.0,
+                None,
+                None,
+                None,
+            )
+        };
 
         let is_dimmed = label.is_empty(); // unused elements are dimmed
         cells.push(CellSpec {
@@ -369,6 +430,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             kind,
             led_state,
             led_rgb,
+            shape,
         });
     }
     let modules = geom
@@ -560,7 +622,15 @@ pub(crate) fn performance_overlay(
             circuit_store: &circuit_store,
         };
         let headline = performance_headline(&ctx, &comp.id, &cell.label);
-        let (w, h) = callout_size(&headline, &cell.state_text);
+        // A composed button face drops the in-cell state-text row (the shape
+        // carries the state), so the callout resolves the live state text
+        // from the component instead of going blank.
+        let state_text = if cell.state_text.is_empty() {
+            cell_visuals(comp, false, false).1
+        } else {
+            cell.state_text.clone()
+        };
+        let (w, h) = callout_size(&headline, &state_text);
         inputs.push(crate::performance::LabelInput {
             host_id: inputs.len(),
             host_rect: crate::performance::Rect::new(
@@ -572,12 +642,7 @@ pub(crate) fn performance_overlay(
             label_w: w,
             label_h: h,
         });
-        meta.push((
-            headline,
-            cell.state_text.clone(),
-            cell.color,
-            cell.highlighted,
-        ));
+        meta.push((headline, state_text, cell.color, cell.highlighted));
     }
     let mut callouts: Vec<CalloutSpec> = crate::performance::place_labels(rack, &inputs)
         .into_iter()
@@ -779,7 +844,17 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         return;
     }
 
-    // Render LED inside the element if present: outline ring plus inset
+    // Composed button face (button-led-composition D5/D6/D7): the outline
+    // carries the button state, the folded LED is the inner fill, the label
+    // renders under the shape when the cell has room, and the state-text row
+    // is dropped. The fill stays bright while paused (fader-led-contrast);
+    // only the outline and the label dim.
+    if let Some(shape) = cell.shape {
+        paint_composed(painter, cell, shape, base, paused);
+        return;
+    }
+
+    // Standalone LED chrome for non-composed cells: outline ring plus inset
     // core (fader-led-contrast 2.1). The ring is field chrome and stays
     // full-bright (also while paused); the core carries the value with a
     // brightness floor so an off-LED still shows its field.
@@ -857,6 +932,96 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
 /// callout per placed element. Headlines paint at [`CALLOUT_LABEL_SIZE`]
 /// monospace (the size [`callout_size`] budgets); the state line paints
 /// smaller and muted like the in-cell state text.
+///
+/// Draw a composed button face (button-led-composition D5/D6/D7): a state
+/// outline (off `muted`, on the button token with a bolder stroke) whose
+/// interior belongs to the folded LED as a concentric fill. The fill extent
+/// is `0.25 floor + 0.75 × level` with the patch RGB scaled by level when
+/// known, else white; an element with no bound LED renders the outline
+/// alone. The shape stays centered on the cell so the face reads at every
+/// preset; the label renders under it when the cell has room
+/// (`cell_h − label_line ≥ 0.5 × cell_w`, D7) at the fixed
+/// [`CELL_LABEL_SIZE`] font, else it is omitted. No state-text row.
+fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Color, paused: bool) {
+    let rect = cell.rect;
+    let font = egui::FontId::monospace(CELL_LABEL_SIZE);
+    let label_line = CELL_LABEL_SIZE * 1.25;
+    let has_label_room = !cell.label.is_empty() && rect.height() - label_line >= 0.5 * rect.width();
+    // The face spans the cell (D7's room test only gates the label): the
+    // outline and fill stay concentric with the cell center at every preset,
+    // and the label shares the bottom row when the cell has room for it.
+    let diameter = rect.width().min(rect.height()).max(1.0);
+    let center = rect.center();
+    // The outline is the state channel (D6): the build already resolved it
+    // to `muted` (off) or the button token (on); a non-muted outline gets
+    // the bolder stroke. Paused dims outline + label, never the fill.
+    let on = base != crate::theme::active().muted;
+    let stroke_w = if on { 2.0 } else { 1.0 };
+    let ring = dim(rgb(base), paused);
+    let fill_color = cell.led_state.map(|v| {
+        let level = v.clamp(0.0, 1.0).max(0.25);
+        if let Some(rgb) = cell.led_rgb {
+            let scale = |c: u8| ((c as f32 * level).round().clamp(0.0, 255.0)) as u8;
+            egui::Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
+        } else {
+            let intensity = (level * 255.0) as u8;
+            egui::Color32::from_rgb(intensity, intensity, intensity)
+        }
+    });
+    let extent = cell
+        .led_state
+        .map(|v| 0.25 + 0.75 * v.clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    match shape {
+        CellShape::Round => {
+            let radius = (diameter / 2.0 - 1.0).max(1.0);
+            painter.circle_stroke(center, radius, egui::Stroke::new(stroke_w, ring));
+            if let Some(fill) = fill_color {
+                // The fill grows from the floor core to the full face: its
+                // base is the full half-diameter (a hair past the ring, so
+                // a lit face reads lit), never past half the cell's smaller
+                // side.
+                let fill_r = ((diameter / 2.0) * extent).max(1.0).min(diameter / 2.0);
+                painter.circle_filled(center, fill_r, fill);
+            }
+        }
+        CellShape::Rect => {
+            let shape_rect =
+                Rect::from_center_size(center, Vec2::new(diameter - 2.0, diameter - 2.0));
+            painter.rect_stroke(
+                shape_rect,
+                0.0,
+                egui::Stroke::new(stroke_w, ring),
+                egui::StrokeKind::Inside,
+            );
+            if let Some(fill) = fill_color {
+                // The touch plate fills as one rectangle: extent reads
+                // through brightness (the floor keeps the field visible),
+                // so the fill always spans the plate.
+                let _ = extent;
+                let fill_size = (diameter - 2.0).max(1.0);
+                painter.rect_filled(
+                    Rect::from_center_size(center, Vec2::new(fill_size, fill_size)),
+                    0.0,
+                    fill,
+                );
+            }
+        }
+    }
+    if has_label_room {
+        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+        let budget = (rect.width() / char_w).floor() as usize;
+        if budget > 0 {
+            painter.text(
+                Pos2::new(rect.min.x + 2.0, rect.max.y - label_line),
+                egui::Align2::LEFT_TOP,
+                clip_label(&cell.label, budget),
+                font,
+                dim(rgb(base), paused),
+            );
+        }
+    }
+}
 fn paint_performance(painter: &Painter, overlay: &PerformanceOverlay, paused: bool) {
     let leader = rgb(crate::theme::active().performance_leader);
     let headline_font = egui::FontId::monospace(CALLOUT_LABEL_SIZE);
@@ -1571,6 +1736,7 @@ mod tests {
                 kind: comp.kind,
                 led_state: None,
                 led_rgb: None,
+                shape: None,
             });
         }
         let modules = geom
@@ -1638,16 +1804,38 @@ mod tests {
         let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
         // A zero-origin pane keeps the spec rack-local so it matches `geom`.
         let spec = physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
-        assert_eq!(spec.cells.len(), geom.cells.len());
-        for (cell, &(mi, ci, rect, _)) in spec.cells.iter().zip(geom.cells.iter()) {
-            let comp = &chain.modules[mi].components[ci];
+        // Folded LEDs publish no cell (button-led-composition D4), so the
+        // spec holds the geometry cells minus the folded LED cells.
+        let mut folded: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for module in chain.modules.iter() {
+            for comp in &module.components {
+                if comp.kind != crate::patch::ComponentKind::Button {
+                    continue;
+                }
+                if fold_shape_for_controller(&comp.controller).is_none() {
+                    continue;
+                }
+                if let Some(led) = crate::patch::folded_led_for_element(comp) {
+                    folded.insert(led);
+                }
+            }
+        }
+        let expected: Vec<(usize, usize, egui::Rect)> = geom
+            .cells
+            .iter()
+            .filter(|(mi, ci, _, _)| !folded.contains(&chain.modules[*mi].components[*ci].id))
+            .map(|(mi, ci, rect, _)| (*mi, *ci, *rect))
+            .collect();
+        assert_eq!(spec.cells.len(), expected.len());
+        for (cell, (mi, ci, rect)) in spec.cells.iter().zip(expected.iter()) {
+            let comp = &chain.modules[*mi].components[*ci];
             let expected = patch
                 .hw_components
                 .iter()
                 .position(|c| c.id == comp.id)
                 .expect("every chain component exists in the patch");
             assert_eq!(cell.component_index, Some(expected), "cell {}", comp.id);
-            assert_eq!(cell.rect, rect);
+            assert_eq!(cell.rect, *rect);
         }
         // The second module's cells carry global indices past the first module's
         // component count, which the module-local `ci` could not produce.
@@ -1732,14 +1920,29 @@ mod tests {
             "the button section names hardware tokens"
         );
         let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let mut checked = 0;
         for i in indices {
+            // A folded LED publishes no cell (button-led-composition D4);
+            // its element's cell carries the highlight instead.
+            if patch.hw_components.get(i).is_some_and(|c| {
+                c.kind == crate::patch::ComponentKind::Led
+                    && spec
+                        .cells
+                        .iter()
+                        .all(|cell| cell.component_index != Some(i))
+            }) {
+                continue;
+            }
             let cell = spec
                 .cells
                 .iter()
                 .find(|c| c.component_index == Some(i))
                 .unwrap_or_else(|| panic!("cell for hardware index {i}"));
             assert!(cell.highlighted, "circuit cell {i} is highlighted");
+            checked += 1;
         }
+        assert!(checked > 0, "at least one circuit cell stays highlighted");
     }
 
     #[test]
@@ -1936,6 +2139,7 @@ mod tests {
             kind: ComponentKind::Knob,
             led_state: None,
             led_rgb: None,
+            shape: None,
         }
     }
 
@@ -2025,6 +2229,7 @@ mod tests {
             kind: ComponentKind::Button,
             led_state: None,
             led_rgb: None,
+            shape: None,
         }
     }
 
@@ -2597,8 +2802,10 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 40.0));
         let mut lo = cell_spec(rect, "B");
         lo.led_state = Some(0.0);
+        lo.shape = Some(CellShape::Round);
         let mut hi = cell_spec(rect, "B");
         hi.led_state = Some(1.0);
+        hi.shape = Some(CellShape::Round);
         let radius_of = |cell: &CellSpec| -> f32 {
             painted_shapes(cell, false)
                 .iter()

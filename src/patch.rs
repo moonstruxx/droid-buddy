@@ -1838,6 +1838,15 @@ fn device_default_led(controller: &str, id: &str) -> Option<String> {
 /// separately in `from_ini_str`.
 ///
 /// Returns LED tokens in the same order as the geometry's LED grid.
+///
+/// Dotted element tokens (`B2.5` = instance 2, element 5) map to the dotted
+/// LED twin (`L2.5`), matching the `led = L{inst}.{n}` pairing convention
+/// the fixtures pin; undotted tokens keep the legacy numeric form.
+fn dotted_instance_element(token: &str, family: char) -> Option<(u32, u32)> {
+    let rest = token.strip_prefix(family)?;
+    let (inst, n) = rest.split_once('.')?;
+    Some((inst.parse().ok()?, n.parse().ok()?))
+}
 pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec<String> {
     let ctrl = controller.to_ascii_lowercase();
     let element_kind = element_token.chars().next().unwrap_or('?');
@@ -1853,7 +1862,10 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
         // B32: 32 buttons, 32 LEDs, 1:1 mapping (white-only)
         "b32" | "notebuttons" => {
             if element_kind == 'B' {
-                vec![format!("L{}", element_num)]
+                match dotted_instance_element(element_token, 'B') {
+                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
+                    None => vec![format!("L{}", element_num)],
+                }
             } else {
                 vec![]
             }
@@ -1861,7 +1873,10 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
         // P2B8: 8 buttons, 8 LEDs, 1:1 mapping (RGB)
         "p2b8" => {
             if element_kind == 'B' {
-                vec![format!("L1.{}", element_num)]
+                match dotted_instance_element(element_token, 'B') {
+                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
+                    None => vec![format!("L1.{}", element_num)],
+                }
             } else {
                 vec![]
             }
@@ -1869,7 +1884,10 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
         // P4B2: 2 buttons, 2 LEDs, 1:1 mapping (RGB)
         "p4b2" => {
             if element_kind == 'B' {
-                vec![format!("L1.{}", element_num)]
+                match dotted_instance_element(element_token, 'B') {
+                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
+                    None => vec![format!("L1.{}", element_num)],
+                }
             } else {
                 vec![]
             }
@@ -1877,7 +1895,10 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
         // M4: 4 faders with touch plates, each has RGB LED (L state + R color)
         "m4" | "motorfader" => {
             if element_kind == 'B' {
-                vec![format!("L1.{}", element_num)]
+                match dotted_instance_element(element_token, 'B') {
+                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
+                    None => vec![format!("L1.{}", element_num)],
+                }
             } else {
                 vec![]
             }

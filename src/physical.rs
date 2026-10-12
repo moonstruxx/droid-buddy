@@ -1062,12 +1062,7 @@ impl Default for ScreenMapping {
 }
 
 impl ScreenMapping {
-    pub fn new(
-        cells_per_mm: f64,
-        zoom: f64,
-        offset_x: f64,
-        offset_y: f64,
-    ) -> Self {
+    pub fn new(cells_per_mm: f64, zoom: f64, offset_x: f64, offset_y: f64) -> Self {
         Self {
             cells_per_mm,
             zoom,
