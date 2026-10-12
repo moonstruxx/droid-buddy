@@ -61,6 +61,19 @@ const REPULSION_RADIUS: f32 = 120.0;
 /// Per-axis cap on a single velocity update, keeps the solver from exploding.
 const MAX_DISPLACEMENT: f32 = 20.0;
 
+/// Spring stiffness for slice springs in sections mode (design D1):
+/// pulls each circuit toward its target x = slice_index * HORIZONTAL_SPACING.
+/// Mutable at runtime so sliders can tune it (like `tension`).
+pub const SLICE_K: f32 = DEFAULT_SLICE_K;
+/// Default slice spring stiffness — weak so cable tension can overcome it.
+pub const DEFAULT_SLICE_K: f32 = 0.1;
+/// Spring stiffness for section-hole springs in sections mode (design D1):
+/// pulls banner-group members toward their fixed section hole anchor.
+/// Mutable at runtime so sliders can tune it (like `tension`).
+pub const SECTION_HOLE_K: f32 = DEFAULT_SECTION_HOLE_K;
+/// Default section-hole spring stiffness — anchors but doesn't collapse.
+pub const DEFAULT_SECTION_HOLE_K: f32 = 0.05;
+
 /// Weak per-cluster cohesion pulling each member toward its banner group's
 /// centroid (design D3). Deliberately far below `SPRING_K` so clusters
 /// cohere without collapsing or overriding the single-axis spring bias.
