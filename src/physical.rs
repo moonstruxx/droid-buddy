@@ -725,7 +725,7 @@ impl PhysicalModule {
                 _ => false,
             })
             .collect();
-        out.sort_by(|a, b| (a.family.clone(), a.row, a.col).cmp(&(b.family.clone(), b.row, b.col)));
+        out.sort_by_key(|a| (a.family.clone(), a.row, a.col));
         out
     }
 
