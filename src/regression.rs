@@ -1762,3 +1762,112 @@ fn regression_anchor_module_ui_label_fonts_constant_across_zoom() {
         "one cell-label font at every zoom preset: {sizes:?}"
     );
 }
+
+// ── controller-geometry-fidelity (task 3.1): faceplate rotary stack ─────────
+// One fixture (`fixtures/faceplate_rotary_stack.ini`) declaring all six
+// controllers the change corrects. This story asserts presence and token
+// attribution only: the arrangement, position and ring assertions live in
+// `src/physical.rs` (task 1.1) and the measured data lands in task 2.1, so
+// every token check here is deliberately position-free and stays green
+// across the geometry regeneration.
+
+/// `(geometry key, declared tokens)` for each controller the fixture
+/// declares; one representative token per element family it carries. The
+/// instance numbers are the fixture's own (see its header): bare sections
+/// take chain positions 1..4, the explicit p4b2/db8e take 5/6.
+const ROTARY_STACK_FACEPLATES: &[(&str, &[&str])] = &[
+    ("p2b8", &["B1.1", "L1.8", "P1.2"]),
+    ("p4b2", &["P5.1", "P5.4", "B5.1", "L5.2"]),
+    ("p10", &["P2.1", "P2.10"]),
+    ("s10", &["S3.1", "S3.10"]),
+    ("e4", &["E4.1", "B4.1", "L4.1"]),
+    ("db8e", &["B6.1", "B6.8", "E6.1"]),
+];
+
+#[test]
+fn regression_faceplate_rotary_stack_all_six_declared_and_attributable() {
+    let path = "fixtures/faceplate_rotary_stack.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    // No Error-severity validation finding: the fixture is a valid patch, not
+    // a validation-case carrier.
+    let schema = crate::schema::load_schema();
+    let issues = crate::validation::validate_patch(&patch, schema);
+    let errors: Vec<_> = issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{path} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    // The patch declares all six controllers (lowercased panel names are the
+    // geometry keys).
+    let declared: Vec<String> = patch
+        .module_types()
+        .iter()
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    for (key, _) in ROTARY_STACK_FACEPLATES {
+        assert!(
+            declared.contains(&key.to_string()),
+            "fixture must declare {key}; declared panel types = {declared:?}"
+        );
+    }
+
+    // Each controller has its own faceplate, and every token it declares is
+    // attributed to that faceplate and resolves to a cell on it. Presence and
+    // attribution only — no coordinate is read here.
+    let layout = crate::physical::PhysicalLayout::build(&patch);
+    for (key, tokens) in ROTARY_STACK_FACEPLATES {
+        let ix = layout
+            .modules
+            .iter()
+            .position(|m| m.geometry_key == *key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no faceplate for {key}; faceplates = {:?}",
+                    layout
+                        .modules
+                        .iter()
+                        .map(|m| m.geometry_key.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let faceplate = &layout.modules[ix];
+        assert!(
+            !faceplate.is_fallback,
+            "{key} faceplate must use its geometry entry, not the fallback"
+        );
+        for token in *tokens {
+            assert!(
+                faceplate.components.iter().any(|c| c.id == *token),
+                "{token} must be attributed to the {key} faceplate, got {:?}",
+                faceplate
+                    .components
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                layout.cell_for(ix, token).is_some(),
+                "{token} must resolve to an element cell on the {key} faceplate"
+            );
+        }
+    }
+
+    // Exactly six controller faceplates beside the always-present CV I/O
+    // master: no controller merged into another's plate and none is missing.
+    let controller_faceplates: Vec<&str> = layout
+        .modules
+        .iter()
+        .filter(|m| m.controller != "CV I/O")
+        .map(|m| m.geometry_key.as_str())
+        .collect();
+    assert_eq!(
+        controller_faceplates.len(),
+        6,
+        "six controller faceplates, got {controller_faceplates:?}"
+    );
+}
