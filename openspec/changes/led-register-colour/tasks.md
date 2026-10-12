@@ -8,8 +8,8 @@
 
 ## 2. Resolution and preservation
 
-- [ ] 2.1 Implement the static colour/brightness resolver in `src/patch.rs` (same-suffix `ledcolorN`/`ledvalueN` pairing, single-`ledcolor` fallback, literal/const-expr/single-hop-cable resolution via `expression.rs`, hue table with corpus citation) and wire it into LED initial state at load (upgrade to `Led { value, rgb }` only when a source resolves; B32 drops colour). Verify by making task 1.1 pass with `cargo test patch::`. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/patch.rs] -->
-- [ ] 2.2 Preserve `rgb` in `toggle_component` (`src/handler.rs`): `Led { v, rgb }` alternates value 0.0/1.0 keeping `rgb`; other states keep the old arms. Verify by making task 1.2 pass with `cargo test handler::`. <!-- agent: rusty-engineer.build, depends_on: [1.2], touches: [src/handler.rs] -->
+- [x] 2.1 Implement the static colour/brightness resolver in `src/patch.rs` (same-suffix `ledcolorN`/`ledvalueN` pairing, single-`ledcolor` fallback, literal/const-expr/single-hop-cable resolution via `expression.rs`, hue table with corpus citation) and wire it into LED initial state at load (upgrade to `Led { value, rgb }` only when a source resolves; B32 drops colour). Verify by making task 1.1 pass with `cargo test patch::`. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/patch.rs] -->
+- [x] 2.2 Preserve `rgb` in `toggle_component` (`src/handler.rs`): `Led { v, rgb }` alternates value 0.0/1.0 keeping `rgb`; other states keep the old arms. Verify by making task 1.2 pass with `cargo test handler::`. <!-- agent: rusty-engineer.build, depends_on: [1.2], touches: [src/handler.rs] -->
 
 ## 3. Visual artifacts
 

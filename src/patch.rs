@@ -1030,6 +1030,28 @@ impl Patch {
         let circuit_outputs = collect_circuit_outputs(&sections);
         let preamble_labels = parse_preamble_labels(&raw_lines);
 
+        // Static LED colour/brightness at load (led-register-colour D4): upgrade
+        // LEDs with a resolved source to `Led { value, rgb }`; all others keep
+        // the `Off` default assigned by `add_component`. B32 drops colour
+        // through its `White` capability (brightness only).
+        let led_resolved: Vec<(String, f32, Option<[u8; 3]>)> = components
+            .iter()
+            .filter(|c| c.kind == ComponentKind::Led)
+            .filter_map(|c| {
+                let (v, rgb) = resolve_led_initial(c, &components, &sections, &cable_index)?;
+                Some((c.id.clone(), v, rgb))
+            })
+            .collect();
+        for (id, v, rgb) in led_resolved {
+            if let Some(comp) = components.iter_mut().find(|c| c.id == id) {
+                let rgb = match comp.led_capability {
+                    Some(LedCapability::White) => None,
+                    _ => rgb,
+                };
+                comp.state = ComponentState::Led { value: v, rgb };
+            }
+        }
+
         Ok(Patch {
             name,
             hw_components: components,
@@ -1961,6 +1983,220 @@ pub fn folded_led_for_element(comp: &HwComponent) -> Option<String> {
     positional_leds_for_element(&comp.controller, &comp.id)
         .into_iter()
         .next()
+}
+
+/// Scalar `ledcolor` value → RGB hue table (led-register-colour D3).
+///
+/// OUR mapping over the observed corpus range 0–1.2 (clamped outside),
+/// not manual truth: corpus evidence is `ledcolor` float literals `0`–`1.2`,
+/// constant expressions and cable refs (`ext/droid-lsp/droid_meta_mpfs/
+/// droid_mpfs5melody2.ini:440-500`, `motokit.ini`). The manual's R-channel
+/// table could not be verified (dead manual URLs, unowned RAGFlow dataset),
+/// so hardware verification rides a follow-up bead. Pure; pinned by unit tests.
+pub fn led_colour_for_value(v: f64) -> [u8; 3] {
+    let clamped = v.clamp(0.0, 1.2);
+    // Hue wheel red → … → magenta over the corpus range.
+    let h = (clamped / 1.2) * 300.0;
+    let c = 1.0f64;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        _ => (x, 0.0, c),
+    };
+    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
+}
+
+/// Fold one static LED param value: float literal / constant expression via
+/// `expression::evaluate_droid_expr`, else a single-hop `_CABLE` ref whose
+/// producer section holds a constant that folds the same way. `R`-register
+/// refs and anything dynamic yield `None` (white/floor fallback, out of scope).
+fn fold_led_static_value(
+    raw: &str,
+    sections: &[IniSection],
+    cable_index: &HashMap<String, CableIndexEntry>,
+) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(v) = crate::expression::evaluate_droid_expr(trimmed, &HashMap::new()) {
+        return Some(v);
+    }
+    let names = scan_internal_tokens(trimmed);
+    if names.len() == 1 && names[0] == trimmed {
+        let cable = &names[0];
+        // R-register colour chains are out of scope: fall back to white.
+        if cable.len() > 1
+            && cable.starts_with('R')
+            && cable[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            return None;
+        }
+        let entry = cable_index.get(cable)?;
+        for source in &entry.sources {
+            for section in sections.iter().filter(|s| &s.name == source) {
+                for (key, value) in &section.entries {
+                    // The `output = _CABLE` registration itself never folds.
+                    if scan_internal_tokens(value).len() == 1
+                        && &scan_internal_tokens(value)[0] == value
+                    {
+                        continue;
+                    }
+                    let _ = key;
+                    if let Some(v) =
+                        crate::expression::evaluate_droid_expr(value.trim(), &HashMap::new())
+                    {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pick the `ledcolor*`/`ledvalue*` raw value from one section's entries:
+/// same-suffix pairing first (`ledcolorN` with element suffix `N`, mirroring
+/// the `ledN`/`buttonN` convention), else the section's single bare param
+/// for single-LED circuits. Multiple suffixed params with no suffix match
+/// still resolve (first in file order).
+fn led_param_for<'a>(
+    entries: &'a [(String, String)],
+    prefix: &str,
+    suffix: Option<&str>,
+) -> Option<&'a str> {
+    let mut bare: Option<&'a str> = None;
+    let mut bare_count = 0;
+    let mut first_suffixed: Option<&'a str> = None;
+    for (key, value) in entries {
+        let kl = key.to_lowercase();
+        let Some(rest) = kl.strip_prefix(prefix) else {
+            continue;
+        };
+        if rest.is_empty() {
+            bare_count += 1;
+            if bare.is_none() {
+                bare = Some(value.as_str());
+            }
+        } else if let Some(ds) = leading_digits(&kl) {
+            // Reject non-pure suffixes like `ledcolors`: the char after the
+            // prefix run must be a digit and the tail must be digits only.
+            let after = &kl[prefix.len()..];
+            if !after.chars().next().is_some_and(|c| c.is_ascii_digit())
+                || !after.chars().all(|c| c.is_ascii_digit())
+            {
+                continue;
+            }
+            let _ = ds;
+            if Some(after) == suffix {
+                return Some(value.as_str());
+            }
+            if first_suffixed.is_none() {
+                first_suffixed = Some(value.as_str());
+            }
+        }
+    }
+    if bare_count == 1 {
+        return bare;
+    }
+    // Bare fallback only when unambiguous; otherwise first suffixed match.
+    bare.or(first_suffixed)
+}
+
+/// Resolve an LED component's initial `(value, rgb)` from the owning circuit
+/// section's `ledcolor*`/`ledvalue*` params (led-register-colour D1/D2/D4).
+/// Returns `None` when no source resolves (LED keeps `Off`). Pure.
+fn resolve_led_initial(
+    led: &HwComponent,
+    components: &[HwComponent],
+    sections: &[IniSection],
+    cable_index: &HashMap<String, CableIndexEntry>,
+) -> Option<(f32, Option<[u8; 3]>)> {
+    // Owning element: the component whose `led` pairing points at this LED.
+    let element_id: Option<String> = components
+        .iter()
+        .find(|c| c.led.as_deref() == Some(led.id.as_str()))
+        .map(|c| c.id.clone());
+    // Element entry suffix for same-suffix pairing: the digit run of the key
+    // whose value names the element token.
+    let mut element_suffix: Option<String> = None;
+    // Ranked candidate sections: (a) sections mentioning the element/LED
+    // token, (b) the LED's own controller section (bare synthesis), then
+    // (c) any other section carrying ledcolor/ledvalue params.
+    let mut ranked: Vec<(u8, usize)> = Vec::new();
+    for (i, section) in sections.iter().enumerate() {
+        let mentions = |tok: &str| {
+            section
+                .entries
+                .iter()
+                .any(|(_, v)| scan_hw_tokens(v).iter().any(|t| t == tok))
+        };
+        let mentions_token =
+            element_id.as_deref().is_some_and(|e| mentions(e)) || mentions(&led.id);
+        if mentions_token {
+            ranked.push((0, i));
+            continue;
+        }
+        // Element suffix from the mentioning section is recorded lazily below.
+        let own_controller = titlecase(&section.name) == led.controller
+            || section.name.eq_ignore_ascii_case(&led.controller);
+        if own_controller {
+            ranked.push((1, i));
+            continue;
+        }
+        let has_led_params = section.entries.iter().any(|(k, _)| {
+            let kl = k.to_lowercase();
+            kl == "ledcolor"
+                || kl == "ledvalue"
+                || kl.starts_with("ledcolor")
+                || kl.starts_with("ledvalue")
+        });
+        if has_led_params {
+            ranked.push((2, i));
+        }
+    }
+    ranked.sort();
+    for (_, i) in ranked {
+        let section = &sections[i];
+        if element_suffix.is_none() {
+            if let Some(eid) = element_id.as_deref() {
+                for (key, value) in &section.entries {
+                    if key.starts_with("led") {
+                        continue;
+                    }
+                    if scan_hw_tokens(value).iter().any(|t| t == eid) {
+                        if let Some(ds) = leading_digits(&key.to_lowercase()) {
+                            element_suffix = Some(ds.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        let suffix = element_suffix.as_deref();
+        let color_raw = led_param_for(&section.entries, "ledcolor", suffix);
+        let value_raw = led_param_for(&section.entries, "ledvalue", suffix);
+        if color_raw.is_none() && value_raw.is_none() {
+            continue;
+        }
+        let color = color_raw.and_then(|r| fold_led_static_value(r, sections, cable_index));
+        let value = value_raw.and_then(|r| fold_led_static_value(r, sections, cable_index));
+        // A present-but-dynamic colour poisons the resolution (fallback
+        // rendering): a wire the patch drives live must not light statically.
+        if color_raw.is_some() && color.is_none() {
+            continue;
+        }
+        if color.is_none() && value.is_none() {
+            continue;
+        }
+        let v = value.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+        let rgb = color.map(led_colour_for_value);
+        return Some((v, rgb));
+    }
+    None
 }
 pub fn led_capability_for_controller(controller: &str) -> Option<LedCapability> {
     match controller.to_ascii_lowercase().as_str() {
@@ -3023,9 +3259,7 @@ mod tests {
 
     #[test]
     fn led_colour_literal_pair_loads_off_until_resolver_lands() {
-        // Task 1.1 (red): literal ledcolor/ledvalue pair present in the
-        // section, but the LED component still loads as Off. Task 2.1 will
-        // extend this to assert the resolved (value, rgb).
+        // Task 2.1: literal ledcolor/ledvalue pair resolves at load.
         let patch = led_register_colour_patch("    ledcolor = 1.1\n    ledvalue = 1\n");
         let params = motorfader_params(&patch);
         assert!(params.iter().any(|(k, v)| k == "ledcolor" && v == "1.1"));
@@ -3033,8 +3267,10 @@ mod tests {
         let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
         assert_eq!(
             led.state,
-            ComponentState::Off,
-            "resolver not wired yet: LED stays Off"
+            ComponentState::Led {
+                value: 1.0,
+                rgb: Some(led_colour_for_value(1.1)),
+            },
         );
     }
 
@@ -3049,8 +3285,10 @@ mod tests {
         let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
         assert_eq!(
             led.state,
-            ComponentState::Off,
-            "resolver not wired yet: LED stays Off"
+            ComponentState::Led {
+                value: 1.0,
+                rgb: Some(led_colour_for_value(0.8)),
+            },
         );
     }
 
@@ -3067,8 +3305,10 @@ mod tests {
         let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
         assert_eq!(
             led.state,
-            ComponentState::Off,
-            "resolver not wired yet: LED stays Off"
+            ComponentState::Led {
+                value: 1.0,
+                rgb: Some(led_colour_for_value(0.4)),
+            },
         );
     }
 
@@ -3107,13 +3347,28 @@ mod tests {
             led_capability_for_controller("b32"),
             Some(LedCapability::White)
         );
-        let content = "[b32]\n[m4]\n    ledcolor = 1.1\n    ledvalue = 1\n";
+        let content = "[b32]\n    ledcolor = 1.1\n    ledvalue = 1\n";
         let patch = Patch::from_ini_str(content, String::from("b32_drop")).unwrap();
+        let led = patch.hw_components.iter().find(|c| c.id == "L1.1").unwrap();
+        // White-only: brightness resolves, colour is dropped by design.
         assert_eq!(
-            led_capability_for_controller("b32"),
-            Some(LedCapability::White)
+            led.state,
+            ComponentState::Led {
+                value: 1.0,
+                rgb: None
+            }
         );
-        let _ = patch;
+    }
+
+    #[test]
+    fn led_colour_hue_table_is_pinned() {
+        // D3: our mapping over the corpus range 0-1.2, clamped outside.
+        assert_eq!(led_colour_for_value(0.0), [255, 0, 0]);
+        assert_eq!(led_colour_for_value(-1.0), led_colour_for_value(0.0));
+        assert_eq!(led_colour_for_value(99.0), led_colour_for_value(1.2));
+        // Distinct scalars map to distinct colours across the wheel.
+        assert_ne!(led_colour_for_value(0.0), led_colour_for_value(0.6));
+        assert_ne!(led_colour_for_value(0.6), led_colour_for_value(1.2));
     }
 
     #[test]
