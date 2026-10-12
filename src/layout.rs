@@ -402,6 +402,49 @@ fn circuit_depth(graph: &Graph) -> Vec<usize> {
     depth_over(n, &circuit_edges)
 }
 
+/// Slice index per node for sections mode (sections-black-hole-solver D1):
+/// circuit nodes get their `section_index` (patch order 0..N-1), controller and
+/// input-jack nodes get the fixed left outer slice (0), and output-jack nodes
+/// get the fixed right outer slice (max circuit slice + 1). This mirrors the
+/// outer-column assignment in `assign_columns` so slice springs pull circuits
+/// to their patch-order columns while controllers/jacks stay at fixed edges.
+fn slice_index(graph: &Graph) -> Vec<usize> {
+    let n = graph.nodes.len();
+    let mut slice = vec![0usize; n];
+
+    // Circuit nodes: slice index = section_index (patch order)
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if node.kind == NodeKind::Circuit {
+            slice[i] = node.section_index;
+        }
+    }
+
+    // Find max circuit slice for right outer placement
+    let max_circuit_slice = graph
+        .nodes
+        .iter()
+        .filter(|nd| nd.kind == NodeKind::Circuit)
+        .map(|nd| nd.section_index)
+        .max()
+        .unwrap_or(0);
+
+    // Controller and InputJack: fixed left outer slice (0)
+    // OutputJack: fixed right outer slice (max_circuit_slice + 1)
+    for (i, node) in graph.nodes.iter().enumerate() {
+        match node.kind {
+            NodeKind::Controller | NodeKind::InputJack => {
+                slice[i] = 0;
+            }
+            NodeKind::OutputJack => {
+                slice[i] = max_circuit_slice + 1;
+            }
+            NodeKind::Circuit => {}
+        }
+    }
+
+    slice
+}
+
 /// Column index per node and total column count (graph-column-layout D4): the
 /// left outer column (controllers + input jacks, index 0 when present), the
 /// dense-normalized circuit-depth columns, and the right outer column
@@ -1853,6 +1896,87 @@ mod tests {
             assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
             assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
         }
+    }
+
+    // ── sections-black-hole-solver: slice index computation (task 1.2) ─────
+
+    #[test]
+    fn slice_index_matches_patch_order_for_circuits() {
+        // Build a graph with 3 circuits (section_index 0, 1, 2), 1 controller,
+        // and 1 output jack. Circuit nodes should get slice = section_index.
+        // Controller gets left outer slice (0), output jack gets right outer
+        // slice (max_circuit_slice + 1 = 3).
+        let nodes = vec![
+            node("circuit_a", 0), // index 0: circuit, section_index 0
+            node("circuit_b", 1), // index 1: circuit, section_index 1
+            node("circuit_c", 2), // index 2: circuit, section_index 2
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 3: controller
+            GraphNode {
+                id: NodeId::Jack("OUT1".to_string()),
+                kind: NodeKind::OutputJack,
+                circuit: "OUT1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 4: output jack
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let slice = slice_index(&graph);
+        assert_eq!(slice.len(), 5);
+        // Circuits: slice == section_index (patch order)
+        assert_eq!(slice[0], 0, "circuit_a at section_index 0");
+        assert_eq!(slice[1], 1, "circuit_b at section_index 1");
+        assert_eq!(slice[2], 2, "circuit_c at section_index 2");
+        // Controller: fixed left outer slice (0)
+        assert_eq!(slice[3], 0, "controller gets left outer slice");
+        // Output jack: fixed right outer slice (max_circuit_slice + 1 = 3)
+        assert_eq!(slice[4], 3, "output jack gets right outer slice");
+    }
+
+    #[test]
+    fn slice_index_handles_input_jack() {
+        // Input jack should also get left outer slice (0) like controller
+        let nodes = vec![
+            node("circuit_a", 0),
+            node("circuit_b", 5), // non-contiguous section_index
+            GraphNode {
+                id: NodeId::Jack("IN1".to_string()),
+                kind: NodeKind::InputJack,
+                circuit: "IN1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let slice = slice_index(&graph);
+        assert_eq!(slice[0], 0, "circuit_a at section_index 0");
+        assert_eq!(slice[1], 5, "circuit_b at section_index 5");
+        assert_eq!(slice[2], 0, "input jack gets left outer slice");
+    }
+
+    #[test]
+    fn slice_index_all_circuits_no_outer_nodes() {
+        // Graph with only circuits: slices are just section_index values
+        let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3)]);
+        let slice = slice_index(&graph);
+        assert_eq!(slice, vec![0, 1, 2, 3]);
     }
 
     // ── graph-column-layout: pinned anchors on the column path (task 3.2) ──
