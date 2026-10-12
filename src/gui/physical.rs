@@ -1570,6 +1570,7 @@ mod tests {
                             label: "B1.1".into(),
                             element: Some(1),
                             kind_letter: Some('B'),
+                            kind: None,
                         }],
                     );
                     map
@@ -1669,6 +1670,7 @@ mod tests {
                                 label: "B1.1".into(),
                                 element: Some(1),
                                 kind_letter: Some('B'),
+                                kind: None,
                             },
                             crate::physical::ElementCell {
                                 family: "B".into(),
@@ -1683,6 +1685,7 @@ mod tests {
                                 label: "B1.2".into(),
                                 element: Some(2),
                                 kind_letter: Some('B'),
+                                kind: None,
                             },
                         ],
                     );
