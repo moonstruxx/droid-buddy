@@ -342,7 +342,10 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             } else {
                 None
             };
-            let (glyph, state_text, color) = cell_visuals(comp, false, false);
+            let is_shift_active = app
+                .active_shift
+                .is_some_and(|g| comp.shift_group == Some(g));
+            let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
             // The folded LED (if any) drives the inner fill.
             let folded = shape
                 .is_some()
@@ -422,6 +425,28 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             )
         };
 
+        // Shift slot mirrors the `cell_visuals` group→token match; unaddressed
+        // cells (`ci >= len`) are always `None` (D2).
+        let shift_color = if ci < module.components.len() {
+            let comp = &module.components[ci];
+            if app
+                .active_shift
+                .is_some_and(|g| comp.shift_group == Some(g))
+            {
+                let t = crate::theme::active();
+                match comp.shift_group {
+                    Some(ShiftGroup::Group1) => Some(t.shift1),
+                    Some(ShiftGroup::Group2) => Some(t.shift2),
+                    Some(ShiftGroup::Group3) => Some(t.shift3),
+                    Some(ShiftGroup::Group4) => Some(t.shift4),
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let is_dimmed = label.is_empty(); // unused elements are dimmed
         cells.push(CellSpec {
             rect,
@@ -438,7 +463,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                     || selected_circuit_cells.contains(&i)
                     || app.selected_component.as_deref() == Some(module.components[ci].id.as_str())
             }),
-            shift_color: None,
+            shift_color,
             modifier_wash: None,
             dimmed: is_dimmed,
             kind,
@@ -640,6 +665,8 @@ pub(crate) fn performance_overlay(
         // carries the state), so the callout resolves the live state text
         // from the component instead of going blank.
         let state_text = if cell.state_text.is_empty() {
+            // Label helper is detached from shift context (state text only,
+            // colour-independent); keep `false` per D1.
             cell_visuals(comp, false, false).1
         } else {
             cell.state_text.clone()
