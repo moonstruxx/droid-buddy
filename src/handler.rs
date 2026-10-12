@@ -4158,6 +4158,103 @@ mod tests {
         ));
     }
 
+    fn ctrl_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, key_modifiers::CONTROL)
+    }
+
+    fn idx_of(app: &App, id: &str) -> usize {
+        app.patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == id)
+            .unwrap_or_else(|| panic!("no component {id}"))
+    }
+
+    #[test]
+    fn ctrl_enter_toggles_only_the_folded_led() {
+        let mut app = app_with_fixture();
+        let btn = idx_of(&app, "B1.1");
+        let led = idx_of(&app, "L1.1");
+        app.hovered_component = Some(btn);
+        let quit = handle_event(ctrl_enter(), &mut app);
+        assert!(!quit);
+        let patch = app.patch.as_ref().unwrap();
+        assert!(
+            matches!(patch.hw_components[led].state, ComponentState::On),
+            "folded LED L1.1 must toggle on"
+        );
+        assert!(
+            matches!(patch.hw_components[btn].state, ComponentState::Off),
+            "element state must be unchanged"
+        );
+        assert!(
+            app.status_message.contains("L1.1"),
+            "status must report the LED token, got {:?}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn enter_and_space_toggle_only_the_element() {
+        for code in [KeyCode::Enter, KeyCode::Char(' ')] {
+            let mut app = app_with_fixture();
+            let btn = idx_of(&app, "B1.1");
+            let led = idx_of(&app, "L1.1");
+            app.hovered_component = Some(btn);
+            handle_event(key(code.clone()), &mut app);
+            let patch = app.patch.as_ref().unwrap();
+            assert!(
+                matches!(patch.hw_components[btn].state, ComponentState::On),
+                "element must toggle for {code:?}"
+            );
+            assert!(
+                matches!(patch.hw_components[led].state, ComponentState::Off),
+                "folded LED must be unchanged for {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_enter_without_folded_led_is_silent_noop() {
+        let mut app = app_with_fixture();
+        let btn = idx_of(&app, "B1.1");
+        app.patch.as_mut().unwrap().hw_components[btn].led = None;
+        app.hovered_component = Some(btn);
+        let before = app.status_message.clone();
+        let quit = handle_event(ctrl_enter(), &mut app);
+        assert!(!quit);
+        let patch = app.patch.as_ref().unwrap();
+        assert!(matches!(
+            patch.hw_components[btn].state,
+            ComponentState::Off
+        ));
+        assert_eq!(
+            app.status_message, before,
+            "no status message without a folded LED"
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_paused_toggles_nothing() {
+        let mut app = app_with_fixture();
+        let btn = idx_of(&app, "B1.1");
+        let led = idx_of(&app, "L1.1");
+        app.hovered_component = Some(btn);
+        app.processing_paused = true;
+        handle_event(ctrl_enter(), &mut app);
+        let patch = app.patch.as_ref().unwrap();
+        assert!(
+            matches!(patch.hw_components[led].state, ComponentState::Off),
+            "LED must not toggle while paused"
+        );
+        assert!(
+            matches!(patch.hw_components[btn].state, ComponentState::Off),
+            "element must not toggle while paused"
+        );
+    }
+
     #[test]
     fn shift_key_bindings_1_through_4() {
         let mut app = App::new();

@@ -472,6 +472,7 @@ mod tests {
         ("j/k", "navigate"),
         ("click", "focus element across source + graph"),
         ("Enter/Space", "toggle component"),
+        ("Ctrl+Enter", "toggle element LED"),
         ("s", "toggle skeleton presentation"),
         ("m", "latch modifier on hovered component"),
         ("e", "edit label / validation modal"),
@@ -563,6 +564,7 @@ mod tests {
             ("Tab/Shift+Tab", "cycle pane focus"),
             // Component interaction and modifier/shift family.
             ("Enter/Space", "toggle component"),
+            ("Ctrl+Enter", "toggle element LED"),
             ("arrows/wheel", "pan rack on overflow"),
             ("m", "latch modifier on hovered component"),
             ("e", "edit label / validation modal"),
@@ -630,6 +632,7 @@ mod tests {
             "Alt+b",
             "Alt+s",
             "Ctrl+c",
+            "Ctrl+Enter",
             "Enter/Space",
             "Esc",
             "click",
