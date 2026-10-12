@@ -23,5 +23,5 @@
 
 ## 5. Verification and follow-ups
 
-- [ ] 5.1 Run the full gate — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked` — plus the screenshot render check, and verify every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.1, 3.1, 3.2, 3.3, 4.1, 4.2], touches: [] -->
+- [x] 5.1 Run the full gate — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked` — plus the screenshot render check, and verify every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.1, 3.1, 3.2, 3.3, 4.1, 4.2], touches: [] -->
 - [x] 5.2 File the follow-up beads (`droid_tui-2n4` LED colour bug/P2, `droid_tui-y57` face parity task/P3, `droid_tui-cnb` shift colour task/P3) — patch-driven LED colour never reaches the renderer (nothing constructs `ComponentState::Led { value, rgb }`, so RGB fills render white), P4B2/master/G8/X7 button-face parity, and shift colour on the module UI — each linked `discovered-from` this change. Verify with `bd list --json`. <!-- agent: devops-engineer.fast, depends_on: [3.2], touches: [] -->
