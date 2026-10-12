@@ -2783,4 +2783,64 @@ mod tests {
             .collect();
         assert_eq!(got, again, "stable order across repeated runs");
     }
+
+    // s10-switch-glyphs task 1.1 (TDD wave 1, expected RED): loader must
+    // surface the JSON `kind` annotation. STAND-IN: `entry_kind` below
+    // returns None (the current gap); task 2.1 deletes it and adds the
+    // real `kind` field on entry/cell carried through `preprocess_cells`.
+    fn entry_kind(_entry: &ElementCellEntry) -> Option<&str> {
+        None
+    }
+
+    fn s10_s_cells() -> Vec<ElementCellEntry> {
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let s10 = data.controller("s10").expect("s10 entry");
+        s10.element_cells.get("S").expect("s10 S family").clone()
+    }
+
+    #[test]
+    fn s10_switch_kind_rotary_loads() {
+        let cells = s10_s_cells();
+        assert_eq!(cells.len(), 10, "s10 must carry 10 S entries");
+        let s11 = cells
+            .iter()
+            .find(|c| c.label == "S1.1")
+            .expect("S1.1 entry");
+        assert_eq!(entry_kind(s11), Some("rotary"));
+    }
+
+    #[test]
+    fn s10_switch_kind_small_loads() {
+        let cells = s10_s_cells();
+        let s13 = cells
+            .iter()
+            .find(|c| c.label == "S1.3")
+            .expect("S1.3 entry");
+        assert_eq!(entry_kind(s13), Some("small"));
+    }
+
+    #[test]
+    fn entry_without_kind_loads_none() {
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let p2b8 = data.controller("p2b8").expect("p2b8 entry");
+        let b = p2b8.element_cells.get("B").expect("p2b8 B family");
+        assert!(!b.is_empty(), "p2b8 must carry B entries");
+        for entry in b {
+            assert_eq!(
+                entry_kind(entry),
+                None,
+                "{} has no kind annotation",
+                entry.label
+            );
+        }
+    }
+
+    #[test]
+    fn m4_touch_kind_rides_along() {
+        let data = ControllerGeometry::load().expect("controller_geometry.json loads");
+        let m4 = data.controller("m4").expect("m4 entry");
+        let b = m4.element_cells.get("B").expect("m4 B family");
+        let b11 = b.iter().find(|c| c.label == "B1.1").expect("B1.1 entry");
+        assert_eq!(entry_kind(b11), Some("touch"));
+    }
 }
