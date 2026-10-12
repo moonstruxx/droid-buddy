@@ -1094,6 +1094,75 @@ mod tests {
         assert!(rows.contains(&4), "b32 must span row 4 (B1.17..B1.20)");
     }
 
+    /// Trailing digit-run of a label (`"E1.4"` -> 4, `"E1"` -> 1).
+    fn trailing_number(label: &str) -> u32 {
+        let digits: String = label
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        digits.parse().expect("element label must end in a number")
+    }
+
+    #[test]
+    fn e4_grid_agrees_between_geometry_files() {
+        // Regression (controller-geometry-fidelity, task 1.1): rack_geometry.json
+        // declares the E4 encoders as a vertical stack of 4; controller_geometry
+        // .json's e4 entry must therefore be one column × four rows with
+        // elements 1..=4 — mirroring the B32 4×8 agreement test above.
+        let rack = RackGeometry::load().expect("rack_geometry.json loads");
+        let e4_grid = rack
+            .grids
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("e4"))
+            .map(|(_, v)| v)
+            .expect("rack_geometry.json must carry an e4 grid");
+        match e4_grid {
+            Grid::Stack { count, .. } => assert_eq!(*count, 4, "e4 stack count must be 4"),
+            other => panic!("e4 must be a stack grid, got {other:?}"),
+        }
+
+        let ctrl =
+            crate::physical::ControllerGeometry::load().expect("controller_geometry.json loads");
+        let e4 = ctrl
+            .controller("e4")
+            .expect("controller_geometry.json must carry an e4 entry");
+        let encoders = &e4.element_cells["E"];
+        assert_eq!(
+            encoders.len(),
+            4,
+            "controller_geometry.json e4 must carry 4 encoders"
+        );
+        let cols: std::collections::BTreeSet<u32> = encoders.iter().map(|c| c.col).collect();
+        let rows: std::collections::BTreeSet<u32> = encoders.iter().map(|c| c.row).collect();
+        assert_eq!(cols.len(), 1, "e4 must be a single column");
+        assert_eq!(rows.len(), 4, "e4 must be four rows");
+
+        // Elements 1..=4, with row index increasing as the element number
+        // grows (a vertical stack).
+        let mut by_element: Vec<(u32, u32, u32)> = encoders
+            .iter()
+            .map(|c| (trailing_number(&c.label), c.col, c.row))
+            .collect();
+        by_element.sort();
+        assert_eq!(
+            by_element.iter().map(|(e, _, _)| *e).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "e4 elements must be 1..=4"
+        );
+        for w in by_element.windows(2) {
+            assert!(
+                w[0].2 < w[1].2,
+                "e4 rows must increase with element number ({} vs {})",
+                w[0].2,
+                w[1].2
+            );
+        }
+    }
+
     // ---- BindingFeatures scenario tests (task 1.2) ----
 
     #[test]
