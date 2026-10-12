@@ -6,7 +6,7 @@
 
 ## 2. Shift wiring
 
-- [ ] 2.1 Compute shift membership in `physical_spec` and feed both slots (`src/gui/physical.rs`): `is_shift_active` from `app.active_shift` vs `comp.shift_group` into `cell_visuals`, and `shift_color` set to the group token for members / `None` otherwise (never for unaddressed cells). Verify by making task 1.1 pass with `cargo test gui::physical::`. <!-- agent: layout-designer-engineer.build, depends_on: [1.1], touches: [src/gui/physical.rs] -->
+- [x] 2.1 Compute shift membership in `physical_spec` and feed both slots (`src/gui/physical.rs`): `is_shift_active` from `app.active_shift` vs `comp.shift_group` into `cell_visuals`, and `shift_color` set to the group token for members / `None` otherwise (never for unaddressed cells). Verify by making task 1.1 pass with `cargo test gui::physical::`. <!-- agent: layout-designer-engineer.build, depends_on: [1.1], touches: [src/gui/physical.rs] -->
 
 ## 3. Visual artifacts
 
