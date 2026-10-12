@@ -1328,21 +1328,12 @@ impl App {
             self.picker_entries.extend(inis);
             self.picker_entries.extend(others);
         }
-        // Clamp picker_index after prepending favourites / rebuilding list.
+        // Clamp picker_index after prepending favourites / rebuilding list. No
+        // scale-based entry trimming: the overlay windows its own viewport
+        // around the highlight (`gui::picker::scroll_window`), so every entry
+        // must stay in the list to remain navigable.
         if self.picker_index >= self.picker_entries.len() {
             self.picker_index = self.picker_entries.len().saturating_sub(1);
-        }
-        // Scale factor affects entry density: with higher scale, show fewer entries
-        // to prevent overcrowding the picker UI
-        if self.scale_factor > 2.0 {
-            // When heavily scaled, trim to most relevant entries (parent + first N)
-            let max_entries =
-                (self.picker_entries.len() as f32 / self.scale_factor).ceil() as usize;
-            self.picker_entries.truncate(max_entries.max(1));
-            // Re-clamp after truncation.
-            if self.picker_index >= self.picker_entries.len() {
-                self.picker_index = self.picker_entries.len().saturating_sub(1);
-            }
         }
     }
 
