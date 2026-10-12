@@ -2,8 +2,8 @@
 
 ## 1. Regression tests first (expected red)
 
-- [ ] 1.1 Add enumeration tests in `src/physical.rs`: a module's unaddressed cells exclude addressed `(kind, element)` pairs, include ring segments and unused buttons, skip `element: None` cells, emit fallback modules empty, and order deterministically (family key, row, col across repeated runs). Verify they FAIL with no production change. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/physical.rs] -->
-- [ ] 1.2 Add emission tests in `src/gui/physical.rs`: a partial-B32 spec contains dimmed `None`-index cells for the unused buttons with no published hit rect; an unaddressed P2B8 LED emits no cell; a bare-E4 spec contains all 128 ring segments; a bare-P2B8 spec is unchanged (no unaddressed cells). Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
+- [x] 1.1 Add enumeration tests in `src/physical.rs`: a module's unaddressed cells exclude addressed `(kind, element)` pairs, include ring segments and unused buttons, skip `element: None` cells, emit fallback modules empty, and order deterministically (family key, row, col across repeated runs). Verify they FAIL with no production change. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/physical.rs] -->
+- [x] 1.2 Add emission tests (2 red + 2 guards; watchpoint: partial-B32 inline patch logs fallback-controller warning) in `src/gui/physical.rs`: a partial-B32 spec contains dimmed `None`-index cells for the unused buttons with no published hit rect; an unaddressed P2B8 LED emits no cell; a bare-E4 spec contains all 128 ring segments; a bare-P2B8 spec is unchanged (no unaddressed cells). Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
 
 ## 2. Emission and suppression
 
