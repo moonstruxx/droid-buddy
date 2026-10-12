@@ -1573,6 +1573,9 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                                         toggle_component(led);
                                         let state = match &led.state {
                                             ComponentState::On => "On",
+                                            ComponentState::Led { value, .. } if *value > 0.5 => {
+                                                "On"
+                                            }
                                             _ => "Off",
                                         };
                                         app.status_message = format!("LED {}: {}", led.id, state);
@@ -2438,6 +2441,13 @@ fn toggle_component(comp: &mut crate::patch::HwComponent) {
     match comp.kind {
         ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
             comp.state = match &comp.state {
+                ComponentState::Led { value, rgb } => {
+                    let rgb = *rgb;
+                    ComponentState::Led {
+                        value: if *value > 0.5 { 0.0 } else { 1.0 },
+                        rgb,
+                    }
+                }
                 ComponentState::On => ComponentState::Off,
                 _ => ComponentState::On,
             };
