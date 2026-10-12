@@ -345,7 +345,9 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             let is_shift_active = app
                 .active_shift
                 .is_some_and(|g| comp.shift_group == Some(g));
-            let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, false);
+            let switch_kind = chain.cell_for(mi, &comp.id).and_then(|c| c.kind.as_deref());
+            let (glyph, state_text, color) =
+                cell_visuals(comp, is_shift_active, false, switch_kind);
             // The folded LED (if any) drives the inner fill.
             let folded = shape
                 .is_some()
@@ -667,7 +669,9 @@ pub(crate) fn performance_overlay(
         let state_text = if cell.state_text.is_empty() {
             // Label helper is detached from shift context (state text only,
             // colour-independent); keep `false` per D1.
-            cell_visuals(comp, false, false).1
+            // Label helper has no geometry cell in scope (detached text
+            // context), so no kind to resolve — pass `None` (toggle set).
+            cell_visuals(comp, false, false, None).1
         } else {
             cell.state_text.clone()
         };
@@ -1194,6 +1198,7 @@ pub(crate) fn cell_visuals(
     comp: &crate::patch::HwComponent,
     is_shift_active: bool,
     fader: bool,
+    switch_kind: Option<&str>,
 ) -> (String, String, Color) {
     let t = crate::theme::active();
     match comp.kind {
@@ -1232,9 +1237,12 @@ pub(crate) fn cell_visuals(
             ("\u{25C9}".into(), val, t.knob)
         }
         ComponentKind::Switch => {
+            let round = switch_kind == Some("rotary");
             let (glyph, state) = match &comp.state {
                 ComponentState::Value(v) => ("\u{25C9}", format!("{:.0}%", v * 100.0)),
+                ComponentState::On if round => ("\u{25C9}", "ON".into()),
                 ComponentState::On => ("\u{25A3}", "ON".into()),
+                _ if round => ("\u{25CB}", "OFF".into()),
                 _ => ("\u{25A1}", "OFF".into()),
             };
             (glyph.into(), state, t.switch)
@@ -1794,7 +1802,8 @@ mod tests {
         let mut cells = Vec::new();
         for &(mi, ci, rect, mark) in &geom.cells {
             let comp = &chain.modules[mi].components[ci];
-            let (glyph, state_text, color) = cell_visuals(comp, false, false);
+            // Test fixture has no geometry loaded; kind is unresolvable here.
+            let (glyph, state_text, color) = cell_visuals(comp, false, false, None);
             cells.push(CellSpec {
                 rect,
                 glyph,
@@ -2081,7 +2090,7 @@ mod tests {
             led: None,
             led_capability: Some(crate::patch::LedCapability::Rgb),
         };
-        let (g, s, c) = cell_visuals(&on, false, false);
+        let (g, s, c) = cell_visuals(&on, false, false, None);
         assert_eq!(g, "\u{25CF}");
         assert_eq!(s, "ON");
         assert_eq!(c, t.button);
@@ -2090,7 +2099,7 @@ mod tests {
             shift_group: Some(ShiftGroup::Group2),
             ..on.clone()
         };
-        let (_, _, c) = cell_visuals(&shifted, true, false);
+        let (_, _, c) = cell_visuals(&shifted, true, false, None);
         assert_eq!(c, t.shift2);
         // Fader-marked knob renders the LED strip state.
         let knob = HwComponent {
@@ -2098,18 +2107,14 @@ mod tests {
             state: ComponentState::Value(0.5),
             ..on
         };
-        let (g, s, c) = cell_visuals(&knob, false, true);
+        let (g, s, c) = cell_visuals(&knob, false, true, None);
         assert_eq!(g, "\u{25AE}");
         assert_eq!(s, "50%");
         assert_eq!(c, t.fader_led_bar);
     }
 
-    /// Stand-in for the task 2.2 `switch_kind: Option<&str>` parameter: returns
-    /// today's single glyph set for every kind (the gap D2 closes). Task 2.2
-    /// deletes this and wires the real parameter; assertions flip green.
     fn switch_glyph_for_kind(kind: Option<&str>, comp: &HwComponent) -> (String, String) {
-        let _ = kind;
-        let (g, s, _) = cell_visuals(comp, false, false);
+        let (g, s, _) = cell_visuals(comp, false, false, kind);
         (g, s)
     }
 
