@@ -7,7 +7,7 @@ The module UI renders the patch's DROID controllers as simplified faceplates in 
 
 ### Requirement: Faceplate element fidelity
 
-The module UI SHALL render each controller as a faceplate containing every interactive hardware element of that controller type — pots, faders, encoders, buttons, switches, jacks — at its faceplate position and with the element rendering its type calls for (a knob with pointer, a vertical fader track with thumb, an encoder, a composed button face per "Button face and LED composition", a rotary or toggle switch, or a jack). Where the panel arranges an element family as a single vertical column, the faceplate SHALL render that family as one column at the panel's measured pitch; where the panel arranges a family as a matrix, the faceplate SHALL keep the panel's rows and columns. Faceplate surface artwork SHALL NOT be rendered; the faceplate background is plain.
+The module UI SHALL render each controller as a faceplate containing every interactive hardware element of that controller type — pots, faders, encoders, buttons, switches, jacks — at its faceplate position and with the element rendering its type calls for (a knob with pointer, a vertical fader track with thumb, an encoder, a composed button face per "Button face and LED composition", a rotary or toggle switch, or a jack). Where the panel arranges an element family as a single vertical column, the faceplate SHALL render that family as one column at the panel's measured pitch; where the panel arranges a family as a matrix, the faceplate SHALL keep the panel's rows and columns. Faceplate surface artwork SHALL NOT be rendered; the faceplate background is plain. Switch-kind annotations in the controller geometry (`rotary` vs toggle) SHALL drive the switch glyph: rotary switches render round, toggles square.
 
 #### Scenario: M4 fader renders as a fader
 
@@ -18,6 +18,11 @@ The module UI SHALL render each controller as a faceplate containing every inter
 
 - **WHEN** a patch declares an S10 controller
 - **THEN** its two rotary switches render with a rotary glyph and its eight 3-position switches render with a toggle glyph
+
+#### Scenario: Unannotated switches keep the toggle glyph
+
+- **WHEN** a switch cell carries no kind annotation
+- **THEN** it renders with the toggle glyph exactly as before this change
 
 #### Scenario: B32 keeps its 4×8 grid
 
