@@ -2135,8 +2135,7 @@ fn resolve_led_initial(
                 .iter()
                 .any(|(_, v)| scan_hw_tokens(v).iter().any(|t| t == tok))
         };
-        let mentions_token =
-            element_id.as_deref().is_some_and(|e| mentions(e)) || mentions(&led.id);
+        let mentions_token = element_id.as_deref().is_some_and(mentions) || mentions(&led.id);
         if mentions_token {
             ranked.push((0, i));
             continue;

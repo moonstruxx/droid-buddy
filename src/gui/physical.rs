@@ -2853,7 +2853,7 @@ mod tests {
             .map(|(_, _, fill)| fill)
             .collect();
         assert!(
-            fills.iter().any(|f| *f == expected),
+            fills.contains(&expected),
             "inner fill paints the patch rgb, not white: {fills:?}"
         );
     }
