@@ -205,8 +205,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
     let normal_mapping = || {
         ScreenMapping::new(
-            crate::physical::PHYSICAL_COLS_PER_MM,
-            crate::physical::PHYSICAL_ROWS_PER_MM,
+            crate::physical::PHYSICAL_CELLS_PER_MM,
             app.physical_zoom as f64,
             app.physical_offset.0 as f64 - pane_dx,
             app.physical_offset.1 as f64 - pane_dy,
@@ -421,8 +420,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
 /// `None` on degenerate input (empty pane or rack); the caller falls back to
 /// the normal mapping. Pure math, no App dependency, so tests drive it headless.
 pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option<ScreenMapping> {
-    let cols = crate::physical::PHYSICAL_COLS_PER_MM;
-    let rows = crate::physical::PHYSICAL_ROWS_PER_MM;
+    let cells = crate::physical::PHYSICAL_CELLS_PER_MM;
     let pane_w = pane.width() as f64 / PHYSICAL_CELL_SCALE as f64;
     let pane_h = pane.height() as f64 / PHYSICAL_CELL_SCALE as f64;
     if pane_w <= 0.0 || pane_h <= 0.0 {
@@ -431,7 +429,7 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     if rack.total_width_mm <= 0.0 || rack.total_height_mm <= 0.0 {
         return None;
     }
-    let fit = (pane_w / (rack.total_width_mm * cols)).min(pane_h / (rack.total_height_mm * rows));
+    let fit = (pane_w / (rack.total_width_mm * cells)).min(pane_h / (rack.total_height_mm * cells));
     if !fit.is_finite() || fit <= 0.0 {
         return None;
     }
@@ -440,9 +438,9 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     // exactly like the normal mapping so points land window-absolute.
     let pane_dx = pane.min.x as f64 / PHYSICAL_CELL_SCALE as f64;
     let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
-    let offset_x = (rack.total_width_mm * 0.5) * cols * zoom - pane_dx - pane_w * 0.5;
-    let offset_y = (rack.total_height_mm * 0.5) * rows * zoom - pane_dy - pane_h * 0.5;
-    Some(ScreenMapping::new(cols, rows, zoom, offset_x, offset_y))
+    let offset_x = (rack.total_width_mm * 0.5) * cells * zoom - pane_dx - pane_w * 0.5;
+    let offset_y = (rack.total_height_mm * 0.5) * cells * zoom - pane_dy - pane_h * 0.5;
+    Some(ScreenMapping::new(cells, zoom, offset_x, offset_y))
 }
 
 /// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
@@ -1519,13 +1517,7 @@ mod tests {
     /// The same mapping at a physical zoom preset — the value
     /// `physical_spec` feeds from `app.physical_zoom`.
     fn mapping_at(zoom: f64) -> ScreenMapping {
-        ScreenMapping::new(
-            crate::physical::PHYSICAL_COLS_PER_MM,
-            crate::physical::PHYSICAL_ROWS_PER_MM,
-            zoom,
-            0.0,
-            0.0,
-        )
+        ScreenMapping::new(crate::physical::PHYSICAL_CELLS_PER_MM, zoom, 0.0, 0.0)
     }
 
     /// The resolved spec the paint tests draw: geometry via `rack_geometry`,
@@ -1638,8 +1630,7 @@ mod tests {
         };
         let rack = RackLayout::pack(&chain, &rack_spec);
         let m = ScreenMapping::new(
-            crate::physical::PHYSICAL_COLS_PER_MM,
-            crate::physical::PHYSICAL_ROWS_PER_MM,
+            crate::physical::PHYSICAL_CELLS_PER_MM,
             app.physical_zoom as f64,
             app.physical_offset.0 as f64,
             app.physical_offset.1 as f64,
@@ -1755,25 +1746,25 @@ mod tests {
     fn rack_geometry_maps_mm_to_points() {
         let (rack, chain) = fixture();
         let geom = rack_geometry(&rack, &chain, &mapping(), 10.0);
-        // 200×40 mm at 0.15 cols/mm × 10 px = 300×120 points.
+        // 200×40 mm at isotropic 0.15 cells/mm × 10 px = 300×60 points (D1).
         assert_eq!(
             geom.case_rect,
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 120.0))
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 60.0))
         );
         assert_eq!(geom.module_rects.len(), 1);
         assert_eq!(geom.module_rects[0].0, 0);
         assert_eq!(
             geom.module_rects[0].1,
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 120.0))
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 60.0))
         );
-        // The B1.1 cell: 20×10 mm at (10,5) mm → 3×3 cells at (1.5,1.5) = 30×30 px at (15,15).
+        // The B1.1 cell: 20×10 mm at (10,5) mm → 3×1.5 cells at (1.5,0.75) = 30×15 px at (15,7.5).
         assert_eq!(geom.cells.len(), 1);
         let (_, _, rect, mark) = geom.cells[0];
         assert_eq!(mark, PortMark::Cell);
         assert!((rect.min.x - 15.0).abs() < 1e-3);
-        assert!((rect.min.y - 15.0).abs() < 1e-3);
+        assert!((rect.min.y - 7.5).abs() < 1e-3);
         assert!((rect.width() - 30.0).abs() < 1e-3);
-        assert!((rect.height() - 30.0).abs() < 1e-3);
+        assert!((rect.height() - 15.0).abs() < 1e-3);
     }
 
     #[test]
@@ -2039,7 +2030,10 @@ mod tests {
 
     #[test]
     fn paint_draws_module_title_and_cell_labels() {
-        let labels = painted_labels(&spec(false, false));
+        // Isotropic cells are half as tall as under the old 2:1 stretch, so
+        // the 15 pt fixture cell no longer fits the state-text second row
+        // (D1); at the 200 % preset it does, and the state path is unchanged.
+        let labels = painted_labels(&spec_at_zoom(2.0));
         assert!(
             labels.iter().any(|l| l.contains("P2B8 1")),
             "module title drawn: {labels:?}"
