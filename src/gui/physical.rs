@@ -2101,6 +2101,62 @@ mod tests {
         assert_eq!(c, t.fader_led_bar);
     }
 
+    /// Stand-in for the task 2.2 `switch_kind: Option<&str>` parameter: returns
+    /// today's single glyph set for every kind (the gap D2 closes). Task 2.2
+    /// deletes this and wires the real parameter; assertions flip green.
+    fn switch_glyph_for_kind(kind: Option<&str>, comp: &HwComponent) -> (String, String) {
+        let _ = kind;
+        let (g, s, _) = cell_visuals(comp, false, false);
+        (g, s)
+    }
+
+    fn switch_comp(state: ComponentState) -> HwComponent {
+        HwComponent {
+            id: "S1.1".into(),
+            label: "S1.1".into(),
+            kind: ComponentKind::Switch,
+            shift_group: None,
+            state,
+            controller: "S10".into(),
+            led: None,
+            led_capability: None,
+        }
+    }
+
+    #[test]
+    fn switch_rotary_kind_uses_round_glyphs() {
+        let (g, _) = switch_glyph_for_kind(Some("rotary"), &switch_comp(ComponentState::On));
+        assert_eq!(g, "\u{25C9}");
+        let (g, _) = switch_glyph_for_kind(Some("rotary"), &switch_comp(ComponentState::Off));
+        assert_eq!(g, "\u{25CB}");
+        let (g, s) =
+            switch_glyph_for_kind(Some("rotary"), &switch_comp(ComponentState::Value(0.5)));
+        assert_eq!(g, "\u{25C9}");
+        assert_eq!(s, "50%");
+    }
+
+    #[test]
+    fn switch_toggle_and_unannotated_kinds_use_square_glyphs() {
+        for kind in [Some("small"), Some("touch"), None] {
+            let (g, _) = switch_glyph_for_kind(kind, &switch_comp(ComponentState::On));
+            assert_eq!(g, "\u{25A3}");
+            let (g, _) = switch_glyph_for_kind(kind, &switch_comp(ComponentState::Off));
+            assert_eq!(g, "\u{25A1}");
+        }
+    }
+
+    #[test]
+    fn switch_state_text_unchanged_across_kinds() {
+        for kind in [Some("rotary"), Some("small"), None] {
+            let (_, s) = switch_glyph_for_kind(kind, &switch_comp(ComponentState::On));
+            assert_eq!(s, "ON");
+            let (_, s) = switch_glyph_for_kind(kind, &switch_comp(ComponentState::Off));
+            assert_eq!(s, "OFF");
+            let (_, s) = switch_glyph_for_kind(kind, &switch_comp(ComponentState::Value(0.5)));
+            assert_eq!(s, "50%");
+        }
+    }
+
     fn painted_labels(spec: &PhysicalSpec) -> Vec<String> {
         painted_output(spec).0
     }

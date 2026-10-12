@@ -2,7 +2,7 @@
 
 ## 1. Regression tests first (expected red)
 
-- [ ] 1.1 Add loader tests in `src/physical.rs`: a geometry entry with `"kind": "rotary"` loads into `ElementCellEntry.kind` and carries through to `ElementCell.kind`; entries without `kind` load `None`; M4 `touch` rides along. Verify they FAIL with no production change. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/physical.rs] -->
+- [x] 1.1 Add loader tests (3 red + 1 guard) in `src/physical.rs`: a geometry entry with `"kind": "rotary"` loads into `ElementCellEntry.kind` and carries through to `ElementCell.kind`; entries without `kind` load `None`; M4 `touch` rides along. Verify they FAIL with no production change. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/physical.rs] -->
 - [ ] 1.2 Add glyph tests in `src/gui/physical.rs`: a rotary-kind switch cell emits the round glyph set, a toggle-kind (and unannotated) switch the square set, with state text unchanged. Verify they FAIL. <!-- agent: horst-engineer.build, depends_on: [], touches: [src/gui/physical.rs] -->
 
 ## 2. Kind carry and glyph branch
