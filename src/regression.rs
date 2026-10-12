@@ -1871,3 +1871,123 @@ fn regression_faceplate_rotary_stack_all_six_declared_and_attributable() {
         "six controller faceplates, got {controller_faceplates:?}"
     );
 }
+
+// ── button-led-composition (task 4.1): composed button faces + folded LEDs ─
+// One fixture (`fixtures/button_led_composition.ini`) declaring a P2B8, a B32
+// and an M4 with explicit button/LED pairs, plus one LED-less element (P2B8
+// pot P1.1). This story asserts presence and token attribution only: the
+// faceplates render their declared tokens, no folded LED publishes a cell or
+// a hit rect, and the LED-less element still renders its cell. Positions
+// belong to tasks 1.1/1.2 and are never read here.
+
+/// `(geometry key, declared button tokens)` per controller the fixture
+/// declares. The instance numbers are the fixture's own: bare controller
+/// sections take chain positions 1..3 in file order (p2b8, b32, m4).
+const BUTTON_LED_FACEPLATES: &[(&str, &[&str])] = &[
+    ("p2b8", &["B1.1", "B1.2"]),
+    ("b32", &["B2.1", "B2.2"]),
+    ("m4", &["B3.1"]),
+];
+
+/// The LEDs bound to the declared buttons via explicit `led = L.N` pairs.
+const BUTTON_LED_FOLDED_LEDS: &[&str] = &["L1.1", "L1.2", "L2.1", "L2.2", "L3.1"];
+
+#[test]
+fn regression_button_led_composition_faces_render_and_leds_fold() {
+    let path = "fixtures/button_led_composition.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    // (a) No Error-severity validation finding: the fixture is a valid patch,
+    // not a validation-case carrier.
+    let schema = crate::schema::load_schema();
+    let issues = crate::validation::validate_patch(&patch, schema);
+    let errors: Vec<_> = issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{path} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    // (b) All three faceplates exist and render their declared tokens:
+    // each token is attributed to its faceplate and resolves to a cell.
+    let layout = crate::physical::PhysicalLayout::build(&patch);
+    for (key, tokens) in BUTTON_LED_FACEPLATES {
+        let ix = layout
+            .modules
+            .iter()
+            .position(|m| m.geometry_key == *key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no faceplate for {key}; faceplates = {:?}",
+                    layout
+                        .modules
+                        .iter()
+                        .map(|m| m.geometry_key.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let faceplate = &layout.modules[ix];
+        assert!(
+            !faceplate.is_fallback,
+            "{key} faceplate must use its geometry entry, not the fallback"
+        );
+        for token in *tokens {
+            assert!(
+                faceplate.components.iter().any(|c| c.id == *token),
+                "{token} must be attributed to the {key} faceplate, got {:?}",
+                faceplate
+                    .components
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                layout.cell_for(ix, token).is_some(),
+                "{token} must resolve to an element cell on the {key} faceplate"
+            );
+        }
+    }
+
+    // (c) No folded LED appears as a cell or in `component_rects`: the
+    // published spec cells resolve to token ids via the global
+    // `patch.hw_components` index, and the hit rects derive from those cells.
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    let spec =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    let cell_tokens: Vec<&str> = spec
+        .cells
+        .iter()
+        .filter_map(|c| c.component_index)
+        .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.as_str())
+        .collect();
+    for led in BUTTON_LED_FOLDED_LEDS {
+        assert!(
+            !cell_tokens.contains(led),
+            "folded LED {led} must not publish a cell, got {cell_tokens:?}"
+        );
+    }
+    // The paint path publishes `component_rects` from exactly these spec
+    // cells (`gui/mod.rs`), so mirror that publication headlessly: only real
+    // components (Some index) are hit-testable.
+    let hit_tokens: Vec<&str> = spec
+        .cells
+        .iter()
+        .filter_map(|c| c.component_index)
+        .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.as_str())
+        .collect();
+    for led in BUTTON_LED_FOLDED_LEDS {
+        assert!(
+            !hit_tokens.contains(led),
+            "folded LED {led} must not publish a hit rect, got {hit_tokens:?}"
+        );
+    }
+
+    // (d) The LED-less element still renders its cell.
+    assert!(
+        cell_tokens.contains(&"P1.1"),
+        "the LED-less P1.1 must still render its cell, got {cell_tokens:?}"
+    );
+}
