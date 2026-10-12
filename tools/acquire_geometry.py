@@ -85,22 +85,57 @@ def grid(cols, rows, x0, y0, px, py, w, h, order="row_wise", labels=None, **kw):
     return out
 
 
-def ring_32(cx: float, cy: float, label0: int):
-    """Square ring of 32 LEDs on the perimeter of a 9x9 grid (pitch 1.0 mm,
-    outer half 4 mm) around encoder centre (cx, cy) — manual: 'a square of 32
-    multicolor LEDs'. Returns 32 cells, labelled L{label0+1}..L{label0+32}."""
+def measured_grid(family, cols, rows, cx0, cy0, px, py, w, h,
+                  order="row_wise", labels=None, cell_kw=None, decl_kw=None):
+    """Cells + matching `grids` entry for one grid of MEASURED elements.
+
+    `cx0`/`cy0` are the measured centres (mm from the faceplate's top-left
+    corner) of the element at (col 0, row 0) and `px`/`py` the measured
+    pitches. Both the cells and the documentation entry are derived with the
+    generator's top-left convention (`x_mm = centre_x - w/2`,
+    `y_mm = centre_y - h/2`), so the measured centres are the single source of
+    truth and cells and decl can not drift apart."""
+    x0, y0 = round(cx0 - w / 2, 2), round(cy0 - h / 2, 2)
+    cells = grid(cols, rows, x0, y0, px, py, w, h, order=order, labels=labels,
+                 **(cell_kw or {}))
+    decl = {"family": family, "cols": cols, "rows": rows, "order": order,
+            "x0_mm": x0, "y0_mm": y0, "pitch_x_mm": px, "pitch_y_mm": py,
+            "w_mm": w, "h_mm": h}
+    decl.update(decl_kw or {})
+    return cells, decl
+
+
+def ring_32(cx: float, cy: float, label0: int, pitch: float = 2.76,
+            size: float = 1.8, per_side: int = 9):
+    """Square ring of 32 LEDs around encoder centre (cx, cy) — manual: 'a
+    square of 32 multicolor LEDs'. Measured: 9 LEDs per side at 2.76 mm pitch
+    with 1.8 mm cells, i.e. a ~23.88 mm square centred on the encoder (the
+    guessed 1 mm cells on a 1 mm pitch gave a ~9 mm square, nothing like the
+    faceplate images). Returns 32 cells, walked top (L->R), right (T->B),
+    bottom (R->L), left (B->T) on the ring's 9x9 (col, row) frame, labelled
+    L{label0+1}..L{label0+32}."""
+    assert per_side % 2 == 1 and 4 * (per_side - 1) == 32, \
+        "ring_32 must yield 32 LEDs in a 9-per-side walk"
+    half = (per_side - 1) / 2.0 * pitch  # centre -> outer ring axis
+    off = size / 2.0                     # centre -> top-left conversion
     out, n = [], 0
-    for i in range(9):            # top
-        out.append(cell(i, 0, cx - 4 + i * 1.0, cy - 4, 1, 1, label=f"L{label0 + n + 1}"))
+    for i in range(per_side):              # top, left -> right
+        out.append(cell(i, 0, cx - half + i * pitch - off, cy - half - off,
+                        size, size, label=f"L{label0 + n + 1}"))
         n += 1
-    for j in range(1, 9):         # right
-        out.append(cell(8, j, cx + 4, cy - 4 + j * 1.0, 1, 1, label=f"L{label0 + n + 1}"))
+    for j in range(1, per_side):           # right, top -> bottom
+        out.append(cell(per_side - 1, j, cx + half - off,
+                        cy - half + j * pitch - off, size, size,
+                        label=f"L{label0 + n + 1}"))
         n += 1
-    for i in range(7, -1, -1):    # bottom
-        out.append(cell(i, 8, cx - 4 + i * 1.0, cy + 4, 1, 1, label=f"L{label0 + n + 1}"))
+    for i in range(per_side - 2, -1, -1):  # bottom, right -> left
+        out.append(cell(i, per_side - 1, cx - half + i * pitch - off,
+                        cy + half - off, size, size,
+                        label=f"L{label0 + n + 1}"))
         n += 1
-    for j in range(7, 0, -1):     # left
-        out.append(cell(0, j, cx - 4, cy - 4 + j * 1.0, 1, 1, label=f"L{label0 + n + 1}"))
+    for j in range(per_side - 2, 0, -1):   # left, bottom -> top
+        out.append(cell(0, j, cx - half - off, cy - half + j * pitch - off,
+                        size, size, label=f"L{label0 + n + 1}"))
         n += 1
     assert n == 32, "ring_32 must yield 32 LEDs"
     return out
@@ -119,17 +154,45 @@ def ctrl(name, he, width_hp, cells, token_counts, grids, notes):
     }
 
 
+# Provenance for the six faceplates re-measured from the manual faceplate
+# images (controller-geometry-fidelity, task 2.1). The manual's faceplate
+# drawings are to scale and pin the px/mm factor twice per panel class — width
+# against the HP width, height against the 128.5 mm (3 HE) panel height:
+#
+#   5 HP panel (P2B8/P4B2/P10/S10): 224 px <-> 25.4 mm  -> 8.82 px/mm
+#   6 HP panel (E4/DB8E):           225 px <-> 30.48 mm -> 7.38 px/mm
+#   both, height axis:             1132 px <-> 128.5 mm
+#
+# Element centres are blob centroids of the caps, validated against the printed
+# label grid; pot/rotary centres come from the panel centre column and the
+# printed 0..1 scale marks, because a cap centroid skews by up to ~1 mm where
+# the pointer covers one side. Values are good to ~0.3 mm at this source
+# resolution and are emitted on the declared uniform measured pitch, so a cell
+# can sit up to 0.1 mm from the rounded centre printed in design.md.
+MEASURED = (
+    "Measured (not assumed) from the manual faceplate images with the "
+    "calibration factor: 5 HP panels 224 px <-> 25.4 mm (8.82 px/mm), 6 HP "
+    "panels 225 px <-> 30.48 mm (7.38 px/mm), both confirmed on the "
+    "1132 px <-> 128.5 mm height axis; centres good to ~0.3 mm."
+)
+
 # --- per-controller layouts --------------------------------------------------
 
-# Pitch constants (assumed where the manual is silent; see `notes`).
-#   buttons     8x8 mm, pitch ~12.7 (0.5") or tighter on dense panels
-#   big pot     12x12 mm, pitch 10 mm (P2B8/P4B2 class)
-#   small pot   9x9 mm
+# Pitch/size constants. The six re-measured faceplates carry measured values
+# (see MEASURED and each `notes`); the rest stay assumed where the manual is
+# silent on millimetre positions.
+#   buttons     9x9 mm measured (was 8x8); pitch 12.6 x 15.0 (P2B8), 12.6
+#               (P4B2), 15.2 x 15.1 (DB8E), 11.15 x 12.8 (B32)
+#   big pot     12x12 mm; one centred column at 24.7-24.8 mm pitch when
+#               stacked (P2B8/P4B2/P10 big pots/S10 rotaries)
+#   small pot   9x9 mm; 2 x 4 matrix at 12.6 x 15.1 mm
 #   jack        7x7 mm, pitch 8.5 mm x / 13 mm y
-#   toggle      8x12 mm (3-position)
-#   rotary      12x12 mm (8-position, S10 top row)
-#   LED         3x3 mm standalone / 2x2 in-slider / 1x1 ring
-#   encoder     7x7 mm (E4), 8x8 (DB8E)
+#   toggle      8x12 mm (3-position); S10 small switches 12.6 x 15.1 mm
+#   rotary      12x12 mm (8-position, S10 top row, 24.8 mm pitch)
+#   LED         3x3 mm standalone / 2x2 in-slider / 1.8 mm cell in the 32-LED
+#               ring (9 per side at 2.76 mm pitch, ~23.88 mm square)
+#   encoder     7x7 mm; E4 one centred column at 27.8 mm pitch, DB8E below its
+#               button grid
 
 CTRLS = {}
 
@@ -263,90 +326,96 @@ def _build():
             "patch-cable bridge, transparent to patches — no hardware tokens "
             "exist). Assumed: pitches/margins.")
 
-    # --- p2b8 (5 HP) -----------------------------------------------------------
+    # --- p2b8 (5 HP) — measured from the manual faceplate images -------------
     cells, grids = {}, []
-    cells["P"] = grid(2, 1, 2.54, 14, 10, 0, 12, 12, labels=["P1.1", "P1.2"],
-                      size="big")
-    grids.append({"family": "P", "size": "big", "cols": 2, "rows": 1,
-                  "order": "row_wise", "x0_mm": 2.54, "y0_mm": 14,
-                  "pitch_x_mm": 10, "pitch_y_mm": 0, "w_mm": 12, "h_mm": 12})
-    cells["B"] = grid(2, 4, 3.5, 45, 9.2, 15, 8, 8,
-                      labels=[f"B1.{i}" for i in range(1, 9)])
-    grids.append({"family": "B", "cols": 2, "rows": 4, "order": "row_wise",
-                  "x0_mm": 3.5, "y0_mm": 45, "pitch_x_mm": 9.2, "pitch_y_mm": 15,
-                  "w_mm": 8, "h_mm": 8})
-    cells["L"] = grid(2, 4, 6.0, 47.5, 9.2, 15, 3, 3,
-                      labels=[f"L1.{i}" for i in range(1, 9)])
-    grids.append({"family": "L", "cols": 2, "rows": 4, "order": "row_wise",
-                  "x0_mm": 6.0, "y0_mm": 47.5, "pitch_x_mm": 9.2, "pitch_y_mm": 15,
-                  "w_mm": 3, "h_mm": 3, "note": "LED inside each button"})
+    cells["P"], gp = measured_grid(
+        "P", 1, 2, 12.7, 19.1, 0, 24.7, 12, 12, labels=["P1.1", "P1.2"],
+        cell_kw={"size": "big"},
+        decl_kw={"size": "big", "note": "one centred column (was a two-cell row)"})
+    grids.append(gp)
+    cells["B"], gb = measured_grid(
+        "B", 2, 4, 7.1, 68.5, 12.6, 15.0, 9, 9,
+        labels=[f"B1.{i}" for i in range(1, 9)])
+    grids.append(gb)
+    cells["L"], gl = measured_grid(
+        "L", 2, 4, 7.1, 68.5, 12.6, 15.0, 3, 3,
+        labels=[f"L1.{i}" for i in range(1, 9)],
+        decl_kw={"note": "LED centred in each button"})
+    grids.append(gl)
     CTRLS["p2b8"] = ctrl(
         "p2b8", 3, 5, cells,
         {"P": 2, "B": 8, "L": 8}, grids,
-        "Manual-documented: 5 HP; two pots P1.1..P1.2, eight buttons B1.1.."
-        "B1.8 with LEDs L1.1..L1.8. Assumed: pitches/margins (pot pitch "
-        "10 mm, button pitch 9.2x15 mm); row-wise button numbering.")
+        "Manual-documented: 5 HP; two pots P1.1..P1.2 stacked in one centred "
+        "12x12 column at 24.7 mm pitch, eight buttons B1.1..B1.8 on a 2x4 grid "
+        "of 9x9 cells at 12.6 x 15.0 mm pitch with an LED (3x3, L1.1..L1.8) "
+        "centred in each button; row-wise button numbering. " + MEASURED)
 
-    # --- p4b2 (5 HP) -----------------------------------------------------------
+    # --- p4b2 (5 HP) — measured from the manual faceplate images -------------
     cells, grids = {}, []
-    cells["P"] = grid(2, 2, 2.54, 14, 10, 15, 12, 12,
-                      labels=[f"P1.{i}" for i in range(1, 5)], size="big")
-    grids.append({"family": "P", "size": "big", "cols": 2, "rows": 2,
-                  "order": "row_wise", "x0_mm": 2.54, "y0_mm": 14,
-                  "pitch_x_mm": 10, "pitch_y_mm": 15, "w_mm": 12, "h_mm": 12})
-    cells["B"] = grid(2, 1, 3.5, 55, 9.2, 0, 8, 8, labels=["B1.1", "B1.2"])
-    grids.append({"family": "B", "cols": 2, "rows": 1, "order": "row_wise",
-                  "x0_mm": 3.5, "y0_mm": 55, "pitch_x_mm": 9.2, "pitch_y_mm": 0,
-                  "w_mm": 8, "h_mm": 8})
-    cells["L"] = grid(2, 1, 6.0, 57.5, 9.2, 0, 3, 3, labels=["L1.1", "L1.2"])
-    grids.append({"family": "L", "cols": 2, "rows": 1, "order": "row_wise",
-                  "x0_mm": 6.0, "y0_mm": 57.5, "pitch_x_mm": 9.2, "pitch_y_mm": 0,
-                  "w_mm": 3, "h_mm": 3, "note": "LED inside each button"})
+    cells["P"], gp = measured_grid(
+        "P", 1, 4, 12.7, 19.1, 0, 24.8, 12, 12,
+        labels=[f"P1.{i}" for i in range(1, 5)], cell_kw={"size": "big"},
+        decl_kw={"size": "big", "note": "one centred column (was two columns "
+                                         "x two rows)"})
+    grids.append(gp)
+    cells["B"], gb = measured_grid(
+        "B", 2, 1, 7.1, 113.4, 12.6, 0, 9, 9, labels=["B1.1", "B1.2"])
+    grids.append(gb)
+    cells["L"], gl = measured_grid(
+        "L", 2, 1, 7.1, 113.4, 12.6, 0, 3, 3, labels=["L1.1", "L1.2"],
+        decl_kw={"note": "LED centred in each button"})
+    grids.append(gl)
     CTRLS["p4b2"] = ctrl(
         "p4b2", 3, 5, cells,
         {"P": 4, "B": 2, "L": 2}, grids,
-        "Manual-documented: 5 HP; four pots P1.1..P1.4, two buttons B1.1.."
-        "B1.2 with LEDs. Assumed: pitches/margins (same pot class as P2B8).")
+        "Manual-documented: 5 HP; four pots P1.1..P1.4 stacked in one centred "
+        "12x12 column at 24.8 mm pitch (same pot class as P2B8), two buttons "
+        "B1.1..B1.2 on one 9x9 row at y 113.4 with an LED (3x3) centred in "
+        "each. " + MEASURED)
 
-    # --- p10 (5 HP) ------------------------------------------------------------
+    # --- p10 (5 HP) — measured from the manual faceplate images --------------
     cells, grids = {}, []
-    cells["P"] = grid(2, 1, 2.54, 14, 10, 0, 12, 12, labels=["P1.1", "P1.2"],
-                      size="big")
-    grids.append({"family": "P", "size": "big", "cols": 2, "rows": 1,
-                  "order": "row_wise", "x0_mm": 2.54, "y0_mm": 14,
-                  "pitch_x_mm": 10, "pitch_y_mm": 0, "w_mm": 12, "h_mm": 12})
-    cells["P"] += grid(2, 4, 3.5, 42, 9.2, 15, 9, 9,
-                       labels=[f"P1.{i}" for i in range(3, 11)], size="small")
-    grids.append({"family": "P", "size": "small", "cols": 2, "rows": 4,
-                  "order": "row_wise", "x0_mm": 3.5, "y0_mm": 42,
-                  "pitch_x_mm": 9.2, "pitch_y_mm": 15, "w_mm": 9, "h_mm": 9})
+    cells["P"], gp = measured_grid(
+        "P", 1, 2, 12.7, 19.3, 0, 24.8, 12, 12, labels=["P1.1", "P1.2"],
+        cell_kw={"size": "big"},
+        decl_kw={"size": "big", "note": "big pots, one centred column"})
+    grids.append(gp)
+    small, gs = measured_grid(
+        "P", 2, 4, 6.9, 68.6, 12.6, 15.1, 9, 9,
+        labels=[f"P1.{i}" for i in range(3, 11)], cell_kw={"size": "small"},
+        decl_kw={"size": "small", "note": "small pots, 2 x 4 matrix kept"})
+    grids.append(gs)
+    cells["P"] += small
     CTRLS["p10"] = ctrl(
         "p10", 3, 5, cells,
         {"P": 10}, grids,
-        "Manual-documented: 5 HP; two big pots (P2B8 class, P1.1..P1.2) and "
-        "eight small pots P1.3..P1.10. Assumed: pitches/margins; row-wise "
-        "numbering (faceplate text-image shows 3..10 in 2 columns).")
+        "Manual-documented: 5 HP; two big pots P1.1..P1.2 stacked in one "
+        "centred 12x12 column at 24.8 mm pitch and eight small pots P1.3.."
+        "P1.10 on a 2x4 matrix of 9x9 cells at 12.6 x 15.1 mm pitch; row-wise "
+        "numbering (faceplate text-image shows 3..10 in 2 columns). " + MEASURED)
 
-    # --- s10 (5 HP) ------------------------------------------------------------
+    # --- s10 (5 HP) — measured from the manual faceplate images --------------
     cells, grids = {}, []
-    cells["S"] = grid(2, 1, 2.54, 14, 10, 0, 12, 12, labels=["S1.1", "S1.2"],
-                      kind="rotary")
-    grids.append({"family": "S", "kind": "rotary", "cols": 2, "rows": 1,
-                  "order": "row_wise", "x0_mm": 2.54, "y0_mm": 14,
-                  "pitch_x_mm": 10, "pitch_y_mm": 0, "w_mm": 12, "h_mm": 12,
-                  "note": "8-position rotary switches"})
-    cells["S"] += grid(2, 4, 3.5, 42, 9.2, 15, 8, 12,
-                       labels=[f"S1.{i}" for i in range(3, 11)], kind="small")
-    grids.append({"family": "S", "kind": "small", "cols": 2, "rows": 4,
-                  "order": "row_wise", "x0_mm": 3.5, "y0_mm": 42,
-                  "pitch_x_mm": 9.2, "pitch_y_mm": 15, "w_mm": 8, "h_mm": 12,
-                  "note": "3-position toggle switches"})
+    rotary, gr = measured_grid(
+        "S", 1, 2, 12.7, 18.5, 0, 24.8, 12, 12, labels=["S1.1", "S1.2"],
+        cell_kw={"kind": "rotary"},
+        decl_kw={"kind": "rotary", "note": "8-position rotary switches, one "
+                                           "centred column"})
+    grids.append(gr)
+    small, gs = measured_grid(
+        "S", 2, 4, 6.9, 68.6, 12.6, 15.1, 8, 12,
+        labels=[f"S1.{i}" for i in range(3, 11)], cell_kw={"kind": "small"},
+        decl_kw={"kind": "small", "note": "3-position toggle switches, same "
+                                          "2 x 4 grid as the P10 small pots"})
+    grids.append(gs)
+    cells["S"] = rotary + small
     CTRLS["s10"] = ctrl(
         "s10", 3, 5, cells,
         {"S": 10}, grids,
         "Manual-documented: 5 HP; two 8-position rotary switches S1.1..S1.2 "
-        "and eight 3-position switches S1.3..S1.10. Assumed: pitches/margins; "
-        "row-wise numbering.")
+        "stacked in one centred 12x12 column at 24.8 mm pitch and eight "
+        "3-position switches S1.3..S1.10 on a 2x4 matrix of 8x12 cells at "
+        "12.6 x 15.1 mm pitch; row-wise numbering. " + MEASURED)
 
     # --- p8s8 (8 HP) -----------------------------------------------------------
     cells, grids = {}, []
@@ -397,34 +466,34 @@ def _build():
         "L1.32, faceplate labelled 1..32 as 4 cols x 8 rows (resolves the "
         "8x4 orientation conflict). Assumed: pitches/margins.")
 
-    # --- e4 (6 HP) --------------------------------------------------------------
+    # --- e4 (6 HP) — measured from the manual faceplate images ---------------
     cells, grids = {}, []
-    cells["E"] = grid(4, 1, 0.9, 54, 7.0, 0, 7, 7,
-                      labels=[f"E1.{i}" for i in range(1, 5)])
-    grids.append({"family": "E", "cols": 4, "rows": 1, "order": "row_wise",
-                  "x0_mm": 0.9, "y0_mm": 54, "pitch_x_mm": 7.0, "pitch_y_mm": 0,
-                  "w_mm": 7, "h_mm": 7,
-                  "note": "96-step encoders; reduced side margins (dense panel), "
-                  "adjacent LED rings overlap by 1 mm"})
+    cells["E"], ge = measured_grid(
+        "E", 1, 4, 15.24, 24.3, 0, 27.8, 7, 7,
+        labels=[f"E1.{i}" for i in range(1, 5)],
+        decl_kw={"note": "96-step encoders, one centred column at x 15.24 "
+                         "(was a four-cell row)"})
+    grids.append(ge)
     # encoder push buttons (B registers) co-located in the encoder shafts
-    cells["B"] = grid(4, 1, 2.9, 56, 7.0, 0, 3, 3,
-                      labels=[f"B1.{i}" for i in range(1, 5)])
-    grids.append({"family": "B", "cols": 4, "rows": 1, "order": "row_wise",
-                  "x0_mm": 2.9, "y0_mm": 56, "pitch_x_mm": 7.0, "pitch_y_mm": 0,
-                  "w_mm": 3, "h_mm": 3, "note": "push button integrated in each encoder"})
+    cells["B"], gb = measured_grid(
+        "B", 1, 4, 15.24, 24.3, 0, 27.8, 3, 3,
+        labels=[f"B1.{i}" for i in range(1, 5)],
+        decl_kw={"note": "push button integrated in each encoder"})
+    grids.append(gb)
+    # one 32-LED ring per encoder, centred on its (measured) axis
     cells["L"] = []
-    for col in range(4):
-        cx = 4.4 + col * 7.0  # encoder centre x
-        cells["L"] += ring_32(cx, 57.5, col * 32)
+    for i in range(4):
+        cells["L"] += ring_32(15.24, 24.3 + i * 27.8, i * 32)
     CTRLS["e4"] = ctrl(
         "e4", 3, 6, cells,
         {"E": 4, "B": 4, "L": 128}, grids,
-        "Manual-documented: 6 HP; four 96-step encoders E1.1..E1.4 each "
-        "surrounded by a square of 32 multicolor LEDs ('square of 32' — "
-        "4 rings x 32 = 128), push buttons in the encoder shafts (B1.1.."
-        "B1.4); L1.1..L1.128 (rings 1..32, 33..64, ... per encoder). "
-        "Assumed: pitches/margins (dense panel, reduced side margins); "
-        "ring = perimeter of a 9x9 LED grid, 1.125 mm pitch.")
+        "Manual-documented: 6 HP; four 96-step encoders E1.1..E1.4 stacked in "
+        "one centred 7x7 column at 27.8 mm pitch (x 15.24), push buttons "
+        "B1.1..B1.4 (3x3) in the encoder shafts, and a square of 32 "
+        "multicolor LEDs around each encoder (4 rings x 32 = 128; L1.1.."
+        "L1.128 as rings 1..32, 33..64, ... per encoder) — 9 LEDs per side at "
+        "2.76 mm pitch with 1.8 mm cells, a ~23.88 mm square centred on its "
+        "encoder. " + MEASURED)
 
     # --- m4 (14 HP) -------------------------------------------------------------
     cells, grids = {}, []
@@ -455,26 +524,30 @@ def _build():
         "touch plate with integrated RGB LED below each fader (B1.1..B1.4, "
         "L1.1..L1.4, R1.1..R1.4). Assumed: pitches/margins (fader pitch 17 mm).")
 
-    # --- db8e (6 HP) ------------------------------------------------------------
+    # --- db8e (6 HP) — measured from the manual faceplate images -------------
     cells, grids = {}, []
-    cells["B"] = grid(2, 4, 2.0, 38, 10, 16, 8, 8,
-                      labels=[f"B1.{i}" for i in range(1, 9)])
-    grids.append({"family": "B", "cols": 2, "rows": 4, "order": "row_wise",
-                  "x0_mm": 2.0, "y0_mm": 38, "pitch_x_mm": 10, "pitch_y_mm": 16,
-                  "w_mm": 8, "h_mm": 8,
-                  "note": "8 push buttons; no LEDs on the buttons (manual silent)"})
-    cells["E"] = grid(1, 1, 21.4, 56, 0, 0, 8, 8, labels=["E1.1"])
-    grids.append({"family": "E", "cols": 1, "rows": 1, "order": "row_wise",
-                  "x0_mm": 21.4, "y0_mm": 56, "pitch_x_mm": 0, "pitch_y_mm": 0,
-                  "w_mm": 8, "h_mm": 8, "note": "rotary encoder (same as E4)"})
-    cells["L"] = ring_32(25.4, 60, 0)
+    cells["B"], gb = measured_grid(
+        "B", 2, 4, 7.9, 41.4, 15.2, 15.1, 9, 9,
+        labels=[f"B1.{i}" for i in range(1, 9)],
+        decl_kw={"note": "8 push buttons; display band above the grid; no LEDs "
+                         "on the buttons (manual silent)"})
+    grids.append(gb)
+    cells["E"], ge = measured_grid(
+        "E", 1, 1, 15.24, 108.1, 0, 0, 7, 7, labels=["E1.1"],
+        decl_kw={"note": "rotary encoder below the button grid, on its centre "
+                         "axis (same class as E4); was beside the buttons"})
+    grids.append(ge)
+    cells["L"] = ring_32(15.24, 108.1, 0)
     CTRLS["db8e"] = ctrl(
         "db8e", 3, 6, cells,
         {"B": 8, "E": 1, "L": 32}, grids,
         "Manual-documented: 6 HP; display (D, not rendered — non-goal), eight "
-        "push buttons B1.1..B1.8, one rotary encoder E1.1 with an LED square "
-        "of 32 multicolor LEDs (same as E4, L1.1..L1.32). Assumed: pitches/"
-        "margins; display area in the upper region is reserved, not modelled.")
+        "push buttons B1.1..B1.8 on a 2x4 grid of 9x9 cells at 15.2 x 15.1 mm "
+        "pitch (x 7.9/23.1, y 41.4..86.7), and one rotary encoder E1.1 (7x7, "
+        "same class as E4) BELOW the button grid at (15.24, 108.1) with its "
+        "32-LED square (L1.1..L1.32 — 9 per side at 2.76 mm pitch, 1.8 mm "
+        "cells, ~23.88 mm); the display area in the upper region is reserved, "
+        "not modelled. " + MEASURED)
 
     # --- chain gaps + defaults ---------------------------------------------------
     return CTRLS

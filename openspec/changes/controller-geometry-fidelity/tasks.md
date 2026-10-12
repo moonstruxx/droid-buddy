@@ -6,7 +6,7 @@
 
 ## 2. Geometry data
 
-- [ ] 2.1 Rewrite the p2b8/p4b2/p10/s10/e4/db8e blocks in `tools/acquire_geometry.py` to the measured table in design.md (vertical stacks, measured pitches/sizes, DB8E encoder below the buttons), parameterize `ring_32` (2.76 mm pitch, 1.8 mm cells, 9 per side), switch the `grids`/`notes` provenance from "assumed" to measured, regenerate `controller_geometry.json` via `python3 tools/acquire_geometry.py`, and verify `--check` plus the task-1.1 tests pass <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [tools/acquire_geometry.py, controller_geometry.json] -->
+- [x] 2.1 Rewrite the p2b8/p4b2/p10/s10/e4/db8e blocks in `tools/acquire_geometry.py` to the measured table in design.md (vertical stacks, measured pitches/sizes, DB8E encoder below the buttons), parameterize `ring_32` (2.76 mm pitch, 1.8 mm cells, 9 per side), switch the `grids`/`notes` provenance from "assumed" to measured, regenerate `controller_geometry.json` via `python3 tools/acquire_geometry.py`, and verify `--check` plus the task-1.1 tests pass <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [tools/acquire_geometry.py, controller_geometry.json] -->
 
 ## 3. Visual artifacts
 
