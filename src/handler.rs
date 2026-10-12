@@ -4295,6 +4295,79 @@ mod tests {
     }
 
     #[test]
+    fn enter_preserves_coloured_led_rgb_and_alternates_value() {
+        let mut app = app_with_fixture();
+        let led = idx_of(&app, "L1.1");
+        let rgb = Some([255, 128, 0]);
+        app.patch.as_mut().unwrap().hw_components[led].state =
+            ComponentState::Led { value: 0.0, rgb };
+        app.hovered_component = Some(led);
+        handle_event(key(KeyCode::Enter), &mut app);
+        match &app.patch.as_ref().unwrap().hw_components[led].state {
+            ComponentState::Led { value, rgb: kept } => {
+                assert!(
+                    (*value - 1.0).abs() < 1e-6,
+                    "value must flip to 1.0, got {value}"
+                );
+                assert_eq!(*kept, rgb, "rgb must survive toggle");
+            }
+            other => panic!("coloured LED must stay Led, got {other:?}"),
+        }
+        handle_event(key(KeyCode::Enter), &mut app);
+        match &app.patch.as_ref().unwrap().hw_components[led].state {
+            ComponentState::Led { value, rgb: kept } => {
+                assert!(
+                    value.abs() < 1e-6,
+                    "value must flip back to 0.0, got {value}"
+                );
+                assert_eq!(*kept, rgb, "rgb must survive second toggle");
+            }
+            other => panic!("coloured LED must stay Led, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn space_preserves_coloured_led_rgb() {
+        let mut app = app_with_fixture();
+        let led = idx_of(&app, "L1.1");
+        let rgb = Some([0, 128, 255]);
+        app.patch.as_mut().unwrap().hw_components[led].state =
+            ComponentState::Led { value: 1.0, rgb };
+        app.hovered_component = Some(led);
+        handle_event(key(KeyCode::Char(' ')), &mut app);
+        match &app.patch.as_ref().unwrap().hw_components[led].state {
+            ComponentState::Led { value, rgb: kept } => {
+                assert!(value.abs() < 1e-6, "value must flip to 0.0, got {value}");
+                assert_eq!(*kept, rgb, "rgb must survive toggle");
+            }
+            other => panic!("coloured LED must stay Led, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_enter_preserves_folded_led_rgb() {
+        let mut app = app_with_fixture();
+        let btn = idx_of(&app, "B1.1");
+        let led = idx_of(&app, "L1.1");
+        let rgb = Some([64, 200, 32]);
+        app.patch.as_mut().unwrap().hw_components[led].state =
+            ComponentState::Led { value: 0.0, rgb };
+        app.hovered_component = Some(btn);
+        handle_event(ctrl_enter(), &mut app);
+        match &app.patch.as_ref().unwrap().hw_components[led].state {
+            ComponentState::Led { value, rgb: kept } => {
+                assert!(
+                    (*value - 1.0).abs() < 1e-6,
+                    "value must flip to 1.0, got {value}"
+                );
+                assert_eq!(*kept, rgb, "rgb must survive chord toggle");
+            }
+            other => panic!("folded coloured LED must stay Led, got {other:?}"),
+        }
+        assert_eq!(app.status_message, "LED L1.1: On");
+    }
+
+    #[test]
     fn shift_key_bindings_1_through_4() {
         let mut app = App::new();
         for (ch, expected) in [
