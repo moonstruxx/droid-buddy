@@ -7,7 +7,7 @@
 
 ## 2. Kind carry and glyph branch
 
-- [ ] 2.1 Add `kind: Option<String>` to `ElementCellEntry` and `ElementCell` and carry it in `preprocess_cells` (`src/physical.rs`). Verify by making task 1.1 pass with `cargo test physical::`. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/physical.rs] -->
+- [x] 2.1 Add `kind: Option<String>` (stand-in deleted, 4 tests green) to `ElementCellEntry` and `ElementCell` and carry it in `preprocess_cells` (`src/physical.rs`). Verify by making task 1.1 pass with `cargo test physical::`. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.1], touches: [src/physical.rs] -->
 - [ ] 2.2 Branch the Switch arm in `cell_visuals` on the geometry kind (`src/gui/physical.rs`): new `switch_kind: Option<&str>` param resolved at the spec site from the component's geometry cell (`None` at the label helper and test sites), rotary → round set, else toggle set. Verify by making task 1.2 pass with `cargo test gui::physical::`. <!-- agent: layout-designer-engineer.build, depends_on: [1.2, 2.1], touches: [src/gui/physical.rs] -->
 
 ## 3. Visual artifacts
