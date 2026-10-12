@@ -202,6 +202,15 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/faceplate_rotary_stack.ini",
             setup: setup_faceplate_stack,
         },
+        // Button-face + LED-fold check (change `button-led-composition`,
+        // task 4.2): P2B8 + B32 round faces and the M4 touch-plate rectangle
+        // with their folded LEDs, plus one LED-less pot proving the
+        // shape-alone path, in one startup frame.
+        Shot {
+            file: "button-led-composition.png",
+            fixture: "fixtures/button_led_composition.ini",
+            setup: setup_faceplate_stack,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -277,7 +286,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -325,6 +334,7 @@ fn main() {
         "source-viewer",
         "optimizer",
         "faceplate-rotary-stack",
+        "button-led-composition",
         "large-startup",
         "large-graph",
     ];

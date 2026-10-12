@@ -19,7 +19,7 @@
 ## 4. Visual artifacts
 
 - [x] 4.1 Add `fixtures/button_led_composition.ini` — a P2B8, a B32 and an M4 declaring buttons with their LEDs, plus one element deliberately left without an LED — and the matching `src/regression.rs` story asserting the fixture loads with no Error-severity validation finding, that all three faceplates render their declared tokens, and that no folded LED appears as a cell or a hit rect. Verify with `cargo test regression::`. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [3.2], touches: [fixtures/button_led_composition.ini, src/regression.rs] -->
-- [ ] 4.2 Add the `button-led-composition` shot to `tools/screenshots` (shot table and README row) over the new fixture and re-bless `docs/assets/*.png`; verify the composed faces read as a lit and an unlit button on P2B8 and B32, that the M4 plate fills, and that the plate proportions are true after the mapping fix. Verify with the screenshot render check. <!-- agent: layout-designer-engineer.build, depends_on: [3.2, 4.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
+- [x] 4.2 Add the `button-led-composition` shot to `tools/screenshots` (shot table and README row) over the new fixture and re-bless `docs/assets/*.png`; verify the composed faces read as a lit and an unlit button on P2B8 and B32, that the M4 plate fills, and that the plate proportions are true after the mapping fix. Verify with the screenshot render check. <!-- agent: layout-designer-engineer.build, depends_on: [3.2, 4.1], touches: [tools/screenshots/**, docs/assets/*.png] -->
 
 ## 5. Verification and follow-ups
 

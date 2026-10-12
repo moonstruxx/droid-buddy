@@ -12,6 +12,7 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `source-viewer.png` | `fixtures/source_navigation.ini` | source viewer maximized |
 | `optimizer.png` | `fixtures/optimizer_latency.ini` | + latency optimizer (small) |
 | `faceplate-rotary-stack.png` | `fixtures/faceplate_rotary_stack.ini` | startup: module UI (left big) + source viewer (small); all six corrected faceplates (P2B8, P4B2, P10, S10, E4, DB8E) in one frame |
+| `button-led-composition.png` | `fixtures/button_led_composition.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); P2B8 + B32 round button faces, M4 touch-plate rectangles, and one LED-less pot in one frame |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
@@ -32,6 +33,16 @@ declares no ring LED tokens (a bare `[e4]` synthesizes four LEDs, which land on
 the first four cells of ring 1), so the ring cells are unpainted and the
 ring-legibility risk is not exercised by this shot. The ring geometry itself is
 pinned by the `src/physical.rs` tests.
+
+`button-led-composition.png` is the visual check for change
+`button-led-composition` (task 4.2): its fixture declares a P2B8, a B32 and
+an M4 with explicit button/LED pairs plus one LED-less pot, so every
+composed face — the P2B8/B32 state circles with their dim floor-fill cores
+and no standalone LED dots, the M4 touch-plate rectangle with the same
+treatment — reads in one 1280x800 startup frame. All LEDs are `Off` at load
+(the harness renders static state only: no selection, no input, no toggle
+chord), so the shot proves the unlit faces plus the floor-fill core; the
+lit fill is pinned by the `src/regression.rs` level tests instead.
 
 ## How it works
 
