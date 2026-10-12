@@ -862,6 +862,16 @@ pub struct App {
     /// strict slot order or barycenter crossing-minimization sweeps. Seeded
     /// from `[layout] ordering` at startup.
     pub layout_ordering: crate::config::LayoutOrdering,
+    /// Slice spring stiffness for sections mode (sections-black-hole-solver 5.1):
+    /// controls the horizontal pull of each circuit toward its slice column.
+    /// Seeded from `[layout] slice_force` at startup; keyboard-adjustable via
+    /// the sliders panel (task 5.2). Persists across patch loads.
+    pub layout_slice_force: f32,
+    /// Section-hole spring stiffness for sections mode (sections-black-hole-solver 5.1):
+    /// controls the pull of each banner-group member toward its fixed hole anchor.
+    /// Seeded from `[layout] section_force` at startup; keyboard-adjustable via
+    /// the sliders panel (task 5.2). Persists across patch loads.
+    pub layout_section_force: f32,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -1129,6 +1139,8 @@ impl App {
             tension: crate::layout::DEFAULT_TENSION,
             layout_mode: crate::config::DEFAULT_LAYOUT_MODE,
             layout_ordering: crate::config::DEFAULT_LAYOUT_ORDERING,
+            layout_slice_force: crate::config::DEFAULT_SLICE_FORCE,
+            layout_section_force: crate::config::DEFAULT_SECTION_FORCE,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -2706,7 +2718,11 @@ impl App {
             (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => {
                 "column-barycenter"
             }
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::PatchOrder) => {
+                "column-patch"
+            }
             (crate::config::LayoutMode::Force, _) => "force",
+            (crate::config::LayoutMode::Sections, _) => "sections",
         };
         self.rebuild_graph();
         self.fit_graph_camera(self.refit_viewport());
@@ -2716,10 +2732,18 @@ impl App {
                 crate::config::LayoutOrdering::Barycenter,
             ),
             (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => (
+                crate::config::LayoutMode::Column,
+                crate::config::LayoutOrdering::PatchOrder,
+            ),
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::PatchOrder) => (
                 crate::config::LayoutMode::Force,
                 crate::config::LayoutOrdering::Barycenter,
             ),
             (crate::config::LayoutMode::Force, _) => (
+                crate::config::LayoutMode::Sections,
+                crate::config::LayoutOrdering::Barycenter,
+            ),
+            (crate::config::LayoutMode::Sections, _) => (
                 crate::config::LayoutMode::Column,
                 crate::config::LayoutOrdering::Strict,
             ),
@@ -3466,6 +3490,13 @@ impl App {
                 )
             }
             crate::config::LayoutMode::Force => layout::solve(g, pins, self.tension),
+            crate::config::LayoutMode::Sections => layout::solve_sections(
+                g,
+                pins,
+                self.tension,
+                self.layout_slice_force,
+                self.layout_section_force,
+            ),
         }
     }
 
@@ -5145,18 +5176,22 @@ mod tests {
     #[test]
     fn apply_arrangement_cycles_strict_barycenter_force() {
         // graph-arrange-cycle 2.1: repeat presses walk Column-Strict →
-        // Column-Barycenter → Force → Column-Strict …, each reporting the
-        // APPLIED arrangement in the status line.
+        // Column-Barycenter → Column-PatchOrder → Force → Sections →
+        // Column-Strict …, each reporting the APPLIED arrangement in the
+        // status line. The first press from Column-Strict re-applies
+        // column-strict, the second moves to column-barycenter, etc.
         let mut app = App::new();
+        // Load a patch so apply_arrangement can build a graph
+        app.patch = Some(crate::patch::Patch::sample());
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
         assert!(
             !app.apply_arrangement(),
             "silent no-op without a built graph"
         );
-        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
-        app.load_patch(patch);
-        app.open_graph();
+        // Build the graph like the real app does
+        app.rebuild_graph();
+        // First press: re-applies column-strict, advances to Column-Barycenter
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: column-strict");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
@@ -5164,18 +5199,35 @@ mod tests {
             app.layout_ordering,
             crate::config::LayoutOrdering::Barycenter
         );
+        // Second press: applies column-barycenter, advances to Column-PatchOrder
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: column-barycenter");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::PatchOrder
+        );
+        // Third press: applies column-patch, advances to Force
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-patch");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        // Fourth press: applies force, advances to Sections
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        // Fifth press: applies sections, advances to Column-Strict
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: sections");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
-        assert!(app.apply_arrangement());
-        assert_eq!(
-            app.status_message, "Arrangement: column-strict",
-            "fourth press returns to column-strict"
-        );
         let graph = app.graph.as_ref().unwrap();
         assert_eq!(
             app.graph_positions.len(),

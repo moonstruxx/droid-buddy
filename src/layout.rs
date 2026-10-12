@@ -159,6 +159,22 @@ pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
     positions
 }
 
+/// Sections-mode solver (sections-black-hole-solver 5.1): joint black-hole solve
+/// with slice springs, section-hole springs, cable springs, and size-aware
+/// repulsion. Currently delegates to the force solver; full implementation
+/// in task 3.1.
+pub fn solve_sections(
+    graph: &Graph,
+    pinned: &[usize],
+    tension: f32,
+    _slice_force: f32,
+    _section_force: f32,
+) -> Vec<(f32, f32)> {
+    // TODO(task 3.1): implement joint black-hole solve with four forces
+    // For now, delegate to the force solver with the given tension
+    solve(graph, pinned, tension)
+}
+
 /// Damped local re-settle after a node move (design D1).
 ///
 /// Only nodes within `radius` of the moved node are active and move; distant

@@ -1078,18 +1078,20 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             KeyCode::Char('h') if graph_slot_focused(app) => {
-                // graph-column-layout D5: `h` toggles between the deterministic
-                // column arrangement and the force solver on the focused graph
-                // pane. Flipping the mode then rebuilding re-solves under the
-                // new arrangement (`solve_graph_positions` dispatches by mode)
-                // and emits GraphRebuilt; the status mirrors the tension hint.
+                // graph-column-layout D5: `h` cycles through column, force, and
+                // sections modes on the focused graph pane. Flipping the mode
+                // then rebuilding re-solves under the new arrangement
+                // (`solve_graph_positions` dispatches by mode) and emits
+                // GraphRebuilt; the status mirrors the tension hint.
                 app.layout_mode = match app.layout_mode {
                     crate::config::LayoutMode::Column => crate::config::LayoutMode::Force,
-                    crate::config::LayoutMode::Force => crate::config::LayoutMode::Column,
+                    crate::config::LayoutMode::Force => crate::config::LayoutMode::Sections,
+                    crate::config::LayoutMode::Sections => crate::config::LayoutMode::Column,
                 };
                 app.status_message = match app.layout_mode {
                     crate::config::LayoutMode::Column => String::from("Layout: column"),
                     crate::config::LayoutMode::Force => String::from("Layout: force"),
+                    crate::config::LayoutMode::Sections => String::from("Layout: sections"),
                 };
                 if app.graph.is_some() {
                     app.rebuild_graph();
@@ -5105,9 +5107,9 @@ mod tests {
     #[test]
     fn graph_h_toggles_layout_mode_force_to_column_and_resolves() {
         // Same toggle in reverse: a force-layout graph flips to the column
-        // arrangement, re-solved with the active ordering. The tip stays
-        // pinned (design D6): it anchors at its force-solve position while the
-        // remaining nodes arrange around it.
+        // arrangement via Sections mode, re-solved with the active ordering.
+        // The tip stays pinned (design D6): it anchors at its force-solve
+        // position while the remaining nodes arrange around it.
         let mut app = app_with_fixture();
         app.layout_mode = crate::config::LayoutMode::Force;
         handle_event(key(KeyCode::Char('g')), &mut app);
@@ -5115,6 +5117,9 @@ mod tests {
         assert!(app.showing_graph);
         let before = app.graph_positions.clone();
 
+        // Force -> Sections (first h) -> Column (second h)
+        handle_event(key(KeyCode::Char('h')), &mut app);
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
         handle_event(key(KeyCode::Char('h')), &mut app);
 
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
@@ -5133,7 +5138,7 @@ mod tests {
         );
         assert_eq!(
             app.graph_positions, expected,
-            "force→column toggle re-solves with the column solver, tip anchored"
+            "force->sections->column toggle re-solves with the column solver, tip anchored"
         );
     }
 
