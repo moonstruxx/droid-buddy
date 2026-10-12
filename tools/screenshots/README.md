@@ -14,6 +14,7 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `faceplate-rotary-stack.png` | `fixtures/faceplate_rotary_stack.ini` | startup: module UI (left big) + source viewer (small); all six corrected faceplates (P2B8, P4B2, P10, S10, E4, DB8E) in one frame |
 | `button-led-composition.png` | `fixtures/button_led_composition.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); P2B8 + B32 round button faces, M4 touch-plate rectangles, and one LED-less pot in one frame |
 | `led-register-colour.png` | `fixtures/led_register_colour.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); lit coloured P2B8 button face and M4 touch plate beside the dynamic-cable and sourceless white fallbacks in one frame |
+| `unreferenced-elements.png` | `fixtures/unreferenced_elements.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); partial B32 (5 of 32 buttons, 27 dimmed) beside a bare E4 (124 dimmed ring segments) in one frame |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
@@ -28,12 +29,12 @@ reads in one 1280x800 frame. The module UI pane carries the startup
 arrangement and is zoomed to 2x (`setup_faceplate_stack`) so the ~207 mm rack
 of master plus six controllers fills the pane instead of rendering 38 px wide.
 
-Known gap in this shot: the E4 and DB8E 32-LED rings do not appear. The
-renderer paints a cell only for an element the patch declares, and this fixture
-declares no ring LED tokens (a bare `[e4]` synthesizes four LEDs, which land on
-the first four cells of ring 1), so the ring cells are unpainted and the
-ring-legibility risk is not exercised by this shot. The ring geometry itself is
-pinned by the `src/physical.rs` tests.
+Resolved gap (change `unreferenced-elements`, task 3.2): the E4 32-LED rings
+now render complete — unreferenced ring segments paint dimmed and unlabelled,
+so the four dotted rings read around their encoders even though this fixture
+declares no ring LED tokens. The DB8E ring likewise fills out wherever its
+fixture leaves segments unreferenced. Ring geometry stays pinned by the
+`src/physical.rs` tests.
 
 `button-led-composition.png` is the visual check for change
 `button-led-composition` (task 4.2): its fixture declares a P2B8, a B32 and
@@ -54,6 +55,15 @@ likewise — read beside the two fallbacks (dynamic-cable `ledcolor` and the
 plain pair with no colour params, both rendering the white floor fill) in
 one 1280x800 startup frame at 2x. Only two controllers, so the stack zoom
 fits with margin.
+
+`unreferenced-elements.png` is the visual check for change
+`unreferenced-elements` (task 3.2): its fixture pairs a partial B32 (5 of 32
+buttons via `[notebuttons]`) with a bare `[e4]`, so the 27 dimmed unlabelled
+buttons and the 124 dimmed ring segments read beside their lit siblings in
+one 1280x800 startup frame at 2x. All dimmed cells render the quiet `·`
+marker with no label and no hit rect (stray fold-rule LEDs suppressed); the
+harness renders static state only, so the shot proves the quiet unlit fill,
+and the `src/regression.rs` story pins the counts instead.
 
 ## How it works
 

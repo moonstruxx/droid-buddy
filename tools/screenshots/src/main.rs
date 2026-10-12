@@ -221,6 +221,16 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/led_register_colour.ini",
             setup: setup_faceplate_stack,
         },
+        // Unreferenced-elements check (change `unreferenced-elements`,
+        // task 3.2): a partial B32 (5 of 32 buttons) beside a bare E4, so
+        // the 27 dimmed unlabelled buttons and the 124 dimmed ring segments
+        // read in one startup frame. Two controllers only, so the 2x stack
+        // zoom fits with margin.
+        Shot {
+            file: "unreferenced-elements.png",
+            fixture: "fixtures/unreferenced_elements.ini",
+            setup: setup_faceplate_stack,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -296,7 +306,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -346,6 +356,7 @@ fn main() {
         "faceplate-rotary-stack",
         "button-led-composition",
         "led-register-colour",
+        "unreferenced-elements",
         "large-startup",
         "large-graph",
     ];
