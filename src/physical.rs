@@ -2476,4 +2476,141 @@ mod tests {
         let ring = ring_cells(d_rings, dcx, dcy);
         assert_ring(&ring, dcx, dcy, "db8e ring");
     }
+
+    #[test]
+    fn isotropic_default_mapping_uses_one_factor() {
+        // button-led-composition D1: one isotropic cells-per-mm factor, so a
+        // square millimetre rect maps to a square screen rect. Written
+        // against today's ScreenMapping surface; must FAIL on the 0.15/0.3 pair.
+        let m = ScreenMapping::default();
+        assert_close(m.cols_per_mm, m.rows_per_mm);
+        assert_close(m.cols_per_mm, PHYSICAL_COLS_PER_MM);
+    }
+
+    #[test]
+    fn isotropic_square_mm_rect_maps_to_square_screen_rect() {
+        // A square mm rect maps to equal width and height in screen cells.
+        let m = ScreenMapping::default();
+        let sq = RectMm {
+            x_mm: 5.0,
+            y_mm: 7.0,
+            w_mm: 9.0,
+            h_mm: 9.0,
+        };
+        let (_, _, w, h) = m.mm_to_screen(sq);
+        assert_close(w, h);
+        assert_close(w, 9.0 * m.cols_per_mm * m.zoom);
+        assert_close(h, 9.0 * m.cols_per_mm * m.zoom);
+        let (sw, sh) = m.screen_size(sq);
+        assert_close(sw, sh);
+        // Integer rect keeps the square too (a 9x9 mm button is round, not a 2:1 ellipse).
+        let (_, _, iw, ih) = m.mm_rect_to_screen(sq);
+        assert_eq!(iw, ih);
+    }
+
+    #[test]
+    fn isotropic_round_trip_uses_single_factor() {
+        // Round-trip and size re-derived against the single factor.
+        let m = ScreenMapping::default();
+        let mm = RectMm {
+            x_mm: 3.5,
+            y_mm: 12.0,
+            w_mm: 8.0,
+            h_mm: 4.0,
+        };
+        let (x, y, w, h) = m.mm_to_screen(mm);
+        assert_close(w, mm.w_mm * m.cols_per_mm);
+        assert_close(h, mm.h_mm * m.cols_per_mm);
+        let (mx, my) = m.screen_to_mm(x, y);
+        assert_close(mx, mm.x_mm);
+        assert_close(my, mm.y_mm);
+        let m2 = ScreenMapping::new(PHYSICAL_COLS_PER_MM, PHYSICAL_COLS_PER_MM, 1.5, 7.0, 3.0);
+        let (x2, y2, w2, h2) = m2.mm_to_screen(mm);
+        assert_close(w2, mm.w_mm * m2.cols_per_mm * 1.5);
+        assert_close(h2, mm.h_mm * m2.cols_per_mm * 1.5);
+        let (mx2, my2) = m2.screen_to_mm(x2, y2);
+        assert_close(mx2, mm.x_mm);
+        assert_close(my2, mm.y_mm);
+    }
+
+    #[test]
+    fn isotropic_zoom_about_and_pan_use_single_factor() {
+        // Zoom-about keeps its anchor and pan math re-derived on one factor.
+        let m = ScreenMapping::new(PHYSICAL_COLS_PER_MM, PHYSICAL_COLS_PER_MM, 1.0, 2.0, 4.0);
+        assert_close(m.cols_per_mm, m.rows_per_mm);
+        let (ax, ay) = (40.0, 12.0);
+        let (amx, amy) = m.screen_to_mm(ax, ay);
+        let z = m.zoom_about(2.0, ax, ay);
+        let (nx, ny, _, _) = z.mm_to_screen(RectMm {
+            x_mm: amx,
+            y_mm: amy,
+            w_mm: 1.0,
+            h_mm: 1.0,
+        });
+        assert_close(nx, ax);
+        assert_close(ny, ay);
+        let mm = RectMm {
+            x_mm: 10.0,
+            y_mm: 20.0,
+            w_mm: 5.0,
+            h_mm: 6.0,
+        };
+        let (x0, y0, _, _) = m.mm_to_screen(mm);
+        let p = m.pan(7.0, 11.0);
+        let (x1, y1, _, _) = p.mm_to_screen(mm);
+        assert_close(x1, x0 - 7.0);
+        assert_close(y1, y0 - 11.0);
+        let (mx1, my1) = p.screen_to_mm(x0, y0);
+        assert_close(mx1, mm.x_mm + 7.0 / (m.cols_per_mm * 1.0));
+        assert_close(my1, mm.y_mm + 11.0 / (m.cols_per_mm * 1.0));
+    }
+
+    #[test]
+    fn isotropic_fold_bar_and_row_offset_use_single_factor() {
+        // Fold-bar gap and row offsets re-derived against the single factor.
+        let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
+        let chain = PhysicalLayout::build(&p);
+        let spec = RackSpec {
+            rows: vec![
+                RackRow {
+                    he: 3,
+                    hp: 12.0,
+                    label: None,
+                },
+                RackRow {
+                    he: 3,
+                    hp: 12.0,
+                    label: None,
+                },
+            ],
+            assign: HashMap::from([("CV I/O".to_string(), 1)]),
+            ..RackSpec::default_case(&chain)
+        };
+        let rack = RackLayout::pack(&chain, &spec);
+        let m = ScreenMapping::default();
+        assert_close(m.cols_per_mm, m.rows_per_mm);
+        let row0 = &rack.rows[0];
+        let row1 = &rack.rows[1];
+        let p0 = row0.modules[0].rect_mm;
+        let p1 = row1.modules[0].rect_mm;
+        let y0_abs = row0.y_mm + p0.y_mm;
+        let y1_abs = row1.y_mm + p1.y_mm;
+        let (_, sy0, _, _) = m.mm_to_screen(RectMm {
+            x_mm: p0.x_mm,
+            y_mm: y0_abs,
+            w_mm: p0.w_mm,
+            h_mm: p0.h_mm,
+        });
+        let (_, sy1, _, _) = m.mm_to_screen(RectMm {
+            x_mm: p1.x_mm,
+            y_mm: y1_abs,
+            w_mm: p1.w_mm,
+            h_mm: p1.h_mm,
+        });
+        assert_close(sy1 - sy0, (y1_abs - y0_abs) * m.cols_per_mm);
+        assert_close(
+            sy1 - (sy0 + p0.h_mm * m.cols_per_mm),
+            FOLD_BAR_HEIGHT_MM * m.cols_per_mm,
+        );
+    }
 }
