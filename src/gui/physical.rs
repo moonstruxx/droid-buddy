@@ -2798,6 +2798,67 @@ mod tests {
     }
 
     #[test]
+    fn composed_led_fill_uses_patch_rgb_not_white() {
+        // (led-register-colour D4): a button section carrying `ledcolor` /
+        // `ledvalue` loads its folded LED as `Led { value, rgb }`, and the
+        // composed face paints the fill in that rgb — not the white
+        // fallback. Red until the loader resolver lands (task 2.1): the LED
+        // still loads as `Off`, so `led_rgb` is `None` and the fill is white.
+        let ini = r#"
+[p2b8]
+
+[button]
+    button = B1.1
+    led = L1.1
+    ledcolor = 1.0
+    ledvalue = 1.0
+    output = _OWN_A
+
+[button]
+    button = B1.2
+    led = L1.2
+    output = _OWN_B
+"#;
+        let patch = crate::patch::Patch::from_ini_str(ini, "led-rgb".to_string())
+            .expect("test patch parses");
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let patch = app.patch.as_ref().expect("patch");
+        let idx = patch
+            .hw_components
+            .iter()
+            .position(|c| c.id == "B1.1")
+            .expect("patch declares B1.1");
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .expect("B1.1 cell")
+            .clone();
+        let rgb = cell.led_rgb.expect("folded LED resolves a patch rgb");
+        let expected = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let white = egui::Color32::WHITE;
+        assert!(expected != white, "resolved rgb is a real colour: {rgb:?}");
+        let fills: Vec<egui::Color32> = painted_shapes(&cell, false)
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) => Some((c.center, c.radius, c.fill)),
+                _ => None,
+            })
+            .filter(|(center, _, _)| {
+                let want = cell.rect.center();
+                (center.x - want.x).abs() < 0.5 && (center.y - want.y).abs() < 0.5
+            })
+            .map(|(_, _, fill)| fill)
+            .collect();
+        assert!(
+            fills.contains(&expected),
+            "inner fill paints the patch rgb, not white: {fills:?}"
+        );
+    }
+
+    #[test]
     fn composed_led_fill_grows_with_level_and_stays_inside_ring() {
         let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 40.0));
         let mut lo = cell_spec(rect, "B");
