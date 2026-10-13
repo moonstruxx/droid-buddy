@@ -384,15 +384,23 @@ fn nodes_in_rect(scene: &SceneSpec, (x, y, w, h): (f32, f32, f32, f32)) -> Vec<u
 
 /// The active marquee over `scene` for the given pointer state: present only
 /// while the primary button is held and the press began on empty canvas (a
-/// press on a node is a node drag, not a marquee). `None` when idle.
+/// press on a node is a node drag, not a marquee). A press that begins inside
+/// the `consume` overlay — the sections sliders panel, passed in as
+/// [`sliders_panel_window_rect`] (design D4 pointer priority) — belongs to that
+/// overlay and never starts a marquee, the same early return the minimap click
+/// uses. `None` when idle.
 pub(super) fn frame_marquee(
     scene: Option<&SceneSpec>,
     i: &egui::InputState,
+    consume: Option<egui::Rect>,
 ) -> Option<MarqueeSelection> {
     if !i.pointer.primary_down() {
         return None;
     }
     let origin = i.pointer.press_origin()?;
+    if consume.is_some_and(|rect| rect.contains(origin)) {
+        return None;
+    }
     let scene = scene?;
     if node_at(scene, origin.x, origin.y).is_some() {
         return None;
@@ -615,7 +623,7 @@ fn paint_polish(
     // after it: text layout takes the context write lock again, so it must not
     // run inside the ctx.input closure (same-thread reentrant write deadlock).
     let (marquee, hover) = ctx.input(|i| {
-        let marquee = frame_marquee(Some(spec), i);
+        let marquee = frame_marquee(Some(spec), i, None);
         let hover = i
             .pointer
             .latest_pos()
@@ -716,6 +724,214 @@ fn paint_minimap(
         egui::StrokeKind::Inside,
     );
 }
+
+// ── sections-black-hole-solver 4.1/4.3: the sections sliders panel ─────────
+
+/// Sliders panel size `(w, h)` in `egui::Rect` points.
+const SLIDERS_PANEL_SIZE: (f32, f32) = (232.0, 132.0);
+/// Margin between the sliders panel and the graph pane's edge.
+const SLIDERS_PANEL_PAD: f32 = 10.0;
+/// Inset of the panel content from its chrome.
+const SLIDERS_PANEL_INSET: f32 = 8.0;
+/// Height of one panel row (a slider row or the Arrange button row).
+const SLIDERS_ROW_H: f32 = 24.0;
+/// Vertical gap between panel rows.
+const SLIDERS_ROW_GAP: f32 = 4.0;
+/// Width of a slider row's label column, left of the slider track.
+const SLIDERS_LABEL_W: f32 = 54.0;
+/// Font size of a slider row's label.
+const SLIDERS_FONT_PX: f32 = 12.0;
+/// Upper bound of the slice/section force sliders (task 4.1): the sections
+/// springs are stiffnesses of the same order as the cable tension, so both rows
+/// share its span with a zero floor. The cable row keeps the solver's own
+/// `[TENSION_MIN, TENSION_MAX]` range, so the panel and `Alt+[`/`Alt+]` agree.
+const SLIDERS_FORCE_MAX: f32 = 0.5;
+
+/// Sliders-panel geometry: the panel chrome rect, one row per force (slice,
+/// section, cable — top to bottom), and the Arrange button row. Pure, like
+/// [`Minimap`], so the paint path and the pointer-priority tests share one
+/// source of truth.
+pub(crate) struct SlidersPanel {
+    pub(crate) rect: egui::Rect,
+    /// Slider rows, top to bottom: slice, section, cable.
+    pub(crate) rows: [egui::Rect; 3],
+    /// The Arrange button's row.
+    pub(crate) arrange: egui::Rect,
+}
+
+impl SlidersPanel {
+    /// The label column of row `i`: the left edge of the row.
+    pub(crate) fn label_rect(&self, i: usize) -> egui::Rect {
+        let row = self.rows[i];
+        egui::Rect::from_min_size(row.min, egui::vec2(SLIDERS_LABEL_W, row.height()))
+    }
+
+    /// The slider track of row `i`: the row right of its label column.
+    pub(crate) fn slider_rect(&self, i: usize) -> egui::Rect {
+        let row = self.rows[i];
+        egui::Rect::from_min_size(
+            egui::pos2(row.min.x + SLIDERS_LABEL_W, row.min.y),
+            egui::vec2(row.width() - SLIDERS_LABEL_W, row.height()),
+        )
+    }
+}
+
+/// The sliders panel for the current frame, or `None` when it must not show:
+/// only in `LayoutMode::Sections` with `App::showing_sliders` set (design D4),
+/// and only in a pane big enough to hold it (a smaller pane would spill the
+/// panel over its neighbours). Anchored to the pane's top-right corner,
+/// mirroring the minimap's bottom-left anchor.
+pub(crate) fn sliders_panel_layout(app: &App, pane: egui::Rect) -> Option<SlidersPanel> {
+    if !app.showing_sliders || app.layout_mode != crate::config::LayoutMode::Sections {
+        return None;
+    }
+    let (w, h) = SLIDERS_PANEL_SIZE;
+    if pane.width() < w + 2.0 * SLIDERS_PANEL_PAD || pane.height() < h + 2.0 * SLIDERS_PANEL_PAD {
+        return None;
+    }
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(
+            pane.max.x - w - SLIDERS_PANEL_PAD,
+            pane.min.y + SLIDERS_PANEL_PAD,
+        ),
+        egui::vec2(w, h),
+    );
+    let row = |i: usize| {
+        let y = rect.min.y + SLIDERS_PANEL_INSET + i as f32 * (SLIDERS_ROW_H + SLIDERS_ROW_GAP);
+        egui::Rect::from_min_size(
+            egui::pos2(rect.min.x + SLIDERS_PANEL_INSET, y),
+            egui::vec2(w - 2.0 * SLIDERS_PANEL_INSET, SLIDERS_ROW_H),
+        )
+    };
+    Some(SlidersPanel {
+        rect,
+        rows: [row(0), row(1), row(2)],
+        arrange: row(3),
+    })
+}
+
+/// The sliders panel's rect in window space for this frame, when it is shown:
+/// the overlay hit rect the canvas input paths consume against before
+/// node-drag / node-select / marquee (design D4 pointer priority, task 4.3).
+/// Derived the same way [`graph_pane_rect`] derives the pane
+/// (`App::pane_geometry`), so the painted panel and the consumed rect agree.
+pub fn sliders_panel_window_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
+    graph_pane_rect(app, window).and_then(|pane| sliders_panel_layout(app, pane).map(|p| p.rect))
+}
+
+/// One panel row: the themed label in the row's label column plus a slider
+/// showing its numeric value, bound to `value` in the rest of the row. Returns
+/// the slider's response so the caller owns the re-solve policy.
+fn paint_force_slider(
+    ui: &mut egui::Ui,
+    label_rect: egui::Rect,
+    track_rect: egui::Rect,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    let t = crate::theme::active();
+    ui.painter().text(
+        label_rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(SLIDERS_FONT_PX),
+        t.egui_color(t.graph_node_title),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(track_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
+                egui::Slider::new(value, range)
+                    .show_value(true)
+                    .fixed_decimals(2),
+            )
+        },
+    )
+    .inner
+}
+
+/// Paint the sections-mode sliders panel into the graph pane (design D4): three
+/// force sliders (slice, section, cable) bound to the live `App` values, plus an
+/// Arrange button. A slider change re-solves so the forces are visible while
+/// dragging (design D4: rebuild → solve → refit); Arrange re-anneals from the
+/// current positions instead (design D5). Chrome colors come only from `Theme`
+/// tokens, in the minimap panel's idiom.
+///
+/// Pointer priority (task 4.3): the panel registers its own rect as an
+/// interactive widget ahead of its children, so it owns every press inside it —
+/// the rows stay on top (egui hit-testing prefers the last registered widget at
+/// equal distance) and the panel still swallows presses in the gaps between
+/// them. The canvas paths additionally consume
+/// [`sliders_panel_window_rect`] so the panel wins before node-drag, node
+/// select, and marquee.
+pub(crate) fn paint_sliders_panel(ui: &mut egui::Ui, app: &mut App, pane: egui::Rect) {
+    let Some(panel) = sliders_panel_layout(app, pane) else {
+        return;
+    };
+    let t = crate::theme::active();
+    let bg = t.egui_color(t.graph_canvas_bg);
+    let accent = t.egui_color(t.graph_cluster_border);
+    let text = t.egui_color(t.graph_node_title);
+    let fill = t.egui_color(t.graph_node_fill);
+    let painter = ui.painter().with_clip_rect(pane);
+    // Panel chrome: opaque canvas backdrop + accent border, like the minimap.
+    painter.rect_filled(panel.rect, egui::CornerRadius::same(4), bg);
+    painter.rect(
+        panel.rect,
+        egui::CornerRadius::same(4),
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, accent),
+        egui::StrokeKind::Inside,
+    );
+    // Consume the pointer inside the panel before anything painted under it.
+    let _ = ui.interact(
+        panel.rect,
+        ui.id().with("sections_sliders_panel"),
+        egui::Sense::click_and_drag(),
+    );
+    let slice = paint_force_slider(
+        ui,
+        panel.label_rect(0),
+        panel.slider_rect(0),
+        "Slice",
+        &mut app.layout_slice_force,
+        0.0..=SLIDERS_FORCE_MAX,
+    );
+    let section = paint_force_slider(
+        ui,
+        panel.label_rect(1),
+        panel.slider_rect(1),
+        "Section",
+        &mut app.layout_section_force,
+        0.0..=SLIDERS_FORCE_MAX,
+    );
+    let cable = paint_force_slider(
+        ui,
+        panel.label_rect(2),
+        panel.slider_rect(2),
+        "Cable",
+        &mut app.tension,
+        crate::layout::TENSION_MIN..=crate::layout::TENSION_MAX,
+    );
+    let arrange = ui
+        .put(
+            panel.arrange,
+            egui::Button::new(egui::RichText::new("Arrange").color(text))
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, accent)),
+        )
+        .clicked();
+    if slice.changed() || section.changed() || cable.changed() {
+        app.rebuild_graph();
+    }
+    if arrange {
+        app.arrange_sections();
+    }
+}
+
 /// Ramp stops of the latency coloring scheme: `graph_edge_latency_0` is the
 /// coldest stop, `LATENCY_STOPS-1` the hottest (back edges land there).
 /// Shared by the legend painter and this builder's ramp formula
@@ -3462,5 +3678,279 @@ mod zz_throwaway_dump2 {
             );
         }
         println!("== spec edges = {}", spec.edges.len());
+    }
+}
+
+/// sections-black-hole-solver 4.1/4.3 (and 6.4): the sections sliders panel
+/// paints only in sections mode with the panel toggled on, its three rows bind
+/// to the live `App` forces (each showing its numeric value), the Arrange
+/// button's own click region resolves inside the panel chrome and anneals on
+/// click, and the panel rect consumes the pointer before the canvas marquee.
+#[cfg(test)]
+mod sliders_panel_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::LayoutMode;
+    use crate::graph::{Graph, GraphEdge, GraphNode};
+    use crate::patch::{NodeId, Patch};
+    use std::path::Path;
+
+    /// The graph pane every panel frame paints into.
+    fn pane() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 640.0))
+    }
+
+    fn circuit_node(name: &str, idx: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(name, idx),
+            kind: NodeKind::Circuit,
+            circuit: name.to_string(),
+            instance_index: idx,
+            section_index: idx,
+        }
+    }
+
+    /// Two chained circuits in sections mode with the sliders panel toggled on:
+    /// a graph the panel's Arrange button can re-solve.
+    fn panel_app() -> App {
+        let graph = Graph {
+            nodes: vec![circuit_node("clocktool", 0), circuit_node("osc", 0)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            ..Graph::default()
+        };
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = vec![(10.0, 20.0), (260.0, 20.0)];
+        app.layout_mode = LayoutMode::Sections;
+        app.showing_sliders = true;
+        app
+    }
+
+    fn raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(pane()),
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// Text labels and rect shapes one painted frame emitted.
+    #[derive(Default)]
+    struct PanelOutput {
+        labels: Vec<String>,
+        rects: Vec<egui::Rect>,
+    }
+
+    fn collect(full: &mut egui::FullOutput) -> PanelOutput {
+        let mut out = PanelOutput::default();
+        for cs in &full.shapes {
+            match &cs.shape {
+                egui::epaint::Shape::Text(t) => out.labels.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Rect(r) => out.rects.push(r.rect),
+                _ => {}
+            }
+        }
+        full.textures_delta.clear();
+        out
+    }
+
+    /// Paint one panel frame into its own context and report what it drew.
+    fn panel_frame(app: &mut App, events: Vec<egui::Event>) -> PanelOutput {
+        let ctx = egui::Context::default();
+        let mut full = ctx.run_ui(raw_input(events), |ui| {
+            paint_sliders_panel(ui, app, pane());
+        });
+        collect(&mut full)
+    }
+
+    fn pointer_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// The marquee the frame's pointer state produces, under `consume`.
+    fn marquee_in(
+        scene: &SceneSpec,
+        events: Vec<egui::Event>,
+        consume: Option<egui::Rect>,
+    ) -> Option<MarqueeSelection> {
+        let ctx = egui::Context::default();
+        let mut got = None;
+        let mut full = ctx.run_ui(raw_input(events), |ui| {
+            got = ui.ctx().input(|i| frame_marquee(Some(scene), i, consume));
+        });
+        full.textures_delta.clear();
+        got
+    }
+
+    #[test]
+    fn panel_paints_three_force_sliders_and_arrange_in_sections_mode() {
+        let mut app = panel_app();
+        // Distinct values so each row's readout proves its own binding.
+        app.layout_slice_force = 0.3;
+        app.layout_section_force = 0.05;
+        app.tension = 0.5;
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown in sections mode");
+        let out = panel_frame(&mut app, Vec::new());
+        for label in ["Slice", "Section", "Cable", "Arrange"] {
+            assert!(
+                out.labels.iter().any(|l| l == label),
+                "{label} row missing: {:?}",
+                out.labels
+            );
+        }
+        for value in ["0.30", "0.05", "0.50"] {
+            assert!(
+                out.labels.iter().any(|l| l == value),
+                "value {value} missing: {:?}",
+                out.labels
+            );
+        }
+        // The chrome (backdrop fill, then the border) covers the panel rect.
+        assert!(
+            out.rects
+                .iter()
+                .any(|r| r.min == panel.rect.min && r.max == panel.rect.max),
+            "panel chrome missing: {:?}",
+            out.rects
+        );
+        // Every row and the button row sit inside the chrome, and each row
+        // splits into a label column plus a slider track.
+        for (i, row) in panel.rows.iter().enumerate() {
+            assert!(panel.rect.contains_rect(*row), "row {i} inside the panel");
+            assert!(row.contains_rect(panel.label_rect(i)), "label column {i}");
+            assert!(row.contains_rect(panel.slider_rect(i)), "slider track {i}");
+        }
+        assert!(panel.rect.contains_rect(panel.arrange));
+    }
+
+    #[test]
+    fn panel_absent_outside_sections_mode_or_when_toggled_off() {
+        for (mode, showing) in [
+            (LayoutMode::Column, true),
+            (LayoutMode::Force, true),
+            (LayoutMode::Sections, false),
+        ] {
+            let mut app = panel_app();
+            app.layout_mode = mode;
+            app.showing_sliders = showing;
+            assert!(
+                sliders_panel_layout(&app, pane()).is_none(),
+                "{mode:?} / showing_sliders={showing} must not lay out a panel"
+            );
+            let out = panel_frame(&mut app, Vec::new());
+            assert!(
+                out.labels.is_empty() && out.rects.is_empty(),
+                "{mode:?} / showing_sliders={showing} painted {:?}",
+                out.labels
+            );
+        }
+        // A pane too small to hold the panel paints nothing either: the panel
+        // would spill over its neighbours.
+        let app = panel_app();
+        let tiny = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 90.0));
+        assert!(sliders_panel_layout(&app, tiny).is_none());
+    }
+
+    #[test]
+    fn arrange_button_click_region_is_inside_the_panel_and_anneals() {
+        let mut app = panel_app();
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown");
+        assert!(
+            panel.rect.contains_rect(panel.arrange),
+            "the button row is inside the panel chrome"
+        );
+        let center = panel.arrange.center();
+        assert!(panel.rect.contains(center), "and so is its click region");
+        // Hover/register, press, release on one context: the egui button click
+        // lifecycle.
+        let ctx = egui::Context::default();
+        for events in [
+            vec![egui::Event::PointerMoved(center)],
+            vec![pointer_button(center, true)],
+            vec![pointer_button(center, false)],
+        ] {
+            let mut full = ctx.run_ui(raw_input(events), |ui| {
+                paint_sliders_panel(ui, &mut app, pane());
+            });
+            full.textures_delta.clear();
+        }
+        assert_eq!(
+            app.status_message, "Arranged (sections)",
+            "the Arrange button click re-solves the sections layout"
+        );
+    }
+
+    #[test]
+    fn panel_rect_consumes_the_pointer_before_the_canvas_marquee() {
+        let app = panel_app();
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown");
+        let scene = SceneSpec {
+            background: (0, 0, 0),
+            nodes: vec![],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let inside = panel.rect.center();
+        let outside = egui::pos2(20.0, 20.0);
+        let drag = |from: egui::Pos2| {
+            let to = egui::pos2(from.x + 300.0, from.y + 300.0);
+            vec![
+                egui::Event::PointerMoved(from),
+                pointer_button(from, true),
+                egui::Event::PointerMoved(to),
+            ]
+        };
+        // Positive control: the drag is a marquee outside the panel…
+        assert!(
+            marquee_in(&scene, drag(outside), None).is_some(),
+            "an empty-canvas drag starts a marquee"
+        );
+        assert!(
+            marquee_in(&scene, drag(outside), Some(panel.rect)).is_some(),
+            "the exclusion only covers the panel's own rect"
+        );
+        // …and never one when the press begins inside the consumed panel rect.
+        assert!(
+            marquee_in(&scene, drag(inside), None).is_some(),
+            "without the exclusion the same press does marquee"
+        );
+        assert!(
+            marquee_in(&scene, drag(inside), Some(panel.rect)).is_none(),
+            "a press inside the panel never starts a marquee"
+        );
+    }
+
+    #[test]
+    fn window_rect_resolves_inside_the_open_graph_pane() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.layout_mode = LayoutMode::Sections;
+        app.showing_sliders = true;
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0));
+        let pane = graph_pane_rect(&app, window).expect("the graph pane is open");
+        let panel = sliders_panel_window_rect(&app, window).expect("the panel resolves in it");
+        assert!(
+            pane.contains_rect(panel),
+            "panel {panel:?} inside its pane {pane:?}"
+        );
+        assert_eq!(
+            panel,
+            sliders_panel_layout(&app, pane).unwrap().rect,
+            "window resolution and the painted geometry agree"
+        );
+        // Hidden: nothing to consume, so the guard is free when the panel is off.
+        app.showing_sliders = false;
+        assert!(sliders_panel_window_rect(&app, window).is_none());
     }
 }

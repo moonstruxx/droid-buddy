@@ -630,6 +630,10 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                     app.fit_graph_camera((rect.width(), rect.height()));
                 }
                 graph::paint_scene_in(ui, rect, scene, selected);
+                // sections-black-hole-solver 4.1/4.3: the sections sliders
+                // panel paints over the scene and owns the pointer inside its
+                // rect (see `graph::paint_sliders_panel`).
+                graph::paint_sliders_panel(ui, app, rect);
                 // Publish graph minimap rect and transform for click-to-navigate hit testing.
                 if let Some(spec) = scene {
                     if let Some(minimap) = graph::minimap_layout(spec, rect) {
@@ -872,12 +876,30 @@ impl EguiSurface {
         // camera). `e` requires no modifiers, mirroring the terminal `e`;
         // `x`/`p` have no modifier guard there either.
         //
+        // Overlay pointer priority (sections-black-hole-solver 4.3): the
+        // sections sliders panel rect, resolved through the same window → cell
+        // → pane chain `paint_panes` paints from. The canvas paths below
+        // consume it before their own hit-testing — the same early return the
+        // minimap click applies — so a press on the panel never starts a node
+        // drag, a node select, or a marquee. The panel's own egui widgets read
+        // egui's pointer state directly, so they keep working.
+        let window_rect = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w as f32 / scale, h as f32 / scale),
+        );
+        let sliders_panel = graph::sliders_panel_window_rect(app, window_rect);
         // While the picker overlay is open it owns the wheel and the pointer
         // drag (its own frame report above), so the graph camera must not also
         // pan or zoom behind the modal.
         let picker_open = app.showing_picker;
         let window_frame = self.context.input(|i| {
-            let pointer = i.pointer.latest_pos().map(|p| (p.x, p.y));
+            let pointer = i
+                .pointer
+                .latest_pos()
+                .map(|p| (p.x, p.y))
+                .filter(|&(px, py)| {
+                    !sliders_panel.is_some_and(|rect| rect.contains(egui::pos2(px, py)))
+                });
             // Task 3.2/3.3: middle-drag pans the shared camera, wheel zooms
             // about the cursor, and an empty-canvas left drag selects nodes.
             // `smooth_scroll_delta.y` is positive when scrolling down (zoom
@@ -903,7 +925,7 @@ impl EguiSurface {
                 keys: window_keys,
                 pan_delta,
                 zoom,
-                marquee: graph::frame_marquee(scene, i),
+                marquee: graph::frame_marquee(scene, i, sliders_panel),
             }
         });
         self.winit_state
