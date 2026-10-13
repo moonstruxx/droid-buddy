@@ -2410,3 +2410,244 @@ fn regression_s10_switch_kinds_glyphs() {
     // State text stability: Off switches read OFF on both kinds.
     assert_eq!(cell_for("S1.1").state_text, cell_for("S1.3").state_text);
 }
+
+// ── sections-black-hole-solver (task 6.1): sections mode clusters around
+//    section holes on a real two-banner fixture ──────────────────────────────
+// Cross-layer story: `fixtures/graph_topology_error.ini` (18 lines, the
+// smallest fixture carrying two real comment banners, each owning two
+// circuits) → `App::load_patch` → `layout_mode = LayoutMode::Sections` → the
+// real `open_graph()` build + solve → the solved positions checked against the
+// anchors `Graph.section_holes` recorded at build time. The section-hole
+// spring pulls every banner-group member toward its cluster's fixed black hole
+// (mean slice × slice pitch, y = 0) while the slice springs hold each member
+// near its own slice and size-aware repulsion spreads members vertically, so
+// each banner group must read as a settled horizontal cluster: centred on its
+// anchor, narrower than the pitch gap between anchors, and clear of its
+// neighbour.
+//
+// Tolerances are in world units. `SECTION_PITCH_X` (80.0) mirrors the private
+// `layout::HORIZONTAL_SPACING` — the slice pitch the anchors are built from;
+// the sibling solver stories hard-code their geometry the same way.
+//   * `ANCHOR_TOL_X` = 0.30 × pitch = 24.0. Two honest excursions move a
+//     cluster mean off its anchor: the pinned tip (design D3/D7 — the first
+//     section is an anchor and never follows its hole) and the slice springs
+//     pulling each member to its own slice (up to half a slice each). On this
+//     fixture the worst mean lands 19.6 off (Sinks), so 24.0 clears it by
+//     ~22% while still failing once the hole spring dies (Sinks drifts to
+//     26.3).
+//   * `SPREAD_TOL_X` = 1.25 × pitch = 100.0. At defaults the worst cluster
+//     spread is 74.0 (Sinks: 143.4..217.4); with the hole spring dead its
+//     members fall back on their own two slice targets and spread to 124.1.
+//     100.0 sits between them and stays below the 160.0 gap between the two
+//     anchors, so a passing cluster can never span its neighbour's band.
+//   * Separation: the horizontal clearance between the two clusters (84.2 at
+//     defaults) must exceed the wider cluster's spread (74.0). With the hole
+//     spring dead the clearance collapses to 30.8 against a 124.1 spread.
+// Falsified: zeroing `App::layout_section_force` (the bound value of
+// `layout::SECTION_HOLE_K`) makes this story fail on both the anchor-centring
+// and the separation assertion; restored, it passes.
+//
+// Everything is force-relaxed, so the bounds are tolerances rather than
+// equalities — but the exact-position determinism assertions below stay exact
+// (design D9: identical graph + identical force triple ⇒ identical positions).
+
+/// Slice pitch in world units — mirrors the private
+/// `layout::HORIZONTAL_SPACING` the section-hole anchors are computed with.
+const SECTION_PITCH_X: f32 = 80.0;
+/// How far a banner-group mean x may sit from its cluster's hole anchor.
+const ANCHOR_TOL_X: f32 = 0.30 * SECTION_PITCH_X;
+/// How wide a banner group's x-extent may grow around its anchor.
+const SPREAD_TOL_X: f32 = 1.25 * SECTION_PITCH_X;
+/// Smallest real fixture with two comment banners, each owning two circuits.
+const SECTIONS_FIXTURE: &str = "fixtures/graph_topology_error.ini";
+
+/// One banner group's solved geometry in sections mode: its title, the x of
+/// the section hole every member is anchored to, and each anchored circuit
+/// member's solved x.
+struct SectionsCluster {
+    title: String,
+    anchor_x: f32,
+    member_xs: Vec<f32>,
+}
+
+impl SectionsCluster {
+    fn mean_x(&self) -> f32 {
+        self.member_xs.iter().sum::<f32>() / self.member_xs.len() as f32
+    }
+
+    fn spread_x(&self) -> f32 {
+        self.member_xs
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - self.member_xs.iter().cloned().fold(f32::INFINITY, f32::min)
+    }
+}
+
+/// Load `fixture` through the real app path, switch to sections mode, open the
+/// graph (`open_graph()` builds the graph AND solves it with the current
+/// `layout_mode` and force triple), and return the app plus its banner groups'
+/// solved geometry. Jumps and controller nodes may map into a cluster's section
+/// range but carry no section hole, so only anchored circuit members count.
+fn sections_clusters(fixture: &str) -> (App, Vec<SectionsCluster>) {
+    let patch = Patch::from_ini_file(Path::new(fixture)).expect("fixture must parse");
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    app.layout_mode = crate::config::LayoutMode::Sections;
+    app.open_graph();
+    let graph = app.graph.as_ref().expect("open_graph builds a graph");
+    let positions = &app.graph_positions;
+
+    let mut clusters = Vec::new();
+    for (cluster_index, cluster) in graph.clusters.iter().enumerate() {
+        let members: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                graph.cluster_index_of(node.section_index) == Some(cluster_index)
+                    && graph.section_holes.get(*index).copied().flatten().is_some()
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let anchor_x = graph.section_holes[members[0]]
+            .expect("member is anchored")
+            .0;
+        assert!(
+            members.iter().all(
+                |&index| graph.section_holes[index].expect("member is anchored").0 == anchor_x
+            ),
+            "every member of {:?} must share one section-hole anchor",
+            cluster.title
+        );
+        clusters.push(SectionsCluster {
+            title: cluster.title.clone(),
+            anchor_x,
+            member_xs: members.iter().map(|&index| positions[index].0).collect(),
+        });
+    }
+    (app, clusters)
+}
+
+#[test]
+fn regression_sections_mode_clusters_around_section_holes() {
+    let (app, clusters) = sections_clusters(SECTIONS_FIXTURE);
+
+    // Structure the story depends on: two banner groups, each really a cluster
+    // of at least two anchored circuits (the fixture must not silently lose a
+    // group or a cable).
+    assert!(
+        clusters.len() >= 2,
+        "the fixture must expose at least two banner groups, got {}",
+        clusters.len()
+    );
+    for cluster in &clusters {
+        assert!(
+            cluster.member_xs.len() >= 2,
+            "banner group {:?} must anchor at least two circuits, got {}",
+            cluster.title,
+            cluster.member_xs.len()
+        );
+    }
+
+    let (graph_width, _) = solver_bbox(&app.graph_positions);
+
+    // Requirement: members settle around their hole anchor, tighter than the
+    // graph as a whole.
+    for cluster in &clusters {
+        let mean = cluster.mean_x();
+        let drift = (mean - cluster.anchor_x).abs();
+        assert!(
+            drift <= ANCHOR_TOL_X,
+            "banner group {:?} did not settle on its section hole: anchor {}, mean {mean}, \
+             drift {drift} > {ANCHOR_TOL_X}",
+            cluster.title,
+            cluster.anchor_x
+        );
+        let spread = cluster.spread_x();
+        assert!(
+            spread <= SPREAD_TOL_X,
+            "banner group {:?} is not a tight cluster: x-extent {spread} > {SPREAD_TOL_X}",
+            cluster.title
+        );
+        assert!(
+            spread < graph_width,
+            "banner group {:?} spans the whole graph: {spread} of {graph_width}",
+            cluster.title
+        );
+    }
+
+    // Requirement: the clusters are horizontally separated — the clearance
+    // between two neighbouring banner groups exceeds either one's own extent,
+    // so they read as distinct bands rather than one smear.
+    let mut ordered = clusters.iter().collect::<Vec<_>>();
+    ordered.sort_by(|a, b| a.anchor_x.partial_cmp(&b.anchor_x).expect("finite anchors"));
+    for pair in ordered.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        let left_max = left
+            .member_xs
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let right_min = right
+            .member_xs
+            .iter()
+            .cloned()
+            .fold(f32::INFINITY, f32::min);
+        let clearance = right_min - left_max;
+        let widest = left.spread_x().max(right.spread_x());
+        assert!(
+            clearance > widest,
+            "banner groups {:?} and {:?} are not separated: clearance {clearance} \
+             !> widest intra-cluster spread {widest}",
+            left.title,
+            right.title
+        );
+    }
+
+    // Determinism (design D9): the same graph solved twice under the same force
+    // triple yields identical positions, and a second app driven through the
+    // same real path lands on byte-identical positions.
+    let graph = app.graph.as_ref().expect("graph").clone();
+    let pins = app.pinned_indices(&graph);
+    let triple = (
+        app.tension,
+        app.layout_slice_force,
+        app.layout_section_force,
+    );
+    let first = crate::layout::solve_sections(&graph, &pins, triple.0, triple.1, triple.2);
+    let second = crate::layout::solve_sections(&graph, &pins, triple.0, triple.1, triple.2);
+    assert_eq!(
+        first, second,
+        "solving one graph twice under one force triple must be deterministic"
+    );
+
+    let (again, again_clusters) = sections_clusters(SECTIONS_FIXTURE);
+    assert_eq!(
+        (
+            again.tension,
+            again.layout_slice_force,
+            again.layout_section_force
+        ),
+        triple,
+        "both runs must use the same force triple (the D9 precondition)"
+    );
+    assert_eq!(
+        app.graph_positions, again.graph_positions,
+        "a second open in sections mode must reproduce the first solve exactly"
+    );
+    assert_eq!(
+        clusters
+            .iter()
+            .map(|c| (c.anchor_x, c.member_xs.clone()))
+            .collect::<Vec<_>>(),
+        again_clusters
+            .iter()
+            .map(|c| (c.anchor_x, c.member_xs.clone()))
+            .collect::<Vec<_>>(),
+        "cluster anchors and member positions must be reproducible"
+    );
+}
