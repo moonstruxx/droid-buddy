@@ -1,0 +1,8 @@
+{
+  "assets": [],
+  "changeId": "force-mode-seed-cap",
+  "reason": "This change has NO visual surface, so there is nothing to capture and no web route to capture it with (native Rust desktop app; no pnpm/Chrome path). It alters force-mode node positions only on graphs whose topological depth was sparse or cyclic, and the screenshot harness renders no such shot: the full `tools/screenshots/render.sh` check passed with every shot byte-identical and both stability anchors unchanged. The evidence is therefore numerical. On fixtures/own_scale.ini (511 cyclic nodes) the force seed's horizontal extent fell from 19,622,480 to 320 (bound 480 = (distinct layers - 1) x HORIZONTAL_SPACING x 1.5) and the solved force-mode bbox from 19,621,296 to 141.92 (bound 2,720), asserted by the new unit test `force_mode_seed_and_solve_stay_proportional_on_cyclic_scale_fixture`, which was written before the fix and falsified against the raw-depth seed (failure message recorded in the change's tasks). Contiguous-depth layouts are byte-identical: the pre-existing golden vector `force_mode_positions_are_unchanged_by_size_aware_repulsion` was not edited and still passes with its original literals. Automated verification: cargo fmt --check clean; cargo clippy -D warnings clean; 1296 lib + 12 main + 5 perf-gate tests pass; release build succeeds.",
+  "required": false,
+  "status": "passed",
+  "version": 1
+}
