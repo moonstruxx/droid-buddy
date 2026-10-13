@@ -1082,7 +1082,10 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // sections modes on the focused graph pane. Flipping the mode
                 // then rebuilding re-solves under the new arrangement
                 // (`solve_graph_positions` dispatches by mode) and emits
-                // GraphRebuilt; the status mirrors the tension hint.
+                // GraphRebuilt; the status mirrors the tension hint. The mode
+                // order matches the `a` arrangement cycle's mode order
+                // (column → force → sections), so the two user-facing
+                // arrangement controls agree (sections-black-hole-solver 5.2).
                 app.layout_mode = match app.layout_mode {
                     crate::config::LayoutMode::Column => crate::config::LayoutMode::Force,
                     crate::config::LayoutMode::Force => crate::config::LayoutMode::Sections,
@@ -5108,9 +5111,10 @@ mod tests {
 
     #[test]
     fn graph_a_applies_arrangement_and_reports_it() {
-        // graph-arrange-cycle 2.2: `a` on the focused graph pane applies the
-        // active arrangement (rebuild + refit) and names it in the status;
-        // the stored selection advances so repeat presses cycle layouts.
+        // graph-arrange-cycle 2.2 + sections-black-hole-solver 5.2: `a` on the
+        // focused graph pane applies the active arrangement (rebuild + refit)
+        // and names it in the status; the stored selection advances so repeat
+        // presses cycle Column-Strict → Column-Barycenter → Force → Sections.
         let mut app = app_with_fixture();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
@@ -5127,6 +5131,25 @@ mod tests {
         assert!(
             app.graph_camera.is_some(),
             "apply refits the camera against the live pane"
+        );
+
+        // Repeat presses reach Sections through the user-facing `a` key.
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(app.status_message, "Arrangement: column-barycenter");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(
+            app.status_message, "Arrangement: sections",
+            "Sections is reachable via the `a` cycle"
+        );
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Strict,
+            "the sections press wraps the cycle back to column-strict"
         );
     }
 

@@ -2701,13 +2701,19 @@ impl App {
     }
 
     /// Apply the active arrangement and cycle to the next one
-    /// (graph-arrange-cycle 2.1): re-solves under the current
-    /// `layout_mode`/`layout_ordering`, refits unconditionally, reports the
-    /// APPLIED arrangement in the status line, then advances the stored
-    /// selection so repeat presses walk `Column-Strict → Column-Barycenter →
-    /// Force → Column-Strict …`. The first press from `Column-Strict` thus
-    /// re-applies `column-strict` (the manual escape hatch from the proposal
-    /// Why), the second moves to `column-barycenter`, the third to `force`.
+    /// (graph-arrange-cycle 2.1; sections-black-hole-solver 5.2): re-solves
+    /// under the current `layout_mode`/`layout_ordering`, refits
+    /// unconditionally, reports the APPLIED arrangement in the status line,
+    /// then advances the stored selection so repeat presses walk
+    /// `Column-Strict → Column-Barycenter → Force → Sections → Column-Strict …`.
+    /// The first press from `Column-Strict` thus re-applies `column-strict`
+    /// (the manual escape hatch from the proposal Why), the second moves to
+    /// `column-barycenter`, the third to `force`, the fourth to `sections`.
+    /// `column-patch` (design D6/D7) is deliberately NOT a step in this cycle:
+    /// it is a config-seeded start state (`[layout] ordering = "patch"`);
+    /// pressing `a` from it applies `column-patch` and rejoins the cycle at
+    /// `force`. The mode order here matches `h`'s `column → force → sections`
+    /// toggle so the two user-facing arrangement controls never contradict.
     /// Reuses the existing fields so `h`, config seeding, and
     /// `solve_graph_positions` keep working unchanged. Silent no-op (false)
     /// without a built graph.
@@ -2735,11 +2741,11 @@ impl App {
                 crate::config::LayoutMode::Column,
                 crate::config::LayoutOrdering::Barycenter,
             ),
-            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => (
+            (
                 crate::config::LayoutMode::Column,
-                crate::config::LayoutOrdering::PatchOrder,
-            ),
-            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::PatchOrder) => (
+                crate::config::LayoutOrdering::Barycenter
+                | crate::config::LayoutOrdering::PatchOrder,
+            ) => (
                 crate::config::LayoutMode::Force,
                 crate::config::LayoutOrdering::Barycenter,
             ),
@@ -5294,12 +5300,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_arrangement_cycles_strict_barycenter_force() {
-        // graph-arrange-cycle 2.1: repeat presses walk Column-Strict →
-        // Column-Barycenter → Column-PatchOrder → Force → Sections →
-        // Column-Strict …, each reporting the APPLIED arrangement in the
-        // status line. The first press from Column-Strict re-applies
-        // column-strict, the second moves to column-barycenter, etc.
+    fn apply_arrangement_cycles_strict_barycenter_force_sections() {
+        // graph-arrange-cycle 2.1 + sections-black-hole-solver 5.2: repeat
+        // presses walk Column-Strict → Column-Barycenter → Force → Sections →
+        // Column-Strict …, each reporting the APPLIED arrangement in the status
+        // line. The first press from Column-Strict re-applies column-strict,
+        // the second moves to column-barycenter, the third to force, the fourth
+        // to sections, and the fifth wraps back to column-strict. `column-patch`
+        // is not a cycle step (config-seeded only) — see the dedicated test.
         let mut app = App::new();
         // Load a patch so apply_arrangement can build a graph
         app.patch = Some(crate::patch::Patch::sample());
@@ -5319,23 +5327,15 @@ mod tests {
             app.layout_ordering,
             crate::config::LayoutOrdering::Barycenter
         );
-        // Second press: applies column-barycenter, advances to Column-PatchOrder
+        // Second press: applies column-barycenter, advances to Force
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: column-barycenter");
-        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
-        assert_eq!(
-            app.layout_ordering,
-            crate::config::LayoutOrdering::PatchOrder
-        );
-        // Third press: applies column-patch, advances to Force
-        assert!(app.apply_arrangement());
-        assert_eq!(app.status_message, "Arrangement: column-patch");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
         assert_eq!(
             app.layout_ordering,
             crate::config::LayoutOrdering::Barycenter
         );
-        // Fourth press: applies force, advances to Sections
+        // Third press: applies force, advances to Sections
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: force");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
@@ -5343,17 +5343,54 @@ mod tests {
             app.layout_ordering,
             crate::config::LayoutOrdering::Barycenter
         );
-        // Fifth press: applies sections, advances to Column-Strict
+        // Fourth press: applies sections, advances to Column-Strict
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: sections");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
+        // Fifth press: wraps around and re-applies column-strict
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-strict");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
         let graph = app.graph.as_ref().unwrap();
         assert_eq!(
             app.graph_positions.len(),
             graph.nodes.len(),
             "every cycle step rebuilds positions for the fresh graph"
         );
+    }
+
+    #[test]
+    fn apply_arrangement_from_patch_order_rejoins_cycle_at_force() {
+        // sections-black-hole-solver 5.2 (design D6/D7): `column-patch` is a
+        // config-seeded start state, not a cycle step. Pressing `a` from it
+        // applies column-patch, then rejoins the cycle at Force, so the cycle
+        // stays Column-Strict → Column-Barycenter → Force → Sections.
+        let mut app = App::new();
+        app.patch = Some(crate::patch::Patch::sample());
+        app.layout_ordering = crate::config::LayoutOrdering::PatchOrder;
+        app.rebuild_graph();
+
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-patch");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: sections");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
     }
 
     #[test]
