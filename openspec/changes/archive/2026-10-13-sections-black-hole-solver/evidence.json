@@ -1,0 +1,17 @@
+{
+  "assets": [
+    {
+      "caption": "Sections mode on a 5-node / 2-banner-group patch: circuits chained in patch order as lanes, each banner group reading as a contiguous band, cable springs intact, no overlapping bodies and no enclosing rectangles (the clustering itself is the section visualisation)",
+      "path": "docs/assets/sections-lanes.png"
+    },
+    {
+      "caption": "Sections mode on the 511-node scale anchor (fixtures/own_scale.ini): the same world that used to solve into a ~40:1 ribbon now reads as a grid of wrapped lane rows (bbox 3812 x 2850, aspect ~1.34), bodies separated, cable springs crossing lanes",
+      "path": "docs/assets/sections-scale.png"
+    }
+  ],
+  "changeId": "sections-black-hole-solver",
+  "reason": "No web routes exist (native Rust desktop app; no pnpm/Chrome path), so visual evidence was captured natively: tools/screenshots/render.sh added two sections-mode shots and its full check exits 0 with every pre-existing shot byte-identical. Automated verification: cargo fmt --check clean; cargo clippy -D warnings clean; 1294 lib + 12 main + 5 perf-gate tests pass; release build succeeds. Measured layout outcomes: own_scale.ini sections-mode bbox 39,540 x 60,020 (aspect ~40:1, worst pairwise penetration 79.19) -> 3,812 x 2,850 (aspect ~1.34, worst penetration 1.05, zero pairs above tolerance).",
+  "required": true,
+  "status": "passed",
+  "version": 1
+}

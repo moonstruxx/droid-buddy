@@ -20,14 +20,24 @@ The graph pane SHALL provide an `a` key that rebuilds the graph positions under 
 - **WHEN** no graph is built and the user presses `a` on the graph pane
 - **THEN** nothing changes and no error is reported.
 
+#### Scenario: Arrange applies sections mode
+
+- **WHEN** sections mode is active and the user presses `a`
+- **THEN** the graph re-solves under the sections-mode joint black-hole solver and the camera frames the re-solved layout in the live pane.
+
 ### Requirement: Repeat presses cycle arrangements
 
-Repeated presses of `a` SHALL cycle the arrangement order `Column-Strict → Column-Barycenter → Force → Column-Strict …`, persisting the selection like the existing layout mode/ordering and rebuilding + refitting on every step.
+Repeated presses of `a` SHALL cycle the arrangement order `Column-Strict → Column-Barycenter → Force → Sections → Column-Strict …`, persisting the selection like the existing layout mode/ordering and rebuilding + refitting on every step.
 
 #### Scenario: Cycling order
 
 - **WHEN** the user presses `a` three times from `Column-Strict`
 - **THEN** the arrangements applied are `Column-Strict`, `Column-Barycenter`, `Force`, and the fourth press returns to `Column-Strict`.
+
+#### Scenario: Cycling order includes sections
+
+- **WHEN** the user presses `a` four times from `Column-Strict`
+- **THEN** the arrangements applied are `Column-Strict`, `Column-Barycenter`, `Force`, `Sections`, and the fifth press returns to `Column-Strict`.
 
 ### Requirement: Optimizer preview always refits
 
