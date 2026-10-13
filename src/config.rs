@@ -44,6 +44,13 @@ pub const DEFAULT_LAYOUT_MODE: LayoutMode = LayoutMode::Column;
 /// Within-column ordering default: strict slot order (nthelper style); the
 /// barycenter crossing-minimization sweeps are opt-in.
 pub const DEFAULT_LAYOUT_ORDERING: LayoutOrdering = LayoutOrdering::Strict;
+/// Default slice spring stiffness for sections mode: the layout solver's own
+/// tuned default (`layout::DEFAULT_SLICE_K`) is the single source of truth.
+pub const DEFAULT_SLICE_FORCE: f32 = crate::layout::DEFAULT_SLICE_K;
+/// Default section-hole spring stiffness for sections mode: the layout solver's
+/// own tuned default (`layout::DEFAULT_SECTION_HOLE_K`) is the single source of
+/// truth, so the app's sections solve matches the solver's tuned strength.
+pub const DEFAULT_SECTION_FORCE: f32 = crate::layout::DEFAULT_SECTION_HOLE_K;
 
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -82,6 +89,14 @@ fn default_layout_mode() -> LayoutMode {
 
 fn default_layout_ordering() -> LayoutOrdering {
     DEFAULT_LAYOUT_ORDERING
+}
+
+fn default_slice_force() -> f32 {
+    DEFAULT_SLICE_FORCE
+}
+
+fn default_section_force() -> f32 {
+    DEFAULT_SECTION_FORCE
 }
 
 /// Per-label configuration under `[labels]`.
@@ -184,15 +199,16 @@ impl Plugins {
 }
 
 /// Graph-arrangement mode under `[layout]` (graph-column-layout D5): the
-/// deterministic column arrangement or the force-directed solver. Unknown
-/// values in the file warn once on stderr and fall back to
-/// [`LayoutMode::Column`]; the manual `Deserialize` keeps the rest of the
-/// file loadable.
+/// deterministic column arrangement, the force-directed solver, or the
+/// sections solver (joint black-hole solve). Unknown values in the file warn
+/// once on stderr and fall back to [`LayoutMode::Column`]; the manual
+/// `Deserialize` keeps the rest of the file loadable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayoutMode {
     Column,
     Force,
+    Sections,
 }
 
 impl<'de> Deserialize<'de> for LayoutMode {
@@ -204,8 +220,9 @@ impl<'de> Deserialize<'de> for LayoutMode {
         Ok(match raw.as_str() {
             "column" => Self::Column,
             "force" => Self::Force,
+            "sections" => Self::Sections,
             other => {
-                eprintln!("warning: unknown layout mode \"{other}\"; valid choices: column, force");
+                eprintln!("warning: unknown layout mode \"{other}\"; valid choices: column, force, sections");
                 Self::Column
             }
         })
@@ -213,13 +230,15 @@ impl<'de> Deserialize<'de> for LayoutMode {
 }
 
 /// Within-column ordering under `[layout]` (graph-column-layout D5): strict
-/// slot order or barycenter crossing-minimization sweeps. Unknown values in
-/// the file warn once on stderr and fall back to [`LayoutOrdering::Strict`].
+/// slot order, barycenter crossing-minimization sweeps, or patch order (keeps
+/// banner-group members vertically contiguous). Unknown values in the file
+/// warn once on stderr and fall back to [`LayoutOrdering::Strict`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayoutOrdering {
     Strict,
     Barycenter,
+    PatchOrder,
 }
 
 impl<'de> Deserialize<'de> for LayoutOrdering {
@@ -231,9 +250,10 @@ impl<'de> Deserialize<'de> for LayoutOrdering {
         Ok(match raw.as_str() {
             "strict" => Self::Strict,
             "barycenter" => Self::Barycenter,
+            "patch" => Self::PatchOrder,
             other => {
                 eprintln!(
-                    "warning: unknown layout ordering \"{other}\"; valid choices: strict, barycenter"
+                    "warning: unknown layout ordering \"{other}\"; valid choices: strict, barycenter, patch"
                 );
                 Self::Strict
             }
@@ -243,17 +263,23 @@ impl<'de> Deserialize<'de> for LayoutOrdering {
 
 /// Graph-arrangement preferences under `[layout]` (graph-column-layout D5).
 ///
-/// `mode` picks the default arrangement (the deterministic column layout or
-/// the force solver); `ordering` picks the within-column order on the column
-/// path (strict slot order or barycenter sweeps). Unknown values warn once on
+/// `mode` picks the default arrangement (the deterministic column layout, the
+/// force solver, or the sections solver); `ordering` picks the within-column
+/// order on the column path (strict slot order, barycenter sweeps, or patch
+/// order). `slice_force` and `section_force` control the slice-spring and
+/// section-hole-spring stiffness in sections mode. Unknown values warn once on
 /// stderr and fall back to the defaults; the enum types make invalid values
 /// unrepresentable, so no clamp-on-save is needed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     #[serde(default = "default_layout_mode")]
     pub mode: LayoutMode,
     #[serde(default = "default_layout_ordering")]
     pub ordering: LayoutOrdering,
+    #[serde(default = "default_slice_force")]
+    pub slice_force: f32,
+    #[serde(default = "default_section_force")]
+    pub section_force: f32,
 }
 
 impl Default for Layout {
@@ -261,6 +287,8 @@ impl Default for Layout {
         Self {
             mode: default_layout_mode(),
             ordering: default_layout_ordering(),
+            slice_force: default_slice_force(),
+            section_force: default_section_force(),
         }
     }
 }
@@ -1275,6 +1303,8 @@ mod tests {
             layout: Layout {
                 mode: LayoutMode::Force,
                 ordering: LayoutOrdering::Barycenter,
+                slice_force: DEFAULT_SLICE_FORCE,
+                section_force: DEFAULT_SECTION_FORCE,
             },
         };
         save_to_dir(dir.path(), &settings).unwrap();

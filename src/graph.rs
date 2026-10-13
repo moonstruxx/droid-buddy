@@ -10,6 +10,7 @@ use std::ops::Range;
 
 use crate::geometry::{BindingFeatures, RackGeometry, WiringContext, WiringOutlierScorer};
 use crate::latency::{forward_latency, CostModel, LatencyData};
+use crate::layout::compute_section_holes;
 use crate::patch::{
     scan_hw_tokens_wide, scan_internal_tokens, scan_register_refs, InfluenceContext,
     InfluenceSubtree, Patch,
@@ -106,7 +107,7 @@ pub struct TopologyIssue {
 }
 
 /// The signal-flow graph: circuit nodes, directed cable edges, banner clusters.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
@@ -136,6 +137,12 @@ pub struct Graph {
     /// register edges are already absent from `edges`. Empty when no select
     /// state is assumed.
     pub not_selected: HashSet<usize>,
+    /// Section-hole anchors for sections mode (sections-black-hole-solver D2):
+    /// one per node, `Some((x, y))` for circuit nodes in banner groups (the
+    /// mean-slice anchor), `None` for all other nodes. Computed at graph build
+    /// time from banner groups and slice indices; stored so the solver can use
+    /// fixed black-hole anchors without recomputation.
+    pub section_holes: Vec<Option<(f32, f32)>>,
 }
 
 /// Options for `Graph::build_from_patch` controlling select-state filtering.
@@ -314,6 +321,24 @@ impl Graph {
         edges.extend(filtered_reg_edges);
         edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
 
+        // Compute slice_index for all nodes (circuit section_index, fixed outer slices for controllers/jacks)
+        // and section-hole anchors from banner groups.
+        let slice = compute_slice_index(&nodes);
+        let section_holes = compute_section_holes(
+            &Graph {
+                nodes: nodes.clone(),
+                edges: edges.clone(),
+                clusters: clusters.to_vec(),
+                validation: validation.clone(),
+                latency: latency.clone(),
+                highlighted_nodes: HashSet::new(),
+                highlighted_edges: HashSet::new(),
+                not_selected: not_selected.clone(),
+                section_holes: Vec::new(), // placeholder
+            },
+            &slice,
+        );
+
         Graph {
             nodes,
             edges,
@@ -323,6 +348,7 @@ impl Graph {
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
             not_selected,
+            section_holes,
         }
     }
 
@@ -1011,6 +1037,47 @@ fn validate_influence_outliers(patch: &Patch) -> Vec<TopologyIssue> {
         });
     }
     issues
+}
+
+/// Compute slice index for each node (mirrors layout::slice_index but operates on
+/// nodes directly, without needing a full Graph).
+/// - Circuit nodes: slice index = section_index (patch order)
+/// - Controller and InputJack: fixed left outer slice (0)
+/// - OutputJack: fixed right outer slice (max circuit slice + 1)
+fn compute_slice_index(nodes: &[GraphNode]) -> Vec<usize> {
+    let n = nodes.len();
+    let mut slice = vec![0usize; n];
+
+    // Circuit nodes: slice index = section_index (patch order)
+    for (i, node) in nodes.iter().enumerate() {
+        if node.kind == NodeKind::Circuit {
+            slice[i] = node.section_index;
+        }
+    }
+
+    // Find max circuit slice for right outer placement
+    let max_circuit_slice = nodes
+        .iter()
+        .filter(|nd| nd.kind == NodeKind::Circuit)
+        .map(|nd| nd.section_index)
+        .max()
+        .unwrap_or(0);
+
+    // Controller and InputJack: fixed left outer slice (0)
+    // OutputJack: fixed right outer slice (max_circuit_slice + 1)
+    for (i, node) in nodes.iter().enumerate() {
+        match node.kind {
+            NodeKind::Controller | NodeKind::InputJack => {
+                slice[i] = 0;
+            }
+            NodeKind::OutputJack => {
+                slice[i] = max_circuit_slice + 1;
+            }
+            NodeKind::Circuit => {}
+        }
+    }
+
+    slice
 }
 
 #[cfg(test)]
@@ -1732,6 +1799,7 @@ mod tests {
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
             not_selected: HashSet::new(),
+            section_holes: Vec::new(),
         }
     }
 
@@ -2010,6 +2078,75 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+    }
+
+    #[test]
+    fn section_holes_computed_from_banner_groups_mean_slice() {
+        // Fixture with 2 banner groups covering different section ranges.
+        // Sections: 0=p2b8(controller), 1=src, 2=mid1, 3=mid2, 4=sink1, 5=sink2
+        // Banner group 1: sections 1..3 (src, mid1) -> mean slice = (1+2)/2 = 1.5
+        // Banner group 2: sections 3..5 (mid2, sink1) -> mean slice = (3+4)/2 = 3.5
+        let clusters = vec![
+            Cluster {
+                title: String::from("Group One"),
+                section_range: 1..3,
+            },
+            Cluster {
+                title: String::from("Group Two"),
+                section_range: 3..5,
+            },
+        ];
+        let graph = build(
+            "[p2b8]
+[src]
+    output = _A
+[mid1]
+    input = _A
+    output = _B
+[mid2]
+    input = _B
+    output = _C
+[sink1]
+    input = _C
+    output = _D
+[sink2]
+    input = _D
+",
+            &clusters,
+        );
+
+        // Circuit nodes are at indices 1..6 (0 is p2b8 controller)
+        let circuit_indices: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.kind == NodeKind::Circuit)
+            .map(|(i, _)| i)
+            .collect();
+
+        // HORIZONTAL_SPACING = 80.0 from layout.rs
+        const HORIZONTAL_SPACING: f32 = 80.0;
+
+        // Banner group 1 (sections 1..3): circuits at section_index 1 (src) and 2 (mid1)
+        // Mean = (1 + 2) / 2 = 1.5 -> anchor = 1.5 * 80 = 120.0
+        let group1_hole = graph.section_holes[circuit_indices[1]]; // src at section_index 1
+        assert_eq!(group1_hole, Some((1.5 * HORIZONTAL_SPACING, 0.0)));
+        let group1_hole_mid1 = graph.section_holes[circuit_indices[2]]; // mid1 at section_index 2
+        assert_eq!(group1_hole_mid1, Some((1.5 * HORIZONTAL_SPACING, 0.0)));
+
+        // Banner group 2 (sections 3..5): circuits at section_index 3 (mid2) and 4 (sink1)
+        // Mean = (3 + 4) / 2 = 3.5 -> anchor = 3.5 * 80 = 280.0
+        let group2_hole = graph.section_holes[circuit_indices[3]]; // mid2 at section_index 3
+        assert_eq!(group2_hole, Some((3.5 * HORIZONTAL_SPACING, 0.0)));
+        let group2_hole_sink1 = graph.section_holes[circuit_indices[4]]; // sink1 at section_index 4
+        assert_eq!(group2_hole_sink1, Some((3.5 * HORIZONTAL_SPACING, 0.0)));
+
+        // sink2 at section_index 5 is not in any banner group -> None
+        let no_hole = graph.section_holes[circuit_indices[5]];
+        assert_eq!(no_hole, None);
+
+        // Controller node (index 0) should have None
+        assert_eq!(graph.section_holes[0], None);
     }
 }
 /// Fixture-driven suite through the public `Graph::build_from_patch` entry

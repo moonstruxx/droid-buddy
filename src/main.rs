@@ -58,6 +58,8 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // (graph-column-layout D5); matching App::new's defaults.
     app.layout_mode = settings.layout.mode;
     app.layout_ordering = settings.layout.ordering;
+    app.layout_slice_force = settings.layout.slice_force;
+    app.layout_section_force = settings.layout.section_force;
 
     // [labels]: seed the label-resolution section on App once at startup so
     // painters and the label overlay read it from state (ADR 13) instead of

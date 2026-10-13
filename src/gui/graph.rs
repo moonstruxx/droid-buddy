@@ -384,15 +384,23 @@ fn nodes_in_rect(scene: &SceneSpec, (x, y, w, h): (f32, f32, f32, f32)) -> Vec<u
 
 /// The active marquee over `scene` for the given pointer state: present only
 /// while the primary button is held and the press began on empty canvas (a
-/// press on a node is a node drag, not a marquee). `None` when idle.
+/// press on a node is a node drag, not a marquee). A press that begins inside
+/// the `consume` overlay — the sections sliders panel, passed in as
+/// [`sliders_panel_window_rect`] (design D4 pointer priority) — belongs to that
+/// overlay and never starts a marquee, the same early return the minimap click
+/// uses. `None` when idle.
 pub(super) fn frame_marquee(
     scene: Option<&SceneSpec>,
     i: &egui::InputState,
+    consume: Option<egui::Rect>,
 ) -> Option<MarqueeSelection> {
     if !i.pointer.primary_down() {
         return None;
     }
     let origin = i.pointer.press_origin()?;
+    if consume.is_some_and(|rect| rect.contains(origin)) {
+        return None;
+    }
     let scene = scene?;
     if node_at(scene, origin.x, origin.y).is_some() {
         return None;
@@ -615,7 +623,7 @@ fn paint_polish(
     // after it: text layout takes the context write lock again, so it must not
     // run inside the ctx.input closure (same-thread reentrant write deadlock).
     let (marquee, hover) = ctx.input(|i| {
-        let marquee = frame_marquee(Some(spec), i);
+        let marquee = frame_marquee(Some(spec), i, None);
         let hover = i
             .pointer
             .latest_pos()
@@ -716,6 +724,214 @@ fn paint_minimap(
         egui::StrokeKind::Inside,
     );
 }
+
+// ── sections-black-hole-solver 4.1/4.3: the sections sliders panel ─────────
+
+/// Sliders panel size `(w, h)` in `egui::Rect` points.
+const SLIDERS_PANEL_SIZE: (f32, f32) = (232.0, 132.0);
+/// Margin between the sliders panel and the graph pane's edge.
+const SLIDERS_PANEL_PAD: f32 = 10.0;
+/// Inset of the panel content from its chrome.
+const SLIDERS_PANEL_INSET: f32 = 8.0;
+/// Height of one panel row (a slider row or the Arrange button row).
+const SLIDERS_ROW_H: f32 = 24.0;
+/// Vertical gap between panel rows.
+const SLIDERS_ROW_GAP: f32 = 4.0;
+/// Width of a slider row's label column, left of the slider track.
+const SLIDERS_LABEL_W: f32 = 54.0;
+/// Font size of a slider row's label.
+const SLIDERS_FONT_PX: f32 = 12.0;
+/// Upper bound of the slice/section force sliders (task 4.1): the sections
+/// springs are stiffnesses of the same order as the cable tension, so both rows
+/// share its span with a zero floor. The cable row keeps the solver's own
+/// `[TENSION_MIN, TENSION_MAX]` range, so the panel and `Alt+[`/`Alt+]` agree.
+const SLIDERS_FORCE_MAX: f32 = 0.5;
+
+/// Sliders-panel geometry: the panel chrome rect, one row per force (slice,
+/// section, cable — top to bottom), and the Arrange button row. Pure, like
+/// [`Minimap`], so the paint path and the pointer-priority tests share one
+/// source of truth.
+pub(crate) struct SlidersPanel {
+    pub(crate) rect: egui::Rect,
+    /// Slider rows, top to bottom: slice, section, cable.
+    pub(crate) rows: [egui::Rect; 3],
+    /// The Arrange button's row.
+    pub(crate) arrange: egui::Rect,
+}
+
+impl SlidersPanel {
+    /// The label column of row `i`: the left edge of the row.
+    pub(crate) fn label_rect(&self, i: usize) -> egui::Rect {
+        let row = self.rows[i];
+        egui::Rect::from_min_size(row.min, egui::vec2(SLIDERS_LABEL_W, row.height()))
+    }
+
+    /// The slider track of row `i`: the row right of its label column.
+    pub(crate) fn slider_rect(&self, i: usize) -> egui::Rect {
+        let row = self.rows[i];
+        egui::Rect::from_min_size(
+            egui::pos2(row.min.x + SLIDERS_LABEL_W, row.min.y),
+            egui::vec2(row.width() - SLIDERS_LABEL_W, row.height()),
+        )
+    }
+}
+
+/// The sliders panel for the current frame, or `None` when it must not show:
+/// only in `LayoutMode::Sections` with `App::showing_sliders` set (design D4),
+/// and only in a pane big enough to hold it (a smaller pane would spill the
+/// panel over its neighbours). Anchored to the pane's top-right corner,
+/// mirroring the minimap's bottom-left anchor.
+pub(crate) fn sliders_panel_layout(app: &App, pane: egui::Rect) -> Option<SlidersPanel> {
+    if !app.showing_sliders || app.layout_mode != crate::config::LayoutMode::Sections {
+        return None;
+    }
+    let (w, h) = SLIDERS_PANEL_SIZE;
+    if pane.width() < w + 2.0 * SLIDERS_PANEL_PAD || pane.height() < h + 2.0 * SLIDERS_PANEL_PAD {
+        return None;
+    }
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(
+            pane.max.x - w - SLIDERS_PANEL_PAD,
+            pane.min.y + SLIDERS_PANEL_PAD,
+        ),
+        egui::vec2(w, h),
+    );
+    let row = |i: usize| {
+        let y = rect.min.y + SLIDERS_PANEL_INSET + i as f32 * (SLIDERS_ROW_H + SLIDERS_ROW_GAP);
+        egui::Rect::from_min_size(
+            egui::pos2(rect.min.x + SLIDERS_PANEL_INSET, y),
+            egui::vec2(w - 2.0 * SLIDERS_PANEL_INSET, SLIDERS_ROW_H),
+        )
+    };
+    Some(SlidersPanel {
+        rect,
+        rows: [row(0), row(1), row(2)],
+        arrange: row(3),
+    })
+}
+
+/// The sliders panel's rect in window space for this frame, when it is shown:
+/// the overlay hit rect the canvas input paths consume against before
+/// node-drag / node-select / marquee (design D4 pointer priority, task 4.3).
+/// Derived the same way [`graph_pane_rect`] derives the pane
+/// (`App::pane_geometry`), so the painted panel and the consumed rect agree.
+pub fn sliders_panel_window_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
+    graph_pane_rect(app, window).and_then(|pane| sliders_panel_layout(app, pane).map(|p| p.rect))
+}
+
+/// One panel row: the themed label in the row's label column plus a slider
+/// showing its numeric value, bound to `value` in the rest of the row. Returns
+/// the slider's response so the caller owns the re-solve policy.
+fn paint_force_slider(
+    ui: &mut egui::Ui,
+    label_rect: egui::Rect,
+    track_rect: egui::Rect,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    let t = crate::theme::active();
+    ui.painter().text(
+        label_rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(SLIDERS_FONT_PX),
+        t.egui_color(t.graph_node_title),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(track_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
+                egui::Slider::new(value, range)
+                    .show_value(true)
+                    .fixed_decimals(2),
+            )
+        },
+    )
+    .inner
+}
+
+/// Paint the sections-mode sliders panel into the graph pane (design D4): three
+/// force sliders (slice, section, cable) bound to the live `App` values, plus an
+/// Arrange button. A slider change re-solves so the forces are visible while
+/// dragging (design D4: rebuild → solve → refit); Arrange re-anneals from the
+/// current positions instead (design D5). Chrome colors come only from `Theme`
+/// tokens, in the minimap panel's idiom.
+///
+/// Pointer priority (task 4.3): the panel registers its own rect as an
+/// interactive widget ahead of its children, so it owns every press inside it —
+/// the rows stay on top (egui hit-testing prefers the last registered widget at
+/// equal distance) and the panel still swallows presses in the gaps between
+/// them. The canvas paths additionally consume
+/// [`sliders_panel_window_rect`] so the panel wins before node-drag, node
+/// select, and marquee.
+pub(crate) fn paint_sliders_panel(ui: &mut egui::Ui, app: &mut App, pane: egui::Rect) {
+    let Some(panel) = sliders_panel_layout(app, pane) else {
+        return;
+    };
+    let t = crate::theme::active();
+    let bg = t.egui_color(t.graph_canvas_bg);
+    let accent = t.egui_color(t.graph_cluster_border);
+    let text = t.egui_color(t.graph_node_title);
+    let fill = t.egui_color(t.graph_node_fill);
+    let painter = ui.painter().with_clip_rect(pane);
+    // Panel chrome: opaque canvas backdrop + accent border, like the minimap.
+    painter.rect_filled(panel.rect, egui::CornerRadius::same(4), bg);
+    painter.rect(
+        panel.rect,
+        egui::CornerRadius::same(4),
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, accent),
+        egui::StrokeKind::Inside,
+    );
+    // Consume the pointer inside the panel before anything painted under it.
+    let _ = ui.interact(
+        panel.rect,
+        ui.id().with("sections_sliders_panel"),
+        egui::Sense::click_and_drag(),
+    );
+    let slice = paint_force_slider(
+        ui,
+        panel.label_rect(0),
+        panel.slider_rect(0),
+        "Slice",
+        &mut app.layout_slice_force,
+        0.0..=SLIDERS_FORCE_MAX,
+    );
+    let section = paint_force_slider(
+        ui,
+        panel.label_rect(1),
+        panel.slider_rect(1),
+        "Section",
+        &mut app.layout_section_force,
+        0.0..=SLIDERS_FORCE_MAX,
+    );
+    let cable = paint_force_slider(
+        ui,
+        panel.label_rect(2),
+        panel.slider_rect(2),
+        "Cable",
+        &mut app.tension,
+        crate::layout::TENSION_MIN..=crate::layout::TENSION_MAX,
+    );
+    let arrange = ui
+        .put(
+            panel.arrange,
+            egui::Button::new(egui::RichText::new("Arrange").color(text))
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, accent)),
+        )
+        .clicked();
+    if slice.changed() || section.changed() || cable.changed() {
+        app.rebuild_graph();
+    }
+    if arrange {
+        app.arrange_sections();
+    }
+}
+
 /// Ramp stops of the latency coloring scheme: `graph_edge_latency_0` is the
 /// coldest stop, `LATENCY_STOPS-1` the hottest (back edges land there).
 /// Shared by the legend painter and this builder's ramp formula
@@ -779,6 +995,12 @@ pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
 /// coordinates the pane's clip frames. Edges resolve the full
 /// color-precedence chain, clusters become padded member unions. `None` when
 /// no graph exists or the positional state is inconsistent with the graph.
+///
+/// Cluster containers are suppressed in sections mode: there the arrangement
+/// already reads as density through its member clustering (like a star cluster
+/// in the Milky Way, not a drawn box), so the scene carries no enclosing
+/// banner-group rectangles. The `Graph.clusters` data is untouched — only its
+/// rendering is off. Column and force modes keep the containers unchanged.
 pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<SceneSpec> {
     let graph = app.graph.as_ref()?;
     let mut camera = app.graph_camera.unwrap_or_default();
@@ -791,6 +1013,14 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     let dep_filtered = !app.dependency_nodes.is_empty();
     let inf_filtered = app.influence_filter_active;
     let filtered = dep_filtered || inf_filtered;
+    // Sections mode draws no cluster boxes (spec "Cluster boxes are not drawn
+    // (sections are visible only through member clustering)"): sections must
+    // not appear as drawn objects, only as density. Suppressing the spec here
+    // is the single suppression point — every cluster-shaped thing downstream
+    // (the painted border, the cluster title, minimap/hit geometry derived from
+    // `SceneSpec::clusters`) follows from this list being empty. A filtered
+    // render keeps dropping them for every mode, as before.
+    let render_clusters = !filtered && app.layout_mode != crate::config::LayoutMode::Sections;
     // Draw the animated (settling) positions when a settle is running; equal to
     // the solved `graph_positions` otherwise. Owned locally so the borrow lives
     // through the scene build.
@@ -802,7 +1032,7 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
             graph,
             positions: &display,
             camera,
-            render_clusters: !filtered,
+            render_clusters,
         },
         |idx| {
             !filtered
@@ -815,6 +1045,35 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
                 || (inf_filtered && app.influence_edges.contains(&idx))
         },
     )
+}
+
+/// World-space `(width, height)` node bodies as the renderer draws them
+/// (sections-black-hole-solver 3.10). Outside sections mode this is exactly
+/// [`crate::layout::node_world_sizes`] — the layout's per-node width estimate
+/// that sizes every other mode's frames (ADR 40). In sections mode each width
+/// is clamped to [`crate::layout::SECTIONS_LANE_MAX_NODE_W`], the same cap
+/// [`crate::layout::sections_lanes`] uses when it sizes the lanes, so a wide
+/// node's drawn body never outgrows the lane the solver reserved for it (its
+/// label then simply ellipsizes a little more, ADR 43). The cap is scoped to
+/// sections mode because the layout is solved once at build time while zoom is
+/// a render-time concern: an unconditional cap would change the default column
+/// layout.
+///
+/// One clamp serves both surfaces: the scene's drawn width *is* its spec-space
+/// hit extent ([`node_at`], [`nodes_in_rect`], [`nearest_node_at`]), so the
+/// tooltip, marquee and edge-port attribution geometry all follow the clamped
+/// frame. The terminal/window pointer path tests the same extents in *world*
+/// units (`handler::apply_graph_frame`); that path must read its body sizes
+/// through this function too, which is why it is `pub(crate)` — a node's raw
+/// estimate there would make the hover highlight reach past the drawn frame.
+pub(crate) fn drawn_world_sizes(mode: crate::config::LayoutMode, graph: &Graph) -> Vec<(f32, f32)> {
+    let mut sizes = crate::layout::node_world_sizes(graph);
+    if mode == crate::config::LayoutMode::Sections {
+        for (w, _) in &mut sizes {
+            *w = w.min(crate::layout::SECTIONS_LANE_MAX_NODE_W);
+        }
+    }
+    sizes
 }
 
 /// Shared scene core inputs: the graph to map through `camera`, its solved
@@ -849,8 +1108,10 @@ fn build_scene(
     // through the camera (graph-zoom-node-scaling decision 1): a node's pixel
     // size is its reserved world size times the zoom, so the column
     // arrangement stays overlap-free at any zoom. Indexed by full-graph index.
+    // In sections mode the width is clamped to the lane cap there (task 3.10)
+    // via `drawn_world_sizes`; every other mode is unchanged.
     let zoom = camera.zoom;
-    let world = crate::layout::node_world_sizes(graph);
+    let world = drawn_world_sizes(app.layout_mode, graph);
     let circuit_store = app.current_circuit_store();
 
     let diff = if app.diff_showing {
@@ -1521,6 +1782,7 @@ mod scene_builder_tests {
 
     use crate::app::LabelStore;
     use crate::app::{OptimizerDiffState, OptimizerState};
+    use crate::config::LayoutMode;
     use crate::diff::{ChangedCable, ChangedNode, DiffReport};
     use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
     use crate::latency::{EdgeLatency as ModelEdgeLatency, LatencyData, LatencySummary};
@@ -1799,6 +2061,123 @@ mod scene_builder_tests {
         assert_eq!(d.nodes[0].w, world[0].0 * 2.0);
         assert_eq!(d.nodes[0].h, world[0].1 * 2.0);
         assert_eq!(d.nodes[0].radius, NODE_RADIUS * 2.0);
+    }
+
+    /// A graph whose first node is wider than the sections lane cap and whose
+    /// second is narrower, for the mode-scoped width clamp (3.10).
+    fn wide_then_narrow_app() -> App {
+        // 40 chars × NODE_ESTIMATE_CHAR_WIDTH (8) + padding = 336 > cap (240).
+        let wide = "w".repeat(40);
+        let graph = Graph {
+            nodes: vec![circuit_node(&wide, 0, 0), circuit_node("copy", 0, 1)],
+            ..Graph::default()
+        };
+        scene_app(graph, &[(0.0, 0.0), (400.0, 0.0)])
+    }
+
+    #[test]
+    fn scene_sections_caps_wide_node_drawn_and_hit_width() {
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        let raw = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
+        assert!(raw[0].0 > cap, "fixture guard: raw {} > cap", raw[0].0);
+
+        let s = spec(&app); // fallback camera: zoom 1, pan 0
+        assert_eq!(s.nodes[0].w, cap, "drawn width is clamped to the lane cap");
+        assert_eq!(s.nodes[0].h, raw[0].1, "height is not clamped");
+
+        // Hit geometry follows the drawn frame: inside the cap hits, past it
+        // misses — the spec-space pointer path must not hover a wider region.
+        let (nx, ny) = (s.nodes[0].x, s.nodes[0].y);
+        assert_eq!(node_at(&s, nx + cap - 1.0, ny + 1.0), Some(0));
+        assert_eq!(node_at(&s, nx + cap + 1.0, ny + 1.0), None);
+        assert!(nodes_in_rect(&s, (nx + cap + 1.0, ny, 1.0, 1.0)).is_empty());
+    }
+
+    #[test]
+    fn scene_sections_cap_is_world_space_not_pixel_space() {
+        // The cap applies to the world width before projection, so a zoomed
+        // scene scales the capped body (cap × zoom) instead of the estimate.
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        app.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+        });
+        let s = spec(&app);
+        assert_eq!(s.nodes[0].w, cap * 2.0);
+    }
+
+    #[test]
+    fn scene_sections_leaves_a_narrower_node_unclamped() {
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        let raw = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
+        assert!(raw[1].0 < cap, "fixture guard: narrow {} < cap", raw[1].0);
+
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].w, raw[1].0);
+        let (nx, ny) = (s.nodes[1].x, s.nodes[1].y);
+        assert_eq!(node_at(&s, nx + raw[1].0 - 1.0, ny + 1.0), Some(1));
+        assert_eq!(node_at(&s, nx + raw[1].0 + 1.0, ny + 1.0), None);
+    }
+
+    #[test]
+    fn scene_column_and_force_modes_keep_the_raw_world_width() {
+        // ADR 40 guard: the sections cap is mode-scoped, so column and force
+        // keep drawing the layout's own per-node width estimate.
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        for mode in [LayoutMode::Column, LayoutMode::Force] {
+            let mut app = wide_then_narrow_app();
+            app.layout_mode = mode;
+            let raw = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
+            assert!(raw[0].0 > cap, "fixture guard: raw {} > cap", raw[0].0);
+            let s = spec(&app);
+            assert_eq!(s.nodes[0].w, raw[0].0, "{mode:?} keeps the raw width");
+            assert_eq!(s.nodes[1].w, raw[1].0, "{mode:?} keeps the raw width");
+        }
+    }
+
+    #[test]
+    fn scene_sections_capped_width_still_frames_through_the_camera_path() {
+        // The capped body stays inside the extent the fit reserved (the raw,
+        // uncapped max world width), so the fitted camera still frames it.
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        let canvas = (1280.0, 800.0);
+        let (fit_w, fit_h) = app.graph_fit_node_world();
+        app.graph_camera = Some(graph_window_fit_camera(
+            &app.graph_positions,
+            (fit_w, fit_h),
+            canvas,
+        ));
+        let s = spec(&app);
+        let zoom = spec_zoom(&s);
+        assert_eq!(s.nodes.len(), 2);
+        for (i, n) in s.nodes.iter().enumerate() {
+            assert!(
+                n.x.is_finite() && n.y.is_finite() && n.w.is_finite() && n.h.is_finite(),
+                "node {i} geometry finite"
+            );
+            assert!(n.w > 0.0 && n.h > 0.0, "node {i} has a body");
+            assert!(n.w <= fit_w * zoom + 1e-3, "node {i} within the fit width");
+            assert!(n.h <= fit_h * zoom + 1e-3, "node {i} within the fit height");
+            assert!(
+                n.x >= -0.5 && n.x + n.w <= canvas.0 + 0.5,
+                "node {i} on canvas: {}..{}",
+                n.x,
+                n.x + n.w
+            );
+            assert!(
+                n.y >= -0.5 && n.y + n.h <= canvas.1 + 0.5,
+                "node {i} on canvas: {}..{}",
+                n.y,
+                n.y + n.h
+            );
+        }
     }
 
     #[test]
@@ -2314,6 +2693,117 @@ mod scene_builder_tests {
         assert_eq!(c.title_color, theme().rgb(theme().graph_cluster_title));
     }
 
+    /// Four nodes in two banner groups (nodes 0..2 and 2..4): the fixture that
+    /// gives a sections graph clusters the solver anchors on, and that the
+    /// suppression tests below share.
+    fn two_group_app() -> App {
+        let graph = Graph {
+            nodes: vec![
+                circuit_node("clocktool", 0, 0),
+                circuit_node("osc", 0, 0),
+                circuit_node("vca", 0, 1),
+                circuit_node("filter", 0, 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            clusters: vec![
+                Cluster {
+                    title: "Controls".into(),
+                    section_range: 0..2,
+                },
+                Cluster {
+                    title: "Audio".into(),
+                    section_range: 2..4,
+                },
+            ],
+            ..Graph::default()
+        };
+        scene_app(
+            graph,
+            &[(0.0, 0.0), (260.0, 0.0), (520.0, 0.0), (780.0, 0.0)],
+        )
+    }
+
+    #[test]
+    fn scene_sections_mode_draws_no_cluster_rectangles() {
+        // Spec "No cluster boxes drawn in sections mode": the clustering itself
+        // visualizes sections, so no banner-group enclosing rectangle is built.
+        let mut app = two_group_app();
+        app.layout_mode = LayoutMode::Sections;
+        assert_eq!(
+            app.graph.as_ref().unwrap().clusters.len(),
+            2,
+            "fixture guard: two banner groups to suppress"
+        );
+        let s = spec(&app);
+        assert!(
+            s.clusters.is_empty(),
+            "sections mode builds no cluster rectangles: {:?}",
+            s.clusters
+        );
+        // A box that is not drawn must not be hit-testable either, so nothing
+        // is published for hit-testing/minimap/labels either.
+        assert!(
+            app.graph_cluster_rects.is_empty(),
+            "no cluster hit geometry in sections mode"
+        );
+    }
+
+    #[test]
+    fn scene_sections_multi_group_keeps_the_cluster_data() {
+        // Only the rendering is suppressed: the model keeps its banner groups
+        // so the solver's per-(group, row) anchors stay available.
+        let mut app = two_group_app();
+        app.layout_mode = LayoutMode::Sections;
+        assert!(spec(&app).clusters.is_empty());
+        let clusters = &app.graph.as_ref().unwrap().clusters;
+        assert_eq!(clusters.len(), 2, "the cluster data survives sections mode");
+        assert_eq!(clusters[0].title, "Controls");
+        assert_eq!(clusters[0].section_range, 0..2);
+        assert_eq!(clusters[1].title, "Audio");
+        assert_eq!(clusters[1].section_range, 2..4);
+    }
+
+    #[test]
+    fn scene_column_and_force_modes_keep_cluster_rectangles_unchanged() {
+        // Regression guard: the sections suppression is mode-scoped, so column
+        // and force keep drawing the very same enclosing rectangles.
+        let mut column_app = two_group_app();
+        column_app.layout_mode = LayoutMode::Column;
+        let column = spec(&column_app);
+
+        let mut force_app = two_group_app();
+        force_app.layout_mode = LayoutMode::Force;
+        let force = spec(&force_app);
+
+        assert_eq!(column.clusters.len(), 2, "column keeps both boxes");
+        assert_eq!(force.clusters.len(), 2, "force keeps both boxes");
+        assert_eq!(
+            column.clusters, force.clusters,
+            "both modes draw identical cluster geometry"
+        );
+
+        // The numbers are still the padded member union the cluster-bounds test
+        // above pins, so neither mode's cluster geometry shifted.
+        let world = crate::layout::node_world_sizes(column_app.graph.as_ref().unwrap());
+        let first = &column.clusters[0];
+        assert_eq!(first.title, "Controls");
+        assert_eq!(first.member_indices, vec![0, 1]);
+        assert_eq!(first.x, -CLUSTER_PAD);
+        assert_eq!(first.y, -CLUSTER_PAD);
+        assert_eq!(first.x + first.w, 260.0 + world[1].0 + CLUSTER_PAD);
+        assert_eq!(first.border, theme().rgb(theme().graph_cluster_border));
+        assert_eq!(first.title_color, theme().rgb(theme().graph_cluster_title));
+        let second = &column.clusters[1];
+        assert_eq!(second.title, "Audio");
+        assert_eq!(second.member_indices, vec![2, 3]);
+        assert_eq!(second.x, 520.0 - CLUSTER_PAD);
+        assert_eq!(second.x + second.w, 780.0 + world[3].0 + CLUSTER_PAD);
+    }
+
     #[test]
     fn scene_background_canvas_token_and_shape_counts() {
         let s = spec(&chain_app());
@@ -2341,7 +2831,8 @@ mod scene_builder_tests {
 #[cfg(test)]
 mod window_paint_tests {
     use super::*;
-    use crate::graph::{Graph, GraphEdge, GraphNode};
+    use crate::config::LayoutMode;
+    use crate::graph::{Cluster, Graph, GraphEdge, GraphNode};
     use crate::patch::NodeId;
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
@@ -3041,6 +3532,106 @@ mod window_paint_tests {
         // Never below the visibility floor (2 px length along the tangent).
         assert!(arrow_width(0.001) >= 2.0 - 1e-3);
     }
+
+    // ── sections-black-hole-solver: no cluster boxes in sections mode ───────
+
+    /// Four nodes in two banner groups (nodes 0..2 and 2..4) at world positions
+    /// a fitted camera frames.
+    fn two_group_app() -> App {
+        let graph = Graph {
+            nodes: vec![
+                circuit_node("clocktool", 0, 0),
+                circuit_node("osc", 0, 0),
+                circuit_node("vca", 0, 1),
+                circuit_node("filter", 0, 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            clusters: vec![
+                Cluster {
+                    title: "Controls".into(),
+                    section_range: 0..2,
+                },
+                Cluster {
+                    title: "Audio".into(),
+                    section_range: 2..4,
+                },
+            ],
+            ..Graph::default()
+        };
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = vec![(0.0, 0.0), (260.0, 0.0), (520.0, 0.0), (780.0, 0.0)];
+        app
+    }
+
+    fn scene_of(app: &App) -> SceneSpec {
+        build_scene_spec(
+            app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+        )
+        .expect("scene present")
+    }
+
+    /// Painted rect geometry (frame, fill, stroke color) so two frames can be
+    /// compared shape-for-shape without touching egui mesh internals.
+    fn rect_geometry(
+        rects: &[egui::epaint::RectShape],
+    ) -> Vec<(egui::Rect, egui::Color32, egui::Color32)> {
+        rects
+            .iter()
+            .map(|r| (r.rect, r.fill, r.stroke.color))
+            .collect()
+    }
+
+    #[test]
+    fn paint_omits_cluster_boxes_in_sections_mode() {
+        let canvas = egui::vec2(1280.0, 800.0);
+
+        // Positive control: with the clusters in the spec, column paints extra
+        // shapes — the two boxes and their titles.
+        let mut column = two_group_app();
+        column.layout_mode = LayoutMode::Column;
+        let column_scene = scene_of(&column);
+        let with_boxes = paint(Some(&column_scene), canvas);
+        let mut stripped = scene_of(&column);
+        stripped.clusters.clear();
+        let without_boxes = paint(Some(&stripped), canvas);
+        assert!(
+            with_boxes.rects.len() > without_boxes.rects.len(),
+            "column paints its cluster boxes: {} vs {} rects",
+            with_boxes.rects.len(),
+            without_boxes.rects.len()
+        );
+        assert!(
+            with_boxes.labels.len() > without_boxes.labels.len(),
+            "column paints its cluster titles: {:?}",
+            with_boxes.labels
+        );
+
+        // Sections mode paints exactly the stripped column frame: same nodes,
+        // same cables, and neither a banner-group rectangle nor a cluster
+        // title (spec "No cluster boxes drawn in sections mode").
+        let mut sections = two_group_app();
+        sections.layout_mode = LayoutMode::Sections;
+        let sections_scene = scene_of(&sections);
+        assert!(sections_scene.clusters.is_empty());
+        let sections_out = paint(Some(&sections_scene), canvas);
+        assert_eq!(
+            sections_out.labels, without_boxes.labels,
+            "no cluster title is painted in sections mode"
+        );
+        assert_eq!(
+            rect_geometry(&sections_out.rects),
+            rect_geometry(&without_boxes.rects),
+            "no cluster rectangle is painted in sections mode"
+        );
+        assert_eq!(sections_out.beziers, without_boxes.beziers);
+    }
 }
 #[cfg(test)]
 // Small fit test: the camera frames a spread world and carries a finite
@@ -3462,5 +4053,279 @@ mod zz_throwaway_dump2 {
             );
         }
         println!("== spec edges = {}", spec.edges.len());
+    }
+}
+
+/// sections-black-hole-solver 4.1/4.3 (and 6.4): the sections sliders panel
+/// paints only in sections mode with the panel toggled on, its three rows bind
+/// to the live `App` forces (each showing its numeric value), the Arrange
+/// button's own click region resolves inside the panel chrome and anneals on
+/// click, and the panel rect consumes the pointer before the canvas marquee.
+#[cfg(test)]
+mod sliders_panel_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::LayoutMode;
+    use crate::graph::{Graph, GraphEdge, GraphNode};
+    use crate::patch::{NodeId, Patch};
+    use std::path::Path;
+
+    /// The graph pane every panel frame paints into.
+    fn pane() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 640.0))
+    }
+
+    fn circuit_node(name: &str, idx: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(name, idx),
+            kind: NodeKind::Circuit,
+            circuit: name.to_string(),
+            instance_index: idx,
+            section_index: idx,
+        }
+    }
+
+    /// Two chained circuits in sections mode with the sliders panel toggled on:
+    /// a graph the panel's Arrange button can re-solve.
+    fn panel_app() -> App {
+        let graph = Graph {
+            nodes: vec![circuit_node("clocktool", 0), circuit_node("osc", 0)],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            ..Graph::default()
+        };
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = vec![(10.0, 20.0), (260.0, 20.0)];
+        app.layout_mode = LayoutMode::Sections;
+        app.showing_sliders = true;
+        app
+    }
+
+    fn raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(pane()),
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// Text labels and rect shapes one painted frame emitted.
+    #[derive(Default)]
+    struct PanelOutput {
+        labels: Vec<String>,
+        rects: Vec<egui::Rect>,
+    }
+
+    fn collect(full: &mut egui::FullOutput) -> PanelOutput {
+        let mut out = PanelOutput::default();
+        for cs in &full.shapes {
+            match &cs.shape {
+                egui::epaint::Shape::Text(t) => out.labels.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Rect(r) => out.rects.push(r.rect),
+                _ => {}
+            }
+        }
+        full.textures_delta.clear();
+        out
+    }
+
+    /// Paint one panel frame into its own context and report what it drew.
+    fn panel_frame(app: &mut App, events: Vec<egui::Event>) -> PanelOutput {
+        let ctx = egui::Context::default();
+        let mut full = ctx.run_ui(raw_input(events), |ui| {
+            paint_sliders_panel(ui, app, pane());
+        });
+        collect(&mut full)
+    }
+
+    fn pointer_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// The marquee the frame's pointer state produces, under `consume`.
+    fn marquee_in(
+        scene: &SceneSpec,
+        events: Vec<egui::Event>,
+        consume: Option<egui::Rect>,
+    ) -> Option<MarqueeSelection> {
+        let ctx = egui::Context::default();
+        let mut got = None;
+        let mut full = ctx.run_ui(raw_input(events), |ui| {
+            got = ui.ctx().input(|i| frame_marquee(Some(scene), i, consume));
+        });
+        full.textures_delta.clear();
+        got
+    }
+
+    #[test]
+    fn panel_paints_three_force_sliders_and_arrange_in_sections_mode() {
+        let mut app = panel_app();
+        // Distinct values so each row's readout proves its own binding.
+        app.layout_slice_force = 0.3;
+        app.layout_section_force = 0.05;
+        app.tension = 0.5;
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown in sections mode");
+        let out = panel_frame(&mut app, Vec::new());
+        for label in ["Slice", "Section", "Cable", "Arrange"] {
+            assert!(
+                out.labels.iter().any(|l| l == label),
+                "{label} row missing: {:?}",
+                out.labels
+            );
+        }
+        for value in ["0.30", "0.05", "0.50"] {
+            assert!(
+                out.labels.iter().any(|l| l == value),
+                "value {value} missing: {:?}",
+                out.labels
+            );
+        }
+        // The chrome (backdrop fill, then the border) covers the panel rect.
+        assert!(
+            out.rects
+                .iter()
+                .any(|r| r.min == panel.rect.min && r.max == panel.rect.max),
+            "panel chrome missing: {:?}",
+            out.rects
+        );
+        // Every row and the button row sit inside the chrome, and each row
+        // splits into a label column plus a slider track.
+        for (i, row) in panel.rows.iter().enumerate() {
+            assert!(panel.rect.contains_rect(*row), "row {i} inside the panel");
+            assert!(row.contains_rect(panel.label_rect(i)), "label column {i}");
+            assert!(row.contains_rect(panel.slider_rect(i)), "slider track {i}");
+        }
+        assert!(panel.rect.contains_rect(panel.arrange));
+    }
+
+    #[test]
+    fn panel_absent_outside_sections_mode_or_when_toggled_off() {
+        for (mode, showing) in [
+            (LayoutMode::Column, true),
+            (LayoutMode::Force, true),
+            (LayoutMode::Sections, false),
+        ] {
+            let mut app = panel_app();
+            app.layout_mode = mode;
+            app.showing_sliders = showing;
+            assert!(
+                sliders_panel_layout(&app, pane()).is_none(),
+                "{mode:?} / showing_sliders={showing} must not lay out a panel"
+            );
+            let out = panel_frame(&mut app, Vec::new());
+            assert!(
+                out.labels.is_empty() && out.rects.is_empty(),
+                "{mode:?} / showing_sliders={showing} painted {:?}",
+                out.labels
+            );
+        }
+        // A pane too small to hold the panel paints nothing either: the panel
+        // would spill over its neighbours.
+        let app = panel_app();
+        let tiny = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 90.0));
+        assert!(sliders_panel_layout(&app, tiny).is_none());
+    }
+
+    #[test]
+    fn arrange_button_click_region_is_inside_the_panel_and_anneals() {
+        let mut app = panel_app();
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown");
+        assert!(
+            panel.rect.contains_rect(panel.arrange),
+            "the button row is inside the panel chrome"
+        );
+        let center = panel.arrange.center();
+        assert!(panel.rect.contains(center), "and so is its click region");
+        // Hover/register, press, release on one context: the egui button click
+        // lifecycle.
+        let ctx = egui::Context::default();
+        for events in [
+            vec![egui::Event::PointerMoved(center)],
+            vec![pointer_button(center, true)],
+            vec![pointer_button(center, false)],
+        ] {
+            let mut full = ctx.run_ui(raw_input(events), |ui| {
+                paint_sliders_panel(ui, &mut app, pane());
+            });
+            full.textures_delta.clear();
+        }
+        assert_eq!(
+            app.status_message, "Arranged (sections)",
+            "the Arrange button click re-solves the sections layout"
+        );
+    }
+
+    #[test]
+    fn panel_rect_consumes_the_pointer_before_the_canvas_marquee() {
+        let app = panel_app();
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown");
+        let scene = SceneSpec {
+            background: (0, 0, 0),
+            nodes: vec![],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let inside = panel.rect.center();
+        let outside = egui::pos2(20.0, 20.0);
+        let drag = |from: egui::Pos2| {
+            let to = egui::pos2(from.x + 300.0, from.y + 300.0);
+            vec![
+                egui::Event::PointerMoved(from),
+                pointer_button(from, true),
+                egui::Event::PointerMoved(to),
+            ]
+        };
+        // Positive control: the drag is a marquee outside the panel…
+        assert!(
+            marquee_in(&scene, drag(outside), None).is_some(),
+            "an empty-canvas drag starts a marquee"
+        );
+        assert!(
+            marquee_in(&scene, drag(outside), Some(panel.rect)).is_some(),
+            "the exclusion only covers the panel's own rect"
+        );
+        // …and never one when the press begins inside the consumed panel rect.
+        assert!(
+            marquee_in(&scene, drag(inside), None).is_some(),
+            "without the exclusion the same press does marquee"
+        );
+        assert!(
+            marquee_in(&scene, drag(inside), Some(panel.rect)).is_none(),
+            "a press inside the panel never starts a marquee"
+        );
+    }
+
+    #[test]
+    fn window_rect_resolves_inside_the_open_graph_pane() {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.layout_mode = LayoutMode::Sections;
+        app.showing_sliders = true;
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0));
+        let pane = graph_pane_rect(&app, window).expect("the graph pane is open");
+        let panel = sliders_panel_window_rect(&app, window).expect("the panel resolves in it");
+        assert!(
+            pane.contains_rect(panel),
+            "panel {panel:?} inside its pane {pane:?}"
+        );
+        assert_eq!(
+            panel,
+            sliders_panel_layout(&app, pane).unwrap().rect,
+            "window resolution and the painted geometry agree"
+        );
+        // Hidden: nothing to consume, so the guard is free when the panel is off.
+        app.showing_sliders = false;
+        assert!(sliders_panel_window_rect(&app, window).is_none());
     }
 }

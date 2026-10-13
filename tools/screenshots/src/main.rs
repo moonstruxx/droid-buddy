@@ -166,6 +166,19 @@ fn setup_graph(app: &mut App) {
     app.cancel_graph_settle();
 }
 
+/// The sections-mode arrangement (change `sections-black-hole-solver`,
+/// task 7.1): the same two-big-pane graph layout as [`setup_graph`], but with
+/// the third arrangement mode selected *before* the graph is placed, so the
+/// first solve runs through `layout::solve_sections` (patch-order lanes,
+/// width-aware, wrapped into rows) rather than column or force mode. A plain
+/// field write before paint — no input, deterministic — and the harness's
+/// double-render check enforces it. The camera is left unset so the paint
+/// path's first-frame fit frames the whole solved layout.
+fn setup_sections(app: &mut App) {
+    app.layout_mode = config::LayoutMode::Sections;
+    setup_graph(app);
+}
+
 fn setup_viewer(app: &mut App) {
     // Source-viewer close-up: focus its small pane through the public
     // carousel (startup focus is BigLeft, SmallTop is next in tree order),
@@ -260,6 +273,28 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/s10_switch_kinds.ini",
             setup: setup_faceplate_stack,
         },
+        // Sections-mode lane check (change `sections-black-hole-solver`,
+        // task 7.1): the smallest fixture carrying two comment banners, each
+        // owning two circuits, rendered in the graph pane under
+        // `LayoutMode::Sections`. Circuits chain in patch order into one
+        // width-aware lane each; the two banner groups read as two contiguous
+        // density bands on the single lane row (too few lanes to reach the
+        // wrap target), which is what makes this the legible subject.
+        Shot {
+            file: "sections-lanes.png",
+            fixture: "fixtures/graph_topology_error.ini",
+            setup: setup_sections,
+        },
+        // Sections-mode scale check (same task): the 509-section scale anchor
+        // in the graph pane under `LayoutMode::Sections`, where the new
+        // lane/row arrangement replaced a 40:1 ribbon with a ~1.34 aspect
+        // grid. Layout shape, not label text, is the claim: the shot proves
+        // the big patch no longer collapses into one flat row.
+        Shot {
+            file: "sections-scale.png",
+            fixture: "fixtures/own_scale.ini",
+            setup: setup_sections,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -335,7 +370,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -388,6 +423,8 @@ fn main() {
         "unreferenced-elements",
         "shift-colour",
         "s10-switch-kinds",
+        "sections-lanes",
+        "sections-scale",
         "large-startup",
         "large-graph",
     ];

@@ -2410,3 +2410,409 @@ fn regression_s10_switch_kinds_glyphs() {
     // State text stability: Off switches read OFF on both kinds.
     assert_eq!(cell_for("S1.1").state_text, cell_for("S1.3").state_text);
 }
+
+// ── sections-black-hole-solver (task 6.1): sections mode keeps every banner
+//    group inside its own wrapped lane band ─────────────────────────────────
+// Cross-layer story: `fixtures/graph_topology_error.ini` (the smallest fixture
+// carrying two real comment banners, each owning two circuits) →
+// `App::load_patch` → `layout_mode = LayoutMode::Sections` → the real
+// `open_graph()` build + solve → the solved positions checked against the
+// **lane slots the solver itself seeds from**
+// ([`crate::layout::seed_positions_sections`]).
+//
+// The contract moved under this story (sections-black-hole-solver 3.8 / 3.9).
+// Circuits now chain as **width-aware lanes in patch order** (a lane is as wide
+// as its widest member's `min(estimated_width, SECTIONS_LANE_MAX_NODE_W)`), the
+// lanes **wrap into rows** at `SECTIONS_ROW_TARGET_W`, and the section-hole
+// spring no longer pulls toward the build-time `Graph.section_holes` value
+// (`mean_slice × HORIZONTAL_SPACING`): it pulls toward the mean **seed target**
+// of the group's own circuit members *in the same wrapped row* — one anchor per
+// (group, row) band, derived internally in lane-slot space. A per-node tether
+// (`SECTIONS_TETHER`) bounds how far a member may leave its own seeded slot,
+// and a deterministic overlap-removal pass enforces non-overlap as an explicit
+// post-condition. `Graph.section_holes` is therefore asserted only as the
+// build-time bookkeeping it still is — never against solved positions.
+//
+// Measured on this fixture through the real app path (pin `[0]`, bbox
+// 339.22 × 120.00): Sources members x = 0.000 / 109.031 on lane slots 0 / 142
+// (band anchor 71.0); Sinks members x = 209.375 / 339.219 on lane slots
+// 268 / 370 (band anchor 319.0); both clusters' members sit on y = 0;
+// clearance Sources→Sinks = 100.343.
+//
+// Tolerances are in world units and mirror `layout::tests`:
+//   * `DRIFT_GUARD` = `SECTIONS_TETHER + SECTIONS_LANE_GAP` = 60 + 40 = 100 —
+//     the same bound the scale story asserts as its `drift_tol`. The slice and
+//     section springs are tethered to each node's own seed target by
+//     `SECTIONS_TETHER` (60 = 1.5 lane gaps), and the overlap-removal pass may
+//     add at most one more lane gap while separating a pair, so 100 is the
+//     worst per-axis distance from the seed a solved node may reach. It
+//     replaces the old pitch-derived `ANCHOR_TOL_X` (0.30 × 80 = 24) and
+//     `SPREAD_TOL_X` (1.25 × 80 = 100): lane pitch is width-aware and ≈142
+//     here, so a two-member cluster legitimately spans more than the gap
+//     between band anchors and an inter-cluster-gap bound is structurally
+//     wrong.
+//   * Band centring: a group's mean x must stay **strictly inside**
+//     `SECTIONS_TETHER` (60) of its own band anchor (the mean of its members'
+//     seeded lane slots). The hole-spring pull is tether-bounded, so a group
+//     whose spring targets a distant anchor saturates *every* member against
+//     the tether in one direction and parks the mean exactly 60 away — measured
+//     60.000 for Sinks once the solver is handed the build-time
+//     `Graph.section_holes` anchors instead of the lane band anchors, versus
+//     16.484 (Sources) / 44.703 (Sinks) with them. The bound is strict because
+//     "exactly 60" is the saturated failure mode, not a settled cluster.
+//   * Cluster extent: a cluster's x-spread is bounded by **its own lane-slot
+//     span plus `DRIFT_GUARD`** — the honest replacement for the old
+//     "spread < clearance between anchors", which cannot hold now that one lane
+//     pitch (≈142) is wider than the band gap itself. Measured 109.031 against
+//     0..142 + 100 (Sources) and 129.845 against 268..370 + 100 (Sinks).
+//   * Containment and ordering: a member may lead its own lane slot by up to
+//     the tether (measured 58.625 — the Sinks leader at 209.375 against slot
+//     268), so containment in the group's lane band is asserted at the band ±
+//     `DRIFT_GUARD`, and interleaving is excluded separately: the two groups'
+//     member x-ranges stay disjoint (measured clearance 100.343 > 0) and no
+//     member of either group falls inside the other group's raw lane-slot span.
+// Falsified (scratch): feeding the solver the build-time `Graph.section_holes`
+// anchors instead of `section_hole_anchors_lanes` saturates both Sinks members
+// at the tether (x = 208.0 / 310.0, each exactly 60 left of its slot) and fails
+// the band-centring assertion (mean 259.0, drift 60.000 !< SECTIONS_TETHER);
+// restoring the lane band anchors passes. The tether is *not* a lever on this
+// fixture: at defaults it is never reached, so removing the clamp moves the
+// solved positions by < 0.04.
+//
+// Everything is force-relaxed, so the bounds above are tolerances rather than
+// equalities — but the exact-position determinism assertions below stay exact
+// (design D9: identical graph + identical force triple ⇒ identical positions).
+
+/// Per-axis bound on how far a solved node may sit from its own seeded lane
+/// slot: the tether plus one lane gap of overlap-removal slack — the same bound
+/// `layout::tests` asserts as its `drift_tol`.
+const DRIFT_GUARD: f32 = crate::layout::SECTIONS_TETHER + crate::layout::SECTIONS_LANE_GAP;
+/// Smallest real fixture with two comment banners, each owning two circuits.
+const SECTIONS_FIXTURE: &str = "fixtures/graph_topology_error.ini";
+
+/// One anchored circuit member of a banner group: the lane slot the solver
+/// seeded it on (`(slot_x, seed_y)`) and the position it solved to.
+struct SectionsMember {
+    slot: (f32, f32),
+    position: (f32, f32),
+}
+
+/// One banner group's solved geometry in sections mode: its title and its
+/// anchored circuit members (jumps and controllers may share a cluster's section
+/// range but own no section hole, so they never count as members).
+struct SectionsCluster {
+    title: String,
+    members: Vec<SectionsMember>,
+}
+
+impl SectionsCluster {
+    fn member_xs(&self) -> impl Iterator<Item = f32> + '_ {
+        self.members.iter().map(|member| member.position.0)
+    }
+
+    fn mean_x(&self) -> f32 {
+        self.member_xs().sum::<f32>() / self.members.len() as f32
+    }
+
+    fn spread_x(&self) -> f32 {
+        self.max_x() - self.min_x()
+    }
+
+    fn min_x(&self) -> f32 {
+        self.member_xs().fold(f32::INFINITY, f32::min)
+    }
+
+    fn max_x(&self) -> f32 {
+        self.member_xs().fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Mean seeded lane slot x of the members — the per-(group, row) band anchor
+    /// the solver derives internally (this fixture wraps into a single row, so
+    /// the band is the whole group).
+    fn band_anchor_x(&self) -> f32 {
+        self.members.iter().map(|member| member.slot.0).sum::<f32>() / self.members.len() as f32
+    }
+
+    /// Width of the lane-slot range the group's members were seeded on.
+    fn slot_span_x(&self) -> f32 {
+        let min = self
+            .members
+            .iter()
+            .map(|member| member.slot.0)
+            .fold(f32::INFINITY, f32::min);
+        let max = self
+            .members
+            .iter()
+            .map(|member| member.slot.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        max - min
+    }
+}
+
+/// Load `fixture` through the real app path, switch to sections mode, open the
+/// graph (`open_graph()` builds the graph AND solves it with the current
+/// `layout_mode` and force triple), and return the app plus each banner group's
+/// solved geometry paired with the lane slots the sections seed placed its
+/// members on. Only anchored circuit members count.
+fn sections_clusters(fixture: &str) -> (App, Vec<SectionsCluster>) {
+    let patch = Patch::from_ini_file(Path::new(fixture)).expect("fixture must parse");
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    app.layout_mode = crate::config::LayoutMode::Sections;
+    app.open_graph();
+    let graph = app
+        .graph
+        .as_ref()
+        .expect("open_graph builds a graph")
+        .clone();
+    let positions = app.graph_positions.clone();
+    let slots = crate::layout::seed_positions_sections(&graph);
+
+    let mut clusters = Vec::new();
+    for (cluster_index, cluster) in graph.clusters.iter().enumerate() {
+        let members: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                graph.cluster_index_of(node.section_index) == Some(cluster_index)
+                    && graph.section_holes.get(*index).copied().flatten().is_some()
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        // Build-time bookkeeping only: `compute_section_holes` still records one
+        // `mean_slice × pitch` hole per group, and every member of a group shares
+        // it. The solver no longer reads this value (see the module comment), so
+        // it is never compared against a solved position.
+        let hole_x = graph.section_holes[members[0]]
+            .expect("member is anchored")
+            .0;
+        assert!(
+            members
+                .iter()
+                .all(|&index| graph.section_holes[index].expect("member is anchored").0 == hole_x),
+            "every member of {:?} must share one build-time section-hole anchor",
+            cluster.title
+        );
+        clusters.push(SectionsCluster {
+            title: cluster.title.clone(),
+            members: members
+                .iter()
+                .map(|&index| SectionsMember {
+                    slot: slots[index],
+                    position: positions[index],
+                })
+                .collect(),
+        });
+    }
+    (app, clusters)
+}
+
+#[test]
+fn regression_sections_mode_clusters_around_section_holes() {
+    let (app, clusters) = sections_clusters(SECTIONS_FIXTURE);
+
+    // Structure the story depends on: two banner groups, each really a cluster
+    // of at least two anchored circuits (the fixture must not silently lose a
+    // group or a cable).
+    assert!(
+        clusters.len() >= 2,
+        "the fixture must expose at least two banner groups, got {}",
+        clusters.len()
+    );
+    for cluster in &clusters {
+        assert!(
+            cluster.members.len() >= 2,
+            "banner group {:?} must anchor at least two circuits, got {}",
+            cluster.title,
+            cluster.members.len()
+        );
+    }
+
+    // Requirement 1: no member leaves its own group's lane band. The band is the
+    // range of lane slots its members were seeded on; it is expanded by
+    // DRIFT_GUARD because the tether lets a member lead its own slot — a raw
+    // span containment is exactly what no longer holds (the Sinks leader sits
+    // 58.625 left of slot 268). Interleaving is excluded separately below.
+    for cluster in &clusters {
+        let lo = cluster
+            .members
+            .iter()
+            .map(|member| member.slot.0)
+            .fold(f32::INFINITY, f32::min)
+            - DRIFT_GUARD;
+        let hi = cluster
+            .members
+            .iter()
+            .map(|member| member.slot.0)
+            .fold(f32::NEG_INFINITY, f32::max)
+            + DRIFT_GUARD;
+        for (i, member) in cluster.members.iter().enumerate() {
+            assert!(
+                member.position.0 >= lo && member.position.0 <= hi,
+                "banner group {:?} member {i} solved x={} outside its lane band \
+                 [{lo}, {hi}] (member lane slots ± DRIFT_GUARD {DRIFT_GUARD})",
+                cluster.title,
+                member.position.0
+            );
+        }
+    }
+
+    // Requirement 2: every member stays tethered to its own seeded slot — x to
+    // its lane slot, y to its seeded stack target. Bound DRIFT_GUARD = the
+    // tether (60) plus one lane gap of overlap-removal slack (40); the springs
+    // themselves can only reach the tether, and the separation pass is what
+    // needs the extra lane gap.
+    for cluster in &clusters {
+        for (i, member) in cluster.members.iter().enumerate() {
+            let dx = member.position.0 - member.slot.0;
+            let dy = member.position.1 - member.slot.1;
+            assert!(
+                dx.abs() <= DRIFT_GUARD,
+                "banner group {:?} member {i} x={} left its lane slot {} by \
+                 {dx} > DRIFT_GUARD {DRIFT_GUARD}",
+                cluster.title,
+                member.position.0,
+                member.slot.0
+            );
+            assert!(
+                dy.abs() <= DRIFT_GUARD,
+                "banner group {:?} member {i} y={} left its seeded stack target {} by \
+                 {dy} > DRIFT_GUARD {DRIFT_GUARD}",
+                cluster.title,
+                member.position.1,
+                member.slot.1
+            );
+        }
+    }
+
+    // Requirement 3: a group reads as one tight band **relative to its own lane
+    // span**, not relative to its neighbour. Bound: the group's own lane-slot
+    // span plus DRIFT_GUARD, the worst overhang its outermost members can add.
+    // The old "spread < clearance between anchors" is what this replaces: one
+    // width-aware lane pitch (≈142) is now wider than the band gap itself.
+    for cluster in &clusters {
+        let spread = cluster.spread_x();
+        let bound = cluster.slot_span_x() + DRIFT_GUARD;
+        assert!(
+            spread <= bound,
+            "banner group {:?} x-spread {spread} exceeds its own lane span {} + \
+             DRIFT_GUARD {DRIFT_GUARD} = {bound}",
+            cluster.title,
+            cluster.slot_span_x()
+        );
+    }
+
+    // Requirement 4: each group still settles on its **own lane-derived band
+    // anchor** (the mean slot of its members), not on a distant build-time hole.
+    // Strictly inside SECTIONS_TETHER, because a saturated pull parks the mean
+    // exactly at the tether (measured 60.000 for Sinks with the build-time
+    // `Graph.section_holes` anchors 40 / 200 in place of the band anchors
+    // 71 / 319); a settled band stays well inside it (16.484 / 44.703).
+    for cluster in &clusters {
+        let anchor = cluster.band_anchor_x();
+        let drift = (cluster.mean_x() - anchor).abs();
+        assert!(
+            drift < crate::layout::SECTIONS_TETHER,
+            "banner group {:?} did not settle on its own lane band anchor: mean {}, \
+             anchor {anchor}, drift {drift} !< SECTIONS_TETHER {}",
+            cluster.title,
+            cluster.mean_x(),
+            crate::layout::SECTIONS_TETHER
+        );
+    }
+
+    // Requirement 5: the groups stay distinguishable and ordered — neighbouring
+    // member x-ranges are disjoint (clearance > 0), and no member of one group
+    // intrudes into the other group's raw lane-slot span (no interleaving).
+    let mut ordered = clusters.iter().collect::<Vec<_>>();
+    ordered.sort_by(|a, b| a.min_x().partial_cmp(&b.min_x()).expect("finite member x"));
+    for pair in ordered.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        let clearance = right.min_x() - left.max_x();
+        assert!(
+            clearance > 0.0,
+            "banner groups {:?} and {:?} overlap: clearance {clearance}",
+            left.title,
+            right.title
+        );
+        for (outer, inner) in [(left, right), (right, left)] {
+            let lo = inner
+                .members
+                .iter()
+                .map(|member| member.slot.0)
+                .fold(f32::INFINITY, f32::min);
+            let hi = inner
+                .members
+                .iter()
+                .map(|member| member.slot.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            for member in &outer.members {
+                assert!(
+                    !(member.position.0 > lo && member.position.0 < hi),
+                    "banner group {:?} member x={} interleaves into {:?}'s lane span \
+                     [{lo}, {hi}]",
+                    outer.title,
+                    member.position.0,
+                    inner.title
+                );
+            }
+        }
+    }
+
+    // Determinism (design D9): the same graph solved twice under the same force
+    // triple yields identical positions, and a second app driven through the
+    // same real path lands on byte-identical positions and lane slots.
+    let graph = app.graph.as_ref().expect("graph").clone();
+    let pins = app.pinned_indices(&graph);
+    let triple = (
+        app.tension,
+        app.layout_slice_force,
+        app.layout_section_force,
+    );
+    let first = crate::layout::solve_sections(&graph, &pins, triple.0, triple.1, triple.2);
+    let second = crate::layout::solve_sections(&graph, &pins, triple.0, triple.1, triple.2);
+    assert_eq!(
+        first, second,
+        "solving one graph twice under one force triple must be deterministic"
+    );
+
+    let signature = |clusters: &[SectionsCluster]| {
+        clusters
+            .iter()
+            .map(|cluster| {
+                (
+                    cluster.title.clone(),
+                    cluster
+                        .members
+                        .iter()
+                        .map(|member| (member.slot, member.position))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (again, again_clusters) = sections_clusters(SECTIONS_FIXTURE);
+    assert_eq!(
+        (
+            again.tension,
+            again.layout_slice_force,
+            again.layout_section_force
+        ),
+        triple,
+        "both runs must use the same force triple (the D9 precondition)"
+    );
+    assert_eq!(
+        app.graph_positions, again.graph_positions,
+        "a second open in sections mode must reproduce the first solve exactly"
+    );
+    assert_eq!(
+        signature(&clusters),
+        signature(&again_clusters),
+        "cluster lane slots and member positions must be reproducible"
+    );
+}

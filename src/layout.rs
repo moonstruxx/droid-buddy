@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::config::LayoutOrdering;
+use crate::config::{LayoutMode, LayoutOrdering};
 use crate::graph::{Graph, NodeId, NodeKind};
 
 /// Freeze when total kinetic energy (sum of |velocity|², unit mass) is below.
@@ -60,6 +60,70 @@ const REPULSION_STRENGTH: f32 = 1500.0;
 const REPULSION_RADIUS: f32 = 120.0;
 /// Per-axis cap on a single velocity update, keeps the solver from exploding.
 const MAX_DISPLACEMENT: f32 = 20.0;
+
+/// Spring stiffness for slice springs in sections mode (design D1 + 3.8):
+/// pulls each node toward its own seed target `(slot_x, slot_y + rank · stack
+/// pitch)` — see [`sections_seed`]. Mutable at runtime so sliders can tune it
+/// (like `tension`).
+pub const SLICE_K: f32 = DEFAULT_SLICE_K;
+/// Default slice spring stiffness — strong enough to hold non-clustered nodes
+/// on their seeded targets while still letting cables drag them within a lane.
+pub const DEFAULT_SLICE_K: f32 = 0.1;
+/// Spring stiffness for section-hole springs in sections mode (design D1):
+/// pulls banner-group members toward their fixed section hole anchor — the mean
+/// seed target of their (banner group, row) band ([`section_hole_anchors_lanes`]).
+/// Mutable at runtime so sliders can tune it (like `tension`).
+pub const SECTION_HOLE_K: f32 = DEFAULT_SECTION_HOLE_K;
+/// Default section-hole spring stiffness — anchors members strongly.
+pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
+
+/// Bounded overlap-removal passes appended to a sections-mode solve
+/// (sections-black-hole-solver 3.9), and the slack each resolved pair keeps.
+///
+/// The wrapped seed is the layout's spacing guarantee — measured worst pairwise
+/// penetration 0.00 on `fixtures/own_scale.ini` — but the force relaxation can
+/// still destroy it. Every force is clamped to the same [`MAX_DISPLACEMENT`], so
+/// a node with an unbalanced cable bundle (own_scale's controller has 16 cables)
+/// drifts its entire travel budget — measured 1180 units in both axes, landing
+/// inside another row's lane for 79 units of overlap — and a banner band that
+/// spans a whole row is compressed toward its own mean the same way. The tether
+/// ([`SECTIONS_TETHER`]) stops the runaway; this pass cleans up whatever
+/// penetration the remaining slack still produces.
+///
+/// The relaxation still decides where circuits live (the pass only resolves
+/// penetration, never compacts), so the layout keeps its cable-driven character.
+const SECTION_SEPARATION_PASSES: usize = 8;
+/// Extra clearance a resolved pair keeps, so a pair the pass touches lands
+/// strictly clear instead of exactly touching on the boundary.
+const SECTION_SEPARATION_EPS: f32 = 1.0;
+
+/// Per-axis bound on how far a sections-mode node may be displaced from its own
+/// seed target (sections-black-hole-solver 3.9).
+///
+/// The seed is the spacing contract: it reserves each node's lane, and it is
+/// measured overlap-free (worst pairwise penetration 0.00 on
+/// `fixtures/own_scale.ini`). The springs then only fine-tune inside that space.
+/// Without the tether they do more than fine-tune: cable and section-hole forces
+/// are clamped to the same [`MAX_DISPLACEMENT`] budget as the positional springs,
+/// so a node with an unbalanced cable bundle drifts its whole travel budget —
+/// measured 1180 units in both axes on own_scale — and lands inside another
+/// row's lane.
+///
+/// The value is 1.5 lane gaps, chosen from both ends:
+/// - **At least** 43 units: [`sections_mode_keeps_large_nodes_beyond_their_size_required_distance`]
+///   needs two capped-lane neighbours (lane pitch 360, required 496) to escape
+///   ~43 units each for size-aware repulsion to win. A tighter tether would glue
+///   them below their required separation.
+/// - **At most** a fraction of the row pitch: two nodes can approach each other
+///   by at most `2 × SECTIONS_TETHER`, which the overlap-removal pass then
+///   resolves — measured worst residual 1.71 units on own_scale against a 40-unit
+///   tolerance, so the slack the tether grants stays far inside the requirement.
+///
+/// Mutable at runtime? No: unlike [`SLICE_K`] and [`SECTION_HOLE_K`] this is a
+/// layout invariant, not a look knob — a larger tether buys nothing but overlap.
+pub const SECTIONS_TETHER: f32 = DEFAULT_SECTIONS_TETHER;
+/// Default tether: 1.5 lane gaps (see [`SECTIONS_TETHER`]).
+pub const DEFAULT_SECTIONS_TETHER: f32 = SECTIONS_LANE_GAP * 1.5;
 
 /// Weak per-cluster cohesion pulling each member toward its banner group's
 /// centroid (design D3). Deliberately far below `SPRING_K` so clusters
@@ -100,6 +164,44 @@ pub const NODE_WORLD_H: f32 = 80.0;
 // vertical slot. Checked at compile time so a constants change fails the build
 // instead of tripping `clippy::assertions_on_constants` in a runtime test.
 const _: () = assert!(NODE_WORLD_H < VERTICAL_SPACING);
+
+// ── sections-black-hole-solver 3.8: width-aware lanes wrapped into rows ─────
+
+/// Cap on a node's lane-width contribution in sections mode
+/// (sections-black-hole-solver 3.8). Lane sizing credits every node
+/// `min(estimated_widths[i], SECTIONS_LANE_MAX_NODE_W)`, so one very wide node
+/// cannot blow up its lane and shove the wrapped row grid out of square: node
+/// widths reach ~496 while [`SECTIONS_LANE_GAP`] is 40, so lane pitch must
+/// track width, not a fixed pitch.
+///
+/// `pub` because the renderer clamps the frame it draws to this same value
+/// (task 3.9): a drawn body then never exceeds the lane width the solver
+/// reserved for it.
+pub const SECTIONS_LANE_MAX_NODE_W: f32 = 240.0;
+
+/// Target row width in world units for the wrapped sections seed
+/// (sections-black-hole-solver 3.8). [`sections_lanes`] packs lanes left→right
+/// while they fit under this width and wraps to a new row otherwise. Chosen so
+/// a ~500-lane patch (e.g. `fixtures/own_scale.ini`, 510 lanes) wraps into a
+/// roughly square grid (measured 2732 × 2500, aspect 1.09) instead of the
+/// ~40:1 diagonal ribbon the old pitch seed produced.
+pub const SECTIONS_ROW_TARGET_W: f32 = 4000.0;
+
+/// Horizontal gap between adjacent lanes inside one row, in world units.
+pub const SECTIONS_LANE_GAP: f32 = 40.0;
+
+/// Vertical gap between wrapped rows, in world units.
+pub const SECTIONS_ROW_GAP: f32 = 80.0;
+
+/// Vertical gap between nodes stacked inside one lane. `NODE_WORLD_H` + this
+/// equals [`VERTICAL_SPACING`] (120) — the in-lane pitch earlier seeds used,
+/// so a multi-node lane starts on the same rhythm.
+const SECTIONS_STACK_GAP: f32 = 40.0;
+
+/// Width credited to a lane that holds no nodes. An empty section index still
+/// consumes its slot so lane order always equals patch order, but it must not
+/// reserve a full lane's width.
+const SECTIONS_LANE_MIN_W: f32 = 40.0;
 
 /// Default iteration cap for a damped local re-settle (fewer than a solve).
 pub const LOCAL_ITERATIONS: usize = 40;
@@ -142,6 +244,36 @@ pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
         None,
         pinned,
         tension,
+        LayoutMode::Force,
+    );
+    positions
+}
+
+/// Sections-mode solver (sections-black-hole-solver 5.1): joint black-hole solve
+/// with slice springs, section-hole springs, cable springs, and size-aware
+/// repulsion.
+///
+/// `slice_force` and `section_force` are the runtime-adjustable spring
+/// stiffnesses (bound to `SLICE_K` and `SECTION_HOLE_K` by the caller before
+/// calling). `tension` is the cable spring stiffness.
+pub fn solve_sections(
+    graph: &Graph,
+    pinned: &[usize],
+    tension: f32,
+    slice_force: f32,
+    section_force: f32,
+) -> Vec<(f32, f32)> {
+    let mut positions = seed_positions_sections(graph);
+    run_iterations_with_forces(
+        graph,
+        &mut positions,
+        SOLVE_ITERATIONS,
+        None,
+        pinned,
+        tension,
+        LayoutMode::Sections,
+        slice_force,
+        section_force,
     );
     positions
 }
@@ -172,8 +304,95 @@ pub fn local_resettle(
     let active: Vec<bool> = (0..graph.nodes.len())
         .map(|i| dist(positions[i], c) <= radius)
         .collect();
-    run_iterations(graph, positions, iterations, Some(&active), pinned, tension);
+    run_iterations(
+        graph,
+        positions,
+        iterations,
+        Some(&active),
+        pinned,
+        tension,
+        LayoutMode::Force,
+    );
     true
+}
+
+/// Push every pair of overlapping bodies apart along the axis that needs the
+/// least correction, in bounded deterministic passes (sections-black-hole-solver
+/// 3.9 — see [`SECTION_SEPARATION_PASSES`]).
+///
+/// `sizes` is `(width, height)` per node (parallel to `positions`), the same
+/// extents the renderer draws, so the predicate is the axis-aligned one: a pair
+/// is clear once `|Δx| ≥ (w_i + w_j) / 2` *or* `|Δy| ≥ (h_i + h_j) / 2`. Only
+/// still-overlapping pairs are touched, and only along their cheaper axis, so
+/// the pass never compacts the layout — it strictly removes penetration.
+///
+/// `movable[i] == false` marks a pinned node: it stays exactly where it is (it
+/// is an anchor other nodes are pushed away from) and its partner takes the
+/// whole correction when it can. A pair with both nodes pinned is left alone.
+///
+/// The pass is deliberately *not* tethered: it runs after the relaxation and may
+/// push a node past [`SECTIONS_TETHER`] rather than leave two bodies overlapping
+/// (measured worst extra push on `fixtures/own_scale.ini`: 13.75 units). It is
+/// only needed because the springs can still lose: a lane reserves the width of
+/// its own widest member, so a narrow lane butted against a much wider one can
+/// seed a pair whose horizontal clearance is short of `(w_a + w_b) / 2` (the one
+/// seed-level shortfall the wrapped grid can have).
+///
+/// Returns the number of pairs still overlapping after the last pass (0 when the
+/// layout was already clear, which is the common case).
+///
+/// Deterministic: a single thread, a fixed `(i, j)` sweep order, and no RNG —
+/// the pass is a pure function of the positions and sizes it is given.
+fn separate_overlaps(
+    positions: &mut [(f32, f32)],
+    sizes: &[(f32, f32)],
+    movable: &[bool],
+    passes: usize,
+) -> usize {
+    let n = positions.len();
+    let mut overlapping = 0;
+    for _ in 0..passes {
+        overlapping = 0;
+        for i in 0..n {
+            for j in i + 1..n {
+                let need_x = 0.5 * (sizes[i].0 + sizes[j].0);
+                let need_y = 0.5 * (sizes[i].1 + sizes[j].1);
+                let dx = positions[j].0 - positions[i].0;
+                let dy = positions[j].1 - positions[i].1;
+                let pen_x = need_x - dx.abs();
+                let pen_y = need_y - dy.abs();
+                if pen_x <= 0.0 || pen_y <= 0.0 {
+                    continue;
+                }
+                overlapping += 1;
+                // How much of the correction each side takes: an immovable
+                // partner hands its share to the movable one; two immovable
+                // bodies cannot be separated at all.
+                let (share_i, share_j) = match (movable[i], movable[j]) {
+                    (true, true) => (0.5, 0.5),
+                    (true, false) => (1.0, 0.0),
+                    (false, true) => (0.0, 1.0),
+                    (false, false) => (0.0, 0.0),
+                };
+                // Escape along the cheaper axis (ties go to x, deterministically).
+                if pen_x <= pen_y {
+                    let push = (pen_x + SECTION_SEPARATION_EPS) * 0.5;
+                    let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+                    positions[i].0 -= sign * push * share_i;
+                    positions[j].0 += sign * push * share_j;
+                } else {
+                    let push = (pen_y + SECTION_SEPARATION_EPS) * 0.5;
+                    let sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+                    positions[i].1 -= sign * push * share_i;
+                    positions[j].1 += sign * push * share_j;
+                }
+            }
+        }
+        if overlapping == 0 {
+            break;
+        }
+    }
+    overlapping
 }
 
 /// Deterministic initial placement along a single dominant left→right axis
@@ -200,6 +419,272 @@ pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
             (x, y)
         })
         .collect()
+}
+
+/// Wrapped-lane geometry for sections mode (sections-black-hole-solver 3.8).
+///
+/// A *lane* is one patch-order slice: circuits chain in patch order, controller
+/// and input-jack nodes share the fixed left outer lane, output jacks the fixed
+/// right outer lane (see [`slice_index`]). Lanes are packed left→right into rows
+/// of at most [`SECTIONS_ROW_TARGET_W`], so a 500-lane patch reads roughly
+/// square instead of as a long diagonal ribbon.
+struct SectionsLanes {
+    /// Lane index per node, parallel to `graph.nodes`.
+    lane: Vec<usize>,
+    /// Slot `(left x, top y)` per lane index, indexable by lane index.
+    slot: Vec<(f32, f32)>,
+    /// Row index per lane, indexable by lane index. All lanes in one row share
+    /// the same `slot.1`; the row index is what lets section-hole anchors be
+    /// computed per row band (task 3.9, defect B) instead of from one global
+    /// mean slot that a wrapped group cannot reach.
+    row: Vec<usize>,
+}
+
+impl SectionsLanes {
+    /// The slot of the lane the node at `node` belongs to.
+    fn slot_of(&self, node: usize) -> (f32, f32) {
+        self.slot[self.lane[node]]
+    }
+
+    /// The row band the node at `node` wrapped into.
+    fn row_of(&self, node: usize) -> usize {
+        self.row[self.lane[node]]
+    }
+
+    /// Number of wrapped rows (≥ 1 for any non-empty graph).
+    fn row_count(&self) -> usize {
+        self.row.iter().copied().max().map_or(0, |m| m + 1)
+    }
+}
+
+/// Sections-mode seed geometry for one graph: the wrapped lanes plus each
+/// node's own seed target (task 3.9).
+///
+/// Both the seed and the slice springs read `targets` from here, so the seed a
+/// node starts on and the point its slice spring pulls it back toward can never
+/// drift apart (defect A was exactly that divergence: the seed stacked a
+/// multi-node lane, the spring flattened it onto one `slot_y`).
+struct SectionsSeed {
+    lanes: SectionsLanes,
+    /// `(slot_x, seed_y)` per node, parallel to `graph.nodes`.
+    targets: Vec<(f32, f32)>,
+}
+
+/// Assign every node a lane and pack the lanes into wrapped rows
+/// (sections-black-hole-solver 3.8).
+///
+/// Lane index comes from [`slice_index`] (patch order for circuits, fixed outer
+/// lanes for controllers/jacks). Lane width is the widest member's
+/// `min(estimated_widths[i], SECTIONS_LANE_MAX_NODE_W)` — width *tracking*, so a
+/// 240-wide body still fits the lane the solver reserved, while a wider one is
+/// capped so it cannot blow the row grid up. Lane height is the lane's **full
+/// stacked height** — `(count − 1) · (NODE_WORLD_H + SECTIONS_STACK_GAP) +
+/// NODE_WORLD_H` (task 3.9) — so a multi-node lane reserves its whole stack and
+/// the next row starts below it. A lane with no nodes keeps its slot with
+/// width [`SECTIONS_LANE_MIN_W`], so lane order always equals patch order.
+///
+/// Packing walks lanes in ascending index order, accumulating `row_x`: a lane
+/// starts a new row when placing it would push `row_x + lane_w` past
+/// [`SECTIONS_ROW_TARGET_W`] *and* the row already holds a lane. `row_h` is the
+/// tallest lane stack in the row, so rows never overlap vertically and each
+/// lane's `row` index is recorded for the per-row anchors.
+///
+/// Deterministic: lane order, lane widths, and the packing walk are pure
+/// functions of the graph — no RNG, no hash iteration order.
+fn sections_lanes(graph: &Graph) -> SectionsLanes {
+    let mut lane = slice_index(graph);
+
+    // Defence in depth against a pathological `section_index` from a corrupt or
+    // sparse parse (an absolute index rather than a dense one would otherwise
+    // seed an astronomical grid): clamp every lane to the outer-slice bound so
+    // a bad input degrades to a wide-but-finite layout instead of a black hole.
+    let max_slice = graph
+        .nodes
+        .iter()
+        .map(|node| node.section_index)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    for s in lane.iter_mut() {
+        *s = (*s).min(max_slice);
+    }
+    let lane_count = lane.iter().copied().max().map_or(0, |m| m + 1);
+
+    // Lane extents: widest capped member width, and the lane's full stacked
+    // height. `lane_w` tracks width; `lane_h` must include the whole stack
+    // (task 3.9): a two-node lane reaches `NODE_WORLD_H + SECTIONS_STACK_GAP`
+    // below its slot, so a row sized from `NODE_WORLD_H` alone lets that stack
+    // overflow into the next row's band (measured on
+    // `fixtures/own_scale.ini`: lane 0's second node at y = 120 against row 1's
+    // first node at y = 160 — 40 units of vertical overlap in the seed itself).
+    let widths = estimated_widths(graph);
+    let mut lane_w = vec![0.0f32; lane_count];
+    let mut lane_h = vec![0.0f32; lane_count];
+    let mut lane_nodes = vec![0usize; lane_count];
+    for (i, &s) in lane.iter().enumerate() {
+        lane_w[s] = lane_w[s].max(widths[i].min(SECTIONS_LANE_MAX_NODE_W));
+        lane_nodes[s] += 1;
+    }
+    for (s, count) in lane_nodes.iter().enumerate() {
+        if *count > 0 {
+            lane_h[s] = (*count - 1) as f32 * (NODE_WORLD_H + SECTIONS_STACK_GAP) + NODE_WORLD_H;
+        }
+    }
+
+    // Pack the lanes into rows, in ascending lane order.
+    let mut slot = vec![(0.0f32, 0.0f32); lane_count];
+    let mut row = vec![0usize; lane_count];
+    let (mut row_x, mut row_y, mut row_h) = (0.0f32, 0.0f32, 0.0f32);
+    let mut row_index = 0usize;
+    let mut row_has_lane = false;
+    for s in 0..lane_count {
+        let w = if lane_w[s] > 0.0 {
+            lane_w[s]
+        } else {
+            SECTIONS_LANE_MIN_W
+        };
+        let h = if lane_h[s] > 0.0 {
+            lane_h[s]
+        } else {
+            SECTIONS_LANE_MIN_W
+        };
+        if row_has_lane && row_x + w > SECTIONS_ROW_TARGET_W {
+            row_y += row_h + SECTIONS_ROW_GAP;
+            row_x = 0.0;
+            row_h = 0.0;
+            row_index += 1;
+        }
+        slot[s] = (row_x, row_y);
+        row[s] = row_index;
+        row_x += w + SECTIONS_LANE_GAP;
+        row_h = row_h.max(h);
+        row_has_lane = true;
+    }
+
+    SectionsLanes { lane, slot, row }
+}
+
+/// Sections-mode seed: lane geometry plus each node's own stacked target
+/// (sections-black-hole-solver 3.9).
+///
+/// Per node, with `s = lane[i]` and `r` the node's index among its lane's
+/// members in graph order:
+///
+/// ```text
+/// x = slot_x(s)                                   (the lane's left edge)
+/// y = slot_y(s) + r · (NODE_WORLD_H + SECTIONS_STACK_GAP)
+/// ```
+///
+/// Narrower nodes sit left in their lane; multi-node lanes stack downward at the
+/// full [`VERTICAL_SPACING`] pitch. Deterministic: no RNG, no hash iteration
+/// order.
+fn sections_seed(graph: &Graph) -> SectionsSeed {
+    let lanes = sections_lanes(graph);
+
+    // Rank within the lane = number of earlier nodes (graph order) sharing it.
+    let mut rank = vec![0usize; graph.nodes.len()];
+    let mut next = vec![0usize; lanes.slot.len()];
+    for (i, rank_i) in rank.iter_mut().enumerate() {
+        let s = lanes.lane[i];
+        *rank_i = next[s];
+        next[s] += 1;
+    }
+
+    let targets = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let (slot_x, slot_y) = lanes.slot_of(i);
+            let y = slot_y + rank[i] as f32 * (NODE_WORLD_H + SECTIONS_STACK_GAP);
+            (slot_x, y)
+        })
+        .collect();
+
+    SectionsSeed { lanes, targets }
+}
+
+/// Section-hole anchors in lane space, **one per (banner group, row)**
+/// (sections-black-hole-solver 3.9, defect B).
+///
+/// Before 3.9 every member of a group shared the group's single mean lane slot.
+/// Once lanes wrap, that mean can sit thousands of units from members that
+/// landed in other rows — measured on `fixtures/own_scale.ini`, where each
+/// banner group spans 4-5 rows and its members were dragged at the travel cap
+/// toward one distant point (worst residual body overlap 79.19).
+///
+/// Now the anchor a member feels is the mean **seed target**
+/// ([`sections_seed`]) of *its own group's circuit members in the same row*: a
+/// wrapped group gets one local anchor per row band, so the hole spring
+/// compacts each band in place instead of yanking members across the grid. The
+/// anchor's y is the mean stacked target y of that band's members, not the
+/// row's top edge, so it cannot re-flatten a multi-node lane (defect A's fix).
+///
+/// The anchor is still a fixed black hole: it derives from the graph's lane
+/// geometry only, never from positions, so it is constant for a whole solve.
+/// Membership matches [`compute_section_holes`] (whose build-time
+/// `Graph.section_holes` anchors keep their own `mean_slice * pitch` meaning):
+/// only circuit members of a banner group get `Some`, everything else `None`.
+fn section_hole_anchors_lanes(graph: &Graph, seed: &SectionsSeed) -> Vec<Option<(f32, f32)>> {
+    let n = graph.nodes.len();
+    let mut anchors = vec![None; n];
+    if graph.clusters.is_empty() || n == 0 {
+        return anchors;
+    }
+
+    let rows = seed.lanes.row_count();
+    // `(sum_x, sum_y, count)` per (cluster, row) band, indexed flat.
+    let mut bands = vec![(0.0f32, 0.0f32, 0usize); graph.clusters.len() * rows];
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if node.kind != NodeKind::Circuit {
+            continue;
+        }
+        let Some(c) = graph.cluster_index_of(node.section_index) else {
+            continue;
+        };
+        let band = &mut bands[c * rows + seed.lanes.row_of(i)];
+        band.0 += seed.targets[i].0;
+        band.1 += seed.targets[i].1;
+        band.2 += 1;
+    }
+
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if node.kind != NodeKind::Circuit {
+            continue;
+        }
+        let Some(c) = graph.cluster_index_of(node.section_index) else {
+            continue;
+        };
+        let (sx, sy, count) = bands[c * rows + seed.lanes.row_of(i)];
+        debug_assert!(count > 0, "every member counts into its own band");
+        anchors[i] = Some((sx / count as f32, sy / count as f32));
+    }
+    anchors
+}
+
+/// Sections-mode seed (sections-black-hole-solver D1 + 3.8): chain the circuits
+/// in **patch order** as width-aware lanes, then **wrap the lanes into rows** so
+/// a 500-lane patch reads roughly square rather than as a ~40:1 diagonal
+/// ribbon.
+///
+/// The seed *is* the layout: every force is clamped (`≤ MAX_DISPLACEMENT` per
+/// axis per iteration, `FRICTION`-damped, `SOLVE_ITERATIONS` total), and since
+/// task 3.9 sections mode additionally tethers each node to its own target
+/// ([`SECTIONS_TETHER`]), so the forces only fine-tune what the seed places — and
+/// the slice spring targets this same per-node target.
+///
+/// Per node the target is its own seed position `(slot_x, seed_y)` — see
+/// [`sections_seed`] for the per-node formula; this is the very same vector the
+/// slice springs pull toward, so seed and spring can never disagree. The extent
+/// is proportional to patch size (lanes × lane width over the row target), never
+/// to cycle length — unlike [`seed_positions`], whose topological depth grows
+/// with cycle length on a cyclic patch (measured 245,266 on
+/// `fixtures/own_scale.ini`, a 19.6 M-unit seed the clamped integrator can only
+/// nudge).
+///
+/// Deterministic: no RNG, no hash iteration order.
+pub(crate) fn seed_positions_sections(graph: &Graph) -> Vec<(f32, f32)> {
+    sections_seed(graph).targets
 }
 
 /// Longest-path topological depth via bounded Bellman-Ford relaxation, shared
@@ -371,6 +856,119 @@ fn circuit_depth(graph: &Graph) -> Vec<usize> {
         })
         .collect();
     depth_over(n, &circuit_edges)
+}
+
+/// Slice index per node for sections mode (sections-black-hole-solver D1):
+/// circuit nodes get their `section_index` (patch order 0..N-1), controller and
+/// input-jack nodes get the fixed left outer slice (0), and output-jack nodes
+/// get the fixed right outer slice (max circuit slice + 1). This mirrors the
+/// outer-column assignment in `assign_columns` so slice springs pull circuits
+/// to their patch-order columns while controllers/jacks stay at fixed edges.
+fn slice_index(graph: &Graph) -> Vec<usize> {
+    let n = graph.nodes.len();
+    let mut slice = vec![0usize; n];
+
+    // Circuit nodes: slice index = section_index (patch order)
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if node.kind == NodeKind::Circuit {
+            slice[i] = node.section_index;
+        }
+    }
+
+    // Find max circuit slice for right outer placement
+    let max_circuit_slice = graph
+        .nodes
+        .iter()
+        .filter(|nd| nd.kind == NodeKind::Circuit)
+        .map(|nd| nd.section_index)
+        .max()
+        .unwrap_or(0);
+
+    // Controller and InputJack: fixed left outer slice (0)
+    // OutputJack: fixed right outer slice (max_circuit_slice + 1)
+    for (i, node) in graph.nodes.iter().enumerate() {
+        match node.kind {
+            NodeKind::Controller | NodeKind::InputJack => {
+                slice[i] = 0;
+            }
+            NodeKind::OutputJack => {
+                slice[i] = max_circuit_slice + 1;
+            }
+            NodeKind::Circuit => {}
+        }
+    }
+
+    slice
+}
+
+/// Build-time section-hole anchor per node (sections-black-hole-solver D2):
+/// for each banner group, compute the mean slice of its member circuits (using
+/// `slice_index`), then return the anchor at `(mean_slice * HORIZONTAL_SPACING, 0.0)`.
+/// Nodes not in any cluster get `None`. The anchor is the same for all members
+/// of a cluster (fixed black hole).
+///
+/// This is the meaning of `Graph.section_holes` recorded at build time and is
+/// deliberately unchanged. The *solver* no longer uses it: since task 3.8 the
+/// seed and the slice springs work in wrapped-lane slots, so sections mode
+/// derives its own fixed anchors in that space via
+/// [`section_hole_anchors_lanes`] (mean seed target per group *and row*).
+/// Anchoring members
+/// at a `mean_slice * HORIZONTAL_SPACING` x would fight the lane grid on any
+/// wrapped layout.
+///
+/// `slice_index` is the output of [`slice_index`] (patch order for circuits,
+/// fixed outer slices for controllers/jacks). Deterministic: same graph +
+/// same slice_index → identical anchors.
+pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option<(f32, f32)>> {
+    let n = graph.nodes.len();
+    let mut holes = vec![None; n];
+
+    if graph.clusters.is_empty() {
+        return holes;
+    }
+
+    // member_of[i] = cluster index for node i, or None
+    let member_of: Vec<Option<usize>> = (0..n)
+        .map(|i| graph.cluster_index_of(graph.nodes[i].section_index))
+        .collect();
+
+    // Collect member indices per cluster
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
+    for (i, cluster) in member_of.iter().enumerate() {
+        if let Some(c) = cluster {
+            members[*c].push(i);
+        }
+    }
+
+    // Compute mean slice per cluster (only circuit nodes contribute)
+    for list in members.iter() {
+        if list.is_empty() {
+            continue;
+        }
+        let mut sum = 0usize;
+        let mut count = 0usize;
+        for &i in list {
+            if graph.nodes[i].kind == NodeKind::Circuit {
+                sum += slice_index[i];
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let mean_slice = sum as f32 / count as f32;
+        let anchor = (mean_slice * HORIZONTAL_SPACING, 0.0);
+        // Only circuit nodes (banner group members) get the section-hole anchor.
+        // Controllers and jacks may have section_index in the cluster range but
+        // are not part of the banner group.
+        for &i in list {
+            if graph.nodes[i].kind == NodeKind::Circuit {
+                holes[i] = Some(anchor);
+            }
+        }
+    }
+
+    holes
 }
 
 /// Column index per node and total column count (graph-column-layout D4): the
@@ -649,13 +1247,55 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
 /// indices that never move, exactly like inactive nodes but for the whole
 /// solve (fixed anchors; out-of-range indices are ignored). Freezes early
 /// when kinetic energy converges.
-fn run_iterations(
+///
+/// `mode` selects the force model:
+/// - `LayoutMode::Force`: cable springs + uniform repulsion + weak cohesion
+/// - `LayoutMode::Sections`: slice springs, section-hole springs, cable springs,
+///   and size-aware repulsion (cohesion replaced by hole springs), each node
+///   tethered to its own seed target ([`SECTIONS_TETHER`]) and, once relaxed,
+///   passed through the bounded overlap-removal pass ([`separate_overlaps`])
+///
+/// Runs sections mode with the module-default stiffnesses ([`SLICE_K`],
+/// [`SECTION_HOLE_K`]); sections-mode callers that expose runtime sliders call
+/// [`run_iterations_with_forces`] instead so the stiffnesses actually reach the
+/// solver.
+pub(crate) fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     max_iter: usize,
     active: Option<&[bool]>,
     pinned: &[usize],
     tension: f32,
+    mode: LayoutMode,
+) -> usize {
+    run_iterations_with_forces(
+        graph,
+        positions,
+        max_iter,
+        active,
+        pinned,
+        tension,
+        mode,
+        SLICE_K,
+        SECTION_HOLE_K,
+    )
+}
+
+/// Core solver behind [`run_iterations`] with explicit sections-mode spring
+/// stiffnesses. `slice_k` is the slice-spring stiffness and `section_k` the
+/// section-hole-spring stiffness ([`solve_sections`] forwards its runtime
+/// slider params here); both are ignored in [`LayoutMode::Force`].
+#[allow(clippy::too_many_arguments)] // one param per solver knob (graph, positions, budget, active, pins, tension, mode, slice_k, section_k)
+pub(crate) fn run_iterations_with_forces(
+    graph: &Graph,
+    positions: &mut [(f32, f32)],
+    max_iter: usize,
+    active: Option<&[bool]>,
+    pinned: &[usize],
+    tension: f32,
+    mode: LayoutMode,
+    slice_k: f32,
+    section_k: f32,
 ) -> usize {
     let n = graph.nodes.len();
     if n == 0 {
@@ -672,24 +1312,61 @@ fn run_iterations(
     for &(u, v) in &edges {
         *edge_multiplicity.entry((u, v)).or_insert(0) += 1;
     }
-    // Cluster membership for cohesion (design D3); `None` = node in no banner
-    // group, so the cohesion force is skipped defensively for it.
+    // Cluster membership for cohesion / section holes; `None` = node in no banner
+    // group.
     let member_of: Vec<Option<usize>> = (0..n)
         .map(|i| graph.cluster_index_of(graph.nodes[i].section_index))
         .collect();
+
+    // Sections-mode precomputation: wrapped lane slots (the targets of the
+    // slice springs), section-hole anchors in lane-slot space (computed once —
+    // fixed black holes), and node bounding extents for size-aware repulsion.
+    let (node_targets, holes, sizes, extents, cell_size) = if mode == LayoutMode::Sections {
+        let seed = sections_seed(graph);
+        let hole_anchors = section_hole_anchors_lanes(graph, &seed);
+        // Body sizes as the renderer draws them: `(width, height)` per node.
+        // `sizes` drives the axis-aligned overlap-removal pass; `extents` (the
+        // `max(width, height)` the body claims around its center) drives the
+        // radial size-aware repulsion.
+        let sizes = node_world_sizes(graph);
+        let extents: Vec<f32> = sizes.iter().map(|&(w, h)| w.max(h)).collect();
+        // Grid cell size for this graph: never smaller than `REPULSION_RADIUS`
+        // (keeps the 3x3 neighbour scan valid for the small-node case) and never
+        // smaller than the largest node extent. A pair only repels while its
+        // center distance is below `required = 0.5 * (extent_i + extent_j) <=
+        // max_extent`, and any two points within one cell size differ by at
+        // most one cell per axis, so the 3x3 scan cannot miss a repelling pair.
+        let cell = REPULSION_RADIUS.max(extents.iter().copied().fold(0.0f32, f32::max));
+        (
+            Some(seed.targets),
+            Some(hole_anchors),
+            Some(sizes),
+            Some(extents),
+            cell,
+        )
+    } else {
+        // Force mode keeps the historical `REPULSION_RADIUS` grid so its layout
+        // stays byte-identical (determinism contract).
+        (None, None, None, None, REPULSION_RADIUS)
+    };
+
     let mut velocity = vec![(0.0f32, 0.0f32); n];
 
     let mut iterations = 0;
     for _ in 0..max_iter {
         iterations += 1;
         // Rebuild the uniform repulsion grid from current positions (D9).
+        // Cell size is `REPULSION_RADIUS` for force mode; sections mode widens
+        // it to the largest node extent (see `cell_size` above) so the 3x3
+        // neighbour scan still covers every pair the size-aware force reaches.
         let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for (i, &pos) in positions.iter().enumerate().take(n) {
-            grid.entry(cell_of(pos)).or_default().push(i);
+            grid.entry(cell_of(pos, cell_size)).or_default().push(i);
         }
 
         let mut accel = vec![(0.0f32, 0.0f32); n];
 
+        // Cable springs (both modes): bundle-normalized spring force along edges.
         for &(u, v) in &edges {
             let m = edge_multiplicity[&(u, v)] as f32;
             let f = spring_force(positions[u], positions[v], tension);
@@ -699,50 +1376,114 @@ fn run_iterations(
             accel[v].1 -= f.1 / m;
         }
 
-        for (i, &pos) in positions.iter().enumerate().take(n) {
-            let (cx, cy) = cell_of(pos);
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
-                        continue;
-                    };
-                    for &j in neighbors {
-                        if i >= j {
-                            continue;
-                        }
-                        let f = repulsion_force(pos, positions[j]);
-                        accel[i].0 += f.0;
-                        accel[i].1 += f.1;
-                        accel[j].0 -= f.0;
-                        accel[j].1 -= f.1;
+        // Repulsion and mode-specific springs.
+        if mode == LayoutMode::Sections {
+            // Sections mode: slice springs + section-hole springs + size-aware repulsion
+            let node_targets = node_targets.as_ref().unwrap();
+            let hole_anchors = holes.as_ref().unwrap();
+            let extents = extents.as_ref().unwrap();
+
+            // Slice springs: pull each node toward its own seed target in both
+            // axes — `(slot_x, slot_y + rank · stack pitch)`, so a multi-node
+            // lane's stacked members keep the full pitch instead of collapsing
+            // onto one `slot_y` (task 3.9, defect A). The seed already sits on
+            // that target, and this is what keeps the wrapped row structure
+            // stable under cable pull. Deliberately weak (SLICE_K): cables can
+            // still drag a node within its lane band, and repulsion can spread
+            // the members of a multi-node lane further.
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                let (target_x, target_y) = node_targets[i];
+                accel[i].0 += (target_x - pos.0) * slice_k;
+                accel[i].1 += (target_y - pos.1) * slice_k;
+            }
+
+            // Section-hole springs: pull cluster members toward their fixed anchor
+            // (both x and y). Anchors are fixed black holes computed once at solve start.
+            // Only circuit nodes feel the section-hole spring; controllers/jacks only feel
+            // slice springs and repulsion (D2: sections are circuit groupings).
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                if let Some((anchor_x, anchor_y)) = hole_anchors[i] {
+                    if graph.nodes[i].kind == NodeKind::Circuit {
+                        accel[i].0 += (anchor_x - pos.0) * section_k;
+                        accel[i].1 += (anchor_y - pos.1) * section_k;
                     }
                 }
             }
-        }
 
-        // Per-cluster cohesion: pull members toward their centroid (D3). The
-        // centroid is recomputed from live positions each iteration, so the
-        // force is deterministic and follows the cluster as it moves.
-        if !graph.clusters.is_empty() {
-            let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
-            for (i, cluster) in member_of.iter().enumerate() {
-                if let Some(c) = cluster {
-                    members[*c].push(i);
+            // Size-aware repulsion: two bodies repel until their center
+            // distance reaches `required = 0.5 * (extent_i + extent_j)`, the
+            // separation at which their `max(width, height)` extents stop
+            // overlapping (design D3). `cell_size` was sized from the largest
+            // extent, so the 3x3 scan below sees every such pair.
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                let (cx, cy) = cell_of(pos, cell_size);
+                let extent_i = extents[i];
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
+                            continue;
+                        };
+                        for &j in neighbors {
+                            if i >= j {
+                                continue;
+                            }
+                            let required = 0.5 * (extent_i + extents[j]);
+                            let f = repulsion_force_size_aware(pos, positions[j], required);
+                            accel[i].0 += f.0;
+                            accel[i].1 += f.1;
+                            accel[j].0 -= f.0;
+                            accel[j].1 -= f.1;
+                        }
+                    }
                 }
             }
-            for list in &members {
-                if list.is_empty() {
-                    continue;
+            // Note: cohesion is intentionally omitted in sections mode —
+            // section-hole springs provide the clustering.
+        } else {
+            // Force mode: uniform repulsion + weak cohesion
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                let (cx, cy) = cell_of(pos, cell_size);
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
+                            continue;
+                        };
+                        for &j in neighbors {
+                            if i >= j {
+                                continue;
+                            }
+                            let f = repulsion_force(pos, positions[j]);
+                            accel[i].0 += f.0;
+                            accel[i].1 += f.1;
+                            accel[j].0 -= f.0;
+                            accel[j].1 -= f.1;
+                        }
+                    }
                 }
-                let (mut sx, mut sy) = (0.0f32, 0.0f32);
-                for &i in list {
-                    sx += positions[i].0;
-                    sy += positions[i].1;
+            }
+
+            // Per-cluster cohesion: pull members toward their centroid (D3).
+            if !graph.clusters.is_empty() {
+                let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
+                for (i, cluster) in member_of.iter().enumerate() {
+                    if let Some(c) = cluster {
+                        members[*c].push(i);
+                    }
                 }
-                let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
-                for &i in list {
-                    accel[i].0 += (cx - positions[i].0) * COHESION_K;
-                    accel[i].1 += (cy - positions[i].1) * COHESION_K;
+                for list in &members {
+                    if list.is_empty() {
+                        continue;
+                    }
+                    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+                    for &i in list {
+                        sx += positions[i].0;
+                        sy += positions[i].1;
+                    }
+                    let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
+                    for &i in list {
+                        accel[i].0 += (cx - positions[i].0) * COHESION_K;
+                        accel[i].1 += (cy - positions[i].1) * COHESION_K;
+                    }
                 }
             }
         }
@@ -760,9 +1501,37 @@ fn run_iterations(
             kinetic += velocity[i].0 * velocity[i].0 + velocity[i].1 * velocity[i].1;
         }
 
+        // Sections mode: a node may only fine-tune inside the space the seed
+        // reserved for it (see [`SECTIONS_TETHER`]). Applied to the position
+        // rather than to the acceleration so it bounds the whole trajectory: a
+        // runaway node can no longer drag its cable neighbours across the grid.
+        if mode == LayoutMode::Sections {
+            let node_targets = node_targets.as_ref().unwrap();
+            for i in 0..n {
+                if pinned_mask[i] || active.is_some_and(|act| !act[i]) {
+                    continue;
+                }
+                let (target_x, target_y) = node_targets[i];
+                positions[i].0 = target_x + clamp_axis(positions[i].0 - target_x, SECTIONS_TETHER);
+                positions[i].1 = target_y + clamp_axis(positions[i].1 - target_y, SECTIONS_TETHER);
+            }
+        }
+
         if kinetic < ENERGY_THRESHOLD {
             break;
         }
+    }
+
+    // Sections mode: non-overlap is a hard requirement, so it is enforced as a
+    // post-condition rather than left to the springs (see
+    // [`SECTION_SEPARATION_PASSES`]). Force mode is untouched — its layout is
+    // pinned byte-for-byte by golden vectors.
+    if mode == LayoutMode::Sections {
+        let sizes = sizes.as_ref().unwrap();
+        let movable: Vec<bool> = (0..n)
+            .map(|i| !pinned_mask[i] && !active.is_some_and(|act| !act[i]))
+            .collect();
+        separate_overlaps(positions, sizes, &movable, SECTION_SEPARATION_PASSES);
     }
     iterations
 }
@@ -793,6 +1562,51 @@ fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     ((-dx / d) * mag, (-dy / d) * mag)
 }
 
+/// Size-aware repulsion for sections mode (design D3): push `a` away from `b`
+/// until their center distance reaches `required = 0.5 * (extent_a + extent_b)`
+/// — the separation at which their `max(width, height)` bounding extents stop
+/// overlapping. Magnitude is a linear ramp in the penetration depth
+/// `required - d`, scaled so it reaches the full per-axis step budget
+/// ([`MAX_DISPLACEMENT`]) after one [`REPULSION_RADIUS`] of penetration:
+///
+/// ```text
+/// mag = min(MAX_DISPLACEMENT, MAX_DISPLACEMENT * (required - d) / REPULSION_RADIUS)
+/// ```
+///
+/// Properties this shape is chosen for:
+/// - **Zero at `d >= required`** — no phantom push at rest; the pair stops as
+///   soon as its bodies clear.
+/// - **Monotone and finite as `d -> 0`** — the ramp only grows with penetration,
+///   and the coincident case returns a fixed nudge first, so there is no
+///   division by zero.
+/// - **Scale-free in `required`** — the ramp length is the constant
+///   [`REPULSION_RADIUS`], not `required`. A wide pair (large `required`) is
+///   therefore pushed hard for most of its travel and still held firmly near its
+///   required separation, instead of decaying into nothing at the boundary. That
+///   is the reason for this form over the old inverse-square
+///   `REPULSION_STRENGTH / d²` falloff: at the required distance that falloff has
+///   decayed to `REPULSION_STRENGTH / required²` (≈ 0.006 for a 496-wide pair),
+///   far too weak to expand the pair within [`SOLVE_ITERATIONS`] — which is why
+///   wide bodies never reached their required separation. Normalizing by the
+///   constant radius (rather than by `required` or `required²`) keeps both
+///   regimes in budget: the slope stays below the step budget for a small pair
+///   (`required` ≈ 80), so cluster members are nudged rather than flung, while a
+///   wide pair still saturates the budget for as long as it has to travel.
+fn repulsion_force_size_aware(a: (f32, f32), b: (f32, f32), required: f32) -> (f32, f32) {
+    let (dx, dy, d) = delta(a, b);
+    if d < 1e-6 {
+        // Coincident nodes: a small deterministic nudge breaks the tie.
+        return (0.001, 0.0);
+    }
+    if required <= 0.0 || d >= required {
+        // At or beyond the required separation the pair is clear: no force.
+        return (0.0, 0.0);
+    }
+    let overlap = required - d;
+    let mag = (MAX_DISPLACEMENT * overlap / REPULSION_RADIUS).min(MAX_DISPLACEMENT);
+    ((-dx / d) * mag, (-dy / d) * mag)
+}
+
 fn delta(a: (f32, f32), b: (f32, f32)) -> (f32, f32, f32) {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
@@ -808,10 +1622,16 @@ fn clamp(v: (f32, f32), max: f32) -> (f32, f32) {
     (v.0.clamp(-max, max), v.1.clamp(-max, max))
 }
 
-fn cell_of(p: (f32, f32)) -> (i32, i32) {
+/// Clamp a single offset to `±max` (the per-axis form of [`clamp`], used by the
+/// sections-mode tether).
+fn clamp_axis(v: f32, max: f32) -> f32 {
+    v.clamp(-max, max)
+}
+
+fn cell_of(p: (f32, f32), cell_size: f32) -> (i32, i32) {
     (
-        (p.0 / REPULSION_RADIUS).floor() as i32,
-        (p.1 / REPULSION_RADIUS).floor() as i32,
+        (p.0 / cell_size).floor() as i32,
+        (p.1 / cell_size).floor() as i32,
     )
 }
 
@@ -1219,6 +2039,7 @@ mod tests {
             None,
             &[],
             DEFAULT_TENSION,
+            LayoutMode::Force,
         )
     }
 
@@ -1245,6 +2066,7 @@ mod tests {
             Some(&active),
             &[],
             DEFAULT_TENSION,
+            LayoutMode::Force,
         )
     }
 
@@ -1824,6 +2646,610 @@ mod tests {
             assert!((sx - x).abs() < 1e-3, "x {x} off the {GRID_SNAP} grid");
             assert!((sy - y).abs() < 1e-3, "y {y} off the {GRID_SNAP} grid");
         }
+    }
+
+    // ── sections-black-hole-solver: slice index computation (task 1.2) ─────
+
+    #[test]
+    fn slice_index_matches_patch_order_for_circuits() {
+        // Build a graph with 3 circuits (section_index 0, 1, 2), 1 controller,
+        // and 1 output jack. Circuit nodes should get slice = section_index.
+        // Controller gets left outer slice (0), output jack gets right outer
+        // slice (max_circuit_slice + 1 = 3).
+        let nodes = vec![
+            node("circuit_a", 0), // index 0: circuit, section_index 0
+            node("circuit_b", 1), // index 1: circuit, section_index 1
+            node("circuit_c", 2), // index 2: circuit, section_index 2
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 3: controller
+            GraphNode {
+                id: NodeId::Jack("OUT1".to_string()),
+                kind: NodeKind::OutputJack,
+                circuit: "OUT1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 4: output jack
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let slice = slice_index(&graph);
+        assert_eq!(slice.len(), 5);
+        // Circuits: slice == section_index (patch order)
+        assert_eq!(slice[0], 0, "circuit_a at section_index 0");
+        assert_eq!(slice[1], 1, "circuit_b at section_index 1");
+        assert_eq!(slice[2], 2, "circuit_c at section_index 2");
+        // Controller: fixed left outer slice (0)
+        assert_eq!(slice[3], 0, "controller gets left outer slice");
+        // Output jack: fixed right outer slice (max_circuit_slice + 1 = 3)
+        assert_eq!(slice[4], 3, "output jack gets right outer slice");
+    }
+
+    #[test]
+    fn slice_index_handles_input_jack() {
+        // Input jack should also get left outer slice (0) like controller
+        let nodes = vec![
+            node("circuit_a", 0),
+            node("circuit_b", 5), // non-contiguous section_index
+            GraphNode {
+                id: NodeId::Jack("IN1".to_string()),
+                kind: NodeKind::InputJack,
+                circuit: "IN1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters: vec![],
+            validation: vec![],
+            ..Default::default()
+        };
+        let slice = slice_index(&graph);
+        assert_eq!(slice[0], 0, "circuit_a at section_index 0");
+        assert_eq!(slice[1], 5, "circuit_b at section_index 5");
+        assert_eq!(slice[2], 0, "input jack gets left outer slice");
+    }
+
+    #[test]
+    fn slice_index_all_circuits_no_outer_nodes() {
+        // Graph with only circuits: slices are just section_index values
+        let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3)]);
+        let slice = slice_index(&graph);
+        assert_eq!(slice, vec![0, 1, 2, 3]);
+    }
+
+    // ── sections-black-hole-solver: section-hole anchor computation (task 1.3) ──
+
+    #[test]
+    fn compute_section_holes_two_banner_groups() {
+        // Build a graph with 2 banner groups (clusters):
+        // Cluster 0: circuits at section_index 0, 1 (nodes 0, 1)
+        // Cluster 1: circuits at section_index 3, 4, 5 (nodes 3, 4, 5)
+        // Nodes 2 and 6 are circuits not in any cluster (None expected)
+        // Node 7 is a controller (in cluster 0 via section_index 0, but not a circuit)
+        let nodes = vec![
+            node("c0", 0), // index 0: circuit, section_index 0, cluster 0
+            node("c1", 1), // index 1: circuit, section_index 1, cluster 0
+            node("c2", 2), // index 2: circuit, section_index 2, no cluster
+            node("c3", 3), // index 3: circuit, section_index 3, cluster 1
+            node("c4", 4), // index 4: circuit, section_index 4, cluster 1
+            node("c5", 5), // index 5: circuit, section_index 5, cluster 1
+            node("c6", 6), // index 6: circuit, section_index 6, no cluster
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 7: controller, section_index 0, cluster 0
+        ];
+        let clusters = vec![
+            Cluster {
+                title: "group_a".to_string(),
+                section_range: 0..2, // covers section_index 0, 1
+            },
+            Cluster {
+                title: "group_b".to_string(),
+                section_range: 3..6, // covers section_index 3, 4, 5
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let slice = slice_index(&graph);
+        let holes = compute_section_holes(&graph, &slice);
+
+        assert_eq!(holes.len(), 8);
+
+        // Cluster 0: circuits at indices 0, 1 with slices 0, 1
+        // Mean slice = (0 + 1) / 2 = 0.5
+        // Anchor = (0.5 * 80.0, 0.0) = (40.0, 0.0)
+        let expected_a = Some((0.5 * HORIZONTAL_SPACING, 0.0));
+        assert_eq!(holes[0], expected_a, "circuit 0 in cluster 0");
+        assert_eq!(holes[1], expected_a, "circuit 1 in cluster 0");
+        // Controller at index 7 has section_index in cluster 0 range but is not a circuit
+        // so it should not get the section-hole anchor
+        assert_eq!(holes[7], None, "controller not a circuit -> no anchor");
+
+        // Cluster 1: circuits at indices 3, 4, 5 with slices 3, 4, 5
+        // Mean slice = (3 + 4 + 5) / 3 = 4.0
+        // Anchor = (4.0 * 80.0, 0.0) = (320.0, 0.0)
+        let expected_b = Some((4.0 * HORIZONTAL_SPACING, 0.0));
+        assert_eq!(holes[3], expected_b, "circuit 3 in cluster 1");
+        assert_eq!(holes[4], expected_b, "circuit 4 in cluster 1");
+        assert_eq!(holes[5], expected_b, "circuit 5 in cluster 1");
+
+        // Nodes not in any cluster get None
+        assert_eq!(holes[2], None, "circuit 2 not in any cluster");
+        assert_eq!(holes[6], None, "circuit 6 not in any cluster");
+    }
+
+    #[test]
+    fn compute_section_holes_empty_clusters_returns_all_none() {
+        // Graph with no clusters: all nodes should get None
+        let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3)]);
+        let slice = slice_index(&graph);
+        let holes = compute_section_holes(&graph, &slice);
+        assert_eq!(holes, vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn compute_section_holes_cluster_with_no_circuits_returns_none_for_members() {
+        // Cluster that only contains non-circuit nodes (e.g. only controller)
+        // should result in None for those members (no circuits to average)
+        let nodes = vec![
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+            GraphNode {
+                id: NodeId::Jack("IN1".to_string()),
+                kind: NodeKind::InputJack,
+                circuit: "IN1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+        ];
+        let clusters = vec![Cluster {
+            title: "controllers".to_string(),
+            section_range: 0..1,
+        }];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let slice = slice_index(&graph);
+        let holes = compute_section_holes(&graph, &slice);
+        // No circuits in cluster, so members get None
+        assert_eq!(holes, vec![None, None]);
+    }
+
+    // ── sections-black-hole-solver: sections-mode solver (task 1.4) ──────────
+
+    #[test]
+    fn sections_mode_two_clusters_settle_around_lane_slot_anchors() {
+        // Band-anchor contract (task 3.8, retargeted by 3.9): a banner group's
+        // fixed black hole is the mean **seed target** of its member circuits —
+        // one anchor per (group, row) band — and the pull a member feels is
+        // bounded by [`SECTIONS_TETHER`]. Members therefore compact *inside* their
+        // own lane band instead of being dragged along one global
+        // `mean_slice * HORIZONTAL_SPACING` axis, and the compaction can never
+        // squeeze a member out of the space its lane reserved.
+        //
+        // Build a graph with 2 banner groups (clusters), each with 3 circuits:
+        // Cluster 0: circuits at section_index 0, 1, 2 (nodes 0, 1, 2)
+        // Cluster 1: circuits at section_index 4, 5, 6 (nodes 4, 5, 6)
+        // Node 3 is a circuit not in any cluster (section_index 3)
+        // Node 7 is a controller in cluster 0's range (not an anchor member)
+        // Node 8 is an output jack
+        //
+        // Hand-derived lane geometry (lane width = widest member's capped
+        // estimated width; title widths are chars × 8 + 16): lane 0 holds c0
+        // (32) + ctrl1 (56) -> 56, lanes 1..6 hold one 32-wide circuit each,
+        // lane 7 holds OUT1 (48). With SECTIONS_LANE_GAP = 40 the slots come out
+        // at x = 0, 96, 168, 240, 312, 384, 456, 528 (one row, slot y = 0).
+        let nodes = vec![
+            node("c0", 0), // index 0: circuit, section_index 0, cluster 0
+            node("c1", 1), // index 1: circuit, section_index 1, cluster 0
+            node("c2", 2), // index 2: circuit, section_index 2, cluster 0
+            node("c3", 3), // index 3: circuit, section_index 3, no cluster
+            node("c4", 4), // index 4: circuit, section_index 4, cluster 1
+            node("c5", 5), // index 5: circuit, section_index 5, cluster 1
+            node("c6", 6), // index 6: circuit, section_index 6, cluster 1
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 7: controller, section_index 0, cluster 0 range
+            GraphNode {
+                id: NodeId::Jack("OUT1".to_string()),
+                kind: NodeKind::OutputJack,
+                circuit: "OUT1".to_string(),
+                instance_index: 0,
+                section_index: 10, // outside any cluster range
+            }, // index 8: output jack
+        ];
+        let clusters = vec![
+            Cluster {
+                title: "group_a".to_string(),
+                section_range: 0..3, // covers section_index 0, 1, 2
+            },
+            Cluster {
+                title: "group_b".to_string(),
+                section_range: 4..7, // covers section_index 4, 5, 6
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![], // No edges — pure clustering by section holes
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        // Pin the lane geometry and the anchors it produces before solving.
+        // One row holds every lane, and each lane holds a single node, so a
+        // member's seed target *is* its lane slot and the per-(group, row)
+        // anchor collapses to the old single mean slot — the values below stay
+        // the hand-derived hand-over from task 3.8.
+        let seed = sections_seed(&graph);
+        assert_eq!(
+            seed.lanes.slot,
+            vec![
+                (0.0, 0.0),
+                (96.0, 0.0),
+                (168.0, 0.0),
+                (240.0, 0.0),
+                (312.0, 0.0),
+                (384.0, 0.0),
+                (456.0, 0.0),
+                (528.0, 0.0)
+            ]
+        );
+        let anchors = section_hole_anchors_lanes(&graph, &seed);
+        let anchor_a = (0.0 + 96.0 + 168.0) / 3.0; // mean slot x of nodes 0, 1, 2
+        let anchor_b = (312.0 + 384.0 + 456.0) / 3.0; // mean slot x of nodes 4, 5, 6
+        assert_eq!(anchors[0], Some((anchor_a, 0.0)));
+        assert_eq!(anchors[2], Some((anchor_a, 0.0)));
+        assert_eq!(anchors[4], Some((anchor_b, 0.0)));
+        assert_eq!(anchors[6], Some((anchor_b, 0.0)));
+        // Non-members: the unclustered circuit, the controller (not a circuit
+        // member), and the output jack stay unanchored.
+        assert_eq!(anchors[3], None);
+        assert_eq!(anchors[7], None);
+        assert_eq!(anchors[8], None);
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Cluster 0's circuit members settle around their anchor. Tolerance
+        // HORIZONTAL_SPACING * 0.5 = 40 world units; observed drift 0.0 (the
+        // anchor pull is bounded by SECTIONS_TETHER = 60, so the three members
+        // land symmetrically around the anchor at x = 52.8 / 91.2 / 120.0, and
+        // their mean is the anchor exactly).
+        let cluster_a_x: f32 = [0, 1, 2].iter().map(|&i| positions[i].0).sum::<f32>() / 3.0;
+        let dx_a = (cluster_a_x - anchor_a).abs();
+        assert!(
+            dx_a < HORIZONTAL_SPACING * 0.5,
+            "cluster 0 mean x={cluster_a_x} not near its lane-slot anchor x={anchor_a} (dx={dx_a})"
+        );
+
+        // Cluster 1: same check; observed drift 0.0 as well (its members are two
+        // lane pitches apart, so the bounded pull moves them symmetrically about
+        // the anchor: 355.2 / 384.0 / 412.8).
+        let cluster_b_x: f32 = [4, 5, 6].iter().map(|&i| positions[i].0).sum::<f32>() / 3.0;
+        let dx_b = (cluster_b_x - anchor_b).abs();
+        assert!(
+            dx_b < HORIZONTAL_SPACING * 0.5,
+            "cluster 1 mean x={cluster_b_x} not near its lane-slot anchor x={anchor_b} (dx={dx_b})"
+        );
+
+        // Non-clustered circuit (index 3) has no anchor: the slice spring holds it
+        // on its own lane slot (240), between the two cluster anchors.
+        let c3_x = positions[3].0;
+        assert!(
+            (c3_x - 240.0).abs() <= SECTIONS_LANE_GAP / 4.0,
+            "unclustered circuit 3 x={c3_x} must stay on its lane slot (240)"
+        );
+        assert!(
+            c3_x > cluster_a_x && c3_x < cluster_b_x,
+            "non-clustered circuit 3 x={c3_x} should be between clusters ({cluster_a_x}, {cluster_b_x})"
+        );
+
+        // Output jack (index 8) is unanchored and sits on the right outer lane
+        // slot (528), right of cluster 1.
+        let jack_x = positions[8].0;
+        assert!(
+            jack_x > cluster_b_x,
+            "output jack x={jack_x} should be right of cluster 1 ({cluster_b_x})"
+        );
+
+        // Bounded-compaction contract (task 3.9): the anchor pull is capped by
+        // [`SECTIONS_TETHER`], so the x-compaction that used to force a diagonal
+        // fallback no longer happens — every member stays in its own lane's row
+        // (slot y = 0) and within the tether of its own lane slot. Before 3.9 the
+        // unbounded hole spring squeezed cluster 0's members to ~45-unit
+        // x-neighbours and size-aware repulsion had to push them 29.14 units apart
+        // vertically; now the observed y spread is 0.0 for both clusters (all six
+        // members stay exactly on row 0's edge) and the worst x offset from a
+        // lane slot is 52.8 (cluster 0) / 43.2 (cluster 1), both inside the
+        // 60-unit tether.
+        let y_spread = |indices: [usize; 3]| {
+            let ys: Vec<f32> = indices.iter().map(|&i| positions[i].1).collect();
+            ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - ys.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        let (y_spread_a, y_spread_b) = (y_spread([0, 1, 2]), y_spread([4, 5, 6]));
+        for (name, spread) in [("cluster 0", y_spread_a), ("cluster 1", y_spread_b)] {
+            assert!(
+                spread <= GRID_SNAP,
+                "{name} must stay on its lanes' row (no diagonal fallback): y spread {spread}"
+            );
+        }
+        for (i, slot) in [
+            (0usize, 0.0f32),
+            (1, 96.0),
+            (2, 168.0),
+            (4, 312.0),
+            (5, 384.0),
+            (6, 456.0),
+        ] {
+            let offset = (positions[i].0 - slot).abs();
+            assert!(
+                offset <= SECTIONS_TETHER,
+                "member {i} x={} left its lane slot {slot} by {offset} > SECTIONS_TETHER = {SECTIONS_TETHER}",
+                positions[i].0
+            );
+            assert!(
+                positions[i].1.abs() <= GRID_SNAP,
+                "member {i} y={} left row 0",
+                positions[i].1
+            );
+        }
+
+        // The two clusters are well separated horizontally (observed gap 197.93).
+        let cluster_a_max_x = [0, 1, 2]
+            .iter()
+            .map(|&i| positions[i].0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let cluster_b_min_x = [4, 5, 6]
+            .iter()
+            .map(|&i| positions[i].0)
+            .fold(f32::INFINITY, f32::min);
+        let inter_cluster_gap = cluster_b_min_x - cluster_a_max_x;
+        assert!(
+            inter_cluster_gap > HORIZONTAL_SPACING * 2.0,
+            "clusters should be well separated horizontally (gap={inter_cluster_gap})"
+        );
+    }
+
+    #[test]
+    fn sections_mode_deterministic() {
+        // Same graph + same force constants -> identical positions (determinism).
+        // The lane contract (task 3.8) keeps that guarantee: lane assignment,
+        // lane widths, the wrap walk, the lane-slot anchors, and the packing are
+        // all pure functions of the graph — no RNG and no hash iteration order —
+        // so the wrapped seed and every force target are reproducible.
+        let nodes = vec![node("c0", 0), node("c1", 1), node("c2", 4), node("c3", 5)];
+        let clusters = vec![
+            Cluster {
+                title: "a".to_string(),
+                section_range: 0..2,
+            },
+            Cluster {
+                title: "b".to_string(),
+                section_range: 4..6,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+        let a = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let b = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_eq!(a, b, "sections mode must be deterministic");
+        assert_finite_and_bounded(&a);
+    }
+
+    #[test]
+    fn sections_mode_with_edges_respects_cable_springs() {
+        // Two clusters with internal edges: cable springs should keep connected
+        // nodes closer than unconnected ones, while hole springs keep clusters
+        // separated. Under the lane contract (task 3.8) the circuits sit on lanes
+        // 0, 1, 4, 5 — lane width 46 each (32 title + 1 port marker) → slots 0,
+        // 86, 332, 418 with the two empty lanes in between.
+        let nodes = vec![
+            node("c0", 0), // cluster 0
+            node("c1", 1), // cluster 0
+            node("c2", 4), // cluster 1
+            node("c3", 5), // cluster 1
+        ];
+        let clusters = vec![
+            Cluster {
+                title: "a".to_string(),
+                section_range: 0..2,
+            },
+            Cluster {
+                title: "b".to_string(),
+                section_range: 4..6,
+            },
+        ];
+        let edges = vec![
+            GraphEdge {
+                cable: "_C1".to_string(),
+                source: NodeId::circuit("c0", 0),
+                sink: NodeId::circuit("c1", 0),
+            },
+            GraphEdge {
+                cable: "_C2".to_string(),
+                source: NodeId::circuit("c2", 0),
+                sink: NodeId::circuit("c3", 0),
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges,
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+        assert_eq!(
+            sections_lanes(&graph).slot,
+            vec![
+                (0.0, 0.0),
+                (86.0, 0.0),
+                (172.0, 0.0),
+                (252.0, 0.0),
+                (332.0, 0.0),
+                (418.0, 0.0)
+            ]
+        );
+
+        // Connected pairs should be closer than the inter-cluster gap, and the
+        // cable spring should pull them below their own lane pitch (86): observed
+        // 68.04 for both pairs.
+        let connected_a = dist(positions[0], positions[1]);
+        let connected_b = dist(positions[2], positions[3]);
+        let cluster_a_max_x = positions[0].0.max(positions[1].0);
+        let cluster_b_min_x = positions[2].0.min(positions[3].0);
+        let inter_gap = cluster_b_min_x - cluster_a_max_x;
+
+        assert!(
+            connected_a < 86.0 && connected_b < 86.0,
+            "cable springs should pull each connected pair below its lane pitch: \
+             {connected_a} and {connected_b}"
+        );
+        assert!(
+            connected_a < inter_gap,
+            "connected pair in cluster 0 should be closer than inter-cluster gap"
+        );
+        assert!(
+            connected_b < inter_gap,
+            "connected pair in cluster 1 should be closer than inter-cluster gap"
+        );
+    }
+
+    #[test]
+    fn sections_mode_force_params_change_member_spread_near_anchor() {
+        // sections-black-hole-solver 3.0: the runtime slice/section stiffnesses
+        // must actually reach the solver. Solves one banner group whose circuits
+        // span lanes 0, 2, 4, 6 twice with the same slice_k but a low vs a high
+        // section_k. Under the band-anchor contract (task 3.9) the anchor is the
+        // mean seed target of those members — the slots are 0, 152, 304, 456
+        // (each 32-wide circuit lane followed by an empty lane credited
+        // `SECTIONS_LANE_MIN_W` = 40), so the anchor x is 228. The section-hole
+        // spring is the only x-force that pulls members together, so high
+        // section_k must yield a measurably tighter x-cluster around the anchor
+        // than low section_k — within the bound `SECTIONS_TETHER` puts on it.
+        let nodes = vec![node("c0", 0), node("c1", 2), node("c2", 4), node("c3", 6)];
+        let clusters = vec![Cluster {
+            title: "group_a".to_string(),
+            section_range: 0..7,
+        }];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        // The anchor the solver actually uses: the mean seed target of the
+        // members. Every node here is alone in its lane and every lane is in row
+        // 0, so the per-(group, row) anchor is again the members' mean slot.
+        let seed = sections_seed(&graph);
+        let anchors = section_hole_anchors_lanes(&graph, &seed);
+        let anchor_x = anchors[0].expect("cluster member is anchored").0;
+        assert_eq!(anchor_x, (0.0 + 152.0 + 304.0 + 456.0) / 4.0);
+        assert!(
+            anchors.iter().all(|a| a.map(|p| p.0) == Some(anchor_x)),
+            "in one row every member shares one band anchor"
+        );
+        let spread = |positions: &[(f32, f32)]| {
+            positions
+                .iter()
+                .map(|(x, _)| (x - anchor_x).abs())
+                .fold(0.0f32, f32::max)
+        };
+
+        let low_section_k = SECTION_HOLE_K / 20.0; // hole spring barely felt
+        let high_section_k = DEFAULT_SECTION_HOLE_K * 20.0; // strongly anchored
+
+        let low = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, low_section_k);
+        let high = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, high_section_k);
+        assert_finite_and_bounded(&low);
+        assert_finite_and_bounded(&high);
+
+        // Bounded-compaction contract (task 3.9): an anchor pull can move a
+        // member toward its band anchor by at most SECTIONS_TETHER, so a
+        // saturated high section_k lands exactly on
+        // `max|target − anchor| − SECTIONS_TETHER` = 228 − 60 = 168 (observed
+        // 168.0), while a barely-felt hole spring leaves the members near their
+        // own slots (observed 215.10 for its 12.9 units of tightening). High
+        // section_k must therefore be measurably tighter — but boundedly so,
+        // which is the property that stops the tightening from collapsing the
+        // lanes into each other.
+        let (spread_low, spread_high) = (spread(&low), spread(&high));
+        assert!(
+            spread_high < spread_low,
+            "high section_k must tighten the x-cluster around the anchor: \
+             spread_low={spread_low} spread_high={spread_high}"
+        );
+        assert!(
+            (spread_high - (228.0 - SECTIONS_TETHER)).abs() <= 1.0,
+            "a saturated anchor pull must land on max|target − anchor| − \
+             SECTIONS_TETHER = {}, got spread_high={spread_high}",
+            228.0 - SECTIONS_TETHER
+        );
+        assert!(
+            spread_low - spread_high <= SECTIONS_TETHER,
+            "the tightening a high section_k buys is bounded by the tether: \
+             {spread_low} − {spread_high} > {SECTIONS_TETHER}"
+        );
+        assert_ne!(
+            low, high,
+            "different section_k values must produce different layouts"
+        );
+
+        // Determinism holds per parameter triple.
+        let low_again = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, low_section_k);
+        let high_again = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, high_section_k);
+        assert_eq!(low, low_again, "low section_k solve must be deterministic");
+        assert_eq!(
+            high, high_again,
+            "high section_k solve must be deterministic"
+        );
     }
 
     // ── graph-column-layout: pinned anchors on the column path (task 3.2) ──
@@ -2668,5 +4094,922 @@ mod tests {
             assert!((sy - y).abs() < 1e-3, "node {i} y {y} off the grid");
         }
         assert_columns_do_not_overlap(&graph, &widths, &positions);
+    }
+
+    // ── sections-black-hole-solver: lane slots + outer lanes (tasks 6.3, 3.8) ──
+
+    #[test]
+    fn sections_mode_slice_spring_holds_non_clustered_circuits_at_their_lane_slot() {
+        // Lane-slot contract (task 3.8, sharpened by 3.9): with no banner groups
+        // there are no section-hole anchors, so each circuit is held by the slice
+        // spring alone — and that spring pulls toward the node's *own seed target*
+        // in both axes, not `slice_index * HORIZONTAL_SPACING`. `make_graph`
+        // assigns section_index == index, so the four circuits own lanes 0..3;
+        // every title is `n{i}` (2 chars), so every lane is `estimated_widths[i]`
+        // = 32 wide and the packer lays the slots out at
+        // x = i * (32 + SECTIONS_LANE_GAP) = 0, 72, 144, 216, all in row 0 (y = 0).
+        // Every lane here holds exactly one node, so each node's seed target *is*
+        // its lane slot and the expected targets below are the 3.8 values, derived
+        // from that arithmetic rather than from the solver's `sections_lanes`.
+        let graph = make_graph(4, &[]);
+        assert!(graph.clusters.is_empty(), "fixture must have no clusters");
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        let lane_w = estimated_widths(&graph)[0].min(SECTIONS_LANE_MAX_NODE_W);
+        assert_eq!(lane_w, 32.0, "the 2-char fixture lanes are 32 wide");
+
+        // Tolerance: SECTIONS_LANE_GAP / 4 = 10 world units. The slice spring is
+        // deliberately weak (SLICE_K = 0.1) and the nodes are collinear in row 0,
+        // so size-aware repulsion (required 80 between two 80-tall bodies) fights
+        // the spring head-on along x; the worst observed deviation is 4.91. With
+        // the slice spring targeting the old `slice_index * HORIZONTAL_SPACING`
+        // axis instead, the targets would be 0/80/160/240 and node 1 would read
+        // 70.84 — 9.16 off, while all four targets drift with the lane width.
+        let tolerance = SECTIONS_LANE_GAP / 4.0;
+        for (i, &(x, y)) in positions.iter().enumerate() {
+            let target_x = i as f32 * (lane_w + SECTIONS_LANE_GAP);
+            assert!(
+                (x - target_x).abs() <= tolerance,
+                "circuit {i} x={x} is not within {tolerance} of its lane slot {target_x}"
+            );
+            // Row 0: the single-node lanes all sit on the row's top edge.
+            assert!(
+                y.abs() <= tolerance,
+                "circuit {i} y={y} left its lane's row (slot_y = 0) by more than {tolerance}"
+            );
+        }
+        // Lanes stay ordered left-to-right inside the row (no lane crossing).
+        for pair in positions.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "lane x must increase with patch order"
+            );
+        }
+    }
+
+    #[test]
+    fn sections_mode_outer_nodes_stay_at_the_outer_lanes() {
+        // `slice_index`'s contract (D1) puts controllers and input jacks in the
+        // left outer lane (0) and output jacks in the right outer lane
+        // (max_circuit_lane + 1). The index-level test pins the values; this pins
+        // that the solve lands the nodes on those lanes' *slots*.
+        //
+        // Hand-derived lane geometry (task 3.8 caps each lane at its widest
+        // member's `min(estimated_width, SECTIONS_LANE_MAX_NODE_W)`, all widths
+        // here are title chars × 8 + 16 padding):
+        //   lane 0 = c0 (32), ctrl (48), IN (32)  -> width 48 -> slot x 0
+        //   lane 1 = c1 (32)                      -> slot x 0 + 48 + 40  = 88
+        //   lane 2 = c2 (32)                      -> slot x 88 + 32 + 40 = 160
+        //   lane 3 = OUT (32)                     -> slot x 160 + 32 + 40 = 232
+        // All lanes hold one row, so every slot y is 0.
+        let nodes = vec![
+            node("c0", 0),
+            node("c1", 1),
+            node("c2", 2),
+            GraphNode {
+                id: NodeId::Controller("ctrl".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+            GraphNode {
+                id: NodeId::Jack("IN".to_string()),
+                kind: NodeKind::InputJack,
+                circuit: "IN".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+            GraphNode {
+                id: NodeId::Jack("OUT".to_string()),
+                kind: NodeKind::OutputJack,
+                circuit: "OUT".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            ..Default::default()
+        };
+        assert_eq!(slice_index(&graph), vec![0, 1, 2, 0, 0, 3]);
+        assert_eq!(
+            sections_lanes(&graph).slot,
+            vec![(0.0, 0.0), (88.0, 0.0), (160.0, 0.0), (232.0, 0.0)],
+            "lane slots must track the hand-derived width-aware geometry"
+        );
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Tolerance: SECTIONS_LANE_GAP / 4 = 10 world units (worst observed
+        // deviation 5.0, on the output jack: it is the outermost node, so
+        // repulsion from lane 2 has nothing to push back against).
+        let tolerance = SECTIONS_LANE_GAP / 4.0;
+        for i in [0, 3, 4] {
+            assert!(
+                positions[i].0.abs() <= tolerance,
+                "node {i} x={} must sit at the left outer lane slot (0)",
+                positions[i].0
+            );
+        }
+        let output_target = 232.0;
+        assert!(
+            (positions[5].0 - output_target).abs() <= tolerance,
+            "output jack x={} must sit at the right outer lane slot ({output_target})",
+            positions[5].0
+        );
+        // The outer lanes bracket the circuit lanes.
+        let circuit_max_x = positions[..3]
+            .iter()
+            .map(|p| p.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            positions[5].0 > circuit_max_x,
+            "output jack must sit right of the circuits"
+        );
+    }
+
+    // ── sections-black-hole-solver: size-aware repulsion (D3, task 6.3) ─────
+
+    #[test]
+    fn sections_mode_size_aware_repulsion_acts_beyond_the_fixed_radius() {
+        // Unchanged by the lane contract (task 3.8): this pins the *force* the
+        // sections path applies, and the wrapped lane grid relies on it exactly
+        // as before — lane sizing decides the pitch, this force decides whether a
+        // pair of bodies that ends up closer than `required` is pushed apart.
+        //
+        // D3: sections-mode repulsion is size-aware and cut off by the pair's
+        // *required separation* `req = 0.5 * (extent_i + extent_j)` (extent =
+        // max(width, height)), not by the fixed REPULSION_RADIUS. A 200-wide node
+        // next to an equal one needs a center distance of 200 to clear it, so
+        // repulsion must reach well past the fixed radius (120). This pins the
+        // force contract the solver relies on (nothing else exercises this
+        // function directly).
+        let a = (0.0, 0.0);
+        let b = (150.0, 0.0); // REPULSION_RADIUS (120) < 150 < req (200)
+        assert_eq!(
+            repulsion_force(a, b),
+            (0.0, 0.0),
+            "fixed-radius repulsion must cut off past REPULSION_RADIUS"
+        );
+        let required = 200.0;
+        let f = repulsion_force_size_aware(a, b, required);
+        assert!(
+            f.0 < 0.0 && f.1 == 0.0,
+            "size-aware repulsion must push apart at d=150 with required {required}, got {f:?}"
+        );
+
+        // Zero at and beyond the required separation: no phantom push at rest.
+        assert_eq!(
+            repulsion_force_size_aware((0.0, 0.0), (required, 0.0), required),
+            (0.0, 0.0),
+            "repulsion must be exactly zero at d == required"
+        );
+        assert_eq!(
+            repulsion_force_size_aware((0.0, 0.0), (required + 50.0, 0.0), required),
+            (0.0, 0.0),
+            "repulsion must be zero beyond required"
+        );
+
+        // Monotonic in penetration: a deeper overlap pushes at least as hard,
+        // and the force is still positive just inside the boundary.
+        let mag = |d: f32| {
+            repulsion_force_size_aware((0.0, 0.0), (d, 0.0), required)
+                .0
+                .abs()
+        };
+        assert!(mag(1.0) >= mag(50.0), "force must not weaken as d falls");
+        assert!(mag(50.0) >= mag(150.0), "force must not weaken as d falls");
+        assert!(mag(150.0) >= mag(199.9), "force must not weaken as d falls");
+        assert!(mag(199.9) > 0.0, "force must stay positive inside required");
+
+        // Finite at the coincident point: no division by zero, fixed nudge.
+        let coincident = repulsion_force_size_aware((0.0, 0.0), (0.0, 0.0), required);
+        assert!(
+            coincident.0.is_finite() && coincident.1.is_finite(),
+            "coincident nodes must get a finite nudge, got {coincident:?}"
+        );
+    }
+
+    #[test]
+    fn sections_mode_keeps_large_nodes_beyond_their_size_required_distance() {
+        // D3 end-to-end at the widths the design has to survive. Both cases are
+        // two equal-width circuits with no edges, at lanes 0 and 2, so their
+        // slice springs pull back toward those lanes' slots and are the restoring
+        // force size-aware repulsion must beat. Under the lane contract (task
+        // 3.8) the slot pitch is width-aware: lane 0 is `min(w, cap)` wide, lane 1
+        // is empty (`SECTIONS_LANE_MIN_W` = 40), so slot 2 sits at
+        // `lane_w + 2 · SECTIONS_LANE_GAP` — 296 for the 176-wide case and 360
+        // for the 496-wide case (whose lane is capped at
+        // `SECTIONS_LANE_MAX_NODE_W` = 240). `required` is the combined
+        // half-extent `0.5 * (extent_a + extent_b)` with `extent = max(w, h)`:
+        // below that center distance the bodies overlap.
+        //
+        //   20-char titles -> 176 wide, required 176, slot pitch 296 (clear)
+        //   60-char titles -> 496 wide, required 496, slot pitch 360 (216 short,
+        //                   so repulsion must win 216 units of separation back
+        //                   from the two slice springs)
+        //
+        // Tolerance: 10% of `required` (49.6 units for the wide case). The force
+        // is zero *at* `required`, so with FRICTION damping the pair coasts a
+        // little past it rather than landing exactly on it; the tolerance absorbs
+        // that without allowing overlap. Observed exactly 296.0 for the 176-wide
+        // case (its lane pitch already clears `required` = 176, so both nodes sit
+        // on their slots and repulsion never fires) and 464.08 for the 496-wide
+        // case — 6.4% short of `required`, inside the tolerance, because each node
+        // is held back by a slice spring toward its own slot. It is far tighter
+        // than the defect: the inert pre-fix form left the pair at ~196 regardless
+        // of width, a ~300-unit overlap for the 496 case, so reverting the
+        // magnitude or the grid change fails this test.
+        for (chars, expected_required) in [(20usize, 176.0f32), (60, 496.0)] {
+            let graph = Graph {
+                nodes: vec![node(&"a".repeat(chars), 0), node(&"b".repeat(chars), 2)],
+                ..Default::default()
+            };
+            let sizes = node_world_sizes(&graph);
+            let required = (sizes[0].0.max(sizes[0].1) + sizes[1].0.max(sizes[1].1)) / 2.0;
+            assert_eq!(
+                required, expected_required,
+                "{chars}-char fixture must require {expected_required}"
+            );
+
+            let sections = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+            let force = solve(&graph, &[], DEFAULT_TENSION);
+            assert_finite_and_bounded(&sections);
+            assert_finite_and_bounded(&force);
+
+            let sections_gap = dist(sections[0], sections[1]);
+            let force_gap = dist(force[0], force[1]);
+            let tolerance = required * 0.1;
+            assert!(
+                sections_gap >= required - tolerance,
+                "sections gap {sections_gap} must keep {chars}-char bodies clear \
+                 (required {required}, tolerance {tolerance})"
+            );
+            // Force mode has no slice spring and cuts repulsion off at
+            // REPULSION_RADIUS, so it leaves the pair on the seed gap (120) —
+            // below the size requirement. The fix must not perturb that path.
+            assert!(
+                force_gap < required,
+                "force mode gap {force_gap} should stay below the size requirement {required}"
+            );
+            assert!(
+                sections_gap > force_gap,
+                "sections mode ({sections_gap}) must separate more than force mode ({force_gap})"
+            );
+        }
+    }
+
+    #[test]
+    fn force_mode_positions_are_unchanged_by_size_aware_repulsion() {
+        // Guard for the D3 fix: it must touch only the sections-mode path. Force
+        // mode — and the column path's `local_resettle`, which also runs force
+        // mode — must stay byte-identical: same cutoff radius, same grid cell
+        // size, same force form. The expected values below are exactly what the
+        // pre-fix solver produced on this graph (verified against HEAD f4cd541),
+        // and the graph exercises cable springs, grid-hashed repulsion, and
+        // cohesion (the banner cluster makes `cohesion` fire); any perturbation
+        // of the force path moves them.
+        let mut graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        graph.nodes[0].circuit = "a".repeat(2);
+        graph.nodes[1].circuit = "b".repeat(8);
+        graph.nodes[2].circuit = "c".to_string();
+        graph.nodes[3].circuit = "d".repeat(4);
+        graph.nodes[4].circuit = "e".repeat(11);
+        graph.clusters = vec![Cluster {
+            title: "g".to_string(),
+            section_range: 1..3,
+        }];
+        assert_eq!(
+            solve(&graph, &[], DEFAULT_TENSION),
+            vec![
+                (-0.1171875, 0.0),
+                (80.2, 0.0),
+                (159.8, 0.0),
+                (240.0, 0.0),
+                (320.1172, 0.0),
+            ],
+            "force-mode solve positions must not change"
+        );
+
+        // `local_resettle` (the drag path) enters the same core from a moved
+        // seed; pin it too so the grid-cell-size change cannot perturb it.
+        let mut positions = seed_positions(&graph);
+        positions[3].0 += 25.0;
+        positions[3].1 += 40.0;
+        let moved = graph.nodes[3].id.clone();
+        assert!(local_resettle(
+            &graph,
+            &mut positions,
+            &moved,
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+            &[],
+            DEFAULT_TENSION,
+        ));
+        assert_eq!(
+            positions,
+            vec![
+                (0.0, 0.0),
+                (86.00588, 0.33226788),
+                (168.3252, 5.9020987),
+                (247.21428, 35.46834),
+                (322.01288, -1.7070212),
+            ],
+            "force-mode local re-settle positions must not change"
+        );
+    }
+
+    #[test]
+    fn sections_mode_empty_graph_and_single_node_do_not_panic() {
+        // Empty graph: `run_iterations_with_forces` early-returns on zero nodes,
+        // so sections mode must yield no positions rather than panicking.
+        let empty = Graph::default();
+        assert!(
+            solve_sections(&empty, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K).is_empty(),
+            "empty graph must produce no positions"
+        );
+        // Single node: exactly one finite, bounded position.
+        let single = make_graph(1, &[]);
+        let positions = solve_sections(&single, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_eq!(positions.len(), 1);
+        assert_finite_and_bounded(&positions);
+    }
+
+    /// Bounding box `(width, height)` of a position set.
+    fn positions_bbox(positions: &[(f32, f32)]) -> (f32, f32) {
+        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+        for (x, y) in positions {
+            min_x = min_x.min(*x);
+            max_x = max_x.max(*x);
+            min_y = min_y.min(*y);
+            max_y = max_y.max(*y);
+        }
+        (max_x - min_x, max_y - min_y)
+    }
+
+    #[test]
+    fn sections_mode_scale_is_proportional_to_patch_size_not_cycle_length() {
+        // Regression for the exploding sections seed on a large cyclic patch —
+        // now asserting the *wrapped-lane* goal (task 3.8) instead of one
+        // unbounded ribbon. `fixtures/own_scale.ini` has 511 nodes, feedback
+        // cables making the graph cyclic, and 510 lanes (509 patch-order circuit
+        // lanes plus the output-jack lane).
+        //
+        // Before the lane rework the seed was `x = slice_index *
+        // HORIZONTAL_SPACING`, `y = global_rank * VERTICAL_SPACING`, which
+        // measured a 39,540 × 60,020 ribbon on this fixture (aspect ~40:1). The
+        // wrapped seed instead packs lanes of width
+        // `min(estimated_width, SECTIONS_LANE_MAX_NODE_W)` into rows of at most
+        // `SECTIONS_ROW_TARGET_W`, so the same patch must read roughly square.
+        //
+        // Measured after the rework: lanes 510, lanes/row 32 (the fullest row),
+        // so `ceil(510 / 32) + 1 = 17` rows are budgeted; solved bbox
+        // 3761.50 × 2740.69 → aspect 1.37 (3.9 re-measured 3812.00 × 2849.51 →
+        // aspect 1.34 with the tether and the stack-aware row pitch).
+        //
+        // Falsified: restoring the old `slice_index * HORIZONTAL_SPACING` /
+        // `global_rank * VERTICAL_SPACING` seed fails the aspect assertion and the
+        // per-node drift assertion below.
+        let graph = graph_from_fixture("fixtures/own_scale.ini");
+        let n = graph.nodes.len();
+        assert!(n > 400, "scale fixture should be large, got {n} nodes");
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_eq!(positions.len(), n);
+        for (x, y) in &positions {
+            assert!(
+                x.is_finite() && y.is_finite(),
+                "non-finite position ({x}, {y})"
+            );
+        }
+
+        // The wrapped seed itself is overlap-free — that is what makes the bounded
+        // springs safe to trust. Measured worst seed penetration −28.00 on this
+        // fixture (positive = overlapping). Falsified by the 3.9 row-height fix:
+        // sizing a row from NODE_WORLD_H alone instead of the lane's *full stack*
+        // lets a stacked lane overflow into the next row and puts this at +40.00.
+        let seed = sections_seed(&graph);
+        let sizes = node_world_sizes(&graph);
+        let seed_penetration = worst_penetration(&sizes, &seed.targets);
+        assert!(
+            seed_penetration <= 0.0,
+            "the wrapped seed must be overlap-free, worst seed penetration {seed_penetration}"
+        );
+
+        // Lane geometry, from the helper the solver itself uses.
+        let lanes = sections_lanes(&graph);
+        let lane_count = lanes.slot.len();
+        assert!(
+            lane_count > 400,
+            "the fixture should have hundreds of lanes, got {lane_count}"
+        );
+        let mut row_ys: Vec<f32> = lanes.slot.iter().map(|s| s.1).collect();
+        row_ys.sort_by(|a, b| a.partial_cmp(b).expect("finite slot y"));
+        row_ys.dedup();
+        let rows = row_ys.len();
+        let lanes_per_row = row_ys
+            .iter()
+            .map(|&y| lanes.slot.iter().filter(|s| s.1 == y).count())
+            .max()
+            .expect("the fixture has at least one row");
+        let row_budget = lane_count.div_ceil(lanes_per_row);
+        assert!(
+            rows >= 2,
+            "a {lane_count}-lane patch must wrap into rows, got {rows}"
+        );
+
+        // Overview goal: roughly square (aspect ≤ 4:1) and inside the wrapped
+        // grid's own bounds.
+        let (width, height) = positions_bbox(&positions);
+        let aspect = width.max(height) / width.min(height).max(f32::MIN_POSITIVE);
+        assert!(
+            aspect <= 4.0,
+            "sections bbox {width} x {height} has aspect {aspect}, above the 4:1 \
+             overview goal (the old ribbon seed measured ~40:1)"
+        );
+        let width_bound = SECTIONS_ROW_TARGET_W * 1.5;
+        assert!(
+            width <= width_bound,
+            "sections width {width} exceeds {width_bound} \
+             (SECTIONS_ROW_TARGET_W × 1.5)"
+        );
+        let height_bound = (row_budget + 1) as f32 * (NODE_WORLD_H + SECTIONS_ROW_GAP) * 1.5;
+        assert!(
+            height <= height_bound,
+            "sections height {height} exceeds {height_bound} \
+             ((ceil(lanes / lanes_per_row) + 1) × (NODE_WORLD_H + SECTIONS_ROW_GAP) × 1.5)"
+        );
+
+        // Lane order is patch order (task 3.9 guards it on the seed, where it is
+        // exact): inside every row the lanes ascend left→right, and the next row
+        // sits below the previous one.
+        for pair in lanes.slot.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b.1 == a.1 {
+                assert!(
+                    b.0 > a.0,
+                    "lanes inside one row must ascend left→right: {a:?} then {b:?}"
+                );
+            } else {
+                assert!(b.1 > a.1, "a wrapped row must sit below the previous one");
+            }
+        }
+
+        // Every node stays inside the space its own lane reserved. The springs are
+        // bounded by SECTIONS_TETHER (60 = 1.5 lane gaps) and the overlap-removal
+        // pass may add at most one more lane gap while separating a pair, so the
+        // tolerance is 60 + 40 = 100 world units. Measured worst drift is 73.75
+        // (y, from a separation push) / 60.00 (x — the tether at its limit). Before
+        // 3.9 the same drift was 1180.0, the integrator's whole travel budget
+        // (`MAX_DISPLACEMENT × (SOLVE_ITERATIONS − 1)`), reached by nodes dragged at
+        // full speed toward a far-away anchor: that is what let nodes leave the lane
+        // grid and land on each other. A node can no longer do either, which is what
+        // pins the layout to patch-size proportion.
+        let drift_tol = SECTIONS_TETHER + SECTIONS_LANE_GAP;
+        let mut worst_drift = 0.0f32;
+        for (i, &(x, y)) in positions.iter().enumerate() {
+            let (target_x, target_y) = seed.targets[i];
+            worst_drift = worst_drift.max((x - target_x).abs().max((y - target_y).abs()));
+        }
+        assert!(
+            worst_drift <= drift_tol,
+            "node drifted {worst_drift} > {drift_tol} from its seed target \
+             (SECTIONS_TETHER {SECTIONS_TETHER} + one lane gap of separation slack)"
+        );
+
+        // Non-overlap is a hard user requirement ("space should be chosen so that
+        // circuits do not overlap"), so it is asserted on the scale fixture too,
+        // not merely "no NaN". Tolerance SECTIONS_LANE_GAP = 40 world units, the
+        // same slack 3.8's distinct-lane test used: the wrapped seed itself is clear
+        // with margin (measured worst seed penetration −28.00) and the bounded
+        // springs plus the overlap-removal pass leave 1.05 (measured) — the
+        // tolerance is slack, and it stays far below the 79.19 units of penetration
+        // the unbounded anchor pull and untamed cable drag produced before 3.9, so
+        // this assertion fails as soon as either bound is removed.
+        assert_pairs_clear(&sizes, &positions, SECTIONS_LANE_GAP, "own_scale sections");
+        let worst = worst_penetration(&sizes, &positions);
+        assert!(
+            worst <= SECTIONS_LANE_GAP / 4.0,
+            "own_scale worst pairwise penetration {worst} should be slack-level, \
+             not near the {SECTIONS_LANE_GAP}-unit tolerance"
+        );
+
+        // Pre-existing, out-of-scope divergence: force mode still seeds via the
+        // topological-depth seed and therefore still explodes on this cyclic
+        // fixture (measured seed width ≈ 19.6 M). This is asserted rather than
+        // fixed: force mode has a golden-vector test
+        // (`force_mode_positions_are_unchanged_by_size_aware_repulsion`) and the
+        // D9 determinism contract pinning its bytes. Documenting it here keeps the
+        // two seeds' different behavior visible in one place.
+        let force_seed = seed_positions(&graph);
+        let (force_seed_width, _) = positions_bbox(&force_seed);
+        assert!(
+            force_seed_width > width_bound,
+            "force mode's topological-depth seed unexpectedly fits the sections bound \
+             ({force_seed_width} <= {width_bound}); if force mode was fixed, update this guard"
+        );
+    }
+    #[test]
+    fn sections_lane_width_is_capped_at_the_exported_max() {
+        // The lane-width cap (task 3.8) is exported for the renderer's frame clamp
+        // (task 3.9). A node wider than `SECTIONS_LANE_MAX_NODE_W` contributes only
+        // the cap to its lane, so one 496-wide body cannot shove the rest of the
+        // row out of square: lane 0 is credited 240, so lane 1 starts at
+        // 240 + SECTIONS_LANE_GAP = 280 rather than at 496 + 40 = 536.
+        let graph = Graph {
+            nodes: vec![node(&"a".repeat(60), 0), node("b", 1)],
+            ..Default::default()
+        };
+        let real_w = estimated_widths(&graph)[0];
+        assert_eq!(
+            real_w, 496.0,
+            "60-char title must estimate at 496 before capping"
+        );
+        assert!(
+            real_w > SECTIONS_LANE_MAX_NODE_W,
+            "the fixture node must exceed the export cap ({real_w} > {SECTIONS_LANE_MAX_NODE_W})"
+        );
+
+        // Lane 1 starts one capped lane plus one lane gap to the right, not one
+        // uncapped node width (536) to the right.
+        let second_slot_x = SECTIONS_LANE_MAX_NODE_W + SECTIONS_LANE_GAP;
+        let lanes = sections_lanes(&graph);
+        assert_eq!(lanes.slot, vec![(0.0, 0.0), (second_slot_x, 0.0)]);
+        // The seed the solver starts from sits on those slots (both nodes are the
+        // only member of their lane, so both are at their lane's top edge).
+        assert_eq!(
+            seed_positions_sections(&graph),
+            vec![(0.0, 0.0), (second_slot_x, 0.0)]
+        );
+    }
+
+    #[test]
+    fn sections_mode_wide_node_lanes_do_not_overlap() {
+        // Width-tracking contract (task 3.8): a lane reserves its widest member's
+        // `min(estimated_width, SECTIONS_LANE_MAX_NODE_W)`, so two nodes in
+        // *distinct* lanes are separated by `lane_w(left) + SECTIONS_LANE_GAP`,
+        // which exceeds their required center distance
+        // (`0.5 * (max(w_a, 80) + max(w_b, 80))`) for every width up to the cap. A
+        // fixed pitch could not do that: with the old `HORIZONTAL_SPACING = 80` the
+        // 224/240 pair would need 232 of separation and get 120.
+        //
+        // Fixture: one node per lane, lanes 0..5, titles of 10/14/18/22/26/28 chars
+        // → widths 96/128/160/192/224/240 — all wider than `HORIZONTAL_SPACING`,
+        // all at or below the cap, so lane width == node width.
+        let graph = Graph {
+            nodes: vec![
+                node(&"a".repeat(10), 0),
+                node(&"b".repeat(14), 1),
+                node(&"c".repeat(18), 2),
+                node(&"d".repeat(22), 3),
+                node(&"e".repeat(26), 4),
+                node(&"f".repeat(28), 5),
+            ],
+            ..Default::default()
+        };
+        let sizes = node_world_sizes(&graph);
+        let widths = estimated_widths(&graph);
+        assert_eq!(widths, vec![96.0, 128.0, 160.0, 192.0, 224.0, 240.0]);
+        assert!(
+            widths.iter().all(|&w| w > HORIZONTAL_SPACING),
+            "every fixture node must be wider than the old fixed pitch"
+        );
+        assert!(
+            widths.iter().all(|&w| w <= SECTIONS_LANE_MAX_NODE_W),
+            "and inside the cap, so lane width tracks the node exactly"
+        );
+
+        let lanes = sections_lanes(&graph);
+        assert_eq!(lanes.lane, vec![0, 1, 2, 3, 4, 5], "one node per lane");
+        // Slot pitch tracks width: 96 + 40, then 128 + 40, ...
+        let expected: Vec<f32> = widths
+            .iter()
+            .scan(0.0f32, |row_x, &w| {
+                let here = *row_x;
+                *row_x += w + SECTIONS_LANE_GAP;
+                Some(here)
+            })
+            .collect();
+        assert_eq!(lanes.slot.iter().map(|s| s.0).collect::<Vec<_>>(), expected);
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Non-overlap: two axis-aligned bodies are clear when separated on the x
+        // *or* the y axis. Tolerance `OVERLAP_TOL = SECTIONS_LANE_GAP` (40 world
+        // units). Measured penetration is 0.0 for every pair on this fixture, so
+        // the tolerance is pure slack — but it stays far below the 112 units of
+        // penetration a fixed 80-wide pitch would produce for the 224/240 pair, so
+        // the assertion fails as soon as lane width stops tracking node width.
+        const OVERLAP_TOL: f32 = SECTIONS_LANE_GAP;
+        for a in 0..positions.len() {
+            for b in a + 1..positions.len() {
+                let dx = (positions[a].0 - positions[b].0).abs();
+                let dy = (positions[a].1 - positions[b].1).abs();
+                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
+                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                assert!(
+                    dx >= need_x - OVERLAP_TOL || dy >= need_y - OVERLAP_TOL,
+                    "nodes {a} and {b} overlap: |dx|={dx} (need {need_x}), \
+                     |dy|={dy} (need {need_y}), tolerance {OVERLAP_TOL}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sections_mode_lanes_wrap_into_rows_in_patch_order() {
+        // Wrap contract (task 3.8): lanes pack left→right while
+        // `row_x + lane_w ≤ SECTIONS_ROW_TARGET_W`, then the packer wraps to a new
+        // row and continues with the next lane index. This fixture is 20 lanes of
+        // exactly cap-width nodes (28 chars → 240 world units), so a lane costs
+        // 240 + SECTIONS_LANE_GAP = 280: lanes 0..13 fill row 0
+        // (13·280 + 240 = 3880 ≤ 4000) and lane 14 wraps (14·280 + 240 = 4160 >
+        // 4000), so lanes 14..19 continue on row 1 starting again at x = 0. Row
+        // pitch is NODE_WORLD_H + SECTIONS_ROW_GAP = 160.
+        let graph = Graph {
+            nodes: (0..20).map(|i| node(&"w".repeat(28), i)).collect(),
+            ..Default::default()
+        };
+        let lanes = sections_lanes(&graph);
+        assert_eq!(lanes.slot.len(), 20);
+        let row_0 = &lanes.slot[..14];
+        let row_1 = &lanes.slot[14..];
+        assert!(
+            row_0.iter().all(|s| s.1 == 0.0) && row_1.iter().all(|s| s.1 == 160.0),
+            "lanes 0..13 must sit in row 0 (y = 0) and lanes 14..19 in row 1 \
+             (y = 160), got {:?}",
+            lanes.slot
+        );
+        assert_eq!(row_0[0], (0.0, 0.0));
+        assert_eq!(row_0[13], (3640.0, 0.0)); // 13 · 280
+        assert_eq!(row_1[0], (0.0, 160.0)); // wrapped: restarts at row x = 0
+
+        // Ascending lane order inside each row, then the next row below.
+        for pair in row_0.windows(2).chain(row_1.windows(2)) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "lanes must ascend left→right within a row"
+            );
+        }
+        assert!(row_1[0].1 > row_0[13].1, "row 1 must sit below row 0");
+
+        // The solve keeps the wrap: two tight row y-bands, ordered, with a real
+        // gap. The band y is not the slot y — a 240-wide body's extent is 240 while
+        // the row pitch is only 160, so the rows repel vertically (observed row 0 at
+        // −30.60, row 1 at 190.60: 221.2 apart, well above SECTIONS_ROW_GAP = 80).
+        // What the contract needs is that each row stays one band and the bands stay
+        // ordered; the per-node x must stay on its lane slot.
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+        let y_band = |ps: &[(f32, f32)]| {
+            let lo = ps.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+            let hi = ps.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+            (lo, hi)
+        };
+        let (row_0_lo, row_0_hi) = y_band(&positions[..14]);
+        let (row_1_lo, row_1_hi) = y_band(&positions[14..]);
+        assert!(
+            row_0_hi - row_0_lo <= SECTIONS_ROW_GAP,
+            "row 0 must stay one y-band: {row_0_lo}..{row_0_hi} spans more than \
+             SECTIONS_ROW_GAP = {SECTIONS_ROW_GAP}"
+        );
+        assert!(
+            row_1_hi - row_1_lo <= SECTIONS_ROW_GAP,
+            "row 1 must stay one y-band: {row_1_lo}..{row_1_hi} spans more than \
+             SECTIONS_ROW_GAP = {SECTIONS_ROW_GAP}"
+        );
+        assert!(
+            row_1_lo - row_0_hi > SECTIONS_ROW_GAP,
+            "the two rows must stay separate: row 0 top {row_0_hi}, row 1 bottom \
+             {row_1_lo}"
+        );
+        for (i, &(x, _)) in positions.iter().enumerate() {
+            assert!(
+                (x - lanes.slot_of(i).0).abs() <= SECTIONS_LANE_GAP,
+                "node {i} x={x} left its lane slot {}",
+                lanes.slot_of(i).0
+            );
+        }
+    }
+
+    /// Worst pairwise body penetration over `positions`, in world units. Two
+    /// axis-aligned bodies are clear once `|Δx| ≥ (w_a + w_b) / 2` *or*
+    /// `|Δy| ≥ (h_a + h_b) / 2`, so the penetration of a pair is the smaller of
+    /// the two shortfalls: `≤ 0` means the pair is clear.
+    fn worst_penetration(sizes: &[(f32, f32)], positions: &[(f32, f32)]) -> f32 {
+        let mut worst = f32::NEG_INFINITY;
+        for a in 0..positions.len() {
+            for b in a + 1..positions.len() {
+                let dx = (positions[a].0 - positions[b].0).abs();
+                let dy = (positions[a].1 - positions[b].1).abs();
+                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
+                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                worst = worst.max((need_x - dx).min(need_y - dy));
+            }
+        }
+        worst
+    }
+
+    /// Assert every pair of bodies is clear within `tol` world units.
+    fn assert_pairs_clear(sizes: &[(f32, f32)], positions: &[(f32, f32)], tol: f32, what: &str) {
+        for a in 0..positions.len() {
+            for b in a + 1..positions.len() {
+                let dx = (positions[a].0 - positions[b].0).abs();
+                let dy = (positions[a].1 - positions[b].1).abs();
+                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
+                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                let penetration = (need_x - dx).min(need_y - dy);
+                assert!(
+                    penetration <= tol,
+                    "{what}: nodes {a} and {b} overlap: |dx|={dx} (need {need_x}), \
+                     |dy|={dy} (need {need_y}), penetration {penetration} > {tol}"
+                );
+            }
+        }
+    }
+
+    /// Fixture for the 3.9 non-overlap contract: one lane holding a three-node
+    /// stack, and one banner group whose sixteen wide circuits wrap across a row
+    /// boundary.
+    ///
+    /// Every node is named with a 28-character title so its estimated width is
+    /// exactly the exported lane cap ([`SECTIONS_LANE_MAX_NODE_W`] = 240) and every
+    /// lane is one cap-wide lane: the packing arithmetic is then exact, and no lane
+    /// is narrower than its neighbour (the one seed-level shortfall the wrapped
+    /// grid can have — see [`separate_overlaps`]).
+    ///
+    /// Node layout: 0..2 are the outer-lane stack (two controllers + an input
+    /// jack, all `section_index` 0 → lane 0), 3..18 are the sixteen circuits
+    /// (`section_index` 1..16 → lanes 1..16, all members of banner group `grp`).
+    fn wrapped_stack_graph() -> Graph {
+        let long = |name: &str| format!("{name}{}", "w".repeat(28 - name.len()));
+        let outer = |name: &str, kind: NodeKind, section_index: usize| GraphNode {
+            id: match kind {
+                NodeKind::Controller => NodeId::Controller(long(name), 0),
+                NodeKind::InputJack => NodeId::Jack(long(name)),
+                other => {
+                    unreachable!("outer fixture nodes are controllers or input jacks: {other:?}")
+                }
+            },
+            kind,
+            circuit: long(name),
+            instance_index: 0,
+            section_index,
+        };
+        let mut nodes = vec![
+            outer("ctrl1", NodeKind::Controller, 0),
+            outer("ctrl2", NodeKind::Controller, 0),
+            outer("IN1", NodeKind::InputJack, 0),
+        ];
+        for section in 1..=16usize {
+            nodes.push(node(&long(&format!("c{section}")), section));
+        }
+        Graph {
+            nodes,
+            clusters: vec![Cluster {
+                title: "grp".to_string(),
+                section_range: 1..17,
+            }],
+            validation: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sections_mode_stacked_lanes_and_wrapped_clusters_do_not_overlap() {
+        // Covers the two residual defects of task 3.8 in one fixture, and asserts
+        // the hard requirement they broke (non-overlap) for every pair.
+        //
+        // Defect A — in-lane stacking. Lane 0 is the outer lane and holds three
+        // nodes, so the seed stacks them at NODE_WORLD_H + SECTIONS_STACK_GAP
+        // = 120 pitch. The slice spring must target each node's *own* stacked seed
+        // y; targeting the lane's single `slot_y` compressed the stack onto one y
+        // (pitch 0 before the fix, and only 80 with diagonal help from size-aware
+        // repulsion) even though the seed had reserved 120.
+        //
+        // Defect B — cross-row anchors. Group `grp` owns sixteen 240-wide
+        // circuits; lanes 1..13 land on row 0 and lanes 14..16 wrap to row 1 (row 0
+        // is as tall as lane 0's stack: 3·80 + 2·40 = 320, plus SECTIONS_ROW_GAP
+        // = 80 → row 1's slot y = 400). The group's single global mean anchor
+        // would sit at ≈ (1645, 75), ~1300 units from the wrapped members and
+        // across a row boundary; per-(group, row) anchors instead give each row
+        // band its own anchor — (1960, 0) for row 0 and (280, 400) for row 1.
+        let graph = wrapped_stack_graph();
+        let seed = sections_seed(&graph);
+
+        // Seed geometry, hand-derived above.
+        assert_eq!(
+            seed.lanes.lane[..3],
+            [0, 0, 0],
+            "the outer lane holds the three stacked nodes"
+        );
+        assert_eq!(seed.lanes.slot[0], (0.0, 0.0));
+        assert_eq!(
+            seed.lanes.slot[13],
+            (3640.0, 0.0),
+            "lane 13 is the last lane of row 0"
+        );
+        assert_eq!(
+            seed.lanes.slot[14],
+            (0.0, 400.0),
+            "lane 14 wraps to row 1, whose y accounts for lane 0's full 320-unit stack"
+        );
+        assert_eq!(seed.lanes.slot[16], (560.0, 400.0));
+        assert_eq!(
+            (seed.lanes.row_of(0), seed.lanes.row_of(16)),
+            (0, 1),
+            "node 0 is the outer lane's stack, node 16 is the first wrapped circuit"
+        );
+        assert_eq!(
+            seed.targets[..3],
+            [(0.0, 0.0), (0.0, 120.0), (0.0, 240.0)],
+            "a three-node lane stacks at the full 120 pitch"
+        );
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Defect A: the stack can no longer collapse below the pitch its lane
+        // reserved. The seed stacks lane 0 at NODE_WORLD_H + SECTIONS_STACK_GAP
+        // = 120, and size-aware repulsion may spread it further (these synthetic
+        // nodes are 240 wide, and the sections force model separates by
+        // `max(width, height)`, so their radial requirement is 240 — measured pitch
+        // 174.9), but the bounded springs can never pull it back under 120. Before
+        // the fix every member targeted the lane's single `slot_y`, so the stack
+        // collapsed onto one y and only the overlap-removal pass recreated a gap —
+        // at `h_a + h_b` = 80, below the reserved pitch.
+        let pitch = NODE_WORLD_H + SECTIONS_STACK_GAP;
+        let pitch_ceiling = pitch + 2.0 * SECTIONS_TETHER + GRID_SNAP;
+        for i in 0..2 {
+            let dy = (positions[i].1 - positions[i + 1].1).abs();
+            assert!(
+                dy >= pitch - SECTIONS_LANE_GAP / 4.0,
+                "stacked lane-0 members {i}/{}: pitch {dy} is below the reserved {pitch}",
+                i + 1
+            );
+            assert!(
+                dy <= pitch_ceiling,
+                "stacked lane-0 members {i}/{}: pitch {dy} exceeds the tether-bounded \
+                 {pitch_ceiling}",
+                i + 1
+            );
+        }
+
+        // Defect B: the wrapped pair stays in its own row band, around its own
+        // band anchor. Tolerance SECTIONS_LANE_GAP = 40 world units; with a single
+        // global anchor the pull saturates the 60-unit tether and each member
+        // leaves both its band's x and its row's y by ~60.
+        let wrapped = [16usize, 17, 18]; // circuits in lanes 14..16, i.e. row 1
+        let band_mean_x: f32 =
+            wrapped.iter().map(|&i| positions[i].0).sum::<f32>() / wrapped.len() as f32;
+        let band_target_x: f32 =
+            wrapped.iter().map(|&i| seed.targets[i].0).sum::<f32>() / wrapped.len() as f32;
+        assert_eq!(band_target_x, 280.0, "the wrapped band's own anchor");
+        assert!(
+            (band_mean_x - band_target_x).abs() <= SECTIONS_LANE_GAP,
+            "wrapped band mean x {band_mean_x} left its own row's anchor {band_target_x}"
+        );
+        for &i in &wrapped {
+            assert!(
+                (positions[i].1 - seed.targets[i].1).abs() <= SECTIONS_LANE_GAP,
+                "wrapped member {i} y={} left its row (seed y {})",
+                positions[i].1,
+                seed.targets[i].1
+            );
+        }
+
+        // The hard requirement (user decision: "space should be chosen so that
+        // circuits do not overlap"): every pair is clear on at least one axis.
+        // Tolerance SECTIONS_LANE_GAP = 40 world units — the same slack 3.8's
+        // distinct-lane test used, justified the same way: the seed reserves a full
+        // lane per node and the overlap-removal pass resolves what the bounded
+        // springs still produce, so the tolerance is slack rather than allowance.
+        // It stays far below the ~120 units of penetration the unbounded anchor
+        // pull and the untamed cable drag produced before 3.9.
+        let sizes = node_world_sizes(&graph);
+        assert_pairs_clear(
+            &sizes,
+            &positions,
+            SECTIONS_LANE_GAP,
+            "wrapped-stack fixture",
+        );
+        let worst = worst_penetration(&sizes, &positions);
+        assert!(
+            worst <= SECTIONS_LANE_GAP / 4.0,
+            "the worst pairwise penetration {worst} should be slack-level, not near \
+             the {SECTIONS_LANE_GAP}-unit tolerance"
+        );
+
+        // Determinism survives the bounded pulls and the separation pass.
+        assert_eq!(
+            positions,
+            solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K),
+            "the bounded sections solve must be deterministic"
+        );
     }
 }

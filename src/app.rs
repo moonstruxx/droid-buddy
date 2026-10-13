@@ -862,6 +862,19 @@ pub struct App {
     /// strict slot order or barycenter crossing-minimization sweeps. Seeded
     /// from `[layout] ordering` at startup.
     pub layout_ordering: crate::config::LayoutOrdering,
+    /// Slice spring stiffness for sections mode (sections-black-hole-solver 5.1):
+    /// controls the horizontal pull of each circuit toward its slice column.
+    /// Seeded from `[layout] slice_force` at startup; keyboard-adjustable via
+    /// the sliders panel (task 5.2). Persists across patch loads.
+    pub layout_slice_force: f32,
+    /// Section-hole spring stiffness for sections mode (sections-black-hole-solver 5.1):
+    /// controls the pull of each banner-group member toward its fixed hole anchor.
+    /// Seeded from `[layout] section_force` at startup; keyboard-adjustable via
+    /// the sliders panel (task 5.2). Persists across patch loads.
+    pub layout_section_force: f32,
+    /// Whether the sliders panel is visible in the graph pane (sections-black-hole-solver 5.2).
+    /// Toggled by `S` key in sections mode only.
+    pub showing_sliders: bool,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -1129,6 +1142,9 @@ impl App {
             tension: crate::layout::DEFAULT_TENSION,
             layout_mode: crate::config::DEFAULT_LAYOUT_MODE,
             layout_ordering: crate::config::DEFAULT_LAYOUT_ORDERING,
+            layout_slice_force: crate::config::DEFAULT_SLICE_FORCE,
+            layout_section_force: crate::config::DEFAULT_SECTION_FORCE,
+            showing_sliders: false,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
@@ -2685,13 +2701,19 @@ impl App {
     }
 
     /// Apply the active arrangement and cycle to the next one
-    /// (graph-arrange-cycle 2.1): re-solves under the current
-    /// `layout_mode`/`layout_ordering`, refits unconditionally, reports the
-    /// APPLIED arrangement in the status line, then advances the stored
-    /// selection so repeat presses walk `Column-Strict → Column-Barycenter →
-    /// Force → Column-Strict …`. The first press from `Column-Strict` thus
-    /// re-applies `column-strict` (the manual escape hatch from the proposal
-    /// Why), the second moves to `column-barycenter`, the third to `force`.
+    /// (graph-arrange-cycle 2.1; sections-black-hole-solver 5.2): re-solves
+    /// under the current `layout_mode`/`layout_ordering`, refits
+    /// unconditionally, reports the APPLIED arrangement in the status line,
+    /// then advances the stored selection so repeat presses walk
+    /// `Column-Strict → Column-Barycenter → Force → Sections → Column-Strict …`.
+    /// The first press from `Column-Strict` thus re-applies `column-strict`
+    /// (the manual escape hatch from the proposal Why), the second moves to
+    /// `column-barycenter`, the third to `force`, the fourth to `sections`.
+    /// `column-patch` (design D6/D7) is deliberately NOT a step in this cycle:
+    /// it is a config-seeded start state (`[layout] ordering = "patch"`);
+    /// pressing `a` from it applies `column-patch` and rejoins the cycle at
+    /// `force`. The mode order here matches `h`'s `column → force → sections`
+    /// toggle so the two user-facing arrangement controls never contradict.
     /// Reuses the existing fields so `h`, config seeding, and
     /// `solve_graph_positions` keep working unchanged. Silent no-op (false)
     /// without a built graph.
@@ -2706,7 +2728,11 @@ impl App {
             (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => {
                 "column-barycenter"
             }
+            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::PatchOrder) => {
+                "column-patch"
+            }
             (crate::config::LayoutMode::Force, _) => "force",
+            (crate::config::LayoutMode::Sections, _) => "sections",
         };
         self.rebuild_graph();
         self.fit_graph_camera(self.refit_viewport());
@@ -2715,16 +2741,54 @@ impl App {
                 crate::config::LayoutMode::Column,
                 crate::config::LayoutOrdering::Barycenter,
             ),
-            (crate::config::LayoutMode::Column, crate::config::LayoutOrdering::Barycenter) => (
+            (
+                crate::config::LayoutMode::Column,
+                crate::config::LayoutOrdering::Barycenter
+                | crate::config::LayoutOrdering::PatchOrder,
+            ) => (
                 crate::config::LayoutMode::Force,
                 crate::config::LayoutOrdering::Barycenter,
             ),
             (crate::config::LayoutMode::Force, _) => (
+                crate::config::LayoutMode::Sections,
+                crate::config::LayoutOrdering::Barycenter,
+            ),
+            (crate::config::LayoutMode::Sections, _) => (
                 crate::config::LayoutMode::Column,
                 crate::config::LayoutOrdering::Strict,
             ),
         };
         self.status_message = format!("Arrangement: {applied}");
+        true
+    }
+
+    /// Re-anneal the sections layout from the current positions
+    /// (sections-black-hole-solver 3.2, design D5): runs `run_iterations`
+    /// with the full `SOLVE_ITERATIONS` budget and the current tension under
+    /// `LayoutMode::Sections` starting from `graph_positions` (not a fresh
+    /// seed), so manual drags and slider tuning settle instead of resetting.
+    /// Freezes at the energy threshold inside `run_iterations`, refits the
+    /// camera, and reports `Arranged (sections)`. Silent no-op (false)
+    /// without a built graph.
+    pub fn arrange_sections(&mut self) -> bool {
+        let Some(graph) = self.graph.clone() else {
+            return false;
+        };
+        let pins = self.pinned_indices(&graph);
+        let tension = self.tension;
+        crate::layout::run_iterations_with_forces(
+            &graph,
+            &mut self.graph_positions,
+            crate::layout::SOLVE_ITERATIONS,
+            None,
+            &pins,
+            tension,
+            crate::config::LayoutMode::Sections,
+            self.layout_slice_force,
+            self.layout_section_force,
+        );
+        self.fit_graph_camera(self.refit_viewport());
+        self.status_message = String::from("Arranged (sections)");
         true
     }
 
@@ -3466,6 +3530,13 @@ impl App {
                 )
             }
             crate::config::LayoutMode::Force => layout::solve(g, pins, self.tension),
+            crate::config::LayoutMode::Sections => layout::solve_sections(
+                g,
+                pins,
+                self.tension,
+                self.layout_slice_force,
+                self.layout_section_force,
+            ),
         }
     }
 
@@ -3908,6 +3979,7 @@ impl App {
                 highlighted_nodes: HashSet::new(),
                 highlighted_edges: HashSet::new(),
                 not_selected: HashSet::new(),
+                section_holes: Vec::new(),
             };
             let pins: Vec<usize> = self
                 .dependency_nodes
@@ -4023,6 +4095,7 @@ impl App {
                 highlighted_nodes: HashSet::new(),
                 highlighted_edges: HashSet::new(),
                 not_selected: HashSet::new(),
+                section_holes: Vec::new(),
             };
             let pins: Vec<usize> = self
                 .influence_nodes
@@ -4213,6 +4286,7 @@ impl App {
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
             not_selected: HashSet::new(),
+            section_holes: Vec::new(),
         };
         let pins: Vec<usize> = members
             .iter()
@@ -5008,6 +5082,89 @@ mod tests {
     }
 
     #[test]
+    fn sections_mode_center_and_refit_keys_frame_a_wide_graph() {
+        // sections-black-hole-solver 3.3 (design D6): `c` and `Shift+c` are
+        // mode-agnostic — they read `graph_positions` and the published
+        // `graph_canvas_px`, with no `layout_mode` branch — so a graph wider
+        // than the pane centers and refits in sections mode exactly as in
+        // column/force mode. The section solver must not gate either key.
+        use crate::handler::{handle_event, key_modifiers, KeyCode, KeyEvent};
+
+        // A real >20-circuit patch: the section solver spreads its circuits
+        // across one patch-order slice each, so the world is far wider than a
+        // pane.
+        let patch = Patch::from_ini_file(Path::new("fixtures/influence_outlier.ini")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.layout_mode = crate::config::LayoutMode::Sections;
+        let g = KeyEvent::new(KeyCode::Char('g'), key_modifiers::NONE);
+        handle_event(g.clone(), &mut app);
+        handle_event(g, &mut app);
+        assert!(app.showing_graph, "`g g` opens the graph pane");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+        let nodes = app.graph.as_ref().map(|gr| gr.nodes.len()).unwrap_or(0);
+        assert!(nodes > 20, "fixture must span many circuits, got {nodes}");
+
+        let bounds = WorldBounds::from_positions(&app.graph_positions);
+        let (nw, nh) = app.graph_fit_node_world();
+        let world_w = bounds.max_x - bounds.min_x + nw;
+        assert!(
+            world_w > 1000.0,
+            "the sections solve must span a wide x range: {world_w}"
+        );
+
+        // Halve the world width for the pane so the graph genuinely overflows
+        // horizontally at zoom 1.0 (the spec's "wider than the pane" premise),
+        // and seed the camera + canvas the way the renderer publishes them.
+        let canvas = (world_w / 2.0, 400.0_f32);
+        let seeded_pan = (0.0, 0.0);
+        app.graph_camera = Some(GraphCamera {
+            zoom: 1.0,
+            pan: seeded_pan,
+        });
+        app.graph_canvas_px = Some(canvas);
+
+        // `c`: pan-only center. The CONTENT center (bounds center plus half the
+        // node extent) maps to the canvas center, horizontally and vertically,
+        // while the zoom is untouched.
+        handle_event(
+            KeyEvent::new(KeyCode::Char('c'), key_modifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.status_message, "Graph centered");
+        let cam = app.graph_camera.expect("c keeps the camera");
+        assert_eq!(cam.zoom, 1.0, "centering must not change zoom");
+        let (ccx, ccy) = (
+            (bounds.min_x + bounds.max_x + nw) / 2.0,
+            (bounds.min_y + bounds.max_y + nh) / 2.0,
+        );
+        let (px, py) = cam.world_to_pixel(ccx, ccy);
+        assert!(
+            (px - canvas.0 / 2.0).abs() < 1e-2 && (py - canvas.1 / 2.0).abs() < 1e-2,
+            "content center must map to the canvas center: ({px},{py})"
+        );
+        assert_ne!(cam.pan, seeded_pan, "a wider-than-pane graph must pan");
+        assert!((cam.pan.0 - (ccx * cam.zoom - canvas.0 / 2.0)).abs() < 1e-3);
+        assert!((cam.pan.1 - (ccy * cam.zoom - canvas.1 / 2.0)).abs() < 1e-3);
+
+        // `Shift+c`: full refit against the published canvas — the world bounds
+        // expanded by one node extent fit inside it and the preset resets.
+        handle_event(
+            KeyEvent::new(KeyCode::Char('C'), key_modifiers::SHIFT),
+            &mut app,
+        );
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
+        assert_eq!(app.graph_canvas_px, Some(canvas));
+        let cam = app.graph_camera.expect("Shift+c keeps the camera");
+        let (x0, y0) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        let (x1, y1) = cam.world_to_pixel(bounds.max_x + nw, bounds.max_y + nh);
+        assert!(
+            x0 >= -1e-2 && y0 >= -1e-2 && x1 <= canvas.0 + 1e-2 && y1 <= canvas.1 + 1e-2,
+            "refit must frame the world bounds plus one node extent: ({x0},{y0})-({x1},{y1})"
+        );
+    }
+
+    #[test]
     fn open_graph_builds_and_solves_a_loaded_patch() {
         let mut app = App::new();
         let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
@@ -5143,20 +5300,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_arrangement_cycles_strict_barycenter_force() {
-        // graph-arrange-cycle 2.1: repeat presses walk Column-Strict →
-        // Column-Barycenter → Force → Column-Strict …, each reporting the
-        // APPLIED arrangement in the status line.
+    fn apply_arrangement_cycles_strict_barycenter_force_sections() {
+        // graph-arrange-cycle 2.1 + sections-black-hole-solver 5.2: repeat
+        // presses walk Column-Strict → Column-Barycenter → Force → Sections →
+        // Column-Strict …, each reporting the APPLIED arrangement in the status
+        // line. The first press from Column-Strict re-applies column-strict,
+        // the second moves to column-barycenter, the third to force, the fourth
+        // to sections, and the fifth wraps back to column-strict. `column-patch`
+        // is not a cycle step (config-seeded only) — see the dedicated test.
         let mut app = App::new();
+        // Load a patch so apply_arrangement can build a graph
+        app.patch = Some(crate::patch::Patch::sample());
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
         assert!(
             !app.apply_arrangement(),
             "silent no-op without a built graph"
         );
-        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
-        app.load_patch(patch);
-        app.open_graph();
+        // Build the graph like the real app does
+        app.rebuild_graph();
+        // First press: re-applies column-strict, advances to Column-Barycenter
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: column-strict");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
@@ -5164,17 +5327,34 @@ mod tests {
             app.layout_ordering,
             crate::config::LayoutOrdering::Barycenter
         );
+        // Second press: applies column-barycenter, advances to Force
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: column-barycenter");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        // Third press: applies force, advances to Sections
         assert!(app.apply_arrangement());
         assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+        // Fourth press: applies sections, advances to Column-Strict
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: sections");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
+        // Fifth press: wraps around and re-applies column-strict
         assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-strict");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(
-            app.status_message, "Arrangement: column-strict",
-            "fourth press returns to column-strict"
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
         );
         let graph = app.graph.as_ref().unwrap();
         assert_eq!(
@@ -5182,6 +5362,35 @@ mod tests {
             graph.nodes.len(),
             "every cycle step rebuilds positions for the fresh graph"
         );
+    }
+
+    #[test]
+    fn apply_arrangement_from_patch_order_rejoins_cycle_at_force() {
+        // sections-black-hole-solver 5.2 (design D6/D7): `column-patch` is a
+        // config-seeded start state, not a cycle step. Pressing `a` from it
+        // applies column-patch, then rejoins the cycle at Force, so the cycle
+        // stays Column-Strict → Column-Barycenter → Force → Sections.
+        let mut app = App::new();
+        app.patch = Some(crate::patch::Patch::sample());
+        app.layout_ordering = crate::config::LayoutOrdering::PatchOrder;
+        app.rebuild_graph();
+
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: column-patch");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Barycenter
+        );
+
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+
+        assert!(app.apply_arrangement());
+        assert_eq!(app.status_message, "Arrangement: sections");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(app.layout_ordering, crate::config::LayoutOrdering::Strict);
     }
 
     #[test]

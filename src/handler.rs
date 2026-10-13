@@ -1078,18 +1078,23 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             KeyCode::Char('h') if graph_slot_focused(app) => {
-                // graph-column-layout D5: `h` toggles between the deterministic
-                // column arrangement and the force solver on the focused graph
-                // pane. Flipping the mode then rebuilding re-solves under the
-                // new arrangement (`solve_graph_positions` dispatches by mode)
-                // and emits GraphRebuilt; the status mirrors the tension hint.
+                // graph-column-layout D5: `h` cycles through column, force, and
+                // sections modes on the focused graph pane. Flipping the mode
+                // then rebuilding re-solves under the new arrangement
+                // (`solve_graph_positions` dispatches by mode) and emits
+                // GraphRebuilt; the status mirrors the tension hint. The mode
+                // order matches the `a` arrangement cycle's mode order
+                // (column → force → sections), so the two user-facing
+                // arrangement controls agree (sections-black-hole-solver 5.2).
                 app.layout_mode = match app.layout_mode {
                     crate::config::LayoutMode::Column => crate::config::LayoutMode::Force,
-                    crate::config::LayoutMode::Force => crate::config::LayoutMode::Column,
+                    crate::config::LayoutMode::Force => crate::config::LayoutMode::Sections,
+                    crate::config::LayoutMode::Sections => crate::config::LayoutMode::Column,
                 };
                 app.status_message = match app.layout_mode {
                     crate::config::LayoutMode::Column => String::from("Layout: column"),
                     crate::config::LayoutMode::Force => String::from("Layout: force"),
+                    crate::config::LayoutMode::Sections => String::from("Layout: sections"),
                 };
                 if app.graph.is_some() {
                     app.rebuild_graph();
@@ -1102,6 +1107,32 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // Graph-pane-only, like `h`/`c` above.
                 app.apply_arrangement();
                 return false;
+            }
+            KeyCode::Char('A') => {
+                // sections-black-hole-solver 3.2 (design D5): `A` re-anneals
+                // the sections layout from the current positions in sections
+                // mode only. No conflict with lowercase `a` (arrangement
+                // cycle): winit reports Shift+a as `Char('A')`, a distinct
+                // code. In other modes it falls through to the shared
+                // dispatch below.
+                if app.layout_mode == crate::config::LayoutMode::Sections {
+                    app.arrange_sections();
+                    return false;
+                }
+            }
+            KeyCode::Char('s') => {
+                // sections-black-hole-solver 5.2: `S` toggles the sliders panel
+                // in sections mode only. In other modes, `S` keeps its existing
+                // behavior (falls through to shared dispatch).
+                if app.layout_mode == crate::config::LayoutMode::Sections {
+                    app.showing_sliders = !app.showing_sliders;
+                    app.status_message = if app.showing_sliders {
+                        String::from("Sliders panel: on")
+                    } else {
+                        String::from("Sliders panel: off")
+                    };
+                    return false;
+                }
             }
             KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
@@ -2219,14 +2250,16 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     // Hit-test against each node's world-space extent (graph-zoom-node-scaling,
     // design decision 5): the drawn frame *is* the node's world rect projected
     // through the camera, so testing in world units is exact at every zoom and
-    // needs no `/ zoom` conversion. `node_world_sizes` gives each node its own
-    // world `(width, height)` (node positions are the box's top-left corner).
+    // needs no `/ zoom` conversion. `drawn_world_sizes` gives each node its own
+    // world `(width, height)` (node positions are the box's top-left corner) and
+    // is mode-aware: in sections mode it applies the lane width cap, so the test
+    // rect matches the drawn frame instead of reaching past a capped node.
     // A minimum hit size keeps a node selectable when its drawn frame is only a
     // few pixels, expanding the world test rect symmetrically. First match wins.
     let world = app
         .graph
         .as_ref()
-        .map(crate::layout::node_world_sizes)
+        .map(|graph| crate::gui::drawn_world_sizes(app.layout_mode, graph))
         .unwrap_or_default();
     let min_w = App::GRAPH_MIN_HIT_PX / camera.zoom;
     let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;
@@ -5080,9 +5113,10 @@ mod tests {
 
     #[test]
     fn graph_a_applies_arrangement_and_reports_it() {
-        // graph-arrange-cycle 2.2: `a` on the focused graph pane applies the
-        // active arrangement (rebuild + refit) and names it in the status;
-        // the stored selection advances so repeat presses cycle layouts.
+        // graph-arrange-cycle 2.2 + sections-black-hole-solver 5.2: `a` on the
+        // focused graph pane applies the active arrangement (rebuild + refit)
+        // and names it in the status; the stored selection advances so repeat
+        // presses cycle Column-Strict → Column-Barycenter → Force → Sections.
         let mut app = app_with_fixture();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
@@ -5100,14 +5134,79 @@ mod tests {
             app.graph_camera.is_some(),
             "apply refits the camera against the live pane"
         );
+
+        // Repeat presses reach Sections through the user-facing `a` key.
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(app.status_message, "Arrangement: column-barycenter");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(app.status_message, "Arrangement: force");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(
+            app.status_message, "Arrangement: sections",
+            "Sections is reachable via the `a` cycle"
+        );
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
+        assert_eq!(
+            app.layout_ordering,
+            crate::config::LayoutOrdering::Strict,
+            "the sections press wraps the cycle back to column-strict"
+        );
+    }
+
+    #[test]
+    fn graph_upper_a_arranges_sections_from_current_and_reports() {
+        // sections-black-hole-solver 3.2 (design D5): `A` on the focused
+        // graph pane in sections mode re-anneals from the current positions
+        // (not a fresh seed) and reports it; the mode does not advance.
+        let mut app = app_with_fixture();
+        app.layout_mode = crate::config::LayoutMode::Sections;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+        // Perturb one node so an anneal provably starts from here: a
+        // reseed would discard the offset, the anneal keeps its influence.
+        app.graph_positions[0].0 += 500.0;
+        let before = app.graph_positions.clone();
+        let graph = app.graph.as_ref().unwrap().clone();
+        let pins = app.pinned_indices(&graph);
+        let tension = app.tension;
+        let mut expected = before.clone();
+        crate::layout::run_iterations(
+            &graph,
+            &mut expected,
+            crate::layout::SOLVE_ITERATIONS,
+            None,
+            &pins,
+            tension,
+            crate::config::LayoutMode::Sections,
+        );
+
+        handle_event(key(KeyCode::Char('A')), &mut app);
+
+        assert_eq!(app.status_message, "Arranged (sections)");
+        assert_eq!(
+            app.graph_positions, expected,
+            "A anneals from the current positions"
+        );
+        assert_eq!(
+            app.layout_mode,
+            crate::config::LayoutMode::Sections,
+            "A re-solves without cycling the arrangement"
+        );
+        assert!(
+            app.graph_camera.is_some(),
+            "arrange refits the camera against the live pane"
+        );
     }
 
     #[test]
     fn graph_h_toggles_layout_mode_force_to_column_and_resolves() {
         // Same toggle in reverse: a force-layout graph flips to the column
-        // arrangement, re-solved with the active ordering. The tip stays
-        // pinned (design D6): it anchors at its force-solve position while the
-        // remaining nodes arrange around it.
+        // arrangement via Sections mode, re-solved with the active ordering.
+        // The tip stays pinned (design D6): it anchors at its force-solve
+        // position while the remaining nodes arrange around it.
         let mut app = app_with_fixture();
         app.layout_mode = crate::config::LayoutMode::Force;
         handle_event(key(KeyCode::Char('g')), &mut app);
@@ -5115,6 +5214,9 @@ mod tests {
         assert!(app.showing_graph);
         let before = app.graph_positions.clone();
 
+        // Force -> Sections (first h) -> Column (second h)
+        handle_event(key(KeyCode::Char('h')), &mut app);
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
         handle_event(key(KeyCode::Char('h')), &mut app);
 
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
@@ -5133,7 +5235,7 @@ mod tests {
         );
         assert_eq!(
             app.graph_positions, expected,
-            "force→column toggle re-solves with the column solver, tip anchored"
+            "force->sections->column toggle re-solves with the column solver, tip anchored"
         );
     }
 
