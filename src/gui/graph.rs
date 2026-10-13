@@ -995,6 +995,12 @@ pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
 /// coordinates the pane's clip frames. Edges resolve the full
 /// color-precedence chain, clusters become padded member unions. `None` when
 /// no graph exists or the positional state is inconsistent with the graph.
+///
+/// Cluster containers are suppressed in sections mode: there the arrangement
+/// already reads as density through its member clustering (like a star cluster
+/// in the Milky Way, not a drawn box), so the scene carries no enclosing
+/// banner-group rectangles. The `Graph.clusters` data is untouched — only its
+/// rendering is off. Column and force modes keep the containers unchanged.
 pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<SceneSpec> {
     let graph = app.graph.as_ref()?;
     let mut camera = app.graph_camera.unwrap_or_default();
@@ -1007,6 +1013,14 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     let dep_filtered = !app.dependency_nodes.is_empty();
     let inf_filtered = app.influence_filter_active;
     let filtered = dep_filtered || inf_filtered;
+    // Sections mode draws no cluster boxes (spec "Cluster boxes are not drawn
+    // (sections are visible only through member clustering)"): sections must
+    // not appear as drawn objects, only as density. Suppressing the spec here
+    // is the single suppression point — every cluster-shaped thing downstream
+    // (the painted border, the cluster title, minimap/hit geometry derived from
+    // `SceneSpec::clusters`) follows from this list being empty. A filtered
+    // render keeps dropping them for every mode, as before.
+    let render_clusters = !filtered && app.layout_mode != crate::config::LayoutMode::Sections;
     // Draw the animated (settling) positions when a settle is running; equal to
     // the solved `graph_positions` otherwise. Owned locally so the borrow lives
     // through the scene build.
@@ -1018,7 +1032,7 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
             graph,
             positions: &display,
             camera,
-            render_clusters: !filtered,
+            render_clusters,
         },
         |idx| {
             !filtered
@@ -2679,6 +2693,117 @@ mod scene_builder_tests {
         assert_eq!(c.title_color, theme().rgb(theme().graph_cluster_title));
     }
 
+    /// Four nodes in two banner groups (nodes 0..2 and 2..4): the fixture that
+    /// gives a sections graph clusters the solver anchors on, and that the
+    /// suppression tests below share.
+    fn two_group_app() -> App {
+        let graph = Graph {
+            nodes: vec![
+                circuit_node("clocktool", 0, 0),
+                circuit_node("osc", 0, 0),
+                circuit_node("vca", 0, 1),
+                circuit_node("filter", 0, 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            clusters: vec![
+                Cluster {
+                    title: "Controls".into(),
+                    section_range: 0..2,
+                },
+                Cluster {
+                    title: "Audio".into(),
+                    section_range: 2..4,
+                },
+            ],
+            ..Graph::default()
+        };
+        scene_app(
+            graph,
+            &[(0.0, 0.0), (260.0, 0.0), (520.0, 0.0), (780.0, 0.0)],
+        )
+    }
+
+    #[test]
+    fn scene_sections_mode_draws_no_cluster_rectangles() {
+        // Spec "No cluster boxes drawn in sections mode": the clustering itself
+        // visualizes sections, so no banner-group enclosing rectangle is built.
+        let mut app = two_group_app();
+        app.layout_mode = LayoutMode::Sections;
+        assert_eq!(
+            app.graph.as_ref().unwrap().clusters.len(),
+            2,
+            "fixture guard: two banner groups to suppress"
+        );
+        let s = spec(&app);
+        assert!(
+            s.clusters.is_empty(),
+            "sections mode builds no cluster rectangles: {:?}",
+            s.clusters
+        );
+        // A box that is not drawn must not be hit-testable either, so nothing
+        // is published for hit-testing/minimap/labels either.
+        assert!(
+            app.graph_cluster_rects.is_empty(),
+            "no cluster hit geometry in sections mode"
+        );
+    }
+
+    #[test]
+    fn scene_sections_multi_group_keeps_the_cluster_data() {
+        // Only the rendering is suppressed: the model keeps its banner groups
+        // so the solver's per-(group, row) anchors stay available.
+        let mut app = two_group_app();
+        app.layout_mode = LayoutMode::Sections;
+        assert!(spec(&app).clusters.is_empty());
+        let clusters = &app.graph.as_ref().unwrap().clusters;
+        assert_eq!(clusters.len(), 2, "the cluster data survives sections mode");
+        assert_eq!(clusters[0].title, "Controls");
+        assert_eq!(clusters[0].section_range, 0..2);
+        assert_eq!(clusters[1].title, "Audio");
+        assert_eq!(clusters[1].section_range, 2..4);
+    }
+
+    #[test]
+    fn scene_column_and_force_modes_keep_cluster_rectangles_unchanged() {
+        // Regression guard: the sections suppression is mode-scoped, so column
+        // and force keep drawing the very same enclosing rectangles.
+        let mut column_app = two_group_app();
+        column_app.layout_mode = LayoutMode::Column;
+        let column = spec(&column_app);
+
+        let mut force_app = two_group_app();
+        force_app.layout_mode = LayoutMode::Force;
+        let force = spec(&force_app);
+
+        assert_eq!(column.clusters.len(), 2, "column keeps both boxes");
+        assert_eq!(force.clusters.len(), 2, "force keeps both boxes");
+        assert_eq!(
+            column.clusters, force.clusters,
+            "both modes draw identical cluster geometry"
+        );
+
+        // The numbers are still the padded member union the cluster-bounds test
+        // above pins, so neither mode's cluster geometry shifted.
+        let world = crate::layout::node_world_sizes(column_app.graph.as_ref().unwrap());
+        let first = &column.clusters[0];
+        assert_eq!(first.title, "Controls");
+        assert_eq!(first.member_indices, vec![0, 1]);
+        assert_eq!(first.x, -CLUSTER_PAD);
+        assert_eq!(first.y, -CLUSTER_PAD);
+        assert_eq!(first.x + first.w, 260.0 + world[1].0 + CLUSTER_PAD);
+        assert_eq!(first.border, theme().rgb(theme().graph_cluster_border));
+        assert_eq!(first.title_color, theme().rgb(theme().graph_cluster_title));
+        let second = &column.clusters[1];
+        assert_eq!(second.title, "Audio");
+        assert_eq!(second.member_indices, vec![2, 3]);
+        assert_eq!(second.x, 520.0 - CLUSTER_PAD);
+        assert_eq!(second.x + second.w, 780.0 + world[3].0 + CLUSTER_PAD);
+    }
+
     #[test]
     fn scene_background_canvas_token_and_shape_counts() {
         let s = spec(&chain_app());
@@ -2706,7 +2831,8 @@ mod scene_builder_tests {
 #[cfg(test)]
 mod window_paint_tests {
     use super::*;
-    use crate::graph::{Graph, GraphEdge, GraphNode};
+    use crate::config::LayoutMode;
+    use crate::graph::{Cluster, Graph, GraphEdge, GraphNode};
     use crate::patch::NodeId;
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
@@ -3405,6 +3531,106 @@ mod window_paint_tests {
         );
         // Never below the visibility floor (2 px length along the tangent).
         assert!(arrow_width(0.001) >= 2.0 - 1e-3);
+    }
+
+    // ── sections-black-hole-solver: no cluster boxes in sections mode ───────
+
+    /// Four nodes in two banner groups (nodes 0..2 and 2..4) at world positions
+    /// a fitted camera frames.
+    fn two_group_app() -> App {
+        let graph = Graph {
+            nodes: vec![
+                circuit_node("clocktool", 0, 0),
+                circuit_node("osc", 0, 0),
+                circuit_node("vca", 0, 1),
+                circuit_node("filter", 0, 1),
+            ],
+            edges: vec![GraphEdge {
+                cable: "_CLK".into(),
+                source: NodeId::circuit("clocktool", 0),
+                sink: NodeId::circuit("osc", 0),
+            }],
+            clusters: vec![
+                Cluster {
+                    title: "Controls".into(),
+                    section_range: 0..2,
+                },
+                Cluster {
+                    title: "Audio".into(),
+                    section_range: 2..4,
+                },
+            ],
+            ..Graph::default()
+        };
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = vec![(0.0, 0.0), (260.0, 0.0), (520.0, 0.0), (780.0, 0.0)];
+        app
+    }
+
+    fn scene_of(app: &App) -> SceneSpec {
+        build_scene_spec(
+            app,
+            theme(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
+        )
+        .expect("scene present")
+    }
+
+    /// Painted rect geometry (frame, fill, stroke color) so two frames can be
+    /// compared shape-for-shape without touching egui mesh internals.
+    fn rect_geometry(
+        rects: &[egui::epaint::RectShape],
+    ) -> Vec<(egui::Rect, egui::Color32, egui::Color32)> {
+        rects
+            .iter()
+            .map(|r| (r.rect, r.fill, r.stroke.color))
+            .collect()
+    }
+
+    #[test]
+    fn paint_omits_cluster_boxes_in_sections_mode() {
+        let canvas = egui::vec2(1280.0, 800.0);
+
+        // Positive control: with the clusters in the spec, column paints extra
+        // shapes — the two boxes and their titles.
+        let mut column = two_group_app();
+        column.layout_mode = LayoutMode::Column;
+        let column_scene = scene_of(&column);
+        let with_boxes = paint(Some(&column_scene), canvas);
+        let mut stripped = scene_of(&column);
+        stripped.clusters.clear();
+        let without_boxes = paint(Some(&stripped), canvas);
+        assert!(
+            with_boxes.rects.len() > without_boxes.rects.len(),
+            "column paints its cluster boxes: {} vs {} rects",
+            with_boxes.rects.len(),
+            without_boxes.rects.len()
+        );
+        assert!(
+            with_boxes.labels.len() > without_boxes.labels.len(),
+            "column paints its cluster titles: {:?}",
+            with_boxes.labels
+        );
+
+        // Sections mode paints exactly the stripped column frame: same nodes,
+        // same cables, and neither a banner-group rectangle nor a cluster
+        // title (spec "No cluster boxes drawn in sections mode").
+        let mut sections = two_group_app();
+        sections.layout_mode = LayoutMode::Sections;
+        let sections_scene = scene_of(&sections);
+        assert!(sections_scene.clusters.is_empty());
+        let sections_out = paint(Some(&sections_scene), canvas);
+        assert_eq!(
+            sections_out.labels, without_boxes.labels,
+            "no cluster title is painted in sections mode"
+        );
+        assert_eq!(
+            rect_geometry(&sections_out.rects),
+            rect_geometry(&without_boxes.rects),
+            "no cluster rectangle is painted in sections mode"
+        );
+        assert_eq!(sections_out.beziers, without_boxes.beziers);
     }
 }
 #[cfg(test)]

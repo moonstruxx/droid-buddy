@@ -17,6 +17,8 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `unreferenced-elements.png` | `fixtures/unreferenced_elements.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); partial B32 (5 of 32 buttons, 27 dimmed) beside a bare E4 (124 dimmed ring segments) in one frame |
 | `shift-colour.png` | `fixtures/button_led_composition.ini` | 2x stack zoom plus active Group2 (`setup_shift_colour`): module UI (left big) + source viewer (small); Group2 member faces tinted in the group token beside unshifted Group1/Group3 faces in one frame |
 | `s10-switch-kinds.png` | `fixtures/s10_switch_kinds.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); bare S10 full front with rotary-round S1.1/S1.2 above toggle-square S1.3–S1.10 in one frame |
+| `sections-lanes.png` | `fixtures/graph_topology_error.ini` | + signal-flow graph (right big) in `LayoutMode::Sections` (`setup_sections`): one patch-order lane row carrying both banner groups as contiguous bands |
+| `sections-scale.png` | `fixtures/own_scale.ini` | same arrangement over the 509-section scale anchor: the width-aware lanes wrap into a ~1.34 aspect grid of rows instead of a 40:1 ribbon |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
@@ -84,6 +86,37 @@ rotary glyphs read above the square toggle glyphs on one faceplate in a
 1280x800 startup frame at 2x. Unannotated-switch faces keep the toggle glyph
 by construction (the unannotated scenario), so no second shot is needed.
 
+`sections-lanes.png` and `sections-scale.png` are the visual check for change
+`sections-black-hole-solver` (task 7.1). Sections mode is a third graph
+arrangement: circuits are laid out one per **lane** in patch order (lane width
+= the widest member's width estimate, capped at `SECTIONS_LANE_MAX_NODE_W`),
+lanes pack left→right and **wrap into rows** at `SECTIONS_ROW_TARGET_W`, and
+the banner groups act as invisible anchors — a group reads as a contiguous
+band of lanes, never as a packed box. The seed is a plain `layout_mode` field
+write in `setup_sections` before the graph pane is placed, so the first solve
+runs through `layout::solve_sections`; the harness's double-render check
+enforces determinism.
+
+`fixtures/graph_topology_error.ini` is the legible subject: it is the smallest
+fixture carrying two real comment banners (Sources: `clocktool` + `divider`,
+Sinks: `copy` + `p2b8`), so the shot shows what individual lanes look like at a
+readable size — four labelled bodies in patch order with their cable springs
+(including the red topology-error marker on the doubled `_CLK` edge), and both
+banner groups as separate contiguous bands. On this fixture the lane row fits
+inside the pane without wrapping (too few lanes to reach the row target), so
+band contiguity is the claim this shot carries, not wraparound.
+
+`fixtures/own_scale.ini` (509 sections, 6 banners) is the scale subject:
+the same arrangement over the scale anchor, which used to solve into a 40:1
+ribbon and now settles into a ~1.34 aspect grid. The shot shows the aspect fix
+structurally — a stack of wrapped lane rows filling the pane width, the row
+boundaries between them, the banner groups as contiguous row-bands (the blue
+band rects), cable springs crossing lanes, and no overlapping node bodies.
+At the fit zoom node labels are necessarily ellipsized (the whole 509-node
+world is in frame), so this shot is evidence about layout shape, not about
+text legibility; the legible-label claims live in `sections-lanes.png` and the
+`src/layout.rs` sections tests.
+
 ## How it works
 
 `src/main.rs` compiles the app sources in place (path-shadowed modules, the
@@ -99,6 +132,7 @@ settle animation cancelled so captures show solved positions.
 tools/screenshots/render.sh            # check: render 2x, compare, diff vs disk
 tools/screenshots/render.sh --bless    # rewrite docs/assets/*.png
 tools/screenshots/render.sh --only graph,optimizer
+tools/screenshots/render.sh --bless --only sections-lanes,sections-scale
 ```
 
 A check fails when two fresh renders differ (nondeterministic paint) or when
