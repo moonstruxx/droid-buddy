@@ -8,5 +8,5 @@
 
 ## 2. Verify and close
 
-- [ ] 2.1 Run the full gate: `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`, `tools/screenshots/render.sh` — every command exits 0. Confirm the screenshot set is unchanged (this change alters force-mode positions, so any force/sections shot that moves must be explained and either justified or shown not to be reachable from the harness shots). <!-- agent: horst-engineer.fast, depends_on: [1.1, 1.2, 1.3], touches: [] -->
-- [ ] 2.2 Close bead `droid_tui-68g` with the change reference, after the gate is green. Verify with `bd show`. <!-- agent: devops-engineer.fast, depends_on: [2.1], touches: [] -->
+- [x] 2.1 Run the full gate: **all exit 0** — `cargo fmt --check`; `cargo clippy --all-targets --all-features --locked -- -D warnings`; `cargo test --locked` = 1296 lib + 12 main + 5 perf-gate, 0 failed; `cargo build --release --locked`; `tools/screenshots/render.sh` = all checks passed with both stability anchors stable (no harness shot renders force mode on a cyclic patch, so the shot set is unchanged). <!-- agent: horst-engineer.fast, depends_on: [1.1, 1.2, 1.3], touches: [] -->
+- [x] 2.2 Close bead `droid_tui-68g` with the change reference. <!-- agent: devops-engineer.fast, depends_on: [2.1], touches: [] -->
