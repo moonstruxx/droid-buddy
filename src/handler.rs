@@ -1105,6 +1105,20 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.apply_arrangement();
                 return false;
             }
+            KeyCode::Char('s') => {
+                // sections-black-hole-solver 5.2: `S` toggles the sliders panel
+                // in sections mode only. In other modes, `S` keeps its existing
+                // behavior (falls through to shared dispatch).
+                if app.layout_mode == crate::config::LayoutMode::Sections {
+                    app.showing_sliders = !app.showing_sliders;
+                    app.status_message = if app.showing_sliders {
+                        String::from("Sliders panel: on")
+                    } else {
+                        String::from("Sliders panel: off")
+                    };
+                    return false;
+                }
+            }
             KeyCode::Char('+') | KeyCode::Char('-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph

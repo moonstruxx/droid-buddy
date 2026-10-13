@@ -872,6 +872,9 @@ pub struct App {
     /// Seeded from `[layout] section_force` at startup; keyboard-adjustable via
     /// the sliders panel (task 5.2). Persists across patch loads.
     pub layout_section_force: f32,
+    /// Whether the sliders panel is visible in the graph pane (sections-black-hole-solver 5.2).
+    /// Toggled by `S` key in sections mode only.
+    pub showing_sliders: bool,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
@@ -1141,6 +1144,7 @@ impl App {
             layout_ordering: crate::config::DEFAULT_LAYOUT_ORDERING,
             layout_slice_force: crate::config::DEFAULT_SLICE_FORCE,
             layout_section_force: crate::config::DEFAULT_SECTION_FORCE,
+            showing_sliders: false,
             prefix: None,
             showing_viewer: false,
             selected_component: None,
