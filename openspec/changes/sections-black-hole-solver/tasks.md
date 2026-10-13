@@ -15,9 +15,11 @@
 
 ## 3. App state + sliders + Arrange button
 
-- [ ] 3.1 Add sections-mode state to `src/app.rs`: `slice_force: f32` (default `DEFAULT_SLICE_K`), `section_force: f32` (default `DEFAULT_SECTION_HOLE_K`), `showing_sliders: bool`, and ensure `tension` is the cable force. Add `S` key toggle for sliders panel in `handler.rs` (sections mode only). Verify keys work in sections mode. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.5], touches: [src/app.rs, src/handler.rs] -->
-- [ ] 3.2 Implement `Arrange` action in `src/app.rs`: `arrange_sections()` calls `run_iterations` from current `graph_positions` with full budget, current forces, freezes at energy threshold, reports status. Add `A` key binding in sections mode (beside `h`/`a`). Verify pressing `A` re-solves and reports status. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs] -->
-- [ ] 3.3 Ensure `c`/`Shift+c` centering works in sections mode (uses published `graph_canvas_px`). Add regression test: wide sections-mode graph + `c` centers horizontally. Verify test passes. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs] -->
+- [x] 3.0 Wire `layout_slice_force`/`layout_section_force` through the solver (`run_iterations_with_forces`) so the sliders change the solve; `arrange_sections` honors the live values.
+- [x] 3.1 Add sections-mode state to `src/app.rs` (`showing_sliders` + `S` toggle)
+- [x] 3.2 Implement `Arrange` action (arrange_sections + Shift+`A`) <!-- agent: dermannmitdermachine-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs] -->
+- [x] 3.3 Ensure `c`/`Shift+c` centering works in sections mode (mode-agnostic; mutation-verified regression on a wide graph) <!-- agent: dermannmitdermachine-engineer.build, depends_on: [3.1], touches: [src/app.rs, src/handler.rs] -->
+- [x] 3.4 Align `config::DEFAULT_SECTION_FORCE` with `layout::DEFAULT_SECTION_HOLE_K` (was 0.05 vs 0.15 — the app's sections solve ran weaker than the tuned constant)
 
 ## 4. GUI sliders panel + Arrange button
 
