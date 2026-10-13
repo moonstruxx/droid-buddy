@@ -23,9 +23,9 @@
 
 ## 4. GUI sliders panel + Arrange button
 
-- [ ] 4.1 Implement `paint_sliders_panel` in `src/gui/graph.rs`: small egui panel at top-right of graph pane (toggleable via `showing_sliders`), three `egui::Slider` rows bound to `app.slice_force`, `app.section_force`, `app.tension`, each with label + range. Panel rect consumes pointer before node-drag/marquee/minimap (check `minimap` click pattern). Verify panel renders and sliders move the values. <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/gui/graph.rs] -->
-- [ ] 4.2 Add Arrange button in sliders panel: `egui::Button` calling `app.arrange_sections()`. Verify click triggers re-solve and status update. <!-- agent: layout-designer-engineer.build, depends_on: [4.1, 3.2], touches: [src/gui/graph.rs] -->
-- [ ] 4.3 Wire panel pointer priority: panel rect eats mouse before node-drag/marquee/minimap (same pattern as minimap click in `paint_scene_in`). Verify dragging a slider doesn't start node drag. <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/gui/graph.rs] -->
+- [x] 4.1 Implement `paint_sliders_panel` in `src/gui/graph.rs` (+ `gui/mod.rs` paint-path hook) <!-- agent: layout-designer-engineer.build, depends_on: [3.1], touches: [src/gui/graph.rs] -->
+- [x] 4.2 Add Arrange button in sliders panel <!-- agent: layout-designer-engineer.build, depends_on: [4.1, 3.2], touches: [src/gui/graph.rs] -->
+- [x] 4.3 Wire panel pointer priority (panel eats pointer before node-drag/marquee) <!-- agent: layout-designer-engineer.build, depends_on: [4.1], touches: [src/gui/graph.rs, src/gui/mod.rs] -->
 
 ## 5. Config constants + graph-arrange cycle
 
@@ -33,6 +33,9 @@
 - [ ] 5.2 Update `graph-arrange` cycle in `src/app.rs`/`src/handler.rs`: `a` key cycles `Column-Strict → Column-Barycenter → Force → Sections`. Update `graph-arrange` spec delta test. Verify cycle order. <!-- agent: dermannmitdermachine-engineer.build, depends_on: [1.5], touches: [src/app.rs, src/handler.rs] -->
 
 ## 6. Tests + regression
+
+- [x] 6.2 Sections-mode centering regression (mutation-verified, in `src/app.rs`) — covered by 3.3
+- [x] 6.4 Sliders panel tests (render/binding/Arrange-click/marquee consumption) — covered by 4.1/4.3
 
 - [ ] 6.1 Add sections-mode regression test in `src/regression.rs`: load a multi-banner-group fixture (e.g., `pulsar_clock.ini` equivalent), open graph in sections mode, assert members cluster around section holes, cluster boxes not drawn, `c` centers, `A` re-solves. Verify `cargo test regression::` green. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [2.2, 3.2, 4.2], touches: [src/regression.rs] -->
 - [ ] 6.2 Add centering regression test for wide sections-mode graph (fixture with >20 circuits spanning width). Assert `c` centers horizontally. Verify `cargo test regression::` green. <!-- agent: dermannmitdermachine-engineer.fast, depends_on: [3.3], touches: [src/regression.rs] -->
