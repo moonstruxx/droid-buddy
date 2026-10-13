@@ -498,7 +498,7 @@ pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option
     }
 
     // Compute mean slice per cluster (only circuit nodes contribute)
-    for (c, list) in members.iter().enumerate() {
+    for (_c, list) in members.iter().enumerate() {
         if list.is_empty() {
             continue;
         }
