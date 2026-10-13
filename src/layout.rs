@@ -3454,4 +3454,195 @@ mod tests {
         }
         assert_columns_do_not_overlap(&graph, &widths, &positions);
     }
+
+    // ── sections-black-hole-solver: slice spring + outer slices (task 6.3) ──
+
+    #[test]
+    fn sections_mode_slice_spring_holds_non_clustered_circuits_at_their_slice() {
+        // D1 patch-order slices: with no banner groups there are no section-hole
+        // anchors, so each circuit's x is held by the slice spring alone, at
+        // target_x = section_index * HORIZONTAL_SPACING. `make_graph` assigns
+        // section_index == index, so the four circuits target x 0, 80, 160, 240.
+        let graph = make_graph(4, &[]);
+        assert!(graph.clusters.is_empty(), "fixture must have no clusters");
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Tolerance HORIZONTAL_SPACING * 0.1 = 8 world units. The slice spring is
+        // deliberately weak (SLICE_K = 0.1) so cable tension can re-flow it, and
+        // size-aware repulsion from the vertical stack (seed y = index * 120)
+        // nudges each node a few units off its target; the largest observed
+        // deviation is ~4. Dropping the slice spring leaves every node at the
+        // seed x, which for this edgeless graph is 0 for all four — 80+ units off
+        // for slices 1..3, an order of magnitude above this tolerance.
+        let tolerance = HORIZONTAL_SPACING * 0.1;
+        for (i, &(x, _)) in positions.iter().enumerate() {
+            let target = i as f32 * HORIZONTAL_SPACING;
+            assert!(
+                (x - target).abs() <= tolerance,
+                "circuit {i} x={x} is not within {tolerance} of slice target {target}"
+            );
+        }
+        // Slices stay ordered left-to-right (no slice crossing).
+        for pair in positions.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "slice x must increase with patch order"
+            );
+        }
+    }
+
+    #[test]
+    fn sections_mode_outer_nodes_stay_at_the_outer_slices() {
+        // `slice_index`'s contract (D1) puts controllers and input jacks at the
+        // left outer slice 0 and output jacks at the right outer slice
+        // max_circuit_slice + 1. The index-level tests pin the values; this pins
+        // that the solve actually lands the nodes at those x positions.
+        let nodes = vec![
+            node("c0", 0),
+            node("c1", 1),
+            node("c2", 2),
+            GraphNode {
+                id: NodeId::Controller("ctrl".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+            GraphNode {
+                id: NodeId::Jack("IN".to_string()),
+                kind: NodeKind::InputJack,
+                circuit: "IN".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+            GraphNode {
+                id: NodeId::Jack("OUT".to_string()),
+                kind: NodeKind::OutputJack,
+                circuit: "OUT".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            ..Default::default()
+        };
+        assert_eq!(slice_index(&graph), vec![0, 1, 2, 0, 0, 3]);
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Same weak-slice-spring tolerance as the non-clustered circuit test:
+        // both outer nodes share slice 0, so repulsion pushes the leftmost one
+        // slightly past 0 (observed |x| < 0.2) and the output jack ~4 units short
+        // of its outer slice.
+        let tolerance = HORIZONTAL_SPACING * 0.1;
+        for i in [3, 4] {
+            assert!(
+                positions[i].0.abs() <= tolerance,
+                "node {i} x={} must sit at the left outer slice (0)",
+                positions[i].0
+            );
+        }
+        let output_target = 3.0 * HORIZONTAL_SPACING; // max_circuit_slice (2) + 1
+        assert!(
+            (positions[5].0 - output_target).abs() <= tolerance,
+            "output jack x={} must sit at the right outer slice ({output_target})",
+            positions[5].0
+        );
+        // The outer nodes bracket the circuit band.
+        let circuit_max_x = positions[..3]
+            .iter()
+            .map(|p| p.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            positions[5].0 > circuit_max_x,
+            "output jack must sit right of the circuits"
+        );
+    }
+
+    // ── sections-black-hole-solver: size-aware repulsion (D3, task 6.3) ─────
+
+    #[test]
+    fn sections_mode_size_aware_repulsion_acts_beyond_the_fixed_radius() {
+        // D3: the sections-mode repulsion cutoff is
+        // effective_radius = REPULSION_RADIUS + 0.5 * max(w, h) instead of the
+        // fixed REPULSION_RADIUS. At a separation between the two, the fixed
+        // radius has already cut the force to zero while the size-aware radius
+        // still repels. This pins the radius semantics the solver reads from
+        // `node_world_sizes` (nothing else exercises this function).
+        let a = (0.0, 0.0);
+        let b = (150.0, 0.0); // REPULSION_RADIUS (120) < 150
+        assert_eq!(
+            repulsion_force(a, b),
+            (0.0, 0.0),
+            "fixed-radius repulsion must cut off past REPULSION_RADIUS"
+        );
+        let effective = REPULSION_RADIUS + 0.5 * 200.0; // a 200-wide node -> 220
+        let f = repulsion_force_size_aware(a, b, effective);
+        assert!(
+            f.0 < 0.0 && f.1 == 0.0,
+            "size-aware repulsion must push apart at d=150 with radius {effective}, got {f:?}"
+        );
+    }
+
+    #[test]
+    fn sections_mode_keeps_large_nodes_beyond_their_size_required_distance() {
+        // D3 end-to-end: two 176-wide nodes (20-char names) need a center
+        // distance of at least (176 + 176) / 2 = 176 world units to clear each
+        // other along the wider axis; 176 is the combined half-extent the
+        // bodies require. They sit at distinct slices 0 and 2, so the slice
+        // springs pull them apart in x too. Deterministic solve, so these are
+        // exact contract assertions rather than flake-budgeted ones.
+        let wide_a = "a".repeat(20);
+        let wide_b = "b".repeat(20);
+        let graph = Graph {
+            nodes: vec![node(&wide_a, 0), node(&wide_b, 2)],
+            ..Default::default()
+        };
+        let sizes = node_world_sizes(&graph);
+        assert_eq!(sizes, vec![(176.0, NODE_WORLD_H), (176.0, NODE_WORLD_H)]);
+        let required = (sizes[0].0 + sizes[1].0) / 2.0; // 176
+
+        let sections = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let force = solve(&graph, &[], DEFAULT_TENSION);
+        assert_finite_and_bounded(&sections);
+        assert_finite_and_bounded(&force);
+
+        let sections_gap = dist(sections[0], sections[1]);
+        let force_gap = dist(force[0], force[1]);
+        // Force mode keeps the pair on the seed gap (120): its repulsion cuts
+        // off at REPULSION_RADIUS and it has no slice spring, so the bodies
+        // would overlap. Sections mode separates them past the requirement
+        // (196 > 176, ~11% headroom) and strictly further than force mode.
+        assert!(
+            force_gap < required,
+            "force mode gap {force_gap} should be below the size requirement {required}"
+        );
+        assert!(
+            sections_gap >= required,
+            "sections gap {sections_gap} must clear the required {required}"
+        );
+        assert!(
+            sections_gap > force_gap,
+            "sections mode ({sections_gap}) must separate more than force mode ({force_gap})"
+        );
+    }
+
+    #[test]
+    fn sections_mode_empty_graph_and_single_node_do_not_panic() {
+        // Empty graph: `run_iterations_with_forces` early-returns on zero nodes,
+        // so sections mode must yield no positions rather than panicking.
+        let empty = Graph::default();
+        assert!(
+            solve_sections(&empty, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K).is_empty(),
+            "empty graph must produce no positions"
+        );
+        // Single node: exactly one finite, bounded position.
+        let single = make_graph(1, &[]);
+        let positions = solve_sections(&single, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_eq!(positions.len(), 1);
+        assert_finite_and_bounded(&positions);
+    }
 }
