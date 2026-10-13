@@ -1033,6 +1033,35 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     )
 }
 
+/// World-space `(width, height)` node bodies as the renderer draws them
+/// (sections-black-hole-solver 3.10). Outside sections mode this is exactly
+/// [`crate::layout::node_world_sizes`] — the layout's per-node width estimate
+/// that sizes every other mode's frames (ADR 40). In sections mode each width
+/// is clamped to [`crate::layout::SECTIONS_LANE_MAX_NODE_W`], the same cap
+/// [`crate::layout::sections_lanes`] uses when it sizes the lanes, so a wide
+/// node's drawn body never outgrows the lane the solver reserved for it (its
+/// label then simply ellipsizes a little more, ADR 43). The cap is scoped to
+/// sections mode because the layout is solved once at build time while zoom is
+/// a render-time concern: an unconditional cap would change the default column
+/// layout.
+///
+/// One clamp serves both surfaces: the scene's drawn width *is* its spec-space
+/// hit extent ([`node_at`], [`nodes_in_rect`], [`nearest_node_at`]), so the
+/// tooltip, marquee and edge-port attribution geometry all follow the clamped
+/// frame. The terminal/window pointer path tests the same extents in *world*
+/// units (`handler::apply_graph_frame`); that path must read its body sizes
+/// through this function too, which is why it is `pub(crate)` — a node's raw
+/// estimate there would make the hover highlight reach past the drawn frame.
+pub(crate) fn drawn_world_sizes(mode: crate::config::LayoutMode, graph: &Graph) -> Vec<(f32, f32)> {
+    let mut sizes = crate::layout::node_world_sizes(graph);
+    if mode == crate::config::LayoutMode::Sections {
+        for (w, _) in &mut sizes {
+            *w = w.min(crate::layout::SECTIONS_LANE_MAX_NODE_W);
+        }
+    }
+    sizes
+}
+
 /// Shared scene core inputs: the graph to map through `camera`, its solved
 /// positions, and the render switches. Bundled so `build_scene` stays under
 /// the argument-count lint.
@@ -1065,8 +1094,10 @@ fn build_scene(
     // through the camera (graph-zoom-node-scaling decision 1): a node's pixel
     // size is its reserved world size times the zoom, so the column
     // arrangement stays overlap-free at any zoom. Indexed by full-graph index.
+    // In sections mode the width is clamped to the lane cap there (task 3.10)
+    // via `drawn_world_sizes`; every other mode is unchanged.
     let zoom = camera.zoom;
-    let world = crate::layout::node_world_sizes(graph);
+    let world = drawn_world_sizes(app.layout_mode, graph);
     let circuit_store = app.current_circuit_store();
 
     let diff = if app.diff_showing {
@@ -1737,6 +1768,7 @@ mod scene_builder_tests {
 
     use crate::app::LabelStore;
     use crate::app::{OptimizerDiffState, OptimizerState};
+    use crate::config::LayoutMode;
     use crate::diff::{ChangedCable, ChangedNode, DiffReport};
     use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
     use crate::latency::{EdgeLatency as ModelEdgeLatency, LatencyData, LatencySummary};
@@ -2015,6 +2047,123 @@ mod scene_builder_tests {
         assert_eq!(d.nodes[0].w, world[0].0 * 2.0);
         assert_eq!(d.nodes[0].h, world[0].1 * 2.0);
         assert_eq!(d.nodes[0].radius, NODE_RADIUS * 2.0);
+    }
+
+    /// A graph whose first node is wider than the sections lane cap and whose
+    /// second is narrower, for the mode-scoped width clamp (3.10).
+    fn wide_then_narrow_app() -> App {
+        // 40 chars × NODE_ESTIMATE_CHAR_WIDTH (8) + padding = 336 > cap (240).
+        let wide = "w".repeat(40);
+        let graph = Graph {
+            nodes: vec![circuit_node(&wide, 0, 0), circuit_node("copy", 0, 1)],
+            ..Graph::default()
+        };
+        scene_app(graph, &[(0.0, 0.0), (400.0, 0.0)])
+    }
+
+    #[test]
+    fn scene_sections_caps_wide_node_drawn_and_hit_width() {
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        let raw = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
+        assert!(raw[0].0 > cap, "fixture guard: raw {} > cap", raw[0].0);
+
+        let s = spec(&app); // fallback camera: zoom 1, pan 0
+        assert_eq!(s.nodes[0].w, cap, "drawn width is clamped to the lane cap");
+        assert_eq!(s.nodes[0].h, raw[0].1, "height is not clamped");
+
+        // Hit geometry follows the drawn frame: inside the cap hits, past it
+        // misses — the spec-space pointer path must not hover a wider region.
+        let (nx, ny) = (s.nodes[0].x, s.nodes[0].y);
+        assert_eq!(node_at(&s, nx + cap - 1.0, ny + 1.0), Some(0));
+        assert_eq!(node_at(&s, nx + cap + 1.0, ny + 1.0), None);
+        assert!(nodes_in_rect(&s, (nx + cap + 1.0, ny, 1.0, 1.0)).is_empty());
+    }
+
+    #[test]
+    fn scene_sections_cap_is_world_space_not_pixel_space() {
+        // The cap applies to the world width before projection, so a zoomed
+        // scene scales the capped body (cap × zoom) instead of the estimate.
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        app.graph_camera = Some(GraphCamera {
+            zoom: 2.0,
+            pan: (0.0, 0.0),
+        });
+        let s = spec(&app);
+        assert_eq!(s.nodes[0].w, cap * 2.0);
+    }
+
+    #[test]
+    fn scene_sections_leaves_a_narrower_node_unclamped() {
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        let raw = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
+        assert!(raw[1].0 < cap, "fixture guard: narrow {} < cap", raw[1].0);
+
+        let s = spec(&app);
+        assert_eq!(s.nodes[1].w, raw[1].0);
+        let (nx, ny) = (s.nodes[1].x, s.nodes[1].y);
+        assert_eq!(node_at(&s, nx + raw[1].0 - 1.0, ny + 1.0), Some(1));
+        assert_eq!(node_at(&s, nx + raw[1].0 + 1.0, ny + 1.0), None);
+    }
+
+    #[test]
+    fn scene_column_and_force_modes_keep_the_raw_world_width() {
+        // ADR 40 guard: the sections cap is mode-scoped, so column and force
+        // keep drawing the layout's own per-node width estimate.
+        let cap = crate::layout::SECTIONS_LANE_MAX_NODE_W;
+        for mode in [LayoutMode::Column, LayoutMode::Force] {
+            let mut app = wide_then_narrow_app();
+            app.layout_mode = mode;
+            let raw = crate::layout::node_world_sizes(app.graph.as_ref().unwrap());
+            assert!(raw[0].0 > cap, "fixture guard: raw {} > cap", raw[0].0);
+            let s = spec(&app);
+            assert_eq!(s.nodes[0].w, raw[0].0, "{mode:?} keeps the raw width");
+            assert_eq!(s.nodes[1].w, raw[1].0, "{mode:?} keeps the raw width");
+        }
+    }
+
+    #[test]
+    fn scene_sections_capped_width_still_frames_through_the_camera_path() {
+        // The capped body stays inside the extent the fit reserved (the raw,
+        // uncapped max world width), so the fitted camera still frames it.
+        let mut app = wide_then_narrow_app();
+        app.layout_mode = LayoutMode::Sections;
+        let canvas = (1280.0, 800.0);
+        let (fit_w, fit_h) = app.graph_fit_node_world();
+        app.graph_camera = Some(graph_window_fit_camera(
+            &app.graph_positions,
+            (fit_w, fit_h),
+            canvas,
+        ));
+        let s = spec(&app);
+        let zoom = spec_zoom(&s);
+        assert_eq!(s.nodes.len(), 2);
+        for (i, n) in s.nodes.iter().enumerate() {
+            assert!(
+                n.x.is_finite() && n.y.is_finite() && n.w.is_finite() && n.h.is_finite(),
+                "node {i} geometry finite"
+            );
+            assert!(n.w > 0.0 && n.h > 0.0, "node {i} has a body");
+            assert!(n.w <= fit_w * zoom + 1e-3, "node {i} within the fit width");
+            assert!(n.h <= fit_h * zoom + 1e-3, "node {i} within the fit height");
+            assert!(
+                n.x >= -0.5 && n.x + n.w <= canvas.0 + 0.5,
+                "node {i} on canvas: {}..{}",
+                n.x,
+                n.x + n.w
+            );
+            assert!(
+                n.y >= -0.5 && n.y + n.h <= canvas.1 + 0.5,
+                "node {i} on canvas: {}..{}",
+                n.y,
+                n.y + n.h
+            );
+        }
     }
 
     #[test]
