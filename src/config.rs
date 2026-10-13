@@ -44,10 +44,13 @@ pub const DEFAULT_LAYOUT_MODE: LayoutMode = LayoutMode::Column;
 /// Within-column ordering default: strict slot order (nthelper style); the
 /// barycenter crossing-minimization sweeps are opt-in.
 pub const DEFAULT_LAYOUT_ORDERING: LayoutOrdering = LayoutOrdering::Strict;
-/// Default slice spring stiffness for sections mode (matches layout.rs DEFAULT_SLICE_K).
-pub const DEFAULT_SLICE_FORCE: f32 = 0.1;
-/// Default section-hole spring stiffness for sections mode (matches layout.rs DEFAULT_SECTION_HOLE_K).
-pub const DEFAULT_SECTION_FORCE: f32 = 0.05;
+/// Default slice spring stiffness for sections mode: the layout solver's own
+/// tuned default (`layout::DEFAULT_SLICE_K`) is the single source of truth.
+pub const DEFAULT_SLICE_FORCE: f32 = crate::layout::DEFAULT_SLICE_K;
+/// Default section-hole spring stiffness for sections mode: the layout solver's
+/// own tuned default (`layout::DEFAULT_SECTION_HOLE_K`) is the single source of
+/// truth, so the app's sections solve matches the solver's tuned strength.
+pub const DEFAULT_SECTION_FORCE: f32 = crate::layout::DEFAULT_SECTION_HOLE_K;
 
 const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";

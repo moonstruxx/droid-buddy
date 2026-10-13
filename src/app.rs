@@ -2770,7 +2770,7 @@ impl App {
         };
         let pins = self.pinned_indices(&graph);
         let tension = self.tension;
-        crate::layout::run_iterations(
+        crate::layout::run_iterations_with_forces(
             &graph,
             &mut self.graph_positions,
             crate::layout::SOLVE_ITERATIONS,
@@ -2778,6 +2778,8 @@ impl App {
             &pins,
             tension,
             crate::config::LayoutMode::Sections,
+            self.layout_slice_force,
+            self.layout_section_force,
         );
         self.fit_graph_camera(self.refit_viewport());
         self.status_message = String::from("Arranged (sections)");
@@ -5070,6 +5072,89 @@ mod tests {
         assert!(
             (bpx - 320.0).abs() > 1e-3 || (bpy - 150.0).abs() > 1e-3,
             "bounds center must differ from the content center when extent > 0"
+        );
+    }
+
+    #[test]
+    fn sections_mode_center_and_refit_keys_frame_a_wide_graph() {
+        // sections-black-hole-solver 3.3 (design D6): `c` and `Shift+c` are
+        // mode-agnostic — they read `graph_positions` and the published
+        // `graph_canvas_px`, with no `layout_mode` branch — so a graph wider
+        // than the pane centers and refits in sections mode exactly as in
+        // column/force mode. The section solver must not gate either key.
+        use crate::handler::{handle_event, key_modifiers, KeyCode, KeyEvent};
+
+        // A real >20-circuit patch: the section solver spreads its circuits
+        // across one patch-order slice each, so the world is far wider than a
+        // pane.
+        let patch = Patch::from_ini_file(Path::new("fixtures/influence_outlier.ini")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.layout_mode = crate::config::LayoutMode::Sections;
+        let g = KeyEvent::new(KeyCode::Char('g'), key_modifiers::NONE);
+        handle_event(g.clone(), &mut app);
+        handle_event(g, &mut app);
+        assert!(app.showing_graph, "`g g` opens the graph pane");
+        assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
+        let nodes = app.graph.as_ref().map(|gr| gr.nodes.len()).unwrap_or(0);
+        assert!(nodes > 20, "fixture must span many circuits, got {nodes}");
+
+        let bounds = WorldBounds::from_positions(&app.graph_positions);
+        let (nw, nh) = app.graph_fit_node_world();
+        let world_w = bounds.max_x - bounds.min_x + nw;
+        assert!(
+            world_w > 1000.0,
+            "the sections solve must span a wide x range: {world_w}"
+        );
+
+        // Halve the world width for the pane so the graph genuinely overflows
+        // horizontally at zoom 1.0 (the spec's "wider than the pane" premise),
+        // and seed the camera + canvas the way the renderer publishes them.
+        let canvas = (world_w / 2.0, 400.0_f32);
+        let seeded_pan = (0.0, 0.0);
+        app.graph_camera = Some(GraphCamera {
+            zoom: 1.0,
+            pan: seeded_pan,
+        });
+        app.graph_canvas_px = Some(canvas);
+
+        // `c`: pan-only center. The CONTENT center (bounds center plus half the
+        // node extent) maps to the canvas center, horizontally and vertically,
+        // while the zoom is untouched.
+        handle_event(
+            KeyEvent::new(KeyCode::Char('c'), key_modifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.status_message, "Graph centered");
+        let cam = app.graph_camera.expect("c keeps the camera");
+        assert_eq!(cam.zoom, 1.0, "centering must not change zoom");
+        let (ccx, ccy) = (
+            (bounds.min_x + bounds.max_x + nw) / 2.0,
+            (bounds.min_y + bounds.max_y + nh) / 2.0,
+        );
+        let (px, py) = cam.world_to_pixel(ccx, ccy);
+        assert!(
+            (px - canvas.0 / 2.0).abs() < 1e-2 && (py - canvas.1 / 2.0).abs() < 1e-2,
+            "content center must map to the canvas center: ({px},{py})"
+        );
+        assert_ne!(cam.pan, seeded_pan, "a wider-than-pane graph must pan");
+        assert!((cam.pan.0 - (ccx * cam.zoom - canvas.0 / 2.0)).abs() < 1e-3);
+        assert!((cam.pan.1 - (ccy * cam.zoom - canvas.1 / 2.0)).abs() < 1e-3);
+
+        // `Shift+c`: full refit against the published canvas — the world bounds
+        // expanded by one node extent fit inside it and the preset resets.
+        handle_event(
+            KeyEvent::new(KeyCode::Char('C'), key_modifiers::SHIFT),
+            &mut app,
+        );
+        assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
+        assert_eq!(app.graph_canvas_px, Some(canvas));
+        let cam = app.graph_camera.expect("Shift+c keeps the camera");
+        let (x0, y0) = cam.world_to_pixel(bounds.min_x, bounds.min_y);
+        let (x1, y1) = cam.world_to_pixel(bounds.max_x + nw, bounds.max_y + nh);
+        assert!(
+            x0 >= -1e-2 && y0 >= -1e-2 && x1 <= canvas.0 + 1e-2 && y1 <= canvas.1 + 1e-2,
+            "refit must frame the world bounds plus one node extent: ({x0},{y0})-({x1},{y1})"
         );
     }
 

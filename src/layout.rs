@@ -171,11 +171,11 @@ pub fn solve_sections(
     graph: &Graph,
     pinned: &[usize],
     tension: f32,
-    _slice_force: f32,
-    _section_force: f32,
+    slice_force: f32,
+    section_force: f32,
 ) -> Vec<(f32, f32)> {
     let mut positions = seed_positions(graph);
-    run_iterations(
+    run_iterations_with_forces(
         graph,
         &mut positions,
         SOLVE_ITERATIONS,
@@ -183,6 +183,8 @@ pub fn solve_sections(
         pinned,
         tension,
         LayoutMode::Sections,
+        slice_force,
+        section_force,
     );
     positions
 }
@@ -498,7 +500,7 @@ pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option
     }
 
     // Compute mean slice per cluster (only circuit nodes contribute)
-    for (_c, list) in members.iter().enumerate() {
+    for list in members.iter() {
         if list.is_empty() {
             continue;
         }
@@ -809,6 +811,11 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
 /// - `LayoutMode::Force`: cable springs + uniform repulsion + weak cohesion
 /// - `LayoutMode::Sections`: slice springs + section-hole springs + cable springs
 ///   + size-aware repulsion (cohesion replaced by hole springs)
+///
+/// Runs sections mode with the module-default stiffnesses ([`SLICE_K`],
+/// [`SECTION_HOLE_K`]); sections-mode callers that expose runtime sliders call
+/// [`run_iterations_with_forces`] instead so the stiffnesses actually reach the
+/// solver.
 pub(crate) fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
@@ -817,6 +824,35 @@ pub(crate) fn run_iterations(
     pinned: &[usize],
     tension: f32,
     mode: LayoutMode,
+) -> usize {
+    run_iterations_with_forces(
+        graph,
+        positions,
+        max_iter,
+        active,
+        pinned,
+        tension,
+        mode,
+        SLICE_K,
+        SECTION_HOLE_K,
+    )
+}
+
+/// Core solver behind [`run_iterations`] with explicit sections-mode spring
+/// stiffnesses. `slice_k` is the slice-spring stiffness and `section_k` the
+/// section-hole-spring stiffness ([`solve_sections`] forwards its runtime
+/// slider params here); both are ignored in [`LayoutMode::Force`].
+#[allow(clippy::too_many_arguments)] // one param per solver knob (graph, positions, budget, active, pins, tension, mode, slice_k, section_k)
+pub(crate) fn run_iterations_with_forces(
+    graph: &Graph,
+    positions: &mut [(f32, f32)],
+    max_iter: usize,
+    active: Option<&[bool]>,
+    pinned: &[usize],
+    tension: f32,
+    mode: LayoutMode,
+    slice_k: f32,
+    section_k: f32,
 ) -> usize {
     let n = graph.nodes.len();
     if n == 0 {
@@ -887,7 +923,7 @@ pub(crate) fn run_iterations(
             // Only in x direction; y is free (distributed by repulsion).
             for (i, &pos) in positions.iter().enumerate().take(n) {
                 let target_x = slice[i] as f32 * HORIZONTAL_SPACING;
-                accel[i].0 += (target_x - pos.0) * SLICE_K;
+                accel[i].0 += (target_x - pos.0) * slice_k;
             }
 
             // Section-hole springs: pull cluster members toward their fixed anchor
@@ -897,8 +933,8 @@ pub(crate) fn run_iterations(
             for (i, &pos) in positions.iter().enumerate().take(n) {
                 if let Some((anchor_x, anchor_y)) = hole_anchors[i] {
                     if graph.nodes[i].kind == NodeKind::Circuit {
-                        accel[i].0 += (anchor_x - pos.0) * SECTION_HOLE_K;
-                        accel[i].1 += (anchor_y - pos.1) * SECTION_HOLE_K;
+                        accel[i].0 += (anchor_x - pos.0) * section_k;
+                        accel[i].1 += (anchor_y - pos.1) * section_k;
                     }
                 }
             }
@@ -2514,6 +2550,64 @@ mod tests {
         assert!(
             connected_b < inter_gap,
             "connected pair in cluster 1 should be closer than inter-cluster gap"
+        );
+    }
+
+    #[test]
+    fn sections_mode_force_params_change_member_spread_near_anchor() {
+        // sections-black-hole-solver 3.0: the runtime slice/section stiffnesses
+        // must actually reach the solver. Solves one banner group whose circuits
+        // span slice 0..6 (anchor x = mean slice 3 → 240) twice with the same
+        // slice_k but a low vs a high section_k. The section-hole spring is the
+        // only x-force that pulls members together, so high section_k must yield
+        // a measurably tighter x-cluster around the anchor than low section_k.
+        let nodes = vec![node("c0", 0), node("c1", 2), node("c2", 4), node("c3", 6)];
+        let clusters = vec![Cluster {
+            title: "group_a".to_string(),
+            section_range: 0..7,
+        }];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let anchor_x = 3.0 * HORIZONTAL_SPACING; // mean slice 3
+        let spread = |positions: &[(f32, f32)]| {
+            positions
+                .iter()
+                .map(|(x, _)| (x - anchor_x).abs())
+                .fold(0.0f32, f32::max)
+        };
+
+        let low_section_k = SECTION_HOLE_K / 20.0; // hole spring barely felt
+        let high_section_k = DEFAULT_SECTION_HOLE_K * 20.0; // strongly anchored
+
+        let low = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, low_section_k);
+        let high = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, high_section_k);
+        assert_finite_and_bounded(&low);
+        assert_finite_and_bounded(&high);
+
+        let (spread_low, spread_high) = (spread(&low), spread(&high));
+        assert!(
+            spread_high < spread_low * 0.5,
+            "high section_k must tighten the x-cluster around the anchor: \
+             spread_low={spread_low} spread_high={spread_high}"
+        );
+        assert_ne!(
+            low, high,
+            "different section_k values must produce different layouts"
+        );
+
+        // Determinism holds per parameter triple.
+        let low_again = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, low_section_k);
+        let high_again = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, high_section_k);
+        assert_eq!(low, low_again, "low section_k solve must be deterministic");
+        assert_eq!(
+            high, high_again,
+            "high section_k solve must be deterministic"
         );
     }
 
