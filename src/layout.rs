@@ -397,16 +397,34 @@ fn separate_overlaps(
 
 /// Deterministic initial placement along a single dominant left→right axis
 /// (design D1): sources on the left, sinks right. The seed is a layered
-/// (Sugiyama-style) arrangement — `x = depth · HORIZONTAL_SPACING`,
+/// (Sugiyama-style) arrangement — `x = layer rank · HORIZONTAL_SPACING`,
 /// `y = within-layer order · VERTICAL_SPACING` — where the within-layer order
 /// comes from deterministic barycenter crossing-minimization sweeps
 /// ([`crossing_minimized_orders`]) instead of file order. Coordinates land
 /// exactly on the [`GRID_SNAP`] grid (no jitter), so the convergence target is
 /// a clean horizontal chain of aligned columns.
+///
+/// The layer rank is the **dense-normalized** rank of the topological depth
+/// ([`dense_columns`]), not the raw depth value, mirroring the column
+/// arrangement. The raw depth is a bounded Bellman-Ford relaxation whose
+/// *value* is not bounded by the node count on a cycle — each pass adds roughly
+/// the cycle length (measured 245,281 on `fixtures/own_scale.ini`, a
+/// 19,622,480-unit seed). That seed is unreachable for the integrator, which
+/// moves a node at most `MAX_DISPLACEMENT × SOLVE_ITERATIONS` = 1200 units, so
+/// the seed decides the layout's order of magnitude: force mode then renders a
+/// ~19.6 M-unit smear. Dense-normalizing puts exactly one spacing
+/// unit between adjacent *distinct* layers, bounding the seed's horizontal
+/// extent by `(distinct layers − 1) · HORIZONTAL_SPACING` — proportional to
+/// patch size. It is an order-preserving bijection on distinct depth values, so
+/// [`crossing_minimized_orders`] sees identical layers and identical
+/// within-layer orders, and a graph whose depth values already form a
+/// contiguous `0..N-1` is seeded exactly as before (byte-identical).
 pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
-    // Longest-path topological depth ([`topological_depth`]) with
-    // crossing-minimized within-layer order (barycenter sweeps, deterministic).
-    let depth = topological_depth(graph);
+    // Dense-normalized layered depth (raw depth is unbounded on cycles, see
+    // above) with crossing-minimized within-layer order (barycenter sweeps,
+    // deterministic). Dense normalization is an order-preserving bijection on
+    // distinct depth values, so the crossing-minimization layers are unchanged.
+    let depth = dense_columns(&topological_depth(graph));
     let order = crossing_minimized_orders(graph, &depth);
 
     graph
@@ -677,10 +695,11 @@ fn section_hole_anchors_lanes(graph: &Graph, seed: &SectionsSeed) -> Vec<Option<
 /// [`sections_seed`] for the per-node formula; this is the very same vector the
 /// slice springs pull toward, so seed and spring can never disagree. The extent
 /// is proportional to patch size (lanes × lane width over the row target), never
-/// to cycle length — unlike [`seed_positions`], whose topological depth grows
-/// with cycle length on a cyclic patch (measured 245,266 on
-/// `fixtures/own_scale.ini`, a 19.6 M-unit seed the clamped integrator can only
-/// nudge).
+/// to cycle length — unlike the raw Bellman-Ford depth the layered seed used to
+/// consume, which grows with cycle length on a cyclic patch (measured 245,281
+/// on `fixtures/own_scale.ini`). The layered seed now dense-normalizes that
+/// depth ([`dense_columns`]) before multiplying by [`HORIZONTAL_SPACING`], so it
+/// is bounded by the distinct-layer count in the same way.
 ///
 /// Deterministic: no RNG, no hash iteration order.
 pub(crate) fn seed_positions_sections(graph: &Graph) -> Vec<(f32, f32)> {
@@ -4451,6 +4470,133 @@ mod tests {
         (max_x - min_x, max_y - min_y)
     }
 
+    /// Number of distinct topological-depth layers — the range of the dense
+    /// layer ranks the layered seed contracts the depth onto.
+    fn distinct_layer_count(graph: &Graph) -> usize {
+        dense_columns(&topological_depth(graph))
+            .into_iter()
+            .max()
+            .map_or(1, |last| last + 1)
+    }
+
+    #[test]
+    fn dense_normalization_preserves_barycenter_layers_and_within_layer_orders() {
+        // 1.1 contract (design D1): dense-normalizing the depth must not change
+        // the crossing-minimization input. `crossing_minimized_layers` groups
+        // nodes by depth *equality* (a `HashMap` keyed by the value), fixes the
+        // layer sequence by first appearance in node order, and sorts within a
+        // layer by neighbor barycenters — every one of those steps is
+        // equality-based, so an injective relabeling of the depth values yields
+        // identical layers and identical within-layer orders. Verified here
+        // rather than assumed: on a cyclic graph whose raw depths are inflated
+        // past `n`, the per-node orders computed from the raw depth and from
+        // the dense ranks must match exactly.
+        let graph = make_graph(
+            8,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (0, 4),
+                (4, 5),
+                (5, 6),
+                (6, 4),
+                (2, 7),
+                (7, 5),
+            ],
+        );
+        let raw = topological_depth(&graph);
+        let dense = dense_columns(&raw);
+        let raw_max = raw.iter().copied().max().unwrap_or(0);
+        assert!(
+            raw_max >= graph.nodes.len(),
+            "the fixture must be cycle-inflated (raw depth ≥ n), got max {raw_max}"
+        );
+        assert!(
+            !raw.iter().copied().eq(0..graph.nodes.len()),
+            "the fixture's raw depths must be sparse, not contiguous"
+        );
+        let mut distinct = raw.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            dense.iter().copied().max(),
+            Some(distinct.len() - 1),
+            "dense ranks must be contiguous 0..N-1"
+        );
+        assert_eq!(
+            crossing_minimized_orders(&graph, &raw),
+            crossing_minimized_orders(&graph, &dense),
+            "dense normalization changed the barycenter layers or within-layer orders"
+        );
+        // Directly on the layer structure too: the same layer sequence (same
+        // membership, same order) for the raw depths and the dense ranks.
+        let index = node_index(&graph);
+        let edges = edge_pairs(&graph, &index);
+        let active = vec![true; graph.nodes.len()];
+        assert_eq!(
+            crossing_minimized_layers(graph.nodes.len(), &edges, &raw, &active),
+            crossing_minimized_layers(graph.nodes.len(), &edges, &dense, &active),
+            "dense normalization changed the layer partition or the layer sequence"
+        );
+    }
+
+    #[test]
+    fn force_mode_seed_and_solve_stay_proportional_on_cyclic_scale_fixture() {
+        // 1.1 regression: `fixtures/own_scale.ini` (511 nodes) is cyclic, so the
+        // raw Bellman-Ford depth is not bounded by `n` — measured max depth
+        // 245,281 (over only 5 distinct values), so the raw-depth seed spans
+        // 245,281 × HORIZONTAL_SPACING = 19,622,480 units. The integrator can
+        // travel at most `MAX_DISPLACEMENT × SOLVE_ITERATIONS` = 1200 units per
+        // node, so a raw-depth seed is unreachable: the measured force-mode bbox
+        // width stays at 19,621,300 (proposal / design D1).
+        //
+        // The dense-normalized seed instead puts exactly one spacing unit
+        // between adjacent *distinct layers*, bounding the seed's horizontal
+        // extent by `(distinct layers − 1) × HORIZONTAL_SPACING`. The solved
+        // width can add at most two integrator travel budgets on top (one node
+        // drifting each way from its seed), so it too stays proportional to
+        // patch size instead of exploding with cycle length.
+        let graph = graph_from_fixture("fixtures/own_scale.ini");
+        let n = graph.nodes.len();
+        assert!(n > 400, "scale fixture should be large, got {n} nodes");
+        let layers = distinct_layer_count(&graph);
+        assert!(layers > 1, "scale fixture must have several layers");
+
+        let seed = seed_positions(&graph);
+        for (x, y) in &seed {
+            assert!(x.is_finite() && y.is_finite(), "non-finite seed ({x}, {y})");
+        }
+        let (seed_width, _) = positions_bbox(&seed);
+        let seed_bound = (layers - 1) as f32 * HORIZONTAL_SPACING * 1.5;
+        assert!(
+            seed_width <= seed_bound,
+            "force seed width {seed_width} exceeds {seed_bound} \
+             ((distinct layers − 1) × HORIZONTAL_SPACING × 1.5; {layers} layers); \
+             the raw-depth seed measures 19,622,480 here"
+        );
+
+        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        assert_eq!(positions.len(), n);
+        for (x, y) in &positions {
+            assert!(
+                x.is_finite() && y.is_finite(),
+                "non-finite position ({x}, {y})"
+            );
+        }
+        let travel_budget = MAX_DISPLACEMENT * SOLVE_ITERATIONS as f32;
+        let (width, _) = positions_bbox(&positions);
+        let solved_bound = (layers - 1) as f32 * HORIZONTAL_SPACING + 2.0 * travel_budget;
+        assert!(
+            width <= solved_bound,
+            "force bbox width {width} exceeds {solved_bound} (the dense seed's \
+             {seed_width} extent plus two integrator travel budgets of \
+             {travel_budget}); the raw-depth seed smears to ~19,621,300 here \
+             (proposal; its 19.6 M extent is unreachable for the integrator)"
+        );
+    }
+
     #[test]
     fn sections_mode_scale_is_proportional_to_patch_size_not_cycle_length() {
         // Regression for the exploding sections seed on a large cyclic patch —
@@ -4598,19 +4744,24 @@ mod tests {
              not near the {SECTIONS_LANE_GAP}-unit tolerance"
         );
 
-        // Pre-existing, out-of-scope divergence: force mode still seeds via the
-        // topological-depth seed and therefore still explodes on this cyclic
-        // fixture (measured seed width ≈ 19.6 M). This is asserted rather than
-        // fixed: force mode has a golden-vector test
-        // (`force_mode_positions_are_unchanged_by_size_aware_repulsion`) and the
-        // D9 determinism contract pinning its bytes. Documenting it here keeps the
-        // two seeds' different behavior visible in one place.
+        // The layered force seed now shares the same proportionality contract
+        // (force-mode-seed-cap 1.1): `seed_positions` dense-normalizes the
+        // topological depth before multiplying by HORIZONTAL_SPACING, so on this
+        // cyclic fixture it no longer explodes. Before the cap the raw seed
+        // spanned 245,281 × 80 = 19,622,480 units (and force mode's solved bbox
+        // measured 19,621,300); the dense seed instead spans one spacing unit per
+        // distinct layer — 320 here (5 distinct depths) — which is *narrower* than
+        // the sections bound, hence the inverted guard this replaces ("force mode
+        // still explodes") is no longer the true claim. Asserted instead: the
+        // force seed obeys the layer-proportional bound.
         let force_seed = seed_positions(&graph);
         let (force_seed_width, _) = positions_bbox(&force_seed);
+        let force_seed_bound = (distinct_layer_count(&graph) - 1) as f32 * HORIZONTAL_SPACING * 1.5;
         assert!(
-            force_seed_width > width_bound,
-            "force mode's topological-depth seed unexpectedly fits the sections bound \
-             ({force_seed_width} <= {width_bound}); if force mode was fixed, update this guard"
+            force_seed_width <= force_seed_bound,
+            "force mode's dense-normalized seed must stay proportional to the layer \
+             count: {force_seed_width} > {force_seed_bound}; the raw-depth seed \
+             measured 19,622,480 here"
         );
     }
     #[test]

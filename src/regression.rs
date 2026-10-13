@@ -824,14 +824,28 @@ fn solver_dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 
 #[test]
 fn regression_solver_single_axis_on_real_multi_banner_patch() {
-    // Long synthetic cable chain (70 chained [copy] sections): the solver
-    // must converge along the x-axis — a wide horizontal pipeline
-    // (width-first) — not a vertical stack of banner bands. Synthetic
-    // because the small own fixtures cannot exercise the axis property.
+    // Long synthetic cable chain (70 chained sections): the solver must
+    // converge along the x-axis — a wide horizontal pipeline (width-first) —
+    // not a vertical stack of banner bands. Synthetic because the small own
+    // fixtures cannot exercise the axis property.
+    //
+    // Each chain member carries its OWN circuit name on purpose. `Graph::
+    // build_from_patch` attributes cables by section *name* ("a name shared by
+    // several instances resolves to the first instance"), so the 70 repeated
+    // `[copy]` sections this fixture used to build all resolved to instance 0:
+    // the chain degenerated into ~69 self-loops on that one node, which
+    // inflated the raw Bellman-Ford depth to 5038 (69 × n) and seeded the node
+    // at 5038 × 80 = 403,040 units. The old `x-span >= y-span` claim then held
+    // only because the clamped integrator cannot travel 403,040 units, so the
+    // smear simply sat there (measured x-span 403,040 seed / 400,680 solved,
+    // y-span 6,160) — the assertion was passing vacuously on the very
+    // unreachable seed `force-mode-seed-cap` removes. With distinct names the
+    // fixture is the chain it claims to be, so the axis claim holds on its own
+    // merits: measured x-span 3334.07 against y-span 153.53.
     let mut content = String::from("[p2b8]\n[lfo]\n    hz = 2\n    square = _C0\n");
     for i in 0..70 {
         content.push_str(&format!(
-            "[copy]\n    input = _C{i}\n    output = _C{}\n",
+            "[chain{i}]\n    input = _C{i}\n    output = _C{}\n",
             i + 1
         ));
     }
@@ -864,6 +878,19 @@ fn regression_solver_single_axis_on_real_multi_banner_patch() {
     assert!(
         w >= h,
         "single-axis regression: x-span {w} must be >= y-span {h} (width-first horizontal chain)"
+    );
+
+    // `force-mode-seed-cap` 1.1 contract on a parsed patch: the layered seed
+    // dense-normalizes its depth, so its x extent is one unit per distinct
+    // layer (70 layers here → 70 × 80 = 5,600, bounded by 8,400 = × 1.5) instead
+    // of tracking the raw depth value. The aliased fixture above measured
+    // 403,040 — 48× the bound — which is what the guard catches.
+    let seed = seed_positions(&graph);
+    let (seed_w, _) = solver_bbox(&seed);
+    assert!(
+        seed_w <= 8_400.0,
+        "force seed must stay proportional to the layer count: {seed_w} > 8,400 \
+         (70 distinct layers × 80 world units × 1.5)"
     );
 }
 
