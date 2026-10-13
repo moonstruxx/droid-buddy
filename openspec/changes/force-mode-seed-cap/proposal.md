@@ -4,7 +4,7 @@
 
 The force-directed graph arrangement is unusable on a large **cyclic** patch: it renders a horizontal smear roughly 19.6 million world units wide.
 
-`layout::seed_positions` (`src/layout.rs`) seeds `x = topological_depth[i] * HORIZONTAL_SPACING` from the **raw** depth, and `topological_depth` → `depth_over` is a bounded Bellman-Ford relaxation run for `n` passes. On a cycle, each pass adds about the cycle length, so depth is **not** bounded by `n` — the function's own comment warns that per-depth maps must not assume `depth < n`. On `fixtures/own_scale.ini` (511 nodes, banner chains plus feedback cables) the maximum depth is ≈ **245,266**, so the seed alone spans ≈ **19,621,280** units.
+`layout::seed_positions` (`src/layout.rs`) seeds `x = topological_depth[i] * HORIZONTAL_SPACING` from the **raw** depth, and `topological_depth` → `depth_over` is a bounded Bellman-Ford relaxation run for `n` passes. On a cycle, each pass adds about the cycle length, so depth is **not** bounded by `n` — the function's own comment warns that per-depth maps must not assume `depth < n`. On `fixtures/own_scale.ini` (511 nodes, banner chains plus feedback cables) the maximum depth is **245,281**, so the seed alone spans **19,622,480** units.
 
 The integrator cannot recover from such a seed: acceleration is `clamp(accel, MAX_DISPLACEMENT = 20)` per component, `velocity = (velocity + a) · FRICTION(0.5)` gives `|velocity| ≤ 40` per iteration, and `SOLVE_ITERATIONS = 60` ⇒ at most ≈ **2400** world units of total travel. Measured result: force mode's bbox width on that fixture is **19,621,300** — a smear ~480× beyond the furthest slice target.
 
