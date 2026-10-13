@@ -3939,6 +3939,7 @@ impl App {
                 highlighted_nodes: HashSet::new(),
                 highlighted_edges: HashSet::new(),
                 not_selected: HashSet::new(),
+                section_holes: Vec::new(),
             };
             let pins: Vec<usize> = self
                 .dependency_nodes
@@ -4054,6 +4055,7 @@ impl App {
                 highlighted_nodes: HashSet::new(),
                 highlighted_edges: HashSet::new(),
                 not_selected: HashSet::new(),
+                section_holes: Vec::new(),
             };
             let pins: Vec<usize> = self
                 .influence_nodes
@@ -4244,6 +4246,7 @@ impl App {
             highlighted_nodes: HashSet::new(),
             highlighted_edges: HashSet::new(),
             not_selected: HashSet::new(),
+            section_holes: Vec::new(),
         };
         let pins: Vec<usize> = members
             .iter()
