@@ -2250,14 +2250,16 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     // Hit-test against each node's world-space extent (graph-zoom-node-scaling,
     // design decision 5): the drawn frame *is* the node's world rect projected
     // through the camera, so testing in world units is exact at every zoom and
-    // needs no `/ zoom` conversion. `node_world_sizes` gives each node its own
-    // world `(width, height)` (node positions are the box's top-left corner).
+    // needs no `/ zoom` conversion. `drawn_world_sizes` gives each node its own
+    // world `(width, height)` (node positions are the box's top-left corner) and
+    // is mode-aware: in sections mode it applies the lane width cap, so the test
+    // rect matches the drawn frame instead of reaching past a capped node.
     // A minimum hit size keeps a node selectable when its drawn frame is only a
     // few pixels, expanding the world test rect symmetrically. First match wins.
     let world = app
         .graph
         .as_ref()
-        .map(crate::layout::node_world_sizes)
+        .map(|graph| crate::gui::drawn_world_sizes(app.layout_mode, graph))
         .unwrap_or_default();
     let min_w = App::GRAPH_MIN_HIT_PX / camera.zoom;
     let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;

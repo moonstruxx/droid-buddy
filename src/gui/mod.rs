@@ -34,7 +34,7 @@ mod viewer;
 // consumed by the windowed loop in the `droid_tui` bin (a separate crate), so
 // it re-exports at full visibility. `graph` stays a private canvas module.
 pub use graph::graph_window_fit_camera;
-pub(crate) use graph::{camera_pan, camera_zoom_about};
+pub(crate) use graph::{camera_pan, camera_zoom_about, drawn_world_sizes};
 #[cfg(test)]
 pub(crate) use graph::{paint_scene, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 // Headless cross-layer regression (`src/regression.rs`, same precedent as
