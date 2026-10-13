@@ -809,7 +809,7 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
 /// - `LayoutMode::Force`: cable springs + uniform repulsion + weak cohesion
 /// - `LayoutMode::Sections`: slice springs + section-hole springs + cable springs
 ///   + size-aware repulsion (cohesion replaced by hole springs)
-fn run_iterations(
+pub(crate) fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     max_iter: usize,

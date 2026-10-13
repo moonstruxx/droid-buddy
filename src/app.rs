@@ -2756,6 +2756,34 @@ impl App {
         true
     }
 
+    /// Re-anneal the sections layout from the current positions
+    /// (sections-black-hole-solver 3.2, design D5): runs `run_iterations`
+    /// with the full `SOLVE_ITERATIONS` budget and the current tension under
+    /// `LayoutMode::Sections` starting from `graph_positions` (not a fresh
+    /// seed), so manual drags and slider tuning settle instead of resetting.
+    /// Freezes at the energy threshold inside `run_iterations`, refits the
+    /// camera, and reports `Arranged (sections)`. Silent no-op (false)
+    /// without a built graph.
+    pub fn arrange_sections(&mut self) -> bool {
+        let Some(graph) = self.graph.clone() else {
+            return false;
+        };
+        let pins = self.pinned_indices(&graph);
+        let tension = self.tension;
+        crate::layout::run_iterations(
+            &graph,
+            &mut self.graph_positions,
+            crate::layout::SOLVE_ITERATIONS,
+            None,
+            &pins,
+            tension,
+            crate::config::LayoutMode::Sections,
+        );
+        self.fit_graph_camera(self.refit_viewport());
+        self.status_message = String::from("Arranged (sections)");
+        true
+    }
+
     /// Center the drawn graph in the visible pane: pan so the CONTENT center —
     /// the position-bounds center plus half the node world extent (node
     /// positions are top-left corners) — maps to the canvas center, zoom

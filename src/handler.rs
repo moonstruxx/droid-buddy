@@ -1105,6 +1105,18 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.apply_arrangement();
                 return false;
             }
+            KeyCode::Char('A') => {
+                // sections-black-hole-solver 3.2 (design D5): `A` re-anneals
+                // the sections layout from the current positions in sections
+                // mode only. No conflict with lowercase `a` (arrangement
+                // cycle): winit reports Shift+a as `Char('A')`, a distinct
+                // code. In other modes it falls through to the shared
+                // dispatch below.
+                if app.layout_mode == crate::config::LayoutMode::Sections {
+                    app.arrange_sections();
+                    return false;
+                }
+            }
             KeyCode::Char('s') => {
                 // sections-black-hole-solver 5.2: `S` toggles the sliders panel
                 // in sections mode only. In other modes, `S` keeps its existing
@@ -5115,6 +5127,52 @@ mod tests {
         assert!(
             app.graph_camera.is_some(),
             "apply refits the camera against the live pane"
+        );
+    }
+
+    #[test]
+    fn graph_upper_a_arranges_sections_from_current_and_reports() {
+        // sections-black-hole-solver 3.2 (design D5): `A` on the focused
+        // graph pane in sections mode re-anneals from the current positions
+        // (not a fresh seed) and reports it; the mode does not advance.
+        let mut app = app_with_fixture();
+        app.layout_mode = crate::config::LayoutMode::Sections;
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(key(KeyCode::Char('g')), &mut app);
+        assert!(app.showing_graph);
+        // Perturb one node so an anneal provably starts from here: a
+        // reseed would discard the offset, the anneal keeps its influence.
+        app.graph_positions[0].0 += 500.0;
+        let before = app.graph_positions.clone();
+        let graph = app.graph.as_ref().unwrap().clone();
+        let pins = app.pinned_indices(&graph);
+        let tension = app.tension;
+        let mut expected = before.clone();
+        crate::layout::run_iterations(
+            &graph,
+            &mut expected,
+            crate::layout::SOLVE_ITERATIONS,
+            None,
+            &pins,
+            tension,
+            crate::config::LayoutMode::Sections,
+        );
+
+        handle_event(key(KeyCode::Char('A')), &mut app);
+
+        assert_eq!(app.status_message, "Arranged (sections)");
+        assert_eq!(
+            app.graph_positions, expected,
+            "A anneals from the current positions"
+        );
+        assert_eq!(
+            app.layout_mode,
+            crate::config::LayoutMode::Sections,
+            "A re-solves without cycling the arrangement"
+        );
+        assert!(
+            app.graph_camera.is_some(),
+            "arrange refits the camera against the live pane"
         );
     }
 
