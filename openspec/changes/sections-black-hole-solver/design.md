@@ -49,6 +49,17 @@ accel = cable_spring_force(i) + slice_spring(i) + section_hole_spring(i) + repul
 
 This is why sections mode must seed **by patch order** (`x = slice_index(i) * HORIZONTAL_SPACING`, `y` = within-slice order × `VERTICAL_SPACING`) — which is what D1 already specifies — rather than by topological depth. The force path keeps the old seed unchanged (golden-vector protected); its own uncapped-depth instability is a **pre-existing** bug filed separately as bead `droid_tui-68g`. A scale guard test now pins sections mode to a bbox proportional to patch size on `own_scale.ini`.
 
+**Lane geometry: width-aware, wrapped into rows (user decision).** Two further measured facts force a change beyond the plain patch-order seed: (a) the clamped integrator can travel at most ~2400 units from its seed, so the seed *is* the layout — forces only fine-tune; (b) lanes are `HORIZONTAL_SPACING` (80) apart while node widths reach ~496, so adjacent lanes cannot hold wide nodes without overlap (impossible geometry, not tuning). And one structural fact: banner groups are **contiguous** slice ranges, so patch-order lanes already make each group a contiguous run of lanes — cluster visibility comes from lane *ordering*, not from a force.
+
+Therefore the sections seed is:
+1. **Lane per circuit** in patch order (`slice_index`: circuits → `section_index`; controllers/input-jacks → left outer lane; output jacks → right outer lane).
+2. **Width-aware lane width**: `lane_w[s] = max(estimated_widths[i].min(SECTIONS_LANE_MAX_NODE_W))` over the lane's members — nodes narrower than the cap (`SECTIONS_LANE_MAX_NODE_W = 240`) no longer inflate lanes, and the cap is scoped to sections mode so column mode's `estimated_widths` and layouts are untouched.
+3. **Rows**: lanes are packed left→right into rows and wrap when `row_x + lane_w[s]` would pass `SECTIONS_ROW_TARGET_W = 4000` (when the row already holds ≥1 lane). A 500-circuit patch therefore reads as a roughly square grid of lanes instead of a 40:1 ribbon.
+4. **Slice spring retargeted** to the node's lane slot `(slot_x, slot_y)` in *both* axes — this is what holds the wrapped structure together while staying weak enough that cables can still drag nodes toward the border between lanes (the user's stated intent).
+5. **Section-hole anchor retargeted** to the mean lane slot `(slot_x, slot_y)` of the group's members, so groups compact inside the wrapped grid; still fixed once per solve.
+
+Unchanged: cable springs, size-aware repulsion, force mode (byte-identical golden vectors), and the determinism contract. The user chose "chain, then wrap" and "cap node width at overview zoom" over the alternatives; the cap is applied to lane sizing *and* to the drawn frame width **in sections mode only**, because the layout is solved at build time and zoom is a render-time concern (an unconditional global cap would have changed the default column layout).
+
 ### D2 — Fixed section holes from patch order, not live centroid
 
 Current force solver uses `COHESION_K` pulling toward live centroid of members (chases positions). Sections mode computes holes **once** at solve start:
