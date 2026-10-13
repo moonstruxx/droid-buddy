@@ -57,7 +57,9 @@ Comment banners (`# ---- Name ----`) own a range of circuits from themselves to 
 
 ### Requirement: Convergence-based layout
 
-The force-directed layout SHALL bias the layout toward a single dominant left→right axis: initial positions seed by topological layer (depth → x, within-layer order → y) and the solver converges to a horizontal chain. Cable spring force SHALL dominate the repulsion force so connected circuits cohere into a readable flow. The solver SHALL run bounded iterations until total kinetic energy falls below a threshold, then freeze positions. The solver SHALL be re-invoked only on patch load or when the user drags a node; no continuous tick or drift occurs. Pinned nodes (including the tip, the first circuit in `.ini` order) SHALL act as fixed anchors the solver never moves. This arrangement SHALL be the non-default option, reachable by the layout toggle; the column arrangement is the default.
+The force-directed layout SHALL bias the layout toward a single dominant left→right axis: initial positions seed by topological layer (x from the layer index, y from the within-layer order) and the solver converges to a horizontal chain. The layer index used for the seed SHALL be the **dense-normalized rank** of the node's topological depth, not the raw depth value, so that the seed's horizontal extent is bounded by the number of distinct layers and stays within the integrator's travel budget even when the graph is cyclic. Cable spring force SHALL dominate the repulsion force so connected circuits cohere into a readable flow. The solver SHALL run bounded iterations until total kinetic energy falls below a threshold, then freeze positions. The solver SHALL be re-invoked only on patch load or when the user drags a node; no continuous tick or drift occurs. Pinned nodes (including the tip, the first circuit in `.ini` order) SHALL act as fixed anchors the solver never moves. This arrangement SHALL be the non-default option, reachable by the layout toggle; the column arrangement is the default.
+
+The dense-normalized layer index SHALL be derived deterministically by sorting and deduplicating the depth values, so layout determinism is preserved: same patch + same machine + same tension → identical positions. Nodes whose depth values already form a contiguous `0..N-1` sequence SHALL be seeded exactly as before, keeping such layouts byte-identical.
 
 #### Scenario: Layout converges and freezes
 
@@ -83,6 +85,23 @@ The force-directed layout SHALL bias the layout toward a single dominant left→
 
 - **WHEN** the graph converges in the force arrangement
 - **THEN** the first circuit (`.ini` order) remains at the left and does not drift during the solve or on subsequent redraws.
+
+#### Scenario: Cyclic patch seeds within the integrator's reach
+
+- **WHEN** a deeply cyclic patch (feedback cables making the raw topological depth far exceed the node count) is arranged with the force solver
+- **THEN** the seed's horizontal extent is bounded by `(distinct layer count − 1) × HORIZONTAL_SPACING`
+- **AND** the solved layout's bounding box stays proportional to patch size instead of exploding with the cycle length
+
+#### Scenario: Contiguous-depth layout is unchanged
+
+- **WHEN** a graph's topological depth values already form a contiguous sequence starting at 0
+- **THEN** the dense-normalized rank equals the raw depth for every node
+- **AND** the seed positions and the solved positions are byte-identical to the previous behaviour
+
+#### Scenario: Force-mode determinism holds
+
+- **WHEN** the same patch is solved twice in force mode at the same tension
+- **THEN** both solves return identical positions
 
 ### Requirement: ComfyUI-style rendering
 Nodes shall render as rounded frames with a title bar; left-side input ports and right-side output ports; cable edges approximated with box-drawing characters, color-coded by cable type; cluster containers from banner groups surround their circuits.
