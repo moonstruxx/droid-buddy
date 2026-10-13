@@ -876,14 +876,28 @@ pub(crate) fn run_iterations_with_forces(
         .collect();
 
     // Sections-mode precomputation: slice indices, section-hole anchors, and
-    // node world sizes for size-aware repulsion.
-    let (slice_idx, holes, world_sizes) = if mode == LayoutMode::Sections {
+    // node bounding extents for size-aware repulsion.
+    let (slice_idx, holes, extents, cell_size) = if mode == LayoutMode::Sections {
         let slice = slice_index(graph);
         let hole_anchors = compute_section_holes(graph, &slice);
-        let sizes = node_world_sizes(graph);
-        (Some(slice), Some(hole_anchors), Some(sizes))
+        // Bounding extent per node: the `max(width, height)` the renderer draws,
+        // whose half is the space the body claims around its center.
+        let extents: Vec<f32> = node_world_sizes(graph)
+            .iter()
+            .map(|&(w, h)| w.max(h))
+            .collect();
+        // Grid cell size for this graph: never smaller than `REPULSION_RADIUS`
+        // (keeps the 3x3 neighbour scan valid for the small-node case) and never
+        // smaller than the largest node extent. A pair only repels while its
+        // center distance is below `required = 0.5 * (extent_i + extent_j) <=
+        // max_extent`, and any two points within one cell size differ by at
+        // most one cell per axis, so the 3x3 scan cannot miss a repelling pair.
+        let cell = REPULSION_RADIUS.max(extents.iter().copied().fold(0.0f32, f32::max));
+        (Some(slice), Some(hole_anchors), Some(extents), cell)
     } else {
-        (None, None, None)
+        // Force mode keeps the historical `REPULSION_RADIUS` grid so its layout
+        // stays byte-identical (determinism contract).
+        (None, None, None, REPULSION_RADIUS)
     };
 
     let mut velocity = vec![(0.0f32, 0.0f32); n];
@@ -892,12 +906,12 @@ pub(crate) fn run_iterations_with_forces(
     for _ in 0..max_iter {
         iterations += 1;
         // Rebuild the uniform repulsion grid from current positions (D9).
-        // Cell size is REPULSION_RADIUS for force mode; for sections mode we
-        // still use the same grid but with size-aware effective radius in the
-        // force calculation itself.
+        // Cell size is `REPULSION_RADIUS` for force mode; sections mode widens
+        // it to the largest node extent (see `cell_size` above) so the 3x3
+        // neighbour scan still covers every pair the size-aware force reaches.
         let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for (i, &pos) in positions.iter().enumerate().take(n) {
-            grid.entry(cell_of(pos)).or_default().push(i);
+            grid.entry(cell_of(pos, cell_size)).or_default().push(i);
         }
 
         let mut accel = vec![(0.0f32, 0.0f32); n];
@@ -917,7 +931,7 @@ pub(crate) fn run_iterations_with_forces(
             // Sections mode: slice springs + section-hole springs + size-aware repulsion
             let slice = slice_idx.as_ref().unwrap();
             let hole_anchors = holes.as_ref().unwrap();
-            let sizes = world_sizes.as_ref().unwrap();
+            let extents = extents.as_ref().unwrap();
 
             // Slice springs: pull each node toward target_x = slice_index * HORIZONTAL_SPACING
             // Only in x direction; y is free (distributed by repulsion).
@@ -939,11 +953,14 @@ pub(crate) fn run_iterations_with_forces(
                 }
             }
 
-            // Size-aware repulsion: effective radius = REPULSION_RADIUS + 0.5 * max(width, height)
+            // Size-aware repulsion: two bodies repel until their center
+            // distance reaches `required = 0.5 * (extent_i + extent_j)`, the
+            // separation at which their `max(width, height)` extents stop
+            // overlapping (design D3). `cell_size` was sized from the largest
+            // extent, so the 3x3 scan below sees every such pair.
             for (i, &pos) in positions.iter().enumerate().take(n) {
-                let (cx, cy) = cell_of(pos);
-                let (w_i, h_i) = sizes[i];
-                let radius_i = REPULSION_RADIUS + 0.5 * w_i.max(h_i);
+                let (cx, cy) = cell_of(pos, cell_size);
+                let extent_i = extents[i];
                 for dx in -1..=1 {
                     for dy in -1..=1 {
                         let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
@@ -953,11 +970,8 @@ pub(crate) fn run_iterations_with_forces(
                             if i >= j {
                                 continue;
                             }
-                            let (w_j, h_j) = sizes[j];
-                            let radius_j = REPULSION_RADIUS + 0.5 * w_j.max(h_j);
-                            // Use the larger of the two effective radii for the pair
-                            let effective_radius = radius_i.max(radius_j);
-                            let f = repulsion_force_size_aware(pos, positions[j], effective_radius);
+                            let required = 0.5 * (extent_i + extents[j]);
+                            let f = repulsion_force_size_aware(pos, positions[j], required);
                             accel[i].0 += f.0;
                             accel[i].1 += f.1;
                             accel[j].0 -= f.0;
@@ -971,7 +985,7 @@ pub(crate) fn run_iterations_with_forces(
         } else {
             // Force mode: uniform repulsion + weak cohesion
             for (i, &pos) in positions.iter().enumerate().take(n) {
-                let (cx, cy) = cell_of(pos);
+                let (cx, cy) = cell_of(pos, cell_size);
                 for dx in -1..=1 {
                     for dy in -1..=1 {
                         let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
@@ -1063,19 +1077,48 @@ fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     ((-dx / d) * mag, (-dy / d) * mag)
 }
 
-/// Size-aware repulsion for sections mode (design D3): the cutoff radius is
-/// `effective_radius` instead of the fixed `REPULSION_RADIUS`, so larger nodes
-/// repel at greater distances. Inverse-square falloff capped at `MAX_DISPLACEMENT`.
-fn repulsion_force_size_aware(a: (f32, f32), b: (f32, f32), effective_radius: f32) -> (f32, f32) {
+/// Size-aware repulsion for sections mode (design D3): push `a` away from `b`
+/// until their center distance reaches `required = 0.5 * (extent_a + extent_b)`
+/// — the separation at which their `max(width, height)` bounding extents stop
+/// overlapping. Magnitude is a linear ramp in the penetration depth
+/// `required - d`, scaled so it reaches the full per-axis step budget
+/// ([`MAX_DISPLACEMENT`]) after one [`REPULSION_RADIUS`] of penetration:
+///
+/// ```text
+/// mag = min(MAX_DISPLACEMENT, MAX_DISPLACEMENT * (required - d) / REPULSION_RADIUS)
+/// ```
+///
+/// Properties this shape is chosen for:
+/// - **Zero at `d >= required`** — no phantom push at rest; the pair stops as
+///   soon as its bodies clear.
+/// - **Monotone and finite as `d -> 0`** — the ramp only grows with penetration,
+///   and the coincident case returns a fixed nudge first, so there is no
+///   division by zero.
+/// - **Scale-free in `required`** — the ramp length is the constant
+///   [`REPULSION_RADIUS`], not `required`. A wide pair (large `required`) is
+///   therefore pushed hard for most of its travel and still held firmly near its
+///   required separation, instead of decaying into nothing at the boundary. That
+///   is the reason for this form over the old inverse-square
+///   `REPULSION_STRENGTH / d²` falloff: at the required distance that falloff has
+///   decayed to `REPULSION_STRENGTH / required²` (≈ 0.006 for a 496-wide pair),
+///   far too weak to expand the pair within [`SOLVE_ITERATIONS`] — which is why
+///   wide bodies never reached their required separation. Normalizing by the
+///   constant radius (rather than by `required` or `required²`) keeps both
+///   regimes in budget: the slope stays below the step budget for a small pair
+///   (`required` ≈ 80), so cluster members are nudged rather than flung, while a
+///   wide pair still saturates the budget for as long as it has to travel.
+fn repulsion_force_size_aware(a: (f32, f32), b: (f32, f32), required: f32) -> (f32, f32) {
     let (dx, dy, d) = delta(a, b);
     if d < 1e-6 {
         // Coincident nodes: a small deterministic nudge breaks the tie.
         return (0.001, 0.0);
     }
-    if d > effective_radius {
+    if required <= 0.0 || d >= required {
+        // At or beyond the required separation the pair is clear: no force.
         return (0.0, 0.0);
     }
-    let mag = (REPULSION_STRENGTH / (d * d)).min(MAX_DISPLACEMENT);
+    let overlap = required - d;
+    let mag = (MAX_DISPLACEMENT * overlap / REPULSION_RADIUS).min(MAX_DISPLACEMENT);
     ((-dx / d) * mag, (-dy / d) * mag)
 }
 
@@ -1094,10 +1137,10 @@ fn clamp(v: (f32, f32), max: f32) -> (f32, f32) {
     (v.0.clamp(-max, max), v.1.clamp(-max, max))
 }
 
-fn cell_of(p: (f32, f32)) -> (i32, i32) {
+fn cell_of(p: (f32, f32), cell_size: f32) -> (i32, i32) {
     (
-        (p.0 / REPULSION_RADIUS).floor() as i32,
-        (p.1 / REPULSION_RADIUS).floor() as i32,
+        (p.0 / cell_size).floor() as i32,
+        (p.1 / cell_size).floor() as i32,
     )
 }
 
@@ -3566,67 +3609,175 @@ mod tests {
 
     #[test]
     fn sections_mode_size_aware_repulsion_acts_beyond_the_fixed_radius() {
-        // D3: the sections-mode repulsion cutoff is
-        // effective_radius = REPULSION_RADIUS + 0.5 * max(w, h) instead of the
-        // fixed REPULSION_RADIUS. At a separation between the two, the fixed
-        // radius has already cut the force to zero while the size-aware radius
-        // still repels. This pins the radius semantics the solver reads from
-        // `node_world_sizes` (nothing else exercises this function).
+        // D3: sections-mode repulsion is size-aware and cut off by the pair's
+        // *required separation* `req = 0.5 * (extent_i + extent_j)` (extent =
+        // max(width, height)), not by the fixed REPULSION_RADIUS. A 200-wide node
+        // next to an equal one needs a center distance of 200 to clear it, so
+        // repulsion must reach well past the fixed radius (120). This pins the
+        // force contract the solver relies on (nothing else exercises this
+        // function directly).
         let a = (0.0, 0.0);
-        let b = (150.0, 0.0); // REPULSION_RADIUS (120) < 150
+        let b = (150.0, 0.0); // REPULSION_RADIUS (120) < 150 < req (200)
         assert_eq!(
             repulsion_force(a, b),
             (0.0, 0.0),
             "fixed-radius repulsion must cut off past REPULSION_RADIUS"
         );
-        let effective = REPULSION_RADIUS + 0.5 * 200.0; // a 200-wide node -> 220
-        let f = repulsion_force_size_aware(a, b, effective);
+        let required = 200.0;
+        let f = repulsion_force_size_aware(a, b, required);
         assert!(
             f.0 < 0.0 && f.1 == 0.0,
-            "size-aware repulsion must push apart at d=150 with radius {effective}, got {f:?}"
+            "size-aware repulsion must push apart at d=150 with required {required}, got {f:?}"
+        );
+
+        // Zero at and beyond the required separation: no phantom push at rest.
+        assert_eq!(
+            repulsion_force_size_aware((0.0, 0.0), (required, 0.0), required),
+            (0.0, 0.0),
+            "repulsion must be exactly zero at d == required"
+        );
+        assert_eq!(
+            repulsion_force_size_aware((0.0, 0.0), (required + 50.0, 0.0), required),
+            (0.0, 0.0),
+            "repulsion must be zero beyond required"
+        );
+
+        // Monotonic in penetration: a deeper overlap pushes at least as hard,
+        // and the force is still positive just inside the boundary.
+        let mag = |d: f32| {
+            repulsion_force_size_aware((0.0, 0.0), (d, 0.0), required)
+                .0
+                .abs()
+        };
+        assert!(mag(1.0) >= mag(50.0), "force must not weaken as d falls");
+        assert!(mag(50.0) >= mag(150.0), "force must not weaken as d falls");
+        assert!(mag(150.0) >= mag(199.9), "force must not weaken as d falls");
+        assert!(mag(199.9) > 0.0, "force must stay positive inside required");
+
+        // Finite at the coincident point: no division by zero, fixed nudge.
+        let coincident = repulsion_force_size_aware((0.0, 0.0), (0.0, 0.0), required);
+        assert!(
+            coincident.0.is_finite() && coincident.1.is_finite(),
+            "coincident nodes must get a finite nudge, got {coincident:?}"
         );
     }
 
     #[test]
     fn sections_mode_keeps_large_nodes_beyond_their_size_required_distance() {
-        // D3 end-to-end: two 176-wide nodes (20-char names) need a center
-        // distance of at least (176 + 176) / 2 = 176 world units to clear each
-        // other along the wider axis; 176 is the combined half-extent the
-        // bodies require. They sit at distinct slices 0 and 2, so the slice
-        // springs pull them apart in x too. Deterministic solve, so these are
-        // exact contract assertions rather than flake-budgeted ones.
-        let wide_a = "a".repeat(20);
-        let wide_b = "b".repeat(20);
-        let graph = Graph {
-            nodes: vec![node(&wide_a, 0), node(&wide_b, 2)],
-            ..Default::default()
-        };
-        let sizes = node_world_sizes(&graph);
-        assert_eq!(sizes, vec![(176.0, NODE_WORLD_H), (176.0, NODE_WORLD_H)]);
-        let required = (sizes[0].0 + sizes[1].0) / 2.0; // 176
+        // D3 end-to-end at the widths the design has to survive. Both cases are
+        // two equal-width circuits with no edges, at slices 0 and 2, so their
+        // slice springs pull back toward x = 0 and x = 160 and are the restoring
+        // force size-aware repulsion must beat. `required` is the combined
+        // half-extent `0.5 * (extent_a + extent_b)` with `extent = max(w, h)`:
+        // below that center distance the bodies overlap.
+        //
+        //   20-char titles -> 176 wide, required 176  (the old, easy case)
+        //   60-char titles -> 496 wide, required 496  (a 496-wide body pair)
+        //
+        // Tolerance: 10% of `required` (49.6 units for the wide case). The force
+        // is zero *at* `required`, so with FRICTION damping the pair coasts a
+        // little past it rather than landing exactly on it (observed ~508 for
+        // the 496 case, a ~2.4% overshoot); the tolerance absorbs that without
+        // allowing overlap. It is far tighter than the defect: the inert pre-fix
+        // form left the pair at ~196 regardless of width, a ~300-unit overlap
+        // for the 496 case, so reverting the magnitude or the grid change fails
+        // this test.
+        for (chars, expected_required) in [(20usize, 176.0f32), (60, 496.0)] {
+            let graph = Graph {
+                nodes: vec![node(&"a".repeat(chars), 0), node(&"b".repeat(chars), 2)],
+                ..Default::default()
+            };
+            let sizes = node_world_sizes(&graph);
+            let required = (sizes[0].0.max(sizes[0].1) + sizes[1].0.max(sizes[1].1)) / 2.0;
+            assert_eq!(
+                required, expected_required,
+                "{chars}-char fixture must require {expected_required}"
+            );
 
-        let sections = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
-        let force = solve(&graph, &[], DEFAULT_TENSION);
-        assert_finite_and_bounded(&sections);
-        assert_finite_and_bounded(&force);
+            let sections = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+            let force = solve(&graph, &[], DEFAULT_TENSION);
+            assert_finite_and_bounded(&sections);
+            assert_finite_and_bounded(&force);
 
-        let sections_gap = dist(sections[0], sections[1]);
-        let force_gap = dist(force[0], force[1]);
-        // Force mode keeps the pair on the seed gap (120): its repulsion cuts
-        // off at REPULSION_RADIUS and it has no slice spring, so the bodies
-        // would overlap. Sections mode separates them past the requirement
-        // (196 > 176, ~11% headroom) and strictly further than force mode.
-        assert!(
-            force_gap < required,
-            "force mode gap {force_gap} should be below the size requirement {required}"
+            let sections_gap = dist(sections[0], sections[1]);
+            let force_gap = dist(force[0], force[1]);
+            let tolerance = required * 0.1;
+            assert!(
+                sections_gap >= required - tolerance,
+                "sections gap {sections_gap} must keep {chars}-char bodies clear \
+                 (required {required}, tolerance {tolerance})"
+            );
+            // Force mode has no slice spring and cuts repulsion off at
+            // REPULSION_RADIUS, so it leaves the pair on the seed gap (120) —
+            // below the size requirement. The fix must not perturb that path.
+            assert!(
+                force_gap < required,
+                "force mode gap {force_gap} should stay below the size requirement {required}"
+            );
+            assert!(
+                sections_gap > force_gap,
+                "sections mode ({sections_gap}) must separate more than force mode ({force_gap})"
+            );
+        }
+    }
+
+    #[test]
+    fn force_mode_positions_are_unchanged_by_size_aware_repulsion() {
+        // Guard for the D3 fix: it must touch only the sections-mode path. Force
+        // mode — and the column path's `local_resettle`, which also runs force
+        // mode — must stay byte-identical: same cutoff radius, same grid cell
+        // size, same force form. The expected values below are exactly what the
+        // pre-fix solver produced on this graph (verified against HEAD f4cd541),
+        // and the graph exercises cable springs, grid-hashed repulsion, and
+        // cohesion (the banner cluster makes `cohesion` fire); any perturbation
+        // of the force path moves them.
+        let mut graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        graph.nodes[0].circuit = "a".repeat(2);
+        graph.nodes[1].circuit = "b".repeat(8);
+        graph.nodes[2].circuit = "c".to_string();
+        graph.nodes[3].circuit = "d".repeat(4);
+        graph.nodes[4].circuit = "e".repeat(11);
+        graph.clusters = vec![Cluster {
+            title: "g".to_string(),
+            section_range: 1..3,
+        }];
+        assert_eq!(
+            solve(&graph, &[], DEFAULT_TENSION),
+            vec![
+                (-0.1171875, 0.0),
+                (80.2, 0.0),
+                (159.8, 0.0),
+                (240.0, 0.0),
+                (320.1172, 0.0),
+            ],
+            "force-mode solve positions must not change"
         );
-        assert!(
-            sections_gap >= required,
-            "sections gap {sections_gap} must clear the required {required}"
-        );
-        assert!(
-            sections_gap > force_gap,
-            "sections mode ({sections_gap}) must separate more than force mode ({force_gap})"
+
+        // `local_resettle` (the drag path) enters the same core from a moved
+        // seed; pin it too so the grid-cell-size change cannot perturb it.
+        let mut positions = seed_positions(&graph);
+        positions[3].0 += 25.0;
+        positions[3].1 += 40.0;
+        let moved = graph.nodes[3].id.clone();
+        assert!(local_resettle(
+            &graph,
+            &mut positions,
+            &moved,
+            LOCAL_RADIUS,
+            LOCAL_ITERATIONS,
+            &[],
+            DEFAULT_TENSION,
+        ));
+        assert_eq!(
+            positions,
+            vec![
+                (0.0, 0.0),
+                (86.00588, 0.33226788),
+                (168.3252, 5.9020987),
+                (247.21428, 35.46834),
+                (322.01288, -1.7070212),
+            ],
+            "force-mode local re-settle positions must not change"
         );
     }
 
