@@ -174,7 +174,7 @@ pub fn solve_sections(
     slice_force: f32,
     section_force: f32,
 ) -> Vec<(f32, f32)> {
-    let mut positions = seed_positions(graph);
+    let mut positions = seed_positions_sections(graph);
     run_iterations_with_forces(
         graph,
         &mut positions,
@@ -248,6 +248,78 @@ pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
         .map(|(i, _)| {
             let x = depth[i] as f32 * HORIZONTAL_SPACING;
             let y = order[i] as f32 * VERTICAL_SPACING;
+            (x, y)
+        })
+        .collect()
+}
+
+/// Sections-mode seed (sections-black-hole-solver D1): chain circuits
+/// left→right in **patch order**, not topological depth. Sections mode is a
+/// section-black-hole layout: each circuit is pulled by a slice spring toward
+/// `slice_index * HORIZONTAL_SPACING`, so its seed must sit on that same
+/// target axis or the clamped integrator (≤ `MAX_DISPLACEMENT` per iteration,
+/// `FRICTION`-damped, `SOLVE_ITERATIONS` total) cannot recover the distance.
+///
+/// Why not [`seed_positions`]: it places `x = topological_depth[i] *
+/// HORIZONTAL_SPACING`, and on a **cyclic** graph (patch feedback cables) the
+/// bounded Bellman-Ford depth grows by up to the cycle length per pass, so it
+/// can reach ≈ `n × cycle_length` — measured at 245,266 on
+/// `fixtures/own_scale.ini` (511 nodes), a 19.6 M-unit seed the clamped solver
+/// can only nudge (≤ 2,400 units total travel) and never re-flow.
+///
+/// x = `slice_index[i] * HORIZONTAL_SPACING` (sections mode's own target axis;
+/// circuits get `section_index`, controllers/input jacks the left outer slice
+/// 0, output jacks the right outer slice `max_section_index + 1`).
+/// y = the node's rank in (slice, node-order) sort * `VERTICAL_SPACING` — i.e.
+/// nodes are stacked top-to-bottom in slice order, and within one slice by node
+/// order. Deterministic, and every node gets a distinct y, so no two nodes in
+/// different slices start collinear on the x axis. That matters: the size-aware
+/// repulsion (D3) can only separate two wide bodies along the *free* axis —
+/// slice springs are x-only, so once the pair is collinear the slice springs
+/// fight the repulsion head-on and the capped force cannot clear the bodies
+/// (measured: a 496-wide pair at slices 0/2 settles at 425 collinear vs 508
+/// with a free y axis). Coordinates land exactly on the [`GRID_SNAP`] grid
+/// (both spacings are multiples).
+///
+pub(crate) fn seed_positions_sections(graph: &Graph) -> Vec<(f32, f32)> {
+    let mut slice = slice_index(graph);
+
+    // Bounded by construction: `slice_index` maps every node to
+    // `<= max_section_index + 1`, so the widest x is
+    // `(max_section_index + 1) * HORIZONTAL_SPACING` — proportional to the
+    // patch's section count (≈ 40 k for a 500-section patch), never to cycle
+    // length. The clamp is defence in depth against a pathological
+    // `section_index` from a corrupt or sparse parse (an absolute index rather
+    // than a dense one would otherwise seed an astronomical x): a bad input
+    // degrades to a wide-but-finite layout instead of a black hole.
+    let max_slice = graph
+        .nodes
+        .iter()
+        .map(|node| node.section_index)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    for s in slice.iter_mut() {
+        *s = (*s).min(max_slice);
+    }
+
+    // Deterministic top-to-bottom stacking: rank by (slice, node order). The
+    // rank is `< n`, so y is bounded by `n * VERTICAL_SPACING` — proportional
+    // to patch size, again never to cycle length.
+    let mut row = vec![0usize; graph.nodes.len()];
+    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+    order.sort_by_key(|&i| (slice[i], i));
+    for (rank, &i) in order.iter().enumerate() {
+        row[i] = rank;
+    }
+
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let x = slice[i] as f32 * HORIZONTAL_SPACING;
+            let y = row[i] as f32 * VERTICAL_SPACING;
             (x, y)
         })
         .collect()
@@ -3795,5 +3867,82 @@ mod tests {
         let positions = solve_sections(&single, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
         assert_eq!(positions.len(), 1);
         assert_finite_and_bounded(&positions);
+    }
+
+    /// Bounding box `(width, height)` of a position set.
+    fn positions_bbox(positions: &[(f32, f32)]) -> (f32, f32) {
+        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+        for (x, y) in positions {
+            min_x = min_x.min(*x);
+            max_x = max_x.max(*x);
+            min_y = min_y.min(*y);
+            max_y = max_y.max(*y);
+        }
+        (max_x - min_x, max_y - min_y)
+    }
+
+    #[test]
+    fn sections_mode_scale_is_proportional_to_patch_size_not_cycle_length() {
+        // Regression for the exploding sections seed on a large cyclic patch:
+        // `fixtures/own_scale.ini` (511 nodes, feedback cables making the graph
+        // cyclic). Before the sections-specific seed, `solve_sections` seeded via
+        // `seed_positions` (topological depth) and the depth of a cycle grows by
+        // the cycle length per Bellman-Ford pass, so the seed reached
+        // 245,266 * HORIZONTAL_SPACING and the bbox measured 19,621,300 wide. The
+        // clamped integrator cannot recover that (at most
+        // `FRICTION * MAX_DISPLACEMENT * SOLVE_ITERATIONS` ≈ 2,400 units of
+        // travel), so the layout stayed in orbit. Sections mode must be
+        // proportional to patch size, not to cycle length.
+        let graph = graph_from_fixture("fixtures/own_scale.ini");
+        let n = graph.nodes.len();
+        assert!(n > 400, "scale fixture should be large, got {n} nodes");
+        let max_section = graph
+            .nodes
+            .iter()
+            .map(|node| node.section_index)
+            .max()
+            .unwrap_or(0);
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_eq!(positions.len(), n);
+        for (x, y) in &positions {
+            assert!(
+                x.is_finite() && y.is_finite(),
+                "non-finite position ({x}, {y})"
+            );
+        }
+
+        // Generous multiple of the outermost slice target: the seed itself is
+        // bounded by `(max_section + 1) * HORIZONTAL_SPACING`, so a healthy
+        // layout stays within 1.5x of that. Cycle-length inflation would blow
+        // this by orders of magnitude (19.6 M vs the ~61 k bound below).
+        let width_bound = (max_section + 2) as f32 * HORIZONTAL_SPACING * 1.5;
+        let height_bound = n as f32 * VERTICAL_SPACING * 1.5;
+        let (width, height) = positions_bbox(&positions);
+        assert!(
+            width <= width_bound,
+            "sections width {width} exceeds {width_bound} (patch-size proportional bound); \
+             the seed is exploding with cycle length"
+        );
+        assert!(
+            height <= height_bound,
+            "sections height {height} exceeds {height_bound} (n * VERTICAL_SPACING * 1.5)"
+        );
+
+        // Pre-existing, out-of-scope divergence: force mode still seeds via the
+        // topological-depth seed and therefore still explodes on this cyclic
+        // fixture (measured seed width ≈ 19.6 M, unchanged from HEAD). This is
+        // asserted rather than fixed: force mode has a golden-vector test
+        // (`force_mode_positions_are_unchanged_by_size_aware_repulsion`) and the
+        // D9 determinism contract pinning its bytes. Documenting it here keeps
+        // the two seeds' different behavior visible in one place.
+        let force_seed = seed_positions(&graph);
+        let (force_seed_width, _) = positions_bbox(&force_seed);
+        assert!(
+            force_seed_width > width_bound,
+            "force mode's topological-depth seed unexpectedly fits the sections bound \
+             ({force_seed_width} <= {width_bound}); if force mode was fixed, update this guard"
+        );
     }
 }
