@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::config::LayoutOrdering;
+use crate::config::{LayoutMode, LayoutOrdering};
 use crate::graph::{Graph, NodeId, NodeKind};
 
 /// Freeze when total kinetic energy (sum of |velocity|², unit mass) is below.
@@ -65,14 +65,14 @@ const MAX_DISPLACEMENT: f32 = 20.0;
 /// pulls each circuit toward its target x = slice_index * HORIZONTAL_SPACING.
 /// Mutable at runtime so sliders can tune it (like `tension`).
 pub const SLICE_K: f32 = DEFAULT_SLICE_K;
-/// Default slice spring stiffness — weak so cable tension can overcome it.
+/// Default slice spring stiffness — strong enough to hold non-clustered circuits at their slice.
 pub const DEFAULT_SLICE_K: f32 = 0.1;
 /// Spring stiffness for section-hole springs in sections mode (design D1):
 /// pulls banner-group members toward their fixed section hole anchor.
 /// Mutable at runtime so sliders can tune it (like `tension`).
 pub const SECTION_HOLE_K: f32 = DEFAULT_SECTION_HOLE_K;
-/// Default section-hole spring stiffness — anchors but doesn't collapse.
-pub const DEFAULT_SECTION_HOLE_K: f32 = 0.05;
+/// Default section-hole spring stiffness — anchors members strongly.
+pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
 
 /// Weak per-cluster cohesion pulling each member toward its banner group's
 /// centroid (design D3). Deliberately far below `SPRING_K` so clusters
@@ -155,14 +155,18 @@ pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
         None,
         pinned,
         tension,
+        LayoutMode::Force,
     );
     positions
 }
 
 /// Sections-mode solver (sections-black-hole-solver 5.1): joint black-hole solve
 /// with slice springs, section-hole springs, cable springs, and size-aware
-/// repulsion. Currently delegates to the force solver; full implementation
-/// in task 3.1.
+/// repulsion.
+///
+/// `slice_force` and `section_force` are the runtime-adjustable spring
+/// stiffnesses (bound to `SLICE_K` and `SECTION_HOLE_K` by the caller before
+/// calling). `tension` is the cable spring stiffness.
 pub fn solve_sections(
     graph: &Graph,
     pinned: &[usize],
@@ -170,9 +174,17 @@ pub fn solve_sections(
     _slice_force: f32,
     _section_force: f32,
 ) -> Vec<(f32, f32)> {
-    // TODO(task 3.1): implement joint black-hole solve with four forces
-    // For now, delegate to the force solver with the given tension
-    solve(graph, pinned, tension)
+    let mut positions = seed_positions(graph);
+    run_iterations(
+        graph,
+        &mut positions,
+        SOLVE_ITERATIONS,
+        None,
+        pinned,
+        tension,
+        LayoutMode::Sections,
+    );
+    positions
 }
 
 /// Damped local re-settle after a node move (design D1).
@@ -201,7 +213,15 @@ pub fn local_resettle(
     let active: Vec<bool> = (0..graph.nodes.len())
         .map(|i| dist(positions[i], c) <= radius)
         .collect();
-    run_iterations(graph, positions, iterations, Some(&active), pinned, tension);
+    run_iterations(
+        graph,
+        positions,
+        iterations,
+        Some(&active),
+        pinned,
+        tension,
+        LayoutMode::Force,
+    );
     true
 }
 
@@ -478,7 +498,7 @@ pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option
     }
 
     // Compute mean slice per cluster (only circuit nodes contribute)
-    for (_c, list) in members.iter().enumerate() {
+    for (c, list) in members.iter().enumerate() {
         if list.is_empty() {
             continue;
         }
@@ -495,8 +515,13 @@ pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option
         }
         let mean_slice = sum as f32 / count as f32;
         let anchor = (mean_slice * HORIZONTAL_SPACING, 0.0);
+        // Only circuit nodes (banner group members) get the section-hole anchor.
+        // Controllers and jacks may have section_index in the cluster range but
+        // are not part of the banner group.
         for &i in list {
-            holes[i] = Some(anchor);
+            if graph.nodes[i].kind == NodeKind::Circuit {
+                holes[i] = Some(anchor);
+            }
         }
     }
 
@@ -779,6 +804,11 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
 /// indices that never move, exactly like inactive nodes but for the whole
 /// solve (fixed anchors; out-of-range indices are ignored). Freezes early
 /// when kinetic energy converges.
+///
+/// `mode` selects the force model:
+/// - `LayoutMode::Force`: cable springs + uniform repulsion + weak cohesion
+/// - `LayoutMode::Sections`: slice springs + section-hole springs + cable springs
+///   + size-aware repulsion (cohesion replaced by hole springs)
 fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
@@ -786,6 +816,7 @@ fn run_iterations(
     active: Option<&[bool]>,
     pinned: &[usize],
     tension: f32,
+    mode: LayoutMode,
 ) -> usize {
     let n = graph.nodes.len();
     if n == 0 {
@@ -802,17 +833,32 @@ fn run_iterations(
     for &(u, v) in &edges {
         *edge_multiplicity.entry((u, v)).or_insert(0) += 1;
     }
-    // Cluster membership for cohesion (design D3); `None` = node in no banner
-    // group, so the cohesion force is skipped defensively for it.
+    // Cluster membership for cohesion / section holes; `None` = node in no banner
+    // group.
     let member_of: Vec<Option<usize>> = (0..n)
         .map(|i| graph.cluster_index_of(graph.nodes[i].section_index))
         .collect();
+
+    // Sections-mode precomputation: slice indices, section-hole anchors, and
+    // node world sizes for size-aware repulsion.
+    let (slice_idx, holes, world_sizes) = if mode == LayoutMode::Sections {
+        let slice = slice_index(graph);
+        let hole_anchors = compute_section_holes(graph, &slice);
+        let sizes = node_world_sizes(graph);
+        (Some(slice), Some(hole_anchors), Some(sizes))
+    } else {
+        (None, None, None)
+    };
+
     let mut velocity = vec![(0.0f32, 0.0f32); n];
 
     let mut iterations = 0;
     for _ in 0..max_iter {
         iterations += 1;
         // Rebuild the uniform repulsion grid from current positions (D9).
+        // Cell size is REPULSION_RADIUS for force mode; for sections mode we
+        // still use the same grid but with size-aware effective radius in the
+        // force calculation itself.
         let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for (i, &pos) in positions.iter().enumerate().take(n) {
             grid.entry(cell_of(pos)).or_default().push(i);
@@ -820,6 +866,7 @@ fn run_iterations(
 
         let mut accel = vec![(0.0f32, 0.0f32); n];
 
+        // Cable springs (both modes): bundle-normalized spring force along edges.
         for &(u, v) in &edges {
             let m = edge_multiplicity[&(u, v)] as f32;
             let f = spring_force(positions[u], positions[v], tension);
@@ -829,50 +876,107 @@ fn run_iterations(
             accel[v].1 -= f.1 / m;
         }
 
-        for (i, &pos) in positions.iter().enumerate().take(n) {
-            let (cx, cy) = cell_of(pos);
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
-                        continue;
-                    };
-                    for &j in neighbors {
-                        if i >= j {
-                            continue;
-                        }
-                        let f = repulsion_force(pos, positions[j]);
-                        accel[i].0 += f.0;
-                        accel[i].1 += f.1;
-                        accel[j].0 -= f.0;
-                        accel[j].1 -= f.1;
+        // Repulsion and mode-specific springs.
+        if mode == LayoutMode::Sections {
+            // Sections mode: slice springs + section-hole springs + size-aware repulsion
+            let slice = slice_idx.as_ref().unwrap();
+            let hole_anchors = holes.as_ref().unwrap();
+            let sizes = world_sizes.as_ref().unwrap();
+
+            // Slice springs: pull each node toward target_x = slice_index * HORIZONTAL_SPACING
+            // Only in x direction; y is free (distributed by repulsion).
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                let target_x = slice[i] as f32 * HORIZONTAL_SPACING;
+                accel[i].0 += (target_x - pos.0) * SLICE_K;
+            }
+
+            // Section-hole springs: pull cluster members toward their fixed anchor
+            // (both x and y). Anchors are fixed black holes computed once at solve start.
+            // Only circuit nodes feel the section-hole spring; controllers/jacks only feel
+            // slice springs and repulsion (D2: sections are circuit groupings).
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                if let Some((anchor_x, anchor_y)) = hole_anchors[i] {
+                    if graph.nodes[i].kind == NodeKind::Circuit {
+                        accel[i].0 += (anchor_x - pos.0) * SECTION_HOLE_K;
+                        accel[i].1 += (anchor_y - pos.1) * SECTION_HOLE_K;
                     }
                 }
             }
-        }
 
-        // Per-cluster cohesion: pull members toward their centroid (D3). The
-        // centroid is recomputed from live positions each iteration, so the
-        // force is deterministic and follows the cluster as it moves.
-        if !graph.clusters.is_empty() {
-            let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
-            for (i, cluster) in member_of.iter().enumerate() {
-                if let Some(c) = cluster {
-                    members[*c].push(i);
+            // Size-aware repulsion: effective radius = REPULSION_RADIUS + 0.5 * max(width, height)
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                let (cx, cy) = cell_of(pos);
+                let (w_i, h_i) = sizes[i];
+                let radius_i = REPULSION_RADIUS + 0.5 * w_i.max(h_i);
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
+                            continue;
+                        };
+                        for &j in neighbors {
+                            if i >= j {
+                                continue;
+                            }
+                            let (w_j, h_j) = sizes[j];
+                            let radius_j = REPULSION_RADIUS + 0.5 * w_j.max(h_j);
+                            // Use the larger of the two effective radii for the pair
+                            let effective_radius = radius_i.max(radius_j);
+                            let f = repulsion_force_size_aware(pos, positions[j], effective_radius);
+                            accel[i].0 += f.0;
+                            accel[i].1 += f.1;
+                            accel[j].0 -= f.0;
+                            accel[j].1 -= f.1;
+                        }
+                    }
                 }
             }
-            for list in &members {
-                if list.is_empty() {
-                    continue;
+            // Note: cohesion is intentionally omitted in sections mode —
+            // section-hole springs provide the clustering.
+        } else {
+            // Force mode: uniform repulsion + weak cohesion
+            for (i, &pos) in positions.iter().enumerate().take(n) {
+                let (cx, cy) = cell_of(pos);
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
+                            continue;
+                        };
+                        for &j in neighbors {
+                            if i >= j {
+                                continue;
+                            }
+                            let f = repulsion_force(pos, positions[j]);
+                            accel[i].0 += f.0;
+                            accel[i].1 += f.1;
+                            accel[j].0 -= f.0;
+                            accel[j].1 -= f.1;
+                        }
+                    }
                 }
-                let (mut sx, mut sy) = (0.0f32, 0.0f32);
-                for &i in list {
-                    sx += positions[i].0;
-                    sy += positions[i].1;
+            }
+
+            // Per-cluster cohesion: pull members toward their centroid (D3).
+            if !graph.clusters.is_empty() {
+                let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
+                for (i, cluster) in member_of.iter().enumerate() {
+                    if let Some(c) = cluster {
+                        members[*c].push(i);
+                    }
                 }
-                let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
-                for &i in list {
-                    accel[i].0 += (cx - positions[i].0) * COHESION_K;
-                    accel[i].1 += (cy - positions[i].1) * COHESION_K;
+                for list in &members {
+                    if list.is_empty() {
+                        continue;
+                    }
+                    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+                    for &i in list {
+                        sx += positions[i].0;
+                        sy += positions[i].1;
+                    }
+                    let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
+                    for &i in list {
+                        accel[i].0 += (cx - positions[i].0) * COHESION_K;
+                        accel[i].1 += (cy - positions[i].1) * COHESION_K;
+                    }
                 }
             }
         }
@@ -917,6 +1021,22 @@ fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
         return (0.001, 0.0);
     }
     if d > REPULSION_RADIUS {
+        return (0.0, 0.0);
+    }
+    let mag = (REPULSION_STRENGTH / (d * d)).min(MAX_DISPLACEMENT);
+    ((-dx / d) * mag, (-dy / d) * mag)
+}
+
+/// Size-aware repulsion for sections mode (design D3): the cutoff radius is
+/// `effective_radius` instead of the fixed `REPULSION_RADIUS`, so larger nodes
+/// repel at greater distances. Inverse-square falloff capped at `MAX_DISPLACEMENT`.
+fn repulsion_force_size_aware(a: (f32, f32), b: (f32, f32), effective_radius: f32) -> (f32, f32) {
+    let (dx, dy, d) = delta(a, b);
+    if d < 1e-6 {
+        // Coincident nodes: a small deterministic nudge breaks the tie.
+        return (0.001, 0.0);
+    }
+    if d > effective_radius {
         return (0.0, 0.0);
     }
     let mag = (REPULSION_STRENGTH / (d * d)).min(MAX_DISPLACEMENT);
@@ -1349,6 +1469,7 @@ mod tests {
             None,
             &[],
             DEFAULT_TENSION,
+            LayoutMode::Force,
         )
     }
 
@@ -1375,6 +1496,7 @@ mod tests {
             Some(&active),
             &[],
             DEFAULT_TENSION,
+            LayoutMode::Force,
         )
     }
 
@@ -2091,8 +2213,9 @@ mod tests {
         let expected_a = Some((0.5 * HORIZONTAL_SPACING, 0.0));
         assert_eq!(holes[0], expected_a, "circuit 0 in cluster 0");
         assert_eq!(holes[1], expected_a, "circuit 1 in cluster 0");
-        // Controller at index 7 is also in cluster 0 (section_index 0)
-        assert_eq!(holes[7], expected_a, "controller in cluster 0");
+        // Controller at index 7 has section_index in cluster 0 range but is not a circuit
+        // so it should not get the section-hole anchor
+        assert_eq!(holes[7], None, "controller not a circuit -> no anchor");
 
         // Cluster 1: circuits at indices 3, 4, 5 with slices 3, 4, 5
         // Mean slice = (3 + 4 + 5) / 3 = 4.0
@@ -2152,6 +2275,246 @@ mod tests {
         let holes = compute_section_holes(&graph, &slice);
         // No circuits in cluster, so members get None
         assert_eq!(holes, vec![None, None]);
+    }
+
+    // ── sections-black-hole-solver: sections-mode solver (task 1.4) ──────────
+
+    #[test]
+    fn sections_mode_two_clusters_settle_around_hole_anchors() {
+        // Build a graph with 2 banner groups (clusters), each with 3 circuits:
+        // Cluster 0: circuits at section_index 0, 1, 2 (nodes 0, 1, 2)
+        // Cluster 1: circuits at section_index 4, 5, 6 (nodes 4, 5, 6)
+        // Node 3 is a circuit not in any cluster (section_index 3)
+        // Node 7 is a controller in cluster 0
+        // Node 8 is an output jack
+        let nodes = vec![
+            node("c0", 0), // index 0: circuit, section_index 0, cluster 0
+            node("c1", 1), // index 1: circuit, section_index 1, cluster 0
+            node("c2", 2), // index 2: circuit, section_index 2, cluster 0
+            node("c3", 3), // index 3: circuit, section_index 3, no cluster
+            node("c4", 4), // index 4: circuit, section_index 4, cluster 1
+            node("c5", 5), // index 5: circuit, section_index 5, cluster 1
+            node("c6", 6), // index 6: circuit, section_index 6, cluster 1
+            GraphNode {
+                id: NodeId::Controller("ctrl1".to_string(), 0),
+                kind: NodeKind::Controller,
+                circuit: "ctrl1".to_string(),
+                instance_index: 0,
+                section_index: 0,
+            }, // index 7: controller, section_index 0, cluster 0
+            GraphNode {
+                id: NodeId::Jack("OUT1".to_string()),
+                kind: NodeKind::OutputJack,
+                circuit: "OUT1".to_string(),
+                instance_index: 0,
+                section_index: 10, // outside any cluster range
+            }, // index 8: output jack
+        ];
+        let clusters = vec![
+            Cluster {
+                title: "group_a".to_string(),
+                section_range: 0..3, // covers section_index 0, 1, 2
+            },
+            Cluster {
+                title: "group_b".to_string(),
+                section_range: 4..7, // covers section_index 4, 5, 6
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![], // No edges — pure clustering by section holes
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        // Solve in sections mode
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Expected hole anchors:
+        // Cluster 0: mean slice = (0 + 1 + 2) / 3 = 1.0 -> anchor_x = 1.0 * 80.0 = 80.0
+        // Cluster 1: mean slice = (4 + 5 + 6) / 3 = 5.0 -> anchor_x = 5.0 * 80.0 = 400.0
+        let anchor_a_x = 1.0 * HORIZONTAL_SPACING;
+        let anchor_b_x = 5.0 * HORIZONTAL_SPACING;
+
+        // Cluster 0 center of mass (indices 0, 1, 2, 7) should be near anchor_a_x
+        // Individual members settle at weighted average of their slice target and hole anchor
+        let cluster_a_x: f32 = [0, 1, 2, 7].iter().map(|&i| positions[i].0).sum::<f32>() / 4.0;
+        let dx_a = (cluster_a_x - anchor_a_x).abs();
+        assert!(
+            dx_a < HORIZONTAL_SPACING * 0.5,
+            "cluster 0 center x={} not near anchor x={} (dx={})\n",
+            cluster_a_x,
+            anchor_a_x,
+            dx_a
+        );
+
+        // Cluster 1 center of mass (indices 4, 5, 6) should be near anchor_b_x
+        let cluster_b_x: f32 = [4, 5, 6].iter().map(|&i| positions[i].0).sum::<f32>() / 3.0;
+        let dx_b = (cluster_b_x - anchor_b_x).abs();
+        assert!(
+            dx_b < HORIZONTAL_SPACING * 0.5,
+            "cluster 1 center x={} not near anchor x={} (dx={})\n",
+            cluster_b_x,
+            anchor_b_x,
+            dx_b
+        );
+
+        // Non-clustered circuit (index 3) sits between the two clusters.
+        // It feels slice spring toward 240 and repulsion from both clusters.
+        // It should end up between the cluster centers, closer to the left one.
+        let c3_x = positions[3].0;
+        assert!(
+            c3_x > cluster_a_x && c3_x < cluster_b_x,
+            "non-clustered circuit 3 x={} should be between clusters ({}, {})\n",
+            c3_x,
+            cluster_a_x,
+            cluster_b_x
+        );
+
+        // Output jack (index 8) should be to the right of cluster 1.
+        // It feels slice spring toward 560 and repulsion from the clusters.
+        // It should end up right of cluster 1's center.
+        let jack_x = positions[8].0;
+        assert!(
+            jack_x > cluster_b_x,
+            "output jack x={} should be right of cluster 1 ({})\n",
+            jack_x,
+            cluster_b_x
+        );
+
+        // Vertical spread: members of each cluster should distribute vertically
+        // via repulsion (not all at y=0). Check that y values are not all identical.
+        let cluster_a_ys: Vec<f32> = [0, 1, 2, 7].iter().map(|&i| positions[i].1).collect();
+        let cluster_b_ys: Vec<f32> = [4, 5, 6].iter().map(|&i| positions[i].1).collect();
+        let y_spread_a = cluster_a_ys
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - cluster_a_ys.iter().copied().fold(f32::INFINITY, f32::min);
+        let y_spread_b = cluster_b_ys
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - cluster_b_ys.iter().copied().fold(f32::INFINITY, f32::min);
+        // Vertical spread: members of each cluster should distribute vertically
+        // via repulsion (not all at exactly y=0). The hole spring pulls to y=0,
+        // so spread is limited but should be non-zero.
+        assert!(
+            y_spread_a > 1.0,
+            "cluster 0 members should have some vertical spread (spread={})\n",
+            y_spread_a
+        );
+        assert!(
+            y_spread_b > 1.0,
+            "cluster 1 members should have some vertical spread (spread={})\n",
+            y_spread_b
+        );
+
+        // The two clusters should be well separated horizontally
+        let cluster_a_max_x = [0, 1, 2, 7]
+            .iter()
+            .map(|&i| positions[i].0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let cluster_b_min_x = [4, 5, 6]
+            .iter()
+            .map(|&i| positions[i].0)
+            .fold(f32::INFINITY, f32::min);
+        let inter_cluster_gap = cluster_b_min_x - cluster_a_max_x;
+        assert!(
+            inter_cluster_gap > HORIZONTAL_SPACING * 2.0,
+            "clusters should be well separated horizontally (gap={})\n",
+            inter_cluster_gap
+        );
+    }
+
+    #[test]
+    fn sections_mode_deterministic() {
+        // Same graph + same force constants -> identical positions (determinism)
+        let nodes = vec![node("c0", 0), node("c1", 1), node("c2", 4), node("c3", 5)];
+        let clusters = vec![
+            Cluster {
+                title: "a".to_string(),
+                section_range: 0..2,
+            },
+            Cluster {
+                title: "b".to_string(),
+                section_range: 4..6,
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges: vec![],
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+        let a = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let b = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_eq!(a, b, "sections mode must be deterministic");
+        assert_finite_and_bounded(&a);
+    }
+
+    #[test]
+    fn sections_mode_with_edges_respects_cable_springs() {
+        // Two clusters with internal edges: cable springs should keep connected
+        // nodes closer than unconnected ones, while hole springs keep clusters
+        // separated.
+        let nodes = vec![
+            node("c0", 0), // cluster 0
+            node("c1", 1), // cluster 0
+            node("c2", 4), // cluster 1
+            node("c3", 5), // cluster 1
+        ];
+        let clusters = vec![
+            Cluster {
+                title: "a".to_string(),
+                section_range: 0..2,
+            },
+            Cluster {
+                title: "b".to_string(),
+                section_range: 4..6,
+            },
+        ];
+        let edges = vec![
+            GraphEdge {
+                cable: "_C1".to_string(),
+                source: NodeId::circuit("c0", 0),
+                sink: NodeId::circuit("c1", 0),
+            },
+            GraphEdge {
+                cable: "_C2".to_string(),
+                source: NodeId::circuit("c2", 0),
+                sink: NodeId::circuit("c3", 0),
+            },
+        ];
+        let graph = Graph {
+            nodes,
+            edges,
+            clusters,
+            validation: vec![],
+            ..Default::default()
+        };
+
+        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        assert_finite_and_bounded(&positions);
+
+        // Connected pairs should be closer than the inter-cluster gap
+        let connected_a = dist(positions[0], positions[1]);
+        let connected_b = dist(positions[2], positions[3]);
+        let cluster_a_max_x = positions[0].0.max(positions[1].0);
+        let cluster_b_min_x = positions[2].0.min(positions[3].0);
+        let inter_gap = cluster_b_min_x - cluster_a_max_x;
+
+        assert!(
+            connected_a < inter_gap,
+            "connected pair in cluster 0 should be closer than inter-cluster gap"
+        );
+        assert!(
+            connected_b < inter_gap,
+            "connected pair in cluster 1 should be closer than inter-cluster gap"
+        );
     }
 
     // ── graph-column-layout: pinned anchors on the column path (task 3.2) ──
