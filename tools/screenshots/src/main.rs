@@ -179,6 +179,22 @@ fn setup_sections(app: &mut App) {
     setup_graph(app);
 }
 
+/// The force-arrangement shot (change `force-arrangement-nonoverlap-and-sliders`,
+/// task 4.3): the same two-big-pane graph layout as [`setup_graph`], but with
+/// the force arrangement selected *before* the graph is placed, so the first
+/// solve runs through `layout::solve` — size-aware repulsion plus the
+/// converging separation post-condition — rather than column or sections mode.
+/// The arrangement-aware `S` panel is switched on as well, because the force
+/// arrangement is where it gained its own rows (Repulsion / Cohesion / Cable).
+/// Both are plain field writes before paint — no input, deterministic — and the
+/// harness's double-render check enforces it. The camera is left unset so the
+/// paint path's first-frame fit frames the whole solved layout.
+fn setup_force_sliders(app: &mut App) {
+    app.layout_mode = config::LayoutMode::Force;
+    setup_graph(app);
+    app.showing_sliders = true;
+}
+
 fn setup_viewer(app: &mut App) {
     // Source-viewer close-up: focus its small pane through the public
     // carousel (startup focus is BigLeft, SmallTop is next in tree order),
@@ -295,6 +311,23 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/own_scale.ini",
             setup: setup_sections,
         },
+        // Force-arrangement check (change `force-arrangement-nonoverlap-and-
+        // sliders`, task 4.3): the dependency-walk fixture in the graph pane
+        // under `LayoutMode::Force` with the arrangement-aware `S` panel open.
+        // The fixture is the legible subject for the non-overlap claim — it was
+        // the second-worst pre-fix case (33 intersecting body pairs among its
+        // dozen bodies on a 511-body scale anchor's heels) and small enough
+        // that its bodies and labels stay readable at the fit zoom, unlike the
+        // scale anchor whose whole world is in frame. The shot carries two
+        // claims: no two drawn bodies intersect (the force arrangement's
+        // non-overlap post-condition at the shipped defaults), and the panel's
+        // three rows name the force knobs — Repulsion, Cohesion, Cable — where
+        // the loading-time gate used to lay out nothing but the sections rows.
+        Shot {
+            file: "force-arrangement.png",
+            fixture: "fixtures/graph_dependency_walk.ini",
+            setup: setup_force_sliders,
+        },
         // The scale anchor (perf-gate `SCALE_ANCHOR`, 509 sections): renders
         // must be stable here too, not just on the small specs.
         Shot {
@@ -370,7 +403,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, large-startup, large-graph"
+        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, force-arrangement, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -425,6 +458,7 @@ fn main() {
         "s10-switch-kinds",
         "sections-lanes",
         "sections-scale",
+        "force-arrangement",
         "large-startup",
         "large-graph",
     ];

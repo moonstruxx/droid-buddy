@@ -1,0 +1,13 @@
+{
+  "assets": [
+    {
+      "caption": "Force arrangement on the dependency-walk fixture (invariant-pinned subject of the 33-pair pre-fix pile-up): the graph pane under LayoutMode::Force with the arrangement-aware S panel open. No two drawn body frames intersect - the solved bodies sit in separate slots, wide controller and register bodies included - and the panel's Force rows read Repulsion 1.00 / Cohesion 0.0068 / Cable 0.15, where the panel previously laid out nothing in this arrangement.",
+      "path": "docs/assets/force-arrangement.png"
+    }
+  ],
+  "changeId": "force-arrangement-nonoverlap-and-sliders",
+  "reason": "Native Rust desktop app (no web routes), so verification is the CI-parity gate in the lead session plus measured layout outcomes. Gate: cargo fmt --check clean; cargo clippy --all-targets --all-features --locked -- -D warnings clean; cargo test --locked 1331 passed / 0 failed (1311 lib + 12 main + 2 force-arrangement-invariants + 6 perf-gate); cargo build --release --locked succeeds; cargo test --release --test perf_gate --locked green on all six phases including the new phase_force_solve_and_separation (10 s budget, ~10.6 ms measured at 511 bodies). Measured outcomes: force-mode overlapping body pairs 224 / 33 / 7 / 6 / 4 on own_scale / graph_dependency_walk / cable_banner_combos / graph_latency_chain / own_two_ctrl -> 0 at the shipped defaults (worst pairwise penetration negative on all five fixtures), cohesion 0.01 -> 0.0068 as the top of the zero-overlap band (18 separation sweeps on the 511-body anchor against a 128 cap), sections and column position vectors byte-identical to HEAD (hash-compared, including the pinned-off-grid-pin case), and the panel's row ranges pinned by test to the solver's clearable band. Documented residue: a dragged body caged between immovable bodies keeps its intersection (6 pairs on the anchor survive 8192 sweeps) - bounded to pinned and out-of-neighbourhood bodies and recorded in ADR 49, §15 and the spec delta. Visual evidence was captured natively, not through a web route (none exists): tools/screenshots/render.sh gained a force-arrangement shot and its full check exits 0 with every other shot byte-identical (twelve saved PNGs fresh, both stability anchors unchanged), so the non-overlap claim is legible on a small fixture while the numbers above carry the 511-body anchor. The harness's shot fixture is the same one the invariant test pins (`force_solve_has_zero_overlapping_pairs_on_fixture_set`).",
+  "required": true,
+  "status": "passed",
+  "version": 1
+}

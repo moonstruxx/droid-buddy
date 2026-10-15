@@ -19,6 +19,7 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 | `s10-switch-kinds.png` | `fixtures/s10_switch_kinds.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); bare S10 full front with rotary-round S1.1/S1.2 above toggle-square S1.3–S1.10 in one frame |
 | `sections-lanes.png` | `fixtures/graph_topology_error.ini` | + signal-flow graph (right big) in `LayoutMode::Sections` (`setup_sections`): one patch-order lane row carrying both banner groups as contiguous bands |
 | `sections-scale.png` | `fixtures/own_scale.ini` | same arrangement over the 509-section scale anchor: the width-aware lanes wrap into a ~1.34 aspect grid of rows instead of a 40:1 ribbon |
+| `force-arrangement.png` | `fixtures/graph_dependency_walk.ini` | + signal-flow graph (right big) in `LayoutMode::Force` with the arrangement-aware `S` panel open (`setup_force_sliders`): the solved force layout separated into non-intersecting bodies beside the panel's Repulsion / Cohesion / Cable rows |
 
 Two more renders (`large-startup`, `large-graph` over the scale anchor
 `fixtures/own_scale.ini`, 509 sections) are stability-only: hashed, compared,
@@ -116,6 +117,28 @@ At the fit zoom node labels are necessarily ellipsized (the whole 509-node
 world is in frame), so this shot is evidence about layout shape, not about
 text legibility; the legible-label claims live in `sections-lanes.png` and the
 `src/layout.rs` sections tests.
+
+`force-arrangement.png` is the visual check for change
+`force-arrangement-nonoverlap-and-sliders` (task 4.3). Force mode was the
+arrangement that rendered **intersecting node bodies**: its point repulsion
+(`REPULSION_STRENGTH / d²` under a fixed 120 cutoff) could not push apart a
+pair whose required separation is half the sum of two body widths, and unlike
+sections mode it had no separation post-condition at all. The fix keeps the
+arrangement's character — the same size-aware penetration ramp sections mode
+uses inside `required`, the historical falloff beyond it, a graph-adaptive
+repulsion grid cell — and makes non-overlap a post-condition of the force
+solve, the drag re-settle and the pinned column placement. `fixtures/graph_dependency_walk.ini`
+is the legible subject: the dependency-walk fixture was the second-worst
+pre-fix case (33 intersecting pairs among its dozen bodies, behind only the
+511-body scale anchor), yet it is small enough that individual bodies, their
+titles and the gaps between them stay readable at the fit zoom — the scale
+anchor's whole world has to be in frame, so its bodies cannot show the claim.
+The seed is a plain `layout_mode` field write plus `showing_sliders = true` in
+`setup_force_sliders` before paint — deterministic, no input — and the
+harness's double-render check enforces it. The panel is the second half of the
+shot: `S` now lays out the active arrangement's own knobs, so the force
+arrangement reads Repulsion / Cohesion / Cable where it previously laid out no
+panel at all.
 
 ## How it works
 

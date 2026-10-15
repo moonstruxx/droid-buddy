@@ -26,7 +26,7 @@ The solver SHALL take its physics as an explicit knob tuple (cable tension, slic
 
 #### Scenario: Layout converges to a horizontal chain
 
-- **WHEN** a patch with 60 circuits is loaded and the graph view opens on a wide terminal with the force arrangement is active
+- **WHEN** a patch with 60 circuits is loaded and the graph view opens on a wide terminal with the force arrangement active
 - **THEN** the layout converges along a single left→right axis and fills the canvas width, rather than stacking vertically.
 
 #### Scenario: Cable springs pull circuits together
