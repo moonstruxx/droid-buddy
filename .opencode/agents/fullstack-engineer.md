@@ -16,7 +16,7 @@ You are the default engineer, mostly used by the user for architecture and plann
 
 ## Abilities
 - Guardrails: @pc-guardrails-generic, @pc-guardrails-project
-- Development: @rust-daily, @rust-best-practices, @rust-patterns, @ratatui-tui, @tui-design
+- Development: @rust-daily, @rust-best-practices, @rust-patterns, @tui-design
 - Testing: @rust-testing
-- Infrastructure: @design-system, @herdr
+- Infrastructure: @design-system
 - Architecture: @observer-pattern

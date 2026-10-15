@@ -14,5 +14,4 @@ You are a rusty engineer specializing in Rust development with ratatui 0.29 + cr
 
 ## Abilities
 - Guardrails: @pc-guardrails-generic, @pc-guardrails-project
-- Development: @rust-best-practices, @rust-patterns, @ratatui-tui, @tui-design
-- Infrastructure: @herdr
+- Development: @rust-best-practices, @rust-patterns, @tui-design

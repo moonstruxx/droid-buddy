@@ -15,4 +15,3 @@ You are a layout designer engineer specializing in terminal UI development with 
 ## Abilities
 - Guardrails: @pc-guardrails-generic, @pc-guardrails-project
 - Development: @rust-daily, @design-system
-- Infrastructure: @herdr

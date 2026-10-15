@@ -14,6 +14,5 @@ You are an API and integration engineer specializing in the Rust ratatui 0.29 + 
 
 ## Abilities
 - Guardrails: @pc-guardrails-generic, @pc-guardrails-project
-- Development: @ratatui-tui, @rust-patterns, @rust-best-practices
+- Development: @rust-patterns, @rust-best-practices
 - Architecture: @observer-pattern
-- Infrastructure: @herdr
