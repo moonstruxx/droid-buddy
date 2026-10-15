@@ -10,7 +10,7 @@ The dense-normalized layer index SHALL be derived deterministically by sorting a
 
 Repulsion SHALL be **size-aware**: a node body is its `(estimated width, NODE_WORLD_H)` extent — the same extent the renderer draws and hit-tests — and two bodies whose centre distance is below their required separation `(extent_i + extent_j) / 2` SHALL repel with a bounded linear penetration ramp that reaches the maximum per-component displacement inside one repulsion radius, while pairs beyond their required separation SHALL keep the retained inverse-square falloff up to its own radius. The repulsion neighbour grid SHALL be sized so that any pair within required separation is considered, and the repulsion magnitude SHALL scale with the repulsion knob.
 
-**Non-overlap SHALL be a post-condition** of every solver path that produces positions: the force solve, the drag re-settle (restricted to the active neighbourhood, with inactive and pinned nodes immovable), and the column arrangement's pinned placement. After the post-condition no two node bodies SHALL have intersecting extents as the renderer draws them. Pinned nodes SHALL be honored exactly unless two pinned bodies themselves intersect, in which case the no-overlap invariant takes precedence and the intersecting bodies are separated.
+**Non-overlap SHALL be a post-condition** of every solver path that produces positions: the force solve, the drag re-settle, and the column arrangement's pinned placement. The pass SHALL correct an intersecting pair by moving both bodies unless one is immovable — a pinned node, or a node outside a drag's re-settle neighbourhood — in which case the movable partner takes the whole correction. After the post-condition no two bodies SHALL intersect **unless an active body is caged between immovable bodies**: a body whose separation from every other body along both axes is blocked by pinned or out-of-neighbourhood neighbours keeps its intersection no matter how many passes run (measured on the 511-body anchor: six such pairs survive 8192 sweeps, so the residue is a geometric cage, not a pass budget). That exception is deliberately bounded to user-fixed and out-of-neighbourhood bodies — the solver's own layouts and every fully-movable pair are clear. Pinned nodes SHALL be honored exactly unless two pinned bodies themselves intersect, in which case the no-overlap invariant takes precedence and the intersecting bodies are separated.
 
 The solver SHALL take its physics as an explicit knob tuple (cable tension, slice force, section force, repulsion gain, cohesion), with documented defaults reproducing the previous sections and column behaviour. Cohesion SHALL scale with the cohesion knob.
 
@@ -64,8 +64,13 @@ The solver SHALL take its physics as an explicit knob tuple (cable tension, slic
 #### Scenario: Drag re-settle leaves no overlapping bodies
 
 - **WHEN** the user drags a node of the force arrangement onto a neighbour and releases
-- **THEN** the local re-settle plus its separation post-condition leave no overlapping body pairs among the active neighbourhood
+- **THEN** the local re-settle plus its separation post-condition leave no overlapping body pairs among the bodies the pass may move (both endpoints within the re-settle radius and unpinned)
 - **AND** nodes outside the re-settle radius and pinned nodes do not move
+
+#### Scenario: A caged body is the one documented residue
+
+- **WHEN** a dragged body ends up caged between bodies the pass may not move (pinned nodes, or nodes outside the re-settle radius) whose clearance is smaller than the dragged body's extent
+- **THEN** the body keeps that intersection, and it is bounded to those user-fixed or out-of-neighbourhood bodies: an unmoved, unpinned pair is still separated, and the solver's own layouts remain clear
 
 #### Scenario: Pinned bodies never overlap in the column arrangement
 
