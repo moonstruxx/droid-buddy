@@ -747,13 +747,52 @@ const SLIDERS_FONT_PX: f32 = 12.0;
 /// `[TENSION_MIN, TENSION_MAX]` range, so the panel and `Alt+[`/`Alt+]` agree.
 const SLIDERS_FORCE_MAX: f32 = 0.5;
 
+/// Upper bound of the force arrangement's Repulsion row (design D7): the gain is
+/// a multiplier on the size-aware ramp, whose per-pair push is already capped at
+/// the solver's `MAX_DISPLACEMENT` per axis, so only a small multiple of the
+/// `1.0` default is a usable span. `3.0` is the ceiling the panel offers, and
+/// `0.0` is the loose end (repulsion off).
+const REPULSION_GAIN_MAX: f32 = 3.0;
+
+/// Span of the Cohesion row as a multiple of the solver's own default cohesion.
+/// The ceiling is derived from [`crate::layout::SolveKnobs::default`] rather than
+/// written out again: the default is a measured, retunable value, and a row whose
+/// range did not follow it would go stale the moment it moved.
+const COHESION_SLIDER_SPAN: f32 = 10.0;
+
+/// Floor of the derived Cohesion ceiling. A default of zero would otherwise
+/// collapse the row to a degenerate `0.0..=0.0` range that cannot be dragged; at
+/// the tuned default this is the smaller of the two terms.
+const COHESION_SLIDER_MIN_SPAN: f32 = 0.1;
+
+/// Display (and rounding) precision of the force sliders. Two decimals matches
+/// the sections rows and the `0.05` cable-tension step.
+const SLIDERS_FORCE_DECIMALS: usize = 2;
+
+/// The Cohesion row carries two digits more: its values are a tenth of the other
+/// rows' and its default is a measured number (`0.0068` at the time of writing),
+/// so two decimals could not show the knob's own default — and the slider rounds
+/// what it cannot show.
+const SLIDERS_COHESION_DECIMALS: usize = 4;
+
+/// The Cohesion row's ceiling: [`COHESION_SLIDER_SPAN`]× the solver's default
+/// cohesion, floored at [`COHESION_SLIDER_MIN_SPAN`] so the range is always
+/// draggable. Read from the solver so retuning the default retunes the row.
+fn cohesion_slider_max() -> f32 {
+    (crate::layout::SolveKnobs::default().cohesion * COHESION_SLIDER_SPAN)
+        .max(COHESION_SLIDER_MIN_SPAN)
+}
+
 /// Sliders-panel geometry: the panel chrome rect, one row per force (slice,
-/// section, cable — top to bottom), and the Arrange button row. Pure, like
-/// [`Minimap`], so the paint path and the pointer-priority tests share one
-/// source of truth.
+/// section, cable in sections mode; repulsion, cohesion, cable in force mode —
+/// top to bottom), and the Arrange button row. Pure, like [`Minimap`], so the
+/// paint path and the pointer-priority tests share one source of truth. The
+/// geometry is mode-independent — only the rows' labels and bindings change
+/// (design D7).
 pub(crate) struct SlidersPanel {
     pub(crate) rect: egui::Rect,
-    /// Slider rows, top to bottom: slice, section, cable.
+    /// Slider rows, top to bottom: the arrangement's two force knobs, then the
+    /// shared cable row.
     pub(crate) rows: [egui::Rect; 3],
     /// The Arrange button's row.
     pub(crate) arrange: egui::Rect,
@@ -776,13 +815,15 @@ impl SlidersPanel {
     }
 }
 
-/// The sliders panel for the current frame, or `None` when it must not show:
-/// only in `LayoutMode::Sections` with `App::showing_sliders` set (design D4),
-/// and only in a pane big enough to hold it (a smaller pane would spill the
-/// panel over its neighbours). Anchored to the pane's top-right corner,
-/// mirroring the minimap's bottom-left anchor.
+/// The sliders panel for the current frame, or `None` when it must not show: in
+/// the arrangements that have forces (`Force` and `Sections`) with
+/// `App::showing_sliders` set, and only in a pane big enough to hold it (a
+/// smaller pane would spill the panel over its neighbours). The column
+/// arrangement has no forces, so it never lays the panel out — `S` reports that
+/// in the status line instead (design D7). Anchored to the pane's top-right
+/// corner, mirroring the minimap's bottom-left anchor.
 pub(crate) fn sliders_panel_layout(app: &App, pane: egui::Rect) -> Option<SlidersPanel> {
-    if !app.showing_sliders || app.layout_mode != crate::config::LayoutMode::Sections {
+    if !app.showing_sliders || app.layout_mode == crate::config::LayoutMode::Column {
         return None;
     }
     let (w, h) = SLIDERS_PANEL_SIZE;
@@ -819,9 +860,44 @@ pub fn sliders_panel_window_rect(app: &App, window: egui::Rect) -> Option<egui::
     graph_pane_rect(app, window).and_then(|pane| sliders_panel_layout(app, pane).map(|p| p.rect))
 }
 
+/// Whether a slider row's response is a real edit by the user rather than the
+/// slider re-rounding the knob to its own display precision.
+///
+/// egui rounds (and clamps) whatever value a `Slider` is handed on *every*
+/// frame — two decimals turn a cohesion default of `0.0068` into `0.01` before
+/// any input arrives — and it reports that write-back through `changed()`.
+/// Treating it as an edit would retune the knob and re-solve the layout on the
+/// first painted frame, so the row only follows the pointer or the keyboard: a
+/// press or drag on the row, or a key on a focused row.
+fn slider_row_edited(ui: &egui::Ui, response: &egui::Response, before: f32, after: f32) -> bool {
+    if before == after || !response.changed() {
+        return false;
+    }
+    if response.is_pointer_button_down_on() || response.dragged() {
+        return true;
+    }
+    // Keyboard editing (arrows step the value, Enter/Tab commit a typed one)
+    // only counts while the row actually holds focus.
+    response.has_focus()
+        && ui.input(|i| {
+            [
+                egui::Key::ArrowLeft,
+                egui::Key::ArrowRight,
+                egui::Key::ArrowUp,
+                egui::Key::ArrowDown,
+                egui::Key::Enter,
+                egui::Key::Tab,
+            ]
+            .iter()
+            .any(|key| i.key_pressed(*key))
+        })
+}
+
 /// One panel row: the themed label in the row's label column plus a slider
-/// showing its numeric value, bound to `value` in the rest of the row. Returns
-/// the slider's response so the caller owns the re-solve policy.
+/// showing its numeric value at `decimals`, bound to `value` in the rest of the
+/// row. Returns whether the *user* moved the row this frame (see
+/// [`slider_row_edited`]), so the caller owns the re-solve policy without a
+/// repaint ever counting as an edit.
 fn paint_force_slider(
     ui: &mut egui::Ui,
     label_rect: egui::Rect,
@@ -829,7 +905,8 @@ fn paint_force_slider(
     label: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
-) -> egui::Response {
+    decimals: usize,
+) -> bool {
     let t = crate::theme::active();
     ui.painter().text(
         label_rect.left_center(),
@@ -838,27 +915,40 @@ fn paint_force_slider(
         egui::FontId::proportional(SLIDERS_FONT_PX),
         t.egui_color(t.graph_node_title),
     );
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(track_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.add(
-                egui::Slider::new(value, range)
-                    .show_value(true)
-                    .fixed_decimals(2),
-            )
-        },
-    )
-    .inner
+    let before = *value;
+    let (response, draft) = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(track_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                let mut draft = before;
+                let response = ui.add(
+                    egui::Slider::new(&mut draft, range)
+                        .show_value(true)
+                        .fixed_decimals(decimals),
+                );
+                (response, draft)
+            },
+        )
+        .inner;
+    if slider_row_edited(ui, &response, before, draft) {
+        *value = draft;
+        true
+    } else {
+        false
+    }
 }
 
-/// Paint the sections-mode sliders panel into the graph pane (design D4): three
-/// force sliders (slice, section, cable) bound to the live `App` values, plus an
-/// Arrange button. A slider change re-solves so the forces are visible while
-/// dragging (design D4: rebuild → solve → refit); Arrange re-anneals from the
-/// current positions instead (design D5). Chrome colors come only from `Theme`
-/// tokens, in the minimap panel's idiom.
+/// Paint the sliders panel into the graph pane (design D4/D7): three force
+/// sliders bound to the live `App` values of the active arrangement, plus an
+/// Arrange button. In force mode the rows are Repulsion, Cohesion and Cable; in
+/// sections mode Slice, Section and Cable (unchanged). A slider change re-solves
+/// so the forces are visible while dragging (design D4: rebuild → solve →
+/// refit). Arrange follows the arrangement: sections anneals from the current
+/// positions (design D5), force re-solves from the seed
+/// ([`App::arrange_force`]). Chrome colors come only from `Theme` tokens, in the
+/// minimap panel's idiom.
 ///
 /// Pointer priority (task 4.3): the panel registers its own rect as an
 /// interactive widget ahead of its children, so it owns every press inside it —
@@ -889,32 +979,62 @@ pub(crate) fn paint_sliders_panel(ui: &mut egui::Ui, app: &mut App, pane: egui::
     // Consume the pointer inside the panel before anything painted under it.
     let _ = ui.interact(
         panel.rect,
-        ui.id().with("sections_sliders_panel"),
+        ui.id().with("graph_sliders_panel"),
         egui::Sense::click_and_drag(),
     );
-    let slice = paint_force_slider(
-        ui,
-        panel.label_rect(0),
-        panel.slider_rect(0),
-        "Slice",
-        &mut app.layout_slice_force,
-        0.0..=SLIDERS_FORCE_MAX,
-    );
-    let section = paint_force_slider(
-        ui,
-        panel.label_rect(1),
-        panel.slider_rect(1),
-        "Section",
-        &mut app.layout_section_force,
-        0.0..=SLIDERS_FORCE_MAX,
-    );
-    let cable = paint_force_slider(
+    // The first two rows bind the active arrangement's own pair of forces
+    // (design D7); the mode is the same one `sliders_panel_layout` gated on, so
+    // only the force and sections pairs are reachable here.
+    let (first_edited, second_edited) = match app.layout_mode {
+        crate::config::LayoutMode::Force => (
+            paint_force_slider(
+                ui,
+                panel.label_rect(0),
+                panel.slider_rect(0),
+                "Repulsion",
+                &mut app.layout_repulsion_force,
+                0.0..=REPULSION_GAIN_MAX,
+                SLIDERS_FORCE_DECIMALS,
+            ),
+            paint_force_slider(
+                ui,
+                panel.label_rect(1),
+                panel.slider_rect(1),
+                "Cohesion",
+                &mut app.layout_cohesion_force,
+                0.0..=cohesion_slider_max(),
+                SLIDERS_COHESION_DECIMALS,
+            ),
+        ),
+        _ => (
+            paint_force_slider(
+                ui,
+                panel.label_rect(0),
+                panel.slider_rect(0),
+                "Slice",
+                &mut app.layout_slice_force,
+                0.0..=SLIDERS_FORCE_MAX,
+                SLIDERS_FORCE_DECIMALS,
+            ),
+            paint_force_slider(
+                ui,
+                panel.label_rect(1),
+                panel.slider_rect(1),
+                "Section",
+                &mut app.layout_section_force,
+                0.0..=SLIDERS_FORCE_MAX,
+                SLIDERS_FORCE_DECIMALS,
+            ),
+        ),
+    };
+    let cable_edited = paint_force_slider(
         ui,
         panel.label_rect(2),
         panel.slider_rect(2),
         "Cable",
         &mut app.tension,
         crate::layout::TENSION_MIN..=crate::layout::TENSION_MAX,
+        SLIDERS_FORCE_DECIMALS,
     );
     let arrange = ui
         .put(
@@ -924,11 +1044,21 @@ pub(crate) fn paint_sliders_panel(ui: &mut egui::Ui, app: &mut App, pane: egui::
                 .stroke(egui::Stroke::new(1.0, accent)),
         )
         .clicked();
-    if slice.changed() || section.changed() || cable.changed() {
+    if first_edited || second_edited || cable_edited {
         app.rebuild_graph();
     }
     if arrange {
-        app.arrange_sections();
+        match app.layout_mode {
+            crate::config::LayoutMode::Force => {
+                app.arrange_force();
+            }
+            crate::config::LayoutMode::Sections => {
+                app.arrange_sections();
+            }
+            // Unreachable: `sliders_panel_layout` lays out no panel in column
+            // mode, so its Arrange button cannot be pressed.
+            crate::config::LayoutMode::Column => {}
+        }
     }
 }
 
@@ -4208,31 +4338,112 @@ mod sliders_panel_tests {
     }
 
     #[test]
-    fn panel_absent_outside_sections_mode_or_when_toggled_off() {
-        for (mode, showing) in [
-            (LayoutMode::Column, true),
-            (LayoutMode::Force, true),
-            (LayoutMode::Sections, false),
+    fn panel_lays_out_in_the_force_and_sections_arrangements_only() {
+        // Design D7: the panel belongs to the arrangements that have forces.
+        // `Force` joins `Sections` in laying it out; `Column` has no forces and
+        // never does, whatever `showing_sliders` says.
+        for (mode, showing, lays_out) in [
+            (LayoutMode::Column, true, false),
+            (LayoutMode::Column, false, false),
+            (LayoutMode::Force, true, true),
+            (LayoutMode::Force, false, false),
+            (LayoutMode::Sections, true, true),
+            (LayoutMode::Sections, false, false),
         ] {
             let mut app = panel_app();
             app.layout_mode = mode;
             app.showing_sliders = showing;
-            assert!(
-                sliders_panel_layout(&app, pane()).is_none(),
-                "{mode:?} / showing_sliders={showing} must not lay out a panel"
+            assert_eq!(
+                sliders_panel_layout(&app, pane()).is_some(),
+                lays_out,
+                "{mode:?} / showing_sliders={showing} laid out (or not) wrongly"
             );
             let out = panel_frame(&mut app, Vec::new());
-            assert!(
-                out.labels.is_empty() && out.rects.is_empty(),
+            assert_eq!(
+                !out.labels.is_empty(),
+                lays_out,
                 "{mode:?} / showing_sliders={showing} painted {:?}",
                 out.labels
             );
+            if !lays_out {
+                assert!(
+                    out.rects.is_empty(),
+                    "{mode:?} / showing_sliders={showing} painted no chrome or rows"
+                );
+            }
         }
         // A pane too small to hold the panel paints nothing either: the panel
         // would spill over its neighbours.
         let app = panel_app();
         let tiny = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 90.0));
         assert!(sliders_panel_layout(&app, tiny).is_none());
+    }
+
+    #[test]
+    fn panel_rows_follow_the_arrangement() {
+        // Design D7: same geometry, mode-dependent labels and bindings.
+        let mut force = panel_app();
+        force.layout_mode = LayoutMode::Force;
+        force.layout_repulsion_force = 2.0;
+        force.layout_cohesion_force = 0.1;
+        force.tension = 0.5;
+        let out = panel_frame(&mut force, Vec::new());
+        for label in ["Repulsion", "Cohesion", "Cable", "Arrange"] {
+            assert!(
+                out.labels.iter().any(|l| l == label),
+                "force row {label} missing: {:?}",
+                out.labels
+            );
+        }
+        for stale in ["Slice", "Section"] {
+            assert!(
+                !out.labels.iter().any(|l| l == stale),
+                "force panel must not label a sections row {stale}"
+            );
+        }
+        for value in ["2.00", "0.1000", "0.50"] {
+            assert!(
+                out.labels.iter().any(|l| l == value),
+                "force value {value} missing: {:?}",
+                out.labels
+            );
+        }
+    }
+
+    #[test]
+    fn painting_the_panel_never_retunes_a_knob_or_re_solves_by_itself() {
+        // egui rounds a slider to the row's display precision on every frame and
+        // reports that write-back as a change. The measured cohesion default is
+        // finer than two decimals, so without the user-edit gate the first
+        // painted frame would retune the knob and rebuild the graph.
+        let mut app = panel_app();
+        app.layout_mode = LayoutMode::Force;
+        let cohesion = crate::layout::SolveKnobs::default().cohesion;
+        app.layout_cohesion_force = cohesion;
+        let positions = app.graph_positions.clone();
+        let out = panel_frame(&mut app, Vec::new());
+        assert!(
+            !out.labels.is_empty(),
+            "the force panel painted nothing to test"
+        );
+        assert_eq!(
+            app.layout_cohesion_force, cohesion,
+            "a repaint must not retune the cohesion knob"
+        );
+        assert_eq!(
+            app.graph_positions, positions,
+            "a repaint must not re-solve the layout"
+        );
+        // The Cohesion row shows the knob's own value at the row's precision.
+        let grid = 0.5 * 10f32.powi(-(SLIDERS_COHESION_DECIMALS as i32));
+        assert!(
+            out.labels
+                .iter()
+                .filter_map(|l| l.parse::<f32>().ok())
+                .any(|v| (v - cohesion).abs() <= grid + 1e-6),
+            "the Cohesion row must show {cohesion} to {SLIDERS_COHESION_DECIMALS} decimals: {:?}",
+            out.labels
+        );
     }
 
     #[test]
@@ -4261,6 +4472,82 @@ mod sliders_panel_tests {
         assert_eq!(
             app.status_message, "Arranged (sections)",
             "the Arrange button click re-solves the sections layout"
+        );
+    }
+
+    #[test]
+    fn arrange_button_re_solves_the_force_layout_from_its_seed() {
+        let mut app = panel_app();
+        app.layout_mode = LayoutMode::Force;
+        app.layout_repulsion_force = 2.0;
+        // A perturbed position proves the button re-seeds instead of annealing
+        // from what the user currently sees.
+        app.graph_positions[0] = (9_000.0, 9_000.0);
+        let graph = app.graph.as_ref().unwrap().clone();
+        let pins = app.pinned_indices(&graph);
+        let expected = crate::layout::solve(&graph, &pins, app.force_solve_knobs());
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown");
+        let center = panel.arrange.center();
+        let ctx = egui::Context::default();
+        for events in [
+            vec![egui::Event::PointerMoved(center)],
+            vec![pointer_button(center, true)],
+            vec![pointer_button(center, false)],
+        ] {
+            let mut full = ctx.run_ui(raw_input(events), |ui| {
+                paint_sliders_panel(ui, &mut app, pane());
+            });
+            full.textures_delta.clear();
+        }
+        assert_eq!(
+            app.status_message, "Arranged (force)",
+            "the Arrange button reports the arrangement it arranged"
+        );
+        assert_eq!(
+            app.graph_positions, expected,
+            "force Arrange re-solves from the seed under the live knobs"
+        );
+    }
+
+    #[test]
+    fn dragging_a_force_row_commits_the_knob_and_re_solves_live() {
+        // The user-edit gate must not swallow real drags: a press on the
+        // Repulsion track commits the value and rebuilds the layout (design D7).
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.layout_mode = LayoutMode::Force;
+        app.showing_sliders = true;
+        let before = app.graph_positions.clone();
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown in force mode");
+        let track = panel.slider_rect(0);
+        // The slider itself is one `slider_width` (100 pt) wide from the track's
+        // left edge, so the press goes inside it rather than into the free track.
+        let target = egui::pos2(track.min.x + 70.0, track.center().y);
+        let ctx = egui::Context::default();
+        for events in [
+            vec![egui::Event::PointerMoved(target)],
+            vec![pointer_button(target, true)],
+            vec![pointer_button(target, false)],
+        ] {
+            let mut full = ctx.run_ui(raw_input(events), |ui| {
+                paint_sliders_panel(ui, &mut app, pane());
+            });
+            full.textures_delta.clear();
+        }
+        assert!(
+            app.layout_repulsion_force > 1.5,
+            "the drag must move the Repulsion knob, got {}",
+            app.layout_repulsion_force
+        );
+        assert!(
+            !app.graph_positions.is_empty(),
+            "the live re-solve must keep a solved layout"
+        );
+        assert_ne!(
+            app.graph_positions, before,
+            "a re-solve under the new gain must move the nodes"
         );
     }
 

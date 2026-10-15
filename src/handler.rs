@@ -1109,27 +1109,58 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 return false;
             }
             KeyCode::Char('A') => {
-                // sections-black-hole-solver 3.2 (design D5): `A` re-anneals
-                // the sections layout from the current positions in sections
-                // mode only. No conflict with lowercase `a` (arrangement
-                // cycle): winit reports Shift+a as `Char('A')`, a distinct
-                // code. In other modes it falls through to the shared
-                // dispatch below.
-                if app.layout_mode == crate::config::LayoutMode::Sections {
-                    app.arrange_sections();
-                    return false;
+                // sections-black-hole-solver 3.2 (design D5) +
+                // force-arrangement-nonoverlap-and-sliders D7: `A` applies the
+                // active arrangement's Arrange action without cycling it —
+                // sections re-anneals from the current positions, force
+                // re-solves from its seed under the current knobs. No conflict
+                // with lowercase `a` (arrangement cycle): winit reports Shift+a
+                // as `Char('A')`, a distinct code. Column has no forces, so it
+                // falls through to the shared dispatch below.
+                match app.layout_mode {
+                    crate::config::LayoutMode::Sections => {
+                        app.arrange_sections();
+                        return false;
+                    }
+                    crate::config::LayoutMode::Force => {
+                        app.arrange_force();
+                        return false;
+                    }
+                    crate::config::LayoutMode::Column => {}
                 }
             }
+            // `S` toggles the sliders panel of the active arrangement
+            // (sections-black-hole-solver 5.2 + force-arrangement-nonoverlap-
+            // and-sliders D7). Force and sections own the panel (three knobs
+            // each); the status names the arrangement it belongs to.
+            KeyCode::Char('S') => {
+                let arrangement = match app.layout_mode {
+                    crate::config::LayoutMode::Force => Some("force"),
+                    crate::config::LayoutMode::Sections => Some("sections"),
+                    crate::config::LayoutMode::Column => None,
+                };
+                let Some(name) = arrangement else {
+                    // Column lays out no panel: there is nothing to tune, so
+                    // report that rather than opening one (design D7).
+                    app.status_message = String::from("Column arrangement has no forces to tune");
+                    return false;
+                };
+                app.showing_sliders = !app.showing_sliders;
+                let state = if app.showing_sliders { "on" } else { "off" };
+                app.status_message = format!("Sliders panel: {state} ({name})");
+                return false;
+            }
+            // Lowercase `s` is the sections panel's historical toggle and stays
+            // sections-only, so in the other arrangements it keeps falling
+            // through to the shared dispatch below (open/focus the module-UI
+            // pane, and toggle the skeleton inside it).
             KeyCode::Char('s') => {
-                // sections-black-hole-solver 5.2: `S` toggles the sliders panel
-                // in sections mode only. In other modes, `S` keeps its existing
-                // behavior (falls through to shared dispatch).
                 if app.layout_mode == crate::config::LayoutMode::Sections {
                     app.showing_sliders = !app.showing_sliders;
                     app.status_message = if app.showing_sliders {
-                        String::from("Sliders panel: on")
+                        String::from("Sliders panel: on (sections)")
                     } else {
-                        String::from("Sliders panel: off")
+                        String::from("Sliders panel: off (sections)")
                     };
                     return false;
                 }
@@ -1996,6 +2027,10 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 );
             }
             let pins = app.pinned_indices(graph);
+            // The drag settles under the App's force knobs, so the panel's
+            // repulsion/cohesion (force mode) reach the re-settle too
+            // (force-arrangement-nonoverlap-and-sliders D7).
+            let knobs = app.force_solve_knobs();
             layout::local_resettle(
                 graph,
                 &mut app.graph_positions,
@@ -2003,10 +2038,7 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 layout::LOCAL_RADIUS,
                 layout::LOCAL_ITERATIONS,
                 &pins,
-                layout::SolveKnobs {
-                    tension: app.tension,
-                    ..layout::SolveKnobs::default()
-                },
+                knobs,
             );
             app.notify_node_moved(&node_id);
         }
@@ -2389,6 +2421,9 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             );
         }
         let pins = app.pinned_indices(graph);
+        // Same knob source as the terminal drag path: the re-settle honors the
+        // panel's repulsion/cohesion, not just the cable tension.
+        let knobs = app.force_solve_knobs();
         layout::local_resettle(
             graph,
             &mut app.graph_positions,
@@ -2396,10 +2431,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             layout::LOCAL_RADIUS,
             layout::LOCAL_ITERATIONS,
             &pins,
-            layout::SolveKnobs {
-                tension: app.tension,
-                ..layout::SolveKnobs::default()
-            },
+            knobs,
         );
         app.notify_node_moved(&node_id);
     }

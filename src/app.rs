@@ -886,7 +886,9 @@ pub struct App {
     /// without a second literal. Drives the panel's Cohesion row in force mode.
     pub layout_cohesion_force: f32,
     /// Whether the sliders panel is visible in the graph pane (sections-black-hole-solver 5.2).
-    /// Toggled by `S` key in sections mode only.
+    /// Toggled by `S` in the two arrangements that have forces (`Force` and
+    /// `Sections`); the column arrangement has no forces, so it lays out no
+    /// panel and reports that in the status line instead (design D7).
     pub showing_sliders: bool,
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
@@ -2809,6 +2811,25 @@ impl App {
         true
     }
 
+    /// Re-solve the force arrangement from its seed under the current knobs
+    /// (force-arrangement-nonoverlap-and-sliders D7): the panel's Arrange button
+    /// and `Shift+A` in force mode. Unlike [`Self::arrange_sections`] — which
+    /// anneals from the positions the user currently sees — this discards them
+    /// and re-runs the seed solve through [`Self::force_solve_knobs`], so it is
+    /// the force arrangement's "start over" action and the repulsion/cohesion
+    /// sliders show on a layout the user did not drag. Refits the camera and
+    /// reports `Arranged (force)`. Silent no-op (false) without a built graph.
+    pub fn arrange_force(&mut self) -> bool {
+        let Some(graph) = self.graph.clone() else {
+            return false;
+        };
+        let pins = self.pinned_indices(&graph);
+        self.graph_positions = crate::layout::solve(&graph, &pins, self.force_solve_knobs());
+        self.fit_graph_camera(self.refit_viewport());
+        self.status_message = String::from("Arranged (force)");
+        true
+    }
+
     /// Center the drawn graph in the visible pane: pan so the CONTENT center —
     /// the position-bounds center plus half the node world extent (node
     /// positions are top-left corners) — maps to the canvas center, zoom
@@ -3516,8 +3537,10 @@ impl App {
     /// Force-mode solver knobs (design D6): the `App`-owned half of the knob
     /// tuple — the cable tension plus the two force-only sliders (repulsion
     /// gain, cohesion) the panel drives. `slice_k`/`section_k` stay at the
-    /// solver defaults: force mode ignores them.
-    fn force_solve_knobs(&self) -> layout::SolveKnobs {
+    /// solver defaults: force mode ignores them. The graph drag path takes the
+    /// same tuple for its `local_resettle` (design D7), so a drag settles under
+    /// the values the panel shows.
+    pub(crate) fn force_solve_knobs(&self) -> layout::SolveKnobs {
         layout::SolveKnobs {
             tension: self.tension,
             repulsion: self.layout_repulsion_force,

@@ -137,6 +137,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("n", "cancel upload (confirm modal)"),
             ("h", "toggle column/force layout"),
             ("a", "apply arrangement / cycle layouts"),
+            ("S", "toggle forces panel (force/sections)"),
             ("f", "dependency filter"),
             ("i", "influence filter"),
             ("g s", "open select-state menu"),
