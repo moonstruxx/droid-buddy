@@ -82,9 +82,11 @@ pub const SECTION_HOLE_K: f32 = DEFAULT_SECTION_HOLE_K;
 /// Default section-hole spring stiffness — anchors members strongly.
 pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
 
-/// Bounded overlap-removal passes appended to a force- or sections-mode solve
-/// (sections-black-hole-solver 3.9; force mode joins it under design D3), and
-/// the slack each resolved pair keeps.
+/// Bounded overlap-removal passes for the **sections and column** paths
+/// (sections-black-hole-solver 3.9) and the slack each resolved pair keeps.
+/// The force path runs the same sweep but with a converging loop instead of this
+/// fixed budget ([`FORCE_SEPARATION_MAX_PASSES`]), because cohesion makes its
+/// pass count a function of the knob tuple ([`separate_overlaps_converging`]).
 ///
 /// The wrapped seed is the layout's spacing guarantee — measured worst pairwise
 /// penetration 0.00 on `fixtures/own_scale.ini` — but the force relaxation can
@@ -102,6 +104,34 @@ const SEPARATION_PASSES: usize = 8;
 /// Extra clearance a resolved pair keeps, so a pair the pass touches lands
 /// strictly clear instead of exactly touching on the boundary.
 const SEPARATION_EPS: f32 = 1.0;
+
+/// Pass cap for the force path's converging separation loop
+/// ([`separate_overlaps_converging`]), in whole sweeps.
+///
+/// The sections and column paths use the fixed [`SEPARATION_PASSES`] budget, but
+/// the force relaxation cannot: per-cluster cohesion ([`COHESION_K`]) piles the
+/// members of a banner group onto one centroid, so the number of sweeps a layout
+/// needs is a property of the knob tuple, not of the arrangement. A sweep that
+/// resolves a pair can also push one of its bodies into contact with a neighbour
+/// the sweep already visited — which is why the visited-pair count a sweep
+/// reports is *not* a residual count — so the loop re-reads the whole pair set
+/// before every sweep and stops only when that reading is zero.
+///
+/// **Measured (2026-10-15, five-fixture set, default tension and repulsion
+/// gain)**: at the default cohesion ([`COHESION_K`]) every fixture reaches zero
+/// pairs, and the 511-body `fixtures/own_scale.ini` anchor is the worst of them
+/// at 18 sweeps (its 17th leaves 1 pair). The cap is 7× that need, and a
+/// comfortable cap is close to free: the loop reads the residual *before* its
+/// first sweep, so an already-separated layout pays one O(n²) read and no sweep
+/// at all.
+///
+/// The cap is the termination guarantee for a layout the greedy sweep cannot
+/// clear in any practical budget — two immovable bodies pinning a pair, or a
+/// cohesion pile past its ceiling (at cohesion ≥ 0.0070 that anchor still has
+/// 91–274 pairs after 512 sweeps, against 18 sweeps at the default). Beyond the
+/// cap the loop returns the residual count instead of iterating, which matters
+/// because `solve` runs on the graph surface, where the cost is user-visible.
+const FORCE_SEPARATION_MAX_PASSES: usize = 128;
 
 /// Per-axis bound on how far a sections-mode node may be displaced from its own
 /// seed target (sections-black-hole-solver 3.9).
@@ -134,7 +164,28 @@ pub const DEFAULT_SECTIONS_TETHER: f32 = SECTIONS_LANE_GAP * 1.5;
 /// Weak per-cluster cohesion pulling each member toward its banner group's
 /// centroid (design D3). Deliberately far below `SPRING_K` so clusters
 /// cohere without collapsing or overriding the single-axis spring bias.
-const COHESION_K: f32 = 0.01;
+///
+/// **Measured (2026-10-15, five-fixture set, default tension and repulsion
+/// gain)** — this was 0.01 before the force path gained its converging
+/// separation loop (task 1.4). The value is bracketed from both sides, and the
+/// 511-body `fixtures/own_scale.ini` anchor is the binding fixture:
+///
+/// - **Ceiling — zero overlapping pairs.** Residual pairs after `solve` on the
+///   anchor: 0 up to and including 0.0068 (18 sweeps of the converging pass),
+///   137 at 0.0069 with the cap at 128, 86 at 256 and 0 at 384 — just past the
+///   ceiling the need jumps ~17× — and 0.0070 and above do not converge at any
+///   cap tested up to 512 (91–274 pairs). The other four fixtures stay clear at
+///   every value here.
+/// - **Floor — banner groups must still read as groups.** On a synthetic graph
+///   of two 3-member clusters with no edges the mechanism bifurcates between
+///   0.006 (max intra-cluster spread / min inter-cluster gap = 1.98 — clusters
+///   interleave) and 0.0065 (0.97 — clusters separate).
+///
+/// 0.0068 is the largest value inside both bands: 18 sweeps to zero pairs, and
+/// 0.94 on that ratio. Its headroom to the ceiling is only 0.0001, so what
+/// absorbs a layout whose own ceiling sits lower is the pass cap (7× the
+/// measured need), not slack in this constant.
+const COHESION_K: f32 = 0.0068;
 
 /// The solver's knob tuple (design D6): one value per force the arrangements
 /// use, threaded through every entry point as a bundle instead of as loose
@@ -366,7 +417,10 @@ pub fn local_resettle(
 
 /// Push every pair of overlapping bodies apart along the axis that needs the
 /// least correction, in bounded deterministic passes (sections-black-hole-solver
-/// 3.9; the force path joins it under design D3 — see [`SEPARATION_PASSES`]).
+/// 3.9; the column path shares it under design D3 — see [`SEPARATION_PASSES`]).
+/// The force path runs the same sweep through
+/// [`separate_overlaps_converging`], which stops on a measured residual instead
+/// of a fixed budget.
 ///
 /// This is the **non-overlap post-condition**: it is what makes "no two drawn
 /// bodies intersect" hold by construction rather than by tuning, because the
@@ -399,56 +453,178 @@ pub fn local_resettle(
 ///
 /// Deterministic: a single thread, a fixed `(i, j)` sweep order, and no RNG —
 /// the pass is a pure function of the positions and sizes it is given.
+///
+/// The force path keeps this exact budget *and* this exact order for its first
+/// sweep, then hands over to [`separate_overlaps_converging`], which re-reads the
+/// residual after each sweep and cycles through further deterministic orders
+/// while pairs persist. Sections and column keep this entry point unchanged, so
+/// their output stays byte-identical.
 fn separate_overlaps(
     positions: &mut [(f32, f32)],
     sizes: &[(f32, f32)],
     movable: &[bool],
     passes: usize,
 ) -> usize {
-    let n = positions.len();
+    let order: Vec<usize> = (0..positions.len()).collect();
     let mut overlapping = 0;
     for _ in 0..passes {
-        overlapping = 0;
-        for i in 0..n {
-            for j in i + 1..n {
-                let need_x = 0.5 * (sizes[i].0 + sizes[j].0);
-                let need_y = 0.5 * (sizes[i].1 + sizes[j].1);
-                let dx = positions[j].0 - positions[i].0;
-                let dy = positions[j].1 - positions[i].1;
-                let pen_x = need_x - dx.abs();
-                let pen_y = need_y - dy.abs();
-                if pen_x <= 0.0 || pen_y <= 0.0 {
-                    continue;
-                }
-                overlapping += 1;
-                // How much of the correction each side takes: an immovable
-                // partner hands its share to the movable one; two immovable
-                // bodies cannot be separated at all.
-                let (share_i, share_j) = match (movable[i], movable[j]) {
-                    (true, true) => (0.5, 0.5),
-                    (true, false) => (1.0, 0.0),
-                    (false, true) => (0.0, 1.0),
-                    (false, false) => (0.0, 0.0),
-                };
-                // Escape along the cheaper axis (ties go to x, deterministically).
-                if pen_x <= pen_y {
-                    let push = (pen_x + SEPARATION_EPS) * 0.5;
-                    let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
-                    positions[i].0 -= sign * push * share_i;
-                    positions[j].0 += sign * push * share_j;
-                } else {
-                    let push = (pen_y + SEPARATION_EPS) * 0.5;
-                    let sign = if dy >= 0.0 { 1.0 } else { -1.0 };
-                    positions[i].1 -= sign * push * share_i;
-                    positions[j].1 += sign * push * share_j;
-                }
-            }
-        }
+        overlapping = separation_sweep(positions, sizes, movable, &order);
         if overlapping == 0 {
             break;
         }
     }
     overlapping
+}
+
+/// One separation sweep: walk the pairs in `order` order, resolve each pair whose
+/// axis-aligned bodies still intersect along the cheaper axis, and return how
+/// many intersecting pairs the sweep *visited*.
+///
+/// The returned count is a work measure, not a residual: a push can move a body
+/// into a pair the sweep already passed. Callers that need the residual use
+/// [`count_overlapping_pairs`].
+///
+/// `movable[i] == false` bodies never move; a pair with both bodies immovable is
+/// counted but left alone. Deterministic: pure in the positions, sizes and order
+/// it is given.
+fn separation_sweep(
+    positions: &mut [(f32, f32)],
+    sizes: &[(f32, f32)],
+    movable: &[bool],
+    order: &[usize],
+) -> usize {
+    let mut overlapping = 0;
+    for oi in 0..order.len() {
+        let i = order[oi];
+        for &j in &order[oi + 1..] {
+            let need_x = 0.5 * (sizes[i].0 + sizes[j].0);
+            let need_y = 0.5 * (sizes[i].1 + sizes[j].1);
+            let dx = positions[j].0 - positions[i].0;
+            let dy = positions[j].1 - positions[i].1;
+            let pen_x = need_x - dx.abs();
+            let pen_y = need_y - dy.abs();
+            if pen_x <= 0.0 || pen_y <= 0.0 {
+                continue;
+            }
+            overlapping += 1;
+            // How much of the correction each side takes: an immovable
+            // partner hands its share to the movable one; two immovable
+            // bodies cannot be separated at all.
+            let (share_i, share_j) = match (movable[i], movable[j]) {
+                (true, true) => (0.5, 0.5),
+                (true, false) => (1.0, 0.0),
+                (false, true) => (0.0, 1.0),
+                (false, false) => (0.0, 0.0),
+            };
+            // Escape along the cheaper axis (ties go to x, deterministically).
+            if pen_x <= pen_y {
+                let push = (pen_x + SEPARATION_EPS) * 0.5;
+                let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+                positions[i].0 -= sign * push * share_i;
+                positions[j].0 += sign * push * share_j;
+            } else {
+                let push = (pen_y + SEPARATION_EPS) * 0.5;
+                let sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+                positions[i].1 -= sign * push * share_i;
+                positions[j].1 += sign * push * share_j;
+            }
+        }
+    }
+    overlapping
+}
+
+/// Pairs whose axis-aligned bodies still intersect — the separation predicate
+/// ([`separation_sweep`]) evaluated without moving anything.
+///
+/// This is the loop condition of [`separate_overlaps_converging`]: the sweep's
+/// own visited count cannot tell a cleared layout from one where the sweep
+/// pushed a body into a pair it had already passed, so the converging loop's
+/// "zero pairs" exit is a fresh reading of the whole pair set, never an
+/// inference. Deterministic: O(n²), read-only, no RNG.
+fn count_overlapping_pairs(positions: &[(f32, f32)], sizes: &[(f32, f32)]) -> usize {
+    let n = positions.len();
+    let mut overlapping = 0;
+    for i in 0..n {
+        for j in i + 1..n {
+            let need_x = 0.5 * (sizes[i].0 + sizes[j].0);
+            let need_y = 0.5 * (sizes[i].1 + sizes[j].1);
+            let dx = (positions[j].0 - positions[i].0).abs();
+            let dy = (positions[j].1 - positions[i].1).abs();
+            if need_x - dx > 0.0 && need_y - dy > 0.0 {
+                overlapping += 1;
+            }
+        }
+    }
+    overlapping
+}
+
+/// The sweep order of the force path's `pass`-th separation sweep, as an index
+/// permutation of `positions`.
+///
+/// Fixed three-cycle: node index, then bottom-up in y, then left-to-right in x.
+/// The cycle is a robustness measure, not a load-bearing trick: measured on the
+/// fixture set (2026-10-15) a greedy sweep reaches zero pairs at ≤18 sweeps in
+/// *every* ordering, index-only included, and the order only reshapes the
+/// intermediate residuals (a pair or two at a given cap, e.g. 23 / 22 / 22 pairs
+/// after one sweep on `fixtures/own_scale.ini`). It costs nothing — three sorts
+/// per sweep, against an O(n²) sweep — and it keeps a pile from being walked the
+/// same way every time when the cheapest-axis escape happens to push against
+/// the order.
+///
+/// A total order (`total_cmp`, node index as the tie-break) keeps the sequence a
+/// pure function of the positions: no RNG, no hash iteration.
+fn separation_order(positions: &[(f32, f32)], pass: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..positions.len()).collect();
+    match pass % 3 {
+        1 => order.sort_by(|&a, &b| {
+            positions[a]
+                .1
+                .total_cmp(&positions[b].1)
+                .then_with(|| a.cmp(&b))
+        }),
+        2 => order.sort_by(|&a, &b| {
+            positions[a]
+                .0
+                .total_cmp(&positions[b].0)
+                .then_with(|| a.cmp(&b))
+        }),
+        // pass 0 (and every third pass): node-index order, the same order
+        // [`separate_overlaps`] uses, so the first sweep matches it exactly.
+        _ => {}
+    }
+    order
+}
+
+/// Force-path separation: sweep until a fresh [`count_overlapping_pairs`] reads
+/// zero, cycling the sweep order ([`separation_order`]) while pairs persist and
+/// bounded by `max_passes` sweeps.
+///
+/// This is the force path's half of the non-overlap post-condition (design D3).
+/// Unlike [`separate_overlaps`] it makes no promise about *how many* sweeps a
+/// layout needs — cohesion can pile a banner group onto a point, and the packet
+/// of sweeps a pile needs is a property of the knob tuple. What it does promise
+/// is the exit condition: the loop returns only when a full read of the pair set
+/// is zero, so a zero return *is* the measured invariant, and a non-zero return
+/// is the honest residual of a layout the cap (or an immovable pair) makes
+/// unresolvable.
+///
+/// Deterministic: fixed sweep orders, deterministic tie-breaks, no RNG.
+fn separate_overlaps_converging(
+    positions: &mut [(f32, f32)],
+    sizes: &[(f32, f32)],
+    movable: &[bool],
+    max_passes: usize,
+) -> usize {
+    let mut pass = 0;
+    loop {
+        let remaining = count_overlapping_pairs(positions, sizes);
+        if remaining == 0 || pass >= max_passes {
+            return remaining;
+        }
+        let order = separation_order(positions, pass);
+        separation_sweep(positions, sizes, movable, &order);
+        pass += 1;
+    }
 }
 
 /// Deterministic initial placement along a single dominant left→right axis
@@ -1643,9 +1819,8 @@ pub(crate) fn run_iterations_with_forces(
     // Non-overlap is a post-condition of every path that produces positions
     // (design D3), not a tuning hope: the integrator is clamped, so a strong
     // spring can still drag one body onto another and lose the push. The pass is
-    // bounded and deterministic ([`SEPARATION_PASSES`]) and never compacts — it
-    // only resolves penetration, so the relaxation still decides where circuits
-    // live.
+    // bounded and deterministic and never compacts — it only resolves
+    // penetration, so the relaxation still decides where circuits live.
     //
     // `movable` mirrors the integrator's own policy, so separation can never
     // move a body the solve was not allowed to move: a pinned node stays exactly
@@ -1655,10 +1830,20 @@ pub(crate) fn run_iterations_with_forces(
     // that is the whole policy: exact pin honoring yields to the invariant only
     // on the column path (see [`solve_columns_pinned`]), where pins carry
     // off-grid positions from a previous force solve or drag.
+    //
+    // Sections keeps the fixed `SEPARATION_PASSES` budget *and* the single
+    // node-index sweep order, so its output is byte-identical under the knob
+    // plumbing. Force mode converges instead ([`separate_overlaps_converging`]):
+    // cohesion piles a banner group onto one centroid, and how many sweeps that
+    // pile needs is a property of the knob tuple, not of the arrangement.
     let movable: Vec<bool> = (0..n)
         .map(|i| !pinned_mask[i] && !active.is_some_and(|act| !act[i]))
         .collect();
-    separate_overlaps(positions, &sizes, &movable, SEPARATION_PASSES);
+    if mode == LayoutMode::Sections {
+        separate_overlaps(positions, &sizes, &movable, SEPARATION_PASSES);
+    } else {
+        separate_overlaps_converging(positions, &sizes, &movable, FORCE_SEPARATION_MAX_PASSES);
+    }
     iterations
 }
 
@@ -4626,7 +4811,9 @@ mod tests {
         // any unintended change to the force path moves them. Task 3.4 replaces
         // them with the determinism-per-knob-tuple and non-overlap guards, which
         // are the real contract; the sections and column paths keep their own
-        // byte-identity guards.
+        // byte-identity guards. Re-blessed once more by tasks 1.4/1.5: the drag
+        // path now runs the converging separation loop, and the default
+        // cohesion is the measured `COHESION_K = 0.0068` rather than 0.01.
         let mut graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
         graph.nodes[0].circuit = "a".repeat(2);
         graph.nodes[1].circuit = "b".repeat(8);
@@ -4640,11 +4827,11 @@ mod tests {
         assert_eq!(
             solve(&graph, &[], SolveKnobs::default()),
             vec![
-                (-9.252154, 0.0),
-                (77.194374, 0.0),
-                (161.92744, 0.0),
-                (236.34213, 0.0),
-                (333.7882, 0.0),
+                (-9.444492, 0.0),
+                (76.9771, 0.0),
+                (162.09888, 0.0),
+                (236.46185, 0.0),
+                (333.90665, 0.0),
             ],
             "force-mode solve positions must match the size-aware solver"
         );
@@ -4669,10 +4856,10 @@ mod tests {
             positions,
             vec![
                 (0.0, 0.0),
-                (87.79236, 0.02813325),
-                (173.51154, 4.909482),
-                (238.00919, 39.55642),
-                (335.37885, -4.494233),
+                (87.70639, 0.020735445),
+                (173.76686, 4.86222),
+                (238.07115, 39.6247),
+                (335.43875, -4.5079155),
             ],
             "force-mode local re-settle positions must match the size-aware solver"
         );

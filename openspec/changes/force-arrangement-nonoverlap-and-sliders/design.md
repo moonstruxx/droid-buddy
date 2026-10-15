@@ -5,14 +5,14 @@
 Three arrangements live in `src/layout.rs`:
 
 - **Column** (default): deterministic width-aware dense-normalized depth columns, fixed outer controller/jack columns, no force relaxation — overlap-free by construction, but it honors `pins` **exactly** at whatever position they carry.
-- **Force** (retained, `h` / `a` cycle): one-shot convergence from a layered Sugiyama seed. Forces: bundle-normalized cable springs (`tension` 0.05–0.5), point repulsion (`REPULSION_STRENGTH/d²`, cutoff `REPULSION_RADIUS = 120`, grid cell = that radius), weak per-cluster cohesion (`COHESION_K = 0.01`). **No** separation post-condition, **no** size awareness.
+- **Force** (retained, `h` / `a` cycle): one-shot convergence from a layered Sugiyama seed. Forces: bundle-normalized cable springs (`tension` 0.05–0.5), size-aware repulsion — the legacy inverse-square falloff, now with a linear penetration ramp inside `required = 0.5·(extent_i + extent_j)` (D1/D2) — and weak per-cluster cohesion (`COHESION_K`, measured down from 0.01 to 0.0068, D3). The result passes through the **converging** non-overlap post-condition `separate_overlaps_converging` (D3), which replaced the wave-1 fixed 8-pass budget in task 1.4.
 - **Sections** (sections-black-hole-solver): width-aware patch-order lanes, joint slice/section-hole/cable solve, **size-aware** repulsion with a linear penetration ramp on a graph-adaptive grid, and `separate_overlaps` as a hard post-condition.
 
 Node bodies are `node_world_sizes()` = (`estimated_widths[i]`, `NODE_WORLD_H = 80`); the renderer draws exactly those extents and hit-tests the same world-space extents (ADR 40), so the body used by any overlap predicate *is* the frame the user sees. Widths reach ~496 (long title + two port markers), and sections mode clamps only its own drawn width, not force mode's.
 
 The gap: force mode's repulsion is a **point** force with a cutoff (120) far below the required centre separation of two wide bodies (`(w_i + w_j)/2`, up to ~480). Such a pair is never pushed apart by the solver, and nothing else enforces separation, so the solve freezes with intersecting frames. `local_resettle` (drag) shares the same path.
 
-**Measured (2026-10-15, `tests/force_overlap_probe.rs`, default tension and cost model)** — force-mode overlapping body pairs per fixture: `own_scale` 224, `graph_dependency_walk` 33, `cable_banner_combos` 7, `graph_latency_chain` 6, `own_two_ctrl` 4. The column arrangement reports 0 pairs on every fixture, which is the contract this change extends to force mode. The probe's per-fixture ratchet is superseded by task 3.1's zero-pairs invariant.
+**Measured (2026-10-15, `tests/force_overlap_probe.rs`, default tension and cost model)** — force-mode overlapping body pairs per fixture: `own_scale` 224, `graph_dependency_walk` 33, `cable_banner_combos` 7, `graph_latency_chain` 6, `own_two_ctrl` 4. The column arrangement reports 0 pairs on every fixture, which is the contract this change extends to force mode. Those numbers are the *pre-change* baseline (HEAD, before tasks 1.1–1.4); the post-change measurements, including the zero-pairs table the defaults are chosen from, are in D3.
 
 The `S` panel (`src/gui/graph.rs`) is gated on `LayoutMode::Sections`, so force mode's repulsion and cohesion are unreachable at runtime — only `Alt+[`/`Alt+]` (tension) is live.
 
@@ -51,6 +51,8 @@ Rationale: the inverse-square falloff is what spaces *non-overlapping* neighbour
 
 Rejected alternative: replace force-mode repulsion with the pure sections ramp (no long-range term). It is simpler, but it removes the spread that keeps clusters readable in force mode and would make the golden re-bless a rewrite rather than a perturbation.
 
+**Measured reach (2026-10-15, task 1.5).** The ramp is real but it is not the whole story, and the difference is what task 1.4/1.5 had to fix. `fixtures/own_scale.ini`'s bodies are only ≤124 wide, so `required = 0.5·(w_i + w_j)` leaves the ramp nearly inert there — its residual overlap was never repulsion-driven. It is cohesion-driven: `COHESION_K` pulled ~85 banner-group members onto one centroid, and a batch of that density is a *separation* problem, not a force problem. Two consequences, both now measured rather than asserted: the force path's post-condition has to converge (D3), and the default cohesion has to sit at the top of the band where the pile still clears in a practical budget (D3's table). The slider (default `COHESION_K`) is the user's live lever inside that band.
+
 ### D2 — The repulsion grid cell adapts; the falloff keeps its own cutoff
 
 The neighbour scan is a 3×3 cell walk, which is only correct when no repelling pair can be more than one cell apart. Since a repelling pair now exists up to `d < required ≤ max_extent`, the cell becomes `max(REPULSION_RADIUS, max_extent)` (the sections-mode rule). The falloff keeps its own `REPULSION_RADIUS` cutoff inside the force function, so widening the grid does **not** extend the long-range force's reach — it only lets the ramp see wide pairs. This keeps the positional change scoped to overlapping neighbourhoods.
@@ -59,7 +61,39 @@ The neighbour scan is a 3×3 cell walk, which is only correct when no repelling 
 
 The integrator is clamped (`clamp(accel, MAX_DISPLACEMENT)`, `FRICTION`, bounded iterations), so a strong spring can still drag one body onto another and lose the push. Sections mode already resolves this by enforcing the invariant explicitly (`separate_overlaps`, 8 bounded passes, cheapest-axis escape, deterministic `(i, j)` sweep). Force mode gets the same post-condition rather than a higher repulsion gain, because the invariant must hold *by construction*, not by tuning.
 
-Cost: O(n²) per pass, bounded at 8 passes — ~0.13 M pair checks per pass at the 511-node scale anchor. Acceptable, and gated (task 3.5).
+The force path cannot share the fixed budget, though (task 1.4): what a cohesion pile needs is a property of the knob tuple, not of the arrangement, and wave 1 measured the 8-pass budget leaving 240 pairs on the anchor at the then-default cohesion. So force mode runs `separate_overlaps_converging`:
+
+1. read the residual over the **whole** pair set;
+2. if it is zero, stop — the exit is a fresh reading, *never* the sweep's own visited-pair count (a sweep's push can create a pair it has already passed, so the visited count overstates the residual; that overstatement is the entire explanation of wave 1's "more passes make 0.01 worse" reading, and of its "64 passes at cohesion 0" need — the count-driven loop clears that anchor in 15);
+3. otherwise sweep once, cycling three deterministic orders — node index, then bottom-up in y, then left-to-right in x — and go back to 1;
+4. stop at `FORCE_SEPARATION_MAX_PASSES = 128` sweeps, the termination bound for a pile the greedy sweep cannot spread in any practical budget.
+
+Sections keeps `SEPARATION_PASSES = 8` **and** the single node-index order (`separate_overlaps` is unchanged in behaviour, only its inner sweep moved into a shared helper), which is why its output stays byte-identical under the knob plumbing.
+
+**Measured (2026-10-15, five-fixture set, default tension and repulsion gain).** Residual overlapping body pairs after `solve` on the 511-body `fixtures/own_scale.ini` anchor — the binding fixture of the set; the other four (`cable_banner_combos`, `graph_latency_chain`, `own_two_ctrl`, `graph_dependency_walk`) reach zero pairs at every cohesion and every cap in this table:
+
+| cohesion \ cap | 8 | 12 | 16 | 17 | 18 | 19 | 20 | 24 | 28 | 32 | 64 | 128 | 256 | 384 | 512 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.0 | 9 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | – | – |
+| 0.005 | 6 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | – | – |
+| 0.006 | 3 | 3 | 2 | 1 | 0 | 0 | – | – | – | – | – | 0 | – | – | – |
+| 0.0065 | 3 | 3 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | – | – |
+| **0.0068** | – | – | – | 2 | 0 | 0 | – | – | – | 0 | 0 | 0 | 0 | 0 | 0 |
+| 0.0069 | 223 | – | – | 213 | 209 | 207 | – | – | – | – | – | 137 | 86 | **0** | 0 |
+| 0.0070 | 242 | 240 | 238 | 233 | 234 | – | 234 | 230 | 228 | 225 | 212 | 200 | 157 | 131 | 91 |
+| 0.0080 | 258 | 258 | 262 | 261 | 259 | – | 261 | 261 | 262 | 265 | 268 | 269 | 267 | 260 | 256 |
+| 0.0100 | 240 | 245 | 244 | 243 | 242 | – | 243 | 243 | 246 | 247 | 251 | 257 | 264 | – | 274 |
+
+Cells are residual pairs (the axis-aligned predicate `separate_overlaps` itself uses); `–` = not measured. Readings:
+
+- **The default cohesion is `0.0068` (was `0.01`), and the frontier is a cost wall, not a breakage cliff.** Above `0.0068` the residual does fall with the cap, but the budget it needs explodes: `0.0069` needs ~300 sweeps where `0.0068` needs 18, and `0.0070`+ still has 91–274 pairs after 512 sweeps. So "the largest cohesion that reaches zero pairs" only has a meaning *together with the cap*, exactly as the task framed it — the pair is `(0.0068, 128)`, i.e. the largest cohesion that converges in a budget a live re-solve can afford.
+- **The invariant is met, measured.** At that pair all five fixtures return zero overlapping body pairs. The cap is not doing the work: the worst fixture need is **18 sweeps** (the anchor at `0.006` and at `0.0068`; at `0.0065` and below it is ≤17), and 128 is 7× that. A clear layout pays one O(n²) read and no sweep at all.
+- **The bracketing value is the largest that satisfies both bands.** `0.0068` is the top of the zero-pairs band; the same measurement run also shows the *floor*: on a synthetic graph of two 3-member clusters with no edges, cohesion bifurcates between `0.006` (max intra-cluster spread / min inter-cluster gap = 1.98 — members interleave and the clusters do not read as groups) and `0.0065` (0.97). A default at `0.006` is inside the zero-pairs band but fails the property test the repository already has for the mechanism, which is why the default sits at the top of the band rather than in the middle of it. Its headroom to the ceiling is 0.0001, so the pass cap — 7× the measured need — is what absorbs a layout whose own ceiling sits lower.
+- **The sweep order is a residual-shaping knob, not a convergence switch.** Measured at the same caps with index-only, y-only and x-only sweeps: intermediate residuals differ by a pair or two (cap 1: 23 / 22 / 22 pairs on the anchor) but every ordering reaches zero on every fixture at ≤18 sweeps. The three-cycle is kept because the task calls for it and because it costs nothing, not because it is load-bearing.
+- **Cohesion still coheres, and measurably more than at the old default's intent.** Mean distance from the banner-group centroid on the anchor: 3533 units at cohesion 0, **2870 at the 0.0068 default**, 2794 at the pathological 0.01 (whose layout is a pile of overlapping bodies). The knob does its job across its whole live range.
+- **Cost.** O(n²) per sweep + O(n²) per residual read, so ~0.26 M pair checks per sweep at the 511-body anchor: a converging default solve (relaxation + 18 sweeps) measures ~145 ms debug / **13 ms release**, and the worst case — a user-dragged cohesion in the non-convergent regime, 128 sweeps — measures ~0.5 s debug / **38 ms release**. Only the non-convergent regime pays the cap. Task 3.5 gates the release figure.
+
+**Cross-lane consequence (task 2.2):** the cohesion slider should top out at the measured ceiling, i.e. `COHESION_MAX ≈ 0.0068` — the default. Above it the panel offers the user a setting the solver cannot clear in any budget a live re-solve can afford, and the layout comes back visibly overlapping (`0.0069` → 137 pairs at the 128-sweep cap, `0.01` → 257).
 
 ### D4 — Drag: separation restricted to the active neighbourhood
 
@@ -117,7 +151,7 @@ Size-aware repulsion necessarily moves force-mode positions, so `force_mode_posi
 
 - **Force mode looks different on every patch.** Accepted and intended: the arrangement was rendering intersecting frames. Where a wide node now pushes its neighbours apart, its cluster spreads slightly more than before.
 - **A dense bundle of wide nodes may spread more than expected** because the ramp is stronger inside `required` than the old falloff. Mitigation: the gain slider (default 1.0 keeps the ramp bounded at `MAX_DISPLACEMENT`); if the default reads too loose, the knob is the tuning surface, not a code change.
-- **Separation cost** grows quadratically; bounded at 8 passes and gated by a perf phase.
+- **Separation cost** grows quadratically in each sweep, and the force path re-reads the residual between sweeps; bounded at `FORCE_SEPARATION_MAX_PASSES = 128` sweeps, measured 13 ms for a converging default solve on the 511-body anchor and 38 ms for a cap-exhausted one (release), and gated by a perf phase (task 3.5).
 - **Pinned-pinned conflicts move pins** in column mode (D5). Only when they actually intersect, and it is the documented trade-off.
 - **Sections byte-identity is the fragile part of this change** — the knob plumbing must not alter the sections forces. Guarded by the existing sections golden vector and its regression story.
 
