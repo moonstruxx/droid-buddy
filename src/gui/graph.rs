@@ -4192,11 +4192,15 @@ mod zz_throwaway_dump2 {
     }
 }
 
-/// sections-black-hole-solver 4.1/4.3 (and 6.4): the sections sliders panel
-/// paints only in sections mode with the panel toggled on, its three rows bind
-/// to the live `App` forces (each showing its numeric value), the Arrange
-/// button's own click region resolves inside the panel chrome and anneals on
-/// click, and the panel rect consumes the pointer before the canvas marquee.
+/// sections-black-hole-solver 4.1/4.3 (and 6.4) plus
+/// force-arrangement-nonoverlap-and-sliders 2.2/2.3 (design D7): the sliders
+/// panel paints only in the arrangements that have forces (`Force` and
+/// `Sections`) with the panel toggled on, its three rows follow the arrangement
+/// and bind to the live `App` forces (each showing its numeric value, clamped to
+/// the row's own range), the Arrange button's own click region resolves inside
+/// the panel chrome and reports the arrangement it arranged, the Cohesion row's
+/// ceiling stays inside the solver's clearable cohesion band, and the panel rect
+/// consumes the pointer before the canvas marquee.
 #[cfg(test)]
 mod sliders_panel_tests {
     use super::*;
@@ -4421,6 +4425,193 @@ mod sliders_panel_tests {
                 out.labels
             );
         }
+    }
+
+    #[test]
+    fn cohesion_row_ceiling_stays_inside_the_solvers_clearable_band() {
+        // Above the solver's own default cohesion the separation pass stops
+        // clearing its budget — measured, `0.0069` needs ~380 sweeps and `0.008`
+        // never converges at the 128-sweep cap — so the row must never offer that
+        // regime, and its strongest setting must still be the measured default
+        // (design D3/D7).
+        let default = crate::layout::SolveKnobs::default().cohesion;
+        let ceiling = cohesion_slider_max();
+        assert!(
+            ceiling <= default + 1e-9,
+            "the Cohesion ceiling {ceiling} exceeds the solver's default {default}"
+        );
+        assert!(
+            ceiling >= default - 1e-9,
+            "the solver's default {default} is unreachable inside 0.0..={ceiling}"
+        );
+        assert!(
+            ceiling > 0.0,
+            "the Cohesion row must stay draggable, got 0.0..={ceiling}"
+        );
+
+        // And the painted row enforces that same ceiling: a knob above it is
+        // clamped by the row, so the user cannot select an unclearable value.
+        let mut app = panel_app();
+        app.layout_mode = LayoutMode::Force;
+        let above = default * 100.0;
+        app.layout_cohesion_force = above;
+        let out = panel_frame(&mut app, Vec::new());
+        let shown = format!("{:.*}", SLIDERS_COHESION_DECIMALS, ceiling);
+        assert!(
+            out.labels.iter().any(|l| *l == shown),
+            "the Cohesion row must clamp to its ceiling {shown}: {:?}",
+            out.labels
+        );
+        assert_eq!(
+            app.layout_cohesion_force, above,
+            "painting the clamped row must not write the clamp back onto the knob"
+        );
+    }
+
+    #[test]
+    fn panel_rows_keep_their_ranges_in_both_force_bearing_arrangements() {
+        // Design D7: the geometry is shared, the ranges are per-row, and each row
+        // clamps the value it paints. Driving every knob past an endpoint of its
+        // own range therefore names that endpoint in the painted output: the
+        // sections triple is the regression guard for the shared panel (it must
+        // not have been rebound by making the panel arrangement-aware) and the
+        // force triple pins the two new rows.
+        for mode in [LayoutMode::Sections, LayoutMode::Force] {
+            let mut app = panel_app();
+            app.layout_mode = mode;
+            app.layout_slice_force = 10.0;
+            app.layout_section_force = -1.0;
+            app.layout_repulsion_force = 10.0;
+            app.layout_cohesion_force = -1.0;
+            app.tension = -1.0;
+            let out = panel_frame(&mut app, Vec::new());
+            let shows = |label: &str| out.labels.iter().any(|l| l == label);
+            for label in ["Arrange", "Cable"] {
+                assert!(
+                    shows(label),
+                    "{mode:?}: {label} row missing: {:?}",
+                    out.labels
+                );
+            }
+            // The shared Cable row keeps the solver's own `[TENSION_MIN,
+            // TENSION_MAX]` range, so a below-floor tension paints the floor.
+            assert!(
+                shows(&format!("{:.2}", crate::layout::TENSION_MIN)),
+                "{mode:?}: the Cable row must clamp to TENSION_MIN: {:?}",
+                out.labels
+            );
+            match mode {
+                LayoutMode::Force => {
+                    for label in ["Repulsion", "Cohesion"] {
+                        assert!(
+                            shows(label),
+                            "{mode:?}: {label} row missing: {:?}",
+                            out.labels
+                        );
+                    }
+                    for stale in ["Slice", "Section"] {
+                        assert!(
+                            !shows(stale),
+                            "{mode:?}: stale row {stale}: {:?}",
+                            out.labels
+                        );
+                    }
+                    assert!(
+                        shows(&format!("{:.2}", REPULSION_GAIN_MAX)),
+                        "{mode:?}: the Repulsion row must clamp to REPULSION_GAIN_MAX: {:?}",
+                        out.labels
+                    );
+                    assert!(
+                        shows(&format!("{:.*}", SLIDERS_COHESION_DECIMALS, 0.0)),
+                        "{mode:?}: the Cohesion row must clamp to its 0.0 floor: {:?}",
+                        out.labels
+                    );
+                }
+                _ => {
+                    for label in ["Slice", "Section"] {
+                        assert!(
+                            shows(label),
+                            "{mode:?}: {label} row missing: {:?}",
+                            out.labels
+                        );
+                    }
+                    for stale in ["Repulsion", "Cohesion"] {
+                        assert!(
+                            !shows(stale),
+                            "{mode:?}: stale row {stale}: {:?}",
+                            out.labels
+                        );
+                    }
+                    assert!(
+                        shows(&format!("{:.2}", SLIDERS_FORCE_MAX)),
+                        "{mode:?}: the slice/section rows must keep clamping to SLIDERS_FORCE_MAX: {:?}",
+                        out.labels
+                    );
+                    assert!(
+                        shows(&format!("{:.2}", 0.0)),
+                        "{mode:?}: the Section row must clamp to its 0.0 floor: {:?}",
+                        out.labels
+                    );
+                }
+            }
+            // A repaint never writes a row's clamp back onto the knob.
+            assert_eq!(
+                app.tension, -1.0,
+                "{mode:?}: painting must not retune the Cable knob"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_a_sections_row_commits_the_sections_knob_and_re_solves_live() {
+        // Design D7's other half: row 0 stays the sections Slice binding when the
+        // arrangement is `Sections` — making the panel arrangement-aware must not
+        // have rebound it to the force-only Repulsion knob, and the sections drag
+        // must still re-solve live.
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        app.load_patch(patch);
+        app.open_graph();
+        app.layout_mode = LayoutMode::Sections;
+        app.showing_sliders = true;
+        let before = app.graph_positions.clone();
+        let repulsion_before = app.layout_repulsion_force;
+        assert_eq!(
+            app.layout_slice_force,
+            crate::config::DEFAULT_SLICE_FORCE,
+            "the sections drag test needs the solver's own slice default to move from"
+        );
+        let panel = sliders_panel_layout(&app, pane()).expect("panel shown in sections mode");
+        let track = panel.slider_rect(0);
+        let target = egui::pos2(track.min.x + 70.0, track.center().y);
+        let ctx = egui::Context::default();
+        for events in [
+            vec![egui::Event::PointerMoved(target)],
+            vec![pointer_button(target, true)],
+            vec![pointer_button(target, false)],
+        ] {
+            let mut full = ctx.run_ui(raw_input(events), |ui| {
+                paint_sliders_panel(ui, &mut app, pane());
+            });
+            full.textures_delta.clear();
+        }
+        assert!(
+            app.layout_slice_force > crate::config::DEFAULT_SLICE_FORCE,
+            "the drag must move the Slice knob, got {}",
+            app.layout_slice_force
+        );
+        assert_eq!(
+            app.layout_repulsion_force, repulsion_before,
+            "a sections drag must not touch the force-only Repulsion knob"
+        );
+        assert!(
+            !app.graph_positions.is_empty(),
+            "the sections re-solve must keep a solved layout"
+        );
+        assert_ne!(
+            app.graph_positions, before,
+            "a sections re-solve under the new slice force must move the nodes"
+        );
     }
 
     #[test]
