@@ -757,13 +757,19 @@ const REPULSION_GAIN_MAX: f32 = 3.0;
 /// Span of the Cohesion row as a multiple of the solver's own default cohesion.
 /// The ceiling is derived from [`crate::layout::SolveKnobs::default`] rather than
 /// written out again: the default is a measured, retunable value, and a row whose
-/// range did not follow it would go stale the moment it moved.
-const COHESION_SLIDER_SPAN: f32 = 10.0;
+/// range did not follow it would go stale the moment it moved. The multiplier is
+/// `1.0` by measurement, not by taste — cohesion has a narrow legal band and the
+/// default sits at its top: below about `0.0063` (of the default's `0.0068`)
+/// banner groups interleave, and above the default the separation pass stops
+/// clearing its budget (`0.0069` converges only near 380 sweeps, `0.008` does not
+/// converge within 512 at all). The row therefore spans "no cohesion" up to the
+/// strongest setting whose layout still clears the shipped guarantee, instead of
+/// offering a regime where bodies stay overlapped.
+const COHESION_SLIDER_SPAN: f32 = 1.0;
 
 /// Floor of the derived Cohesion ceiling. A default of zero would otherwise
-/// collapse the row to a degenerate `0.0..=0.0` range that cannot be dragged; at
-/// the tuned default this is the smaller of the two terms.
-const COHESION_SLIDER_MIN_SPAN: f32 = 0.1;
+/// collapse the row to a degenerate `0.0..=0.0` range that cannot be dragged.
+const COHESION_SLIDER_MIN_SPAN: f32 = 0.005;
 
 /// Display (and rounding) precision of the force sliders. Two decimals matches
 /// the sections rows and the `0.05` cable-tension step.
@@ -4385,7 +4391,10 @@ mod sliders_panel_tests {
         let mut force = panel_app();
         force.layout_mode = LayoutMode::Force;
         force.layout_repulsion_force = 2.0;
-        force.layout_cohesion_force = 0.1;
+        // Inside the row's range: the ceiling is the solver's own measured default
+        // (see COHESION_SLIDER_SPAN), so an out-of-band value could not be shown.
+        let cohesion = crate::layout::SolveKnobs::default().cohesion;
+        force.layout_cohesion_force = cohesion;
         force.tension = 0.5;
         let out = panel_frame(&mut force, Vec::new());
         for label in ["Repulsion", "Cohesion", "Cable", "Arrange"] {
@@ -4401,9 +4410,13 @@ mod sliders_panel_tests {
                 "force panel must not label a sections row {stale}"
             );
         }
-        for value in ["2.00", "0.1000", "0.50"] {
+        for value in [
+            "2.00".to_string(),
+            format!("{cohesion:.4}"),
+            "0.50".to_string(),
+        ] {
             assert!(
-                out.labels.iter().any(|l| l == value),
+                out.labels.iter().any(|l| *l == value),
                 "force value {value} missing: {:?}",
                 out.labels
             );
