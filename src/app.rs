@@ -2775,17 +2775,15 @@ impl App {
             return false;
         };
         let pins = self.pinned_indices(&graph);
-        let tension = self.tension;
+        let knobs = self.sections_solve_knobs();
         crate::layout::run_iterations_with_forces(
             &graph,
             &mut self.graph_positions,
             crate::layout::SOLVE_ITERATIONS,
             None,
             &pins,
-            tension,
             crate::config::LayoutMode::Sections,
-            self.layout_slice_force,
-            self.layout_section_force,
+            knobs,
         );
         self.fit_graph_camera(self.refit_viewport());
         self.status_message = String::from("Arranged (sections)");
@@ -3496,6 +3494,27 @@ impl App {
         }
     }
 
+    /// Force-mode solver knobs (design D6): the `App`-owned half of the knob
+    /// tuple. `tension` is the only force-mode knob held in `App` state so far;
+    /// the repulsion-gain and cohesion sliders join it in the panel task.
+    fn force_solve_knobs(&self) -> layout::SolveKnobs {
+        layout::SolveKnobs {
+            tension: self.tension,
+            ..layout::SolveKnobs::default()
+        }
+    }
+
+    /// Sections-mode solver knobs (design D6): the cable tension plus the two
+    /// sections sliders, so the panel's live values reach the solver.
+    fn sections_solve_knobs(&self) -> layout::SolveKnobs {
+        layout::SolveKnobs {
+            tension: self.tension,
+            slice_k: self.layout_slice_force,
+            section_k: self.layout_section_force,
+            ..layout::SolveKnobs::default()
+        }
+    }
+
     /// Solve the full graph's node positions by the active layout mode
     /// (graph-column-layout D5): column mode places nodes via
     /// `layout::solve_columns` (width-aware, deterministic, no force
@@ -3529,14 +3548,10 @@ impl App {
                     &anchored,
                 )
             }
-            crate::config::LayoutMode::Force => layout::solve(g, pins, self.tension),
-            crate::config::LayoutMode::Sections => layout::solve_sections(
-                g,
-                pins,
-                self.tension,
-                self.layout_slice_force,
-                self.layout_section_force,
-            ),
+            crate::config::LayoutMode::Force => layout::solve(g, pins, self.force_solve_knobs()),
+            crate::config::LayoutMode::Sections => {
+                layout::solve_sections(g, pins, self.sections_solve_knobs())
+            }
         }
     }
 
@@ -3990,7 +4005,7 @@ impl App {
                 .collect();
             (subset, pins)
         };
-        let sub_pos = crate::layout::solve(&subset, &pins, self.tension);
+        let sub_pos = crate::layout::solve(&subset, &pins, self.force_solve_knobs());
         let mut positions = vec![(0.0, 0.0); self.graph.as_ref().map_or(0, |g| g.nodes.len())];
         for (pi, &fi) in self.dependency_nodes.iter().enumerate() {
             positions[fi] = sub_pos[pi];
@@ -4106,7 +4121,7 @@ impl App {
                 .collect();
             (subset, pins)
         };
-        let sub_pos = crate::layout::solve(&subset, &pins, self.tension);
+        let sub_pos = crate::layout::solve(&subset, &pins, self.force_solve_knobs());
         let mut positions = vec![(0.0, 0.0); self.graph.as_ref().map_or(0, |g| g.nodes.len())];
         for (pi, &fi) in self.influence_nodes.iter().enumerate() {
             positions[fi] = sub_pos[pi];
@@ -4294,7 +4309,7 @@ impl App {
             .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
             .map(|(pi, _)| pi)
             .collect();
-        let positions = crate::layout::solve(&subset, &pins, self.tension);
+        let positions = crate::layout::solve(&subset, &pins, self.force_solve_knobs());
         self.influence_subset = Some(InfluenceSubset {
             nodes: members,
             edges,
@@ -5213,7 +5228,7 @@ mod tests {
         app.open_graph();
         let graph = app.graph.as_ref().unwrap();
         let pins = app.pinned_indices(graph);
-        let expected = layout::solve(graph, &pins, app.tension);
+        let expected = layout::solve(graph, &pins, app.force_solve_knobs());
         assert_eq!(app.graph_positions, expected);
     }
 

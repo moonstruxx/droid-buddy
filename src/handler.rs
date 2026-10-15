@@ -2003,7 +2003,10 @@ fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
                 layout::LOCAL_RADIUS,
                 layout::LOCAL_ITERATIONS,
                 &pins,
-                app.tension,
+                layout::SolveKnobs {
+                    tension: app.tension,
+                    ..layout::SolveKnobs::default()
+                },
             );
             app.notify_node_moved(&node_id);
         }
@@ -2393,7 +2396,10 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             layout::LOCAL_RADIUS,
             layout::LOCAL_ITERATIONS,
             &pins,
-            app.tension,
+            layout::SolveKnobs {
+                tension: app.tension,
+                ..layout::SolveKnobs::default()
+            },
         );
         app.notify_node_moved(&node_id);
     }
@@ -5104,7 +5110,11 @@ mod tests {
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
         assert_eq!(app.status_message, "Layout: force");
         let graph = app.graph.as_ref().unwrap();
-        let expected = crate::layout::solve(graph, &app.pinned_indices(graph), app.tension);
+        let knobs = crate::layout::SolveKnobs {
+            tension: app.tension,
+            ..Default::default()
+        };
+        let expected = crate::layout::solve(graph, &app.pinned_indices(graph), knobs);
         assert_eq!(
             app.graph_positions, expected,
             "column→force toggle re-solves with the force solver"
@@ -5171,7 +5181,6 @@ mod tests {
         let before = app.graph_positions.clone();
         let graph = app.graph.as_ref().unwrap().clone();
         let pins = app.pinned_indices(&graph);
-        let tension = app.tension;
         let mut expected = before.clone();
         crate::layout::run_iterations(
             &graph,
@@ -5179,8 +5188,11 @@ mod tests {
             crate::layout::SOLVE_ITERATIONS,
             None,
             &pins,
-            tension,
             crate::config::LayoutMode::Sections,
+            crate::layout::SolveKnobs {
+                tension: app.tension,
+                ..Default::default()
+            },
         );
 
         handle_event(key(KeyCode::Char('A')), &mut app);

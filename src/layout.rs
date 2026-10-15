@@ -56,8 +56,13 @@ pub const TENSION_MAX: f32 = 0.5;
 /// Repulsion magnitude coefficient (force ~ strength / distance²). Softened
 /// below spring influence so edges read as the primary structure (design D2).
 const REPULSION_STRENGTH: f32 = 1500.0;
-/// Repulsion cutoff radius; also the uniform-grid cell size.
+/// Repulsion cutoff radius; also the floor of the uniform-grid cell size.
 const REPULSION_RADIUS: f32 = 120.0;
+/// Default repulsion gain (design D1): the multiplier on the size-aware
+/// penetration ramp both arrangements apply. `1.0` reproduces the tuned forces,
+/// so [`SolveKnobs::default()`] leaves the sections path byte-identical while
+/// the same knob can loosen or stiffen force mode's separation.
+pub const REPULSION_GAIN_DEFAULT: f32 = 1.0;
 /// Per-axis cap on a single velocity update, keeps the solver from exploding.
 const MAX_DISPLACEMENT: f32 = 20.0;
 
@@ -77,8 +82,9 @@ pub const SECTION_HOLE_K: f32 = DEFAULT_SECTION_HOLE_K;
 /// Default section-hole spring stiffness — anchors members strongly.
 pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
 
-/// Bounded overlap-removal passes appended to a sections-mode solve
-/// (sections-black-hole-solver 3.9), and the slack each resolved pair keeps.
+/// Bounded overlap-removal passes appended to a force- or sections-mode solve
+/// (sections-black-hole-solver 3.9; force mode joins it under design D3), and
+/// the slack each resolved pair keeps.
 ///
 /// The wrapped seed is the layout's spacing guarantee — measured worst pairwise
 /// penetration 0.00 on `fixtures/own_scale.ini` — but the force relaxation can
@@ -92,10 +98,10 @@ pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
 ///
 /// The relaxation still decides where circuits live (the pass only resolves
 /// penetration, never compacts), so the layout keeps its cable-driven character.
-const SECTION_SEPARATION_PASSES: usize = 8;
+const SEPARATION_PASSES: usize = 8;
 /// Extra clearance a resolved pair keeps, so a pair the pass touches lands
 /// strictly clear instead of exactly touching on the boundary.
-const SECTION_SEPARATION_EPS: f32 = 1.0;
+const SEPARATION_EPS: f32 = 1.0;
 
 /// Per-axis bound on how far a sections-mode node may be displaced from its own
 /// seed target (sections-black-hole-solver 3.9).
@@ -129,6 +135,42 @@ pub const DEFAULT_SECTIONS_TETHER: f32 = SECTIONS_LANE_GAP * 1.5;
 /// centroid (design D3). Deliberately far below `SPRING_K` so clusters
 /// cohere without collapsing or overriding the single-axis spring bias.
 const COHESION_K: f32 = 0.01;
+
+/// The solver's knob tuple (design D6): one value per force the arrangements
+/// use, threaded through every entry point as a bundle instead of as loose
+/// arguments.
+///
+/// The tuple is the layout's determinism key — same patch + same machine +
+/// same knob tuple → identical positions — and [`SolveKnobs::default()`]
+/// reproduces the tuned defaults, so passing it is exactly today's behaviour
+/// (the sections path is byte-identical under it, [`REPULSION_GAIN_DEFAULT`]
+/// being 1.0).
+#[derive(Clone, Copy, Debug)]
+pub struct SolveKnobs {
+    /// Cable-spring stiffness, both arrangements (the `[`/`]` knob).
+    pub tension: f32,
+    /// Sections mode: slice-spring stiffness. Ignored in force mode.
+    pub slice_k: f32,
+    /// Sections mode: section-hole-spring stiffness. Ignored in force mode.
+    pub section_k: f32,
+    /// Gain on the size-aware repulsion ramp, both arrangements.
+    pub repulsion: f32,
+    /// Force mode: per-cluster cohesion strength. Ignored in sections mode
+    /// (its section-hole springs do the clustering).
+    pub cohesion: f32,
+}
+
+impl Default for SolveKnobs {
+    fn default() -> Self {
+        Self {
+            tension: DEFAULT_TENSION,
+            slice_k: SLICE_K,
+            section_k: SECTION_HOLE_K,
+            repulsion: REPULSION_GAIN_DEFAULT,
+            cohesion: COHESION_K,
+        }
+    }
+}
 
 /// Horizontal gap between topological-depth levels in the seed layout.
 const HORIZONTAL_SPACING: f32 = 80.0;
@@ -231,11 +273,19 @@ pub const SOLVE_ITERATIONS: usize = 60;
 /// converges independently under the same bounded, grid-hashed solver
 /// (`SOLVE_ITERATIONS`, `ENERGY_THRESHOLD`).
 ///
-/// `tension` is the spring stiffness (`SPRING_K`); pass [`DEFAULT_TENSION`]
-/// for the tuned default. Higher tension pulls cable-connected nodes closer
-/// together, lower tension lets repulsion spread them out. Determinism holds
-/// per tension value: same patch + same machine + same tension → same layout.
-pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
+/// `knobs` is the solver's knob tuple ([`SolveKnobs`]); its `tension` is the
+/// spring stiffness (`SPRING_K`) — pass [`SolveKnobs::default()`] for the tuned
+/// defaults. Higher tension pulls cable-connected nodes closer together, lower
+/// tension lets repulsion spread them out. Determinism holds per knob tuple:
+/// same patch + same machine + same knobs → same layout.
+///
+/// Beyond the tuned force, the solve runs the **non-overlap post-condition**
+/// (design D3): the result passes through the bounded [`separate_overlaps`]
+/// pass, which resolves the residual penetration a clamped integrator leaves
+/// between drawn bodies. The pass is bounded and pairwise-greedy, not a packing
+/// algorithm, so it clears the layouts the solver produces whenever bodies are
+/// not piled into the same space — a dense pile can keep a residual.
+pub fn solve(graph: &Graph, pinned: &[usize], knobs: SolveKnobs) -> Vec<(f32, f32)> {
     let mut positions = seed_positions(graph);
     run_iterations(
         graph,
@@ -243,8 +293,8 @@ pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
         SOLVE_ITERATIONS,
         None,
         pinned,
-        tension,
         LayoutMode::Force,
+        knobs,
     );
     positions
 }
@@ -253,16 +303,11 @@ pub fn solve(graph: &Graph, pinned: &[usize], tension: f32) -> Vec<(f32, f32)> {
 /// with slice springs, section-hole springs, cable springs, and size-aware
 /// repulsion.
 ///
-/// `slice_force` and `section_force` are the runtime-adjustable spring
-/// stiffnesses (bound to `SLICE_K` and `SECTION_HOLE_K` by the caller before
-/// calling). `tension` is the cable spring stiffness.
-pub fn solve_sections(
-    graph: &Graph,
-    pinned: &[usize],
-    tension: f32,
-    slice_force: f32,
-    section_force: f32,
-) -> Vec<(f32, f32)> {
+/// `knobs` carries the runtime-adjustable stiffnesses (`slice_k` and
+/// `section_k`, bound to [`SLICE_K`] and [`SECTION_HOLE_K`] by the caller before
+/// calling) plus the cable `tension` and the repulsion gain; pass
+/// [`SolveKnobs::default()`] for the tuned defaults.
+pub fn solve_sections(graph: &Graph, pinned: &[usize], knobs: SolveKnobs) -> Vec<(f32, f32)> {
     let mut positions = seed_positions_sections(graph);
     run_iterations_with_forces(
         graph,
@@ -270,10 +315,8 @@ pub fn solve_sections(
         SOLVE_ITERATIONS,
         None,
         pinned,
-        tension,
         LayoutMode::Sections,
-        slice_force,
-        section_force,
+        knobs,
     );
     positions
 }
@@ -286,8 +329,13 @@ pub fn solve_sections(
 /// node in `graph`; positions are otherwise left untouched. `pinned` marks
 /// node indices that never move — they stay exactly where they currently sit
 /// (e.g. a drag-dropped anchor) while still exerting forces on the active
-/// neighbourhood. Returns whether the moved node was found. `tension` is the
-/// spring stiffness used for the re-settle (see [`solve`]).
+/// neighbourhood. Returns whether the moved node was found. `knobs` is the
+/// solver's knob tuple ([`SolveKnobs`]; see [`solve`]).
+///
+/// The separation post-condition ([`separate_overlaps`]) runs with
+/// `movable = active ∧ unpinned` (design D4): a drag can push its own
+/// neighbourhood apart, but the anchors outside `radius` never move, so the
+/// whole layout can never shift under a drag.
 pub fn local_resettle(
     graph: &Graph,
     positions: &mut [(f32, f32)],
@@ -295,7 +343,7 @@ pub fn local_resettle(
     radius: f32,
     iterations: usize,
     pinned: &[usize],
-    tension: f32,
+    knobs: SolveKnobs,
 ) -> bool {
     let Some(center) = graph.nodes.iter().position(|n| &n.id == moved) else {
         return false;
@@ -310,15 +358,20 @@ pub fn local_resettle(
         iterations,
         Some(&active),
         pinned,
-        tension,
         LayoutMode::Force,
+        knobs,
     );
     true
 }
 
 /// Push every pair of overlapping bodies apart along the axis that needs the
 /// least correction, in bounded deterministic passes (sections-black-hole-solver
-/// 3.9 — see [`SECTION_SEPARATION_PASSES`]).
+/// 3.9; the force path joins it under design D3 — see [`SEPARATION_PASSES`]).
+///
+/// This is the **non-overlap post-condition**: it is what makes "no two drawn
+/// bodies intersect" hold by construction rather than by tuning, because the
+/// integrator is clamped and a strong spring can still drag one body onto
+/// another and lose the push.
 ///
 /// `sizes` is `(width, height)` per node (parallel to `positions`), the same
 /// extents the renderer draws, so the predicate is the axis-aligned one: a pair
@@ -326,9 +379,12 @@ pub fn local_resettle(
 /// still-overlapping pairs are touched, and only along their cheaper axis, so
 /// the pass never compacts the layout — it strictly removes penetration.
 ///
-/// `movable[i] == false` marks a pinned node: it stays exactly where it is (it
-/// is an anchor other nodes are pushed away from) and its partner takes the
-/// whole correction when it can. A pair with both nodes pinned is left alone.
+/// `movable[i] == false` marks a body the solve may not move at all: a pinned
+/// node, or (during a drag) an inactive node outside the moved node's
+/// neighbourhood. It stays exactly where it is — it is an anchor other nodes are
+/// pushed away from — and its partner takes the whole correction when it can. A
+/// pair with both bodies immovable is left alone (see [`solve_columns_pinned`]
+/// for the one place that policy yields to the invariant).
 ///
 /// The pass is deliberately *not* tethered: it runs after the relaxation and may
 /// push a node past [`SECTIONS_TETHER`] rather than leave two bodies overlapping
@@ -376,12 +432,12 @@ fn separate_overlaps(
                 };
                 // Escape along the cheaper axis (ties go to x, deterministically).
                 if pen_x <= pen_y {
-                    let push = (pen_x + SECTION_SEPARATION_EPS) * 0.5;
+                    let push = (pen_x + SEPARATION_EPS) * 0.5;
                     let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
                     positions[i].0 -= sign * push * share_i;
                     positions[j].0 += sign * push * share_j;
                 } else {
-                    let push = (pen_y + SECTION_SEPARATION_EPS) * 0.5;
+                    let push = (pen_y + SEPARATION_EPS) * 0.5;
                     let sign = if dy >= 0.0 { 1.0 } else { -1.0 };
                     positions[i].1 -= sign * push * share_i;
                     positions[j].1 += sign * push * share_j;
@@ -785,8 +841,11 @@ pub fn solve_columns(graph: &Graph, widths: &[f32], ordering: LayoutOrdering) ->
 /// occupied by a pinned node in their column. Deterministic per (graph,
 /// widths, ordering, pins) — same inputs, same output.
 ///
-/// Pins are honored exactly; the no-overlap property holds when pinned
-/// positions are grid-aligned (as previous column-solve outputs are).
+/// Pins are honored exactly whenever that is possible; the no-overlap property
+/// holds when pinned positions are grid-aligned (as previous column-solve
+/// outputs are). The one exception is two pinned bodies that actually
+/// intersect: there the invariant wins and only those bodies move — see the
+/// separation pass at the end of this function.
 pub fn solve_columns_pinned(
     graph: &Graph,
     widths: &[f32],
@@ -854,6 +913,34 @@ pub fn solve_columns_pinned(
         let y = slot[c] as f32 * VERTICAL_SPACING;
         positions[i] = (x, y);
         slot[c] += 1;
+    }
+
+    // Non-overlap is a post-condition of the column path too (design D3/D5).
+    // Pins are honored exactly whenever that is possible, but an off-grid pin
+    // carried over from a force solve or a drag can land inside a slot
+    // neighbour, and two immovable bodies cannot be separated at all — so the
+    // policy is two-phase:
+    //
+    //   1. separate with every pin immovable: in the common case the unpinned
+    //      neighbours give way and no pin moves at all;
+    //   2. if pairs still intersect, one final pass with every body movable.
+    //
+    // Exact pin honoring therefore yields to the no-overlap invariant **only**
+    // when two pinned bodies intersect — and then only the intersecting bodies
+    // actually move, because the first pass already cleared every pair that had
+    // a movable partner.
+    //
+    // The extents are the ones this placement reserved per node (`widths` plus
+    // `NODE_WORLD_H`; the app passes `estimated_widths`, which is exactly
+    // `node_world_sizes()`' width — ADR 40), so the pass and the placed geometry
+    // cannot disagree.
+    let sizes: Vec<(f32, f32)> = width.iter().map(|&w| (w, NODE_WORLD_H)).collect();
+    let movable: Vec<bool> = (0..n)
+        .map(|i| !pins.iter().any(|&(pinned_index, _)| pinned_index == i))
+        .collect();
+    let remaining = separate_overlaps(&mut positions, &sizes, &movable, SEPARATION_PASSES);
+    if remaining > 0 {
+        separate_overlaps(&mut positions, &sizes, &vec![true; n], SEPARATION_PASSES);
     }
     positions
 }
@@ -1268,53 +1355,48 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
 /// when kinetic energy converges.
 ///
 /// `mode` selects the force model:
-/// - `LayoutMode::Force`: cable springs + uniform repulsion + weak cohesion
+/// - `LayoutMode::Force`: cable springs + size-aware repulsion + weak cohesion
 /// - `LayoutMode::Sections`: slice springs, section-hole springs, cable springs,
 ///   and size-aware repulsion (cohesion replaced by hole springs), each node
-///   tethered to its own seed target ([`SECTIONS_TETHER`]) and, once relaxed,
-///   passed through the bounded overlap-removal pass ([`separate_overlaps`])
+///   tethered to its own seed target ([`SECTIONS_TETHER`])
 ///
-/// Runs sections mode with the module-default stiffnesses ([`SLICE_K`],
-/// [`SECTION_HOLE_K`]); sections-mode callers that expose runtime sliders call
-/// [`run_iterations_with_forces`] instead so the stiffnesses actually reach the
-/// solver.
+/// `knobs` is the solver's knob tuple ([`SolveKnobs`]), the determinism key and
+/// the only source of stiffness and gain values.
+///
+/// Both models end with the same **non-overlap post-condition** (design D3):
+/// the bounded [`separate_overlaps`] pass, so the invariant comes from an
+/// explicit pass rather than from tuning the forces. Pinned nodes, and (for a
+/// drag) inactive nodes, are immovable in that pass, so only bodies free to
+/// move are ever pushed.
 pub(crate) fn run_iterations(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     max_iter: usize,
     active: Option<&[bool]>,
     pinned: &[usize],
-    tension: f32,
     mode: LayoutMode,
+    knobs: SolveKnobs,
 ) -> usize {
-    run_iterations_with_forces(
-        graph,
-        positions,
-        max_iter,
-        active,
-        pinned,
-        tension,
-        mode,
-        SLICE_K,
-        SECTION_HOLE_K,
-    )
+    run_iterations_with_forces(graph, positions, max_iter, active, pinned, mode, knobs)
 }
 
-/// Core solver behind [`run_iterations`] with explicit sections-mode spring
-/// stiffnesses. `slice_k` is the slice-spring stiffness and `section_k` the
-/// section-hole-spring stiffness ([`solve_sections`] forwards its runtime
-/// slider params here); both are ignored in [`LayoutMode::Force`].
-#[allow(clippy::too_many_arguments)] // one param per solver knob (graph, positions, budget, active, pins, tension, mode, slice_k, section_k)
+/// Core solver behind [`run_iterations`]: one force model per arrangement, both
+/// driven entirely by [`SolveKnobs`].
+///
+/// `knobs.tension` is the cable-spring stiffness (both arrangements);
+/// `knobs.slice_k` and `knobs.section_k` are the sections-mode slice and
+/// section-hole stiffnesses (ignored in [`LayoutMode::Force`]);
+/// `knobs.repulsion` scales the size-aware penetration ramp (both arrangements);
+/// `knobs.cohesion` is the force-mode per-cluster cohesion (unused in sections
+/// mode).
 pub(crate) fn run_iterations_with_forces(
     graph: &Graph,
     positions: &mut [(f32, f32)],
     max_iter: usize,
     active: Option<&[bool]>,
     pinned: &[usize],
-    tension: f32,
     mode: LayoutMode,
-    slice_k: f32,
-    section_k: f32,
+    knobs: SolveKnobs,
 ) -> usize {
     let n = graph.nodes.len();
     if n == 0 {
@@ -1337,36 +1419,33 @@ pub(crate) fn run_iterations_with_forces(
         .map(|i| graph.cluster_index_of(graph.nodes[i].section_index))
         .collect();
 
+    // Body extents as the renderer draws them (ADR 40): `(width, height)` per
+    // node. `sizes` drives the axis-aligned overlap-removal pass; `extents` (the
+    // `max(width, height)` each body claims around its center) drives the radial
+    // size-aware repulsion. Both arrangements read the same extents, so the force
+    // that separates a pair and the pass that guarantees it always agree with the
+    // frame the user sees.
+    let sizes = node_world_sizes(graph);
+    let extents: Vec<f32> = sizes.iter().map(|&(w, h)| w.max(h)).collect();
+    // Grid cell size for this graph (design D2): never smaller than
+    // `REPULSION_RADIUS` (keeps the 3x3 neighbour scan valid for the small-node
+    // case) and never smaller than the largest node extent. A pair only repels
+    // while its center distance is below `required = 0.5 * (extent_i +
+    // extent_j) <= max_extent`, and any two points within one cell size differ by
+    // at most one cell per axis, so the 3x3 scan cannot miss a repelling pair —
+    // in either arrangement. The falloff keeps its own `REPULSION_RADIUS` cutoff,
+    // so widening the cell does not extend the long-range force's reach.
+    let cell_size = REPULSION_RADIUS.max(extents.iter().copied().fold(0.0f32, f32::max));
+
     // Sections-mode precomputation: wrapped lane slots (the targets of the
-    // slice springs), section-hole anchors in lane-slot space (computed once —
-    // fixed black holes), and node bounding extents for size-aware repulsion.
-    let (node_targets, holes, sizes, extents, cell_size) = if mode == LayoutMode::Sections {
+    // slice springs) and section-hole anchors in lane-slot space (computed once
+    // — fixed black holes). Force mode has neither.
+    let (node_targets, holes) = if mode == LayoutMode::Sections {
         let seed = sections_seed(graph);
-        let hole_anchors = section_hole_anchors_lanes(graph, &seed);
-        // Body sizes as the renderer draws them: `(width, height)` per node.
-        // `sizes` drives the axis-aligned overlap-removal pass; `extents` (the
-        // `max(width, height)` the body claims around its center) drives the
-        // radial size-aware repulsion.
-        let sizes = node_world_sizes(graph);
-        let extents: Vec<f32> = sizes.iter().map(|&(w, h)| w.max(h)).collect();
-        // Grid cell size for this graph: never smaller than `REPULSION_RADIUS`
-        // (keeps the 3x3 neighbour scan valid for the small-node case) and never
-        // smaller than the largest node extent. A pair only repels while its
-        // center distance is below `required = 0.5 * (extent_i + extent_j) <=
-        // max_extent`, and any two points within one cell size differ by at
-        // most one cell per axis, so the 3x3 scan cannot miss a repelling pair.
-        let cell = REPULSION_RADIUS.max(extents.iter().copied().fold(0.0f32, f32::max));
-        (
-            Some(seed.targets),
-            Some(hole_anchors),
-            Some(sizes),
-            Some(extents),
-            cell,
-        )
+        let holes = section_hole_anchors_lanes(graph, &seed);
+        (Some(seed.targets), Some(holes))
     } else {
-        // Force mode keeps the historical `REPULSION_RADIUS` grid so its layout
-        // stays byte-identical (determinism contract).
-        (None, None, None, None, REPULSION_RADIUS)
+        (None, None)
     };
 
     let mut velocity = vec![(0.0f32, 0.0f32); n];
@@ -1374,10 +1453,9 @@ pub(crate) fn run_iterations_with_forces(
     let mut iterations = 0;
     for _ in 0..max_iter {
         iterations += 1;
-        // Rebuild the uniform repulsion grid from current positions (D9).
-        // Cell size is `REPULSION_RADIUS` for force mode; sections mode widens
-        // it to the largest node extent (see `cell_size` above) so the 3x3
-        // neighbour scan still covers every pair the size-aware force reaches.
+        // Rebuild the uniform repulsion grid from current positions (D9). The
+        // cell is graph-adaptive in both arrangements (see `cell_size` above) so
+        // the 3x3 neighbour scan covers every pair the size-aware force reaches.
         let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for (i, &pos) in positions.iter().enumerate().take(n) {
             grid.entry(cell_of(pos, cell_size)).or_default().push(i);
@@ -1388,7 +1466,7 @@ pub(crate) fn run_iterations_with_forces(
         // Cable springs (both modes): bundle-normalized spring force along edges.
         for &(u, v) in &edges {
             let m = edge_multiplicity[&(u, v)] as f32;
-            let f = spring_force(positions[u], positions[v], tension);
+            let f = spring_force(positions[u], positions[v], knobs.tension);
             accel[u].0 += f.0 / m;
             accel[u].1 += f.1 / m;
             accel[v].0 -= f.0 / m;
@@ -1400,7 +1478,6 @@ pub(crate) fn run_iterations_with_forces(
             // Sections mode: slice springs + section-hole springs + size-aware repulsion
             let node_targets = node_targets.as_ref().unwrap();
             let hole_anchors = holes.as_ref().unwrap();
-            let extents = extents.as_ref().unwrap();
 
             // Slice springs: pull each node toward its own seed target in both
             // axes — `(slot_x, slot_y + rank · stack pitch)`, so a multi-node
@@ -1412,8 +1489,8 @@ pub(crate) fn run_iterations_with_forces(
             // the members of a multi-node lane further.
             for (i, &pos) in positions.iter().enumerate().take(n) {
                 let (target_x, target_y) = node_targets[i];
-                accel[i].0 += (target_x - pos.0) * slice_k;
-                accel[i].1 += (target_y - pos.1) * slice_k;
+                accel[i].0 += (target_x - pos.0) * knobs.slice_k;
+                accel[i].1 += (target_y - pos.1) * knobs.slice_k;
             }
 
             // Section-hole springs: pull cluster members toward their fixed anchor
@@ -1423,17 +1500,17 @@ pub(crate) fn run_iterations_with_forces(
             for (i, &pos) in positions.iter().enumerate().take(n) {
                 if let Some((anchor_x, anchor_y)) = hole_anchors[i] {
                     if graph.nodes[i].kind == NodeKind::Circuit {
-                        accel[i].0 += (anchor_x - pos.0) * section_k;
-                        accel[i].1 += (anchor_y - pos.1) * section_k;
+                        accel[i].0 += (anchor_x - pos.0) * knobs.section_k;
+                        accel[i].1 += (anchor_y - pos.1) * knobs.section_k;
                     }
                 }
             }
 
-            // Size-aware repulsion: two bodies repel until their center
-            // distance reaches `required = 0.5 * (extent_i + extent_j)`, the
-            // separation at which their `max(width, height)` extents stop
-            // overlapping (design D3). `cell_size` was sized from the largest
-            // extent, so the 3x3 scan below sees every such pair.
+            // Size-aware repulsion (design D1): two bodies repel until their
+            // center distance reaches `required = 0.5 * (extent_i + extent_j)`,
+            // the separation at which their `max(width, height)` extents stop
+            // overlapping. `cell_size` was sized from the largest extent, so the
+            // 3x3 scan below sees every such pair.
             for (i, &pos) in positions.iter().enumerate().take(n) {
                 let (cx, cy) = cell_of(pos, cell_size);
                 let extent_i = extents[i];
@@ -1447,7 +1524,12 @@ pub(crate) fn run_iterations_with_forces(
                                 continue;
                             }
                             let required = 0.5 * (extent_i + extents[j]);
-                            let f = repulsion_force_size_aware(pos, positions[j], required);
+                            let f = repulsion_force_size_aware(
+                                pos,
+                                positions[j],
+                                required,
+                                knobs.repulsion,
+                            );
                             accel[i].0 += f.0;
                             accel[i].1 += f.1;
                             accel[j].0 -= f.0;
@@ -1459,9 +1541,20 @@ pub(crate) fn run_iterations_with_forces(
             // Note: cohesion is intentionally omitted in sections mode —
             // section-hole springs provide the clustering.
         } else {
-            // Force mode: uniform repulsion + weak cohesion
+            // Force mode: size-aware repulsion + weak cohesion.
+            //
+            // The predicate is the same one sections mode uses — the linear
+            // penetration ramp inside `required` (design D1/D3), because a point
+            // force with a fixed cutoff cannot separate wide bodies: node
+            // extents reach ~496 while `REPULSION_RADIUS` is 120, so two wide
+            // bodies were never pushed apart at all. Beyond `required` the
+            // solver keeps the historical inverse-square falloff, so the spread
+            // between *already clear* neighbours is unchanged and long chains
+            // cannot collapse; that falloff keeps its own `REPULSION_RADIUS`
+            // cutoff, so the wider grid cell only lets the ramp see wide pairs.
             for (i, &pos) in positions.iter().enumerate().take(n) {
                 let (cx, cy) = cell_of(pos, cell_size);
+                let extent_i = extents[i];
                 for dx in -1..=1 {
                     for dy in -1..=1 {
                         let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
@@ -1471,7 +1564,13 @@ pub(crate) fn run_iterations_with_forces(
                             if i >= j {
                                 continue;
                             }
-                            let f = repulsion_force(pos, positions[j]);
+                            let required = 0.5 * (extent_i + extents[j]);
+                            let f = repulsion_force_with_falloff(
+                                pos,
+                                positions[j],
+                                required,
+                                knobs.repulsion,
+                            );
                             accel[i].0 += f.0;
                             accel[i].1 += f.1;
                             accel[j].0 -= f.0;
@@ -1500,8 +1599,8 @@ pub(crate) fn run_iterations_with_forces(
                     }
                     let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
                     for &i in list {
-                        accel[i].0 += (cx - positions[i].0) * COHESION_K;
-                        accel[i].1 += (cy - positions[i].1) * COHESION_K;
+                        accel[i].0 += (cx - positions[i].0) * knobs.cohesion;
+                        accel[i].1 += (cy - positions[i].1) * knobs.cohesion;
                     }
                 }
             }
@@ -1541,17 +1640,25 @@ pub(crate) fn run_iterations_with_forces(
         }
     }
 
-    // Sections mode: non-overlap is a hard requirement, so it is enforced as a
-    // post-condition rather than left to the springs (see
-    // [`SECTION_SEPARATION_PASSES`]). Force mode is untouched — its layout is
-    // pinned byte-for-byte by golden vectors.
-    if mode == LayoutMode::Sections {
-        let sizes = sizes.as_ref().unwrap();
-        let movable: Vec<bool> = (0..n)
-            .map(|i| !pinned_mask[i] && !active.is_some_and(|act| !act[i]))
-            .collect();
-        separate_overlaps(positions, sizes, &movable, SECTION_SEPARATION_PASSES);
-    }
+    // Non-overlap is a post-condition of every path that produces positions
+    // (design D3), not a tuning hope: the integrator is clamped, so a strong
+    // spring can still drag one body onto another and lose the push. The pass is
+    // bounded and deterministic ([`SEPARATION_PASSES`]) and never compacts — it
+    // only resolves penetration, so the relaxation still decides where circuits
+    // live.
+    //
+    // `movable` mirrors the integrator's own policy, so separation can never
+    // move a body the solve was not allowed to move: a pinned node stays exactly
+    // where it is (an anchor others are pushed away from), and an inactive node
+    // — outside a drag's neighbourhood, or an anchor in a local re-settle —
+    // stays exactly where it is too (design D4). For `solve` and `local_resettle`
+    // that is the whole policy: exact pin honoring yields to the invariant only
+    // on the column path (see [`solve_columns_pinned`]), where pins carry
+    // off-grid positions from a previous force solve or drag.
+    let movable: Vec<bool> = (0..n)
+        .map(|i| !pinned_mask[i] && !active.is_some_and(|act| !act[i]))
+        .collect();
+    separate_overlaps(positions, &sizes, &movable, SEPARATION_PASSES);
     iterations
 }
 
@@ -1568,6 +1675,12 @@ fn spring_force(a: (f32, f32), b: (f32, f32), tension: f32) -> (f32, f32) {
 }
 
 /// Force on `a` pushing it away from `b` (inverse-square, radius-capped).
+///
+/// Since design D1 this is the **long-range term** of the force-mode repulsion
+/// rather than that arrangement's whole force: it is what spaces pairs whose
+/// bodies are already clear of each other, and its own [`REPULSION_RADIUS`]
+/// cutoff is deliberately unchanged, so widening the repulsion grid cell lets
+/// the penetration ramp see wide pairs without extending this term's reach.
 fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     let (dx, dy, d) = delta(a, b);
     if d < 1e-6 {
@@ -1581,16 +1694,22 @@ fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     ((-dx / d) * mag, (-dy / d) * mag)
 }
 
-/// Size-aware repulsion for sections mode (design D3): push `a` away from `b`
-/// until their center distance reaches `required = 0.5 * (extent_a + extent_b)`
-/// — the separation at which their `max(width, height)` bounding extents stop
-/// overlapping. Magnitude is a linear ramp in the penetration depth
-/// `required - d`, scaled so it reaches the full per-axis step budget
-/// ([`MAX_DISPLACEMENT`]) after one [`REPULSION_RADIUS`] of penetration:
-///
-/// ```text
-/// mag = min(MAX_DISPLACEMENT, MAX_DISPLACEMENT * (required - d) / REPULSION_RADIUS)
-/// ```
+/// Magnitude of the size-aware penetration ramp both arrangements share
+/// (design D1/D3): linear in the penetration `required - d`, saturating at the
+/// per-axis step budget [`MAX_DISPLACEMENT`] after one [`REPULSION_RADIUS`] of
+/// penetration. Normalizing by that constant radius (not by `required` or
+/// `required²`) keeps both regimes in budget, and it is the one formula behind
+/// the force and the sections path, so both arrangements speak one separation
+/// language.
+fn penetration_ramp_mag(d: f32, required: f32) -> f32 {
+    (MAX_DISPLACEMENT * (required - d) / REPULSION_RADIUS).min(MAX_DISPLACEMENT)
+}
+
+/// Size-aware repulsion for the sections arrangement (design D3): push `a` away
+/// from `b` until their center distance reaches `required = 0.5 * (extent_a +
+/// extent_b)` — the separation at which their `max(width, height)` bounding
+/// extents stop overlapping. `gain` scales the ramp; `1.0`
+/// ([`REPULSION_GAIN_DEFAULT`]) is byte-identical to the pre-gain solver.
 ///
 /// Properties this shape is chosen for:
 /// - **Zero at `d >= required`** — no phantom push at rest; the pair stops as
@@ -1611,7 +1730,12 @@ fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
 ///   regimes in budget: the slope stays below the step budget for a small pair
 ///   (`required` ≈ 80), so cluster members are nudged rather than flung, while a
 ///   wide pair still saturates the budget for as long as it has to travel.
-fn repulsion_force_size_aware(a: (f32, f32), b: (f32, f32), required: f32) -> (f32, f32) {
+fn repulsion_force_size_aware(
+    a: (f32, f32),
+    b: (f32, f32),
+    required: f32,
+    gain: f32,
+) -> (f32, f32) {
     let (dx, dy, d) = delta(a, b);
     if d < 1e-6 {
         // Coincident nodes: a small deterministic nudge breaks the tie.
@@ -1621,8 +1745,49 @@ fn repulsion_force_size_aware(a: (f32, f32), b: (f32, f32), required: f32) -> (f
         // At or beyond the required separation the pair is clear: no force.
         return (0.0, 0.0);
     }
-    let overlap = required - d;
-    let mag = (MAX_DISPLACEMENT * overlap / REPULSION_RADIUS).min(MAX_DISPLACEMENT);
+    let mag = penetration_ramp_mag(d, required) * gain;
+    ((-dx / d) * mag, (-dy / d) * mag)
+}
+
+/// Force-mode repulsion (design D1): the size-aware penetration ramp *inside*
+/// `required`, then the retained inverse-square falloff beyond it, both scaled by
+/// `gain`.
+///
+/// ```text
+/// required = 0.5 * (extent_i + extent_j)     // extent = max(width, height)
+/// d <  required: mag = MAX_DISPLACEMENT * min(1, (required - d) / REPULSION_RADIUS)
+/// d >= required: mag = min(MAX_DISPLACEMENT, REPULSION_STRENGTH / d²)
+///                      (zero beyond REPULSION_RADIUS)
+/// mag *= gain
+/// ```
+///
+/// Keeping the falloff is what preserves the arrangement's character: it is the
+/// term that spaces neighbours that are already clear, so removing it would
+/// change the whole layout rather than add the missing separation. The ramp
+/// engages only where two `node_world_sizes()` bodies actually intersect (ADR
+/// 40) and is bounded by [`MAX_DISPLACEMENT`], so it can only push an overlapping
+/// pair apart — never blow the layout up. Where `d < required`, the ramp
+/// *replaces* the falloff (which at those distances is both weak and, for wide
+/// pairs, below the cutoff entirely).
+fn repulsion_force_with_falloff(
+    a: (f32, f32),
+    b: (f32, f32),
+    required: f32,
+    gain: f32,
+) -> (f32, f32) {
+    let (dx, dy, d) = delta(a, b);
+    if d < 1e-6 {
+        // Coincident nodes: the same deterministic nudge the other forms use.
+        return (0.001, 0.0);
+    }
+    let mag = if required > 0.0 && d < required {
+        penetration_ramp_mag(d, required) * gain
+    } else {
+        // Bodies clear of each other: the historical falloff decides, gain-scaled
+        // (and zero beyond its own REPULSION_RADIUS cutoff).
+        let (fx, fy) = repulsion_force(a, b);
+        return (fx * gain, fy * gain);
+    };
     ((-dx / d) * mag, (-dy / d) * mag)
 }
 
@@ -1759,7 +1924,7 @@ mod tests {
     #[test]
     fn single_node_solves_to_finite_position() {
         let graph = make_graph(1, &[]);
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(positions.len(), 1);
         assert_finite_and_bounded(&positions);
     }
@@ -1768,7 +1933,7 @@ mod tests {
     fn disconnected_graph_produces_finite_positions() {
         // Three independent components with no connecting edges.
         let graph = make_graph(6, &[(0, 1), (2, 3), (4, 5)]);
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(positions.len(), 6);
         assert_finite_and_bounded(&positions);
     }
@@ -1777,7 +1942,7 @@ mod tests {
     fn cyclic_graph_produces_finite_positions() {
         // A closed loop; topological depth is bounded by the solver.
         let graph = make_graph(4, &[(0, 1), (1, 2), (2, 3), (3, 0)]);
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(positions.len(), 4);
         assert_finite_and_bounded(&positions);
     }
@@ -1790,7 +1955,7 @@ mod tests {
             edges.push((i, i + 1));
         }
         let graph = make_graph(600, &edges);
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(positions.len(), 600);
         assert_finite_and_bounded(&positions);
     }
@@ -1803,8 +1968,8 @@ mod tests {
             edges.push((i, i + 1));
         }
         let graph = make_graph(50, &edges);
-        let a = solve(&graph, &[], DEFAULT_TENSION);
-        let b = solve(&graph, &[], DEFAULT_TENSION);
+        let a = solve(&graph, &[], SolveKnobs::default());
+        let b = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(a, b);
     }
 
@@ -1813,8 +1978,8 @@ mod tests {
         // After a solve, re-solving the unchanged graph yields identical
         // frozen positions (no drift across queries).
         let graph = make_graph(40, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)]);
-        let first = solve(&graph, &[], DEFAULT_TENSION);
-        let second = solve(&graph, &[], DEFAULT_TENSION);
+        let first = solve(&graph, &[], SolveKnobs::default());
+        let second = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(first, second);
     }
 
@@ -1827,10 +1992,31 @@ mod tests {
         // layered seed, so higher tension pulls them measurably closer to the
         // source.
         let graph = make_graph(6, &[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
-        let low = solve(&graph, &[], TENSION_MIN);
-        let low_again = solve(&graph, &[], TENSION_MIN);
+        let low = solve(
+            &graph,
+            &[],
+            SolveKnobs {
+                tension: TENSION_MIN,
+                ..Default::default()
+            },
+        );
+        let low_again = solve(
+            &graph,
+            &[],
+            SolveKnobs {
+                tension: TENSION_MIN,
+                ..Default::default()
+            },
+        );
         assert_eq!(low, low_again, "same tension must reproduce the layout");
-        let high = solve(&graph, &[], TENSION_MAX);
+        let high = solve(
+            &graph,
+            &[],
+            SolveKnobs {
+                tension: TENSION_MAX,
+                ..Default::default()
+            },
+        );
         assert_finite_and_bounded(&low);
         assert_finite_and_bounded(&high);
         assert_ne!(low, high, "different tension must change the frozen layout");
@@ -1861,7 +2047,14 @@ mod tests {
         let graph = make_graph(20, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)]);
         let mut t = TENSION_MIN;
         while t <= TENSION_MAX + 1e-6 {
-            assert_finite_and_bounded(&solve(&graph, &[], t));
+            assert_finite_and_bounded(&solve(
+                &graph,
+                &[],
+                SolveKnobs {
+                    tension: t,
+                    ..Default::default()
+                },
+            ));
             t += TENSION_STEP;
         }
     }
@@ -1872,7 +2065,7 @@ mod tests {
             12,
             &[(0, 1), (1, 2), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)],
         );
-        let mut positions = solve(&graph, &[], DEFAULT_TENSION);
+        let mut positions = solve(&graph, &[], SolveKnobs::default());
 
         // Teleport node 0 far away; distant nodes must stay put.
         let before = positions.clone();
@@ -1884,7 +2077,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
         assert!(found);
         assert_finite_and_bounded(&positions);
@@ -1898,7 +2091,7 @@ mod tests {
     #[test]
     fn local_resettle_unknown_node_is_noop() {
         let graph = make_graph(3, &[(0, 1), (1, 2)]);
-        let mut positions = solve(&graph, &[], DEFAULT_TENSION);
+        let mut positions = solve(&graph, &[], SolveKnobs::default());
         let before = positions.clone();
         let found = local_resettle(
             &graph,
@@ -1907,7 +2100,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
         assert!(!found);
         assert_eq!(positions, before);
@@ -1946,7 +2139,7 @@ mod tests {
             validation: vec![],
             ..Default::default()
         };
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         // Sinks sit right of sources: x grows with topological depth.
         assert!(positions[2].0 > positions[0].0 + HORIZONTAL_SPACING * 0.5);
         assert!(positions[2].0 > positions[1].0 + HORIZONTAL_SPACING * 0.5);
@@ -2057,8 +2250,8 @@ mod tests {
             SOLVE_ITERATIONS,
             None,
             &[],
-            DEFAULT_TENSION,
             LayoutMode::Force,
+            SolveKnobs::default(),
         )
     }
 
@@ -2084,8 +2277,8 @@ mod tests {
             iterations,
             Some(&active),
             &[],
-            DEFAULT_TENSION,
             LayoutMode::Force,
+            SolveKnobs::default(),
         )
     }
 
@@ -2102,7 +2295,7 @@ mod tests {
         let count = solve_iteration_count(&graph);
         assert!(count <= SOLVE_ITERATIONS, "solve exceeded cap: {count}");
         assert!(count > 0);
-        assert_finite_and_bounded(&solve(&graph, &[], DEFAULT_TENSION));
+        assert_finite_and_bounded(&solve(&graph, &[], SolveKnobs::default()));
     }
 
     #[test]
@@ -2121,7 +2314,7 @@ mod tests {
             "expected energy convergence below cap, took {count} (cap {SOLVE_ITERATIONS})"
         );
         assert!(count > 0);
-        assert_finite_and_bounded(&solve(&graph, &[], DEFAULT_TENSION));
+        assert_finite_and_bounded(&solve(&graph, &[], SolveKnobs::default()));
     }
 
     #[test]
@@ -2145,11 +2338,11 @@ mod tests {
                 (11, 12),
             ],
         );
-        let baseline = solve(&graph, &[], DEFAULT_TENSION);
+        let baseline = solve(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&baseline);
         for _ in 0..3 {
             assert_eq!(
-                solve(&graph, &[], DEFAULT_TENSION),
+                solve(&graph, &[], SolveKnobs::default()),
                 baseline,
                 "positions drifted across a repeated query"
             );
@@ -2181,8 +2374,8 @@ mod tests {
                 (13, 14),
             ],
         );
-        let a = solve(&graph, &[], DEFAULT_TENSION);
-        let b = solve(&graph, &[], DEFAULT_TENSION);
+        let a = solve(&graph, &[], SolveKnobs::default());
+        let b = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(a, b);
         assert_finite_and_bounded(&a);
     }
@@ -2192,7 +2385,7 @@ mod tests {
         // Determinism extends to the damped re-settle: the same move from the
         // same frozen layout must yield the same result (D9).
         let graph = make_graph(20, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]);
-        let baseline = solve(&graph, &[], DEFAULT_TENSION);
+        let baseline = solve(&graph, &[], SolveKnobs::default());
 
         let mut a = baseline.clone();
         a[0] = (5000.0, 5000.0);
@@ -2203,7 +2396,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
 
         let mut b = baseline.clone();
@@ -2215,7 +2408,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
 
         assert_eq!(a, b);
@@ -2253,7 +2446,7 @@ mod tests {
             "expected full solve to need more than {LOCAL_ITERATIONS} iters, got {full_count}"
         );
 
-        let mut positions = solve(&graph, &[], DEFAULT_TENSION);
+        let mut positions = solve(&graph, &[], SolveKnobs::default());
         let resettle_count = resettle_iteration_count(
             &graph,
             &mut positions,
@@ -2287,7 +2480,7 @@ mod tests {
                 (12, 13),
             ],
         );
-        let baseline = solve(&graph, &[], DEFAULT_TENSION);
+        let baseline = solve(&graph, &[], SolveKnobs::default());
         let mut positions = baseline.clone();
         positions[0] = (10000.0, 10000.0);
         let found = local_resettle(
@@ -2297,7 +2490,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
         assert!(found);
         assert_finite_and_bounded(&positions);
@@ -2339,7 +2532,7 @@ mod tests {
             }
         }
         let graph = make_graph(60, &edges);
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
         let (w, h) = bbox_span(&positions);
         assert!(w > 1000.0, "layout underuses the canvas width: {w}");
@@ -2355,7 +2548,7 @@ mod tests {
         // attraction must dominate repulsion so the connected pair settles
         // nearer each other than any unconnected pairing.
         let graph = make_graph(4, &[(0, 1)]);
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
         let connected = dist(positions[0], positions[1]);
         let unconnected = [
@@ -2396,7 +2589,7 @@ mod tests {
             validation: vec![],
             ..Default::default()
         };
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
         let intra = [
             dist(positions[0], positions[1]),
@@ -2431,7 +2624,7 @@ mod tests {
         // position while every other node still settles under the forces.
         let graph = make_graph(10, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]);
         let seed = seed_positions(&graph);
-        let positions = solve(&graph, &[0, 3], DEFAULT_TENSION);
+        let positions = solve(&graph, &[0, 3], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
         assert_eq!(positions[0], seed[0], "pinned node 0 moved");
         assert_eq!(positions[3], seed[3], "pinned node 3 moved");
@@ -2470,7 +2663,7 @@ mod tests {
                 (10, 11),
             ],
         );
-        let baseline = solve(&graph, &[], DEFAULT_TENSION);
+        let baseline = solve(&graph, &[], SolveKnobs::default());
 
         // Case A: the moved node itself is pinned at its drop position.
         let mut a = baseline.clone();
@@ -2483,7 +2676,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[0],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
         assert!(found);
         assert_eq!(a[0], drop, "pinned moved node must stay at its drop");
@@ -2500,7 +2693,7 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[1],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         );
         assert!(found);
         assert_eq!(b[1], baseline[1], "pinned neighbour must not move");
@@ -2524,15 +2717,15 @@ mod tests {
                 (8, 9),
             ],
         );
-        let free = solve(&graph, &[], DEFAULT_TENSION);
+        let free = solve(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&free);
         assert_eq!(
-            solve(&graph, &[], DEFAULT_TENSION),
+            solve(&graph, &[], SolveKnobs::default()),
             free,
             "&[] must be deterministic"
         );
         assert_eq!(
-            solve(&graph, &[999, 1000, usize::MAX], DEFAULT_TENSION),
+            solve(&graph, &[999, 1000, usize::MAX], SolveKnobs::default()),
             free,
             "out-of-range pins must be ignored"
         );
@@ -2553,7 +2746,7 @@ mod tests {
             "real patch solve took {count} iterations (budget {SOLVE_ITERATIONS})"
         );
         assert!(count > 0);
-        assert_finite_and_bounded(&solve(&graph, &[], DEFAULT_TENSION));
+        assert_finite_and_bounded(&solve(&graph, &[], SolveKnobs::default()));
     }
 
     #[test]
@@ -2563,7 +2756,7 @@ mod tests {
         // responsive. Asserted via the iteration count, not wall-clock timing:
         // the re-settle is capped at LOCAL_ITERATIONS and deterministic.
         let graph = graph_from_fixture("fixtures/own_buttons.ini");
-        let mut positions = solve(&graph, &[], DEFAULT_TENSION);
+        let mut positions = solve(&graph, &[], SolveKnobs::default());
         let moved = graph.nodes[0].id.clone();
         positions[0] = (positions[0].0 + 60.0, positions[0].1 + 40.0);
         let count = resettle_iteration_count(
@@ -2963,7 +3156,7 @@ mod tests {
         assert_eq!(anchors[7], None);
         assert_eq!(anchors[8], None);
 
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
 
         // Cluster 0's circuit members settle around their anchor. Tolerance
@@ -3092,8 +3285,8 @@ mod tests {
             validation: vec![],
             ..Default::default()
         };
-        let a = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
-        let b = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let a = solve_sections(&graph, &[], SolveKnobs::default());
+        let b = solve_sections(&graph, &[], SolveKnobs::default());
         assert_eq!(a, b, "sections mode must be deterministic");
         assert_finite_and_bounded(&a);
     }
@@ -3141,7 +3334,7 @@ mod tests {
             ..Default::default()
         };
 
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
         assert_eq!(
             sections_lanes(&graph).slot,
@@ -3225,8 +3418,22 @@ mod tests {
         let low_section_k = SECTION_HOLE_K / 20.0; // hole spring barely felt
         let high_section_k = DEFAULT_SECTION_HOLE_K * 20.0; // strongly anchored
 
-        let low = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, low_section_k);
-        let high = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, high_section_k);
+        let low = solve_sections(
+            &graph,
+            &[],
+            SolveKnobs {
+                section_k: low_section_k,
+                ..Default::default()
+            },
+        );
+        let high = solve_sections(
+            &graph,
+            &[],
+            SolveKnobs {
+                section_k: high_section_k,
+                ..Default::default()
+            },
+        );
         assert_finite_and_bounded(&low);
         assert_finite_and_bounded(&high);
 
@@ -3262,8 +3469,22 @@ mod tests {
         );
 
         // Determinism holds per parameter triple.
-        let low_again = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, low_section_k);
-        let high_again = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, high_section_k);
+        let low_again = solve_sections(
+            &graph,
+            &[],
+            SolveKnobs {
+                section_k: low_section_k,
+                ..Default::default()
+            },
+        );
+        let high_again = solve_sections(
+            &graph,
+            &[],
+            SolveKnobs {
+                section_k: high_section_k,
+                ..Default::default()
+            },
+        );
         assert_eq!(low, low_again, "low section_k solve must be deterministic");
         assert_eq!(
             high, high_again,
@@ -4132,7 +4353,7 @@ mod tests {
         // from that arithmetic rather than from the solver's `sections_lanes`.
         let graph = make_graph(4, &[]);
         assert!(graph.clusters.is_empty(), "fixture must have no clusters");
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
 
         let lane_w = estimated_widths(&graph)[0].min(SECTIONS_LANE_MAX_NODE_W);
@@ -4219,7 +4440,7 @@ mod tests {
             "lane slots must track the hand-derived width-aware geometry"
         );
 
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
 
         // Tolerance: SECTIONS_LANE_GAP / 4 = 10 world units (worst observed
@@ -4274,7 +4495,7 @@ mod tests {
             "fixed-radius repulsion must cut off past REPULSION_RADIUS"
         );
         let required = 200.0;
-        let f = repulsion_force_size_aware(a, b, required);
+        let f = repulsion_force_size_aware(a, b, required, REPULSION_GAIN_DEFAULT);
         assert!(
             f.0 < 0.0 && f.1 == 0.0,
             "size-aware repulsion must push apart at d=150 with required {required}, got {f:?}"
@@ -4282,12 +4503,22 @@ mod tests {
 
         // Zero at and beyond the required separation: no phantom push at rest.
         assert_eq!(
-            repulsion_force_size_aware((0.0, 0.0), (required, 0.0), required),
+            repulsion_force_size_aware(
+                (0.0, 0.0),
+                (required, 0.0),
+                required,
+                REPULSION_GAIN_DEFAULT
+            ),
             (0.0, 0.0),
             "repulsion must be exactly zero at d == required"
         );
         assert_eq!(
-            repulsion_force_size_aware((0.0, 0.0), (required + 50.0, 0.0), required),
+            repulsion_force_size_aware(
+                (0.0, 0.0),
+                (required + 50.0, 0.0),
+                required,
+                REPULSION_GAIN_DEFAULT
+            ),
             (0.0, 0.0),
             "repulsion must be zero beyond required"
         );
@@ -4295,7 +4526,7 @@ mod tests {
         // Monotonic in penetration: a deeper overlap pushes at least as hard,
         // and the force is still positive just inside the boundary.
         let mag = |d: f32| {
-            repulsion_force_size_aware((0.0, 0.0), (d, 0.0), required)
+            repulsion_force_size_aware((0.0, 0.0), (d, 0.0), required, REPULSION_GAIN_DEFAULT)
                 .0
                 .abs()
         };
@@ -4305,7 +4536,8 @@ mod tests {
         assert!(mag(199.9) > 0.0, "force must stay positive inside required");
 
         // Finite at the coincident point: no division by zero, fixed nudge.
-        let coincident = repulsion_force_size_aware((0.0, 0.0), (0.0, 0.0), required);
+        let coincident =
+            repulsion_force_size_aware((0.0, 0.0), (0.0, 0.0), required, REPULSION_GAIN_DEFAULT);
         assert!(
             coincident.0.is_finite() && coincident.1.is_finite(),
             "coincident nodes must get a finite nudge, got {coincident:?}"
@@ -4336,12 +4568,9 @@ mod tests {
         // little past it rather than landing exactly on it; the tolerance absorbs
         // that without allowing overlap. Observed exactly 296.0 for the 176-wide
         // case (its lane pitch already clears `required` = 176, so both nodes sit
-        // on their slots and repulsion never fires) and 464.08 for the 496-wide
-        // case — 6.4% short of `required`, inside the tolerance, because each node
-        // is held back by a slice spring toward its own slot. It is far tighter
-        // than the defect: the inert pre-fix form left the pair at ~196 regardless
-        // of width, a ~300-unit overlap for the 496 case, so reverting the
-        // magnitude or the grid change fails this test.
+        // on their slots and repulsion never fires) and 496.49 for the 496-wide
+        // case — the pair clears `required` because repulsion wins 216 units of
+        // separation back from the two slice springs.
         for (chars, expected_required) in [(20usize, 176.0f32), (60, 496.0)] {
             let graph = Graph {
                 nodes: vec![node(&"a".repeat(chars), 0), node(&"b".repeat(chars), 2)],
@@ -4354,8 +4583,8 @@ mod tests {
                 "{chars}-char fixture must require {expected_required}"
             );
 
-            let sections = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
-            let force = solve(&graph, &[], DEFAULT_TENSION);
+            let sections = solve_sections(&graph, &[], SolveKnobs::default());
+            let force = solve(&graph, &[], SolveKnobs::default());
             assert_finite_and_bounded(&sections);
             assert_finite_and_bounded(&force);
 
@@ -4367,30 +4596,37 @@ mod tests {
                 "sections gap {sections_gap} must keep {chars}-char bodies clear \
                  (required {required}, tolerance {tolerance})"
             );
-            // Force mode has no slice spring and cuts repulsion off at
-            // REPULSION_RADIUS, so it leaves the pair on the seed gap (120) —
-            // below the size requirement. The fix must not perturb that path.
+            // Re-blessed (design D8): force mode is size-aware now too, so it
+            // also keeps the pair clear. HEAD's point-repulsion left both widths
+            // at the seed gap (measured 120.10, i.e. 56-376 units of overlap);
+            // the size-aware solver measures 178.97 (20-char) and 506.39
+            // (60-char). The old expectation asserted the overlap this change
+            // removes, and the old "sections separates more than force" claim no
+            // longer holds for the wide case (496.49 vs 506.39): sections mode is
+            // tethered to its lane slots while untethered force mode coasts a
+            // little past `required`.
             assert!(
-                force_gap < required,
-                "force mode gap {force_gap} should stay below the size requirement {required}"
-            );
-            assert!(
-                sections_gap > force_gap,
-                "sections mode ({sections_gap}) must separate more than force mode ({force_gap})"
+                force_gap >= required - tolerance,
+                "force mode gap {force_gap} must keep {chars}-char bodies clear \
+                 (required {required}, tolerance {tolerance})"
             );
         }
     }
 
     #[test]
-    fn force_mode_positions_are_unchanged_by_size_aware_repulsion() {
-        // Guard for the D3 fix: it must touch only the sections-mode path. Force
-        // mode — and the column path's `local_resettle`, which also runs force
-        // mode — must stay byte-identical: same cutoff radius, same grid cell
-        // size, same force form. The expected values below are exactly what the
-        // pre-fix solver produced on this graph (verified against HEAD f4cd541),
-        // and the graph exercises cable springs, grid-hashed repulsion, and
-        // cohesion (the banner cluster makes `cohesion` fire); any perturbation
-        // of the force path moves them.
+    fn force_mode_positions_reflect_size_aware_repulsion() {
+        // Re-blessed (design D8): the premise of the old
+        // `force_mode_positions_are_unchanged_by_size_aware_repulsion` guard —
+        // force mode is byte-identical to the pre-size-aware solver — inverts
+        // once force-mode repulsion becomes size-aware, because the whole point
+        // of the change is to move positions where bodies intersect. These two
+        // vectors are the size-aware solver's output on this graph, kept as a
+        // *perturbation* guard: the graph exercises cable springs, grid-hashed
+        // repulsion, and cohesion (the banner cluster makes `cohesion` fire), so
+        // any unintended change to the force path moves them. Task 3.4 replaces
+        // them with the determinism-per-knob-tuple and non-overlap guards, which
+        // are the real contract; the sections and column paths keep their own
+        // byte-identity guards.
         let mut graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
         graph.nodes[0].circuit = "a".repeat(2);
         graph.nodes[1].circuit = "b".repeat(8);
@@ -4402,19 +4638,20 @@ mod tests {
             section_range: 1..3,
         }];
         assert_eq!(
-            solve(&graph, &[], DEFAULT_TENSION),
+            solve(&graph, &[], SolveKnobs::default()),
             vec![
-                (-0.1171875, 0.0),
-                (80.2, 0.0),
-                (159.8, 0.0),
-                (240.0, 0.0),
-                (320.1172, 0.0),
+                (-9.252154, 0.0),
+                (77.194374, 0.0),
+                (161.92744, 0.0),
+                (236.34213, 0.0),
+                (333.7882, 0.0),
             ],
-            "force-mode solve positions must not change"
+            "force-mode solve positions must match the size-aware solver"
         );
 
         // `local_resettle` (the drag path) enters the same core from a moved
-        // seed; pin it too so the grid-cell-size change cannot perturb it.
+        // seed; pin it too, so the grid-cell and separation changes cannot
+        // perturb it unnoticed.
         let mut positions = seed_positions(&graph);
         positions[3].0 += 25.0;
         positions[3].1 += 40.0;
@@ -4426,18 +4663,18 @@ mod tests {
             LOCAL_RADIUS,
             LOCAL_ITERATIONS,
             &[],
-            DEFAULT_TENSION,
+            SolveKnobs::default(),
         ));
         assert_eq!(
             positions,
             vec![
                 (0.0, 0.0),
-                (86.00588, 0.33226788),
-                (168.3252, 5.9020987),
-                (247.21428, 35.46834),
-                (322.01288, -1.7070212),
+                (87.79236, 0.02813325),
+                (173.51154, 4.909482),
+                (238.00919, 39.55642),
+                (335.37885, -4.494233),
             ],
-            "force-mode local re-settle positions must not change"
+            "force-mode local re-settle positions must match the size-aware solver"
         );
     }
 
@@ -4447,12 +4684,12 @@ mod tests {
         // so sections mode must yield no positions rather than panicking.
         let empty = Graph::default();
         assert!(
-            solve_sections(&empty, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K).is_empty(),
+            solve_sections(&empty, &[], SolveKnobs::default()).is_empty(),
             "empty graph must produce no positions"
         );
         // Single node: exactly one finite, bounded position.
         let single = make_graph(1, &[]);
-        let positions = solve_sections(&single, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&single, &[], SolveKnobs::default());
         assert_eq!(positions.len(), 1);
         assert_finite_and_bounded(&positions);
     }
@@ -4577,7 +4814,7 @@ mod tests {
              the raw-depth seed measures 19,622,480 here"
         );
 
-        let positions = solve(&graph, &[], DEFAULT_TENSION);
+        let positions = solve(&graph, &[], SolveKnobs::default());
         assert_eq!(positions.len(), n);
         for (x, y) in &positions {
             assert!(
@@ -4624,7 +4861,7 @@ mod tests {
         let n = graph.nodes.len();
         assert!(n > 400, "scale fixture should be large, got {n} nodes");
 
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_eq!(positions.len(), n);
         for (x, y) in &positions {
             assert!(
@@ -4847,7 +5084,7 @@ mod tests {
             .collect();
         assert_eq!(lanes.slot.iter().map(|s| s.0).collect::<Vec<_>>(), expected);
 
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
 
         // Non-overlap: two axis-aligned bodies are clear when separated on the x
@@ -4915,7 +5152,7 @@ mod tests {
         // −30.60, row 1 at 190.60: 221.2 apart, well above SECTIONS_ROW_GAP = 80).
         // What the contract needs is that each row stays one band and the bands stay
         // ordered; the per-node x must stay on its lane slot.
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
         let y_band = |ps: &[(f32, f32)]| {
             let lo = ps.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
@@ -5082,7 +5319,7 @@ mod tests {
             "a three-node lane stacks at the full 120 pitch"
         );
 
-        let positions = solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K);
+        let positions = solve_sections(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
 
         // Defect A: the stack can no longer collapse below the pitch its lane
@@ -5159,7 +5396,7 @@ mod tests {
         // Determinism survives the bounded pulls and the separation pass.
         assert_eq!(
             positions,
-            solve_sections(&graph, &[], DEFAULT_TENSION, SLICE_K, SECTION_HOLE_K),
+            solve_sections(&graph, &[], SolveKnobs::default()),
             "the bounded sections solve must be deterministic"
         );
     }

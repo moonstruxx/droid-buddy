@@ -19,7 +19,7 @@ use crate::app::{App, SourceViewMode, ViewType, ViewerFocus};
 use crate::graph::{Cluster, Graph, GraphOptions};
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
-    local_resettle, node_world_sizes, seed_positions, solve, DEFAULT_TENSION, LOCAL_ITERATIONS,
+    local_resettle, node_world_sizes, seed_positions, solve, SolveKnobs, LOCAL_ITERATIONS,
     LOCAL_RADIUS,
 };
 use crate::patch::{NodeId, Patch, ShiftGroup};
@@ -869,7 +869,7 @@ fn regression_solver_single_axis_on_real_multi_banner_patch() {
         "chain should be spec-scale, got {} nodes",
         graph.nodes.len()
     );
-    let positions = solve(&graph, &[], DEFAULT_TENSION);
+    let positions = solve(&graph, &[], SolveKnobs::default());
     for (x, y) in &positions {
         assert!(x.is_finite() && y.is_finite(), "non-finite position");
     }
@@ -900,7 +900,7 @@ fn regression_solver_spring_dominance_on_real_cable_chain() {
     // isolated controller node. Spring attraction must keep cable-connected
     // circuits nearer each other than unconnected pairs settle.
     let (_patch, graph) = solver_fixture("fixtures/graph_edge_kinds.ini");
-    let positions = solve(&graph, &[], DEFAULT_TENSION);
+    let positions = solve(&graph, &[], SolveKnobs::default());
     let n = graph.nodes.len();
     let edge_pairs: Vec<(usize, usize)> = graph
         .edges
@@ -963,7 +963,7 @@ fn regression_solver_cluster_cohesion_on_real_banner_groups() {
         members.len() >= 2,
         "Mixer cluster should have multiple members"
     );
-    let positions = solve(&graph, &[], DEFAULT_TENSION);
+    let positions = solve(&graph, &[], SolveKnobs::default());
     let xs: Vec<f32> = members.iter().map(|&i| positions[i].0).collect();
     let ys: Vec<f32> = members.iter().map(|&i| positions[i].1).collect();
     let min_x = xs.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -999,14 +999,14 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
     // Pinned through a full solve: the tip never leaves its seed (the fixed
     // anchor) while the other nodes settle.
     let seed = seed_positions(&graph);
-    let positions = solve(&graph, &[tip], DEFAULT_TENSION);
+    let positions = solve(&graph, &[tip], SolveKnobs::default());
     assert_eq!(
         positions[tip], seed[tip],
         "pinned tip moved during full solve"
     );
 
     // Unpinned, the tip re-flows under the forces.
-    let free = solve(&graph, &[], DEFAULT_TENSION);
+    let free = solve(&graph, &[], SolveKnobs::default());
     assert_ne!(
         free[tip], seed[tip],
         "unpinned tip should re-flow off its seed"
@@ -1024,7 +1024,7 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
         LOCAL_RADIUS,
         LOCAL_ITERATIONS,
         &[tip],
-        DEFAULT_TENSION,
+        SolveKnobs::default(),
     );
     assert!(found);
     assert_eq!(
@@ -1042,7 +1042,7 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
         LOCAL_RADIUS,
         LOCAL_ITERATIONS,
         &[],
-        DEFAULT_TENSION,
+        SolveKnobs::default(),
     );
     assert!(found);
     assert_ne!(
@@ -2800,8 +2800,14 @@ fn regression_sections_mode_clusters_around_section_holes() {
         app.layout_slice_force,
         app.layout_section_force,
     );
-    let first = crate::layout::solve_sections(&graph, &pins, triple.0, triple.1, triple.2);
-    let second = crate::layout::solve_sections(&graph, &pins, triple.0, triple.1, triple.2);
+    let knobs = SolveKnobs {
+        tension: triple.0,
+        slice_k: triple.1,
+        section_k: triple.2,
+        ..Default::default()
+    };
+    let first = crate::layout::solve_sections(&graph, &pins, knobs);
+    let second = crate::layout::solve_sections(&graph, &pins, knobs);
     assert_eq!(
         first, second,
         "solving one graph twice under one force triple must be deterministic"
