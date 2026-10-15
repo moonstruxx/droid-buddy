@@ -4420,7 +4420,7 @@ mod sliders_panel_tests {
             "0.50".to_string(),
         ] {
             assert!(
-                out.labels.iter().any(|l| *l == value),
+                out.labels.contains(&value),
                 "force value {value} missing: {:?}",
                 out.labels
             );
@@ -4458,7 +4458,7 @@ mod sliders_panel_tests {
         let out = panel_frame(&mut app, Vec::new());
         let shown = format!("{:.*}", SLIDERS_COHESION_DECIMALS, ceiling);
         assert!(
-            out.labels.iter().any(|l| *l == shown),
+            out.labels.contains(&shown),
             "the Cohesion row must clamp to its ceiling {shown}: {:?}",
             out.labels
         );
