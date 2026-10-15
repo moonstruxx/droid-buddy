@@ -32,6 +32,24 @@ pub const PARSE_RENDER_BUDGET: Duration = Duration::from_secs(10);
 // 2026-10-04 on own_scale (509 sections): phase_graph_solve ~166 ms.
 pub const GRAPH_SOLVE_BUDGET: Duration = Duration::from_secs(10);
 
+// Measured release baseline 2026-10-15: own_scale force `layout::solve`
+// (size-aware repulsion relaxation over 511 nodes + the separation
+// post-condition) ~10.6 ms.
+// The force path's non-overlap post-condition is a pairwise-greedy O(n^2)
+// pass — ~130k body-pair tests per pass on the anchor — run once per solve for
+// every pass the solver's own budget allows. Its cost is therefore node count
+// squared *times* pass count, so it can only get expensive by a factor the
+// solver controls (a wider pass cap, or a loop that no longer exits at zero),
+// which is exactly the silent regression this phase names.
+// Budget = 10 s, ~950x the measured release cost, matching the neighbouring
+// phases' wide margin on purpose: their figure is the debug-mode solution cost
+// the same watchdog times, and it has to stay green when task 1.5 re-tunes the
+// force separation budget upward (the pass needs ~64 rounds at cohesion 0 on
+// this anchor, versus the 8 the solver shipped when this phase was added), while
+// still tripping on the unbounded loop that is the real failure mode.
+// 2026-10-15 on own_scale (511 nodes): phase_force_solve_and_separation ~10.6 ms.
+pub const FORCE_SOLVE_BUDGET: Duration = Duration::from_secs(10);
+
 // Measured release baseline 2026-10-03: own_scale `layout::node_world_sizes`
 // (the renderer's per-frame node-size estimate, called twice per frame — scene
 // build + pointer hit-testing) ~0.4 ms after the O(n + e) rewrite; 100 calls
@@ -127,7 +145,7 @@ fn phase_graph_solve() {
         let cost = CostModel::default();
         let options = graph::GraphOptions::default();
         let g = graph::Graph::build_from_patch(&patch, &clusters, &cost, &options);
-        let positions = layout::solve(&g, &[], layout::DEFAULT_TENSION);
+        let positions = layout::solve(&g, &[], layout::SolveKnobs::default());
         // The solver must return one position per node.
         assert_eq!(positions.len(), g.nodes.len());
         start.elapsed()
@@ -136,6 +154,56 @@ fn phase_graph_solve() {
     assert!(
         elapsed <= GRAPH_SOLVE_BUDGET,
         "phase_graph_solve took {elapsed:?}, budget {GRAPH_SOLVE_BUDGET:?}"
+    );
+}
+
+/// Guards the **force** arrangement's end-to-end solve cost at scale: the
+/// relaxation over 511 anchor nodes *plus* the non-overlap post-condition
+/// (`layout::separate_overlaps`, a bounded pairwise-greedy pass over every
+/// `(i, j)` body pair — O(n^2) per pass).
+///
+/// The pass exists so "no two drawn bodies intersect" holds by construction
+/// rather than by tuning, and while it was invisibly cheap the cost was fine;
+/// but its work is node-count squared times pass count, so the two ways it
+/// regresses are silent (a wider pass cap, or an unbounded loop) and both show
+/// up only as a frozen frame on a large patch. This phase runs whatever the
+/// solver does at its default knobs and turns that freeze into a named failure.
+///
+/// Deliberately no hardcoded pass count or knob value: the phase must measure
+/// the solver's shipped defaults, so re-tuning them cannot make the gate lie.
+#[test]
+fn phase_force_solve_and_separation() {
+    let elapsed = budgeted(
+        "phase_force_solve_and_separation",
+        FORCE_SOLVE_BUDGET,
+        || {
+            let patch = Patch::from_ini_file(Path::new(SCALE_ANCHOR)).unwrap();
+            // Mirrors app::clusters_from_patch, which is private to the crate.
+            let clusters: Vec<Cluster> = patch
+                .banner_groups
+                .iter()
+                .map(|group| Cluster {
+                    title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
+                    section_range: group.section_range.clone(),
+                })
+                .collect();
+            let cost = CostModel::default();
+            let options = graph::GraphOptions::default();
+            let g = graph::Graph::build_from_patch(&patch, &clusters, &cost, &options);
+            // The anchor build itself is gated by phase_graph_solve; the timer
+            // wraps only what this phase is the guard for — the solve and its
+            // separation post-condition, at the solver's default knobs.
+            let start = Instant::now();
+            let positions = layout::solve(&g, &[], layout::SolveKnobs::default());
+            // The solver must return one position per node.
+            assert_eq!(positions.len(), g.nodes.len());
+            start.elapsed()
+        },
+    );
+    eprintln!("phase_force_solve_and_separation elapsed: {elapsed:.3?}");
+    assert!(
+        elapsed <= FORCE_SOLVE_BUDGET,
+        "phase_force_solve_and_separation took {elapsed:?}, budget {FORCE_SOLVE_BUDGET:?}"
     );
 }
 
