@@ -872,6 +872,19 @@ pub struct App {
     /// Seeded from `[layout] section_force` at startup; keyboard-adjustable via
     /// the sliders panel (task 5.2). Persists across patch loads.
     pub layout_section_force: f32,
+    /// Repulsion gain for force mode (design D6/D7): scales the size-aware
+    /// penetration ramp the force solver applies, `1.0` being the tuned default.
+    /// Unlike the sections sliders this is **session-only** — no `[layout]` key
+    /// carries it — and it is seeded from [`layout::SolveKnobs::default`] so the
+    /// solver keeps ownership of the tuned value. Drives the panel's Repulsion
+    /// row in force mode.
+    pub layout_repulsion_force: f32,
+    /// Per-cluster cohesion strength for force mode (design D6/D7): the pull on
+    /// each banner-group member toward its group centroid. Session-only like
+    /// [`App::layout_repulsion_force`], and likewise seeded from
+    /// [`layout::SolveKnobs::default`] so a retuned default reaches the panel
+    /// without a second literal. Drives the panel's Cohesion row in force mode.
+    pub layout_cohesion_force: f32,
     /// Whether the sliders panel is visible in the graph pane (sections-black-hole-solver 5.2).
     /// Toggled by `S` key in sections mode only.
     pub showing_sliders: bool,
@@ -1109,6 +1122,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        // Session-only force knobs (design D6/D7): the solver's own knob tuple
+        // is the single source of truth for their defaults, so retuning
+        // `COHESION_K` never leaves a stale literal behind here.
+        let force_knobs = crate::layout::SolveKnobs::default();
         let mut app = Self {
             patch: None,
             active_shift: None,
@@ -1144,6 +1161,8 @@ impl App {
             layout_ordering: crate::config::DEFAULT_LAYOUT_ORDERING,
             layout_slice_force: crate::config::DEFAULT_SLICE_FORCE,
             layout_section_force: crate::config::DEFAULT_SECTION_FORCE,
+            layout_repulsion_force: force_knobs.repulsion,
+            layout_cohesion_force: force_knobs.cohesion,
             showing_sliders: false,
             prefix: None,
             showing_viewer: false,
@@ -3495,17 +3514,25 @@ impl App {
     }
 
     /// Force-mode solver knobs (design D6): the `App`-owned half of the knob
-    /// tuple. `tension` is the only force-mode knob held in `App` state so far;
-    /// the repulsion-gain and cohesion sliders join it in the panel task.
+    /// tuple — the cable tension plus the two force-only sliders (repulsion
+    /// gain, cohesion) the panel drives. `slice_k`/`section_k` stay at the
+    /// solver defaults: force mode ignores them.
     fn force_solve_knobs(&self) -> layout::SolveKnobs {
         layout::SolveKnobs {
             tension: self.tension,
+            repulsion: self.layout_repulsion_force,
+            cohesion: self.layout_cohesion_force,
             ..layout::SolveKnobs::default()
         }
     }
 
     /// Sections-mode solver knobs (design D6): the cable tension plus the two
     /// sections sliders, so the panel's live values reach the solver.
+    ///
+    /// The repulsion gain stays at the solver default here on purpose: the
+    /// force panel's Repulsion row is only reachable in force mode, and
+    /// sections mode must stay byte-identical (design D8), so its gain must not
+    /// follow that slider. Cohesion is force-only and ignored either way.
     fn sections_solve_knobs(&self) -> layout::SolveKnobs {
         layout::SolveKnobs {
             tension: self.tension,

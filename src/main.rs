@@ -2,7 +2,7 @@ use color_eyre::Result;
 
 use droid_tui::app::{App, GraphWindowRequest};
 use droid_tui::latency::CostModel;
-use droid_tui::{config, schema, theme};
+use droid_tui::{config, layout, schema, theme};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -60,6 +60,13 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     app.layout_ordering = settings.layout.ordering;
     app.layout_slice_force = settings.layout.slice_force;
     app.layout_section_force = settings.layout.section_force;
+    // The force-mode repulsion gain and cohesion are session-only (no `[layout]`
+    // key carries them, mirroring the sections sliders' runtime semantics), so
+    // they are seeded from the solver's own knob tuple — the single source of
+    // truth for the tuned defaults — rather than from `settings`.
+    let force_knobs = layout::SolveKnobs::default();
+    app.layout_repulsion_force = force_knobs.repulsion;
+    app.layout_cohesion_force = force_knobs.cohesion;
 
     // [labels]: seed the label-resolution section on App once at startup so
     // painters and the label overlay read it from state (ADR 13) instead of
