@@ -448,8 +448,10 @@ pub fn local_resettle(
 /// seed a pair whose horizontal clearance is short of `(w_a + w_b) / 2` (the one
 /// seed-level shortfall the wrapped grid can have).
 ///
-/// Returns the number of pairs still overlapping after the last pass (0 when the
-/// layout was already clear, which is the common case).
+/// Returns the number of pairs still overlapping after the last pass, re-read
+/// from the full pair set so the value is a true residual (0 when the layout is
+/// clear, which is the common case) rather than the sweep's visited count — see
+/// [`separation_sweep`] and [`count_overlapping_pairs`].
 ///
 /// Deterministic: a single thread, a fixed `(i, j)` sweep order, and no RNG —
 /// the pass is a pure function of the positions and sizes it is given.
@@ -466,14 +468,16 @@ fn separate_overlaps(
     passes: usize,
 ) -> usize {
     let order: Vec<usize> = (0..positions.len()).collect();
-    let mut overlapping = 0;
     for _ in 0..passes {
-        overlapping = separation_sweep(positions, sizes, movable, &order);
-        if overlapping == 0 {
+        if separation_sweep(positions, sizes, movable, &order) == 0 {
             break;
         }
     }
-    overlapping
+    // The sweep's own count is a work measure (a push can re-introduce a pair it
+    // already passed), so the residual is re-read here to give callers an exact
+    // "still overlapping" value they can branch on — `solve_columns_pinned` uses
+    // it to decide its all-movable second phase.
+    count_overlapping_pairs(positions, sizes)
 }
 
 /// One separation sweep: walk the pairs in `order` order, resolve each pair whose
@@ -1109,7 +1113,9 @@ pub fn solve_columns_pinned(
     // The extents are the ones this placement reserved per node (`widths` plus
     // `NODE_WORLD_H`; the app passes `estimated_widths`, which is exactly
     // `node_world_sizes()`' width — ADR 40), so the pass and the placed geometry
-    // cannot disagree.
+    // cannot disagree. `remaining` is a true residual (the pass re-reads the pair
+    // set), so the second phase runs only when pairs the pinned-immovable pass
+    // could not clear actually remain.
     let sizes: Vec<(f32, f32)> = width.iter().map(|&w| (w, NODE_WORLD_H)).collect();
     let movable: Vec<bool> = (0..n)
         .map(|i| !pins.iter().any(|&(pinned_index, _)| pinned_index == i))
