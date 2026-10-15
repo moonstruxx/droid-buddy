@@ -4799,21 +4799,19 @@ mod tests {
     }
 
     #[test]
-    fn force_mode_positions_reflect_size_aware_repulsion() {
-        // Re-blessed (design D8): the premise of the old
-        // `force_mode_positions_are_unchanged_by_size_aware_repulsion` guard —
-        // force mode is byte-identical to the pre-size-aware solver — inverts
-        // once force-mode repulsion becomes size-aware, because the whole point
-        // of the change is to move positions where bodies intersect. These two
-        // vectors are the size-aware solver's output on this graph, kept as a
-        // *perturbation* guard: the graph exercises cable springs, grid-hashed
-        // repulsion, and cohesion (the banner cluster makes `cohesion` fire), so
-        // any unintended change to the force path moves them. Task 3.4 replaces
-        // them with the determinism-per-knob-tuple and non-overlap guards, which
-        // are the real contract; the sections and column paths keep their own
-        // byte-identity guards. Re-blessed once more by tasks 1.4/1.5: the drag
-        // path now runs the converging separation loop, and the default
-        // cohesion is the measured `COHESION_K = 0.0068` rather than 0.01.
+    fn force_mode_positions_are_deterministic_and_non_overlapping() {
+        // Task 3.4 / design D8. This started as
+        // `force_mode_positions_are_unchanged_by_size_aware_repulsion` (a
+        // sections-change guard asserting force mode was byte-identical), was
+        // re-blessed once into a perturbation vector, and is replaced here by the
+        // contract the force path actually promises. Byte-identity is the wrong
+        // guard: size-aware repulsion exists precisely to move positions where
+        // bodies intersect, so a re-blessed vector only re-records whatever the
+        // solver happens to do. The pair that replaces it is stronger — the knob
+        // tuple is the determinism key (same graph + same knobs → identical
+        // positions) and the output is non-overlapping, both asserted on a graph
+        // that exercises every force-mode mechanism: cable springs, grid-hashed
+        // repulsion, and cohesion (the banner cluster makes `cohesion` fire).
         let mut graph = make_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
         graph.nodes[0].circuit = "a".repeat(2);
         graph.nodes[1].circuit = "b".repeat(8);
@@ -4824,45 +4822,44 @@ mod tests {
             title: "g".to_string(),
             section_range: 1..3,
         }];
+        let sizes = node_world_sizes(&graph);
+        let first = solve(&graph, &[], SolveKnobs::default());
+        assert_finite_and_bounded(&first);
         assert_eq!(
+            first,
             solve(&graph, &[], SolveKnobs::default()),
-            vec![
-                (-9.444492, 0.0),
-                (76.9771, 0.0),
-                (162.09888, 0.0),
-                (236.46185, 0.0),
-                (333.90665, 0.0),
-            ],
-            "force-mode solve positions must match the size-aware solver"
+            "same graph + same knob tuple must reproduce the force-mode positions"
         );
+        assert_pairs_clear(&sizes, &first, 0.0, "force-mode solve");
 
         // `local_resettle` (the drag path) enters the same core from a moved
-        // seed; pin it too, so the grid-cell and separation changes cannot
-        // perturb it unnoticed.
-        let mut positions = seed_positions(&graph);
-        positions[3].0 += 25.0;
-        positions[3].1 += 40.0;
-        let moved = graph.nodes[3].id.clone();
-        assert!(local_resettle(
-            &graph,
-            &mut positions,
-            &moved,
-            LOCAL_RADIUS,
-            LOCAL_ITERATIONS,
-            &[],
-            SolveKnobs::default(),
-        ));
+        // seed, so it carries the same two guarantees. The radius covers this
+        // whole graph and nothing is pinned, so every body is movable and the
+        // non-overlap assertion is the whole-set one, not a neighbourhood.
+        let dragged = |shift: (f32, f32)| {
+            let mut positions = seed_positions(&graph);
+            positions[3].0 += shift.0;
+            positions[3].1 += shift.1;
+            let moved = graph.nodes[3].id.clone();
+            assert!(local_resettle(
+                &graph,
+                &mut positions,
+                &moved,
+                LOCAL_RADIUS,
+                LOCAL_ITERATIONS,
+                &[],
+                SolveKnobs::default(),
+            ));
+            positions
+        };
+        let settled = dragged((25.0, 40.0));
+        assert_finite_and_bounded(&settled);
         assert_eq!(
-            positions,
-            vec![
-                (0.0, 0.0),
-                (87.70639, 0.020735445),
-                (173.76686, 4.86222),
-                (238.07115, 39.6247),
-                (335.43875, -4.5079155),
-            ],
-            "force-mode local re-settle positions must match the size-aware solver"
+            settled,
+            dragged((25.0, 40.0)),
+            "same drag + same knob tuple must reproduce the re-settled positions"
         );
+        assert_pairs_clear(&sizes, &settled, 0.0, "force-mode local re-settle");
     }
 
     #[test]
@@ -5585,6 +5582,458 @@ mod tests {
             positions,
             solve_sections(&graph, &[], SolveKnobs::default()),
             "the bounded sections solve must be deterministic"
+        );
+    }
+
+    // ── force-arrangement-nonoverlap-and-sliders: tasks 3.1 / 3.2 ──────────
+    //
+    // The force path's contract is a pair of invariants (design D8):
+    // **non-overlap** as a post-condition of every path that produces positions,
+    // and **determinism per knob tuple**. Tasks 1.4/1.5 measured both with a
+    // throwaway harness; these tests make the measurements permanent.
+    //
+    // The overlap predicate here is the test module's own (`assert_pairs_clear` /
+    // `worst_penetration`), not the solver's `count_overlapping_pairs`: if the
+    // solver's predicate drifted, an invariant asserted through it would pass
+    // vacuously.
+
+    /// The fixture set the force non-overlap invariant is pinned on (task 3.1).
+    /// `own_scale` is the 511-body anchor and the binding fixture for the
+    /// default cohesion (18 separation sweeps, design D3); the other four are the
+    /// rest of the measured set.
+    const FORCE_NONOVERLAP_FIXTURES: &[&str] = &[
+        "fixtures/own_scale.ini",
+        "fixtures/cable_banner_combos.ini",
+        "fixtures/graph_latency_chain.ini",
+        "fixtures/own_two_ctrl.ini",
+        "fixtures/graph_dependency_walk.ini",
+    ];
+
+    /// The DROID patch the cancelled recon lane listed. It is not part of
+    /// `fixtures/`, so it is only exercised when a checkout carries a copy
+    /// there — the same presence guard the measurement probe used.
+    const FORCE_NONOVERLAP_OPTIONAL_FIXTURE: &str = "fixtures/droid_mpfs5melody2.ini";
+
+    /// Closest pair of node positions; ties break to the lower index pair.
+    fn closest_node_pair(positions: &[(f32, f32)]) -> (usize, usize) {
+        let mut best: Option<(f32, usize, usize)> = None;
+        for a in 0..positions.len() {
+            for b in a + 1..positions.len() {
+                let d = dist(positions[a], positions[b]);
+                if best.map(|(best_d, _, _)| d < best_d).unwrap_or(true) {
+                    best = Some((d, a, b));
+                }
+            }
+        }
+        let (_, a, b) = best.expect("closest pair needs at least two nodes");
+        (a, b)
+    }
+
+    /// Mean Euclidean distance from every node in `members` to the centroid of
+    /// `members` — the cluster-tightness measure the cohesion knob is pinned on.
+    fn mean_distance_to_centroid(positions: &[(f32, f32)], members: &[usize]) -> f32 {
+        assert!(!members.is_empty(), "centroid needs members");
+        let (mut sx, mut sy) = (0.0f32, 0.0f32);
+        for &i in members {
+            sx += positions[i].0;
+            sy += positions[i].1;
+        }
+        let centroid = (sx / members.len() as f32, sy / members.len() as f32);
+        members
+            .iter()
+            .map(|&i| dist(positions[i], centroid))
+            .sum::<f32>()
+            / members.len() as f32
+    }
+
+    /// Mean pairwise distance over `members` — the layout-spread measure the
+    /// repulsion gain is pinned on.
+    fn mean_pairwise_distance(positions: &[(f32, f32)], members: &[usize]) -> f32 {
+        let mut total = 0.0f32;
+        let mut count = 0usize;
+        for a in 0..members.len() {
+            for b in a + 1..members.len() {
+                total += dist(positions[members[a]], positions[members[b]]);
+                count += 1;
+            }
+        }
+        total / count as f32
+    }
+
+    /// Assert every pair of bodies whose **both** endpoints are marked active is
+    /// clear within `tol` world units — the scope a drag's separation pass can
+    /// guarantee (design D4).
+    ///
+    /// The stronger "at least one endpoint active" reading is deliberately *not*
+    /// asserted, because it is not achievable: the active set is movable while
+    /// everything outside it is a fixed anchor, and an active body wedged between
+    /// two anchors closer together than its own required separation cannot be
+    /// clear of both. Measured on `fixtures/own_scale.ini` (2026-10-15): dropping
+    /// the nearest node onto its partner leaves 6 residual active/inactive pairs
+    /// that survive an 8192-sweep separation unchanged — a cage, not a sweep
+    /// budget — while every active/active pair is clear.
+    fn assert_active_pairs_clear(
+        sizes: &[(f32, f32)],
+        positions: &[(f32, f32)],
+        active: &[bool],
+        tol: f32,
+        what: &str,
+    ) {
+        for a in 0..positions.len() {
+            for b in a + 1..positions.len() {
+                if !active[a] || !active[b] {
+                    continue;
+                }
+                let dx = (positions[a].0 - positions[b].0).abs();
+                let dy = (positions[a].1 - positions[b].1).abs();
+                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
+                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                let penetration = (need_x - dx).min(need_y - dy);
+                assert!(
+                    penetration <= tol,
+                    "{what}: nodes {a} and {b} overlap: |dx|={dx} (need {need_x}), \
+                     |dy|={dy} (need {need_y}), penetration {penetration} > {tol}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn force_solve_has_zero_overlapping_pairs_on_fixture_set() {
+        // Task 3.1 / design D3: `solve` returns zero overlapping axis-aligned
+        // body pairs on the measured fixture set under the task 1.5 defaults.
+        // Measured (2026-10-15): all five fixtures reach zero pairs, the anchor
+        // at 18 sweeps; this makes that fact executable.
+        let mut checked = 0usize;
+        for name in FORCE_NONOVERLAP_FIXTURES {
+            if !Path::new(name).exists() {
+                continue;
+            }
+            let graph = graph_from_fixture(name);
+            assert!(!graph.nodes.is_empty(), "{name}: fixture graph is empty");
+            let sizes = node_world_sizes(&graph);
+            let positions = solve(&graph, &[], SolveKnobs::default());
+            assert_finite_and_bounded(&positions);
+            assert_pairs_clear(&sizes, &positions, 0.0, name);
+            checked += 1;
+        }
+        assert!(
+            checked == FORCE_NONOVERLAP_FIXTURES.len(),
+            "the whole measured fixture set must be present, checked {checked} of {}",
+            FORCE_NONOVERLAP_FIXTURES.len()
+        );
+
+        if Path::new(FORCE_NONOVERLAP_OPTIONAL_FIXTURE).exists() {
+            let graph = graph_from_fixture(FORCE_NONOVERLAP_OPTIONAL_FIXTURE);
+            let sizes = node_world_sizes(&graph);
+            let positions = solve(&graph, &[], SolveKnobs::default());
+            assert_finite_and_bounded(&positions);
+            assert_pairs_clear(&sizes, &positions, 0.0, FORCE_NONOVERLAP_OPTIONAL_FIXTURE);
+        }
+    }
+
+    #[test]
+    fn local_resettle_clears_overlap_in_the_active_neighbourhood() {
+        // Task 3.1 / design D4: after a deliberately overlapping drag, no two
+        // *active* bodies overlap. That is the scope the pass can guarantee: every
+        // body outside `LOCAL_RADIUS` is a fixed anchor, so a pair of two inactive
+        // nodes never changed (the pre-drag solve left it clear) and an
+        // active/inactive pair can be unresolvable when the active body is wedged
+        // between anchors — the cage case measured and documented on
+        // [`assert_active_pairs_clear`].
+        //
+        // The deliberate overlap: drop the wider member of the closest pair
+        // exactly onto its partner, i.e. a total body overlap at the centre of
+        // the neighbourhood.
+        for name in FORCE_NONOVERLAP_FIXTURES {
+            if !Path::new(name).exists() {
+                continue;
+            }
+            let graph = graph_from_fixture(name);
+            let sizes = node_world_sizes(&graph);
+            let mut positions = solve(&graph, &[], SolveKnobs::default());
+
+            let (a, b) = closest_node_pair(&positions);
+            let (moved, target) = if sizes[a].0 >= sizes[b].0 {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            positions[moved] = positions[target];
+            // The active set `local_resettle` computes: distance to the moved
+            // node's position *at call time*.
+            let center = positions[moved];
+            let active: Vec<bool> = positions
+                .iter()
+                .map(|&p| dist(p, center) <= LOCAL_RADIUS)
+                .collect();
+            assert!(
+                active[moved] && active[target],
+                "{name}: the deliberate overlap must sit inside the active neighbourhood"
+            );
+
+            let moved_id = graph.nodes[moved].id.clone();
+            assert!(local_resettle(
+                &graph,
+                &mut positions,
+                &moved_id,
+                LOCAL_RADIUS,
+                LOCAL_ITERATIONS,
+                &[],
+                SolveKnobs::default(),
+            ));
+
+            assert_active_pairs_clear(
+                &sizes,
+                &positions,
+                &active,
+                0.0,
+                &format!("{name}: active neighbourhood after local_resettle"),
+            );
+        }
+    }
+
+    #[test]
+    fn columns_pinned_with_overlapping_off_grid_pins_has_no_overlap() {
+        // Task 3.1 / design D5. Two pins carried over from a force solve or a
+        // drag can land on top of each other, off the slot grid, and two
+        // immovable bodies cannot be separated — so exact pin honoring yields to
+        // the no-overlap invariant: phase 1 keeps every pin fixed (unpinned
+        // neighbours give way), then one all-movable pass separates the pins.
+        let graph = make_graph(2, &[]);
+        let widths = vec![20.0; 2];
+        let pins = [(0, (10.0, 60.0)), (1, (10.0, 60.0))];
+        let positions = solve_columns_pinned(&graph, &widths, LayoutOrdering::Strict, &pins);
+        let sizes: Vec<(f32, f32)> = widths.iter().map(|&w| (w, NODE_WORLD_H)).collect();
+        assert_finite_and_bounded(&positions);
+        assert_pairs_clear(
+            &sizes,
+            &positions,
+            0.0,
+            "column solve with two coincident off-grid pins",
+        );
+        assert!(
+            positions[0] != (10.0, 60.0) || positions[1] != (10.0, 60.0),
+            "two intersecting pinned bodies cannot both keep their requested position: {positions:?}"
+        );
+
+        // A lone off-grid pin has no pinned partner to conflict with, so exact
+        // pin honoring stands: the unpinned neighbours give way and the pin does
+        // not move at all. This guards the D5 trade-off from over-reaching.
+        let graph = make_graph(6, &[(0, 5), (1, 5), (2, 5), (3, 5), (4, 5)]);
+        let widths = vec![20.0; 6];
+        let lone = solve_columns_pinned(
+            &graph,
+            &widths,
+            LayoutOrdering::Strict,
+            &[(1, (10.0, 60.0))],
+        );
+        assert_eq!(
+            lone[1],
+            (10.0, 60.0),
+            "a lone off-grid pin must keep its exact position"
+        );
+        let sizes: Vec<(f32, f32)> = widths.iter().map(|&w| (w, NODE_WORLD_H)).collect();
+        assert_pairs_clear(&sizes, &lone, 0.0, "column solve with one off-grid pin");
+    }
+
+    #[test]
+    fn solve_knobs_default_reproduces_the_documented_defaults() {
+        // Task 3.2: `SolveKnobs` is the determinism key, so its default must be
+        // the documented tuple (design D6) — and the two force-mode values it
+        // carries are the *measured* ones (design D3): the gain that reproduces
+        // the tuned forces, and the cohesion bracketed from above by the
+        // zero-pairs band and from below by the cluster-coherence floor.
+        let knobs = SolveKnobs::default();
+        assert_eq!(knobs.tension, DEFAULT_TENSION);
+        assert_eq!(knobs.slice_k, SLICE_K);
+        assert_eq!(knobs.section_k, SECTION_HOLE_K);
+        assert_eq!(knobs.repulsion, REPULSION_GAIN_DEFAULT);
+        assert_eq!(knobs.cohesion, COHESION_K);
+        assert_eq!(DEFAULT_TENSION, SPRING_K, "documented tension default");
+        assert_eq!(REPULSION_GAIN_DEFAULT, 1.0, "documented gain default");
+        assert_eq!(
+            COHESION_K, 0.0068,
+            "the measured cohesion default (design D3's table)"
+        );
+    }
+
+    /// Graph for the knob-effect tests: one source feeding five sinks (cable
+    /// springs respond to `tension`), every node in one banner group (cohesion
+    /// pulls the sinks together), and long titles so the sink bodies are wide
+    /// enough for the repulsion ramp to fire. All three force-mode knobs
+    /// therefore have a mechanism to act on.
+    fn knob_probe_graph() -> Graph {
+        let mut graph = make_graph(6, &[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
+        for (i, node) in graph.nodes.iter_mut().enumerate() {
+            node.circuit = format!("sink{i:02}{}", "w".repeat(20));
+        }
+        graph.clusters = vec![Cluster {
+            title: "grp".to_string(),
+            section_range: 0..6,
+        }];
+        graph
+    }
+
+    /// Nine nodes in one banner group, no edges, seeded one [`VERTICAL_SPACING`]
+    /// apart in a single column — the cluster-tightness fixture for the cohesion
+    /// knob. The group is wide enough (a 266-unit mean radius at zero cohesion)
+    /// that the pull is a smooth contraction across the knob's live range instead
+    /// of a step at the collapse threshold: measured mean distance to the group
+    /// centroid 266.68 / 238.36 / 211.88 / 179.58 for cohesion
+    /// 0 / 0.002 / 0.004 / [`COHESION_K`].
+    fn one_cluster_graph() -> Graph {
+        let nodes: Vec<GraphNode> = (0..9).map(|i| node(&format!("n{i}"), i)).collect();
+        Graph {
+            nodes,
+            edges: vec![],
+            clusters: vec![Cluster {
+                title: "one".to_string(),
+                section_range: 0..9,
+            }],
+            validation: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn solve_knobs_tuple_is_the_determinism_key() {
+        // Task 3.2: same graph + same knob tuple → identical positions, asserted
+        // on a *non-default* tuple so the key is the whole bundle rather than the
+        // defaults.
+        let graph = knob_probe_graph();
+        let knobs = SolveKnobs {
+            tension: 0.2,
+            repulsion: 1.4,
+            cohesion: 0.004,
+            ..SolveKnobs::default()
+        };
+        let first = solve(&graph, &[], knobs);
+        assert_finite_and_bounded(&first);
+        assert_eq!(
+            first,
+            solve(&graph, &[], knobs),
+            "identical knob tuples must reproduce identical positions"
+        );
+    }
+
+    #[test]
+    fn each_force_knob_measurably_changes_the_layout() {
+        // Task 3.2: no force-mode knob may silently become a no-op. Tension's own
+        // test (`tension_is_deterministic_per_value_and_changes_layout`) covers it
+        // on a plain graph; this triple-checks all three on one graph that gives
+        // every knob a mechanism.
+        let graph = knob_probe_graph();
+        let base = SolveKnobs {
+            tension: 0.2,
+            repulsion: 1.4,
+            cohesion: 0.004,
+            ..SolveKnobs::default()
+        };
+        let baseline = solve(&graph, &[], base);
+        for (label, knobs) in [
+            (
+                "tension",
+                SolveKnobs {
+                    tension: 0.35,
+                    ..base
+                },
+            ),
+            (
+                "repulsion",
+                SolveKnobs {
+                    repulsion: 0.5,
+                    ..base
+                },
+            ),
+            (
+                "cohesion",
+                SolveKnobs {
+                    cohesion: 0.006,
+                    ..base
+                },
+            ),
+        ] {
+            let changed = solve(&graph, &[], knobs);
+            assert_ne!(baseline, changed, "changing {label} must change the layout");
+        }
+    }
+
+    #[test]
+    fn repulsion_gain_changes_layout_spread() {
+        // Task 3.2: the repulsion gain has a measurable geometric effect, not
+        // just a different float. On the knob-probe graph the ramp pushes the five
+        // wide sinks apart while cohesion pulls them together, so their
+        // equilibrium spread grows with the gain; the measure is the mean pairwise
+        // distance, so a gain that only reshuffled nodes without spreading them
+        // would fail.
+        let graph = knob_probe_graph();
+        let sinks: Vec<usize> = (1..6).collect();
+        let spread = |repulsion: f32| {
+            let positions = solve(
+                &graph,
+                &[],
+                SolveKnobs {
+                    repulsion,
+                    ..SolveKnobs::default()
+                },
+            );
+            assert_finite_and_bounded(&positions);
+            mean_pairwise_distance(&positions, &sinks)
+        };
+        let off = spread(0.0);
+        let nominal = spread(REPULSION_GAIN_DEFAULT);
+        let strong = spread(4.0);
+        assert!(
+            nominal > off,
+            "the ramp must spread the sinks: {nominal} !> {off} (gain off)"
+        );
+        assert!(
+            strong > nominal,
+            "a higher gain must spread further: {strong} !> {nominal}"
+        );
+    }
+
+    #[test]
+    fn cohesion_gain_tightens_banner_clusters() {
+        // Task 3.2 / design D3: the cohesion gain has a measurable effect on
+        // cluster tightness. The fixture's only forces are the group's own
+        // cohesion, the repulsion falloff, and the separation post-condition, so
+        // raising the gain must contract the group — and it must do so across the
+        // knob's live range, not just at one point (a single-point assertion
+        // would not catch a knob that only bites past its threshold).
+        let graph = one_cluster_graph();
+        let members: Vec<usize> = (0..9).collect();
+        let tightness = |cohesion: f32| {
+            let positions = solve(
+                &graph,
+                &[],
+                SolveKnobs {
+                    cohesion,
+                    ..SolveKnobs::default()
+                },
+            );
+            assert_finite_and_bounded(&positions);
+            mean_distance_to_centroid(&positions, &members)
+        };
+        let ladder: Vec<f32> = [0.0, 0.002, 0.004, COHESION_K]
+            .iter()
+            .copied()
+            .map(tightness)
+            .collect();
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[1] < pair[0],
+                "cohesion must tighten the group across its live range, got {ladder:?}"
+            );
+        }
+        // The default's effect is substantial, not numerical dust: measured 32%
+        // tighter than zero cohesion, asserted at half that margin.
+        assert!(
+            ladder[3] < ladder[0] * 0.8,
+            "the default cohesion must tighten the group measurably: {} !< {}",
+            ladder[3],
+            ladder[0] * 0.8
         );
     }
 }
