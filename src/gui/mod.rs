@@ -584,7 +584,42 @@ fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
     } else {
         " \u{B7} skeleton off"
     });
+    // D11: the element under the pointer (falling back to the selection) is the
+    // title's last segment, so its full label and state stay readable even when
+    // the cell could only ellipsize them.
+    if let Some(subject) = module_ui_status_subject(app) {
+        title.push_str(&format!(" \u{B7} {subject}"));
+    }
     ellipsize_pane_title(&title, rect.width())
+}
+
+/// The element named by the module-UI title's status suffix (D11): the hovered
+/// element, falling back to the selected one. `None` when neither is set, so the
+/// title keeps the plain view state.
+fn module_ui_status_subject(app: &App) -> Option<String> {
+    let patch = app.patch.as_ref()?;
+    let comp = match app.hovered_component {
+        Some(index) => patch.hw_components.get(index),
+        None => patch
+            .hw_components
+            .iter()
+            .find(|comp| app.selected_component.as_deref() == Some(comp.id.as_str())),
+    }?;
+    let (_, state_text, _) = physical::cell_visuals(comp, false, false, None);
+    let shift = app.active_shift.map_or(1, |group| group as u8);
+    let store = app.current_hw_store();
+    let label = patch.display_label(
+        &comp.id,
+        shift,
+        app.labels.layers_enabled,
+        app.labels.max_shift_layer,
+        &store,
+    );
+    Some(if state_text.is_empty() {
+        label
+    } else {
+        format!("{label}: {state_text}")
+    })
 }
 
 /// Ellipsize a pane title to the 12 pt chrome font's advance (~0.5 em) minus the

@@ -552,31 +552,32 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                         crate::config::LabelPresentation::On => true,
                     }
             })
-            .map(|cell| {
-                // A composed button face drops the in-cell state row (the shape
-                // carries the state), so its callout resolves the live state
-                // text from the component exactly as the performance overlay
-                // does; every other path keeps the state the cell already has.
-                let mut source = cell.clone();
-                if source.state_text.is_empty() {
-                    if let Some(state) = cell
-                        .component_index
-                        .and_then(|i| patch.hw_components.get(i))
-                        .map(|comp| cell_visuals(comp, false, false, None).1)
-                    {
-                        source.state_text = state;
-                    }
-                }
-                source
-            })
+            .map(|cell| with_resolved_state(cell, patch))
             .collect();
         let candidates: Vec<&CellSpec> = sources.iter().collect();
         budget_annotations(pane, geom.case_rect, &candidates).callouts
     };
+    // Hover reveal (D11): the full label plus state of the element under the
+    // pointer, anchored to its cell and drawn in every presentation mode and in
+    // the skeleton. `physical_spec` takes no pointer, so the handler-published
+    // `hovered_component` is the single input; the performance view already
+    // explodes every label and draws no second callout.
+    let hover = if app.showing_performance {
+        None
+    } else {
+        app.hovered_component
+            .and_then(|index| {
+                cells
+                    .iter()
+                    .find(|cell| cell.component_index == Some(index))
+            })
+            .map(|cell| with_resolved_state(cell, patch))
+            .and_then(|cell| hover_callout(pane, &cell))
+    };
     Some(PhysicalSpec {
         performance,
         annotations,
-        hover: None,
+        hover,
         background: crate::theme::active().graph_canvas_bg,
         case_rect: geom.case_rect,
         mounts: geom.mounts,
@@ -812,6 +813,68 @@ pub(crate) fn budget_annotations(pane: Rect, rack_rect: Rect, cells: &[&CellSpec
     // Top-to-bottom paint order, mirroring `performance_overlay`.
     callouts.sort_by_key(|c| (c.label_rect.min.y * 4096.0) as i32);
     LabelPlan { callouts, dropped }
+}
+
+/// A copy of `cell` carrying the live state text when its paint path drops the
+/// in-cell state row (a composed button face puts the state on its outline), so a
+/// callout can show the state the cell itself cannot. Shared by the annotation
+/// layer and the hover reveal.
+fn with_resolved_state(cell: &CellSpec, patch: &crate::patch::Patch) -> CellSpec {
+    let mut source = cell.clone();
+    if source.state_text.is_empty() {
+        if let Some(state) = cell
+            .component_index
+            .and_then(|i| patch.hw_components.get(i))
+            .map(|comp| cell_visuals(comp, false, false, None).1)
+        {
+            source.state_text = state;
+        }
+    }
+    source
+}
+
+/// The hover reveal (D11): the full label plus state of the hovered cell, as a
+/// callout anchored to its edge. The side is chosen to stay inside the pane —
+/// right of the cell when it fits, else left — and the rect is centred on the
+/// cell vertically and clamped into the pane, so the callout never covers the
+/// element it describes. `None` for an unlabelled or unaddressed cell.
+fn hover_callout(pane: Rect, cell: &CellSpec) -> Option<CalloutSpec> {
+    if cell.label.is_empty() || cell.component_index.is_none() {
+        return None;
+    }
+    let (w, h) = callout_size(&cell.label, &cell.state_text);
+    let gap = crate::performance::SIDE_MARGIN;
+    let right = cell.rect.max.x + gap;
+    let left = cell.rect.min.x - gap - w;
+    // A side only counts when the whole callout lands inside the pane: a cell
+    // outside or wider than the pane has no valid side at all.
+    let fits_right = right >= pane.min.x && right + w <= pane.max.x;
+    let fits_left = left >= pane.min.x && left + w <= pane.max.x;
+    let (x, anchor_x) = if fits_right {
+        (right, cell.rect.max.x)
+    } else if fits_left {
+        // Flip to the side that keeps the callout inside the pane.
+        (left, cell.rect.min.x)
+    } else {
+        // Neither side has room (a cell outside or wider than the pane): clamp
+        // into the pane, keeping the leader on the edge facing the callout.
+        let clamped = (pane.max.x - w).max(pane.min.x);
+        let anchor = if clamped < cell.rect.min.x {
+            cell.rect.min.x
+        } else {
+            cell.rect.max.x
+        };
+        (clamped, anchor)
+    };
+    let y = (cell.rect.center().y - h / 2.0).clamp(pane.min.y, (pane.max.y - h).max(pane.min.y));
+    Some(CalloutSpec {
+        label_rect: Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)),
+        anchor: Pos2::new(anchor_x, cell.rect.center().y),
+        label: cell.label.clone(),
+        state_text: cell.state_text.clone(),
+        color: cell.color,
+        highlighted: cell.highlighted,
+    })
 }
 
 /// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
