@@ -1333,7 +1333,10 @@ mod tests {
         let chain =
             PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
         let rack = RackLayout::pack(&chain, &spec(&[(3, 20.0)], &[]));
-        let zooms = [0.75, 1.0, 1.5, 2.0];
+        // The supported range widened to [ZOOM_MIN, ZOOM_MAX] (D5), so the
+        // abutment promise must hold at the new extremes, not only at the
+        // retired [0.75, 2.0] presets.
+        let zooms = [ZOOM_MIN, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, ZOOM_MAX];
         let offsets = [(0.0, 0.0), (0.4, 0.0), (-1.3, 0.7), (2.1, -0.9)];
         for zoom in zooms {
             for &(ox, oy) in &offsets {
@@ -1372,7 +1375,7 @@ mod tests {
     fn screen_mapping_multi_row_offsets_include_fold_bars() {
         // Row 1 sits below row 0 plus exactly one fold bar: pack a two-row
         // rack and map both rows' module rects — the screen gap must equal
-        // the mm gap × cells_per_mm × zoom (D1/D11).
+        // the mm gap × points_per_mm × zoom (D1/D11).
         let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
         let chain = PhysicalLayout::build(&p);
         let spec = RackSpec {
@@ -1410,7 +1413,7 @@ mod tests {
         assert_close(y1_abs - (y0_abs + p0.h_mm), FOLD_BAR_HEIGHT_MM);
 
         // Mapping the rack-absolute rects: the screen gap equals the mm gap
-        // × cells_per_mm (the mapping is isotropic in mm, D1).
+        // × points_per_mm (the mapping is isotropic in mm, D1).
         let m = ScreenMapping::default();
         let abs0 = RectMm {
             x_mm: p0.x_mm,

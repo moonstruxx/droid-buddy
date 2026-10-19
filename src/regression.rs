@@ -1737,7 +1737,18 @@ fn regression_anchor_graph_label_fonts_constant_across_zoom() {
     );
 }
 
-/// Monospace font sizes painted for a module-UI spec at one physical zoom.
+/// Monospace font sizes painted for the *in-cell labels* of a module-UI spec
+/// at one physical zoom.
+///
+/// Scoped to cell labels on purpose: `paint_physical` also paints 14 pt
+/// monospace callout headlines for the label annotations, the performance
+/// overlay and the hover reveal. Those are a separate typographic role
+/// (fixed callout size, placed outside the rack cells), so counting them here
+/// would compare the cell-label size against the callout size rather than
+/// measuring whether cell labels stay constant across zoom presets. A shape
+/// counts only when it is monospace and its painted rect fits a cell's rect
+/// (expanded by 1 pt for egui's monospace advance differing slightly from the
+/// 0.6 em budget used to clip labels).
 fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
     use egui::epaint::Shape;
     use egui::RawInput;
@@ -1768,7 +1779,18 @@ fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
                 .first()
                 .map(|s| s.format.font_id.clone())
                 .unwrap_or_default();
-            if font.family == egui::FontFamily::Monospace {
+            if font.family != egui::FontFamily::Monospace {
+                continue;
+            }
+            // Cell labels paint LEFT_TOP from a point inside their cell, so
+            // the painted rect starts at `t.pos`. Annotations and other
+            // callouts paint inside their own label rect, outside the cells.
+            let text_rect = egui::Rect::from_min_size(t.pos, t.galley.size());
+            let inside_a_cell = spec
+                .cells
+                .iter()
+                .any(|cell| cell.rect.expand(1.0).contains_rect(text_rect));
+            if inside_a_cell {
                 sizes.push(font.size);
             }
         }
@@ -1781,7 +1803,12 @@ fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
 fn regression_anchor_module_ui_label_fonts_constant_across_zoom() {
     let mut sizes = Vec::new();
     for zoom in [0.75f32, 1.0, 1.5, 2.0] {
-        sizes.extend(painted_physical_label_sizes(zoom));
+        let at_zoom = painted_physical_label_sizes(zoom);
+        assert!(
+            !at_zoom.is_empty(),
+            "anchor module UI paints cell labels at zoom {zoom}"
+        );
+        sizes.extend(at_zoom);
     }
     assert!(!sizes.is_empty(), "anchor module UI paints cell labels");
     assert!(
