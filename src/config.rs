@@ -28,10 +28,19 @@ pub const DEFAULT_PHYSICAL_SHOW_SKELETON: bool = false;
 pub const DEFAULT_PHYSICAL_ZOOM: f64 = 1.0;
 /// Pan-origin default (`physical_offset: (0.0, 0.0)` in `App`).
 pub const DEFAULT_PHYSICAL_OFFSET: f64 = 0.0;
-/// Zoom floor/ceiling — the `+`/`-` scale presets `[0.75, 1.0, 1.5, 2.0]`
-/// (handler.rs), so a configured zoom always sits on the preset ladder.
-pub const MIN_PHYSICAL_ZOOM: f64 = 0.75;
-pub const MAX_PHYSICAL_ZOOM: f64 = 2.0;
+/// Zoom floor/ceiling — the supported range of the true-1:1 baseline
+/// (module-ui-labels D5): `[physical] zoom` sanitisation and the runtime clamp
+/// share `physical::ZOOM_MIN`/`ZOOM_MAX` so the two can never disagree.
+pub const MIN_PHYSICAL_ZOOM: f64 = crate::physical::ZOOM_MIN;
+pub const MAX_PHYSICAL_ZOOM: f64 = crate::physical::ZOOM_MAX;
+
+/// Marker naming the scale baseline a stored `[physical] zoom` was expressed
+/// against (module-ui-labels D13). Configs written before true 1:1 lack it, so
+/// their zoom is ignored once (the view opens fitted); `save_to_dir` writes the
+/// marker, after which a stored zoom is honoured. The field is additive: an old
+/// config stays valid and a hand-written one without the marker simply gets one
+/// fit.
+pub const PHYSICAL_ZOOM_BASELINE: u32 = 2;
 
 /// Plugin-loading default under `[plugins]`: enabled by default, no directory
 /// override (the standard XDG plugins dir applies).
@@ -141,7 +150,12 @@ pub struct Physical {
     pub show_skeleton: bool,
     #[serde(default = "default_physical_zoom")]
     pub zoom: f64,
-    /// Pan offset in screen cells; negative values reveal content above/left.
+    /// Scale baseline the stored `zoom` is relative to (D13). Absent on configs
+    /// written before the true-1:1 rebaseline; `save_to_dir` stamps the current
+    /// value so the reset happens exactly once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom_baseline: Option<u32>,
+    /// Pan offset in points; negative values reveal content above/left.
     #[serde(default = "default_physical_offset")]
     pub offset_x: f64,
     #[serde(default = "default_physical_offset")]
@@ -155,10 +169,20 @@ impl Default for Physical {
         Self {
             show_skeleton: default_show_skeleton(),
             zoom: default_physical_zoom(),
+            zoom_baseline: None,
             offset_x: default_physical_offset(),
             offset_y: default_physical_offset(),
             rack: crate::physical::RackSpec::default(),
         }
+    }
+}
+
+impl Physical {
+    /// True when the stored zoom was written against the current true-1:1
+    /// baseline (module-ui-labels D13). Only then may the app seed it; a legacy
+    /// value is ignored once and the view opens fitted.
+    pub fn zoom_baseline_is_current(&self) -> bool {
+        self.zoom_baseline == Some(PHYSICAL_ZOOM_BASELINE)
     }
 }
 
@@ -448,6 +472,9 @@ pub fn save_to_dir(dir: &Path, settings: &Settings) -> io::Result<()> {
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
     sanitize_physical(&mut normalized.physical);
+    // D13: stamp the baseline on every save, so a legacy config is migrated
+    // exactly once and later runs honour the stored zoom.
+    normalized.physical.zoom_baseline = Some(PHYSICAL_ZOOM_BASELINE);
     let body = toml::to_string(&normalized)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     let target = dir.join(CONFIG_FILE_NAME);
@@ -910,11 +937,12 @@ mod tests {
     #[test]
     fn physical_zoom_clamped_on_load() {
         for (raw, expected) in [
-            (0.1, 0.75),
-            (0.75, 0.75),
+            (0.1, 0.25),
+            (0.25, 0.25),
             (1.5, 1.5),
             (2.0, 2.0),
-            (5.0, 2.0),
+            (4.0, 4.0),
+            (5.0, 4.0),
         ] {
             let dir = TempDir::new().unwrap();
             let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
@@ -991,6 +1019,7 @@ mod tests {
             physical: Physical {
                 show_skeleton: true,
                 zoom: 1.5,
+                zoom_baseline: None,
                 offset_x: 2.0,
                 offset_y: -8.0,
                 rack: crate::physical::RackSpec {
@@ -1016,7 +1045,8 @@ mod tests {
             &test_canonical,
             &TEST_CATALOG,
         );
-        assert_eq!(loaded.physical, settings.physical);
+        assert_eq!(loaded.physical.zoom, settings.physical.zoom);
+        assert!(loaded.physical.zoom_baseline_is_current());
     }
 
     #[test]
@@ -1031,6 +1061,7 @@ mod tests {
                 physical: Physical {
                     show_skeleton: false,
                     zoom: 5.0,
+                    zoom_baseline: None,
                     offset_x: 0.0,
                     offset_y: 0.0,
                     rack: crate::physical::RackSpec {
@@ -1054,7 +1085,7 @@ mod tests {
             &test_canonical,
             &TEST_CATALOG,
         );
-        assert_eq!(loaded.physical.zoom, 2.0);
+        assert_eq!(loaded.physical.zoom, 4.0);
         assert_eq!(loaded.physical.rack.top_mount_te, 0.0);
         assert_eq!(loaded.physical.rack.rows[0].he, 1);
         assert_eq!(loaded.physical.rack.rows[0].hp, 1.0);
@@ -1355,5 +1386,45 @@ mod tests {
                 "raw {raw} should sanitise to {expected}"
             );
         }
+    }
+
+    #[test]
+    fn physical_zoom_baseline_resets_a_legacy_zoom_once() {
+        // D13: a config written against the old baseline has no marker, so its
+        // stored zoom must not be interpreted against the new one. The load
+        // keeps the (sanitised) value for inspection; the app ignores it and
+        // opens fitted. A save stamps the marker, after which the value is
+        // honoured.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical]\nzoom = 2.0\n",
+        )
+        .unwrap();
+        let legacy = load_at(&dir);
+        assert!(
+            !legacy.physical.zoom_baseline_is_current(),
+            "a marker-less config is a legacy baseline"
+        );
+        assert_eq!(legacy.physical.zoom, 2.0, "still in the supported range");
+
+        // The next save writes the additive marker (and a re-save honours it).
+        save_to_dir(&cfg_dir, &legacy).unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("zoom_baseline"), "marker written: {body}");
+        let reloaded = load_at(&dir);
+        assert!(reloaded.physical.zoom_baseline_is_current());
+        assert_eq!(reloaded.physical.zoom, 2.0, "now honoured as-is");
+    }
+
+    #[test]
+    fn physical_zoom_baseline_absent_serialises_cleanly() {
+        // Additive marker: an unchanged default never gains a stray key until
+        // something actually saves.
+        assert_eq!(Physical::default().zoom_baseline, None);
+        let body = toml::to_string(&Physical::default()).unwrap();
+        assert!(!body.contains("zoom_baseline"), "body: {body}");
     }
 }

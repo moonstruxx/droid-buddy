@@ -2941,6 +2941,21 @@ impl App {
         ))
     }
 
+    /// Seed the physical-view state from `[physical]` (module-ui-labels D13).
+    /// Offset, skeleton, and rack always seed; the zoom seeds only when the
+    /// stored value was written against the current true-1:1 baseline. A legacy
+    /// value is ignored once so the view opens fitted, and `config::save_to_dir`
+    /// stamps the marker on the next save.
+    pub fn seed_physical_view(&mut self, physical: &crate::config::Physical) {
+        if physical.zoom_baseline_is_current() {
+            self.scale_factor = physical.zoom as f32;
+            self.physical_zoom = physical.zoom as f32;
+        }
+        self.physical_offset = (physical.offset_x as f32, physical.offset_y as f32);
+        self.physical_show_skeleton = physical.show_skeleton;
+        self.physical_rack_spec = physical.rack.clone();
+    }
+
     pub fn load_patch(&mut self, patch: Patch) -> bool {
         let issues = validate_patch(&patch, load_schema());
         // Gate only on hard errors (unknown_circuit, ram_overflow). Legacy
@@ -8083,5 +8098,34 @@ mod tests {
             (true, true),
             "the rack extent at the current zoom must drive overflow"
         );
+    }
+
+    #[test]
+    fn seed_physical_view_ignores_a_legacy_zoom_once() {
+        // D13: a marker-less (old-baseline) zoom must not seed the app; the
+        // view opens fitted. A marked value is honoured.
+        let mut app = App::new();
+        let legacy = crate::config::Physical {
+            zoom: 2.0,
+            zoom_baseline: None,
+            show_skeleton: true,
+            offset_x: 3.0,
+            offset_y: -4.0,
+            rack: crate::physical::RackSpec::default(),
+        };
+        app.seed_physical_view(&legacy);
+        assert_eq!(app.physical_zoom, 1.0, "legacy zoom is ignored once");
+        assert_eq!(app.scale_factor, 1.0);
+        assert!(app.physical_show_skeleton);
+        assert_eq!(app.physical_offset, (3.0, -4.0));
+
+        let current = crate::config::Physical {
+            zoom: 2.0,
+            zoom_baseline: Some(crate::config::PHYSICAL_ZOOM_BASELINE),
+            ..crate::config::Physical::default()
+        };
+        app.seed_physical_view(&current);
+        assert_eq!(app.physical_zoom, 2.0, "a current baseline is honoured");
+        assert_eq!(app.scale_factor, 2.0);
     }
 }

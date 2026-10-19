@@ -189,7 +189,10 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
             let next = camera_zoom_about(cam, clamped, anchor);
             *cam = next;
         } else {
-            app.physical_zoom = (app.physical_zoom * clamped).clamp(0.5, 3.0);
+            app.physical_zoom = (app.physical_zoom * clamped).clamp(
+                crate::physical::ZOOM_MIN as f32,
+                crate::physical::ZOOM_MAX as f32,
+            );
             app.scale_factor = app.physical_zoom;
         }
         let _ = ZOOM_SENSITIVITY;
@@ -342,14 +345,7 @@ fn physical_slot_focused(app: &App) -> bool {
 /// Cycle the physical panel scale presets (shared by the panels arm and the
 /// graph arm's scale-the-other-pane path).
 fn cycle_panel_scale(app: &mut App, plus: bool) {
-    // Cycle through the scaling presets defined by the module-scaling spec.
-    const PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
-    let idx = PRESETS
-        .iter()
-        .position(|p| (*p - app.scale_factor).abs() < f32::EPSILON)
-        .unwrap_or(1);
-    let step = if plus { 1 } else { PRESETS.len() - 1 };
-    let next = PRESETS[(idx + step) % PRESETS.len()];
+    let next = next_scale_preset(app.physical_zoom, plus);
     app.scale_factor = next;
     // The physical renderers link `physical_zoom` from `scale_factor`
     // every frame; sync it here so the status hint below shows the
@@ -358,6 +354,29 @@ fn cycle_panel_scale(app: &mut App, plus: bool) {
     app.status_message = app
         .physical_status_hint()
         .unwrap_or_else(|| format!("Scaling: {}%", (next * 100.0) as u32));
+}
+
+/// The next preset strictly in the direction of travel from `current`
+/// (module-ui-labels D5). The ladder values stay multipliers of the true-1:1
+/// baseline, and an off-ladder fit value (e.g. 0.98) steps to the adjacent
+/// preset instead of snapping: upward 0.98 → 1.0, downward → 0.75. The ends
+/// wrap, preserving the established preset cycle.
+fn next_scale_preset(current: f32, plus: bool) -> f32 {
+    const PRESETS: [f32; 4] = [0.75, 1.0, 1.5, 2.0];
+    if plus {
+        PRESETS
+            .iter()
+            .copied()
+            .find(|p| *p > current + f32::EPSILON)
+            .unwrap_or(PRESETS[0])
+    } else {
+        PRESETS
+            .iter()
+            .rev()
+            .copied()
+            .find(|p| *p < current - f32::EPSILON)
+            .unwrap_or(PRESETS[PRESETS.len() - 1])
+    }
 }
 
 /// Focus the pane holding `view` (no-op when the view is not open). The class
@@ -3399,6 +3418,37 @@ mod tests {
         // At the top preset, '+' wraps around to the bottom.
         handle_event(key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 0.75);
+    }
+
+    #[test]
+    fn scale_ladder_steps_from_an_off_ladder_fit_zoom() {
+        // D5: a fitted zoom need not sit on the ladder; `+`/`-` step to the
+        // next preset in the direction of travel instead of snapping.
+        let mut app = App::new();
+        app.physical_zoom = 0.98;
+        app.scale_factor = 0.98;
+        handle_event(key(KeyCode::Char('+')), &mut app);
+        assert_eq!(app.physical_zoom, 1.0, "0.98 steps up to 1.0");
+        assert_eq!(app.scale_factor, 1.0);
+
+        let mut down = App::new();
+        down.physical_zoom = 0.98;
+        down.scale_factor = 0.98;
+        handle_event(key(KeyCode::Char('-')), &mut down);
+        assert_eq!(down.physical_zoom, 0.75, "0.98 steps down to 0.75");
+        assert_eq!(down.scale_factor, 0.75);
+
+        // Above the ladder the same rule applies (fit may exceed 2.0).
+        let mut high = App::new();
+        high.physical_zoom = 2.6;
+        high.scale_factor = 2.6;
+        handle_event(key(KeyCode::Char('+')), &mut high);
+        assert_eq!(high.physical_zoom, 0.75, "past the top wraps to the floor");
+        let mut high_down = App::new();
+        high_down.physical_zoom = 2.6;
+        high_down.scale_factor = 2.6;
+        handle_event(key(KeyCode::Char('-')), &mut high_down);
+        assert_eq!(high_down.physical_zoom, 2.0, "steps down to the top preset");
     }
 
     // Task 2.3: graph camera persistent state + wheel/arrow zoom-pan.
@@ -8428,9 +8478,18 @@ mod tests {
             },
             &mut app,
         );
-        // The frame clamps the factor by MAX_ZOOM_STEP before applying it.
+        // The frame clamps the factor by MAX_ZOOM_STEP before applying it and
+        // the result by the supported zoom range (D5).
         let factor = 2.0_f32.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
-        assert!((app.physical_zoom - (before * factor).clamp(0.5, 3.0)).abs() < 1e-6);
+        assert!(
+            (app.physical_zoom
+                - (before * factor).clamp(
+                    crate::physical::ZOOM_MIN as f32,
+                    crate::physical::ZOOM_MAX as f32,
+                ))
+            .abs()
+                < 1e-6
+        );
         assert_eq!(app.scale_factor, app.physical_zoom);
     }
 
