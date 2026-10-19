@@ -54,6 +54,8 @@ pub(crate) use viewer::ViewerFrame;
 use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 use winit::dpi::LogicalSize;
@@ -159,6 +161,12 @@ thread_local! {
     static DISPLAY: RefCell<Option<OwnedDisplayHandle>> = const { RefCell::new(None) };
 }
 
+/// One-shot guard for [`destroy_window_for_panic`]: once a teardown has run,
+/// a second call (a nested panic, or thread-exit running the hook again) must
+/// not touch thread-locals that may already be destroyed. Reset by
+/// [`GraphWindow::open`], because the guard belongs to one window's lifetime.
+static TEARDOWN_DONE: AtomicBool = AtomicBool::new(false);
+
 /// The wgpu swapchain: surface, device, and the egui renderer bound to it.
 struct WgpuCanvas {
     surface: wgpu::Surface<'static>,
@@ -230,6 +238,9 @@ impl GraphWindow {
         // DROID keybindings dead at startup until the user clicked the window
         // (bead droid_tui-5u9).
         window.focus_window();
+        // A fresh window may be torn down again: the one-shot panic guard is
+        // scoped to one window's lifetime (open/close/reopen is legitimate).
+        TEARDOWN_DONE.store(false, Ordering::SeqCst);
         // A stale surface must not survive a reopen; the display handle is
         // injected into the wgpu instance so Wayland-GLES can create surfaces.
         EGUI.with(|slot| *slot.borrow_mut() = None);
@@ -1148,27 +1159,64 @@ impl EguiSurface {
     }
 }
 
+/// Runs one teardown step, swallowing any panic it raises.
+///
+/// The panic hook runs while the process is already unwinding, so a panic
+/// here — `LocalKey::with` on a destroyed thread-local, or a wgpu object
+/// panicking while it drops — would abort the process through a second panic.
+/// Containing each step lets the remaining steps still run. A swallowed panic
+/// is reported on stderr so it stays diagnosable rather than silent.
+pub(crate) fn teardown_step<F: FnOnce()>(label: &str, f: F) {
+    if std::panic::catch_unwind(AssertUnwindSafe(f)).is_err() {
+        eprintln!("[panic] window teardown step contained: {label}");
+    }
+}
+
+/// Resets the one-shot panic-teardown guard; tests only, so the guard tests
+/// are independent of each other and of test order.
+#[cfg(test)]
+pub(crate) fn reset_teardown_guard() {
+    TEARDOWN_DONE.store(false, Ordering::SeqCst);
+}
+
 /// Destroys the graph window surface and its canvas; called by the panic hook
 /// in `main.rs` so a panic cannot leave an orphaned window on the desktop.
 ///
-/// Uses `try_borrow_mut` so a panic that happens while a slot is borrowed
-/// cannot recurse; unwinding drops the surface anyway. The wgpu canvas dies
-/// before the window, matching the surface's raw-handle safety contract.
+/// One-shot: after the first call the window is gone, and a repeated call
+/// returns without touching thread-locals that may already be destroyed.
+///
+/// Each slot clear is a contained [`teardown_step`], so a source of panic the
+/// `try_borrow_mut` check cannot cover (destroyed TLS, or a wgpu drop during
+/// unwinding) does not skip the remaining steps. `try_borrow_mut` is kept so a
+/// borrowed slot still cannot recurse; unwinding drops the surface anyway.
+/// Order is load-bearing: the wgpu canvas dies before the window, matching the
+/// surface's raw-handle safety contract.
 pub fn destroy_window_for_panic() {
-    EGUI.with(|slot| {
-        if let Ok(mut handle) = slot.try_borrow_mut() {
-            *handle = None;
-        }
+    // Claim the one-shot before any step so a nested teardown (a panic raised
+    // by a drop re-entering this hook) is already a no-op.
+    if TEARDOWN_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    teardown_step("clear EGUI (egui/wgpu canvas)", || {
+        EGUI.with(|slot| {
+            if let Ok(mut handle) = slot.try_borrow_mut() {
+                *handle = None;
+            }
+        });
     });
-    DISPLAY.with(|slot| {
-        if let Ok(mut handle) = slot.try_borrow_mut() {
-            *handle = None;
-        }
+    teardown_step("clear DISPLAY (owned display handle)", || {
+        DISPLAY.with(|slot| {
+            if let Ok(mut handle) = slot.try_borrow_mut() {
+                *handle = None;
+            }
+        });
     });
-    WINDOW.with(|slot| {
-        if let Ok(mut handle) = slot.try_borrow_mut() {
-            *handle = None;
-        }
+    teardown_step("clear WINDOW", || {
+        WINDOW.with(|slot| {
+            if let Ok(mut handle) = slot.try_borrow_mut() {
+                *handle = None;
+            }
+        });
     });
 }
 
