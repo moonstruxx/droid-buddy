@@ -2,13 +2,12 @@
 //! geometry in millimetres (task 2.1 of physical-scale-model).
 //!
 //! Pure module: no terminal dependency. Mirrors the conventions of
-//! `src/geometry.rs` (JSON data loading via `CARGO_MANIFEST_DIR` + serde,
+//! `src/geometry.rs` (geometry data embedded at build time + serde,
 //! case-insensitive controller resolution) and `src/graph.rs` (in-module
 //! unit tests). Task 2.3 adds rack/row packing on top of the public chain
 //! types (`PhysicalLayout` / `PhysicalModule`).
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Once;
 
 use serde::{Deserialize, Serialize};
@@ -123,40 +122,20 @@ pub struct ElementCellEntry {
 // Loader
 // ---------------------------------------------------------------------------
 
+/// Compiled in so a binary copied away from the repo still has its faceplates.
+const CONTROLLER_GEOMETRY_JSON: &str = include_str!("../controller_geometry.json");
+
 impl ControllerGeometry {
-    /// Load `controller_geometry.json` from the crate/repo root, mirroring
-    /// `RackGeometry::load` in `src/geometry.rs`. Never panics.
+    /// Parse the embedded `controller_geometry.json`, mirroring
+    /// `RackGeometry::load` in `src/geometry.rs`. Malformed data returns a
+    /// descriptive `Err(String)`; this never panics.
     pub fn load() -> Result<Self, String> {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let candidates = [
-            format!("{manifest_dir}/controller_geometry.json"),
-            "controller_geometry.json".to_string(),
-            "../controller_geometry.json".to_string(),
-            "./controller_geometry.json".to_string(),
-        ];
-        let mut last_err = String::new();
-        for cand in &candidates {
-            let p = Path::new(cand);
-            if !p.exists() {
-                last_err = format!("not found: {cand}");
-                continue;
-            }
-            match std::fs::read_to_string(p) {
-                Ok(s) => match serde_json::from_str::<Self>(&s) {
-                    Ok(v) => return Ok(v),
-                    Err(e) => {
-                        return Err(format!("failed to parse {cand}: {e}"));
-                    }
-                },
-                Err(e) => {
-                    last_err = format!("failed to read {cand}: {e}");
-                }
-            }
-        }
-        Err(format!(
-            "controller_geometry.json not found or unreadable. Tried: {}. Last error: {last_err}",
-            candidates.join(", ")
-        ))
+        Self::from_json(CONTROLLER_GEOMETRY_JSON)
+    }
+
+    fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text)
+            .map_err(|e| format!("failed to parse embedded controller_geometry.json: {e}"))
     }
 
     /// Empty data source with the documented defaults, used when the file is
@@ -1715,6 +1694,45 @@ mod tests {
         // controller follows at module 1 with the fallback width.
         assert!(!layout.modules[0].is_fallback);
         assert!(layout.modules[1].is_fallback);
+    }
+
+    #[test]
+    fn embedded_controller_geometry_parses_and_matches_tracked_file() {
+        let embedded =
+            ControllerGeometry::load().expect("embedded controller_geometry.json parses");
+        assert!(!embedded.controllers.is_empty());
+
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("controller_geometry.json");
+        let tracked = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("tracked {} unreadable: {e}", path.display()));
+        assert_eq!(
+            CONTROLLER_GEOMETRY_JSON, tracked,
+            "compiled-in controller geometry drifted from the tracked file"
+        );
+
+        let from_file = ControllerGeometry::from_json(&tracked)
+            .expect("tracked controller_geometry.json parses");
+        assert_eq!(
+            serde_json::to_value(&embedded).expect("embedded geometry serialises"),
+            serde_json::to_value(&from_file).expect("tracked geometry serialises"),
+            "embedded and tracked controller geometry parse to different models"
+        );
+    }
+
+    #[test]
+    fn loader_does_not_search_the_filesystem() {
+        // Production source is everything before the test module.
+        let source = include_str!("physical.rs");
+        let production = source.split("#[cfg(test)]").next().expect("test module");
+        assert!(
+            !production.contains("CARGO_MANIFEST_DIR"),
+            "controller geometry must come from include_str!, not a manifest-relative path"
+        );
+        assert!(
+            !production.contains("std::fs"),
+            "controller geometry must not be read from the filesystem at runtime"
+        );
     }
 
     #[test]
