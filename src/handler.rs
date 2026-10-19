@@ -1627,7 +1627,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             // module-ui-labels D6: fit and centre the module UI and clear the
             // manual-navigation latch. Free here because the graph's `f` is
             // graph-scoped and returns in the arm above.
-            if let Some((w, h)) = app.physical_pane_size {
+            if let Some((w, h)) = app.physical_pane_size() {
                 if app.fit_physical_view(w, h) {
                     app.status_message = app.physical_status_hint().unwrap_or_default();
                 }
@@ -2922,7 +2922,7 @@ mod tests {
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
         // A roomy pane so the live rack fits and the wheel can adjust rather
         // than pan (overflow is judged from the live extent, D5).
-        app.physical_viewport = Some(Rect::new(0, 3, 1000, 600));
+        app.note_physical_pane_rect(Rect::new(0, 0, 1000, 600));
 
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
@@ -2941,7 +2941,7 @@ mod tests {
     /// viewport on both axes (4.3 pan tests).
     fn app_with_overflowing_rack() -> App {
         let mut app = app_with_fixture();
-        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        app.note_physical_pane_rect(Rect::new(0, 0, 80, 24));
         app
     }
 
@@ -2970,7 +2970,7 @@ mod tests {
     #[test]
     fn arrow_keys_preserve_navigation_when_rack_fits() {
         let mut app = app_with_fixture();
-        app.physical_viewport = Some(Rect::new(0, 3, 1000, 600));
+        app.note_physical_pane_rect(Rect::new(0, 0, 1000, 600));
         // Rack fits the viewport: Down/Up navigate, Left/Right stay no-ops.
         handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.hovered_component, Some(1));
@@ -3013,8 +3013,7 @@ mod tests {
         let mut app = App::new();
         app.patch = Some(patch);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
-        app.physical_rack_size = (200, 100);
-        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        app.note_physical_pane_rect(Rect::new(0, 0, 80, 24));
 
         // Vertical overflow forces panning even over a hovered knob cell;
         // scroll up pans up (negative offset) and leaves the value alone.
@@ -3028,9 +3027,9 @@ mod tests {
         assert_eq!(app.physical_offset, (0.0, 0.0));
 
         // Rack fits a roomy pane: the wheel adjusts the hovered knob as before.
-        // The overflow judge uses the live rack extent, so the pane (not a
-        // stored rack size) decides.
-        app.physical_viewport = Some(Rect::new(0, 3, 800, 600));
+        // The overflow judge uses the live rack extent, so the published pane
+        // (not a stored rack size) decides.
+        app.note_physical_pane_rect(Rect::new(0, 0, 800, 600));
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
             ComponentState::Value(v) => assert!((v - 0.05).abs() < 1e-6),
@@ -3472,7 +3471,7 @@ mod tests {
     #[test]
     fn f_refits_the_module_ui_and_clears_the_latch() {
         let mut app = app_with_fixture();
-        app.note_physical_pane_size(640.0, 520.0);
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
         app.apply_physical_fit_triggers();
         let fitted = app.physical_zoom;
         assert!(app.physical_fit_zoom.is_some(), "the view opened fitted");

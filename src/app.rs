@@ -986,26 +986,20 @@ pub struct App {
     /// Pending automatic fit request (view open, patch load, rack change). The
     /// pane dispatch consumes it once the pane size is known.
     pub physical_fit_pending: bool,
-    /// The module-UI pane size in points as last drawn (D4's resize trigger and
-    /// the `f` key's fit target). Published by the pane dispatch.
-    pub physical_pane_size: Option<(f32, f32)>,
+    /// The module-UI pane rect as last drawn (D4's resize trigger, the `f`
+    /// key's fit target, and the overflow/pan judge), in cell coordinates.
+    /// Published by the pane dispatch every frame (`paint_panes`) through
+    /// `note_physical_pane_rect`, so overflow and pan judge the pane actually
+    /// on screen (D8). `None` before the first painted frame and in headless
+    /// tests that never render. Not reset on patch load — pane geometry is a
+    /// property of the window arrangement, not the patch.
+    pub physical_pane_rect: Option<Rect>,
     /// The case/rack definition the physical view packs into (design D12).
     /// Seeded from `[physical.rack]` at startup (main.rs); empty rows mean
     /// "no rack configured" and `RackLayout::pack` materializes the default
     /// single-row case. Not reset on patch load — the rack is a property of
     /// the environment, not the patch.
     pub physical_rack_spec: crate::physical::RackSpec,
-    /// Screen size (w, h) in cells of the whole rack under the current
-    /// mapping, published by the renderers each frame
-    /// (renderer-owns-geometry contract). `physical_overflow` compares it
-    /// against the visible area for the 4.3 wheel-pan wiring.
-    pub physical_rack_size: (u16, u16),
-    /// Main-panel viewport the physical view renders into, published by the
-    /// renderer (renderer-owns-geometry contract, like `minimap_rect`). The
-    /// 4.3 pan wiring compares the published rack size against it via
-    /// `physical_main_area()`; until a render has run the live terminal size
-    /// is the fallback. Reset on patch load with the other viewport state.
-    pub physical_viewport: Option<Rect>,
     /// Primary `_VAR` derived from the selected hardware token (`hw_token_to_vars` first element).
     pub active_modifier_var: Option<String>,
     /// Hardware token of the component currently being held with the mouse (mouse Down on
@@ -1206,11 +1200,9 @@ impl App {
             physical_fit_zoom: None,
             physical_nav_latched: false,
             physical_fit_pending: true,
-            physical_pane_size: None,
+            physical_pane_rect: None,
             physical_rack_spec: crate::physical::RackSpec::default(),
             graph_window_request: GraphWindowRequest::default(),
-            physical_rack_size: (0, 0),
-            physical_viewport: None,
             active_modifier_var: None,
             hold_component: None,
             latched_component: None,
@@ -2579,18 +2571,30 @@ impl App {
         self.physical_fit_zoom = None;
     }
 
-    /// Publish the module-UI pane size from the pane dispatch and arm the fit
-    /// when it changed (D4's pane-resize trigger). Suppressed while the manual
-    /// latch is set.
-    pub fn note_physical_pane_size(&mut self, pane_w: f32, pane_h: f32) {
-        if pane_w <= 0.0 || pane_h <= 0.0 {
+    /// Publish the module-UI pane rect from the pane dispatch and arm the fit
+    /// when its size changed (D4's pane-resize trigger). Suppressed while the
+    /// manual latch is set. The rect is the live pane geometry (D8), so
+    /// overflow and pan judge what is actually drawn rather than a stored
+    /// screen size.
+    pub fn note_physical_pane_rect(&mut self, rect: Rect) {
+        if rect.width == 0 || rect.height == 0 {
             return;
         }
-        let changed = self.physical_pane_size != Some((pane_w, pane_h));
-        self.physical_pane_size = Some((pane_w, pane_h));
+        let changed = match self.physical_pane_rect {
+            Some(prev) => (prev.width, prev.height) != (rect.width, rect.height),
+            None => true,
+        };
+        self.physical_pane_rect = Some(rect);
         if changed && !self.physical_nav_latched {
             self.physical_fit_pending = true;
         }
+    }
+
+    /// Size in points of the published module-UI pane: the fit computation's
+    /// pane argument (D3/D4).
+    pub fn physical_pane_size(&self) -> Option<(f32, f32)> {
+        self.physical_pane_rect
+            .map(|r| (r.width as f32, r.height as f32))
     }
 
     /// Apply a pending automatic fit (view open, patch load, rack change, pane
@@ -2604,7 +2608,7 @@ impl App {
         if !self.physical_fit_pending {
             return;
         }
-        let Some((w, h)) = self.physical_pane_size else {
+        let Some((w, h)) = self.physical_pane_size() else {
             return;
         };
         if !self.fit_physical_view(w, h) {
@@ -2625,16 +2629,14 @@ impl App {
     /// and the mouse wheel move the viewport by this amount per press/tick.
     pub const PHYSICAL_PAN_STEP: f32 = 8.0;
 
-    /// The main-panel viewport the physical view renders into (the
-    /// `chunks[1]` band of `render()`: header 3 rows, status 3 rows). The
-    /// renderer publishes the exact rect each frame; until then the live
-    /// terminal size is the best estimate, so pan stays correct on the very
-    /// first frame and in headless handler tests that never render.
+    /// The module-UI pane rect as published by the pane dispatch this frame
+    /// (D8). Only its size is consumed: overflow and pan ask whether the drawn
+    /// rack is larger than the pane actually on screen. Before the first
+    /// painted frame — and in headless handler tests that never render — the
+    /// small fixed fallback below stands in; the next frame republishes the
+    /// real rect before any input is handled.
     pub fn physical_main_area(&self) -> Rect {
-        match self.physical_viewport {
-            Some(rect) => rect,
-            None => Rect::new(0, 3, 80, 24),
-        }
+        self.physical_pane_rect.unwrap_or(Rect::new(0, 3, 80, 24))
     }
 
     /// Pan one step along the pressed axis only when the rack overflows the
@@ -3131,7 +3133,6 @@ impl App {
             self.showing_performance = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
-            self.physical_viewport = None;
             // module-ui-labels D4: a load is a fit trigger; the pane dispatch
             // fits once it knows the pane size.
             self.physical_fit_zoom = None;
@@ -3196,7 +3197,6 @@ impl App {
         self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
-        self.physical_viewport = None;
         self.physical_fit_zoom = None;
         self.physical_nav_latched = false;
         self.physical_fit_pending = true;
@@ -3281,7 +3281,6 @@ impl App {
             self.showing_performance = false;
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
-            self.physical_viewport = None;
             // module-ui-labels D4: a load is a fit trigger; the pane dispatch
             // fits once it knows the pane size.
             self.physical_fit_zoom = None;
@@ -3344,7 +3343,6 @@ impl App {
         self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
-        self.physical_viewport = None;
         self.physical_fit_zoom = None;
         self.physical_nav_latched = false;
         self.physical_fit_pending = true;
@@ -5824,17 +5822,22 @@ mod tests {
     }
 
     #[test]
-    fn physical_viewport_resets_on_patch_load() {
+    fn physical_pane_rect_survives_patch_load() {
         let mut app = App::new();
         app.physical_offset = (9.0, 7.0);
         app.physical_zoom = 2.0;
-        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
-        // The first load always installs the patch and resets the viewport;
-        // a gated re-load preserves state by design.
+        app.note_physical_pane_rect(Rect::new(0, 3, 80, 24));
+        // The first load always installs the patch and resets the view state;
+        // a gated re-load preserves state by design. Pane geometry belongs to
+        // the window arrangement, so it survives the load (D8).
         app.load_sample_patch();
         assert_eq!(app.physical_offset, (0.0, 0.0));
         assert_eq!(app.physical_zoom, 1.0);
-        assert_eq!(app.physical_viewport, None);
+        assert_eq!(
+            app.physical_pane_rect,
+            Some(Rect::new(0, 3, 80, 24)),
+            "the published pane is window state, not patch state"
+        );
     }
 
     #[test]
@@ -5845,28 +5848,46 @@ mod tests {
         // the viewer to exercise the pan axis itself.
         app.showing_viewer = false;
         app.patch = Some(Patch::from_ini_str("[a]\n    out1 = B1.1\n", String::from("a")).unwrap());
-        app.physical_rack_size = (200, 100);
-        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        app.note_physical_pane_rect(Rect::new(0, 3, 80, 24));
         // Both axes overflow: panning works along each.
         assert!(app.physical_pan_if_overflow(1, 0));
         assert_eq!(app.physical_offset, (8.0, 0.0));
         assert!(app.physical_pan_if_overflow(0, 1));
         assert_eq!(app.physical_offset, (8.0, 8.0));
         // A roomy pane fits the rack horizontally: the horizontal pan is a
-        // no-op while the vertical one still overflows (live rack extent).
-        app.physical_viewport = Some(Rect::new(0, 3, 1000, 24));
+        // no-op while the vertical one still overflows (live rack extent and
+        // the published pane, D8).
+        app.note_physical_pane_rect(Rect::new(0, 3, 1000, 24));
         assert!(!app.physical_pan_if_overflow(1, 0));
         assert_eq!(app.physical_offset, (8.0, 8.0));
         assert!(app.physical_pan_if_overflow(0, 1));
         assert_eq!(app.physical_offset, (8.0, 16.0));
     }
 
+    // ---- module-ui-labels 1.5: the published pane drives overflow and pan ----
+
+    #[test]
+    fn pan_judges_the_published_pane() {
+        let mut app = App::new();
+        // master + S10 + P10: 92.94 mm ≈ 351 pt at 100 %, and 128.5 mm ≈ 486 pt
+        // tall — fitting a 640 × 520 pane (design D3) but not a narrow one.
+        app.patch = Some(Patch::from_ini_str("[s10]\n[p10]\n", String::from("fit-rack")).unwrap());
+        // A pane narrower than the rack pans the pressed axis...
+        app.note_physical_pane_rect(Rect::new(0, 0, 200, 520));
+        assert!(app.physical_pan_if_overflow(1, 0));
+        assert_eq!(app.physical_offset, (8.0, 0.0));
+        // ...and republishing a roomy pane (what the next frame does) makes the
+        // same key inert instead of moving the camera.
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        assert!(!app.physical_pan_if_overflow(1, 0));
+        assert_eq!(app.physical_offset, (8.0, 0.0));
+    }
+
     #[test]
     fn physical_pan_skipped_under_focused_viewer_graph() {
         let mut app = App::new();
         app.patch = Some(Patch::from_ini_str("[a]\n    out1 = B1.1\n", String::from("a")).unwrap());
-        app.physical_rack_size = (200, 100);
-        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        app.note_physical_pane_rect(Rect::new(0, 3, 80, 24));
         // Change `pane-class-layout`: the source viewer is co-visible from
         // startup, so panning is gated on the *focused* pane, not on any open
         // surface. A focused graph pane suppresses panning.
@@ -5891,7 +5912,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_status_hint_requires_a_patch_and_reflects_viewport_state() {
+    fn physical_status_hint_requires_a_patch_and_reflects_view_state() {
         let mut app = App::new();
         assert_eq!(app.physical_status_hint(), None);
         app.load_sample_patch();
@@ -8257,7 +8278,7 @@ mod tests {
     fn physical_fit_runs_on_the_pane_and_reports_the_fit_segment() {
         let mut app = App::new();
         app.patch = Some(Patch::from_ini_str("[s10]\n[p10]\n", String::from("fit-rack")).unwrap());
-        app.note_physical_pane_size(640.0, 520.0);
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
         app.apply_physical_fit_triggers();
         let fitted = app.physical_zoom;
         assert!(
@@ -8269,7 +8290,7 @@ mod tests {
         assert!(hint.contains(" fit "), "fitting-zoom segment: {hint}");
 
         // A resize refits while no manual navigation has latched the view.
-        app.note_physical_pane_size(320.0, 260.0);
+        app.note_physical_pane_rect(Rect::new(0, 0, 320, 260));
         app.apply_physical_fit_triggers();
         assert!(app.physical_zoom < fitted, "a smaller pane fits smaller");
     }
@@ -8278,7 +8299,7 @@ mod tests {
     fn physical_fit_latch_suppresses_the_resize_trigger() {
         let mut app = App::new();
         app.patch = Some(Patch::from_ini_str("[s10]\n[p10]\n", String::from("fit-rack")).unwrap());
-        app.note_physical_pane_size(640.0, 520.0);
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
         app.apply_physical_fit_triggers();
         assert!(app.physical_fit_zoom.is_some(), "a fit ran");
 
@@ -8288,7 +8309,7 @@ mod tests {
         assert!(!app.physical_status_hint().expect("patch").contains(" fit "));
 
         // A pane resize must leave the user's zoom alone.
-        app.note_physical_pane_size(500.0, 400.0);
+        app.note_physical_pane_rect(Rect::new(0, 0, 500, 400));
         app.apply_physical_fit_triggers();
         assert_eq!(app.physical_zoom, 2.0, "resize discarded the manual zoom");
         assert!(app.physical_nav_latched);
