@@ -14,7 +14,7 @@ Note on agent names: `.opencode/harness.json` pins `models.plan/build/fast` to i
 
 ## 2. Wiring and cross-platform tests
 
-- [ ] 2.1 Route config, labels, favourites and plugins through `platform::data_dir` and delete the three duplicated XDG implementations in `config.rs`, `app.rs`, `favorites.rs` and `plugin.rs`; keep Linux and macOS behavior byte-identical (including the non-absolute-XDG rule and the warn-once paths). Verify with the existing config/labels/favourites/plugin tests plus a test that all four stores resolve into the same `droid-tui` directory. <!-- agent: rusty-engineer, depends_on: [1.1], touches: [src/config.rs, src/app.rs, src/plugin.rs, src/favorites.rs] -->
+- [x] 2.1 Route config, labels, favourites and plugins through `platform::data_dir` and delete the three duplicated XDG implementations in `config.rs`, `app.rs`, `favorites.rs` and `plugin.rs`; keep Linux and macOS behavior byte-identical (including the non-absolute-XDG rule and the warn-once paths). Verify with the existing config/labels/favourites/plugin tests plus a test that all four stores resolve into the same `droid-tui` directory. <!-- agent: rusty-engineer, depends_on: [1.1], touches: [src/config.rs, src/app.rs, src/plugin.rs, src/favorites.rs, src/schema.rs, src/main.rs] -->
 - [ ] 2.2 Make the path assertions platform-neutral: replace the unix-absolute expectations in `config.rs`, `favorites.rs` and the picker tests with `tempfile`-based or resolver-level assertions that hold on all three targets. Verify that `cargo test` passes on Linux and that no test asserts a literal `/home/...` or `/tmp/...` path any more. <!-- agent: horst-engineer, depends_on: [2.1], touches: [src/config.rs, src/favorites.rs, src/app.rs, src/plugin.rs] -->
 
 ## 3. CI and release

@@ -215,6 +215,46 @@ mod tests {
     }
 
     #[test]
+    fn every_user_store_resolves_into_the_same_application_directory() {
+        let xdg = Some(OsStr::new("/custom/xdg"));
+        let home = Some(OsStr::new("/home/user"));
+        let appdata = Some(OsStr::new("/appdata/roaming"));
+
+        let app_dir = config_dir_from(xdg, home, appdata).expect("application directory");
+
+        assert_eq!(
+            crate::config::config_dir(xdg, home, appdata),
+            Some(app_dir.clone())
+        );
+        assert_eq!(
+            crate::plugin::plugin_dir_from(xdg, home, appdata),
+            Some(app_dir.join("plugins"))
+        );
+        assert_eq!(
+            crate::app::labels_file_path_from(xdg, home, appdata)
+                .and_then(|path| path.parent().map(Path::to_path_buf)),
+            Some(app_dir.clone())
+        );
+        assert_eq!(
+            crate::favorites::favourites_file_path_from(xdg, home, appdata)
+                .and_then(|path| path.parent().map(Path::to_path_buf)),
+            Some(app_dir)
+        );
+    }
+
+    #[test]
+    fn every_user_store_degrades_to_none_together() {
+        assert_eq!(config_dir_from(None, None, None), None);
+        assert_eq!(crate::config::config_dir(None, None, None), None);
+        assert_eq!(crate::plugin::plugin_dir_from(None, None, None), None);
+        assert_eq!(crate::app::labels_file_path_from(None, None, None), None);
+        assert_eq!(
+            crate::favorites::favourites_file_path_from(None, None, None),
+            None
+        );
+    }
+
+    #[test]
     #[cfg(not(windows))]
     fn drive_roots_are_empty_off_windows_even_when_every_probe_hits() {
         assert!(drive_roots_with(Path::new("/home/user"), |_| true).is_empty());

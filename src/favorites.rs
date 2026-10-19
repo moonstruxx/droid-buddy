@@ -1,4 +1,5 @@
 use std::env;
+#[cfg(test)]
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -6,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const FAVOURITES_DIR_NAME: &str = "droid-tui";
 const FAVOURITES_FILE_NAME: &str = "favourites.toml";
 
-/// Persistent favourites list stored in `favourites.toml` under the XDG config home.
+/// Persistent favourites list stored in `favourites.toml` under the platform
+/// data directory (`platform::config_dir`).
 ///
 /// File shape:
 /// ```toml
@@ -86,16 +87,12 @@ impl FavoritesStore {
         }
     }
 
-    /// Save to the discovered XDG path.
+    /// Save to the discovered platform path.
     pub fn save(&self) -> io::Result<()> {
-        let dir = favourites_dir(
-            env::var_os("XDG_CONFIG_HOME").as_deref(),
-            env::var_os("HOME").as_deref(),
-        )
-        .ok_or_else(|| {
+        let dir = crate::platform::config_dir().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "cannot determine config directory ($XDG_CONFIG_HOME or $HOME)",
+                "cannot determine the platform data directory (XDG_CONFIG_HOME, HOME or APPDATA)",
             )
         })?;
         self.save_to_dir(&dir)
@@ -139,26 +136,22 @@ impl FavoritesStore {
     }
 }
 
-fn favourites_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home {
-        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
-        _ => {
-            let home = home?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Some(base.join(FAVOURITES_DIR_NAME))
+fn favourites_file_path() -> Option<PathBuf> {
+    Some(crate::platform::config_dir()?.join(FAVOURITES_FILE_NAME))
 }
 
-fn favourites_file_path() -> Option<PathBuf> {
-    let dir = favourites_dir(
-        env::var_os("XDG_CONFIG_HOME").as_deref(),
-        env::var_os("HOME").as_deref(),
-    )?;
-    Some(dir.join(FAVOURITES_FILE_NAME))
+/// Resolve the favourites file from injected environment values. The
+/// directory rule lives in [`crate::platform::config_dir_from`].
+#[cfg(test)]
+pub(crate) fn favourites_file_path_from(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    Some(
+        crate::platform::config_dir_from(xdg_config_home, home, appdata)?
+            .join(FAVOURITES_FILE_NAME),
+    )
 }
 
 #[cfg(test)]
@@ -263,20 +256,32 @@ mod tests {
     }
 
     #[test]
-    fn favourites_dir_handles_non_absolute_xdg() {
-        let dir = favourites_dir(
+    #[cfg(not(windows))]
+    fn favourites_file_path_handles_non_absolute_xdg() {
+        let dir = favourites_file_path_from(
             Some(OsStr::new("relative/path")),
             Some(OsStr::new("/home/user")),
+            None,
         );
-        assert_eq!(dir, Some(PathBuf::from("/home/user/.config/droid-tui")));
+        assert_eq!(
+            dir,
+            Some(PathBuf::from(
+                "/home/user/.config/droid-tui/favourites.toml"
+            ))
+        );
     }
 
     #[test]
-    fn favourites_dir_uses_xdg_when_absolute() {
-        let dir = favourites_dir(
+    #[cfg(not(windows))]
+    fn favourites_file_path_uses_xdg_when_absolute() {
+        let dir = favourites_file_path_from(
             Some(OsStr::new("/custom/config")),
             Some(OsStr::new("/home/user")),
+            None,
         );
-        assert_eq!(dir, Some(PathBuf::from("/custom/config/droid-tui")));
+        assert_eq!(
+            dir,
+            Some(PathBuf::from("/custom/config/droid-tui/favourites.toml"))
+        );
     }
 }

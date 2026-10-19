@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
+#[cfg(test)]
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -8,7 +9,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-const LABELS_DIR_NAME: &str = "droid-tui";
+/// File name of the per-patch label store inside the platform data directory.
 const LABELS_FILE_NAME: &str = "labels.toml";
 
 /// Per-patch buckets: `hw` (token → layer → label) + `circuits` (NodeId `"name:idx"` → label).
@@ -22,7 +23,7 @@ pub struct PatchLabels {
     pub circuits: HashMap<String, String>,
 }
 
-/// XDG label store for `~/.config/droid-tui/labels.toml`.
+/// Label store for `<platform data dir>/labels.toml`.
 ///
 /// File shape mirrors the spec:
 /// ```toml
@@ -109,16 +110,12 @@ impl LabelStore {
         }
     }
 
-    /// Save to the discovered XDG path.
+    /// Save to the discovered platform path.
     pub fn save(&self) -> io::Result<()> {
-        let dir = labels_dir(
-            env::var_os("XDG_CONFIG_HOME").as_deref(),
-            env::var_os("HOME").as_deref(),
-        )
-        .ok_or_else(|| {
+        let dir = crate::platform::config_dir().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "cannot determine config directory ($XDG_CONFIG_HOME or $HOME)",
+                "cannot determine the platform data directory (XDG_CONFIG_HOME, HOME or APPDATA)",
             )
         })?;
         self.save_to_dir(&dir)
@@ -242,26 +239,19 @@ impl LabelStore {
     }
 }
 
-fn labels_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home {
-        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
-        _ => {
-            let home = home?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Some(base.join(LABELS_DIR_NAME))
+fn labels_file_path() -> Option<PathBuf> {
+    Some(crate::platform::config_dir()?.join(LABELS_FILE_NAME))
 }
 
-fn labels_file_path() -> Option<PathBuf> {
-    let dir = labels_dir(
-        env::var_os("XDG_CONFIG_HOME").as_deref(),
-        env::var_os("HOME").as_deref(),
-    )?;
-    Some(dir.join(LABELS_FILE_NAME))
+/// Resolve the label-store file from injected environment values. The
+/// directory rule lives in [`crate::platform::config_dir_from`].
+#[cfg(test)]
+pub(crate) fn labels_file_path_from(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    Some(crate::platform::config_dir_from(xdg_config_home, home, appdata)?.join(LABELS_FILE_NAME))
 }
 
 use crate::diff::DiffReport;

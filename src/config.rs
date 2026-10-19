@@ -1,6 +1,6 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
 //! and `[physical.rack]`, `[plugins]`, `[layout]`) stored in
-//! `config.toml` under the XDG config home.
+//! `config.toml` under the platform data directory (`platform::config_dir`).
 //! Loaded once at startup, before the terminal UI initializes (design decision 5).
 //!
 //! This module stays decoupled from the theme catalog: canonical name
@@ -15,6 +15,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use crate::platform::APP_DIR_NAME;
 
 pub const DEFAULT_THEME: &str = "classic";
 pub const DEFAULT_LAYERS_ENABLED: bool = true;
@@ -61,7 +64,6 @@ pub const DEFAULT_SLICE_FORCE: f32 = crate::layout::DEFAULT_SLICE_K;
 /// truth, so the app's sections solve matches the solver's tuned strength.
 pub const DEFAULT_SECTION_FORCE: f32 = crate::layout::DEFAULT_SECTION_HOLE_K;
 
-const CONFIG_DIR_NAME: &str = "droid-tui";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 fn default_theme() -> String {
@@ -246,14 +248,15 @@ impl Physical {
 
 /// Plugin-loading configuration under `[plugins]`.
 ///
-/// `dir` overrides the plugin directory; `None` selects the standard XDG
-/// plugins dir resolved by `plugin::discover_plugins`
-/// (`$XDG_CONFIG_HOME/droid-tui/plugins`). `enabled = false` disables plugin
-/// loading entirely.
+/// `dir` overrides the plugin directory; `None` selects the standard plugin
+/// dir resolved by `plugin::discover_plugins` (`plugins/` under
+/// `platform::config_dir`). `enabled = false` disables plugin loading
+/// entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plugins {
     /// Directory override, kept as written. Read via [`Plugins::plugins_dir`],
-    /// which applies the XDG rule (non-absolute values treated as unset).
+    /// which applies the data-directory rule (non-absolute values treated as
+    /// unset).
     #[serde(default)]
     pub dir: Option<PathBuf>,
     #[serde(default = "default_plugins_enabled")]
@@ -271,10 +274,10 @@ impl Default for Plugins {
 
 impl Plugins {
     /// Resolved directory override: the configured absolute `dir`, or `None`
-    /// when absent (caller falls back to the standard XDG plugins dir). A
+    /// when absent (caller falls back to the platform plugins dir). A
     /// non-absolute configured value is treated as unset, mirroring the
-    /// `$XDG_CONFIG_HOME` rule in `config_dir`/`plugin::plugin_dir` (silent,
-    /// no warning).
+    /// data-directory rule in `platform::config_dir_from` (silent, no
+    /// warning).
     pub fn plugins_dir(&self) -> Option<&Path> {
         self.dir.as_deref().filter(|path| path.is_absolute())
     }
@@ -412,20 +415,14 @@ impl Default for Settings {
 pub type ThemeCanonicalizer<'a> = &'a dyn Fn(&str) -> Option<&'static str>;
 
 /// Resolve the config directory from explicit environment values so tests
-/// never touch process env. Per XDG spec, a non-absolute
-/// `$XDG_CONFIG_HOME` is treated as unset.
-fn config_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home {
-        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
-        _ => {
-            let home = home?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Some(base.join(CONFIG_DIR_NAME))
+/// never touch process env. A thin delegation to
+/// [`crate::platform::config_dir_from`], which owns the platform rule.
+pub fn config_dir(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    crate::platform::config_dir_from(xdg_config_home, home, appdata)
 }
 
 /// Full path of the user's config file, or `None` when no home directory
@@ -434,6 +431,7 @@ fn config_file_path() -> Option<PathBuf> {
     let dir = config_dir(
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
+        env::var_os("APPDATA").as_deref(),
     )?;
     Some(dir.join(CONFIG_FILE_NAME))
 }
@@ -509,11 +507,12 @@ pub fn save(settings: &Settings) -> io::Result<()> {
     let dir = config_dir(
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
+        env::var_os("APPDATA").as_deref(),
     )
     .ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "cannot determine config directory ($XDG_CONFIG_HOME or $HOME)",
+            "cannot determine the platform data directory (XDG_CONFIG_HOME, HOME or APPDATA)",
         )
     })?;
     save_to_dir(&dir, settings)
@@ -562,7 +561,7 @@ mod tests {
 
     fn load_at(dir: &TempDir) -> Settings {
         load_from(
-            &dir.path().join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME),
+            &dir.path().join(APP_DIR_NAME).join(CONFIG_FILE_NAME),
             &test_canonical,
             &TEST_CATALOG,
         )
@@ -589,33 +588,82 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn xdg_config_home_override_honored() {
-        let result = config_dir(Some(OsStr::new("/tmp/cfg")), Some(OsStr::new("/home/u")));
+        let result = config_dir(
+            Some(OsStr::new("/tmp/cfg")),
+            Some(OsStr::new("/home/u")),
+            None,
+        );
         assert_eq!(result, Some(PathBuf::from("/tmp/cfg/droid-tui")));
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn xdg_unset_falls_back_to_home_dot_config() {
-        let result = config_dir(None, Some(OsStr::new("/home/u")));
+        let result = config_dir(None, Some(OsStr::new("/home/u")), None);
         assert_eq!(result, Some(PathBuf::from("/home/u/.config/droid-tui")));
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn relative_xdg_value_treated_as_unset() {
-        let result = config_dir(Some(OsStr::new("rel/path")), Some(OsStr::new("/home/u")));
+        let result = config_dir(
+            Some(OsStr::new("rel/path")),
+            Some(OsStr::new("/home/u")),
+            None,
+        );
         assert_eq!(result, Some(PathBuf::from("/home/u/.config/droid-tui")));
     }
 
     #[test]
     fn no_home_means_no_config_path() {
-        assert_eq!(config_dir(None, None), None);
-        assert_eq!(config_dir(Some(OsStr::new("")), None), None);
+        assert_eq!(config_dir(None, None, None), None);
+        assert_eq!(config_dir(Some(OsStr::new("")), None, None), None);
+    }
+
+    #[test]
+    fn all_user_stores_resolve_under_one_application_directory() {
+        let xdg = Some(OsStr::new("/custom/xdg"));
+        let home = Some(OsStr::new("/home/user"));
+        let appdata = Some(OsStr::new(r"C:\Users\user\AppData\Roaming"));
+        let dir = crate::platform::config_dir_from(xdg, home, appdata)
+            .expect("injected environment resolves");
+        assert_eq!(
+            dir.file_name(),
+            Some(OsStr::new(crate::platform::APP_DIR_NAME))
+        );
+
+        assert_eq!(config_dir(xdg, home, appdata), Some(dir.clone()));
+        assert_eq!(
+            crate::app::labels_file_path_from(xdg, home, appdata),
+            Some(dir.join("labels.toml"))
+        );
+        assert_eq!(
+            crate::favorites::favourites_file_path_from(xdg, home, appdata),
+            Some(dir.join("favourites.toml"))
+        );
+        assert_eq!(
+            crate::plugin::plugin_dir_from(xdg, home, appdata),
+            Some(dir.join("plugins"))
+        );
+    }
+
+    #[test]
+    fn no_environment_means_no_store_paths() {
+        assert_eq!(config_dir(None, None, None), None);
+        assert_eq!(crate::app::labels_file_path_from(None, None, None), None);
+        assert_eq!(
+            crate::favorites::favourites_file_path_from(None, None, None),
+            None
+        );
+        assert_eq!(crate::plugin::plugin_dir_from(None, None, None), None);
     }
 
     #[test]
     fn broken_toml_falls_back_to_defaults() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = [not valid").unwrap();
         assert_eq!(load_at(&dir), Settings::default());
@@ -624,7 +672,7 @@ mod tests {
     #[test]
     fn unknown_theme_name_falls_back_to_default() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"bogus\"").unwrap();
         assert_eq!(load_at(&dir), Settings::default());
@@ -633,7 +681,7 @@ mod tests {
     #[test]
     fn empty_theme_name_falls_back_to_default() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"\"").unwrap();
         assert_eq!(load_at(&dir), Settings::default());
@@ -642,7 +690,7 @@ mod tests {
     #[test]
     fn known_theme_canonicalized_case_insensitively() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"TERMINAL\"").unwrap();
         assert_eq!(load_at(&dir).theme, "terminal");
@@ -651,7 +699,7 @@ mod tests {
     #[test]
     fn unknown_keys_ignored_and_known_keys_still_apply() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -664,7 +712,7 @@ mod tests {
     #[test]
     fn missing_theme_key_defaults_without_warning_path() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "[other]\nkey = 1\n").unwrap();
         assert_eq!(load_at(&dir), Settings::default());
@@ -736,7 +784,7 @@ mod tests {
     #[test]
     fn labels_defaults_when_table_missing() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
         let loaded = load_at(&dir);
@@ -748,7 +796,7 @@ mod tests {
     #[test]
     fn labels_defaults_when_file_empty() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "").unwrap();
         let loaded = load_at(&dir);
@@ -759,7 +807,7 @@ mod tests {
     fn max_shift_layer_clamped_on_load() {
         for (raw, expected) in [(0, 1), (1, 1), (4, 4), (8, 8), (20, 8), (255, 8)] {
             let dir = TempDir::new().unwrap();
-            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join(CONFIG_FILE_NAME),
@@ -863,7 +911,7 @@ mod tests {
     #[test]
     fn unknown_labels_keys_ignored() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -879,7 +927,7 @@ mod tests {
     #[test]
     fn latency_per_circuit_parses_from_config() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -894,7 +942,7 @@ mod tests {
     #[test]
     fn latency_absent_defaults_to_empty() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
         let loaded = load_at(&dir);
@@ -933,7 +981,7 @@ mod tests {
     #[test]
     fn physical_defaults_when_tables_missing() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
         let loaded = load_at(&dir);
@@ -950,7 +998,7 @@ mod tests {
     #[test]
     fn physical_table_parses() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -967,7 +1015,7 @@ mod tests {
     #[test]
     fn physical_rack_table_parses() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1003,7 +1051,7 @@ mod tests {
             (5.0, 4.0),
         ] {
             let dir = TempDir::new().unwrap();
-            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join(CONFIG_FILE_NAME),
@@ -1021,7 +1069,7 @@ mod tests {
     #[test]
     fn physical_rack_sanitized_on_load() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1039,7 +1087,7 @@ mod tests {
     #[test]
     fn malformed_physical_rack_falls_back_to_defaults() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1052,7 +1100,7 @@ mod tests {
     #[test]
     fn existing_config_without_physical_section_loads_unchanged() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1156,7 +1204,7 @@ mod tests {
     #[test]
     fn plugins_defaults_when_table_missing() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
         let loaded = load_at(&dir);
@@ -1169,7 +1217,7 @@ mod tests {
     #[test]
     fn plugins_defaults_when_file_empty() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "").unwrap();
         let loaded = load_at(&dir);
@@ -1179,7 +1227,7 @@ mod tests {
     #[test]
     fn plugins_enabled_false_parses() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1194,7 +1242,7 @@ mod tests {
     #[test]
     fn plugins_dir_override_parses() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1209,7 +1257,7 @@ mod tests {
     #[test]
     fn plugins_relative_dir_treated_as_unset() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1227,7 +1275,7 @@ mod tests {
     #[test]
     fn plugins_malformed_enabled_falls_back_to_defaults() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1271,7 +1319,7 @@ mod tests {
         // The `[gui] graph_window` toggle was removed. A user config that still
         // carries it must load without error: serde ignores unknown fields.
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1286,7 +1334,7 @@ mod tests {
     #[test]
     fn layout_defaults_when_table_missing() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
         let loaded = load_at(&dir);
@@ -1299,7 +1347,7 @@ mod tests {
     #[test]
     fn layout_defaults_when_file_empty() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "").unwrap();
         let loaded = load_at(&dir);
@@ -1309,7 +1357,7 @@ mod tests {
     #[test]
     fn layout_mode_force_parses() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1324,7 +1372,7 @@ mod tests {
     #[test]
     fn layout_ordering_barycenter_parses() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1339,7 +1387,7 @@ mod tests {
     #[test]
     fn unknown_layout_mode_falls_back_to_default() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1355,7 +1403,7 @@ mod tests {
     #[test]
     fn unknown_layout_ordering_falls_back_to_default() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1370,7 +1418,7 @@ mod tests {
     #[test]
     fn malformed_layout_value_type_falls_back_to_defaults() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1433,7 +1481,7 @@ mod tests {
             (5.0, 4.0),
         ] {
             let dir = TempDir::new().unwrap();
-            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join(CONFIG_FILE_NAME),
@@ -1456,7 +1504,7 @@ mod tests {
         // opens fitted. A save stamps the marker, after which the value is
         // honoured.
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1501,7 +1549,7 @@ mod tests {
     #[test]
     fn physical_labels_key_absent_defaults_to_auto() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1523,7 +1571,7 @@ mod tests {
             ("on", LabelPresentation::On),
         ] {
             let dir = TempDir::new().unwrap();
-            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join(CONFIG_FILE_NAME),
@@ -1544,7 +1592,7 @@ mod tests {
         // falls back to the default (`auto`), keeping the rest of the file
         // loadable.
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
@@ -1562,7 +1610,7 @@ mod tests {
     #[test]
     fn physical_labels_round_trip_through_save() {
         let dir = TempDir::new().unwrap();
-        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let settings = Settings {
             theme: "classic".to_string(),

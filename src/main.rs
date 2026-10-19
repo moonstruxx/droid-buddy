@@ -15,6 +15,7 @@ fn main() -> Result<()> {
         &settings,
         std::env::var_os("XDG_CONFIG_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
+        std::env::var_os("APPDATA").as_deref(),
     );
     // Destroy the graph window on panic so a panic leaves no orphaned desktop
     // window, then chain the default hook.
