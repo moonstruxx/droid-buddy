@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -69,44 +68,21 @@ fn default_true() -> bool {
 // Loader
 // ---------------------------------------------------------------------------
 
+/// Compiled in so a binary copied away from the repo still has its rack data.
+const RACK_GEOMETRY_JSON: &str = include_str!("../rack_geometry.json");
+
 impl RackGeometry {
-    /// Load `rack_geometry.json` from the crate/repo root.
+    /// Parse the embedded `rack_geometry.json`.
     ///
-    /// Tries `CARGO_MANIFEST_DIR/rack_geometry.json` first (works for `cargo test`
-    /// regardless of cwd), then `./rack_geometry.json` and `../rack_geometry.json`
-    /// as fallbacks. Returns a descriptive `Err(String)` on failure and never
-    /// panics.
+    /// Malformed data returns a descriptive `Err(String)` so callers can warn
+    /// and degrade; this never panics.
     pub fn load() -> Result<Self, String> {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let candidates = [
-            format!("{manifest_dir}/rack_geometry.json"),
-            "rack_geometry.json".to_string(),
-            "../rack_geometry.json".to_string(),
-            "./rack_geometry.json".to_string(),
-        ];
-        let mut last_err = String::new();
-        for cand in &candidates {
-            let p = Path::new(cand);
-            if !p.exists() {
-                last_err = format!("not found: {cand}");
-                continue;
-            }
-            match std::fs::read_to_string(p) {
-                Ok(s) => match serde_json::from_str::<Self>(&s) {
-                    Ok(v) => return Ok(v),
-                    Err(e) => {
-                        return Err(format!("failed to parse {cand}: {e}"));
-                    }
-                },
-                Err(e) => {
-                    last_err = format!("failed to read {cand}: {e}");
-                }
-            }
-        }
-        Err(format!(
-            "rack_geometry.json not found or unreadable. Tried: {}. Last error: {last_err}",
-            candidates.join(", ")
-        ))
+        Self::from_json(RACK_GEOMETRY_JSON)
+    }
+
+    fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text)
+            .map_err(|e| format!("failed to parse embedded rack_geometry.json: {e}"))
     }
 
     /// Resolve a hardware token like `B1.17`, `L1.17`, `E4.4`, `M4.2` to an
@@ -1042,12 +1018,49 @@ mod tests {
 
     #[test]
     fn load_returns_ok() {
-        // Validates the real committed file when present
+        // Validates the embedded data
         let loaded = RackGeometry::load();
         assert!(loaded.is_ok(), "load failed: {:?}", loaded.err());
         let geo = loaded.unwrap();
         assert!(!geo.racks.is_empty());
         assert!(geo.grids.contains_key("b32"));
+    }
+
+    #[test]
+    fn embedded_rack_geometry_parses_and_matches_tracked_file() {
+        let embedded = RackGeometry::load().expect("embedded rack_geometry.json parses");
+        assert!(!embedded.racks.is_empty());
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("rack_geometry.json");
+        let tracked = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("tracked {} unreadable: {e}", path.display()));
+        assert_eq!(
+            RACK_GEOMETRY_JSON, tracked,
+            "compiled-in rack geometry drifted from the tracked file"
+        );
+
+        let from_file =
+            RackGeometry::from_json(&tracked).expect("tracked rack_geometry.json parses");
+        assert_eq!(
+            serde_json::to_value(&embedded).expect("embedded geometry serialises"),
+            serde_json::to_value(&from_file).expect("tracked geometry serialises"),
+            "embedded and tracked rack geometry parse to different models"
+        );
+    }
+
+    #[test]
+    fn loader_does_not_search_the_filesystem() {
+        // Production source is everything before the test module.
+        let source = include_str!("geometry.rs");
+        let production = source.split("#[cfg(test)]").next().expect("test module");
+        assert!(
+            !production.contains("CARGO_MANIFEST_DIR"),
+            "rack geometry must come from include_str!, not a manifest-relative path"
+        );
+        assert!(
+            !production.contains("std::fs"),
+            "rack geometry must not be read from the filesystem at runtime"
+        );
     }
 
     #[test]

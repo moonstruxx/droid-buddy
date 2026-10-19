@@ -48,8 +48,11 @@ every graph build and label save.
 
 ## Storage
 
-Labels live at `$XDG_CONFIG_HOME/droid-tui/labels.toml`
-(`~/.config/droid-tui/labels.toml` by default), keyed by the
-canonicalized absolute patch path — moving the patch starts a fresh
-bucket. Writes are atomic; a corrupt file warns once and falls back
-to empty.
+Labels live at `labels.toml` in the `droid-tui` data directory:
+`$XDG_CONFIG_HOME/droid-tui/labels.toml`, else
+`~/.config/droid-tui/labels.toml` on Linux and macOS, and
+`%APPDATA%\droid-tui\labels.toml` on Windows (see [Platforms →
+Where your files live](platforms.md#where-your-files-live)). Entries
+are keyed by the canonicalized absolute patch path — moving the patch
+starts a fresh bucket. Writes are atomic; a corrupt file warns once and
+falls back to empty.

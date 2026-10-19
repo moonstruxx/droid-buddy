@@ -8,10 +8,27 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      # One platform's failure must not cancel the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            timeout: 60
+          - os: windows-latest
+            timeout: 45
+          - os: macos-latest
+            timeout: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # ext/droid-lsp provides circuits.json, which is compiled in with
+          # include_str!, so a shallow checkout without submodules cannot build.
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -21,10 +38,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Formatting and lints are deterministic across targets, so they run once,
+      # on the Linux job (design decision 5).
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --check
 
       - name: Clippy
+        if: runner.os == 'Linux'
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Tests
@@ -33,5 +54,8 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+      # The perf gate's budgets were calibrated on Linux; tests/perf_gate.rs is
+      # cfg-gated to target_os = "linux" (design decision 5).
       - name: Perf gate (release)
+        if: runner.os == 'Linux'
         run: cargo test --release --test perf_gate --locked

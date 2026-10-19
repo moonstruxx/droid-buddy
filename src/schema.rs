@@ -529,18 +529,23 @@ pub fn reset_test_schema() {
 /// `plugins.enabled == false` installs the pure embedded schema and returns
 /// without touching any plugin directory. Otherwise the configured
 /// `plugins.dir` override wins; absent that, discovery resolves the standard
-/// XDG plugins dir from the injected environment values (`None` in tests —
-/// the process env is never read here, mirroring `plugin::discover_plugins`
-/// and `config::config_dir`).
+/// platform plugins dir from the injected environment values (`None` in tests
+/// — the process env is never read here, mirroring
+/// `plugin::discover_plugins` and `platform::config_dir_from`).
 ///
 /// Content-idempotent: a second call with the same settings yields a schema
 /// with identical circuit keys and counts — the extra `Box::leak` of a fresh
 /// merge is acceptable for a process-lifetime static.
-pub fn init(settings: &Settings, xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) {
+pub fn init(
+    settings: &Settings,
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) {
     let installed: &'static Schema = if settings.plugins.enabled {
         let files = match settings.plugins.plugins_dir() {
             Some(dir) => crate::plugin::discover_plugins_from_dir(dir),
-            None => crate::plugin::discover_plugins(xdg_config_home, home),
+            None => crate::plugin::discover_plugins(xdg_config_home, home, appdata),
         };
         Box::leak(Box::new(merge_plugins(parse_embedded(), &files)))
     } else {
@@ -1018,7 +1023,7 @@ mod tests {
     fn init_disabled_installs_embedded_only() {
         let _guard = cache_guard();
         reset_test_schema();
-        init(&settings_with_plugins(false, None), None, None);
+        init(&settings_with_plugins(false, None), None, None, None);
         let schema = load_schema();
         // Disabled plugins: pure embedded schema, no discovery, no merge.
         assert_eq!(schema.circuits.len(), 76);
@@ -1035,6 +1040,7 @@ mod tests {
             &settings_with_plugins(true, Some(PathBuf::from(PLUGIN_FIXTURES))),
             None,
             None,
+            None,
         );
         let schema = load_schema();
         // The fixtures dir adds `newckt` and overrides embedded `copy`.
@@ -1048,9 +1054,9 @@ mod tests {
         let _guard = cache_guard();
         reset_test_schema();
         let settings = settings_with_plugins(true, Some(PathBuf::from(PLUGIN_FIXTURES)));
-        init(&settings, None, None);
+        init(&settings, None, None, None);
         let first = load_schema();
-        init(&settings, None, None);
+        init(&settings, None, None, None);
         let second = load_schema();
         // Identical circuit key sets and plugin definitions — a second init
         // must not double-merge or nest plugin circuits.

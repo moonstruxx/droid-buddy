@@ -1,14 +1,13 @@
 //! Plugin-file discovery and TOML parsing for user-defined DROID circuits.
 //!
 //! Plugin files extend the embedded circuit schema (see `schema.rs`) with
-//! user-defined circuits. They live in `$XDG_CONFIG_HOME/droid-tui/plugins/`
-//! (`$HOME/.config/droid-tui/plugins/` when XDG is unset), one `[[circuit]]`
-//! table per circuit. A file that fails to parse, or that defines a circuit
-//! without the required `ramsize`, is skipped with a single stderr warning —
-//! startup never aborts because of a plugin, and one bad file never affects
-//! the others. Circuit names are case-insensitive, matching the embedded
-//! schema lookup (`load_schema` keys by lowercased name), so the loader
-//! lowercases them here.
+//! user-defined circuits. They live in `plugins/` under the platform data
+//! directory (`platform::config_dir`), one `[[circuit]]` table per circuit. A
+//! file that fails to parse, or that defines a circuit without the required
+//! `ramsize`, is skipped with a single stderr warning — startup never aborts
+//! because of a plugin, and one bad file never affects the others. Circuit
+//! names are case-insensitive, matching the embedded schema lookup
+//! (`load_schema` keys by lowercased name), so the loader lowercases them here.
 //!
 //! This module only discovers and parses. Merging into `Schema` (insert-or-
 //! override on collision) is a separate concern in `schema.rs`.
@@ -19,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-const CONFIG_DIR_NAME: &str = "droid-tui";
 const PLUGIN_DIR_NAME: &str = "plugins";
 
 /// One `[[circuit]]` table as parsed from TOML, before semantic validation.
@@ -100,21 +98,14 @@ pub struct PluginFile {
     pub circuits: Vec<PluginCircuit>,
 }
 
-/// Resolve the plugin directory from explicit environment values so tests
-/// never touch process env. Mirrors `config::config_dir`: a non-absolute
-/// `$XDG_CONFIG_HOME` is treated as unset, with `$HOME/.config` fallback.
-fn plugin_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home {
-        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
-        _ => {
-            let home = home?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Some(base.join(CONFIG_DIR_NAME).join(PLUGIN_DIR_NAME))
+/// Resolve the plugin directory from injected environment values. The
+/// directory rule lives in [`crate::platform::config_dir_from`].
+pub(crate) fn plugin_dir_from(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    Some(crate::platform::config_dir_from(xdg_config_home, home, appdata)?.join(PLUGIN_DIR_NAME))
 }
 
 /// Discover and parse every `*.toml` plugin file, in sorted-filename order.
@@ -123,8 +114,12 @@ fn plugin_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<P
 /// that cannot be read, fails to parse as TOML, or defines a circuit without
 /// the required `ramsize` is skipped with one stderr warning and never
 /// affects the remaining files.
-pub fn discover_plugins(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Vec<PluginFile> {
-    let Some(dir) = plugin_dir(xdg_config_home, home) else {
+pub fn discover_plugins(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Vec<PluginFile> {
+    let Some(dir) = plugin_dir_from(xdg_config_home, home, appdata) else {
         return Vec::new();
     };
     discover_plugins_from_dir(&dir)
@@ -232,32 +227,70 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn plugin_dir_uses_xdg_when_absolute() {
         assert_eq!(
-            plugin_dir(Some(OsStr::new("/tmp/cfg")), None),
-            Some(PathBuf::from("/tmp/cfg/droid-tui/plugins"))
+            plugin_dir_from(Some(OsStr::new("/custom/cfg")), None, None),
+            Some(PathBuf::from("/custom/cfg/droid-tui/plugins"))
         );
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn plugin_dir_falls_back_to_home_dot_config() {
         assert_eq!(
-            plugin_dir(None, Some(OsStr::new("/home/u"))),
-            Some(PathBuf::from("/home/u/.config/droid-tui/plugins"))
+            plugin_dir_from(None, Some(OsStr::new("/user-home")), None),
+            Some(PathBuf::from("/user-home/.config/droid-tui/plugins"))
         );
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn plugin_dir_relative_xdg_treated_as_unset() {
         assert_eq!(
-            plugin_dir(Some(OsStr::new("cfg")), Some(OsStr::new("/home/u"))),
-            Some(PathBuf::from("/home/u/.config/droid-tui/plugins"))
+            plugin_dir_from(
+                Some(OsStr::new("cfg")),
+                Some(OsStr::new("/user-home")),
+                None
+            ),
+            Some(PathBuf::from("/user-home/.config/droid-tui/plugins"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn plugin_dir_uses_appdata() {
+        assert_eq!(
+            plugin_dir_from(
+                Some(OsStr::new(r"C:\custom\xdg")),
+                Some(OsStr::new(r"C:\Users\user")),
+                Some(OsStr::new(r"C:\Users\user\AppData\Roaming"))
+            ),
+            Some(
+                PathBuf::from(r"C:\Users\user\AppData\Roaming")
+                    .join("droid-tui")
+                    .join("plugins")
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn plugin_dir_falls_back_to_home_when_appdata_is_unset() {
+        assert_eq!(
+            plugin_dir_from(None, Some(OsStr::new(r"C:\Users\user")), None),
+            Some(
+                PathBuf::from(r"C:\Users\user")
+                    .join(".config")
+                    .join("droid-tui")
+                    .join("plugins")
+            )
         );
     }
 
     #[test]
     fn plugin_dir_no_home_returns_none() {
-        assert_eq!(plugin_dir(None, None), None);
+        assert_eq!(plugin_dir_from(None, None, None), None);
     }
 
     #[test]
@@ -345,7 +378,7 @@ mod tests {
         )
         .expect("write fixture");
 
-        let files = discover_plugins(Some(tmp.path().as_os_str()), None);
+        let files = discover_plugins(Some(tmp.path().as_os_str()), None, None);
 
         // Sorted filename order, invalid file skipped, valid files contribute.
         assert_eq!(files.len(), 2);
@@ -365,7 +398,7 @@ mod tests {
 
     #[test]
     fn discover_plugins_missing_dir_returns_empty() {
-        let files = discover_plugins(Some(OsStr::new("/nonexistent")), None);
+        let files = discover_plugins(Some(OsStr::new("/nonexistent")), None, None);
         assert!(files.is_empty());
     }
 
@@ -415,7 +448,7 @@ mod tests {
         fs::write(plugins.join("README.md"), "not a plugin").expect("write non-toml file");
         fs::write(plugins.join("schema.json"), "{}").expect("write non-toml file");
 
-        let files = discover_plugins(Some(tmp.path().as_os_str()), None);
+        let files = discover_plugins(Some(tmp.path().as_os_str()), None, None);
 
         assert_eq!(files.len(), 1);
         assert_eq!(
@@ -442,7 +475,7 @@ mod tests {
         )
         .expect("copy fixture");
 
-        let files = discover_plugins(Some(tmp.path().as_os_str()), None);
+        let files = discover_plugins(Some(tmp.path().as_os_str()), None, None);
 
         assert_eq!(files.len(), 2);
         assert_eq!(

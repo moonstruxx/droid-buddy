@@ -17,7 +17,7 @@
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use crate::app::{is_picker_parent_entry, App};
+use crate::app::{is_picker_parent_entry, picker_entry_display_name, App};
 use crate::theme::Color;
 
 /// Wheel motion below this many points is treated as no scroll (trackpad
@@ -180,9 +180,7 @@ pub(crate) fn picker_spec(app: &App) -> PickerSpec {
         .iter()
         .map(|p| {
             (
-                p.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
+                picker_entry_display_name(p),
                 p.metadata().is_ok_and(|m| m.is_dir()),
             )
         })
@@ -198,9 +196,7 @@ pub(crate) fn picker_spec(app: &App) -> PickerSpec {
         .skip(fav_count.min(app.picker_entries.len()))
         .map(|p| {
             (
-                p.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
+                picker_entry_display_name(p),
                 p.metadata().is_ok_and(|m| m.is_dir()),
                 is_picker_parent_entry(p),
             )
@@ -443,7 +439,7 @@ mod tests {
         let rows = ordered_entries(favs, listing);
         PickerSpec {
             title: " File Picker ".into(),
-            picker_dir: "/tmp".into(),
+            picker_dir: "fixtures".into(),
             filter: None,
             rows,
             selected: 0,
@@ -824,12 +820,25 @@ mod tests {
         use std::path::PathBuf;
         let mut app = App::new();
         app.favorites = crate::favorites::FavoritesStore::default();
-        app.picker_entries = vec![PathBuf::from("/tmp/b.ini"), PathBuf::from("..")];
+        app.picker_entries = vec![PathBuf::from("b.ini"), PathBuf::from("..")];
         app.picker_index = 1;
         assert_eq!(picker_spec(&app).filter, None);
         app.picker_filter_active = true;
         app.picker_filter = "abba".to_string();
         assert_eq!(picker_spec(&app).filter, Some("abba".to_string()));
+    }
+
+    #[test]
+    fn picker_spec_labels_drive_root_entries() {
+        use std::path::PathBuf;
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+        app.picker_entries = vec![PathBuf::from(r"D:\")];
+        app.picker_index = 0;
+        let spec = picker_spec(&app);
+        // A drive root has no `file_name`, so the row must fall back to the
+        // root spelling instead of rendering blank.
+        assert_eq!(spec.rows[0].label, r"D:\");
     }
 
     #[test]
@@ -839,7 +848,7 @@ mod tests {
         // App::new() loads the real favourites store; empty it so the
         // favourites section and separator are absent.
         app.favorites = crate::favorites::FavoritesStore::default();
-        app.picker_entries = vec![PathBuf::from("/tmp/b.ini"), PathBuf::from("..")];
+        app.picker_entries = vec![PathBuf::from("b.ini"), PathBuf::from("..")];
         app.picker_index = 1;
         let spec = picker_spec(&app);
         assert_eq!(spec.title, " File Picker ");

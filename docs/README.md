@@ -10,6 +10,10 @@ feature overview, build & run), see the repo-root
 
 - [Getting started](getting-started.md) — install, open a patch, first
   five minutes.
+- [Platforms](platforms.md) — support matrix, data directories per OS,
+  MIDI prerequisites, unsigned builds, known limits.
+- [Building from source](build.md) — prerequisites per OS, the gates,
+  CI jobs and the release process.
 - [Views](views.md) — module UI, source viewer, signal-flow graph,
   optimizer, picker, and overlays.
 - [Keys](keys.md) — the full key reference, per view.

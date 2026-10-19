@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
+#[cfg(test)]
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -8,7 +9,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-const LABELS_DIR_NAME: &str = "droid-tui";
+/// File name of the per-patch label store inside the platform data directory.
 const LABELS_FILE_NAME: &str = "labels.toml";
 
 /// Per-patch buckets: `hw` (token → layer → label) + `circuits` (NodeId `"name:idx"` → label).
@@ -22,7 +23,7 @@ pub struct PatchLabels {
     pub circuits: HashMap<String, String>,
 }
 
-/// XDG label store for `~/.config/droid-tui/labels.toml`.
+/// Label store for `<platform data dir>/labels.toml`.
 ///
 /// File shape mirrors the spec:
 /// ```toml
@@ -109,16 +110,12 @@ impl LabelStore {
         }
     }
 
-    /// Save to the discovered XDG path.
+    /// Save to the discovered platform path.
     pub fn save(&self) -> io::Result<()> {
-        let dir = labels_dir(
-            env::var_os("XDG_CONFIG_HOME").as_deref(),
-            env::var_os("HOME").as_deref(),
-        )
-        .ok_or_else(|| {
+        let dir = crate::platform::config_dir().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "cannot determine config directory ($XDG_CONFIG_HOME or $HOME)",
+                "cannot determine the platform data directory (XDG_CONFIG_HOME, HOME or APPDATA)",
             )
         })?;
         self.save_to_dir(&dir)
@@ -242,26 +239,19 @@ impl LabelStore {
     }
 }
 
-fn labels_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home {
-        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
-        _ => {
-            let home = home?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Some(base.join(LABELS_DIR_NAME))
+fn labels_file_path() -> Option<PathBuf> {
+    Some(crate::platform::config_dir()?.join(LABELS_FILE_NAME))
 }
 
-fn labels_file_path() -> Option<PathBuf> {
-    let dir = labels_dir(
-        env::var_os("XDG_CONFIG_HOME").as_deref(),
-        env::var_os("HOME").as_deref(),
-    )?;
-    Some(dir.join(LABELS_FILE_NAME))
+/// Resolve the label-store file from injected environment values. The
+/// directory rule lives in [`crate::platform::config_dir_from`].
+#[cfg(test)]
+pub(crate) fn labels_file_path_from(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    Some(crate::platform::config_dir_from(xdg_config_home, home, appdata)?.join(LABELS_FILE_NAME))
 }
 
 use crate::diff::DiffReport;
@@ -574,9 +564,11 @@ pub enum GraphWindowRequest {
 
 /// MIDI upload transport probe result (change `midi-upload`, task 1.2).
 ///
-/// `droid_port` is the `amidi -l` hardware port whose line names the DROID
-/// (USB-MIDI/X7); `other_ports` are the remaining listed ports (DIN MIDI
-/// candidates). `amidi`/`sendmidi` record tool presence on `PATH`.
+/// `droid_port` is the listed entry whose line names the DROID (USB-MIDI/X7):
+/// an ALSA `hw:N,M` token from `amidi -l`, or a device name from
+/// `sendmidi list`. `other_ports` are the remaining listed entries (DIN MIDI
+/// candidates). `amidi`/`sendmidi` record tool presence on `PATH`; discovery
+/// prefers `amidi` whenever it exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UploadTransport {
     pub amidi: bool,
@@ -601,7 +593,13 @@ impl UploadTransport {
             out.push("no MIDI tool found (need `amidi` or `sendmidi`)".to_string());
         }
         if self.droid_port.is_none() && self.other_ports.is_empty() {
-            out.push("no MIDI port detected (`amidi -l` is empty)".to_string());
+            // Name the listing command that actually ran (or would run): a
+            // sendmidi device list is not an `amidi -l` port list.
+            if !self.amidi && self.sendmidi {
+                out.push("no MIDI port detected (`sendmidi list` is empty)".to_string());
+            } else {
+                out.push("no MIDI port detected (`amidi -l` is empty)".to_string());
+            }
         }
         out
     }
@@ -615,19 +613,36 @@ impl UploadTransport {
         } else {
             ""
         };
-        if let Some(port) = self.droid_port.as_deref() {
-            if tool.is_empty() {
-                return format!("USB-MIDI {port} (no MIDI tool installed)");
-            }
-            return format!("USB-MIDI {port} via {tool}");
+        let Some(port) = self
+            .droid_port
+            .as_deref()
+            .or_else(|| self.other_ports.first().map(String::as_str))
+        else {
+            return String::from("no transport detected");
+        };
+        if tool.is_empty() {
+            let kind = if self.droid_port.is_some() {
+                "USB-MIDI"
+            } else {
+                "DIN MIDI"
+            };
+            return format!("{kind} {port} (no MIDI tool installed)");
         }
-        if let Some(port) = self.other_ports.first() {
-            if tool.is_empty() {
-                return format!("DIN MIDI {port} (no MIDI tool installed)");
-            }
-            return format!("DIN MIDI {port} via {tool}");
+        if self.amidi {
+            let kind = if self.droid_port.is_some() {
+                "USB-MIDI"
+            } else {
+                "DIN MIDI"
+            };
+            return format!("{kind} {port} via {tool}");
         }
-        String::from("no transport detected")
+        // `sendmidi list` yields device names, not ALSA `hw:` port tokens.
+        let kind = if self.droid_port.is_some() {
+            "DROID MIDI device"
+        } else {
+            "MIDI device"
+        };
+        format!("{kind} {port} via {tool}")
     }
 }
 
@@ -658,16 +673,49 @@ pub fn parse_amidi_list(output: &str) -> (Option<String>, Vec<String>) {
     (droid, others)
 }
 
+/// Parse `sendmidi list` output into `(droid_port, other_ports)` (pure seam:
+/// the impure [`detect_upload_transport`] runs the command, tests inject
+/// fixtures here). One device name per line; surrounding whitespace is
+/// trimmed, blank lines and exact duplicates are skipped, and the first line
+/// naming the DROID (`droid`/`x7`, case-insensitive — the USB-MIDI/X7
+/// interface) wins. Unlike [`parse_amidi_list`], the entries are device names
+/// the tool passes verbatim to `sendmidi dev <device>`, not `hw:` tokens.
+pub fn parse_sendmidi_list(output: &str) -> (Option<String>, Vec<String>) {
+    let mut droid = None;
+    let mut others: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for line in output.lines() {
+        let name = line.trim();
+        if name.is_empty() || seen.contains(&name) {
+            continue;
+        }
+        seen.push(name);
+        let lower = name.to_lowercase();
+        if droid.is_none() && (lower.contains("droid") || lower.contains("x7")) {
+            droid = Some(name.to_string());
+        } else {
+            others.push(name.to_string());
+        }
+    }
+    (droid, others)
+}
+
 /// Build the transport from probe parts (pure seam for tests: `amidi_list`
-/// is the stdout of `amidi -l`, the bools are tool presence on `PATH`).
+/// is the stdout of `amidi -l`, `sendmidi_list` the stdout of `sendmidi
+/// list`, and the bools are tool presence on `PATH`). A caller normally runs
+/// only one listing command; when both outputs are supplied the `amidi` list
+/// wins, matching [`detect_upload_transport`]'s preference.
 pub fn probe_upload_transport(
     amidi_list: Option<&str>,
+    sendmidi_list: Option<&str>,
     has_amidi: bool,
     has_sendmidi: bool,
 ) -> UploadTransport {
-    let (droid_port, other_ports) = amidi_list
-        .map(parse_amidi_list)
-        .unwrap_or((None, Vec::new()));
+    let (droid_port, other_ports) = match (amidi_list, sendmidi_list) {
+        (Some(out), _) => parse_amidi_list(out),
+        (None, Some(out)) => parse_sendmidi_list(out),
+        (None, None) => (None, Vec::new()),
+    };
     UploadTransport {
         amidi: has_amidi,
         sendmidi: has_sendmidi,
@@ -676,26 +724,58 @@ pub fn probe_upload_transport(
     }
 }
 
-/// Tool presence on `PATH` (no `which` dependency).
+/// Tool presence on `PATH` (no `which` dependency). On Windows an executable
+/// may carry `.exe`, `.cmd` or `.bat`, so the bare name alone is not enough;
+/// other platforms keep the bare-name check.
 fn command_present(cmd: &str) -> bool {
-    env::var_os("PATH")
-        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(cmd).is_file()))
+    #[cfg(windows)]
+    const SUFFIXES: &[&str] = &["", ".exe", ".cmd", ".bat"];
+    #[cfg(not(windows))]
+    const SUFFIXES: &[&str] = &[""];
+
+    env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| {
+            SUFFIXES
+                .iter()
+                .any(|suffix| dir.join(format!("{cmd}{suffix}")).is_file())
+        })
+    })
 }
 
-/// Run the preflight probe: `amidi -l` for ports plus tool presence. Never
-/// fails — an absent tool or command just yields `false`/`None`, which the
-/// modal reports as missing reasons.
-pub fn detect_upload_transport() -> UploadTransport {
-    let list = std::process::Command::new("amidi")
-        .arg("-l")
+/// Run one listing command and return its stdout, or `None` when it is absent
+/// or fails (a probe never propagates an error).
+fn command_stdout(cmd: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(cmd)
+        .args(args)
         .output()
         .ok()
         .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok());
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+}
+
+/// Run the preflight probe: `amidi -l` when `amidi` is present, otherwise
+/// `sendmidi list` when `sendmidi` is present, plus tool presence. Never runs
+/// a MIDI command when neither tool exists, and never fails — an absent tool
+/// or command just yields `false`/`None`, which the modal reports as missing
+/// reasons.
+pub fn detect_upload_transport() -> UploadTransport {
+    let has_amidi = command_present("amidi");
+    let has_sendmidi = command_present("sendmidi");
+    let amidi_list = if has_amidi {
+        command_stdout("amidi", &["-l"])
+    } else {
+        None
+    };
+    let sendmidi_list = if !has_amidi && has_sendmidi {
+        command_stdout("sendmidi", &["list"])
+    } else {
+        None
+    };
     probe_upload_transport(
-        list.as_deref(),
-        command_present("amidi"),
-        command_present("sendmidi"),
+        amidi_list.as_deref(),
+        sendmidi_list.as_deref(),
+        has_amidi,
+        has_sendmidi,
     )
 }
 
@@ -1282,15 +1362,11 @@ impl App {
 
     /// Display label for a picker entry: favourited files keep their leaf name
     /// with `★ `, favourited directories add a trailing `/`. The parent sentinel
-    /// `..` is never considered favourited.
+    /// `..` is never considered favourited. A filesystem root (a Windows drive
+    /// root such as `D:\`) has no leaf name, so it keeps [`picker_entry_display_name`]'s
+    /// root spelling.
     pub fn picker_entry_label(&self, path: &Path) -> String {
-        let base = if is_picker_parent_entry(path) {
-            "..".to_string()
-        } else {
-            path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
+        let base = picker_entry_display_name(path);
         if !is_picker_parent_entry(path) && self.is_favourite_entry(path) {
             if path.metadata().is_ok_and(|m| m.is_dir()) {
                 format!("★ {base}/")
@@ -1328,6 +1404,18 @@ impl App {
     }
 
     pub fn refresh_picker_entries(&mut self) {
+        // Other drives are only meaningful at a Windows drive root; the seam
+        // injects the list so the listing logic stays testable on any host.
+        let drives = crate::platform::drive_roots(&self.picker_dir);
+        self.refresh_picker_entries_with_drives(&drives);
+    }
+
+    /// Listing builder with the drive list injected. `drives` is appended after
+    /// the `..` sentinel and before the directory listing, and is left out
+    /// entirely when `picker_dir` has a parent (the same rule that drops `..`).
+    /// The latching filter needs no drive special case: it narrows the
+    /// `read_dir` groups, never the entries already collected here.
+    fn refresh_picker_entries_with_drives(&mut self, drives: &[PathBuf]) {
         self.picker_entries.clear();
         // Pinned favourites section at the top. Favourited `.ini` files and
         // directories are prepended even when not in `picker_dir`, sorted for
@@ -1355,6 +1443,11 @@ impl App {
             .is_some_and(|p| !p.as_os_str().is_empty())
         {
             self.picker_entries.push(PathBuf::from(".."));
+        } else {
+            // Drive roots are directory rows too: they follow the `..` slot and
+            // precede every `read_dir` group, so they read as the first
+            // directories and survive the filter below.
+            self.picker_entries.extend(drives.iter().cloned());
         }
         // Read directory entries. `read_dir` order is arbitrary, so collect
         // into groups and sort directories first, then `.ini` files, then any
@@ -4996,6 +5089,29 @@ pub fn is_picker_parent_entry(path: &Path) -> bool {
     )
 }
 
+/// Display name for a picker entry before favourite decoration: the parent
+/// sentinel renders as `..`, a normal entry as its leaf name, and a filesystem
+/// root (a Windows drive root such as `D:\`) as its full path, because a root
+/// has no `file_name`. Shared by the GUI spec and [`App::picker_entry_label`]
+/// so the drive rows read the same everywhere.
+pub fn picker_entry_display_name(path: &Path) -> String {
+    if is_picker_parent_entry(path) {
+        return "..".to_string();
+    }
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None if is_filesystem_root(path) => path.to_string_lossy().into_owned(),
+        None => String::new(),
+    }
+}
+
+/// True for a filesystem root: no parent and a rooted path. This is what makes
+/// a Windows drive root (`D:\`) a navigable picker row despite having no
+/// `file_name`.
+fn is_filesystem_root(path: &Path) -> bool {
+    path.has_root() && path.parent().is_none()
+}
+
 /// Check if a file picker entry is selectable (.ini files or directories).
 /// The parent `..` sentinel is always selectable; it carries no file name, so
 /// it must be checked before the `file_name` branch.
@@ -5004,7 +5120,9 @@ pub fn is_entry_selectable(path: &Path) -> bool {
         return true; // parent directory entry is always selectable
     }
     if path.file_name().is_none() {
-        return false;
+        // A filesystem root has no leaf name but is a navigable directory: a
+        // Windows drive root such as `D:\` is listed exactly for this.
+        return is_filesystem_root(path) && path.metadata().is_ok_and(|m| m.is_dir());
     }
     let is_dir = path.metadata().is_ok_and(|m| m.is_dir());
     if is_dir {
@@ -5038,6 +5156,19 @@ mod tests {
         app.load_patch(patch);
         app.open_graph();
         app
+    }
+
+    /// Filesystem root for the picker tests: `/` on Unix and a drive root on
+    /// Windows, where a bare `/` is drive-relative rather than a root.
+    fn filesystem_root() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
     }
 
     #[test]
@@ -7163,18 +7294,15 @@ mod tests {
         assert!(is_picker_parent_entry(&app.picker_entries[0]));
         assert_eq!(app.picker_entries[0], PathBuf::from(".."));
         // Entries sort directories first, then .ini files, then other files.
-        let names: Vec<String> = app
-            .picker_entries
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
+        // Compare components through `Path`, not rendered strings, so the
+        // assertion holds with native separators on every target.
         assert_eq!(
-            names,
+            app.picker_entries,
             vec![
-                "..",
-                "fixtures/picker_test/subdir",
-                "fixtures/picker_test/patch_a.ini",
-                "fixtures/picker_test/readme.txt",
+                PathBuf::from(".."),
+                PathBuf::from("fixtures/picker_test/subdir"),
+                PathBuf::from("fixtures/picker_test/patch_a.ini"),
+                PathBuf::from("fixtures/picker_test/readme.txt"),
             ]
         );
     }
@@ -7226,7 +7354,7 @@ mod tests {
     #[test]
     fn refresh_picker_entries_has_no_parent_entry_at_filesystem_root() {
         let mut app = App::new();
-        app.picker_dir = PathBuf::from("/");
+        app.picker_dir = filesystem_root();
         app.refresh_picker_entries();
         assert!(
             app.picker_entries
@@ -7234,6 +7362,51 @@ mod tests {
                 .all(|p| !is_picker_parent_entry(p)),
             "no '..' entry at the filesystem root"
         );
+    }
+
+    #[test]
+    fn picker_listing_offers_drive_roots_only_at_a_filesystem_root() {
+        let drives = vec![PathBuf::from(r"D:\"), PathBuf::from(r"E:\")];
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+
+        // At a root the drive rows follow the (absent) `..` slot and precede
+        // the read_dir listing.
+        app.picker_dir = filesystem_root();
+        app.refresh_picker_entries_with_drives(&drives);
+        assert_eq!(&app.picker_entries[..drives.len()], &drives[..]);
+        assert!(
+            app.picker_entries
+                .iter()
+                .all(|p| !is_picker_parent_entry(p)),
+            "no '..' at the filesystem root"
+        );
+
+        // The latching filter narrows only the read_dir listing, so the drive
+        // rows stay visible while it is on.
+        app.picker_filter_active = true;
+        app.picker_filter = "qzxwv-no-such-name-9843".to_string();
+        app.refresh_picker_entries_with_drives(&drives);
+        assert_eq!(app.picker_entries, drives);
+        app.reset_picker_filter();
+
+        // A directory with a parent keeps the `..` row and no drive rows.
+        app.picker_dir = PathBuf::from("fixtures/picker_test/subdir");
+        app.refresh_picker_entries_with_drives(&drives);
+        assert!(
+            app.picker_entries.iter().all(|p| !drives.contains(p)),
+            "drive rows only belong to a root: {:?}",
+            app.picker_entries
+        );
+        assert!(app.picker_entries.iter().any(|p| is_picker_parent_entry(p)));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_drive_root_entries_are_labelled_and_selectable() {
+        let drive = PathBuf::from(r"C:\");
+        assert_eq!(picker_entry_display_name(&drive), r"C:\");
+        assert!(is_entry_selectable(&drive));
     }
 
     #[test]
@@ -8047,15 +8220,134 @@ mod tests {
     #[test]
     fn probe_transport_gate_needs_tool_and_port() {
         assert!(upload_test_transport().can_send());
-        // Tool but no port: nothing to address.
-        let no_port = super::probe_upload_transport(Some(""), true, false);
+        // Tool but no ports listed: nothing to address.
+        let no_port = super::probe_upload_transport(Some(""), None, true, false);
         assert!(!no_port.can_send());
-        // Port but no tool: nothing to send with.
-        let no_tool = super::probe_upload_transport(Some("hw:2,0,0  X7 MIDI 1\n"), false, false);
+        // Ports but no tool: nothing to send with.
+        let no_tool =
+            super::probe_upload_transport(Some("hw:2,0,0  X7 MIDI 1\n"), None, false, false);
         assert!(!no_tool.can_send());
-        // sendmidi + a listed DIN port is a path.
-        let din = super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), false, true);
-        assert!(din.can_send());
+        // sendmidi + a listed device is a path.
+        let sendmidi = super::probe_upload_transport(None, Some("X7 MIDI 1\n"), false, true);
+        assert!(sendmidi.can_send());
+    }
+
+    #[test]
+    fn parse_sendmidi_list_finds_device_lines_blanks_and_duplicates() {
+        let out = "  IAC Driver Bus 1  \n\nX7 MIDI 1\nX7 MIDI 1\n\nUSB Audio MIDI 1\n";
+        let (droid, others) = super::parse_sendmidi_list(out);
+        assert_eq!(droid.as_deref(), Some("X7 MIDI 1"));
+        assert_eq!(
+            others,
+            vec![
+                "IAC Driver Bus 1".to_string(),
+                "USB Audio MIDI 1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_sendmidi_list_matches_droid_case_insensitively_and_first_wins() {
+        let (droid, others) =
+            super::parse_sendmidi_list("IAC Driver Bus 1\nDROID MIDI\nDroid MIDI 2\n");
+        assert_eq!(droid.as_deref(), Some("DROID MIDI"));
+        assert_eq!(
+            others,
+            vec!["IAC Driver Bus 1".to_string(), "Droid MIDI 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_sendmidi_list_without_droid_match_keeps_all_devices() {
+        let (droid, others) = super::parse_sendmidi_list("IAC Driver Bus 1\nUSB Audio MIDI 1\n");
+        assert_eq!(droid, None);
+        assert_eq!(
+            others,
+            vec![
+                "IAC Driver Bus 1".to_string(),
+                "USB Audio MIDI 1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_sendmidi_list_empty_yields_no_devices() {
+        let (droid, others) = super::parse_sendmidi_list("\n  \n");
+        assert_eq!(droid, None);
+        assert!(others.is_empty());
+    }
+
+    #[test]
+    fn probe_transport_prefers_amidi_list_when_both_tools_exist() {
+        let transport = super::probe_upload_transport(
+            Some("hw:2,0,0  X7 MIDI 1\n"),
+            Some("X7 MIDI 1\n"),
+            true,
+            true,
+        );
+        assert_eq!(transport.droid_port.as_deref(), Some("hw:2,0,0"));
+        assert!(transport.other_ports.is_empty());
+        assert_eq!(transport.transport_line(), "USB-MIDI hw:2,0,0 via amidi");
+    }
+
+    #[test]
+    fn probe_transport_uses_sendmidi_list_without_amidi() {
+        let transport =
+            super::probe_upload_transport(None, Some("IAC Driver Bus 1\nX7 MIDI 1\n"), false, true);
+        assert_eq!(transport.droid_port.as_deref(), Some("X7 MIDI 1"));
+        assert_eq!(transport.other_ports, vec!["IAC Driver Bus 1".to_string()]);
+        assert!(transport.can_send());
+        assert_eq!(
+            transport.transport_line(),
+            "DROID MIDI device X7 MIDI 1 via sendmidi"
+        );
+    }
+
+    #[test]
+    fn probe_transport_without_tools_yields_nothing() {
+        let transport = super::probe_upload_transport(None, None, false, false);
+        assert_eq!(transport.droid_port, None);
+        assert!(transport.other_ports.is_empty());
+        assert!(!transport.can_send());
+        let reasons = transport.missing_reasons();
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons[0].contains("need `amidi` or `sendmidi`"));
+        assert!(reasons[1].contains("amidi -l"));
+    }
+
+    #[test]
+    fn probe_transport_sendmidi_only_missing_reason_names_sendmidi_list() {
+        let transport = super::probe_upload_transport(None, Some(""), false, true);
+        let reasons = transport.missing_reasons();
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("`sendmidi list`"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_present_resolves_windows_executable_extensions() {
+        use std::path::PathBuf;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("sendmidi.exe"), b"").expect("fixture exe");
+
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![PathBuf::from(dir.path())];
+        if let Some(old) = old_path.as_ref() {
+            paths.extend(std::env::split_paths(old));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        std::env::set_var("PATH", joined);
+
+        let found = super::command_present("sendmidi");
+        let missing = super::command_present("droid-tui-absent-tool");
+
+        match old_path {
+            Some(old) => std::env::set_var("PATH", old),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(found, "sendmidi.exe on PATH must count as present");
+        assert!(!missing);
     }
 
     #[test]
@@ -8073,7 +8365,8 @@ mod tests {
             upload_test_transport().transport_line(),
             "USB-MIDI hw:2,0,0 via amidi"
         );
-        let din = super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), true, false);
+        let din =
+            super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), None, true, false);
         assert_eq!(din.transport_line(), "DIN MIDI hw:3,0,0 via amidi");
         assert_eq!(
             upload_blocked_transport().transport_line(),
