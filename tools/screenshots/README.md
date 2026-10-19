@@ -7,16 +7,17 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 
 | PNG | Fixture | Arrangement |
 |---|---|---|
-| `module-ui.png` | `fixtures/own_buttons.ini` | startup: module UI (left big) + source viewer (small) |
+| `module-ui.png` | `fixtures/own_buttons.ini` | startup: module UI (left big) at its fit zoom + source viewer (small) |
+| `module-ui-labels.png` | `fixtures/module_ui_labels.ini` | startup at a pinned true 1:1 camera (`setup_labels_auto`): module UI (left big) + source viewer (small); the default `auto` presentation annotates the two clipped preamble labels as side-bound callouts while the fitting label stays in its cell |
 | `graph.png` | `fixtures/own_buttons.ini` | + signal-flow graph (right big) |
 | `source-viewer.png` | `fixtures/source_navigation.ini` | source viewer maximized |
 | `optimizer.png` | `fixtures/optimizer_latency.ini` | + latency optimizer (small) |
 | `faceplate-rotary-stack.png` | `fixtures/faceplate_rotary_stack.ini` | startup: module UI (left big) + source viewer (small); all six corrected faceplates (P2B8, P4B2, P10, S10, E4, DB8E) in one frame |
-| `button-led-composition.png` | `fixtures/button_led_composition.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); P2B8 + B32 round button faces, M4 touch-plate rectangles, and one LED-less pot in one frame |
-| `led-register-colour.png` | `fixtures/led_register_colour.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); lit coloured P2B8 button face and M4 touch plate beside the dynamic-cable and sourceless white fallbacks in one frame |
-| `unreferenced-elements.png` | `fixtures/unreferenced_elements.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); partial B32 (5 of 32 buttons, 27 dimmed) beside a bare E4 (124 dimmed ring segments) in one frame |
-| `shift-colour.png` | `fixtures/button_led_composition.ini` | 2x stack zoom plus active Group2 (`setup_shift_colour`): module UI (left big) + source viewer (small); Group2 member faces tinted in the group token beside unshifted Group1/Group3 faces in one frame |
-| `s10-switch-kinds.png` | `fixtures/s10_switch_kinds.ini` | startup arrangement at 2x zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); bare S10 full front with rotary-round S1.1/S1.2 above toggle-square S1.3–S1.10 in one frame |
+| `button-led-composition.png` | `fixtures/button_led_composition.ini` | startup arrangement at the pane's fit zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); P2B8 + B32 round button faces, M4 touch-plate rectangles, and one LED-less pot in one frame |
+| `led-register-colour.png` | `fixtures/led_register_colour.ini` | startup arrangement at the pane's fit zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); lit coloured P2B8 button face and M4 touch plate beside the dynamic-cable and sourceless white fallbacks in one frame |
+| `unreferenced-elements.png` | `fixtures/unreferenced_elements.ini` | startup arrangement at the pane's fit zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); partial B32 (5 of 32 buttons, 27 dimmed) beside a bare E4 (124 dimmed ring segments) in one frame |
+| `shift-colour.png` | `fixtures/button_led_composition.ini` | pane-fit zoom plus active Group2 (`setup_shift_colour`): module UI (left big) + source viewer (small); Group2 member faces tinted in the group token beside unshifted Group1/Group3 faces in one frame |
+| `s10-switch-kinds.png` | `fixtures/s10_switch_kinds.ini` | startup arrangement at the pane's fit zoom (`setup_faceplate_stack`): module UI (left big) + source viewer (small); bare S10 full front with rotary-round S1.1/S1.2 above toggle-square S1.3–S1.10 in one frame |
 | `sections-lanes.png` | `fixtures/graph_topology_error.ini` | + signal-flow graph (right big) in `LayoutMode::Sections` (`setup_sections`): one patch-order lane row carrying both banner groups as contiguous bands |
 | `sections-scale.png` | `fixtures/own_scale.ini` | same arrangement over the 509-section scale anchor: the width-aware lanes wrap into a ~1.34 aspect grid of rows instead of a 40:1 ribbon |
 | `force-arrangement.png` | `fixtures/graph_dependency_walk.ini` | + signal-flow graph (right big) in `LayoutMode::Force` with the arrangement-aware `S` panel open (`setup_force_sliders`): the solved force layout separated into non-intersecting bodies beside the panel's Repulsion / Cohesion / Cable rows |
@@ -31,8 +32,34 @@ controllers whose faceplate geometry moved to the measured panel arrangement,
 so every corrected element arrangement — the P2B8/P4B2/P10 pot stacks, the S10
 rotary stack, the E4 encoder stack, and the DB8E encoder below its buttons —
 reads in one 1280x800 frame. The module UI pane carries the startup
-arrangement and is zoomed to 2x (`setup_faceplate_stack`) so the ~207 mm rack
-of master plus six controllers fills the pane instead of rendering 38 px wide.
+arrangement and opens at the pane's fit zoom (`setup_faceplate_stack`), so the
+~207 mm rack of master plus six controllers fills the pane at ~80 % instead of
+rendering 38 px wide at the old nominal scale.
+
+Every module-UI-bearing shot now renders at true 1:1 (change
+`module-ui-labels`, task 3.4): 100 % zoom is 3.7795 pt per millimetre, so a
+9 mm button cell is 34 pt and a 12 mm pot 45 pt, and the pane fits and centres
+the rack itself on its first frame. Each shot's pane title carries the live
+state (`Module UI · 161% fit · labels auto · skeleton off`), so the fit
+percentage printed in the image is the evidence. The `setup_faceplate_stack`
+2x seed is now superseded by that fit (207 mm at 2x would overflow the pane);
+it stays as the pre-fit camera. The graph, optimizer, and source-viewer panes
+are unaffected: every graph-bearing shot's right pane is pixel-identical to
+its pre-change render, and `source-viewer.png` is byte-identical.
+
+`module-ui-labels.png` is the visual check for change `module-ui-labels`
+(task 3.4) and the only shot that pins the camera instead of taking the fit.
+`fixtures/module_ui_labels.ini`'s three preamble labels are chosen for the
+B32's 9 mm buttons at true 1:1 — "Go" fits the cell's five-character budget
+while "Trigger input" and "Clock reset" clip — so at 1:1 the default `auto`
+presentation annotates exactly the two clipped labels as side-bound callouts
+with leader lines and the resolved state, and leaves "Go" alone on the rack.
+The camera is centred at 1:1 (`setup_labels_auto`) because the fitted zoom
+would both scale the rack past the size the fixture measures and leave no side
+band for the callouts. The other two modes need no shot: `off` draws no
+annotations and `on` annotates every addressed label, both pinned by the
+`src/gui/physical.rs` and `src/regression.rs` tests, so this shot carries the
+clipping-driven rule that makes `auto` the default.
 
 Resolved gap (change `unreferenced-elements`, task 3.2): the E4 32-LED rings
 now render complete — unreferenced ring segments paint dimmed and unlabelled,
@@ -58,14 +85,14 @@ brightness via literal `ledcolor`/`ledvalue`), so the lit coloured faces —
 the P2B8 state circle filled in its mapped colour, the M4 plate filled
 likewise — read beside the two fallbacks (dynamic-cable `ledcolor` and the
 plain pair with no colour params, both rendering the white floor fill) in
-one 1280x800 startup frame at 2x. Only two controllers, so the stack zoom
-fits with margin.
+one 1280x800 startup frame at the pane's fit zoom (117 %). Only two
+controllers, so the fitted rack sits inside the pane with margin.
 
 `unreferenced-elements.png` is the visual check for change
 `unreferenced-elements` (task 3.2): its fixture pairs a partial B32 (5 of 32
 buttons via `[notebuttons]`) with a bare `[e4]`, so the 27 dimmed unlabelled
 buttons and the 124 dimmed ring segments read beside their lit siblings in
-one 1280x800 startup frame at 2x. All dimmed cells render the quiet `·`
+one 1280x800 startup frame at the pane's fit zoom (131 %). All dimmed cells render the quiet `·`
 marker with no label and no hit rect (stray fold-rule LEDs suppressed); the
 harness renders static state only, so the shot proves the quiet unlit fill,
 and the `src/regression.rs` story pins the counts instead.
@@ -84,7 +111,7 @@ byte-identical freshness is the proof.
 (task 3.2): a bare `[s10]` synthesizes the full 10-switch front whose S-family
 geometry annotates S1.1/S1.2 `rotary` and the rest toggle, so the round
 rotary glyphs read above the square toggle glyphs on one faceplate in a
-1280x800 startup frame at 2x. Unannotated-switch faces keep the toggle glyph
+1280x800 startup frame at the pane's fit zoom (161 %). Unannotated-switch faces keep the toggle glyph
 by construction (the unannotated scenario), so no second shot is needed.
 
 `sections-lanes.png` and `sections-scale.png` are the visual check for change

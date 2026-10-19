@@ -131,13 +131,60 @@ struct Shot {
 
 fn setup_startup(_app: &mut App) {}
 
+/// The annotation-layer shot (change `module-ui-labels`, task 3.4): the startup
+/// arrangement at true 1:1, the size `fixtures/module_ui_labels.ini`'s preamble
+/// labels were chosen for — at 1:1 a 9 mm B32 button cell budgets five 10 pt
+/// characters, so "Trigger input" and "Clock reset" clip while "Go" fits, and
+/// the default `auto` presentation annotates exactly the two clipped labels.
+///
+/// The startup fit would scale this ~91 mm rack past 1:1 (the harness pane is
+/// taller than one true-size rack), which both hides the clipping and leaves no
+/// side band for the callouts, so the shot pins the zoom. The camera is centred
+/// for the pinned zoom without hard-coding a layout number: the startup pane is
+/// published through the same `refresh_hit_geometry` call the first painted
+/// frame makes, one fit gives the rack's real extent (the fit offset is
+/// `(rack·zoom − pane)/2` per axis), and the pinned offset re-centres that same
+/// extent. The manual-navigation latch then keeps the pane-resize trigger from
+/// refitting over the pinned camera. Field writes before paint only —
+/// deterministic, no input.
+fn setup_labels_auto(app: &mut App) {
+    setup_startup(app);
+    app.refresh_hit_geometry(app::Rect::new(0, 0, VIEWPORT.0 as u16, VIEWPORT.1 as u16));
+    let Some((_, pane)) = app
+        .pane_hit_rects
+        .iter()
+        .find(|(id, _)| *id == PaneId::BigLeft)
+    else {
+        return;
+    };
+    let (pane_w, pane_h) = (pane.width as f32, pane.height as f32);
+    if !app.fit_physical_view(pane_w, pane_h) {
+        return;
+    }
+    let fit = app.physical_zoom as f64;
+    let (off_x, off_y) = (app.physical_offset.0 as f64, app.physical_offset.1 as f64);
+    let rack_w = (pane_w as f64 + 2.0 * off_x) / fit;
+    let rack_h = (pane_h as f64 + 2.0 * off_y) / fit;
+    app.physical_zoom = 1.0;
+    app.scale_factor = 1.0;
+    app.physical_offset = (
+        ((rack_w - pane_w as f64) / 2.0) as f32,
+        ((rack_h - pane_h as f64) / 2.0) as f32,
+    );
+    // 1:1 is the shot's subject, not the pane's fit, so the title carries the
+    // plain zoom; the latch keeps the first frame's fit trigger inert.
+    app.physical_fit_zoom = None;
+    app.physical_fit_pending = false;
+    app.physical_nav_latched = true;
+}
+
 /// The startup arrangement, zoomed so the module UI's rack fills its pane.
 /// The six-controller faceplate fixture draws a ~207 mm rack — wider than any
 /// other shot's — so at the default 1:1 zoom its faceplates are only ~38 px
-/// wide and the element stacks are hard to judge. 2x is the largest integer
-/// zoom that still keeps master plus all six controllers inside the
-/// half-width pane at 1280x800 (the drawn rack spans 620 x 766 px there);
-/// `setup_startup` runs first so the arrangement stays the startup one.
+/// wide and the element stacks are hard to judge. The 2x seed below predates
+/// the true-1:1 rebaseline (then 207 mm at 2x spanned 620 x 766 px); since
+/// `module-ui-labels` the pane fits itself on its first frame, so the fit
+/// supersedes this seed and the shot opens at the pane's fit zoom instead.
 fn setup_faceplate_stack(app: &mut App) {
     setup_startup(app);
     app.physical_zoom = 2.0;
@@ -213,6 +260,19 @@ fn shots() -> Vec<Shot> {
             file: "module-ui.png",
             fixture: "fixtures/own_buttons.ini",
             setup: setup_startup,
+        },
+        // Label-annotation check (change `module-ui-labels`, task 3.4): the
+        // fixture's preamble labels are sized for the B32's 9 mm button cells
+        // at true 1:1, so "Trigger input" and "Clock reset" overflow their
+        // cells while "Go" fits. Under the default `auto` presentation the
+        // two clipped labels become side-bound callouts with leader lines and
+        // "Go" is never annotated, in the same frame that shows the rack at
+        // true size (fit-on-open, centred). No field write beyond the startup
+        // arrangement: the annotation layer is the shipped default.
+        Shot {
+            file: "module-ui-labels.png",
+            fixture: "fixtures/module_ui_labels.ini",
+            setup: setup_labels_auto,
         },
         Shot {
             file: "graph.png",
@@ -403,7 +463,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, force-arrangement, large-startup, large-graph"
+        "  shots: module-ui, module-ui-labels, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, force-arrangement, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -447,6 +507,7 @@ fn main() {
 
     let names = [
         "module-ui",
+        "module-ui-labels",
         "graph",
         "source-viewer",
         "optimizer",
