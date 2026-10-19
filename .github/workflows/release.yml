@@ -1,0 +1,167 @@
+name: Release
+
+# Publishes unsigned desktop artifacts for a `v*` tag (design decision 6):
+#   Windows x86_64 zip  -> droid_tui.exe
+#   macOS universal zip -> droid_tui.app (arm64 + x86_64 via lipo)
+#
+# Deliberately absent: code signing, notarization, DMG, MSI. Signing needs
+# credentials the project does not have; docs/platforms.md documents the
+# Gatekeeper and SmartScreen first-launch prompts.
+#
+# Version: the tag without its leading "v" (tag v0.1.0 -> version 0.1.0). It
+# names both assets and fills CFBundleShortVersionString.
+#
+# Release behaviour (one rule, no branching elsewhere): if the tag has no
+# release yet, create it as a DRAFT; if a release already exists (a draft from
+# a previous run, or one a maintainer already published), upload the assets to
+# it with --clobber. Publishing the draft is a human step on the releases page.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  # Needed to create the release and upload assets with GITHUB_TOKEN.
+  contents: write
+
+# Two runs for the same tag must not race on the release assets.
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # On a tag push github.ref_name is the tag; a manual run names it via input.
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # ext/droid-lsp provides circuits.json, compiled in with include_str!.
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # windows-latest is x86_64-pc-windows-msvc, so the default target already
+      # produces target/release/droid_tui.exe.
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          if (-not (Test-Path -LiteralPath 'target/release/droid_tui.exe')) {
+            throw 'target/release/droid_tui.exe is missing'
+          }
+          $zip = "droid_tui-$version-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path 'target/release/droid_tui.exe' -DestinationPath $zip -Force
+          "ZIP=$zip" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The runner is arm64; the x86_64 slice is a standard Apple cross-build.
+      - name: Add macOS targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build arm64
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --locked --target x86_64-apple-darwin
+
+      # Joins the slices with lipo, writes Info.plist and zips the bundle.
+      # The script prints only the zip path on stdout.
+      - name: Package universal .app
+        id: package
+        run: |
+          zip="$(./scripts/package-macos.sh --version "${TAG#v}")"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The preinstalled gh CLI does the upload; --repo makes repo context
+      # explicit, so this job needs no checkout.
+      - name: Create draft or update existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          version="${tag#v}"
+          files=(
+            "dist/droid_tui-${version}-x86_64-pc-windows-msvc.zip"
+            "dist/droid_tui-${version}-macos-universal.zip"
+          )
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || { echo "missing expected asset: $f" >&2; exit 1; }
+          done
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag exists; uploading assets with --clobber" >&2
+            gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "Creating draft release $tag" >&2
+            gh release create "$tag" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "$tag" \
+              --generate-notes
+          fi

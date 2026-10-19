@@ -20,7 +20,7 @@ Note on agent names: `.opencode/harness.json` pins `models.plan/build/fast` to i
 ## 3. CI and release
 
 - [x] 3.1 CI matrix in `.github/workflows/ci.yml`: keep fmt, clippy, `cargo test`, the release build and the release perf gate on `ubuntu-latest`, add `windows-latest` and `macos-latest` jobs that build and run `cargo test`. Verify with a green run on all three jobs and a deliberate failure check that the workflow fails when any job fails. <!-- agent: devops-engineer, depends_on: [1.5, 2.2], touches: [.github/workflows/ci.yml] -->
-- [ ] 3.2 Add a `v*`-tag workflow that publishes a Windows x86_64 zip containing `droid_tui.exe` and a macOS universal `.app` zip built from `aarch64-apple-darwin` and `x86_64-apple-darwin` joined with `lipo`, via `scripts/package-macos.sh`; artifacts are unsigned. Verify by running the workflow from a draft tag and confirming both assets attach and unpack. <!-- agent: devops-engineer, depends_on: [3.1], touches: [.github/workflows/release.yml, scripts/package-macos.sh] -->
+- [x] 3.2 Add a `v*`-tag workflow that publishes a Windows x86_64 zip containing `droid_tui.exe` and a macOS universal `.app` zip built from `aarch64-apple-darwin` and `x86_64-apple-darwin` joined with `lipo`, via `scripts/package-macos.sh`; artifacts are unsigned. Verify by running the workflow from a draft tag and confirming both assets attach and unpack. <!-- agent: devops-engineer, depends_on: [3.1], touches: [.github/workflows/release.yml, scripts/package-macos.sh] -->
 
 ## 4. Documentation
 
