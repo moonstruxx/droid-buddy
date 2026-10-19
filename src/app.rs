@@ -574,9 +574,11 @@ pub enum GraphWindowRequest {
 
 /// MIDI upload transport probe result (change `midi-upload`, task 1.2).
 ///
-/// `droid_port` is the `amidi -l` hardware port whose line names the DROID
-/// (USB-MIDI/X7); `other_ports` are the remaining listed ports (DIN MIDI
-/// candidates). `amidi`/`sendmidi` record tool presence on `PATH`.
+/// `droid_port` is the listed entry whose line names the DROID (USB-MIDI/X7):
+/// an ALSA `hw:N,M` token from `amidi -l`, or a device name from
+/// `sendmidi list`. `other_ports` are the remaining listed entries (DIN MIDI
+/// candidates). `amidi`/`sendmidi` record tool presence on `PATH`; discovery
+/// prefers `amidi` whenever it exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UploadTransport {
     pub amidi: bool,
@@ -601,7 +603,13 @@ impl UploadTransport {
             out.push("no MIDI tool found (need `amidi` or `sendmidi`)".to_string());
         }
         if self.droid_port.is_none() && self.other_ports.is_empty() {
-            out.push("no MIDI port detected (`amidi -l` is empty)".to_string());
+            // Name the listing command that actually ran (or would run): a
+            // sendmidi device list is not an `amidi -l` port list.
+            if !self.amidi && self.sendmidi {
+                out.push("no MIDI port detected (`sendmidi list` is empty)".to_string());
+            } else {
+                out.push("no MIDI port detected (`amidi -l` is empty)".to_string());
+            }
         }
         out
     }
@@ -615,19 +623,36 @@ impl UploadTransport {
         } else {
             ""
         };
-        if let Some(port) = self.droid_port.as_deref() {
-            if tool.is_empty() {
-                return format!("USB-MIDI {port} (no MIDI tool installed)");
-            }
-            return format!("USB-MIDI {port} via {tool}");
+        let Some(port) = self
+            .droid_port
+            .as_deref()
+            .or_else(|| self.other_ports.first().map(String::as_str))
+        else {
+            return String::from("no transport detected");
+        };
+        if tool.is_empty() {
+            let kind = if self.droid_port.is_some() {
+                "USB-MIDI"
+            } else {
+                "DIN MIDI"
+            };
+            return format!("{kind} {port} (no MIDI tool installed)");
         }
-        if let Some(port) = self.other_ports.first() {
-            if tool.is_empty() {
-                return format!("DIN MIDI {port} (no MIDI tool installed)");
-            }
-            return format!("DIN MIDI {port} via {tool}");
+        if self.amidi {
+            let kind = if self.droid_port.is_some() {
+                "USB-MIDI"
+            } else {
+                "DIN MIDI"
+            };
+            return format!("{kind} {port} via {tool}");
         }
-        String::from("no transport detected")
+        // `sendmidi list` yields device names, not ALSA `hw:` port tokens.
+        let kind = if self.droid_port.is_some() {
+            "DROID MIDI device"
+        } else {
+            "MIDI device"
+        };
+        format!("{kind} {port} via {tool}")
     }
 }
 
@@ -658,16 +683,49 @@ pub fn parse_amidi_list(output: &str) -> (Option<String>, Vec<String>) {
     (droid, others)
 }
 
+/// Parse `sendmidi list` output into `(droid_port, other_ports)` (pure seam:
+/// the impure [`detect_upload_transport`] runs the command, tests inject
+/// fixtures here). One device name per line; surrounding whitespace is
+/// trimmed, blank lines and exact duplicates are skipped, and the first line
+/// naming the DROID (`droid`/`x7`, case-insensitive — the USB-MIDI/X7
+/// interface) wins. Unlike [`parse_amidi_list`], the entries are device names
+/// the tool passes verbatim to `sendmidi dev <device>`, not `hw:` tokens.
+pub fn parse_sendmidi_list(output: &str) -> (Option<String>, Vec<String>) {
+    let mut droid = None;
+    let mut others: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for line in output.lines() {
+        let name = line.trim();
+        if name.is_empty() || seen.contains(&name) {
+            continue;
+        }
+        seen.push(name);
+        let lower = name.to_lowercase();
+        if droid.is_none() && (lower.contains("droid") || lower.contains("x7")) {
+            droid = Some(name.to_string());
+        } else {
+            others.push(name.to_string());
+        }
+    }
+    (droid, others)
+}
+
 /// Build the transport from probe parts (pure seam for tests: `amidi_list`
-/// is the stdout of `amidi -l`, the bools are tool presence on `PATH`).
+/// is the stdout of `amidi -l`, `sendmidi_list` the stdout of `sendmidi
+/// list`, and the bools are tool presence on `PATH`). A caller normally runs
+/// only one listing command; when both outputs are supplied the `amidi` list
+/// wins, matching [`detect_upload_transport`]'s preference.
 pub fn probe_upload_transport(
     amidi_list: Option<&str>,
+    sendmidi_list: Option<&str>,
     has_amidi: bool,
     has_sendmidi: bool,
 ) -> UploadTransport {
-    let (droid_port, other_ports) = amidi_list
-        .map(parse_amidi_list)
-        .unwrap_or((None, Vec::new()));
+    let (droid_port, other_ports) = match (amidi_list, sendmidi_list) {
+        (Some(out), _) => parse_amidi_list(out),
+        (None, Some(out)) => parse_sendmidi_list(out),
+        (None, None) => (None, Vec::new()),
+    };
     UploadTransport {
         amidi: has_amidi,
         sendmidi: has_sendmidi,
@@ -676,26 +734,58 @@ pub fn probe_upload_transport(
     }
 }
 
-/// Tool presence on `PATH` (no `which` dependency).
+/// Tool presence on `PATH` (no `which` dependency). On Windows an executable
+/// may carry `.exe`, `.cmd` or `.bat`, so the bare name alone is not enough;
+/// other platforms keep the bare-name check.
 fn command_present(cmd: &str) -> bool {
-    env::var_os("PATH")
-        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(cmd).is_file()))
+    #[cfg(windows)]
+    const SUFFIXES: &[&str] = &["", ".exe", ".cmd", ".bat"];
+    #[cfg(not(windows))]
+    const SUFFIXES: &[&str] = &[""];
+
+    env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| {
+            SUFFIXES
+                .iter()
+                .any(|suffix| dir.join(format!("{cmd}{suffix}")).is_file())
+        })
+    })
 }
 
-/// Run the preflight probe: `amidi -l` for ports plus tool presence. Never
-/// fails — an absent tool or command just yields `false`/`None`, which the
-/// modal reports as missing reasons.
-pub fn detect_upload_transport() -> UploadTransport {
-    let list = std::process::Command::new("amidi")
-        .arg("-l")
+/// Run one listing command and return its stdout, or `None` when it is absent
+/// or fails (a probe never propagates an error).
+fn command_stdout(cmd: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(cmd)
+        .args(args)
         .output()
         .ok()
         .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok());
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+}
+
+/// Run the preflight probe: `amidi -l` when `amidi` is present, otherwise
+/// `sendmidi list` when `sendmidi` is present, plus tool presence. Never runs
+/// a MIDI command when neither tool exists, and never fails — an absent tool
+/// or command just yields `false`/`None`, which the modal reports as missing
+/// reasons.
+pub fn detect_upload_transport() -> UploadTransport {
+    let has_amidi = command_present("amidi");
+    let has_sendmidi = command_present("sendmidi");
+    let amidi_list = if has_amidi {
+        command_stdout("amidi", &["-l"])
+    } else {
+        None
+    };
+    let sendmidi_list = if !has_amidi && has_sendmidi {
+        command_stdout("sendmidi", &["list"])
+    } else {
+        None
+    };
     probe_upload_transport(
-        list.as_deref(),
-        command_present("amidi"),
-        command_present("sendmidi"),
+        amidi_list.as_deref(),
+        sendmidi_list.as_deref(),
+        has_amidi,
+        has_sendmidi,
     )
 }
 
@@ -8047,15 +8137,134 @@ mod tests {
     #[test]
     fn probe_transport_gate_needs_tool_and_port() {
         assert!(upload_test_transport().can_send());
-        // Tool but no port: nothing to address.
-        let no_port = super::probe_upload_transport(Some(""), true, false);
+        // Tool but no ports listed: nothing to address.
+        let no_port = super::probe_upload_transport(Some(""), None, true, false);
         assert!(!no_port.can_send());
-        // Port but no tool: nothing to send with.
-        let no_tool = super::probe_upload_transport(Some("hw:2,0,0  X7 MIDI 1\n"), false, false);
+        // Ports but no tool: nothing to send with.
+        let no_tool =
+            super::probe_upload_transport(Some("hw:2,0,0  X7 MIDI 1\n"), None, false, false);
         assert!(!no_tool.can_send());
-        // sendmidi + a listed DIN port is a path.
-        let din = super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), false, true);
-        assert!(din.can_send());
+        // sendmidi + a listed device is a path.
+        let sendmidi = super::probe_upload_transport(None, Some("X7 MIDI 1\n"), false, true);
+        assert!(sendmidi.can_send());
+    }
+
+    #[test]
+    fn parse_sendmidi_list_finds_device_lines_blanks_and_duplicates() {
+        let out = "  IAC Driver Bus 1  \n\nX7 MIDI 1\nX7 MIDI 1\n\nUSB Audio MIDI 1\n";
+        let (droid, others) = super::parse_sendmidi_list(out);
+        assert_eq!(droid.as_deref(), Some("X7 MIDI 1"));
+        assert_eq!(
+            others,
+            vec![
+                "IAC Driver Bus 1".to_string(),
+                "USB Audio MIDI 1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_sendmidi_list_matches_droid_case_insensitively_and_first_wins() {
+        let (droid, others) =
+            super::parse_sendmidi_list("IAC Driver Bus 1\nDROID MIDI\nDroid MIDI 2\n");
+        assert_eq!(droid.as_deref(), Some("DROID MIDI"));
+        assert_eq!(
+            others,
+            vec!["IAC Driver Bus 1".to_string(), "Droid MIDI 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_sendmidi_list_without_droid_match_keeps_all_devices() {
+        let (droid, others) = super::parse_sendmidi_list("IAC Driver Bus 1\nUSB Audio MIDI 1\n");
+        assert_eq!(droid, None);
+        assert_eq!(
+            others,
+            vec![
+                "IAC Driver Bus 1".to_string(),
+                "USB Audio MIDI 1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_sendmidi_list_empty_yields_no_devices() {
+        let (droid, others) = super::parse_sendmidi_list("\n  \n");
+        assert_eq!(droid, None);
+        assert!(others.is_empty());
+    }
+
+    #[test]
+    fn probe_transport_prefers_amidi_list_when_both_tools_exist() {
+        let transport = super::probe_upload_transport(
+            Some("hw:2,0,0  X7 MIDI 1\n"),
+            Some("X7 MIDI 1\n"),
+            true,
+            true,
+        );
+        assert_eq!(transport.droid_port.as_deref(), Some("hw:2,0,0"));
+        assert!(transport.other_ports.is_empty());
+        assert_eq!(transport.transport_line(), "USB-MIDI hw:2,0,0 via amidi");
+    }
+
+    #[test]
+    fn probe_transport_uses_sendmidi_list_without_amidi() {
+        let transport =
+            super::probe_upload_transport(None, Some("IAC Driver Bus 1\nX7 MIDI 1\n"), false, true);
+        assert_eq!(transport.droid_port.as_deref(), Some("X7 MIDI 1"));
+        assert_eq!(transport.other_ports, vec!["IAC Driver Bus 1".to_string()]);
+        assert!(transport.can_send());
+        assert_eq!(
+            transport.transport_line(),
+            "DROID MIDI device X7 MIDI 1 via sendmidi"
+        );
+    }
+
+    #[test]
+    fn probe_transport_without_tools_yields_nothing() {
+        let transport = super::probe_upload_transport(None, None, false, false);
+        assert_eq!(transport.droid_port, None);
+        assert!(transport.other_ports.is_empty());
+        assert!(!transport.can_send());
+        let reasons = transport.missing_reasons();
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons[0].contains("need `amidi` or `sendmidi`"));
+        assert!(reasons[1].contains("amidi -l"));
+    }
+
+    #[test]
+    fn probe_transport_sendmidi_only_missing_reason_names_sendmidi_list() {
+        let transport = super::probe_upload_transport(None, Some(""), false, true);
+        let reasons = transport.missing_reasons();
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("`sendmidi list`"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_present_resolves_windows_executable_extensions() {
+        use std::path::PathBuf;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("sendmidi.exe"), b"").expect("fixture exe");
+
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![PathBuf::from(dir.path())];
+        if let Some(old) = old_path.as_ref() {
+            paths.extend(std::env::split_paths(old));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        std::env::set_var("PATH", joined);
+
+        let found = super::command_present("sendmidi");
+        let missing = super::command_present("droid-tui-absent-tool");
+
+        match old_path {
+            Some(old) => std::env::set_var("PATH", old),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(found, "sendmidi.exe on PATH must count as present");
+        assert!(!missing);
     }
 
     #[test]
@@ -8073,7 +8282,8 @@ mod tests {
             upload_test_transport().transport_line(),
             "USB-MIDI hw:2,0,0 via amidi"
         );
-        let din = super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), true, false);
+        let din =
+            super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), None, true, false);
         assert_eq!(din.transport_line(), "DIN MIDI hw:3,0,0 via amidi");
         assert_eq!(
             upload_blocked_transport().transport_line(),
