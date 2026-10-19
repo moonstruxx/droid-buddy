@@ -1,3 +1,12 @@
+// The budgets in this file are release timings calibrated on x86_64 Linux
+// (the ubuntu-latest anchor); they are not portable. A shared Windows or macOS
+// CI runner has a different CPU, which would make the gate flake, and a flaky
+// gate is worse than none — so the whole integration test is Linux-only.
+// CI still runs it in release on ubuntu-latest; docs/build.md documents the
+// scoping. The `#![cfg]` removes the entire crate on other targets, leaving an
+// empty test binary with no unused imports or items.
+#![cfg(target_os = "linux")]
+
 //! Profiling gate: runs core pure phases over the scale-anchor workload under
 //! named wall-clock budgets so a CPU hog or endless loop fails the suite with
 //! the phase name and elapsed time instead of hanging it.
