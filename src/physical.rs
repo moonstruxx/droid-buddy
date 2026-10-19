@@ -2845,4 +2845,163 @@ mod tests {
         let b11 = b.iter().find(|c| c.label == "B1.1").expect("B1.1 entry");
         assert_eq!(b11.kind.as_deref(), Some("touch"));
     }
+
+    // ---- module-ui-labels 1.1 (red): true 1:1 baseline, fit, zoom range ----
+
+    /// The 96-dpi reference: one inch (25.4 mm) is 96 points.
+    const POINTS_PER_MM_96DPI: f64 = 3.779_527_559;
+    /// The design's measuring pane (design D3).
+    const FIT_PANE_W: f32 = 640.0;
+    const FIT_PANE_H: f32 = 520.0;
+
+    /// A rack layout carrying only the two overall extents the fit and
+    /// overflow math consume, at the design's measured rack size (D3:
+    /// master + S10 + P10 = 92.94 mm wide, 3 HE = 128.5 mm tall).
+    fn rack_extent_fixture(width_mm: f64, height_mm: f64) -> RackLayout {
+        RackLayout {
+            rows: Vec::new(),
+            fold_bars: Vec::new(),
+            mounts: RackMounts::default(),
+            total_width_mm: width_mm,
+            total_height_mm: height_mm,
+            fold_bar_height_mm: FOLD_BAR_HEIGHT_MM,
+        }
+    }
+
+    #[test]
+    fn true_scale_is_ninety_six_points_per_inch() {
+        // D1: one true-1:1 constant replaces the 0.15 cells/mm × 10 divide.
+        assert_eq!(PHYSICAL_POINTS_PER_MM, POINTS_PER_MM_96DPI);
+        let m = ScreenMapping::default();
+        assert_eq!(m.points_per_mm, PHYSICAL_POINTS_PER_MM);
+        assert_eq!(m.zoom, 1.0);
+        let square = |mm: f64| RectMm {
+            x_mm: 0.0,
+            y_mm: 0.0,
+            w_mm: mm,
+            h_mm: mm,
+        };
+        // 25.4 mm = 1 in = 96 pt at 100 % zoom (physical-scale-model spec).
+        let (_, _, w, _) = m.mm_to_screen(square(25.4));
+        assert!((w - 96.0).abs() < 1e-6, "25.4 mm must be 96 pt, got {w}");
+        // The same mapping is isotropic: a 9 mm button cell is ~34 pt square.
+        let (_, _, bw, bh) = m.mm_to_screen(square(9.0));
+        assert!(
+            (bw - 34.0).abs() < 0.1,
+            "a 9 mm cell must be ~34 pt, got {bw}"
+        );
+        assert!((bh - bw).abs() < 1e-9, "both axes share one points-per-mm");
+    }
+
+    #[test]
+    fn zoom_range_spans_one_quarter_to_four() {
+        // D5: the supported range reaches from 25 % to 400 % of the 1:1
+        // baseline, so a 400 mm rack and a 2-row rack fit at the low end.
+        assert_eq!(ZOOM_MIN, 0.25);
+        assert_eq!(ZOOM_MAX, 4.0);
+        assert!(ZOOM_MIN < 1.0 && ZOOM_MAX > 1.0);
+    }
+
+    #[test]
+    fn fit_zoom_fits_a_short_rack_by_height() {
+        // Design D3: master + S10 + P10 (92.94 mm) in a 640 × 520 pane is 107 %.
+        let zoom = fit_zoom(92.94, 128.5, FIT_PANE_W, FIT_PANE_H);
+        assert_eq!((zoom * 100.0).round() as u32, 107, "got {zoom}");
+        // Height-bound: the pane-height term is the minimum.
+        let by_height = FIT_PANE_H as f64 / 128.5 / PHYSICAL_POINTS_PER_MM;
+        assert!((zoom - by_height).abs() < 1e-9, "must be height-bound");
+    }
+
+    #[test]
+    fn fit_zoom_fits_a_wide_rack_by_width() {
+        // Design D3: a 400 mm rack in the same pane is 42 %.
+        let zoom = fit_zoom(400.0, 128.5, FIT_PANE_W, FIT_PANE_H);
+        assert_eq!((zoom * 100.0).round() as u32, 42, "got {zoom}");
+        assert!(
+            (zoom - 0.423_333_333_339_507).abs() < 1e-9,
+            "width-bound fit"
+        );
+    }
+
+    #[test]
+    fn fit_zoom_fits_a_two_row_rack_by_height() {
+        // Design D3: any 2-row 3 HE rack is 257 mm tall and fits at 54 %.
+        let zoom = fit_zoom(173.0, 257.0, FIT_PANE_W, FIT_PANE_H);
+        assert_eq!((zoom * 100.0).round() as u32, 54, "got {zoom}");
+    }
+
+    #[test]
+    fn fit_zoom_clamps_to_the_supported_range() {
+        // A tiny rack would need ~1376 %: the ceiling binds.
+        assert_eq!(fit_zoom(10.0, 10.0, FIT_PANE_W, FIT_PANE_H), ZOOM_MAX);
+        // A huge rack would need ~4 %: the floor binds.
+        assert_eq!(fit_zoom(4000.0, 128.5, FIT_PANE_W, FIT_PANE_H), ZOOM_MIN);
+        // A rack exactly at the floor stays there rather than drifting below.
+        let floor_w = FIT_PANE_W as f64 / (PHYSICAL_POINTS_PER_MM * ZOOM_MIN);
+        assert!(
+            (fit_zoom(floor_w, 128.5, FIT_PANE_W, FIT_PANE_H) - ZOOM_MIN).abs() < 1e-9,
+            "the floor is inclusive"
+        );
+    }
+
+    #[test]
+    fn fit_offset_centres_the_rack_in_the_pane() {
+        let (w_mm, h_mm) = (92.94, 128.5);
+        let zoom = fit_zoom(w_mm, h_mm, FIT_PANE_W, FIT_PANE_H);
+        let (ox, oy) = fit_offset(w_mm, h_mm, FIT_PANE_W, FIT_PANE_H, zoom);
+        let rack_w = w_mm * PHYSICAL_POINTS_PER_MM * zoom;
+        let rack_h = h_mm * PHYSICAL_POINTS_PER_MM * zoom;
+        assert!(
+            (ox as f64 - (rack_w - FIT_PANE_W as f64) / 2.0).abs() < 1e-3,
+            "x offset must centre {rack_w} pt in {FIT_PANE_W} pt, got {ox}"
+        );
+        assert!(
+            (oy as f64 - (rack_h - FIT_PANE_H as f64) / 2.0).abs() < 1e-3,
+            "y offset must centre {rack_h} pt in {FIT_PANE_H} pt, got {oy}"
+        );
+        // The rack's centre lands on the pane's centre under the fit mapping.
+        let m = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, zoom, ox as f64, oy as f64);
+        let (cx, cy, _, _) = m.mm_to_screen(RectMm {
+            x_mm: w_mm / 2.0,
+            y_mm: h_mm / 2.0,
+            w_mm: 0.0,
+            h_mm: 0.0,
+        });
+        assert!(
+            (cx - FIT_PANE_W as f64 / 2.0).abs() < 1e-2,
+            "rack centre x must be the pane centre, got {cx}"
+        );
+        assert!(
+            (cy - FIT_PANE_H as f64 / 2.0).abs() < 1e-2,
+            "rack centre y must be the pane centre, got {cy}"
+        );
+    }
+
+    #[test]
+    fn rack_extent_points_scales_the_rack_at_the_current_zoom() {
+        // The pure helper behind `App::physical_overflow` (task 1.5): the
+        // rack's extent in points at the current zoom, never a stored size.
+        let rack = rack_extent_fixture(92.94, 128.5);
+        let (w1, h1) = rack_extent_points(&rack, 1.0);
+        assert!(
+            (w1 as f64 - 92.94 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3,
+            "true-size width, got {w1}"
+        );
+        assert!(
+            (h1 as f64 - 128.5 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3,
+            "true-size height, got {h1}"
+        );
+        // At 4x the same rack no longer fits the 640 × 520 pane on either axis.
+        let (w4, h4) = rack_extent_points(&rack, ZOOM_MAX);
+        assert!((w4 as f64 - 4.0 * 92.94 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3);
+        assert!((h4 as f64 - 4.0 * 128.5 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3);
+        assert!(w4 > FIT_PANE_W && h4 > FIT_PANE_H);
+        // At the fit zoom the extent is inside the pane on both axes.
+        let fit = fit_zoom(92.94, 128.5, FIT_PANE_W, FIT_PANE_H);
+        let (wf, hf) = rack_extent_points(&rack, fit);
+        assert!(
+            wf <= FIT_PANE_W + 1e-2 && hf <= FIT_PANE_H + 1e-2,
+            "fit must not overflow: {wf} × {hf}"
+        );
+    }
 }

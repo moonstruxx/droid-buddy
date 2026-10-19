@@ -1319,4 +1319,41 @@ mod tests {
         );
         assert_eq!(loaded.layout, settings.layout);
     }
+
+    // ---- module-ui-labels 1.1 (red): widened [physical] zoom range ----
+
+    #[test]
+    fn physical_zoom_bounds_match_the_physical_module() {
+        // One source of truth for the range (design D5).
+        assert_eq!(MIN_PHYSICAL_ZOOM, crate::physical::ZOOM_MIN);
+        assert_eq!(MAX_PHYSICAL_ZOOM, crate::physical::ZOOM_MAX);
+        assert_eq!(MIN_PHYSICAL_ZOOM, 0.25);
+        assert_eq!(MAX_PHYSICAL_ZOOM, 4.0);
+    }
+
+    #[test]
+    fn physical_zoom_sanitisation_accepts_the_widened_range() {
+        // `sanitize_physical` runs on both load and save; load exercises it.
+        for (raw, expected) in [
+            (0.2, 0.25),
+            (0.25, 0.25),
+            (1.0, 1.0),
+            (4.0, 4.0),
+            (5.0, 4.0),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[physical]\nzoom = {raw}\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.physical.zoom, expected,
+                "raw {raw} should sanitise to {expected}"
+            );
+        }
+    }
 }

@@ -8039,4 +8039,49 @@ mod tests {
         assert!(picker_filter_matches("-a_", "sub-a_.ini"));
         assert!(picker_filter_matches("", "anything.ini"));
     }
+
+    // ---- module-ui-labels 1.1 (red): fit computation and live overflow ----
+
+    #[test]
+    fn module_ui_fit_zoom_matches_the_design_table() {
+        // Design D3's measuring pane; the fit math is `physical::fit_zoom`.
+        let (w, h) = (640.0_f32, 520.0_f32);
+        // master + S10 + P10 (92.94 mm) → 107 %, height-bound.
+        assert_eq!(
+            (crate::physical::fit_zoom(92.94, 128.5, w, h) * 100.0).round() as u32,
+            107
+        );
+        // A 400 mm rack → 42 %, width-bound.
+        assert_eq!(
+            (crate::physical::fit_zoom(400.0, 128.5, w, h) * 100.0).round() as u32,
+            42
+        );
+        // Any 2-row 3 HE rack (257 mm tall) → 54 %, height-bound.
+        assert_eq!(
+            (crate::physical::fit_zoom(173.0, 257.0, w, h) * 100.0).round() as u32,
+            54
+        );
+    }
+
+    #[test]
+    fn physical_overflow_judges_the_live_rack_at_the_current_zoom() {
+        let mut app = App::new();
+        // master + S10 + P10: the default single-row case, 3 HE tall.
+        app.patch = Some(Patch::from_ini_str("[s10]\n[p10]\n", String::from("fit-rack")).unwrap());
+        let pane = Rect::new(0, 0, 640, 520);
+        // The rack's true extent (~365 × ~486 pt) fits the pane at 100 %.
+        app.physical_zoom = 1.0;
+        assert_eq!(
+            app.physical_overflow(pane),
+            (false, false),
+            "a rack that fits reports no overflow"
+        );
+        // The same rack at the 4x ceiling is ~1460 × ~1943 pt: both axes overflow.
+        app.physical_zoom = 4.0;
+        assert_eq!(
+            app.physical_overflow(pane),
+            (true, true),
+            "the rack extent at the current zoom must drive overflow"
+        );
+    }
 }
