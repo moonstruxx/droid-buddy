@@ -108,11 +108,15 @@ droid_tui/
 │                           #   contributing.md, assets/ (screenshots)
 ├── .github/workflows/      # ci.yml (three-OS matrix) + release.yml (tag → unsigned desktop artifacts)
 ├── openspec/
-│   ├── changes/            # OpenSpec change proposals (archive/ holds completed ones)
-│   └── specs/              # capability specs: controller-panels, file-picker, mouse-interaction,
-│                           #   patch-parsing, shift-visualization, keybinding, module-scaling,
-│                           #   module-orientation, viewer-layout, source-navigation, signal-flow-graph,
-│                           #   physical-scale-model, graph-arrange, midi-upload
+│   ├── changes/            # OpenSpec change proposals; archive/ holds completed ones
+│   │                       #   (newest: archive/2026-10-19-cross-platform-builds)
+│   └── specs/              # 43 capability specs, one directory per capability, each the
+│                           #   behaviour contract: module-ui, physical-scale-model,
+│                           #   signal-flow-graph, graph-arrange, pane-class-layout, viewer-layout,
+│                           #   patch-parsing, patch-validation, patch-diff-viewer, keybinding,
+│                           #   theming, midi-upload, configuration, circuit-plugins,
+│                           #   label-management, file-picker, distribution, performance-gate,
+│                           #   visual-validation, …
 ├── .opencode/              # agent orchestration config (engineers, source roots, platform)
 ├── .agents/skills/         # project skills (guardrails, tui, rust, openspec, …)
 ├── .beads/                 # beads issue tracker data (Dolt-backed, tooling only)
@@ -477,7 +481,7 @@ The `ext/droid-lsp` submodule is used for development reference and as the vendo
 - **Unsigned artifacts**: neither release is code-signed or notarised (no Apple developer account, no Windows code-signing certificate), so macOS Gatekeeper and Windows SmartScreen warn on first launch. There is no MSI, DMG or `pkg` installer, no Windows ARM64 build, and no prebuilt Linux binary — Linux builds from source. `docs/platforms.md` records the support matrix, the first-launch bypasses and the known limits; `docs/build.md` records the prerequisites, gates, CI jobs and release process.
 - **Containerization**: none.
 - **Environment config**: the only environment variables the app reads are the data-directory inputs (`$XDG_CONFIG_HOME`, `$HOME`, `%APPDATA%`, per §3.21); there is no other application-specific environment configuration, and the picker starts in `std::env::current_dir()`. Preferences and the other stores live in the platform data directory (§5): `config.toml` carries `theme` + `[labels] layers_enabled=true, max_shift_layer=4` clamped 1..8 (disabled coerces display to layer 1 while preserving 2..N), `[latency] per_circuit` overrides the per-circuit `AVG` cost model, `[layout] mode` (`column` default / `force` / `sections`) and `[layout] ordering` (`strict` default / `barycenter`), `[physical] zoom` (clamped to 0.25–4.0, where 100 % is true 1:1; the additive `zoom_baseline` marker records the scale generation, so a zoom saved before the 1:1 rebaseline is ignored once and the view opens fitted) and `[physical] labels` (`off` / `auto` default / `on`) plus `[physical.rack]`, and `[plugins] dir` (optional absolute plugin-directory override; a non-absolute value is treated as unset) with `[plugins] enabled` (default `true`). Per-patch labels live beside it in `labels.toml`, favourites in `favourites.toml`.
-- **Git**: `ext/droid-lsp` is a git submodule (`https://github.com/moonstruxx/droid-lsp`) vendored as the schema/validation reference; the main repo's remote is `origin` (`https://github.com/moonstruxx/droid-buddy.git`) with `main` tracking `origin/main`; changes are developed on per-change feature branches (e.g. `feature/module-ui-labels`, `feature/cross-platform-builds` (current)), and archived changes live on `archive/*` branches plus `openspec/changes/archive/`.
+- **Git**: `ext/droid-lsp` is a git submodule (`https://github.com/moonstruxx/droid-lsp`) vendored as the schema/validation reference; the main repo's remote is `origin` (`https://github.com/moonstruxx/droid-buddy.git`) with `main` tracking `origin/main`; changes are developed on per-change feature branches (e.g. `feature/module-ui-labels`, `feature/cross-platform-builds`) that merge into `main`, and their archive commit lands on `archive/<change-id>` (e.g. `archive/cross-platform-builds`), with archived proposals under `openspec/changes/archive/`.
 
 ## 9. Security Architecture
 
@@ -600,7 +604,6 @@ The `ext/droid-lsp` submodule is used for development reference and as the vendo
 
 ## 15. Constraints, Risks, and Technical Debt
 
-- **`target/` partially tracked in git** (725+ files) — build artifacts committed at some point; `.gitignore` only covers beads/Dolt files. Hygiene debt; `git add -A` can accidentally sweep build output into commits.
 - **`ext/droid-lsp` is a vendored git submodule** — the schema source of truth (`src/circuits.json`) and validation reference (`src/diagnostics.ts`) live in a large multi-project clone; the build depends on the submodule being initialized, so a fresh checkout must run `git submodule update --init`.
 - **Cross-platform verification is CI-deep, not runtime-deep** — CI compiles and tests Linux, Windows and macOS, but no job opens a window or talks to a MIDI device. Window painting, the macOS bundle's first launch, Windows drive navigation and a real SysEx send are manual smoke tests; a regression in those paths surfaces after release, not in CI.
 - **Unsigned artifacts, no installers** — the Windows zip and macOS `.app` zip are neither code-signed nor notarised (Gatekeeper/SmartScreen warn on first launch), and there is no MSI, DMG or `pkg`, no Windows ARM64 build and no prebuilt Linux binary. `docs/platforms.md` documents the bypasses and the limits rather than hiding them.
@@ -714,4 +717,4 @@ The `ext/droid-lsp` submodule is used for development reference and as the vendo
 - **Section-hole / band anchor**: the fixed mean seeded slot of one banner group's members, computed per (banner group, row) once per solve and never moved — the "black hole" a member's section spring pulls toward.
 - **Tether**: `SECTIONS_TETHER` (60), the per-node bound on how far the sections joint solve may drag a node from its seeded lane slot, applied ahead of the `separate_overlaps` post-condition.
 
-<!-- Last updated: 2026-10-19T21:27:46+02:00 -->
+<!-- Last updated: 2026-10-19T22:19:21+02:00 -->

@@ -56,6 +56,8 @@ Available engineers:
 | `horst-engineer` | `.opencode/agents/horst-engineer.md` | Rust unit and regression testing for the ratatui TUI |
 | `dermannmitdermachine-engineer` | `.opencode/agents/dermannmitdermachine-engineer.md` | Rust application logic, DROID framework, monolith/layered architecture, and design patterns for the ratatui TUI |
 | `api-engineer` | `.opencode/agents/api-engineer.md` | API/Integration, ComfyUI-style node graphs, force-directed physics layout, and third-party integration for the ratatui TUI |
+| `frontend-engineer` | `.opencode/agents/frontend-engineer.md` | egui 0.36 paint surfaces (pane band, module UI, viewer, picker, overlays, graph canvas), semantic colour tokens, and headless paint tests |
+| `data-engineer` | `.opencode/agents/data-engineer.md` | Patch-corpus analysis, CSV/JSON feature pipelines and offline-fitted decision tables (Python 3 stdlib + Rust 2021), with corpus-wide data-quality guards |
 
 The `pc-plan-apply` skill is authoritative for subagent waves, dependency ordering, retries, and concurrency. Read `agents.maxConcurrent` from `.opencode/harness.json` before spawning workers.
 

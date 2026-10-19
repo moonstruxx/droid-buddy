@@ -15,3 +15,4 @@ thoughts
 .codegraph/
 .opencode/harness-run.json
 .opencode/opencode-quota/
+.claude/

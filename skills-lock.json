@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "desktop-applications": {
+      "source": "bobmatnyc/claude-mpm-skills",
+      "sourceType": "github",
+      "skillPath": "toolchains/rust/desktop-applications/SKILL.md",
+      "computedHash": "a786ce0a9c0e1fb1f2797b4eb35a8069c4e26c7b5fc66c773bd15911d30092a4"
+    }
+  }
+}
