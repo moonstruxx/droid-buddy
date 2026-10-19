@@ -951,6 +951,12 @@ pub struct App {
     /// default main view since 4.2. Reset on patch load like
     /// `processing_paused`.
     pub physical_show_skeleton: bool,
+    /// Label presentation for the module UI (module-ui-labels D10/D12): `off`
+    /// draws in-cell labels only, `auto` annotates exactly the elements whose
+    /// in-cell label is clipped, `on` annotates every addressed label. Cycled by
+    /// `a` while the module UI pane holds focus and persisted as
+    /// `[physical] labels`; seeded from that setting at startup.
+    pub label_presentation: crate::config::LabelPresentation,
     /// True when the Physical pane shows the performance view (change
     /// `performance-view`): the rack renders compact and centered while
     /// every element label renders big in the field around it. Presentation
@@ -1192,6 +1198,7 @@ impl App {
             events: EventBus::default(),
             processing_paused: false,
             physical_show_skeleton: false,
+            label_presentation: crate::config::LabelPresentation::default(),
             showing_performance: false,
             physical_skeleton_rects: Vec::new(),
             physical_full_rects: Vec::new(),
@@ -8256,7 +8263,7 @@ mod tests {
             show_skeleton: true,
             offset_x: 3.0,
             offset_y: -4.0,
-            rack: crate::physical::RackSpec::default(),
+            ..crate::config::Physical::default()
         };
         app.seed_physical_view(&legacy);
         assert_eq!(app.physical_zoom, 1.0, "legacy zoom is ignored once");

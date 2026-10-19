@@ -168,6 +168,16 @@ pub(crate) struct PhysicalSpec {
     /// Performance-view overlay (compact rack + exploded callouts), present
     /// exactly when `App.showing_performance` was on at spec-build time.
     pub performance: Option<PerformanceOverlay>,
+    /// Label-presentation annotations (module-ui-labels D10): side-bound
+    /// callouts with leader lines, outside the rack, holding the labels the
+    /// cells themselves cannot show. Decorative — they publish no hit rect and
+    /// never touch `cells` or the geometry. Empty when nothing is annotated
+    /// (`off`, `auto` with nothing clipped, budget-dropped set empty).
+    pub annotations: Vec<CalloutSpec>,
+    /// Hover reveal (module-ui-labels D11): the full label plus state of the
+    /// element under the pointer, anchored to its cell and flipped to stay
+    /// inside the pane. `None` with no hovered element.
+    pub hover: Option<CalloutSpec>,
     /// Skeleton presentation: module outlines + cell markers only.
     pub skeleton: bool,
     /// Global processing pause: everything renders dimmed.
@@ -498,8 +508,75 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     } else {
         None
     };
+    // Label annotations (D10): `off` draws none, `auto` annotates exactly the
+    // addressed cells whose in-cell label is clipped, `on` every addressed label.
+    // The performance view already explodes every label big around a compact
+    // rack, so it carries no second annotation layer. Candidates are the same
+    // cells the painter consumes (rect + label + clipped flag).
+    let annotations = if app.showing_performance {
+        Vec::new()
+    } else {
+        // `auto` only annotates labels the user actually wrote: a derived token
+        // name ("Button B1.3") is mechanical, so annotating every derived name a
+        // narrow cell ellipsizes would flood the field with noise. `on` draws
+        // every addressed label on request, derived names included.
+        let shift = app.active_shift.map_or(1, |g| g as u8);
+        let layers_enabled = app.labels.layers_enabled;
+        let max_shift_layer = app.labels.max_shift_layer;
+        let hw_store = app.current_hw_store();
+        let explicitly_labelled = |cell: &CellSpec| -> bool {
+            cell.component_index
+                .and_then(|i| patch.hw_components.get(i))
+                .is_some_and(|comp| {
+                    patch
+                        .explicit_hw_label(
+                            &comp.id,
+                            shift,
+                            layers_enabled,
+                            max_shift_layer,
+                            &hw_store,
+                        )
+                        .is_some()
+                })
+        };
+        let sources: Vec<CellSpec> = cells
+            .iter()
+            .filter(|cell| {
+                cell.component_index.is_some()
+                    && !cell.label.is_empty()
+                    && match app.label_presentation {
+                        crate::config::LabelPresentation::Off => false,
+                        crate::config::LabelPresentation::Auto => {
+                            cell.label_clipped && explicitly_labelled(cell)
+                        }
+                        crate::config::LabelPresentation::On => true,
+                    }
+            })
+            .map(|cell| {
+                // A composed button face drops the in-cell state row (the shape
+                // carries the state), so its callout resolves the live state
+                // text from the component exactly as the performance overlay
+                // does; every other path keeps the state the cell already has.
+                let mut source = cell.clone();
+                if source.state_text.is_empty() {
+                    if let Some(state) = cell
+                        .component_index
+                        .and_then(|i| patch.hw_components.get(i))
+                        .map(|comp| cell_visuals(comp, false, false, None).1)
+                    {
+                        source.state_text = state;
+                    }
+                }
+                source
+            })
+            .collect();
+        let candidates: Vec<&CellSpec> = sources.iter().collect();
+        budget_annotations(pane, geom.case_rect, &candidates).callouts
+    };
     Some(PhysicalSpec {
         performance,
+        annotations,
+        hover: None,
         background: crate::theme::active().graph_canvas_bg,
         case_rect: geom.case_rect,
         mounts: geom.mounts,
@@ -599,6 +676,142 @@ pub(crate) fn label_is_clipped(cell: &CellSpec) -> bool {
     let budget = (rect.width() / char_w).floor() as usize;
     let room = budget.saturating_sub(cell.glyph.chars().count() + 1);
     room == 0 || label_chars > room
+}
+
+/// The placed annotations plus how many candidates the 30 % band budget had to
+/// drop (module-ui-labels D10). The dropped count is what the pane title reports
+/// as hidden labels.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LabelPlan {
+    pub callouts: Vec<CalloutSpec>,
+    pub dropped: usize,
+}
+
+/// Annotation drop family (D10's fixed priority): LEDs and jacks go first, then
+/// buttons, then switches, then pots, and faders last. A fader is a knob or
+/// encoder cell carrying the fader face, so `is_fader` outranks its kind.
+fn annotation_family(cell: &CellSpec) -> u8 {
+    if cell.is_fader {
+        return 4;
+    }
+    match cell.kind {
+        ComponentKind::Led | ComponentKind::CvIn | ComponentKind::CvOut => 0,
+        ComponentKind::Button => 1,
+        ComponentKind::Switch => 2,
+        ComponentKind::Knob | ComponentKind::Encoder => 3,
+    }
+}
+
+/// Band depth of the deepest placed label on each axis, measured from the rack
+/// edge to the farthest label edge: vertical for the Over/Under bands, horizontal
+/// for Left/Right. The 30 % budget bounds each axis against its own pane extent.
+fn band_depths(rack: Rect, placed: &[crate::performance::PlacedLabel]) -> (f32, f32) {
+    let mut depth_y = 0.0_f32;
+    let mut depth_x = 0.0_f32;
+    for label in placed {
+        let r = label.label_rect;
+        match label.side {
+            crate::performance::Side::Over => {
+                depth_y = depth_y.max(rack.min.y - r.y);
+            }
+            crate::performance::Side::Under => {
+                depth_y = depth_y.max((r.y + r.h) - rack.max.y);
+            }
+            crate::performance::Side::Left => {
+                depth_x = depth_x.max(rack.min.x - r.x);
+            }
+            crate::performance::Side::Right => {
+                depth_x = depth_x.max((r.x + r.w) - rack.max.x);
+            }
+        }
+    }
+    (depth_y, depth_x)
+}
+
+/// Place the annotation candidates with `performance::place_labels` and enforce
+/// the 30 % band budget (module-ui-labels D10): while the deepest band exceeds
+/// 30 % of the pane on either axis, drop one candidate at a time in the fixed
+/// family order. A `highlighted` cell — the focused element or the selected
+/// circuit's hardware — is never dropped; if only protected candidates remain
+/// the loop stops and keeps them, so the emphasis the user is following never
+/// disappears.
+pub(crate) fn budget_annotations(pane: Rect, rack_rect: Rect, cells: &[&CellSpec]) -> LabelPlan {
+    if pane.width() <= 0.0 || pane.height() <= 0.0 {
+        return LabelPlan::default();
+    }
+    let rack = crate::performance::Rect::new(
+        rack_rect.min.x,
+        rack_rect.min.y,
+        rack_rect.width(),
+        rack_rect.height(),
+    );
+    // Measure once: the drop loop only re-places.
+    let measured: Vec<(f32, f32)> = cells
+        .iter()
+        .map(|cell| callout_size(&cell.label, &cell.state_text))
+        .collect();
+    // Drop order is total and deterministic: family first, candidate order to
+    // break ties.
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by_key(|&i| (annotation_family(cells[i]), i));
+    let place = |kept: &[bool]| {
+        let inputs: Vec<crate::performance::LabelInput> = (0..cells.len())
+            .filter(|&i| kept[i])
+            .map(|i| crate::performance::LabelInput {
+                host_id: i,
+                host_rect: crate::performance::Rect::new(
+                    cells[i].rect.min.x,
+                    cells[i].rect.min.y,
+                    cells[i].rect.width(),
+                    cells[i].rect.height(),
+                ),
+                label_w: measured[i].0,
+                label_h: measured[i].1,
+            })
+            .collect();
+        crate::performance::place_labels(rack, &inputs)
+    };
+    let mut kept = vec![true; cells.len()];
+    let mut placed = place(&kept);
+    loop {
+        let (depth_y, depth_x) = band_depths(rack_rect, &placed);
+        if depth_y <= 0.3 * pane.height() && depth_x <= 0.3 * pane.width() {
+            break;
+        }
+        match order
+            .iter()
+            .copied()
+            .find(|&i| kept[i] && !cells[i].highlighted)
+        {
+            Some(next) => {
+                kept[next] = false;
+                placed = place(&kept);
+            }
+            // Every remaining candidate is protected: never drop one.
+            None => break,
+        }
+    }
+    let dropped = kept.iter().filter(|kept| !**kept).count();
+    let mut callouts: Vec<CalloutSpec> = placed
+        .into_iter()
+        .map(|label| {
+            let cell = cells[label.host_id];
+            CalloutSpec {
+                label_rect: Rect::from_min_size(
+                    Pos2::new(label.label_rect.x, label.label_rect.y),
+                    Vec2::new(label.label_rect.w, label.label_rect.h),
+                ),
+                anchor: Pos2::new(label.anchor.x, label.anchor.y),
+                label: cell.label.clone(),
+                state_text: cell.state_text.clone(),
+                color: cell.color,
+                highlighted: cell.highlighted,
+            }
+        })
+        .collect();
+    // Top-to-bottom paint order, mirroring `performance_overlay`.
+    callouts.sort_by_key(|c| (c.label_rect.min.y * 4096.0) as i32);
+    LabelPlan { callouts, dropped }
 }
 
 /// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
@@ -889,6 +1102,14 @@ pub(crate) fn paint_physical(
     if let Some(overlay) = &spec.performance {
         paint_performance(&painter, overlay, spec.paused);
     }
+    // Label annotations (module-ui-labels D10): the same side-bound callouts the
+    // performance view draws, holding the labels the cells cannot show. Like the
+    // performance overlay and the DB8E bands they are decoration — no hit rect.
+    paint_callouts(&painter, &spec.annotations, spec.paused);
+    // Hover reveal (D11): one callout for the element under the pointer.
+    if let Some(hover) = &spec.hover {
+        paint_callouts(&painter, std::slice::from_ref(hover), spec.paused);
+    }
 
     drop(painter);
     ui.ctx().input(|i| physical_frame(i, pane))
@@ -1123,10 +1344,18 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
     }
 }
 fn paint_performance(painter: &Painter, overlay: &PerformanceOverlay, paused: bool) {
+    paint_callouts(painter, &overlay.callouts, paused);
+}
+
+/// Draw side-bound callouts: one leader line from the host-cell edge anchor to
+/// the placed label rect, then the big monospace headline and the muted state
+/// row. Shared by the performance overlay, the label annotations, and the hover
+/// reveal, so every callout on the surface reads as one presentation.
+fn paint_callouts(painter: &Painter, callouts: &[CalloutSpec], paused: bool) {
     let leader = rgb(crate::theme::active().performance_leader);
     let headline_font = egui::FontId::monospace(CALLOUT_LABEL_SIZE);
     let state_font = egui::FontId::proportional((CALLOUT_LABEL_SIZE * 0.8).max(9.0));
-    for callout in &overlay.callouts {
+    for callout in callouts {
         let rect = callout.label_rect;
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             continue;

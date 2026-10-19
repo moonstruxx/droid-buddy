@@ -126,6 +126,65 @@ impl Default for Labels {
     }
 }
 
+/// Label presentation for the module UI (module-ui-labels D10/D12): `off` draws
+/// in-cell labels only, `auto` annotates exactly the elements whose in-cell label
+/// is clipped, and `on` annotates every addressed element that carries a label.
+/// Default `auto`; unknown values in the file warn once on stderr and fall back
+/// to `auto`, mirroring [`LayoutMode`]'s handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LabelPresentation {
+    Off,
+    Auto,
+    On,
+}
+
+impl Default for LabelPresentation {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl LabelPresentation {
+    /// The persisted and displayed name (`off` / `auto` / `on`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::On => "on",
+        }
+    }
+
+    /// The next presentation in `off` → `auto` → `on` → `off` (D6's `a` key).
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Auto,
+            Self::Auto => Self::On,
+            Self::On => Self::Off,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LabelPresentation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "off" => Self::Off,
+            "auto" => Self::Auto,
+            "on" => Self::On,
+            other => {
+                eprintln!(
+                    "warning: unknown label presentation \"{other}\"; valid choices: off, auto, on"
+                );
+                Self::Auto
+            }
+        })
+    }
+}
+
 /// Per-circuit latency overrides under `[latency]`.
 ///
 /// Keys are DROID circuit names; values override the ramsize-proportional
@@ -148,6 +207,9 @@ pub struct Latency {
 pub struct Physical {
     #[serde(default = "default_show_skeleton")]
     pub show_skeleton: bool,
+    /// Label presentation (D10): `off` / `auto` / `on`; absent means `auto`.
+    #[serde(default)]
+    pub labels: LabelPresentation,
     #[serde(default = "default_physical_zoom")]
     pub zoom: f64,
     /// Scale baseline the stored `zoom` is relative to (D13). Absent on configs
@@ -168,6 +230,7 @@ impl Default for Physical {
     fn default() -> Self {
         Self {
             show_skeleton: default_show_skeleton(),
+            labels: LabelPresentation::default(),
             zoom: default_physical_zoom(),
             zoom_baseline: None,
             offset_x: default_physical_offset(),
@@ -1018,6 +1081,7 @@ mod tests {
             latency: Latency::default(),
             physical: Physical {
                 show_skeleton: true,
+                labels: LabelPresentation::default(),
                 zoom: 1.5,
                 zoom_baseline: None,
                 offset_x: 2.0,
@@ -1060,6 +1124,7 @@ mod tests {
                 latency: Latency::default(),
                 physical: Physical {
                     show_skeleton: false,
+                    labels: LabelPresentation::default(),
                     zoom: 5.0,
                     zoom_baseline: None,
                     offset_x: 0.0,
