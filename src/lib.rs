@@ -18,6 +18,7 @@ pub mod panes;
 pub mod patch;
 pub mod performance;
 pub mod physical;
+pub mod platform;
 pub mod plugin;
 pub mod rendermetrics;
 pub mod schema;
