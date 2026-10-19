@@ -63,9 +63,10 @@ Rules worth knowing:
 
 - `$XDG_CONFIG_HOME` must be an absolute path. An empty or relative
   value is treated as unset and `~/.config` is used.
-- On Windows, `%APPDATA%` wins when it is set. If it is empty or
-  unset — a MSYS/Cygwin-style shell, for example — the resolver falls
-  back to `$HOME/.config` so the app still finds a writable home.
+- On Windows, `%APPDATA%` wins when it is set and absolute. If it is
+  empty, relative or unset — a MSYS/Cygwin-style shell, for example —
+  the resolver falls back to `$HOME/.config` so the app still finds a
+  writable home.
 - A missing directory is not an error: the app starts with built-in
   defaults. Only a *save* with no resolvable data directory reports
   that it cannot determine one.

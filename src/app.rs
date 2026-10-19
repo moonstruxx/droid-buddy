@@ -597,11 +597,32 @@ impl UploadTransport {
             // sendmidi device list is not an `amidi -l` port list.
             if !self.amidi && self.sendmidi {
                 out.push("no MIDI port detected (`sendmidi list` is empty)".to_string());
-            } else {
+            } else if self.amidi {
                 out.push("no MIDI port detected (`amidi -l` is empty)".to_string());
+            } else {
+                out.push("no MIDI port detected (no MIDI tool to list ports)".to_string());
             }
         }
         out
+    }
+
+    /// Program and argument prefix for one send. `amidi` addresses an ALSA
+    /// port (`-p <port> -s <file>`), `sendmidi` a device name (`dev <name> syf
+    /// <file>`). The tool that produced the port list decides, so a DIN port
+    /// from `amidi -l` is never handed to `sendmidi` just because both tools
+    /// happen to be installed. Callers gate on [`Self::can_send`] first.
+    pub fn send_command(&self, port: &str) -> (&'static str, Vec<String>) {
+        if self.amidi {
+            (
+                "amidi",
+                vec!["-p".to_string(), port.to_string(), "-s".to_string()],
+            )
+        } else {
+            (
+                "sendmidi",
+                vec!["dev".to_string(), port.to_string(), "syf".to_string()],
+            )
+        }
     }
 
     /// One-line transport description for the confirm modal.
@@ -1446,8 +1467,10 @@ impl App {
         } else {
             // Drive roots are directory rows too: they follow the `..` slot and
             // precede every `read_dir` group, so they read as the first
-            // directories and survive the filter below.
-            self.picker_entries.extend(drives.iter().cloned());
+            // directories and survive the filter below. A favourited drive
+            // already sits in the pinned section, so it is skipped here.
+            self.picker_entries
+                .extend(unpinned_drives(drives, &fav_keys, &raw_fav_set));
         }
         // Read directory entries. `read_dir` order is arbitrary, so collect
         // into groups and sort directories first, then `.ini` files, then any
@@ -1651,17 +1674,8 @@ impl App {
             .clone()
             .or_else(|| confirm.transport.other_ports.first().cloned())
             .unwrap_or_else(|| String::from("droid"));
-        if confirm.transport.amidi && confirm.transport.droid_port.is_some() {
-            let args = vec!["-p".to_string(), port.clone(), "-s".to_string()];
-            self.spawn_upload("amidi", &args, &payload, &port)
-        } else if confirm.transport.sendmidi {
-            let args = vec!["dev".to_string(), port.clone(), "syf".to_string()];
-            self.spawn_upload("sendmidi", &args, &payload, &port)
-        } else {
-            // DIN port via amidi (no DROID-named port, but a listed one).
-            let args = vec!["-p".to_string(), port.clone(), "-s".to_string()];
-            self.spawn_upload("amidi", &args, &payload, &port)
-        }
+        let (program, args) = confirm.transport.send_command(&port);
+        self.spawn_upload(program, &args, &payload, &port)
     }
 
     /// Fork the sender with the payload staged to a temp file (no async
@@ -5112,6 +5126,24 @@ fn is_filesystem_root(path: &Path) -> bool {
     path.has_root() && path.parent().is_none()
 }
 
+/// Drive rows that are not already pinned as favourites: a favourited drive
+/// sits in the picker's favourite section, so listing it again in the drive
+/// rows would render the same directory twice.
+fn unpinned_drives(
+    drives: &[PathBuf],
+    fav_keys: &HashSet<String>,
+    raw_fav_set: &HashSet<String>,
+) -> Vec<PathBuf> {
+    drives
+        .iter()
+        .filter(|drive| {
+            let key = crate::favorites::FavoritesStore::canonical_key(drive);
+            !fav_keys.contains(&key) && !raw_fav_set.contains(&key)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Check if a file picker entry is selectable (.ini files or directories).
 /// The parent `..` sentinel is always selectable; it carries no file name, so
 /// it must be checked before the `file_name` branch.
@@ -8304,6 +8336,35 @@ mod tests {
     }
 
     #[test]
+    fn send_command_follows_the_tool_that_listed_the_ports() {
+        // Both tools installed, only a DIN port listed by `amidi -l`: the ALSA
+        // token must go to amidi, never to `sendmidi dev`.
+        let din =
+            super::probe_upload_transport(Some("hw:3,0,0  USB Audio MIDI 1\n"), None, true, true);
+        let (program, args) = din.send_command("hw:3,0,0");
+        assert_eq!(program, "amidi");
+        assert_eq!(args, vec!["-p", "hw:3,0,0", "-s"]);
+
+        // sendmidi-only: a device name in `dev <name> syf` form.
+        let device = super::probe_upload_transport(None, Some("X7 MIDI 1\n"), false, true);
+        let (program, args) = device.send_command("X7 MIDI 1");
+        assert_eq!(program, "sendmidi");
+        assert_eq!(args, vec!["dev", "X7 MIDI 1", "syf"]);
+    }
+
+    #[test]
+    fn a_favourited_drive_is_not_listed_twice() {
+        let drives = vec![PathBuf::from(r"D:\"), PathBuf::from(r"E:\")];
+        let favourited = PathBuf::from(r"D:\");
+        let fav_keys: HashSet<String> =
+            [crate::favorites::FavoritesStore::canonical_key(&favourited)]
+                .into_iter()
+                .collect();
+        let kept = super::unpinned_drives(&drives, &fav_keys, &HashSet::new());
+        assert_eq!(kept, vec![PathBuf::from(r"E:\")]);
+    }
+
+    #[test]
     fn probe_transport_without_tools_yields_nothing() {
         let transport = super::probe_upload_transport(None, None, false, false);
         assert_eq!(transport.droid_port, None);
@@ -8312,7 +8373,10 @@ mod tests {
         let reasons = transport.missing_reasons();
         assert_eq!(reasons.len(), 2);
         assert!(reasons[0].contains("need `amidi` or `sendmidi`"));
-        assert!(reasons[1].contains("amidi -l"));
+        assert!(
+            reasons[1].contains("no MIDI tool to list ports"),
+            "a machine with no tool must not be told an amidi list is empty: {reasons:?}"
+        );
     }
 
     #[test]
@@ -8355,7 +8419,7 @@ mod tests {
         let reasons = upload_blocked_transport().missing_reasons();
         assert_eq!(reasons.len(), 2);
         assert!(reasons[0].contains("amidi"));
-        assert!(reasons[1].contains("amidi -l"));
+        assert!(reasons[1].contains("no MIDI tool to list ports"));
         assert!(upload_test_transport().missing_reasons().is_empty());
     }
 

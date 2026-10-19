@@ -7,9 +7,9 @@
 //! - Linux and macOS: an absolute, non-empty `$XDG_CONFIG_HOME`, else
 //!   `$HOME/.config`. A non-absolute `$XDG_CONFIG_HOME` is treated as unset,
 //!   per the XDG spec, and `%APPDATA%` is ignored.
-//! - Windows: `%APPDATA%`; when it is unset or empty, fall back to
-//!   `$HOME/.config` so a MSYS/Cygwin-style environment still works. Nothing
-//!   else resolves there.
+//! - Windows: `%APPDATA%` when it is absolute and non-empty; otherwise fall
+//!   back to `$HOME/.config` so a MSYS/Cygwin-style environment still works.
+//!   Nothing else resolves there.
 //!
 //! Consumers take [`config_dir_from`] (injectable) or [`config_dir`]
 //! (process environment) and receive the application directory itself.
@@ -36,7 +36,10 @@ pub fn data_dir(
     #[cfg(windows)]
     let base = {
         let _ = xdg_config_home;
+        // A relative `%APPDATA%` would resolve against the process cwd, so it
+        // counts as unset exactly like a relative XDG value does.
         non_empty(appdata)
+            .filter(|value| Path::new(value).is_absolute())
             .map(PathBuf::from)
             .or_else(|| home_config(home))
     };
@@ -111,13 +114,18 @@ pub fn drive_roots_with(current: &Path, exists: impl Fn(&Path) -> bool) -> Vec<P
 /// `c:` -> `C`), or `None` when the path has no drive prefix.
 #[cfg(windows)]
 fn path_drive_letter(path: &Path) -> Option<char> {
+    use std::path::{Component, Prefix};
+
     match path.components().next()? {
-        std::path::Component::Prefix(prefix) => prefix
-            .as_os_str()
-            .to_string_lossy()
-            .chars()
-            .next()
-            .map(|letter| letter.to_ascii_uppercase()),
+        Component::Prefix(prefix) => match prefix.kind() {
+            // `VerbatimDisk` covers `\\?\C:\...`: the letter is not the first
+            // character of the prefix, so pattern-matching the kind is the only
+            // reliable way to read it.
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                Some((letter as char).to_ascii_uppercase())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -280,8 +288,27 @@ mod tests {
             vec![PathBuf::from(r"A:\"), PathBuf::from(r"D:\")]
         );
 
+        // A verbatim path carries the same drive letter; it must still exclude
+        // the current drive.
+        let from_verbatim = drive_roots_with(Path::new(r"\\?\C:\Users\user"), |path| {
+            present.contains(path)
+        });
+        assert_eq!(
+            from_verbatim,
+            vec![PathBuf::from(r"A:\"), PathBuf::from(r"D:\")]
+        );
+
         // Nothing present, nothing listed.
         assert!(drive_roots_with(Path::new(r"C:\"), |_| false).is_empty());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_ignores_a_relative_appdata() {
+        assert_eq!(
+            data_dir(None, os(r"C:\Users\user"), os("Roaming")),
+            Some(PathBuf::from(r"C:\Users\user").join(".config"))
+        );
     }
 
     #[test]
