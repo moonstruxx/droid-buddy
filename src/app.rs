@@ -1372,15 +1372,11 @@ impl App {
 
     /// Display label for a picker entry: favourited files keep their leaf name
     /// with `★ `, favourited directories add a trailing `/`. The parent sentinel
-    /// `..` is never considered favourited.
+    /// `..` is never considered favourited. A filesystem root (a Windows drive
+    /// root such as `D:\`) has no leaf name, so it keeps [`picker_entry_display_name`]'s
+    /// root spelling.
     pub fn picker_entry_label(&self, path: &Path) -> String {
-        let base = if is_picker_parent_entry(path) {
-            "..".to_string()
-        } else {
-            path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
+        let base = picker_entry_display_name(path);
         if !is_picker_parent_entry(path) && self.is_favourite_entry(path) {
             if path.metadata().is_ok_and(|m| m.is_dir()) {
                 format!("★ {base}/")
@@ -1418,6 +1414,18 @@ impl App {
     }
 
     pub fn refresh_picker_entries(&mut self) {
+        // Other drives are only meaningful at a Windows drive root; the seam
+        // injects the list so the listing logic stays testable on any host.
+        let drives = crate::platform::drive_roots(&self.picker_dir);
+        self.refresh_picker_entries_with_drives(&drives);
+    }
+
+    /// Listing builder with the drive list injected. `drives` is appended after
+    /// the `..` sentinel and before the directory listing, and is left out
+    /// entirely when `picker_dir` has a parent (the same rule that drops `..`).
+    /// The latching filter needs no drive special case: it narrows the
+    /// `read_dir` groups, never the entries already collected here.
+    fn refresh_picker_entries_with_drives(&mut self, drives: &[PathBuf]) {
         self.picker_entries.clear();
         // Pinned favourites section at the top. Favourited `.ini` files and
         // directories are prepended even when not in `picker_dir`, sorted for
@@ -1445,6 +1453,11 @@ impl App {
             .is_some_and(|p| !p.as_os_str().is_empty())
         {
             self.picker_entries.push(PathBuf::from(".."));
+        } else {
+            // Drive roots are directory rows too: they follow the `..` slot and
+            // precede every `read_dir` group, so they read as the first
+            // directories and survive the filter below.
+            self.picker_entries.extend(drives.iter().cloned());
         }
         // Read directory entries. `read_dir` order is arbitrary, so collect
         // into groups and sort directories first, then `.ini` files, then any
@@ -5086,6 +5099,29 @@ pub fn is_picker_parent_entry(path: &Path) -> bool {
     )
 }
 
+/// Display name for a picker entry before favourite decoration: the parent
+/// sentinel renders as `..`, a normal entry as its leaf name, and a filesystem
+/// root (a Windows drive root such as `D:\`) as its full path, because a root
+/// has no `file_name`. Shared by the GUI spec and [`App::picker_entry_label`]
+/// so the drive rows read the same everywhere.
+pub fn picker_entry_display_name(path: &Path) -> String {
+    if is_picker_parent_entry(path) {
+        return "..".to_string();
+    }
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None if is_filesystem_root(path) => path.to_string_lossy().into_owned(),
+        None => String::new(),
+    }
+}
+
+/// True for a filesystem root: no parent and a rooted path. This is what makes
+/// a Windows drive root (`D:\`) a navigable picker row despite having no
+/// `file_name`.
+fn is_filesystem_root(path: &Path) -> bool {
+    path.has_root() && path.parent().is_none()
+}
+
 /// Check if a file picker entry is selectable (.ini files or directories).
 /// The parent `..` sentinel is always selectable; it carries no file name, so
 /// it must be checked before the `file_name` branch.
@@ -5094,7 +5130,9 @@ pub fn is_entry_selectable(path: &Path) -> bool {
         return true; // parent directory entry is always selectable
     }
     if path.file_name().is_none() {
-        return false;
+        // A filesystem root has no leaf name but is a navigable directory: a
+        // Windows drive root such as `D:\` is listed exactly for this.
+        return is_filesystem_root(path) && path.metadata().is_ok_and(|m| m.is_dir());
     }
     let is_dir = path.metadata().is_ok_and(|m| m.is_dir());
     if is_dir {
@@ -7324,6 +7362,51 @@ mod tests {
                 .all(|p| !is_picker_parent_entry(p)),
             "no '..' entry at the filesystem root"
         );
+    }
+
+    #[test]
+    fn picker_listing_offers_drive_roots_only_at_a_filesystem_root() {
+        let drives = vec![PathBuf::from(r"D:\"), PathBuf::from(r"E:\")];
+        let mut app = App::new();
+        app.favorites = crate::favorites::FavoritesStore::default();
+
+        // At a root the drive rows follow the (absent) `..` slot and precede
+        // the read_dir listing.
+        app.picker_dir = PathBuf::from("/");
+        app.refresh_picker_entries_with_drives(&drives);
+        assert_eq!(&app.picker_entries[..drives.len()], &drives[..]);
+        assert!(
+            app.picker_entries
+                .iter()
+                .all(|p| !is_picker_parent_entry(p)),
+            "no '..' at the filesystem root"
+        );
+
+        // The latching filter narrows only the read_dir listing, so the drive
+        // rows stay visible while it is on.
+        app.picker_filter_active = true;
+        app.picker_filter = "qzxwv-no-such-name-9843".to_string();
+        app.refresh_picker_entries_with_drives(&drives);
+        assert_eq!(app.picker_entries, drives);
+        app.reset_picker_filter();
+
+        // A directory with a parent keeps the `..` row and no drive rows.
+        app.picker_dir = PathBuf::from("fixtures/picker_test/subdir");
+        app.refresh_picker_entries_with_drives(&drives);
+        assert!(
+            app.picker_entries.iter().all(|p| !drives.contains(p)),
+            "drive rows only belong to a root: {:?}",
+            app.picker_entries
+        );
+        assert!(app.picker_entries.iter().any(|p| is_picker_parent_entry(p)));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_drive_root_entries_are_labelled_and_selectable() {
+        let drive = PathBuf::from(r"C:\");
+        assert_eq!(picker_entry_display_name(&drive), r"C:\");
+        assert!(is_entry_selectable(&drive));
     }
 
     #[test]

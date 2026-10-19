@@ -13,6 +13,9 @@
 //!
 //! Consumers take [`config_dir_from`] (injectable) or [`config_dir`]
 //! (process environment) and receive the application directory itself.
+//!
+//! The module also owns [`drive_roots`], the file picker's drive list. It is
+//! empty on Linux and macOS, so the picker never grows a second branch.
 
 use std::env;
 use std::ffi::OsStr;
@@ -68,6 +71,55 @@ pub fn config_dir() -> Option<PathBuf> {
         env::var_os("HOME").as_deref(),
         env::var_os("APPDATA").as_deref(),
     )
+}
+
+/// Drive roots other than the one `current` sits on, for the file picker's
+/// "switch drive" rows. Production wrapper around [`drive_roots_with`] that
+/// probes the real filesystem; empty everywhere but Windows.
+pub fn drive_roots(current: &Path) -> Vec<PathBuf> {
+    drive_roots_with(current, Path::exists)
+}
+
+/// Pure seam for [`drive_roots`]: probe `A:` through `Z:` with `exists`,
+/// skipping the drive that holds `current` (compared case-insensitively, so a
+/// lower-case `c:\` still excludes `C:\`). Results are alphabetical by
+/// construction. Always empty off Windows, regardless of `exists`, so the
+/// picker listing is byte-identical on Linux and macOS.
+pub fn drive_roots_with(current: &Path, exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let current_letter = path_drive_letter(current);
+        ('A'..='Z')
+            .filter_map(|letter| {
+                if current_letter == Some(letter) {
+                    return None;
+                }
+                let root = PathBuf::from(format!("{letter}:\\"));
+                exists(&root).then_some(root)
+            })
+            .collect()
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (current, exists);
+        Vec::new()
+    }
+}
+
+/// Upper-case drive letter of an absolute Windows path (`C:\x` -> `C`,
+/// `c:` -> `C`), or `None` when the path has no drive prefix.
+#[cfg(windows)]
+fn path_drive_letter(path: &Path) -> Option<char> {
+    match path.components().next()? {
+        std::path::Component::Prefix(prefix) => prefix
+            .as_os_str()
+            .to_string_lossy()
+            .chars()
+            .next()
+            .map(|letter| letter.to_ascii_uppercase()),
+        _ => None,
+    }
 }
 
 /// `$HOME/.config`, or `None` when `home` is unset or empty.
@@ -160,6 +212,36 @@ mod tests {
             config_dir_from(None, os("/home/user"), None),
             Some(PathBuf::from("/home/user/.config/droid-tui"))
         );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn drive_roots_are_empty_off_windows_even_when_every_probe_hits() {
+        assert!(drive_roots_with(Path::new("/home/user"), |_| true).is_empty());
+        assert!(drive_roots(Path::new("/")).is_empty());
+        assert!(drive_roots(Path::new("/home/user/droid-tui")).is_empty());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn drive_roots_probes_a_to_z_and_skips_the_current_drive() {
+        use std::collections::HashSet;
+
+        let present: HashSet<PathBuf> =
+            [r"A:\", r"C:\", r"D:\"].iter().map(PathBuf::from).collect();
+        // Lower-case current drive must still exclude `C:\`.
+        let found = drive_roots_with(Path::new(r"c:\Users\user"), |path| present.contains(path));
+        assert_eq!(found, vec![PathBuf::from(r"A:\"), PathBuf::from(r"D:\")]);
+
+        // A drive-relative `C:` (no root) names the same drive.
+        let from_relative = drive_roots_with(Path::new(r"C:"), |path| present.contains(path));
+        assert_eq!(
+            from_relative,
+            vec![PathBuf::from(r"A:\"), PathBuf::from(r"D:\")]
+        );
+
+        // Nothing present, nothing listed.
+        assert!(drive_roots_with(Path::new(r"C:\"), |_| false).is_empty());
     }
 
     #[test]
