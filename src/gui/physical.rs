@@ -104,6 +104,12 @@ pub(crate) struct CellSpec {
     /// Composed-face discriminant (button-led-composition D2): `Some` on
     /// button-kind cells of P2B8/B32 (round) and M4 (rect), `None` elsewhere.
     pub shape: Option<CellShape>,
+    /// The label does not fit the budget this cell's own paint path applies
+    /// (module-ui-labels D9): `true` when the label is non-empty and would be
+    /// ellipsized or omitted. Set by `physical_spec` through the single shared
+    /// [`label_is_clipped`] budget, so the annotation layer and the painter can
+    /// never disagree about what the cell shows.
+    pub label_clipped: bool,
 }
 
 /// Fixed screen-space font (points) for a performance-view callout headline:
@@ -441,7 +447,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             None
         };
         let is_dimmed = label.is_empty(); // unused elements are dimmed
-        cells.push(CellSpec {
+        let mut cell = CellSpec {
             rect,
             glyph,
             label,
@@ -463,7 +469,13 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             led_state,
             led_rgb,
             shape,
-        });
+            label_clipped: false,
+        };
+        // D9: the cell's own budget answers, once, whether its label fits — the
+        // annotation layer consumes this flag instead of re-deriving a fit test
+        // that could drift from what `paint_cell` draws.
+        cell.label_clipped = label_is_clipped(&cell);
+        cells.push(cell);
     }
     let modules = geom
         .module_rects
@@ -529,6 +541,64 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     let offset_y =
         (rack.total_height_mm * 0.5) * points_per_mm * zoom - pane.min.y as f64 - pane_h * 0.5;
     Some(ScreenMapping::new(points_per_mm, zoom, offset_x, offset_y))
+}
+
+/// Whether this cell's label is clipped or hidden by the budget its own paint
+/// path applies (module-ui-labels D9). One answer for all three cell families,
+/// so what the annotation layer selects is exactly what the cell cannot show:
+///
+/// - the compact path spends one character of the fixed [`CELL_LABEL_SIZE`]
+///   font on the state glyph plus a separating space before the label budget,
+///   and hides the label outright below one character of that font;
+/// - the composed button face drops the label row when
+///   `h − label_line < 0.5 × w` and otherwise shares the same character budget;
+/// - the fader path gives the label the column right of the 2–10 pt track and
+///   drops it when that column is under 6 pt or narrower than one character of
+///   the height-derived proportional font.
+///
+/// An empty label is never clipped (an unaddressed cell has nothing to show).
+pub(crate) fn label_is_clipped(cell: &CellSpec) -> bool {
+    if cell.label.is_empty() {
+        return false;
+    }
+    let rect = cell.rect;
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return true;
+    }
+    let label_chars = cell.label.chars().count();
+
+    // Fader path (`paint_fader`): label column right of the track.
+    if cell.is_fader {
+        let track_w = rect.width().clamp(2.0, 10.0);
+        let text_w = rect.width() - track_w - 3.0;
+        if text_w < 6.0 {
+            return true;
+        }
+        let font_size = (rect.height() * 0.34).clamp(8.0, 13.0);
+        let budget = (text_w / font_size).floor() as usize;
+        return budget == 0 || label_chars > budget;
+    }
+
+    // Composed button face (`paint_composed`): the label row shares the bottom
+    // of the cell only when the face leaves it room.
+    if cell.shape.is_some() {
+        let label_line = CELL_LABEL_SIZE * 1.25;
+        if rect.height() - label_line < 0.5 * rect.width() {
+            return true;
+        }
+        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+        let budget = (rect.width() / char_w).floor() as usize;
+        return budget == 0 || label_chars > budget;
+    }
+
+    // Compact cell (`paint_cell`): glyph + separating space, then the label.
+    let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+    if rect.width() < char_w {
+        return true;
+    }
+    let budget = (rect.width() / char_w).floor() as usize;
+    let room = budget.saturating_sub(cell.glyph.chars().count() + 1);
+    room == 0 || label_chars > room
 }
 
 /// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
