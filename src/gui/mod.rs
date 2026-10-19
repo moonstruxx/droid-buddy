@@ -553,6 +553,55 @@ pub(crate) fn draw_pane_frame(
     }
 }
 
+/// The module-UI pane title (module-ui-labels D12): the view state rides the
+/// existing pane chrome instead of a new painted strip —
+/// `Module UI · 98% fit · labels auto · skeleton off`. `fit` appears only while
+/// the live zoom is still the last fitted value, `Pan x/y` only after a pan, and
+/// `labels` only when the presentation is not `off`. Ellipsized to the pane width
+/// so the title never paints past its own frame.
+fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
+    let mut title = format!(" Module UI \u{B7} {}%", (app.physical_zoom * 100.0) as u32);
+    if app
+        .physical_fit_zoom
+        .is_some_and(|zoom| (zoom - app.physical_zoom).abs() < 1e-4)
+    {
+        title.push_str(" fit");
+    }
+    if app.physical_offset != (0.0, 0.0) {
+        title.push_str(&format!(
+            " \u{B7} Pan {:.0}/{:.0}",
+            app.physical_offset.0, app.physical_offset.1
+        ));
+    }
+    if app.label_presentation != crate::config::LabelPresentation::Off {
+        title.push_str(&format!(
+            " \u{B7} labels {}",
+            app.label_presentation.as_str()
+        ));
+    }
+    title.push_str(if app.physical_show_skeleton {
+        " \u{B7} skeleton on"
+    } else {
+        " \u{B7} skeleton off"
+    });
+    ellipsize_pane_title(&title, rect.width())
+}
+
+/// Ellipsize a pane title to the 12 pt chrome font's advance (~0.5 em) minus the
+/// left/right inset `draw_pane_frame` paints it with.
+fn ellipsize_pane_title(title: &str, pane_width: f32) -> String {
+    const TITLE_FONT_SIZE: f32 = 12.0;
+    const TITLE_INSET: f32 = 12.0;
+    let per_char = TITLE_FONT_SIZE * 0.5;
+    let max_chars = (((pane_width - TITLE_INSET) / per_char).floor()).max(1.0) as usize;
+    if title.chars().count() <= max_chars {
+        return title.to_string();
+    }
+    let mut out: String = title.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
 /// Whether the band has anything to paint: a maximized pane, or at least one
 /// pane holding a view. The module UI counts here — it is a view in the
 /// class layout (design D2), not a permanent left pane, so a band showing only
@@ -626,7 +675,8 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                         .collect();
                 }
                 let painter = ui.painter().with_clip_rect(rect);
-                draw_pane_frame(&painter, rect, focused, " Module UI ", t);
+                let title = module_ui_pane_title(app, rect);
+                draw_pane_frame(&painter, rect, focused, &title, t);
             }
             Some(crate::app::ViewType::Graph) => {
                 // The pane is the visible graph canvas: publish its size and
@@ -1500,6 +1550,45 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.hovered_component, Some(idx));
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn module_ui_pane_title_carries_the_presentation_and_skeleton_state() {
+        // module-ui-labels D12: the view state rides the existing pane title (no
+        // new painted strip). `off` drops the labels segment; the skeleton flag
+        // names the presentation.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        app.label_presentation = crate::config::LabelPresentation::Auto;
+        app.physical_show_skeleton = false;
+        let mut out = run_paint_panes(&mut app);
+        let labels = text_labels(&out);
+        let title = labels
+            .iter()
+            .find(|label| label.contains("Module UI"))
+            .unwrap_or_else(|| panic!("module UI title missing: {labels:?}"))
+            .clone();
+        assert!(title.contains("labels auto"), "title: {title}");
+        assert!(title.contains("skeleton off"), "title: {title}");
+        out.textures_delta.clear();
+
+        app.label_presentation = crate::config::LabelPresentation::Off;
+        app.physical_show_skeleton = true;
+        let mut out = run_paint_panes(&mut app);
+        let labels = text_labels(&out);
+        let title = labels
+            .iter()
+            .find(|label| label.contains("Module UI"))
+            .unwrap_or_else(|| panic!("module UI title missing: {labels:?}"))
+            .clone();
+        assert!(
+            !title.contains("labels"),
+            "off hides the labels segment: {title}"
+        );
+        assert!(title.contains("skeleton on"), "title: {title}");
         out.textures_delta.clear();
     }
 

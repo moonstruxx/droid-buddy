@@ -1634,6 +1634,16 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
+        KeyCode::Char('a') if physical_slot_focused(app) => {
+            // module-ui-labels D6/D10: `a` cycles the label presentation
+            // off -> auto -> on while the module UI pane holds focus, and
+            // reports the new mode. Free here because the graph's `a`
+            // (arrangement cycle) is graph-scoped and returns in the arm above;
+            // every other pane keeps its existing `a` meaning.
+            app.label_presentation = app.label_presentation.next();
+            app.status_message = format!("Labels: {}", app.label_presentation.as_str());
+            false
+        }
         KeyCode::Char('+') | KeyCode::Char('-') => {
             // Zoom family (change `tiled-window-manager`, 4.2): plain scales
             // the panels pane; `Shift` would scale the other pane, which the
@@ -6746,6 +6756,50 @@ mod tests {
     }
 
     // ── performance-view tasks 1.1 + 1.4 ──
+
+    #[test]
+    fn a_cycles_label_presentation_on_the_physical_pane_only() {
+        // module-ui-labels D6/spec "Label presentation key on the module UI":
+        // while the module UI pane holds focus, `a` cycles off -> auto -> on and
+        // reports the mode; every other pane keeps its own `a` meaning.
+        let mut app = app_with_fixture();
+        assert!(
+            physical_slot_focused(&app),
+            "startup focus is the module UI"
+        );
+        assert_eq!(
+            app.label_presentation,
+            crate::config::LabelPresentation::Auto,
+            "the default presentation is auto"
+        );
+
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(app.label_presentation, crate::config::LabelPresentation::On);
+        assert_eq!(app.status_message, "Labels: on");
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(
+            app.label_presentation,
+            crate::config::LabelPresentation::Off
+        );
+        assert_eq!(app.status_message, "Labels: off");
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(
+            app.label_presentation,
+            crate::config::LabelPresentation::Auto,
+            "the cycle wraps off -> auto"
+        );
+        assert_eq!(app.status_message, "Labels: auto");
+
+        // Off the module UI the key is inert (the viewer keeps its own arms).
+        handle_event(key(KeyCode::Tab), &mut app);
+        assert!(!physical_slot_focused(&app));
+        let before = app.label_presentation;
+        handle_event(key(KeyCode::Char('a')), &mut app);
+        assert_eq!(
+            app.label_presentation, before,
+            "`a` is inert outside the module UI pane"
+        );
+    }
 
     #[test]
     fn p_opens_performance_view_on_physical_pane_only_and_esc_exits() {

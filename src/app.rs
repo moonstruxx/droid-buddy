@@ -3083,6 +3083,7 @@ impl App {
         self.physical_offset = (physical.offset_x as f32, physical.offset_y as f32);
         self.physical_show_skeleton = physical.show_skeleton;
         self.physical_rack_spec = physical.rack.clone();
+        self.label_presentation = physical.labels;
     }
 
     pub fn load_patch(&mut self, patch: Patch) -> bool {
