@@ -72,10 +72,13 @@ be left orphaned.
 
 ### D4 — Both verdicts are pure helpers
 
-`startup_open_verdict(opened_ever: bool, open_error: Option<&str>) -> Result<(), String>`
-and `teardown_step(label, f)` (the contained-step helper) are free functions
-with unit tests, mirroring `should_exit`. *Why*: the event loop cannot be built
-in a unit test, and the defect is a decision, not a mechanism.
+`startup_open_verdict(open_error: Option<String>) -> Result<(), String>` (the
+startup open outcome) and
+`completion_verdict(window_opened: bool, open_error: Option<&str>) -> Result<(), String>`
+(the post-loop check), plus `teardown_step(label, f)` (the contained-step
+helper), are free functions with unit tests, mirroring `should_exit`. *Why*:
+the event loop cannot be built in a unit test, and the defect is a decision,
+not a mechanism.
 
 ## Risks / Trade-offs
 

@@ -2071,4 +2071,36 @@ mod tests {
         );
         full_output.textures_delta.clear();
     }
+
+    #[test]
+    fn panic_teardown_is_one_shot_and_safe_to_repeat() {
+        // Spec "Teardown runs twice": the panic hook may fire again after the
+        // first teardown (or while TLS is being destroyed), so a repeated call
+        // must be a no-op instead of touching slots that are already gone.
+        reset_teardown_guard();
+        let first = std::panic::catch_unwind(destroy_window_for_panic);
+        assert!(first.is_ok(), "the first panic teardown must not panic");
+        let second = std::panic::catch_unwind(destroy_window_for_panic);
+        assert!(
+            second.is_ok(),
+            "a repeated panic teardown must be a no-op, not a panic"
+        );
+    }
+
+    #[test]
+    fn teardown_step_swallows_a_panic_and_keeps_going() {
+        // Spec "A failing teardown step is swallowed": a poisoned thread-local
+        // access (or a wgpu drop) must not skip the remaining teardown steps,
+        // and must not escape the helper to abort an already-unwinding process.
+        let ran = std::cell::Cell::new(0);
+        teardown_step("deliberately failing test step", || {
+            panic!("simulated destroyed-TLS panic")
+        });
+        teardown_step("following test step", || ran.set(ran.get() + 1));
+        assert_eq!(
+            ran.get(),
+            1,
+            "the step after a panicking teardown step must still run"
+        );
+    }
 }

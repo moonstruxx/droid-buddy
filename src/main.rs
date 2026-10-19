@@ -453,4 +453,56 @@ mod tests {
     fn should_exit_on_both_signals() {
         assert!(should_exit(true, true));
     }
+
+    #[test]
+    fn startup_open_verdict_is_ok_without_an_open_error() {
+        // Spec "Launch opens a window": no recorded failure means the startup
+        // open succeeded and the event loop owns a window from here.
+        assert_eq!(startup_open_verdict(None), Ok(()));
+    }
+
+    #[test]
+    fn startup_open_verdict_carries_the_open_failure() {
+        // Spec "An unopenable window fails loudly": the recorded cause must be
+        // the run's error verbatim, so the process can report it after exit.
+        let message = "no display available (X :0)".to_string();
+        let err = startup_open_verdict(Some(message.clone()))
+            .expect_err("a recorded open failure must not be a success");
+        assert!(err.contains(&message), "verdict lost the cause: {err}");
+    }
+
+    #[test]
+    fn completion_verdict_accepts_a_run_that_opened_a_window() {
+        // Spec "The native window is the application": opening the window is
+        // the only success, and a stale recorded error must not fail a run
+        // that did open one.
+        assert_eq!(completion_verdict(true, None), Ok(()));
+        assert_eq!(completion_verdict(true, Some("superseded")), Ok(()));
+    }
+
+    #[test]
+    fn completion_verdict_rejects_a_run_that_never_opened_a_window() {
+        // Spec "No window is never a success": exit 0 with no window was the
+        // reported symptom, so a loop that ended windowless is an error even
+        // when nothing recorded a cause.
+        let err =
+            completion_verdict(false, None).expect_err("a windowless run must not report success");
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("window") && lower.contains("never opened"),
+            "verdict must name the missing window: {err}"
+        );
+    }
+
+    #[test]
+    fn completion_verdict_carries_the_open_error_for_a_windowless_run() {
+        // When an open failure was recorded, the post-loop verdict must keep
+        // its cause rather than replace it with a generic advisory.
+        let err = completion_verdict(false, Some("surface creation failed"))
+            .expect_err("a windowless run must not report success");
+        assert!(
+            err.contains("surface creation failed"),
+            "verdict lost the recorded cause: {err}"
+        );
+    }
 }
