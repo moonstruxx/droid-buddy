@@ -122,6 +122,38 @@ fn should_exit(close_requested: bool, quit_requested: bool) -> bool {
     close_requested || quit_requested
 }
 
+/// The startup window-open outcome as the run's verdict (design D1/D4).
+///
+/// The window is the application (native-rendering), so a failed startup open
+/// has nothing left to run for: `open_window` records the cause here and ends
+/// the event loop, and `run` turns this verdict into its `Result` instead of
+/// letting the process exit successfully with only a warning on stderr.
+fn startup_open_verdict(open_error: Option<String>) -> Result<(), String> {
+    match open_error {
+        None => Ok(()),
+        Some(cause) => Err(format!("failed to open the graph window: {cause}")),
+    }
+}
+
+/// The post-loop verdict (design D2/D4): a run that never opened a window is
+/// not a success.
+///
+/// This is belt and braces for [`startup_open_verdict`]: even if a future path
+/// swallows an open failure again, the process cannot silently report exit 0
+/// without a window — the exact regression droid_tui-533 describes. A recorded
+/// cause is kept in the message, never replaced by the generic advisory.
+fn completion_verdict(window_opened: bool, open_error: Option<&str>) -> Result<(), String> {
+    if window_opened {
+        return Ok(());
+    }
+    Err(match open_error {
+        Some(cause) => format!("the graph window never opened: {cause}"),
+        None => {
+            "the graph window never opened; the event loop ended without creating it".to_string()
+        }
+    })
+}
+
 mod windowed {
     use color_eyre::Result;
     use winit::application::ApplicationHandler;
@@ -134,7 +166,10 @@ mod windowed {
     use droid_tui::{config, handler, theme};
     use winit::keyboard::ModifiersState;
 
-    use super::{load_initial_patch, queue_startup_window_open, seed_app, should_exit};
+    use super::{
+        completion_verdict, load_initial_patch, queue_startup_window_open, seed_app, should_exit,
+        startup_open_verdict,
+    };
 
     /// The native application: owns the single `App` and the graph window,
     /// driven by winit's event loop (gpu-graph-window design D1).
@@ -142,6 +177,9 @@ mod windowed {
         app: App,
         window: GraphWindow,
         error: Option<color_eyre::Report>,
+        /// Whether the window was opened at any point in this run. A loop that
+        /// ends without it is an error (design D2), never a silent success.
+        window_opened: bool,
         /// Current keyboard modifier state, updated on every
         /// `ModifiersChanged` event so that `handle_window_event`
         /// receives accurate Ctrl/Shift/Alt info.
@@ -151,9 +189,9 @@ mod windowed {
     impl AppHandler {
         /// Consume the handler's pending native-window request: the handler
         /// cannot reach `GraphWindow` (owned by this loop), so it queues `Open`
-        /// on `App` and the loop opens the window on its next frame. A failed
-        /// open (headless display) leaves the window closed; the app keeps
-        /// running.
+        /// on `App` and the loop opens the window on its next frame. This is the
+        /// only window-open path (ADR 36), at startup, so a failure here is
+        /// fatal: there is no windowless mode to keep running for.
         fn act_on_window_request(&mut self, event_loop: &ActiveEventLoop) {
             match self.app.take_graph_window_request() {
                 GraphWindowRequest::None => {}
@@ -166,8 +204,18 @@ mod windowed {
         }
 
         fn open_window(&mut self, event_loop: &ActiveEventLoop) {
-            if let Err(err) = self.window.open(event_loop) {
-                eprintln!("[warn] graph window open failed ({err})");
+            match self.window.open(event_loop) {
+                Ok(()) => self.window_opened = true,
+                Err(err) => {
+                    eprintln!("[warn] graph window open failed ({err})");
+                    // D1: the failure becomes the run's error, and the window
+                    // being the whole application means the loop ends with it
+                    // rather than idling windowless until something else quits.
+                    if let Err(message) = startup_open_verdict(Some(err.to_string())) {
+                        self.error = Some(color_eyre::Report::msg(message));
+                    }
+                    event_loop.exit();
+                }
             }
         }
     }
@@ -319,13 +367,20 @@ mod windowed {
             app,
             window: GraphWindow::new(),
             error: None,
+            window_opened: false,
             modifiers: ModifiersState::empty(),
         };
         queue_startup_window_open(&mut handler.app);
         event_loop
             .run_app(&mut handler)
             .map_err(|err| color_eyre::Report::msg(format!("winit event loop failed: {err}")))?;
-        handler.error.map_or(Ok(()), Err)
+        // A recorded startup failure is the run's error (D1); keep the report
+        // itself so its message stays the process diagnostic.
+        if let Some(error) = handler.error {
+            return Err(error);
+        }
+        // D2: no window ever opened is never a success, even with no cause.
+        completion_verdict(handler.window_opened, None).map_err(color_eyre::Report::msg)
     }
 }
 
