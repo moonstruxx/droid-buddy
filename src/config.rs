@@ -591,18 +591,46 @@ mod tests {
     #[cfg(not(windows))]
     fn xdg_config_home_override_honored() {
         let result = config_dir(
-            Some(OsStr::new("/tmp/cfg")),
-            Some(OsStr::new("/home/u")),
+            Some(OsStr::new("/custom/xdg")),
+            Some(OsStr::new("/user-home")),
             None,
         );
-        assert_eq!(result, Some(PathBuf::from("/tmp/cfg/droid-tui")));
+        assert_eq!(result, Some(PathBuf::from("/custom/xdg/droid-tui")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn appdata_override_honored_over_xdg_and_home() {
+        let result = config_dir(
+            Some(OsStr::new(r"C:\custom\xdg")),
+            Some(OsStr::new(r"C:\Users\user")),
+            Some(OsStr::new(r"C:\Users\user\AppData\Roaming")),
+        );
+        assert_eq!(
+            result,
+            Some(PathBuf::from(r"C:\Users\user\AppData\Roaming").join("droid-tui"))
+        );
     }
 
     #[test]
     #[cfg(not(windows))]
     fn xdg_unset_falls_back_to_home_dot_config() {
-        let result = config_dir(None, Some(OsStr::new("/home/u")), None);
-        assert_eq!(result, Some(PathBuf::from("/home/u/.config/droid-tui")));
+        let result = config_dir(None, Some(OsStr::new("/user-home")), None);
+        assert_eq!(result, Some(PathBuf::from("/user-home/.config/droid-tui")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn appdata_unset_falls_back_to_home_dot_config() {
+        let result = config_dir(None, Some(OsStr::new(r"C:\Users\user")), None);
+        assert_eq!(
+            result,
+            Some(
+                PathBuf::from(r"C:\Users\user")
+                    .join(".config")
+                    .join("droid-tui")
+            )
+        );
     }
 
     #[test]
@@ -610,10 +638,30 @@ mod tests {
     fn relative_xdg_value_treated_as_unset() {
         let result = config_dir(
             Some(OsStr::new("rel/path")),
-            Some(OsStr::new("/home/u")),
+            Some(OsStr::new("/user-home")),
             None,
         );
-        assert_eq!(result, Some(PathBuf::from("/home/u/.config/droid-tui")));
+        assert_eq!(result, Some(PathBuf::from("/user-home/.config/droid-tui")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn xdg_is_ignored_on_windows_even_when_absolute() {
+        // Windows resolves `%APPDATA%` then `$HOME`; an XDG value, absolute or
+        // not, never selects the directory.
+        let result = config_dir(
+            Some(OsStr::new(r"C:\custom\xdg")),
+            Some(OsStr::new(r"C:\Users\user")),
+            None,
+        );
+        assert_eq!(
+            result,
+            Some(
+                PathBuf::from(r"C:\Users\user")
+                    .join(".config")
+                    .join("droid-tui")
+            )
+        );
     }
 
     #[test]
@@ -625,7 +673,7 @@ mod tests {
     #[test]
     fn all_user_stores_resolve_under_one_application_directory() {
         let xdg = Some(OsStr::new("/custom/xdg"));
-        let home = Some(OsStr::new("/home/user"));
+        let home = Some(OsStr::new("/user-home"));
         let appdata = Some(OsStr::new(r"C:\Users\user\AppData\Roaming"));
         let dir = crate::platform::config_dir_from(xdg, home, appdata)
             .expect("injected environment resolves");
@@ -1241,16 +1289,23 @@ mod tests {
 
     #[test]
     fn plugins_dir_override_parses() {
+        // The override rule (`is_absolute`) is platform-dependent, so inject an
+        // absolute path for the target instead of a Unix-only spelling.
+        let absolute = if cfg!(windows) {
+            r"C:\plugins"
+        } else {
+            "/some/dir"
+        };
         let dir = TempDir::new().unwrap();
         let cfg_dir = dir.path().join(APP_DIR_NAME);
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(
             cfg_dir.join(CONFIG_FILE_NAME),
-            "theme = \"classic\"\n[plugins]\ndir = \"/some/dir\"\n",
+            format!("theme = \"classic\"\n[plugins]\ndir = {absolute:?}\n"),
         )
         .unwrap();
         let loaded = load_at(&dir);
-        assert_eq!(loaded.plugins.plugins_dir(), Some(Path::new("/some/dir")));
+        assert_eq!(loaded.plugins.plugins_dir(), Some(Path::new(absolute)));
         assert!(loaded.plugins.enabled);
     }
 

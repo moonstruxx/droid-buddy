@@ -178,8 +178,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("favourites.toml");
         let mut store = FavoritesStore::default();
-        store.favourites.push("/tmp/a.ini".to_string());
-        store.favourites.push("/tmp/b.ini".to_string());
+        store
+            .favourites
+            .push(dir.path().join("a.ini").to_string_lossy().into_owned());
+        store
+            .favourites
+            .push(dir.path().join("b.ini").to_string_lossy().into_owned());
         store.save_to(&path).unwrap();
         // No stray tmp file left beside the target.
         assert!(!dir.path().join("favourites.toml.tmp").exists());
@@ -193,7 +197,7 @@ mod tests {
     #[test]
     fn toggle_adds_and_removes() {
         let mut store = FavoritesStore::default();
-        let p = Path::new("/tmp/test.ini");
+        let p = Path::new("test.ini");
         assert!(!store.is_favourite(p));
         assert!(store.toggle(p));
         assert!(store.is_favourite(p));
@@ -208,7 +212,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("favourites.toml");
         let mut store = FavoritesStore::default();
-        let p = Path::new("/tmp/persist.ini");
+        let p = Path::new("persist.ini");
         store.toggle(p);
         store.save_to(&path).unwrap();
         let reloaded = FavoritesStore::load_from(&path);
@@ -247,12 +251,13 @@ mod tests {
     #[test]
     fn save_to_dir_atomic() {
         let dir = tempdir().unwrap();
+        let favourite = dir.path().join("abs.ini").to_string_lossy().into_owned();
         let mut store = FavoritesStore::default();
-        store.favourites.push("/abs/path.ini".to_string());
+        store.favourites.push(favourite.clone());
         store.save_to_dir(dir.path()).unwrap();
         assert!(!dir.path().join("favourites.toml.tmp").exists());
         let loaded = FavoritesStore::load_from(&dir.path().join("favourites.toml"));
-        assert_eq!(loaded.favourites, vec!["/abs/path.ini".to_string()]);
+        assert_eq!(loaded.favourites, vec![favourite]);
     }
 
     #[test]
@@ -260,13 +265,13 @@ mod tests {
     fn favourites_file_path_handles_non_absolute_xdg() {
         let dir = favourites_file_path_from(
             Some(OsStr::new("relative/path")),
-            Some(OsStr::new("/home/user")),
+            Some(OsStr::new("/user-home")),
             None,
         );
         assert_eq!(
             dir,
             Some(PathBuf::from(
-                "/home/user/.config/droid-tui/favourites.toml"
+                "/user-home/.config/droid-tui/favourites.toml"
             ))
         );
     }
@@ -276,12 +281,49 @@ mod tests {
     fn favourites_file_path_uses_xdg_when_absolute() {
         let dir = favourites_file_path_from(
             Some(OsStr::new("/custom/config")),
-            Some(OsStr::new("/home/user")),
+            Some(OsStr::new("/user-home")),
             None,
         );
         assert_eq!(
             dir,
             Some(PathBuf::from("/custom/config/droid-tui/favourites.toml"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn favourites_file_path_uses_appdata() {
+        let dir = favourites_file_path_from(
+            Some(OsStr::new(r"C:\custom\xdg")),
+            Some(OsStr::new(r"C:\Users\user")),
+            Some(OsStr::new(r"C:\Users\user\AppData\Roaming")),
+        );
+        assert_eq!(
+            dir,
+            Some(
+                PathBuf::from(r"C:\Users\user\AppData\Roaming")
+                    .join("droid-tui")
+                    .join("favourites.toml")
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn favourites_file_path_falls_back_to_home_when_appdata_unset() {
+        let dir = favourites_file_path_from(
+            Some(OsStr::new(r"C:\custom\xdg")),
+            Some(OsStr::new(r"C:\Users\user")),
+            None,
+        );
+        assert_eq!(
+            dir,
+            Some(
+                PathBuf::from(r"C:\Users\user")
+                    .join(".config")
+                    .join("droid-tui")
+                    .join("favourites.toml")
+            )
         );
     }
 }

@@ -5158,6 +5158,19 @@ mod tests {
         app
     }
 
+    /// Filesystem root for the picker tests: `/` on Unix and a drive root on
+    /// Windows, where a bare `/` is drive-relative rather than a root.
+    fn filesystem_root() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
+    }
+
     #[test]
     fn open_graph_queues_settle_without_starting_it() {
         // The pending flag is consumed only by `begin_graph_settle` (window
@@ -7281,18 +7294,15 @@ mod tests {
         assert!(is_picker_parent_entry(&app.picker_entries[0]));
         assert_eq!(app.picker_entries[0], PathBuf::from(".."));
         // Entries sort directories first, then .ini files, then other files.
-        let names: Vec<String> = app
-            .picker_entries
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
+        // Compare components through `Path`, not rendered strings, so the
+        // assertion holds with native separators on every target.
         assert_eq!(
-            names,
+            app.picker_entries,
             vec![
-                "..",
-                "fixtures/picker_test/subdir",
-                "fixtures/picker_test/patch_a.ini",
-                "fixtures/picker_test/readme.txt",
+                PathBuf::from(".."),
+                PathBuf::from("fixtures/picker_test/subdir"),
+                PathBuf::from("fixtures/picker_test/patch_a.ini"),
+                PathBuf::from("fixtures/picker_test/readme.txt"),
             ]
         );
     }
@@ -7344,7 +7354,7 @@ mod tests {
     #[test]
     fn refresh_picker_entries_has_no_parent_entry_at_filesystem_root() {
         let mut app = App::new();
-        app.picker_dir = PathBuf::from("/");
+        app.picker_dir = filesystem_root();
         app.refresh_picker_entries();
         assert!(
             app.picker_entries
@@ -7362,7 +7372,7 @@ mod tests {
 
         // At a root the drive rows follow the (absent) `..` slot and precede
         // the read_dir listing.
-        app.picker_dir = PathBuf::from("/");
+        app.picker_dir = filesystem_root();
         app.refresh_picker_entries_with_drives(&drives);
         assert_eq!(&app.picker_entries[..drives.len()], &drives[..]);
         assert!(

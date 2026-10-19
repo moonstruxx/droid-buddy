@@ -230,8 +230,8 @@ mod tests {
     #[cfg(not(windows))]
     fn plugin_dir_uses_xdg_when_absolute() {
         assert_eq!(
-            plugin_dir_from(Some(OsStr::new("/tmp/cfg")), None, None),
-            Some(PathBuf::from("/tmp/cfg/droid-tui/plugins"))
+            plugin_dir_from(Some(OsStr::new("/custom/cfg")), None, None),
+            Some(PathBuf::from("/custom/cfg/droid-tui/plugins"))
         );
     }
 
@@ -239,8 +239,8 @@ mod tests {
     #[cfg(not(windows))]
     fn plugin_dir_falls_back_to_home_dot_config() {
         assert_eq!(
-            plugin_dir_from(None, Some(OsStr::new("/home/u")), None),
-            Some(PathBuf::from("/home/u/.config/droid-tui/plugins"))
+            plugin_dir_from(None, Some(OsStr::new("/user-home")), None),
+            Some(PathBuf::from("/user-home/.config/droid-tui/plugins"))
         );
     }
 
@@ -248,8 +248,43 @@ mod tests {
     #[cfg(not(windows))]
     fn plugin_dir_relative_xdg_treated_as_unset() {
         assert_eq!(
-            plugin_dir_from(Some(OsStr::new("cfg")), Some(OsStr::new("/home/u")), None),
-            Some(PathBuf::from("/home/u/.config/droid-tui/plugins"))
+            plugin_dir_from(
+                Some(OsStr::new("cfg")),
+                Some(OsStr::new("/user-home")),
+                None
+            ),
+            Some(PathBuf::from("/user-home/.config/droid-tui/plugins"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn plugin_dir_uses_appdata() {
+        assert_eq!(
+            plugin_dir_from(
+                Some(OsStr::new(r"C:\custom\xdg")),
+                Some(OsStr::new(r"C:\Users\user")),
+                Some(OsStr::new(r"C:\Users\user\AppData\Roaming"))
+            ),
+            Some(
+                PathBuf::from(r"C:\Users\user\AppData\Roaming")
+                    .join("droid-tui")
+                    .join("plugins")
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn plugin_dir_falls_back_to_home_when_appdata_is_unset() {
+        assert_eq!(
+            plugin_dir_from(None, Some(OsStr::new(r"C:\Users\user")), None),
+            Some(
+                PathBuf::from(r"C:\Users\user")
+                    .join(".config")
+                    .join("droid-tui")
+                    .join("plugins")
+            )
         );
     }
 

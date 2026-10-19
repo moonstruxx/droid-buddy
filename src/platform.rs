@@ -144,7 +144,7 @@ mod tests {
     #[cfg(not(windows))]
     fn absolute_xdg_config_home_wins() {
         assert_eq!(
-            data_dir(os("/custom/xdg"), os("/home/user"), None),
+            data_dir(os("/custom/xdg"), os("/user-home"), None),
             Some(PathBuf::from("/custom/xdg"))
         );
     }
@@ -153,8 +153,8 @@ mod tests {
     #[cfg(not(windows))]
     fn relative_xdg_config_home_is_treated_as_unset() {
         assert_eq!(
-            data_dir(os("relative/xdg"), os("/home/user"), None),
-            Some(PathBuf::from("/home/user/.config"))
+            data_dir(os("relative/xdg"), os("/user-home"), None),
+            Some(PathBuf::from("/user-home/.config"))
         );
     }
 
@@ -162,8 +162,8 @@ mod tests {
     #[cfg(not(windows))]
     fn empty_xdg_config_home_is_treated_as_unset() {
         assert_eq!(
-            data_dir(os(""), os("/home/user"), None),
-            Some(PathBuf::from("/home/user/.config"))
+            data_dir(os(""), os("/user-home"), None),
+            Some(PathBuf::from("/user-home/.config"))
         );
     }
 
@@ -171,8 +171,8 @@ mod tests {
     #[cfg(not(windows))]
     fn missing_xdg_config_home_falls_back_to_home() {
         assert_eq!(
-            data_dir(None, os("/home/user"), None),
-            Some(PathBuf::from("/home/user/.config"))
+            data_dir(None, os("/user-home"), None),
+            Some(PathBuf::from("/user-home/.config"))
         );
     }
 
@@ -180,11 +180,11 @@ mod tests {
     #[cfg(not(windows))]
     fn linux_and_macos_ignore_appdata() {
         assert_eq!(
-            data_dir(None, os("/home/user"), os("/appdata/roaming")),
-            Some(PathBuf::from("/home/user/.config"))
+            data_dir(None, os("/user-home"), os("/appdata/roaming")),
+            Some(PathBuf::from("/user-home/.config"))
         );
         assert_eq!(
-            data_dir(os("/custom/xdg"), os("/home/user"), os("/appdata/roaming")),
+            data_dir(os("/custom/xdg"), os("/user-home"), os("/appdata/roaming")),
             Some(PathBuf::from("/custom/xdg"))
         );
     }
@@ -209,15 +209,15 @@ mod tests {
             Some(PathBuf::from("/custom/xdg/droid-tui"))
         );
         assert_eq!(
-            config_dir_from(None, os("/home/user"), None),
-            Some(PathBuf::from("/home/user/.config/droid-tui"))
+            config_dir_from(None, os("/user-home"), None),
+            Some(PathBuf::from("/user-home/.config/droid-tui"))
         );
     }
 
     #[test]
     fn every_user_store_resolves_into_the_same_application_directory() {
         let xdg = Some(OsStr::new("/custom/xdg"));
-        let home = Some(OsStr::new("/home/user"));
+        let home = Some(OsStr::new("/user-home"));
         let appdata = Some(OsStr::new("/appdata/roaming"));
 
         let app_dir = config_dir_from(xdg, home, appdata).expect("application directory");
@@ -257,9 +257,9 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn drive_roots_are_empty_off_windows_even_when_every_probe_hits() {
-        assert!(drive_roots_with(Path::new("/home/user"), |_| true).is_empty());
+        assert!(drive_roots_with(Path::new("/user-home"), |_| true).is_empty());
         assert!(drive_roots(Path::new("/")).is_empty());
-        assert!(drive_roots(Path::new("/home/user/droid-tui")).is_empty());
+        assert!(drive_roots(Path::new("/user-home/droid-tui")).is_empty());
     }
 
     #[test]

@@ -439,7 +439,7 @@ mod tests {
         let rows = ordered_entries(favs, listing);
         PickerSpec {
             title: " File Picker ".into(),
-            picker_dir: "/tmp".into(),
+            picker_dir: "fixtures".into(),
             filter: None,
             rows,
             selected: 0,
@@ -820,7 +820,7 @@ mod tests {
         use std::path::PathBuf;
         let mut app = App::new();
         app.favorites = crate::favorites::FavoritesStore::default();
-        app.picker_entries = vec![PathBuf::from("/tmp/b.ini"), PathBuf::from("..")];
+        app.picker_entries = vec![PathBuf::from("b.ini"), PathBuf::from("..")];
         app.picker_index = 1;
         assert_eq!(picker_spec(&app).filter, None);
         app.picker_filter_active = true;
@@ -848,7 +848,7 @@ mod tests {
         // App::new() loads the real favourites store; empty it so the
         // favourites section and separator are absent.
         app.favorites = crate::favorites::FavoritesStore::default();
-        app.picker_entries = vec![PathBuf::from("/tmp/b.ini"), PathBuf::from("..")];
+        app.picker_entries = vec![PathBuf::from("b.ini"), PathBuf::from("..")];
         app.picker_index = 1;
         let spec = picker_spec(&app);
         assert_eq!(spec.title, " File Picker ");
