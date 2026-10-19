@@ -72,7 +72,7 @@ Patches with at least one `Severity::Error` SHALL fail to load (`app.patch=None`
 
 ### Requirement: Required parameters satisfied by documented alternatives
 
-The system SHALL satisfy an `essential == 2` input declared as one of several alternative inputs by the DROID manual when at least one of its documented alternatives is present in the same patch section. The alternatives SHALL come from an explicit table in `src/validation.rs`, each row citing its manual basis, and SHALL NOT be inferred from a param's `default`, its type, or its name.
+The system SHALL satisfy an `essential == 2` input declared as one of several alternative inputs by the DROID manual when at least one of its documented alternatives carries a value in the same patch section. An alternative whose assignment is empty, or whose value is the `unpatched` placeholder, SHALL NOT count: it states the absence of an input. The alternatives SHALL come from an explicit table in `src/validation.rs`, each row citing its manual basis, and SHALL NOT be inferred from a param's `default`, its type, or its name.
 
 #### Scenario: Taptempo LFO is not missing hz
 - **WHEN** a `[lfo]` section sets `taptempo` (or `rate`) and no `hz`
@@ -101,6 +101,10 @@ The system SHALL satisfy an `essential == 2` input declared as one of several al
 #### Scenario: Empty alternative set keeps the warning
 - **WHEN** a `[gatetool]` section sets none of `inputgate`, `inputtrigger`, `inputedge`
 - **THEN** `missing_required` is emitted for `inputgate`
+
+#### Scenario: An unwritten alternative value keeps the warning
+- **WHEN** a `[contour]` section writes `trigger` with no value (`trigger =`) or with `trigger = unpatched`, and no `gate`
+- **THEN** `missing_required` is emitted for `gate`
 
 #### Scenario: Drum patch family validates without these false positives
 - **WHEN** `patches_remote/_droid_mpfs5drum.ini` (311 sections) is validated

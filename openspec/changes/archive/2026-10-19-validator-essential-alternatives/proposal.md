@@ -75,9 +75,9 @@ the one this change narrows. `ARCHITECTURE.md` §3.10 ("Patch Validation
 - Changing `circuits.json` or `diagnostics.ts` (vendored upstream). The upstream
   inconsistency is worth reporting, but fixing it is a separate, cross-repo task.
 - A generic "an `essential: 2` param with a default is optional" rule. 43 of the
-  72 singular `essential == 2` inputs declare a non-null default (including
-  `[compare] input`, which is genuinely required), so that rule would silence
-  real findings.
+  72 singular `essential == 2` inputs declare a default other than `unpatched`
+  (47 declare some default at all, `[compare] input` among them, which is
+  genuinely required), so that rule would silence real findings.
 - Suppressing `missing_required` entirely, or downgrading it from `Warning`.
 - Ranged (`prefix` + `count`) params: already skipped, unchanged.
 - Any other validation code (`unknown_param`, `duplicate_param`, cables, RAM).

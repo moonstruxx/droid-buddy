@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::patch::{Patch, Span};
+use crate::patch::{IniEntry, Patch, Span};
 use crate::schema::{is_valid_jack, suggest_circuit_with_schema, validate_jack, Schema};
 
 // ---------------------------------------------------------------------------
@@ -415,7 +415,8 @@ struct AlternativeInputs {
 /// `essential === 2 && !(prefix && count)` policy. The manual does state the
 /// alternatives, in prose, so each row below cites it. Nothing is inferred from
 /// a param's name, type, or default: 43 of the 72 singular `essential == 2`
-/// inputs declare a default (including `[compare] input`), so "has a default"
+/// inputs declare a default other than `unpatched` (47 declare some default,
+/// `[compare] ifequal` and `[contour] gate` among them), so "has a default"
 /// would silence genuinely required params.
 ///
 /// Same shape as the `JACK_TABLE` precedent in `src/schema.rs`: a plain static
@@ -453,14 +454,27 @@ static ALTERNATIVE_INPUTS: &[AlternativeInputs] = &[
 
 /// Is `required` satisfied by a documented alternative in this section?
 ///
-/// `seen` holds only the keys written in the current section, so this is a
-/// same-section check by construction — the whole patch is never consulted.
+/// `entries` holds the section's own entries, so this is a same-section check by
+/// construction; the whole patch is never consulted. An alternative counts only
+/// when it carries a value: an empty assignment (`trigger =`) or the explicit
+/// `unpatched` placeholder states the absence of an input, not evidence of one.
 /// Returns `false` when the table has no row for `(circuit, required)`.
-fn satisfied_by_alternative(circuit: &str, required: &str, seen: &HashMap<String, usize>) -> bool {
+fn satisfied_by_alternative(circuit: &str, required: &str, entries: &[IniEntry]) -> bool {
     ALTERNATIVE_INPUTS
         .iter()
         .find(|row| row.circuit == circuit && row.required == required)
-        .is_some_and(|row| row.alternatives.iter().any(|alt| seen.contains_key(*alt)))
+        .is_some_and(|row| {
+            entries.iter().any(|entry| {
+                row.alternatives.contains(&entry.key.as_str()) && entry_has_value(&entry.value)
+            })
+        })
+}
+
+/// `unpatched` is the schema's marker for "nothing here", so it reads as
+/// absence next to an actually patched input.
+fn entry_has_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unpatched")
 }
 
 // ---------------------------------------------------------------------------
@@ -662,7 +676,11 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
                                 // ALTERNATIVE_INPUTS). A different required
                                 // param of the circuit is not excused: the table
                                 // is keyed by the exact param name.
-                                if satisfied_by_alternative(&lower, &name, &seen) {
+                                if satisfied_by_alternative(
+                                    &lower,
+                                    &name,
+                                    &section.detailed_entries,
+                                ) {
                                     continue;
                                 }
                                 issues.push(ValidationIssue {
@@ -1046,6 +1064,28 @@ mod tests {
         // Manual: "two alternative inputs: gate and trigger" to start the
         // envelope.
         assert_missing_required("[p2b8]\n[contour]\ntrigger = G1\n", &[]);
+    }
+
+    #[test]
+    fn empty_or_unpatched_alternative_does_not_satisfy_the_param() {
+        // A written key is not evidence on its own: the entries carry these
+        // keys, so the rule has to read the value. `unpatched` is the schema's
+        // own marker for "no input here".
+        for ini in [
+            "[p2b8]\n[contour]\ntrigger =\n",
+            "[p2b8]\n[contour]\ntrigger =   \n",
+            "[p2b8]\n[contour]\ntrigger = unpatched\n",
+            "[p2b8]\n[contour]\ntrigger = UNPATCHED\n",
+        ] {
+            assert_missing_required(ini, &["gate"]);
+        }
+    }
+
+    #[test]
+    fn alternative_keys_match_case_insensitively() {
+        // `detailed_entries` stores lowercased keys, so an upper-case write in
+        // the patch still counts.
+        assert_missing_required("[p2b8]\n[contour]\nTRIGGER = G1\n", &[]);
     }
 
     #[test]

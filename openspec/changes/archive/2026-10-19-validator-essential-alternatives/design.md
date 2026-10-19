@@ -47,9 +47,10 @@ every submodule bump. Out of scope for this repo's fix, and a poor trade for a
 4-entry policy. Recommended as a follow-up upstream report.
 
 **A generic "has a default ⇒ optional" rule.** Measured: 43 of the 72 singular
-`essential == 2` inputs declare a non-null `default` — including
-`[compare] input` (`default: "0"`), which is genuinely required. Such a rule
-would silence 60 % of required-param checking and hide real defects. Rejected.
+`essential == 2` inputs declare a default other than `unpatched`, and 47 declare
+some default at all, `[compare] input` (`default: "0"`) among them, which is
+genuinely required. Such a rule would silence 65 % of required-param checking and
+hide real defects. Rejected.
 
 **Dropping `essential` handling for the four circuits entirely.** Would silence
 e.g. a `[gatetool]` with none of the three inputs, or a `[compare]` with no
