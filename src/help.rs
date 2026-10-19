@@ -70,7 +70,12 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
     match view {
         HelpView::ModuleUi => vec![
             ("+/-", "zoom presets"),
-            ("arrows/wheel", "pan rack on overflow"),
+            ("f", "fit rack to pane"),
+            ("a", "cycle label presentation"),
+            ("wheel", "adjust knob/fader value, else zoom about pointer"),
+            ("Ctrl+wheel", "zoom about pointer"),
+            ("middle-drag", "pan rack"),
+            ("arrows", "pan rack on overflow"),
             ("j/k", "navigate"),
             ("click", "focus element across source + graph"),
             ("Enter/Space", "toggle component"),
@@ -389,13 +394,24 @@ mod tests {
 
     #[test]
     fn keybindings_reflect_module_ui_surface() {
-        // Change `help-keybinding-parity` task 1.3 + `retire-panels-surface`:
-        // the Module UI table documents the zoom presets, overflow pan (arrows
-        // + wheel), the j/k navigation the surface really binds, the skeleton
-        // toggle, and Esc closing the view.
+        // Change `help-keybinding-parity` task 1.3 + `retire-panels-surface` +
+        // `module-ui-labels` 2.6: the Module UI table documents the zoom
+        // presets, the fit and label-presentation keys, the pointer gestures
+        // (wheel adjusts a value or zooms, Ctrl+wheel always zooms, middle-drag
+        // pans), arrow-key overflow pan, the j/k navigation the surface really
+        // binds, the skeleton toggle, and Esc closing the view.
         let module_ui = keybindings(HelpView::ModuleUi);
         assert!(module_ui.contains(&("+/-", "zoom presets")));
-        assert!(module_ui.contains(&("arrows/wheel", "pan rack on overflow")));
+        assert!(module_ui.contains(&("f", "fit rack to pane")));
+        assert!(module_ui.contains(&("a", "cycle label presentation")));
+        assert!(module_ui.contains(&("wheel", "adjust knob/fader value, else zoom about pointer")));
+        assert!(module_ui.contains(&("Ctrl+wheel", "zoom about pointer")));
+        assert!(module_ui.contains(&("middle-drag", "pan rack")));
+        assert!(module_ui.contains(&("arrows", "pan rack on overflow")));
+        assert!(
+            !module_ui.contains(&("arrows/wheel", "pan rack on overflow")),
+            "the wheel no longer pans: it adjusts a value or zooms"
+        );
         assert!(module_ui.contains(&("j/k", "navigate")));
         assert!(module_ui.contains(&("s", "toggle skeleton presentation")));
         assert!(module_ui.contains(&("Esc", "close Module UI view")));
@@ -469,7 +485,11 @@ mod tests {
         ("Tab/Shift+Tab", "cycle pane focus"),
         // Module UI (the physical faceplate surface).
         ("+/-", "zoom presets"),
-        ("arrows/wheel", "pan rack on overflow"),
+        ("f", "fit rack to pane"),
+        ("a", "cycle label presentation"),
+        ("wheel", "adjust knob/fader value, else zoom about pointer"),
+        ("Ctrl+wheel", "zoom about pointer"),
+        ("middle-drag", "pan rack"),
         ("arrows", "pan rack on overflow"),
         ("j/k", "navigate"),
         ("click", "focus element across source + graph"),
@@ -557,17 +577,23 @@ mod tests {
         let keys: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
 
         for (key, desc) in [
-            // Navigation, zoom, skeleton, select-state, focus (task 3.1 scope).
+            // Navigation, zoom, label presentation, pointer gestures, skeleton,
+            // select-state, focus (task 3.1 scope + module-ui-labels 2.6).
             ("j/k", "navigate"),
             ("click", "focus element across source + graph"),
             ("+/-", "zoom presets"),
+            ("f", "fit rack to pane"),
+            ("a", "cycle label presentation"),
+            ("wheel", "adjust knob/fader value, else zoom about pointer"),
+            ("Ctrl+wheel", "zoom about pointer"),
+            ("middle-drag", "pan rack"),
             ("s", "toggle skeleton presentation"),
             ("g s", "open select-state menu"),
             ("Tab/Shift+Tab", "cycle pane focus"),
             // Component interaction and modifier/shift family.
             ("Enter/Space", "toggle component"),
             ("Ctrl+Enter", "toggle element LED"),
-            ("arrows/wheel", "pan rack on overflow"),
+            ("arrows", "pan rack on overflow"),
             ("m", "latch modifier on hovered component"),
             ("e", "edit label / validation modal"),
             ("1-4", "shift groups"),
@@ -635,18 +661,22 @@ mod tests {
             "Alt+s",
             "Ctrl+c",
             "Ctrl+Enter",
+            "Ctrl+wheel",
             "Enter/Space",
             "Esc",
             "click",
             "Tab/Shift+Tab",
-            "arrows/wheel",
+            "a",
+            "arrows",
             "d",
             "e",
+            "f",
             "g",
             "g c",
             "g s",
             "j/k",
             "l",
+            "middle-drag",
             "R",
             "m",
             "U",
@@ -655,6 +685,7 @@ mod tests {
             "q",
             "r",
             "s",
+            "wheel",
             "y",
             "z",
         ];
