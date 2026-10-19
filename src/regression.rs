@@ -575,6 +575,11 @@ const VALIDATION_FIXTURES: &[(&str, &str)] = &[
     ("unknown_param", "unknown_param"),
     ("invalid_jack", "invalid_jack"),
     ("missing_required", "missing_required"),
+    // The documented-alternatives fixture: four sections whose essential input
+    // is satisfied by an alternative plus four controls that still warn. It
+    // pins the rule with zero/one counts in `validation::tests`; for the
+    // per-code matrix its primary code is the surviving `missing_required`.
+    ("essential_alternatives", "missing_required"),
     ("undefined_cable", "undefined_cable"),
     ("duplicate_cable", "duplicate_cable"),
     ("unused_cable", "unused_cable"),
@@ -791,7 +796,7 @@ fn regression_validation_fixture_ram_overflow() {
 #[test]
 fn regression_validation_fixture_matrix_all_present() {
     // Full matrix smoke: every fixture yields its primary code.
-    assert_eq!(VALIDATION_FIXTURES.len(), 10, "must have 10 fixtures");
+    assert_eq!(VALIDATION_FIXTURES.len(), 11, "must have 11 fixtures");
     for (fixture, code) in VALIDATION_FIXTURES {
         assert_has_code(fixture, code);
     }
@@ -813,7 +818,7 @@ fn regression_validation_fixture_matrix_all_present() {
     expected.sort();
     assert_eq!(
         names, expected,
-        "fixtures/validation must contain exactly 10 expected files"
+        "fixtures/validation must contain exactly 11 expected files"
     );
 }
 

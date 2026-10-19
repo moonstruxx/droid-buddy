@@ -789,6 +789,25 @@ mod tests {
         issues.iter().map(|i| i.code.clone()).collect()
     }
 
+    /// `missing_required` findings as the quoted parameter names, so the
+    /// alternatives tests assert on *which* param is reported rather than on
+    /// the message wording.
+    fn missing_required_names(ini: &str) -> Vec<String> {
+        validate(ini)
+            .into_iter()
+            .filter(|i| i.code == "missing_required")
+            .filter_map(|i| i.message.split('"').nth(1).map(str::to_string))
+            .collect()
+    }
+
+    fn assert_missing_required(ini: &str, expected: &[&str]) {
+        let mut got = missing_required_names(ini);
+        got.sort();
+        let mut want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+        want.sort();
+        assert_eq!(got, want, "missing_required mismatch for:\n{ini}");
+    }
+
     #[test]
     fn schema_still_has_76_circuits() {
         // Exclude the schema::init tests' merged-schema window (see
@@ -983,6 +1002,253 @@ mod tests {
             misses.iter().any(|m| m.message.contains(&param)),
             "[{circ}] must still require its {param}: {misses:?}"
         );
+    }
+
+    // ── documented alternatives (an essential input satisfied by another) ────
+
+    #[test]
+    fn lfo_hz_is_satisfied_by_taptempo_or_rate() {
+        // Manual: `hz` cannot be used together with `taptempo`, and both
+        // combine with `rate`; either input is positive evidence that the
+        // oscillator has a frequency source.
+        for ini in [
+            "[p2b8]\n[lfo]\ntaptempo = G1\n",
+            "[p2b8]\n[lfo]\nrate = I1\n",
+        ] {
+            assert_missing_required(ini, &[]);
+        }
+    }
+
+    #[test]
+    fn lfo_hz_is_reported_without_an_alternative() {
+        assert_missing_required("[p2b8]\n[lfo]\nlevel = 1\n", &["hz"]);
+    }
+
+    #[test]
+    fn gatetool_inputgate_is_satisfied_by_inputtrigger_or_inputedge() {
+        // Manual: "gatetool has three different types of inputs. Usually you
+        // would patch only one of these" — gate, trigger and edge.
+        for ini in [
+            "[p2b8]\n[gatetool]\ninputtrigger = G1\n",
+            "[p2b8]\n[gatetool]\ninputedge = G1\n",
+        ] {
+            assert_missing_required(ini, &[]);
+        }
+    }
+
+    #[test]
+    fn gatetool_inputgate_is_reported_without_an_alternative() {
+        assert_missing_required("[p2b8]\n[gatetool]\ngatelength = 1\n", &["inputgate"]);
+    }
+
+    #[test]
+    fn contour_gate_is_satisfied_by_trigger() {
+        // Manual: "two alternative inputs: gate and trigger" to start the
+        // envelope.
+        assert_missing_required("[p2b8]\n[contour]\ntrigger = G1\n", &[]);
+    }
+
+    #[test]
+    fn contour_gate_is_reported_without_trigger() {
+        assert_missing_required("[p2b8]\n[contour]\nattack = 1\n", &["gate"]);
+    }
+
+    #[test]
+    fn compare_ifequal_is_satisfied_by_any_documented_branch() {
+        // Manual: "It is allowed to omit any of the inputs ifless, ifequal,
+        // ifgreater or else" — one branch is enough. `input` and `compare`
+        // are separate required inputs and are set here so only `ifequal` is
+        // in question.
+        for branch in ["ifgreater = I1", "ifless = I1", "else = 1"] {
+            let ini = format!("[p2b8]\n[compare]\ninput = 0\ncompare = 0\n{branch}\n");
+            assert_missing_required(&ini, &[]);
+        }
+    }
+
+    #[test]
+    fn compare_ifequal_is_reported_without_a_branch() {
+        assert_missing_required("[p2b8]\n[compare]\ninput = 0\ncompare = 0\n", &["ifequal"]);
+    }
+
+    #[test]
+    fn alternative_in_another_section_does_not_satisfy_the_param() {
+        // Same circuit, same patch: only the second `[lfo]` lacks a frequency
+        // source. `seen` is per section, so the first section's `taptempo`
+        // must not silence the second section's warning.
+        let ini = "[p2b8]\n[lfo]\ntaptempo = G1\n[lfo]\nlevel = 1\n";
+        let issues = validate(ini);
+        let misses: Vec<&ValidationIssue> = issues
+            .iter()
+            .filter(|i| i.code == "missing_required")
+            .collect();
+        assert_eq!(misses.len(), 1, "issues: {issues:?}");
+        assert!(
+            misses[0].message.contains("\"hz\""),
+            "{}",
+            misses[0].message
+        );
+        // header of the second `[lfo]` (0-based line 3)
+        assert_eq!(misses[0].span.line, 3);
+    }
+
+    #[test]
+    fn alternative_does_not_excuse_a_different_required_param() {
+        // `ifgreater` satisfies `ifequal` only. `input` is a separate
+        // `essential: 2` input of [compare] and stays reported.
+        assert_missing_required(
+            "[p2b8]\n[compare]\ncompare = 0\nifgreater = I1\n",
+            &["input"],
+        );
+    }
+
+    #[test]
+    fn alternative_inputs_table_resolves_against_the_embedded_schema() {
+        // Discovery and validation share one schema instance: a parallel test
+        // may install a plugin-merged schema (`schema::init`), and the table
+        // must be checked against exactly the one the validator uses.
+        let _guard = crate::schema::TEST_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let schema = load_schema();
+
+        let mut rows: HashSet<(&str, &str)> = HashSet::new();
+        for row in ALTERNATIVE_INPUTS {
+            assert!(
+                rows.insert((row.circuit, row.required)),
+                "duplicate ALTERNATIVE_INPUTS row for [{}.{}]",
+                row.circuit,
+                row.required
+            );
+            let def = schema
+                .circuits
+                .get(row.circuit)
+                .unwrap_or_else(|| panic!("[{}] is not an embedded circuit", row.circuit));
+            let required = def
+                .inputs
+                .iter()
+                .find(|p| p.name == row.required)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} is not a declared input of [{}]",
+                        row.required, row.circuit
+                    )
+                });
+            // The row only means anything for the arm the validator guards.
+            assert_eq!(
+                required.essential, 2,
+                "[{}.{}] is not an essential: 2 input",
+                row.circuit, row.required
+            );
+            assert!(
+                required.prefix.is_none() && required.count.is_none(),
+                "[{}.{}] is ranged; the validator skips it before consulting the table",
+                row.circuit,
+                row.required
+            );
+
+            for alt in row.alternatives {
+                assert!(
+                    schema
+                        .get_param_names(row.circuit)
+                        .is_some_and(|names| names.iter().any(|n| n == alt)),
+                    "{alt} is not a declared param of [{}]",
+                    row.circuit
+                );
+                // No mutual-exclusion cycle: an alternative that is itself
+                // `essential: 2` must have its own row, otherwise two params
+                // could excuse each other while both are absent.
+                let alt_is_essential = def
+                    .inputs
+                    .iter()
+                    .any(|p| p.name == *alt && p.essential == 2);
+                if alt_is_essential {
+                    assert!(
+                        ALTERNATIVE_INPUTS
+                            .iter()
+                            .any(|r| r.circuit == row.circuit && r.required == *alt),
+                        "[{}.{}] is essential: 2 but is listed only as an alternative; give it its own row",
+                        row.circuit,
+                        alt
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn essential_alternatives_fixture_keeps_only_the_control_warning() {
+        // The fixture pins the alternatives rule end to end. Only
+        // `missing_required` is asserted: cable, jack, expression and RAM
+        // findings are other checks' business (covered by the rest of this
+        // module and the regression fixture matrix).
+        //
+        // Sections are identified by what they contain, not by order: a
+        // section "documents an alternative" when it writes one of its
+        // circuit's `ALTERNATIVE_INPUTS` names, otherwise it is a control.
+        let path = PathBuf::from("fixtures/validation/essential_alternatives.ini");
+        let patch = Patch::from_ini_file(&path)
+            .unwrap_or_else(|e| panic!("{} must parse: {e}", path.display()));
+        let schema = load_schema();
+        let misses: Vec<ValidationIssue> = validate_patch(&patch, schema)
+            .into_iter()
+            .filter(|i| i.code == "missing_required")
+            .collect();
+
+        let mut documented = 0usize;
+        let mut controls = 0usize;
+        for section in &patch.sections {
+            let Some(row) = ALTERNATIVE_INPUTS
+                .iter()
+                .find(|r| r.circuit == section.name.to_lowercase())
+            else {
+                continue;
+            };
+            let keys: Vec<&str> = section
+                .detailed_entries
+                .iter()
+                .map(|e| e.key.as_str())
+                .collect();
+            let here: Vec<&ValidationIssue> = misses
+                .iter()
+                .filter(|m| m.span.line == section.header_span.line)
+                .collect();
+            if row.alternatives.iter().any(|alt| keys.contains(alt)) {
+                documented += 1;
+                assert!(
+                    here.is_empty(),
+                    "[{}] writes a documented alternative but still reports {:?}",
+                    section.name,
+                    here.iter().map(|i| &i.message).collect::<Vec<_>>()
+                );
+            } else {
+                controls += 1;
+                assert_eq!(
+                    here.len(),
+                    1,
+                    "control [{}] must produce exactly one missing_required, got {:?}",
+                    section.name,
+                    here.iter().map(|i| &i.message).collect::<Vec<_>>()
+                );
+                assert!(
+                    here[0].message.contains(&format!("\"{}\"", row.required)),
+                    "control [{}] must report {}: {}",
+                    section.name,
+                    row.required,
+                    here[0].message
+                );
+            }
+        }
+        assert_eq!(
+            documented,
+            ALTERNATIVE_INPUTS.len(),
+            "fixture must cover every table row"
+        );
+        assert_eq!(
+            controls,
+            ALTERNATIVE_INPUTS.len(),
+            "fixture must carry one control per table row"
+        );
+        assert_eq!(misses.len(), controls, "missing_required: {misses:?}");
     }
 
     #[test]
