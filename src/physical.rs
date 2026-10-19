@@ -2951,7 +2951,7 @@ mod tests {
         // baseline, so a 400 mm rack and a 2-row rack fit at the low end.
         assert_eq!(ZOOM_MIN, 0.25);
         assert_eq!(ZOOM_MAX, 4.0);
-        assert!(ZOOM_MIN < 1.0 && ZOOM_MAX > 1.0);
+        const { assert!(ZOOM_MIN < 1.0 && ZOOM_MAX > 1.0) };
     }
 
     #[test]

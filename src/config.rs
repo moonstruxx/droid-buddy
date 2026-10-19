@@ -131,18 +131,13 @@ impl Default for Labels {
 /// is clipped, and `on` annotates every addressed element that carries a label.
 /// Default `auto`; unknown values in the file warn once on stderr and fall back
 /// to `auto`, mirroring [`LayoutMode`]'s handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LabelPresentation {
     Off,
+    #[default]
     Auto,
     On,
-}
-
-impl Default for LabelPresentation {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl LabelPresentation {
