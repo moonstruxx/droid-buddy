@@ -2849,3 +2849,391 @@ fn regression_sections_mode_clusters_around_section_holes() {
         "cluster lane slots and member positions must be reproducible"
     );
 }
+
+// ── module-ui-labels (task 3.1): label presentation on a real rack ─────────
+// One fixture (`fixtures/module_ui_labels.ini`) is a partial B32 front whose
+// preamble labels both fit and overflow their 9 mm cells. The stories drive
+// the production load + fit triggers and the real spec/paint path: the rack
+// opens fitted at true size, its element cells are their millimetre size,
+// `auto` annotates exactly the clipped labels, and switching the label
+// presentation leaves the hit and skeleton geometry untouched.
+
+const MODULE_UI_LABELS_FIXTURE: &str = "fixtures/module_ui_labels.ini";
+
+/// The addressed button whose preamble label fits its 9 mm cell at 1:1
+/// (`Go`, two characters against the composed face's five-character budget).
+const MODULE_UI_LABELS_FITTING: &str = "B1.18";
+
+/// The addressed buttons whose preamble labels the cell budget clips at 1:1
+/// (`Trigger input`, `Clock reset`).
+const MODULE_UI_LABELS_CLIPPED: &[&str] = &["B1.19", "B1.20"];
+
+/// The rack the fixture packs into, from the same chain + default-case source
+/// `App::fit_physical_view` and `physical_spec` consume, so the story's pane
+/// is derived from the geometry that is actually drawn.
+fn module_ui_labels_rack(patch: &Patch) -> crate::physical::RackLayout {
+    let chain = crate::physical::PhysicalLayout::build(patch);
+    let spec = crate::physical::RackSpec::default_case(&chain);
+    crate::physical::RackLayout::pack(&chain, &spec)
+}
+
+/// A pane one true-size rack tall and 640 pt wide. The fit is height-bound
+/// and lands at 100 %, while the horizontal margin gives the rack's right-side
+/// annotation band room to paint inside the pane.
+fn module_ui_labels_pane(rack: &crate::physical::RackLayout) -> egui::Rect {
+    let (_, height) = crate::physical::rack_extent_points(rack, 1.0);
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(640.0, height.ceil()))
+}
+
+/// An `App` opened on the fixture through the production load + fit triggers,
+/// with the module UI pane published at `pane` (the same trigger the pane
+/// dispatch runs each frame).
+fn module_ui_labels_app(pane: egui::Rect) -> App {
+    let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
+        .expect("module_ui_labels fixture must parse");
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "module_ui_labels fixture must load");
+    app.note_physical_pane_rect(Rect::new(
+        0,
+        0,
+        pane.width().round() as u16,
+        pane.height().round() as u16,
+    ));
+    app.apply_physical_fit_triggers();
+    app
+}
+
+/// Edge-touching counts as disjoint, matching the annotation invariant that a
+/// callout never enters the rack.
+fn module_ui_labels_rects_disjoint(a: egui::Rect, b: egui::Rect) -> bool {
+    a.max.x <= b.min.x || b.max.x <= a.min.x || a.max.y <= b.min.y || b.max.y <= a.min.y
+}
+
+/// Headless `paint_physical` text runs as `(painted text, font)`, so the
+/// annotation story asserts what the real paint path draws rather than the
+/// spec's intent.
+fn module_ui_labels_painted_texts(
+    pane: egui::Rect,
+    mut paint: impl FnMut(&mut egui::Ui),
+) -> Vec<(String, egui::FontId)> {
+    use egui::epaint::Shape;
+
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(pane),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw_input, |ui| paint(ui));
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        if let Shape::Text(text) = &clipped.shape {
+            let font = text.galley.job.sections[0].format.font_id.clone();
+            texts.push((text.galley.text().to_string(), font));
+        }
+    }
+    out.textures_delta.clear();
+    texts
+}
+
+#[test]
+fn regression_module_ui_labels_opens_fitted_at_true_size() {
+    let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
+        .expect("module_ui_labels fixture must parse");
+
+    // The fixture is a valid patch, not a validation-case carrier: a single
+    // Error-severity finding would make the app refuse the load above.
+    let issues = crate::validation::validate_patch(&patch, crate::schema::load_schema());
+    let errors: Vec<_> = issues
+        .iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{MODULE_UI_LABELS_FIXTURE} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    let rack = module_ui_labels_rack(&patch);
+    let pane = module_ui_labels_pane(&rack);
+    let app = module_ui_labels_app(pane);
+
+    // The fit trigger ran against the published pane: the reported zoom is the
+    // fit computation's, and for a pane one true-size rack tall it is 1:1.
+    let fitted = app
+        .physical_fit_zoom
+        .expect("the fit trigger must report the zoom it applied");
+    let expected = crate::physical::fit_zoom(
+        rack.total_width_mm,
+        rack.total_height_mm,
+        pane.width(),
+        pane.height(),
+    ) as f32;
+    assert!(
+        (fitted - expected).abs() < 1e-6,
+        "the fitted zoom must be the fit computation's: {fitted} vs {expected}"
+    );
+    assert!(
+        (app.physical_zoom - 1.0).abs() < 0.01,
+        "a pane one true-size rack tall must open at 1:1, got {}%",
+        app.physical_zoom * 100.0
+    );
+
+    // The whole rack is visible and centred — the fit-on-open promise.
+    let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+    let case = spec.case_rect;
+    assert!(
+        case.min.x >= pane.min.x - 0.5
+            && case.min.y >= pane.min.y - 0.5
+            && case.max.x <= pane.max.x + 0.5
+            && case.max.y <= pane.max.y + 0.5,
+        "the fitted rack must be fully visible: case {case:?} in pane {pane:?}"
+    );
+    let (dx, dy) = (
+        (case.center().x - pane.center().x).abs(),
+        (case.center().y - pane.center().y).abs(),
+    );
+    assert!(
+        dx <= 0.5 && dy <= 0.5,
+        "the fitted rack must be centred: off by ({dx}, {dy}) pt"
+    );
+}
+
+#[test]
+fn regression_module_ui_labels_element_cell_is_true_millimetre_size() {
+    let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
+        .expect("module_ui_labels fixture must parse");
+    let rack = module_ui_labels_rack(&patch);
+    let pane = module_ui_labels_pane(&rack);
+    let app = module_ui_labels_app(pane);
+    let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+
+    // A B32 button cell is 9 mm square in the controller geometry, so at the
+    // 96-dpi baseline (3.7795 pt/mm) it must render ~34 pt square at 100 %.
+    let index = idx_for(&app, MODULE_UI_LABELS_FITTING);
+    let cell = spec
+        .cells
+        .iter()
+        .find(|cell| cell.component_index == Some(index))
+        .unwrap_or_else(|| panic!("{} must render a cell", MODULE_UI_LABELS_FITTING));
+    let points_per_mm = crate::physical::PHYSICAL_POINTS_PER_MM as f32;
+    let expected = 9.0 * points_per_mm * app.physical_zoom;
+    assert!(
+        (cell.rect.width() - expected).abs() < 0.1,
+        "a 9 mm cell must be 9 mm wide: {} vs {expected} pt",
+        cell.rect.width()
+    );
+    assert!(
+        (cell.rect.height() - expected).abs() < 0.1,
+        "a 9 mm cell must be 9 mm tall: {} vs {expected} pt",
+        cell.rect.height()
+    );
+    assert!(
+        (cell.rect.width() - cell.rect.height()).abs() < 0.05,
+        "the square B32 cell must stay square: {:?}",
+        cell.rect
+    );
+    assert!(
+        (expected - 34.0).abs() < 0.5,
+        "9 mm at the fitted 1:1 baseline is ~34 pt, got {expected}"
+    );
+}
+
+#[test]
+fn regression_module_ui_labels_auto_annotates_clipped_not_fitting() {
+    let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
+        .expect("module_ui_labels fixture must parse");
+    let rack = module_ui_labels_rack(&patch);
+    let pane = module_ui_labels_pane(&rack);
+    let app = module_ui_labels_app(pane);
+
+    // `auto` is the default presentation; the pane opens with it.
+    assert_eq!(
+        app.label_presentation,
+        crate::config::LabelPresentation::Auto,
+        "the module UI opens in `auto`"
+    );
+    let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+
+    let cell_for = |token: &str| {
+        let index = idx_for(&app, token);
+        spec.cells
+            .iter()
+            .find(|cell| cell.component_index == Some(index))
+            .unwrap_or_else(|| panic!("{token} must render a cell"))
+            .clone()
+    };
+    let fitting = cell_for(MODULE_UI_LABELS_FITTING);
+    assert_eq!(fitting.label, "Go");
+    assert!(
+        !fitting.label_clipped,
+        "a two-character label fits a 9 mm B32 cell at 1:1: {fitting:?}"
+    );
+    for token in MODULE_UI_LABELS_CLIPPED {
+        let clipped = cell_for(token);
+        assert!(
+            clipped.label_clipped,
+            "{token}'s label '{}' must be clipped by its cell at 1:1",
+            clipped.label
+        );
+    }
+
+    // Exactly the clipped, explicitly labelled cells are annotated — the
+    // fitting "Go" is not duplicated beside the rack.
+    let mut annotated: Vec<&str> = spec
+        .annotations
+        .iter()
+        .map(|callout| callout.label.as_str())
+        .collect();
+    annotated.sort_unstable();
+    assert_eq!(
+        annotated,
+        vec!["Clock reset", "Trigger input"],
+        "auto must annotate exactly the clipped labels"
+    );
+    for callout in &spec.annotations {
+        assert!(
+            module_ui_labels_rects_disjoint(callout.label_rect, spec.case_rect),
+            "annotation '{}' enters the rack: {:?}",
+            callout.label,
+            callout.label_rect
+        );
+        let on_host = spec.cells.iter().any(|cell| {
+            let r = cell.rect;
+            cell.component_index.is_some()
+                && callout.anchor.x >= r.min.x - 0.5
+                && callout.anchor.x <= r.max.x + 0.5
+                && callout.anchor.y >= r.min.y - 0.5
+                && callout.anchor.y <= r.max.y + 0.5
+        });
+        assert!(
+            on_host,
+            "annotation '{}' must be anchored on an addressed cell",
+            callout.label
+        );
+    }
+
+    // The real paint path draws the clipped labels at the performance view's
+    // 14 pt callout size and never promotes the fitting in-cell label.
+    let texts = module_ui_labels_painted_texts(pane, |ui| {
+        crate::gui::paint_physical(ui, pane, Some(&spec));
+    });
+    let callout_font = egui::FontId::monospace(14.0);
+    for clipped in MODULE_UI_LABELS_CLIPPED {
+        let label = cell_for(clipped).label;
+        assert!(
+            texts
+                .iter()
+                .any(|(text, font)| *text == label && *font == callout_font),
+            "the clipped label '{label}' must paint as a 14 pt callout: {texts:?}"
+        );
+    }
+    assert!(
+        !texts
+            .iter()
+            .any(|(text, font)| *text == fitting.label && *font == callout_font),
+        "a fitting in-cell label must not be duplicated as a callout: {texts:?}"
+    );
+}
+
+#[test]
+fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
+    let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
+        .expect("module_ui_labels fixture must parse");
+    let rack = module_ui_labels_rack(&patch);
+    let pane = module_ui_labels_pane(&rack);
+
+    // `(published hit rect)` = the same filter `paint_panes` applies to
+    // `component_rects`: only real components, rounded into the app's
+    // cell-grid rect domain. The skeleton geometry is the case, module, and
+    // cell rects the same filter feeds.
+    type HitRects = Vec<(usize, Rect)>;
+    type SkeletonGeometry = (egui::Rect, Vec<egui::Rect>, Vec<egui::Rect>);
+    let mut hits: Vec<HitRects> = Vec::new();
+    let mut skeleton: Vec<SkeletonGeometry> = Vec::new();
+    let mut callout_counts: Vec<usize> = Vec::new();
+
+    for mode in [
+        crate::config::LabelPresentation::Off,
+        crate::config::LabelPresentation::Auto,
+        crate::config::LabelPresentation::On,
+    ] {
+        let mut app = module_ui_labels_app(pane);
+        app.label_presentation = mode;
+        let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+
+        hits.push(
+            spec.cells
+                .iter()
+                .filter_map(|cell| {
+                    cell.component_index.map(|index| {
+                        let r = cell.rect;
+                        (
+                            index,
+                            Rect::new(
+                                r.min.x.round().max(0.0) as u16,
+                                r.min.y.round().max(0.0) as u16,
+                                r.width().round().max(0.0) as u16,
+                                r.height().round().max(0.0) as u16,
+                            ),
+                        )
+                    })
+                })
+                .collect(),
+        );
+
+        // Paint through the real routine in both presentations: the annotation
+        // layer must be decoration only, never a second geometry source.
+        for skeleton_mode in [false, true] {
+            app.physical_show_skeleton = skeleton_mode;
+            let label_spec =
+                crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+            let _ = module_ui_labels_painted_texts(pane, |ui| {
+                crate::gui::paint_physical(ui, pane, Some(&label_spec));
+            });
+            if skeleton_mode {
+                skeleton.push((
+                    label_spec.case_rect,
+                    label_spec.modules.iter().map(|m| m.rect).collect(),
+                    label_spec.cells.iter().map(|c| c.rect).collect(),
+                ));
+            }
+        }
+        app.physical_show_skeleton = false;
+
+        // The 14 pt mono headline count is the visible difference between the
+        // modes — asserted so the invariance below is not vacuous.
+        let texts = module_ui_labels_painted_texts(pane, |ui| {
+            crate::gui::paint_physical(ui, pane, Some(&spec));
+        });
+        let callout_font = egui::FontId::monospace(14.0);
+        callout_counts.push(
+            spec.annotations
+                .iter()
+                .filter(|callout| {
+                    texts
+                        .iter()
+                        .any(|(text, font)| *text == callout.label && *font == callout_font)
+                })
+                .count(),
+        );
+    }
+
+    assert!(
+        !hits[0].is_empty(),
+        "the fixture must publish hit rects for its addressed buttons"
+    );
+    assert_eq!(hits[0], hits[1], "off and auto publish identical hit rects");
+    assert_eq!(hits[0], hits[2], "off and on publish identical hit rects");
+    assert_eq!(
+        skeleton[0], skeleton[1],
+        "off and auto draw identical skeleton rects"
+    );
+    assert_eq!(
+        skeleton[0], skeleton[2],
+        "off and on draw identical skeleton rects"
+    );
+    assert_eq!(
+        callout_counts,
+        vec![0, 2, 3],
+        "off annotates nothing, auto the two clipped labels, on all three"
+    );
+}
