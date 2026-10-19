@@ -34,9 +34,10 @@ mod viewer;
 // consumed by the windowed loop in the `droid_tui` bin (a separate crate), so
 // it re-exports at full visibility. `graph` stays a private canvas module.
 pub use graph::graph_window_fit_camera;
-pub(crate) use graph::{camera_pan, camera_zoom_about, drawn_world_sizes};
 #[cfg(test)]
-pub(crate) use graph::{paint_scene, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
+pub(crate) use graph::paint_scene;
+pub(crate) use graph::MAX_ZOOM_STEP;
+pub(crate) use graph::{camera_pan, camera_zoom_about, drawn_world_sizes};
 // Headless cross-layer regression (`src/regression.rs`, same precedent as
 // `paint_scene`): the viewer spec and the physical-module-UI spec + painter.
 #[allow(unused_imports)]
@@ -698,7 +699,25 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 app.note_physical_pane_rect(to_cell_rect(rect));
                 app.apply_physical_fit_triggers();
                 let spec = physical::physical_spec(app, rect);
-                let _ = physical::paint_physical(ui, rect, spec.as_ref());
+                let frame = physical::paint_physical(ui, rect, spec.as_ref());
+                // module-ui-labels D8: apply the pane's own input report —
+                // middle-drag pan, cursor-anchored wheel zoom, and the D7
+                // wheel split (the frame carries the hit-cell decision). The
+                // picker overlay owns the wheel while it is open, mirroring the
+                // graph frame path.
+                // The frame's `skeleton_toggle` is masked: the window key
+                // pipeline (`handler::handle_window_key_event`) already applies
+                // the `s` key, so consuming it here as well would toggle the
+                // presentation straight back off.
+                if !app.showing_picker {
+                    crate::handler::handle_physical_frame(
+                        PhysicalFrame {
+                            skeleton_toggle: false,
+                            ..frame
+                        },
+                        app,
+                    );
+                }
                 // Publish the drawn element cells as the app-level hit geometry
                 // (`component_rects`): only real components (Some index) are
                 // hit-testable; unused geometry cells are never published.

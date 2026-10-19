@@ -2632,6 +2632,32 @@ impl App {
         self.note_physical_navigation();
     }
 
+    /// Zoom the module UI by `factor` about the pane-local point `anchor`
+    /// (module-ui-labels D7/D8): the content under the anchor stays put, so a
+    /// wheel zoom follows the pointer instead of the pane corner. The target
+    /// zoom clamps to the supported range, and the *effective* ratio (after the
+    /// clamp) drives the offset so a step into a bound cannot drift the view.
+    /// A manual zoom latches the view against the automatic fits (D4).
+    pub fn physical_zoom_about(&mut self, factor: f32, anchor: (f32, f32)) {
+        let current = self.physical_zoom;
+        if current <= 0.0 {
+            return;
+        }
+        let target = (current * factor).clamp(
+            crate::physical::ZOOM_MIN as f32,
+            crate::physical::ZOOM_MAX as f32,
+        );
+        let ratio = target / current;
+        // `screen = mm·points_per_mm·zoom − offset`, so holding the anchor's
+        // screen position fixed across `ratio` requires offset' = offset·ratio
+        // + anchor·(ratio − 1).
+        self.physical_offset.0 = self.physical_offset.0 * ratio + anchor.0 * (ratio - 1.0);
+        self.physical_offset.1 = self.physical_offset.1 * ratio + anchor.1 * (ratio - 1.0);
+        self.physical_zoom = target;
+        self.scale_factor = target;
+        self.note_physical_navigation();
+    }
+
     /// One step of physical-view panning in screen cells (4.3): arrow keys
     /// and the mouse wheel move the viewport by this amount per press/tick.
     pub const PHYSICAL_PAN_STEP: f32 = 8.0;

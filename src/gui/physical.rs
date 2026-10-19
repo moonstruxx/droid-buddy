@@ -185,17 +185,27 @@ pub(crate) struct PhysicalSpec {
 }
 
 /// The frame's physical-view input, reported back for the loop to apply to
-/// `App` (mirrors `WindowFrame`): middle-drag pan in points, wheel zoom about
-/// the cursor, and a plain `s` skeleton toggle.
+/// `App` (mirrors `WindowFrame`): middle-drag pan in points, the wheel's
+/// disambiguated intent (value adjust on an adjustable element, else zoom about
+/// the cursor), and a plain `s` skeleton toggle.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PhysicalFrame {
     /// Pan delta in points (`physical_offset` units; the mapping yields points).
     pub pan_delta: (f32, f32),
     /// Wheel zoom: factor plus the cursor anchor in points.
     pub zoom: Option<(f32, (f32, f32))>,
+    /// Wheel value adjust (module-ui-labels D7): the `patch.hw_components`
+    /// index of the adjustable element under the pointer, plus the signed
+    /// `±WHEEL_VALUE_STEP` to apply. Set instead of `zoom`, never beside it,
+    /// unless `Ctrl` forces the zoom.
+    pub value_adjust: Option<(usize, f32)>,
     /// `s` pressed this frame (no modifiers): toggle skeleton presentation.
     pub skeleton_toggle: bool,
 }
+
+/// One wheel notch over an adjustable element: the terminal path's
+/// `adjust_value(comp, ±0.05)` step (module-ui-labels D7).
+const WHEEL_VALUE_STEP: f32 = 0.05;
 
 /// The fold is a per-controller rule (button-led-composition D2): only
 /// button-kind cells on P2B8/B32 (round face) and M4 (rect touch plate)
@@ -1175,7 +1185,7 @@ pub(crate) fn paint_physical(
     }
 
     drop(painter);
-    ui.ctx().input(|i| physical_frame(i, pane))
+    ui.ctx().input(|i| physical_frame(i, pane, Some(spec)))
 }
 
 /// Draw one element cell: skeleton marker, compact state cell, or the fader
@@ -1810,23 +1820,43 @@ pub(crate) fn mm_grid_lines(
 }
 
 /// The frame's physical-view input from the egui input state: middle-drag
-/// pan (points), wheel zoom about the cursor (same sensitivity/clamp as the
-/// graph canvas), and a plain `s` skeleton toggle. `pane` maps the absolute
-/// pointer (wheel zoom anchor) into the pane-local space the spec's points
-/// live in. Pure so input tests run without a window.
-pub(super) fn physical_frame(i: &egui::InputState, pane: egui::Rect) -> PhysicalFrame {
+/// pan (points), the wheel's disambiguated intent, and a plain `s` skeleton
+/// toggle. `pane` maps the absolute pointer (wheel zoom anchor, drag origin)
+/// into the pane-local space the spec's points live in, and gates every
+/// gesture to this pane so input over another surface can never move the rack.
+/// `spec` resolves the wheel's D7 disambiguation: the hit cell decides whether
+/// the wheel is a value adjust or a zoom. Pure so input tests run without a
+/// window.
+pub(super) fn physical_frame(
+    i: &egui::InputState,
+    pane: egui::Rect,
+    spec: Option<&PhysicalSpec>,
+) -> PhysicalFrame {
     let mut frame = PhysicalFrame::default();
-    if i.pointer.middle_down() {
+    // Only a middle-drag whose press started inside this pane is ours; the
+    // origin check keeps a drag begun on another pane from moving the rack.
+    if i.pointer.middle_down()
+        && i.pointer
+            .press_origin()
+            .is_some_and(|origin| pane.contains(origin))
+    {
         let d = i.pointer.delta();
         frame.pan_delta = (d.x, d.y);
     }
-    let pointer = i.pointer.latest_pos();
-    if i.smooth_scroll_delta.y.abs() > f32::EPSILON {
-        let factor = ((-i.smooth_scroll_delta.y) * ZOOM_SENSITIVITY).exp();
-        let factor = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
-        if let Some(p) = pointer {
+    let pointer = i.pointer.latest_pos().filter(|p| pane.contains(*p));
+    if let Some(p) = pointer {
+        if let Some(factor) = wheel_zoom_factor(i) {
             let local = p - pane.min;
-            frame.zoom = Some((factor, (local.x, local.y)));
+            // D7: `Ctrl` always zooms; otherwise the hit cell decides — an
+            // adjustable element takes the value adjust, anything else in the
+            // pane zooms about the pointer.
+            if i.modifiers.ctrl {
+                frame.zoom = Some((factor, (local.x, local.y)));
+            } else if let Some(index) = adjustable_cell_at(spec, p) {
+                frame.value_adjust = Some((index, wheel_value_step(i.smooth_scroll_delta.y)));
+            } else {
+                frame.zoom = Some((factor, (local.x, local.y)));
+            }
         }
     }
     if i.key_pressed(egui::Key::S)
@@ -1835,6 +1865,60 @@ pub(super) fn physical_frame(i: &egui::InputState, pane: egui::Rect) -> Physical
         frame.skeleton_toggle = true;
     }
     frame
+}
+
+/// This frame's wheel zoom factor at the graph canvas's sensitivity, clamped
+/// to `MAX_ZOOM_STEP` (module-ui-labels D7). `Ctrl`+wheel is consumed by egui
+/// as its own zoom (`zoom_factor_delta`) rather than the smooth scroll delta,
+/// so that path is converted from egui's 1/200 scroll-zoom speed to the
+/// canvas's 0.01 (exponent ratio 2) and inverted: egui's factor grows on the
+/// same scroll sign this app treats as zoom-out, so wheel-up must zoom in.
+/// `None` without a wheel event.
+fn wheel_zoom_factor(i: &egui::InputState) -> Option<f32> {
+    let scroll = i.smooth_scroll_delta.y;
+    let factor = if scroll.abs() > f32::EPSILON {
+        ((-scroll) * ZOOM_SENSITIVITY).exp()
+    } else if i.modifiers.ctrl {
+        let egui_zoom = i.zoom_delta();
+        if (egui_zoom - 1.0).abs() <= f32::EPSILON {
+            return None;
+        }
+        egui_zoom.powf(-2.0)
+    } else {
+        return None;
+    };
+    Some(factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP))
+}
+
+/// The `patch.hw_components` index of the adjustable element under `pos`
+/// (module-ui-labels D7): a knob, an encoder, or a fader face. Buttons,
+/// switches, LEDs, and CV jacks are not adjustable, so the wheel over them is
+/// a zoom.
+fn adjustable_cell_at(spec: Option<&PhysicalSpec>, pos: Pos2) -> Option<usize> {
+    spec?.cells.iter().find_map(|cell| {
+        if !cell.rect.contains(pos) {
+            return None;
+        }
+        if !(cell.is_fader
+            || matches!(
+                cell.kind,
+                crate::patch::ComponentKind::Knob | crate::patch::ComponentKind::Encoder
+            ))
+        {
+            return None;
+        }
+        cell.component_index
+    })
+}
+
+/// One wheel notch's value step: up (egui reports negative Y scrolling up)
+/// raises the value, mirroring the terminal `ScrollUp` path.
+fn wheel_value_step(smooth_scroll_delta_y: f32) -> f32 {
+    if smooth_scroll_delta_y < 0.0 {
+        WHEEL_VALUE_STEP
+    } else {
+        -WHEEL_VALUE_STEP
+    }
 }
 
 fn rgb(color: Color) -> egui::Color32 {
@@ -2957,16 +3041,215 @@ mod tests {
         let mut full_output = ctx.run_ui(park, |_| {});
         full_output.textures_delta.clear();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            frame = ui.ctx().input(|i| physical_frame(i, ui.max_rect()));
+            frame = ui.ctx().input(|i| physical_frame(i, ui.max_rect(), None));
         });
         full_output.textures_delta.clear();
         // 20px drag in points: the mapping yields points directly.
         assert_eq!(frame.pan_delta, (20.0, 10.0));
-        // Wheel up 50px → zoom-in factor > 1 anchored at the cursor.
+        // Wheel up 50px → zoom-in factor > 1 anchored at the cursor. Without a
+        // spec there is no adjustable cell to hit, so the wheel is a zoom (D7).
+        assert_eq!(frame.value_adjust, None);
         let (factor, anchor) = frame.zoom.expect("wheel zoom reported");
         assert!(factor > 1.0, "wheel-up zooms in: {factor}");
         assert_eq!(anchor, (120.0, 110.0));
         assert!(frame.skeleton_toggle, "plain `s` toggles the skeleton");
+    }
+
+    // -- module-ui-labels 1.6: the frame report in production ---------------
+
+    /// One egui frame carrying `events`, after a parking frame that puts the
+    /// pointer at `park` (drag deltas need a previous position; a wheel needs a
+    /// pointer). Returns the physical input report the paint routine would.
+    fn frame_after(
+        park: Pos2,
+        events: Vec<egui::Event>,
+        pane: Rect,
+        spec: Option<&PhysicalSpec>,
+        modifiers: egui::Modifiers,
+    ) -> PhysicalFrame {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let parked = egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![egui::Event::PointerMoved(park)],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(parked, |_| {});
+        out.textures_delta.clear();
+        // egui 0.36 takes modifier state from `ModifiersChanged` events, not a
+        // `RawInput` field (the winit bridge sends one when the user holds a
+        // key), so synthesize it ahead of the wheel/key events.
+        let mut events = events;
+        if modifiers != egui::Modifiers::default() {
+            events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut frame = PhysicalFrame::default();
+        let mut out = ctx.run_ui(raw, |ui| {
+            frame = ui.ctx().input(|i| physical_frame(i, pane, spec));
+        });
+        out.textures_delta.clear();
+        frame
+    }
+
+    fn wheel(up: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, if up { -50.0 } else { 50.0 }),
+            modifiers,
+            phase: egui::TouchPhase::Move,
+        }
+    }
+
+    #[test]
+    fn wheel_over_a_fader_adjusts_only_its_value() {
+        // D7: the hit cell decides. A fader (a knob-kind cell with the fader
+        // face) takes the value step; the camera and the selection stay put.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut spec = spec(false, false);
+        let mut cell = spec.cells[0].clone();
+        cell.rect = Rect::from_min_size(Pos2::new(100.0, 400.0), Vec2::new(40.0, 120.0));
+        cell.kind = crate::patch::ComponentKind::Knob;
+        cell.is_fader = true;
+        cell.component_index = Some(0);
+        spec.cells = vec![cell];
+
+        let mut app = App::new();
+        app.patch = Some(
+            crate::patch::Patch::from_ini_str(
+                "[pot]\n    pot = P1.1\n    output = _X\n",
+                String::from("wheel"),
+            )
+            .unwrap(),
+        );
+        let frame = frame_after(
+            Pos2::new(120.0, 460.0),
+            vec![wheel(true, egui::Modifiers::default())],
+            pane,
+            Some(&spec),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(frame.value_adjust, Some((0, WHEEL_VALUE_STEP)));
+        assert_eq!(frame.zoom, None, "a value wheel must not zoom");
+
+        let zoom_before = app.physical_zoom;
+        let offset_before = app.physical_offset;
+        crate::handler::handle_physical_frame(frame, &mut app);
+        match app.patch.as_ref().unwrap().hw_components[0].state {
+            ComponentState::Value(v) => {
+                assert!((v - WHEEL_VALUE_STEP).abs() < 1e-6, "value: {v}")
+            }
+            _ => panic!("expected Value state"),
+        }
+        assert_eq!(app.physical_zoom, zoom_before, "no zoom on a value wheel");
+        assert_eq!(app.physical_offset, offset_before);
+        assert!(
+            !app.physical_nav_latched,
+            "a value adjust is not navigation"
+        );
+        assert!(app.selected_component.is_none() && app.hovered_component.is_none());
+    }
+
+    #[test]
+    fn ctrl_wheel_over_a_fader_zooms_anywhere() {
+        // D7: `Ctrl` is the unambiguous escape hatch over an adjustable cell.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut spec = spec(false, false);
+        let mut cell = spec.cells[0].clone();
+        cell.rect = Rect::from_min_size(Pos2::new(100.0, 400.0), Vec2::new(40.0, 120.0));
+        cell.kind = crate::patch::ComponentKind::Knob;
+        cell.is_fader = true;
+        cell.component_index = Some(0);
+        spec.cells = vec![cell];
+
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let frame = frame_after(
+            Pos2::new(120.0, 460.0),
+            vec![wheel(true, ctrl)],
+            pane,
+            Some(&spec),
+            ctrl,
+        );
+        assert_eq!(frame.value_adjust, None, "Ctrl always zooms");
+        let (factor, _) = frame.zoom.expect("Ctrl+wheel zooms over the fader");
+        assert!(factor > 1.0, "wheel-up still zooms in: {factor}");
+    }
+
+    #[test]
+    fn wheel_off_a_cell_zooms_about_the_pointer_only() {
+        // D7: a wheel inside the pane but off every adjustable element zooms
+        // about the pointer; the cursor-anchored offset is the frame's anchor.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let spec = spec(false, false); // cells hug the rack near the top
+        let pointer = Pos2::new(700.0, 550.0);
+        assert!(!spec.cells.iter().any(|c| c.rect.contains(pointer)));
+
+        let frame = frame_after(
+            pointer,
+            vec![wheel(true, egui::Modifiers::default())],
+            pane,
+            Some(&spec),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(frame.value_adjust, None);
+        let (factor, anchor) = frame.zoom.expect("wheel off a cell zooms");
+        assert!(factor > 1.0, "wheel-up zooms in: {factor}");
+        assert_eq!(anchor, (700.0, 550.0), "pane-local cursor anchor");
+
+        let mut app = App::new();
+        crate::handler::handle_physical_frame(frame, &mut app);
+        let ratio = app.physical_zoom;
+        assert!(ratio > 1.0, "wheel-up zooms in: {ratio}");
+        // `offset = offset·ratio + anchor·(ratio − 1)`, so the content under
+        // the cursor keeps its screen position while the view scales.
+        assert!((app.physical_offset.0 - 700.0 * (ratio - 1.0)).abs() < 1e-3);
+        assert!((app.physical_offset.1 - 550.0 * (ratio - 1.0)).abs() < 1e-3);
+        assert!(
+            app.physical_nav_latched,
+            "a wheel zoom latches the fit (D4)"
+        );
+    }
+
+    #[test]
+    fn middle_drag_moves_the_offset_and_latches() {
+        // D8: a middle-drag inside the pane arrives as a pan delta and moves
+        // the camera without touching zoom, selection, or focus.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: Pos2::new(200.0, 200.0),
+                button: egui::PointerButton::Middle,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerMoved(Pos2::new(230.0, 180.0)),
+        ];
+        let frame = frame_after(
+            Pos2::new(200.0, 200.0),
+            events,
+            pane,
+            None,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(frame.pan_delta, (30.0, -20.0));
+
+        let mut app = App::new();
+        let zoom_before = app.physical_zoom;
+        crate::handler::handle_physical_frame(frame, &mut app);
+        assert_eq!(app.physical_offset, (30.0, -20.0));
+        assert_eq!(app.physical_zoom, zoom_before, "pan must not zoom");
+        assert!(
+            app.physical_nav_latched,
+            "a manual pan latches the fit (D4)"
+        );
+        assert!(app.selected_component.is_none() && app.hovered_component.is_none());
     }
 
     // -- performance view (performance-view 1.3) ---------------------------

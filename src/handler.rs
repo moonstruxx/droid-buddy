@@ -6,12 +6,11 @@ use winit::event::WindowEvent;
 use winit::keyboard::NamedKey;
 
 #[cfg(test)]
-use crate::gui::{camera_zoom_about, MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
-#[cfg(test)]
-use crate::gui::{PhysicalFrame, ViewerFrame};
-// Production: the picker overlay's input report is applied from the paint layer
-// (`gui::paint_overlays`), not from the window frame.
-use crate::gui::PickerFrame;
+use crate::gui::ViewerFrame;
+// Production: the module UI's and the picker overlay's input reports are applied
+// from the paint layer (`gui::paint_panes` / `gui::paint_overlays`), not from the
+// window frame. `MAX_ZOOM_STEP` bounds one wheel/key zoom step (D5).
+use crate::gui::{PhysicalFrame, PickerFrame, MAX_ZOOM_STEP};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyCode {
@@ -169,7 +168,16 @@ fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-#[cfg(test)]
+/// Apply the module UI's per-frame input report (module-ui-labels D7/D8). The
+/// window paint routine (`gui::paint_panes`) produces the report and calls this
+/// from the frame it just drew; the keyboard/pointer tests drive the same
+/// function, so the production path and the tests share one applier.
+///
+/// D7 wheel disambiguation, decided where the pointer hit the spec (the frame
+/// carries the answer): a wheel over an adjustable element arrives as
+/// `value_adjust` and changes only that value; a wheel off it arrives as
+/// `zoom` and scales about the cursor. Manual pan and zoom latch the view
+/// (D4), and no gesture touches the selection or the pane focus.
 pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::App) {
     if frame.skeleton_toggle {
         app.physical_show_skeleton = !app.physical_show_skeleton;
@@ -179,27 +187,31 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
             String::from("Skeleton: off")
         };
     }
+    // A wheel over an adjustable element is a value adjust, never a camera
+    // gesture: no zoom and no pan may ride along with it.
+    if let Some((index, delta)) = frame.value_adjust {
+        if !app.processing_paused {
+            if let Some(comp) = app
+                .patch
+                .as_mut()
+                .and_then(|patch| patch.hw_components.get_mut(index))
+            {
+                adjust_value(comp, delta);
+            }
+        }
+    }
     if frame.pan_delta != (0.0, 0.0) {
-        app.physical_offset.0 += frame.pan_delta.0;
-        app.physical_offset.1 += frame.pan_delta.1;
-        app.note_physical_navigation();
+        // `physical_pan_by` also sets the manual-navigation latch (D4).
+        app.physical_pan_by(frame.pan_delta.0, frame.pan_delta.1);
     }
     if let Some((factor, anchor)) = frame.zoom {
-        let clamped = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
-        if let Some(cam) = app.graph_camera.as_mut() {
-            let next = camera_zoom_about(cam, clamped, anchor);
-            *cam = next;
-        } else {
-            app.physical_zoom = (app.physical_zoom * clamped).clamp(
-                crate::physical::ZOOM_MIN as f32,
-                crate::physical::ZOOM_MAX as f32,
-            );
-            app.scale_factor = app.physical_zoom;
-            app.note_physical_navigation();
-        }
-        let _ = ZOOM_SENSITIVITY;
+        // Cursor-anchored zoom with the graph canvas's sensitivity, clamped to
+        // the supported range; latches the view like every manual zoom. The
+        // input layer already clamps its wheel factor, but the applier bounds
+        // every caller so no step can exceed the graph canvas's step.
+        let factor = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
+        app.physical_zoom_about(factor, anchor);
     }
-    let _ = WindowEvent::RedrawRequested;
 }
 
 #[cfg(test)]
