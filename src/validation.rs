@@ -394,6 +394,76 @@ fn parse_jack_for_validate(token: &str) -> Option<(String, u32, Option<u32>)> {
 }
 
 // ---------------------------------------------------------------------------
+// Documented alternatives
+// ---------------------------------------------------------------------------
+
+/// One row of the documented-alternatives table: an `essential == 2` parameter
+/// that the DROID manual documents as one of several alternative inputs.
+struct AlternativeInputs {
+    circuit: &'static str,
+    required: &'static str,
+    alternatives: &'static [&'static str],
+}
+
+/// Inputs the manual documents as alternatives, keyed by the `essential == 2`
+/// param they satisfy.
+///
+/// The schema is the authority for *what exists*, but `essential` in
+/// `circuits.json` is a one-dimensional flag and cannot express "A or B".
+/// Neither does upstream `droid-lsp`: `circuits.json` carries only `essential`
+/// and `essential_count`, and `diagnostics.ts` implements exactly the same
+/// `essential === 2 && !(prefix && count)` policy. The manual does state the
+/// alternatives, in prose, so each row below cites it. Nothing is inferred from
+/// a param's name, type, or default: 43 of the 72 singular `essential == 2`
+/// inputs declare a default (including `[compare] input`), so "has a default"
+/// would silence genuinely required params.
+///
+/// Same shape as the `JACK_TABLE` precedent in `src/schema.rs`: a plain static
+/// slice of rules, scanned linearly.
+static ALTERNATIVE_INPUTS: &[AlternativeInputs] = &[
+    AlternativeInputs {
+        circuit: "lfo",
+        required: "hz",
+        // Manual: "you cannot use hz at that same time as taptempo"; both
+        // combine with `rate`, and `hz` additionally defaults to 1.
+        alternatives: &["taptempo", "rate"],
+    },
+    AlternativeInputs {
+        circuit: "gatetool",
+        required: "inputgate",
+        // Manual: "gatetool has three different types of inputs. Usually you
+        // would patch only one of these" — inputgate, inputtrigger, inputedge.
+        alternatives: &["inputtrigger", "inputedge"],
+    },
+    AlternativeInputs {
+        circuit: "contour",
+        required: "gate",
+        // Manual: "two alternative inputs: gate and trigger" for starting the
+        // envelope.
+        alternatives: &["trigger"],
+    },
+    AlternativeInputs {
+        circuit: "compare",
+        required: "ifequal",
+        // Manual: "It is allowed to omit any of the inputs ifless, ifequal,
+        // ifgreater or else."
+        alternatives: &["ifgreater", "ifless", "else"],
+    },
+];
+
+/// Is `required` satisfied by a documented alternative in this section?
+///
+/// `seen` holds only the keys written in the current section, so this is a
+/// same-section check by construction — the whole patch is never consulted.
+/// Returns `false` when the table has no row for `(circuit, required)`.
+fn satisfied_by_alternative(circuit: &str, required: &str, seen: &HashMap<String, usize>) -> bool {
+    ALTERNATIVE_INPUTS
+        .iter()
+        .find(|row| row.circuit == circuit && row.required == required)
+        .is_some_and(|row| row.alternatives.iter().any(|alt| seen.contains_key(*alt)))
+}
+
+// ---------------------------------------------------------------------------
 // Main validator
 // ---------------------------------------------------------------------------
 
@@ -587,6 +657,14 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
                         );
                         for name in expanded {
                             if !seen.contains_key(&name) {
+                                // A documented alternative present in this same
+                                // section satisfies the param (see
+                                // ALTERNATIVE_INPUTS). A different required
+                                // param of the circuit is not excused: the table
+                                // is keyed by the exact param name.
+                                if satisfied_by_alternative(&lower, &name, &seen) {
+                                    continue;
+                                }
                                 issues.push(ValidationIssue {
                                     span: section.header_span,
                                     severity: Severity::Warning,

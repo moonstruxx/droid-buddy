@@ -94,5 +94,9 @@ verbatim and compares verbatim, and all six sections also produce no
 - `[compare]` with `ifgreater` but no `input` → still reports `input`.
 - Table sanity: every old/new name resolves to a declared param of that circuit,
   and no row creates a mutual-exclusion cycle.
-- Corpus regression on `patches_remote/_droid_mpfs5drum.ini`: `missing_required`
-  drops from 14 to 0 while total findings stay at 14 (all 14 were this code).
+- Corpus regression on a self-contained fixture: `fixtures/validation/essential_alternatives.ini`
+  carries one section per row plus a control section that sets none of the
+  alternatives — the first four must produce no `missing_required`, the control
+  exactly one. The 14 → 0 measurement on `patches_remote/_droid_mpfs5drum.ini`
+  stays evidence in `proposal.md` and is not a test dependency: that path is a
+  symlink into a working tree outside the repo, so CI cannot rely on it.
