@@ -182,6 +182,7 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
     if frame.pan_delta != (0.0, 0.0) {
         app.physical_offset.0 += frame.pan_delta.0;
         app.physical_offset.1 += frame.pan_delta.1;
+        app.note_physical_navigation();
     }
     if let Some((factor, anchor)) = frame.zoom {
         let clamped = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
@@ -194,6 +195,7 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
                 crate::physical::ZOOM_MAX as f32,
             );
             app.scale_factor = app.physical_zoom;
+            app.note_physical_navigation();
         }
         let _ = ZOOM_SENSITIVITY;
     }
@@ -351,6 +353,8 @@ fn cycle_panel_scale(app: &mut App, plus: bool) {
     // every frame; sync it here so the status hint below shows the
     // new zoom immediately instead of lagging one frame.
     app.physical_zoom = next;
+    // D4: a manual zoom latches the module UI against automatic fits.
+    app.note_physical_navigation();
     app.status_message = app
         .physical_status_hint()
         .unwrap_or_else(|| format!("Scaling: {}%", (next * 100.0) as u32));
@@ -1617,6 +1621,17 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             } else {
                 adjust_big_boundary(app, delta)
             };
+            false
+        }
+        KeyCode::Char('f') if physical_slot_focused(app) => {
+            // module-ui-labels D6: fit and centre the module UI and clear the
+            // manual-navigation latch. Free here because the graph's `f` is
+            // graph-scoped and returns in the arm above.
+            if let Some((w, h)) = app.physical_pane_size {
+                if app.fit_physical_view(w, h) {
+                    app.status_message = app.physical_status_hint().unwrap_or_default();
+                }
+            }
             false
         }
         KeyCode::Char('+') | KeyCode::Char('-') => {
@@ -2905,6 +2920,9 @@ mod tests {
         let mut app = App::new();
         app.patch = Some(patch);
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
+        // A roomy pane so the live rack fits and the wheel can adjust rather
+        // than pan (overflow is judged from the live extent, D5).
+        app.physical_viewport = Some(Rect::new(0, 3, 1000, 600));
 
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
@@ -2923,7 +2941,6 @@ mod tests {
     /// viewport on both axes (4.3 pan tests).
     fn app_with_overflowing_rack() -> App {
         let mut app = app_with_fixture();
-        app.physical_rack_size = (200, 100);
         app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
         app
     }
@@ -2953,8 +2970,7 @@ mod tests {
     #[test]
     fn arrow_keys_preserve_navigation_when_rack_fits() {
         let mut app = app_with_fixture();
-        app.physical_rack_size = (40, 10);
-        app.physical_viewport = Some(Rect::new(0, 3, 80, 24));
+        app.physical_viewport = Some(Rect::new(0, 3, 1000, 600));
         // Rack fits the viewport: Down/Up navigate, Left/Right stay no-ops.
         handle_event(key(KeyCode::Down), &mut app);
         assert_eq!(app.hovered_component, Some(1));
@@ -3011,8 +3027,10 @@ mod tests {
         handle_mouse_event(mouse(MouseEventKind::ScrollDown, 5, 1), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
 
-        // Rack fits: the wheel adjusts the hovered knob as before.
-        app.physical_rack_size = (40, 10);
+        // Rack fits a roomy pane: the wheel adjusts the hovered knob as before.
+        // The overflow judge uses the live rack extent, so the pane (not a
+        // stored rack size) decides.
+        app.physical_viewport = Some(Rect::new(0, 3, 800, 600));
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
             ComponentState::Value(v) => assert!((v - 0.05).abs() < 1e-6),
@@ -3449,6 +3467,34 @@ mod tests {
         high_down.scale_factor = 2.6;
         handle_event(key(KeyCode::Char('-')), &mut high_down);
         assert_eq!(high_down.physical_zoom, 2.0, "steps down to the top preset");
+    }
+
+    #[test]
+    fn f_refits_the_module_ui_and_clears_the_latch() {
+        let mut app = app_with_fixture();
+        app.note_physical_pane_size(640.0, 520.0);
+        app.apply_physical_fit_triggers();
+        let fitted = app.physical_zoom;
+        assert!(app.physical_fit_zoom.is_some(), "the view opened fitted");
+
+        // A manual zoom latches the view.
+        handle_event(key(KeyCode::Char('+')), &mut app);
+        assert!(app.physical_nav_latched);
+        assert_ne!(app.physical_zoom, fitted);
+
+        // `f` on the focused module UI pane returns to the fit.
+        handle_event(key(KeyCode::Char('f')), &mut app);
+        assert!(!app.physical_nav_latched, "fit clears the latch");
+        assert!(
+            (app.physical_zoom - fitted).abs() < 1e-6,
+            "f refits: {fitted} -> {}",
+            app.physical_zoom
+        );
+        assert!(
+            app.status_message.contains("fit"),
+            "status names the fitting zoom: {}",
+            app.status_message
+        );
     }
 
     // Task 2.3: graph camera persistent state + wheel/arrow zoom-pan.

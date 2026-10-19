@@ -39,20 +39,13 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // build so latency coloring and the optimizer stay coherent.
     app.cost_model = CostModel::from_config(settings);
 
-    // [physical] view defaults (design D12): zoom seeds both the UI scale
-    // factor and the linked physical zoom (the `+`/`-` presets set both),
-    // offset seeds the pan origin, show_skeleton seeds the presentation
-    // mode, and rack seeds the case the physical view packs into. Absent
-    // `[physical]` defaults mirror App::new, so out-of-box behavior is
-    // unchanged.
-    app.scale_factor = settings.physical.zoom as f32;
-    app.physical_zoom = settings.physical.zoom as f32;
-    app.physical_offset = (
-        settings.physical.offset_x as f32,
-        settings.physical.offset_y as f32,
-    );
-    app.physical_show_skeleton = settings.physical.show_skeleton;
-    app.physical_rack_spec = settings.physical.rack.clone();
+    // [physical] view defaults (design D12/D13): offset seeds the pan origin,
+    // show_skeleton seeds the presentation mode, and rack seeds the case the
+    // physical view packs into. Absent `[physical]` defaults mirror App::new,
+    // so out-of-box behavior is unchanged. The zoom seeds only when the stored
+    // value was written against the current true-1:1 baseline (D13): a legacy
+    // value is ignored once and the view opens fitted.
+    app.seed_physical_view(&settings.physical);
 
     // [layout] mode/ordering: seed the graph-arrangement preference
     // (graph-column-layout D5); matching App::new's defaults.

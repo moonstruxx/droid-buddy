@@ -976,6 +976,19 @@ pub struct App {
     /// reset on patch load like `physical_show_skeleton`.
     pub physical_offset: (f32, f32),
     pub physical_zoom: f32,
+    /// Last fitted zoom (module-ui-labels D4/D12), `None` until a fit runs and
+    /// after any manual navigation. The status hint appends its `fit` segment
+    /// only while the live zoom still equals it.
+    pub physical_fit_zoom: Option<f32>,
+    /// Manual-navigation latch (D4): set by any manual zoom or pan, cleared by
+    /// the fit key. While set, the automatic fit triggers stay suppressed.
+    pub physical_nav_latched: bool,
+    /// Pending automatic fit request (view open, patch load, rack change). The
+    /// pane dispatch consumes it once the pane size is known.
+    pub physical_fit_pending: bool,
+    /// The module-UI pane size in points as last drawn (D4's resize trigger and
+    /// the `f` key's fit target). Published by the pane dispatch.
+    pub physical_pane_size: Option<(f32, f32)>,
     /// The case/rack definition the physical view packs into (design D12).
     /// Seeded from `[physical.rack]` at startup (main.rs); empty rows mean
     /// "no rack configured" and `RackLayout::pack` materializes the default
@@ -1190,6 +1203,10 @@ impl App {
             physical_full_rects: Vec::new(),
             physical_offset: (0.0, 0.0),
             physical_zoom: 1.0,
+            physical_fit_zoom: None,
+            physical_nav_latched: false,
+            physical_fit_pending: true,
+            physical_pane_size: None,
             physical_rack_spec: crate::physical::RackSpec::default(),
             graph_window_request: GraphWindowRequest::default(),
             physical_rack_size: (0, 0),
@@ -1996,6 +2013,12 @@ impl App {
             self.set_focus(id);
             return;
         }
+        // module-ui-labels D4: opening the module UI fits it once the dispatch
+        // publishes the pane size; a fresh open clears a previous latch.
+        if view == ViewType::Physical {
+            self.physical_fit_pending = true;
+            self.physical_nav_latched = false;
+        }
         self.place_view(view);
         if view == ViewType::Graph {
             self.recompute_influence();
@@ -2490,22 +2513,112 @@ impl App {
     /// count with the `e` hint in the status bar, and `true` is returned.
     /// Return value is `#[must_use]`-free so existing call sites that
     /// ignore it keep compiling.
-    /// True when the rack overflows `area` on each axis (design D5): the
-    /// wheel then pans instead of adjusting knob/fader values. Uses the rack
-    /// screen size the skeleton renderer published last frame.
+    /// True when the rack overflows `area` on each axis (design D5). Uses the
+    /// rack's live extent at the current zoom (module-ui-labels D3/D5), never a
+    /// stored screen size, so the answer always matches what the mapping draws.
     pub fn physical_overflow(&self, area: Rect) -> (bool, bool) {
-        (
-            self.physical_rack_size.0 > area.width,
-            self.physical_rack_size.1 > area.height,
-        )
+        let Some(rack) = self.physical_rack_for_fit() else {
+            return (false, false);
+        };
+        let (w, h) = crate::physical::rack_extent_points(&rack, self.physical_zoom as f64);
+        (w > area.width as f32, h > area.height as f32)
     }
 
-    /// Pan the physical view by `(dx, dy)` screen cells (design D5). A pure
-    /// offset mutation — callers decide when overflow makes panning
-    /// appropriate (4.3's wheel wiring).
+    /// The rack the physical view packs into: the configured `[physical.rack]`
+    /// when present, else the chain's default case. `None` without a patch.
+    /// Built from the same chain/rack source the painter uses.
+    fn physical_rack_for_fit(&self) -> Option<crate::physical::RackLayout> {
+        let patch = self.patch.as_ref()?;
+        let chain = crate::physical::PhysicalLayout::build(patch);
+        let spec = if self.physical_rack_spec.rows.is_empty() {
+            crate::physical::RackSpec::default_case(&chain)
+        } else {
+            self.physical_rack_spec.clone()
+        };
+        Some(crate::physical::RackLayout::pack(&chain, &spec))
+    }
+
+    /// Fit and centre the module UI in a `pane_w` × `pane_h` point pane
+    /// (module-ui-labels D3/D4): computes the fit zoom from the rack's real
+    /// millimetre extent, centres it, and clears the manual-navigation latch.
+    /// Returns whether a rack existed to fit.
+    pub fn fit_physical_view(&mut self, pane_w: f32, pane_h: f32) -> bool {
+        let Some(rack) = self.physical_rack_for_fit() else {
+            return false;
+        };
+        if pane_w <= 0.0
+            || pane_h <= 0.0
+            || rack.total_width_mm <= 0.0
+            || rack.total_height_mm <= 0.0
+        {
+            return false;
+        }
+        let zoom =
+            crate::physical::fit_zoom(rack.total_width_mm, rack.total_height_mm, pane_w, pane_h);
+        let (ox, oy) = crate::physical::fit_offset(
+            rack.total_width_mm,
+            rack.total_height_mm,
+            pane_w,
+            pane_h,
+            zoom,
+        );
+        self.physical_zoom = zoom as f32;
+        self.scale_factor = zoom as f32;
+        self.physical_offset = (ox, oy);
+        self.physical_fit_zoom = Some(zoom as f32);
+        self.physical_nav_latched = false;
+        self.physical_fit_pending = false;
+        true
+    }
+
+    /// Record that the user navigated the module UI manually (wheel zoom,
+    /// middle-drag pan, `+`/`-`): latch the view so automatic fit triggers no
+    /// longer discard the user's navigation (module-ui-labels D4).
+    pub fn note_physical_navigation(&mut self) {
+        self.physical_nav_latched = true;
+        self.physical_fit_zoom = None;
+    }
+
+    /// Publish the module-UI pane size from the pane dispatch and arm the fit
+    /// when it changed (D4's pane-resize trigger). Suppressed while the manual
+    /// latch is set.
+    pub fn note_physical_pane_size(&mut self, pane_w: f32, pane_h: f32) {
+        if pane_w <= 0.0 || pane_h <= 0.0 {
+            return;
+        }
+        let changed = self.physical_pane_size != Some((pane_w, pane_h));
+        self.physical_pane_size = Some((pane_w, pane_h));
+        if changed && !self.physical_nav_latched {
+            self.physical_fit_pending = true;
+        }
+    }
+
+    /// Apply a pending automatic fit (view open, patch load, rack change, pane
+    /// resize) once the pane size is known. A no-op after manual navigation
+    /// until the fit key clears the latch.
+    pub fn apply_physical_fit_triggers(&mut self) {
+        if self.physical_nav_latched {
+            self.physical_fit_pending = false;
+            return;
+        }
+        if !self.physical_fit_pending {
+            return;
+        }
+        let Some((w, h)) = self.physical_pane_size else {
+            return;
+        };
+        if !self.fit_physical_view(w, h) {
+            self.physical_fit_pending = false;
+        }
+    }
+
+    /// Pan the physical view by `(dx, dy)` points (design D5). A pure offset
+    /// mutation — callers decide when overflow makes panning appropriate — and
+    /// a manual pan latches the view against automatic fits (D4).
     pub fn physical_pan_by(&mut self, dx: f32, dy: f32) {
         self.physical_offset.0 += dx;
         self.physical_offset.1 += dy;
+        self.note_physical_navigation();
     }
 
     /// One step of physical-view panning in screen cells (4.3): arrow keys
@@ -2928,9 +3041,16 @@ impl App {
     /// does not exist then, so zoom/scale keep their legacy messages.
     pub fn physical_status_hint(&self) -> Option<String> {
         self.patch.as_ref()?;
+        // D12: the `fit` segment appears only while the live zoom is still the
+        // last fitted value (a manual zoom drops it).
+        let fit = match self.physical_fit_zoom {
+            Some(z) if (z - self.physical_zoom).abs() < 1e-4 => " fit",
+            _ => "",
+        };
         Some(format!(
-            "Physical {}% \u{B7} Pan {:.0}/{:.0} \u{B7} Skeleton: {}",
+            "Physical {}%{} \u{B7} Pan {:.0}/{:.0} \u{B7} Skeleton: {}",
             (self.physical_zoom * 100.0) as u32,
+            fit,
             self.physical_offset.0,
             self.physical_offset.1,
             if self.physical_show_skeleton {
@@ -3012,12 +3132,11 @@ impl App {
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
-            // D7: Fit-width seeding will be done by the renderer when it has
-            // the pane size (ADR 35 pattern, like graph_canvas_px).
-            // Reset zoom to 1.0 as a starting point; the renderer will
-            // compute and apply the fit-width zoom on the next frame.
-            self.physical_zoom = 1.0;
-            self.physical_viewport = None;
+            // module-ui-labels D4: a load is a fit trigger; the pane dispatch
+            // fits once it knows the pane size.
+            self.physical_fit_zoom = None;
+            self.physical_nav_latched = false;
+            self.physical_fit_pending = true;
             self.disabled_circuits.clear();
             self.editing = None;
             // A confirm modal snapshots the previous patch's byte count; drop it
@@ -3078,6 +3197,9 @@ impl App {
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
         self.physical_viewport = None;
+        self.physical_fit_zoom = None;
+        self.physical_nav_latched = false;
+        self.physical_fit_pending = true;
         self.disabled_circuits.clear();
         self.editing = None;
         self.current_patch_path = None;
@@ -3160,12 +3282,11 @@ impl App {
             self.physical_offset = (0.0, 0.0);
             self.physical_zoom = 1.0;
             self.physical_viewport = None;
-            // D7: Fit-width seeding will be done by the renderer when it has
-            // the pane size (ADR 35 pattern, like graph_canvas_px).
-            // Reset zoom to 1.0 as a starting point; the renderer will
-            // compute and apply the fit-width zoom on the next frame.
-            self.physical_zoom = 1.0;
-            self.physical_viewport = None;
+            // module-ui-labels D4: a load is a fit trigger; the pane dispatch
+            // fits once it knows the pane size.
+            self.physical_fit_zoom = None;
+            self.physical_nav_latched = false;
+            self.physical_fit_pending = true;
             self.disabled_circuits.clear();
             self.editing = None;
             // A confirm modal snapshots the previous patch's byte count; drop it
@@ -3224,6 +3345,9 @@ impl App {
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
         self.physical_viewport = None;
+        self.physical_fit_zoom = None;
+        self.physical_nav_latched = false;
+        self.physical_fit_pending = true;
         self.disabled_circuits.clear();
         self.editing = None;
         // A confirm modal snapshots the previous patch's byte count; drop it
@@ -5728,9 +5852,9 @@ mod tests {
         assert_eq!(app.physical_offset, (8.0, 0.0));
         assert!(app.physical_pan_if_overflow(0, 1));
         assert_eq!(app.physical_offset, (8.0, 8.0));
-        // Horizontal axis fits now: the horizontal pan is a no-op while the
-        // vertical one still overflows.
-        app.physical_rack_size = (40, 100);
+        // A roomy pane fits the rack horizontally: the horizontal pan is a
+        // no-op while the vertical one still overflows (live rack extent).
+        app.physical_viewport = Some(Rect::new(0, 3, 1000, 24));
         assert!(!app.physical_pan_if_overflow(1, 0));
         assert_eq!(app.physical_offset, (8.0, 8.0));
         assert!(app.physical_pan_if_overflow(0, 1));
@@ -8127,5 +8251,51 @@ mod tests {
         app.seed_physical_view(&current);
         assert_eq!(app.physical_zoom, 2.0, "a current baseline is honoured");
         assert_eq!(app.scale_factor, 2.0);
+    }
+
+    #[test]
+    fn physical_fit_runs_on_the_pane_and_reports_the_fit_segment() {
+        let mut app = App::new();
+        app.patch = Some(Patch::from_ini_str("[s10]\n[p10]\n", String::from("fit-rack")).unwrap());
+        app.note_physical_pane_size(640.0, 520.0);
+        app.apply_physical_fit_triggers();
+        let fitted = app.physical_zoom;
+        assert!(
+            (fitted - crate::physical::fit_zoom(92.94, 128.5, 640.0, 520.0) as f32).abs() < 1e-2,
+            "the fit uses the rack's real extent: {fitted}"
+        );
+        assert_eq!(app.physical_fit_zoom, Some(fitted));
+        let hint = app.physical_status_hint().expect("patch loaded");
+        assert!(hint.contains(" fit "), "fitting-zoom segment: {hint}");
+
+        // A resize refits while no manual navigation has latched the view.
+        app.note_physical_pane_size(320.0, 260.0);
+        app.apply_physical_fit_triggers();
+        assert!(app.physical_zoom < fitted, "a smaller pane fits smaller");
+    }
+
+    #[test]
+    fn physical_fit_latch_suppresses_the_resize_trigger() {
+        let mut app = App::new();
+        app.patch = Some(Patch::from_ini_str("[s10]\n[p10]\n", String::from("fit-rack")).unwrap());
+        app.note_physical_pane_size(640.0, 520.0);
+        app.apply_physical_fit_triggers();
+        assert!(app.physical_fit_zoom.is_some(), "a fit ran");
+
+        // A manual zoom latches the view and drops the fit segment.
+        app.note_physical_navigation();
+        app.physical_zoom = 2.0;
+        assert!(!app.physical_status_hint().expect("patch").contains(" fit "));
+
+        // A pane resize must leave the user's zoom alone.
+        app.note_physical_pane_size(500.0, 400.0);
+        app.apply_physical_fit_triggers();
+        assert_eq!(app.physical_zoom, 2.0, "resize discarded the manual zoom");
+        assert!(app.physical_nav_latched);
+
+        // The fit action clears the latch and returns to a fitted view.
+        assert!(app.fit_physical_view(500.0, 400.0));
+        assert!(!app.physical_nav_latched);
+        assert_eq!(app.physical_fit_zoom, Some(app.physical_zoom));
     }
 }

@@ -607,6 +607,11 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 // The spec is anchored at this pane's origin so the drawn rack
                 // and the published hit geometry follow the pane wherever the
                 // module UI is placed (not just BigLeft at 0,0).
+                // module-ui-labels D4: publish the live pane size and apply any
+                // pending fit before the spec is built, so the painted frame is
+                // already the fitted one.
+                app.note_physical_pane_size(rect.width(), rect.height());
+                app.apply_physical_fit_triggers();
                 let spec = physical::physical_spec(app, rect);
                 let _ = physical::paint_physical(ui, rect, spec.as_ref());
                 // Publish the drawn element cells as the app-level hit geometry
