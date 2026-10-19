@@ -1427,4 +1427,97 @@ mod tests {
         let body = toml::to_string(&Physical::default()).unwrap();
         assert!(!body.contains("zoom_baseline"), "body: {body}");
     }
+
+    // ---- module-ui-labels 2.1 (red): [physical] label presentation ----
+
+    #[test]
+    fn label_presentation_defaults_to_auto() {
+        // D10: an absent setting, the struct default, and the enum default all
+        // agree on `auto`.
+        assert_eq!(LabelPresentation::default(), LabelPresentation::Auto);
+        assert_eq!(Physical::default().labels, LabelPresentation::Auto);
+    }
+
+    #[test]
+    fn physical_labels_key_absent_defaults_to_auto() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical]\nzoom = 1.5\nshow_skeleton = true\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.physical.labels, LabelPresentation::Auto);
+        // The rest of the table still applies.
+        assert_eq!(loaded.physical.zoom, 1.5);
+        assert!(loaded.physical.show_skeleton);
+    }
+
+    #[test]
+    fn physical_labels_parses_the_three_modes() {
+        for (raw, expected) in [
+            ("off", LabelPresentation::Off),
+            ("auto", LabelPresentation::Auto),
+            ("on", LabelPresentation::On),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[physical]\nlabels = \"{raw}\"\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.physical.labels, expected,
+                "labels = \"{raw}\" should parse to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_labels_invalid_value_falls_back_to_auto() {
+        // The file's convention: an unknown enum value warns on stderr and
+        // falls back to the default (`auto`), keeping the rest of the file
+        // loadable.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical]\nlabels = \"sometimes\"\nzoom = 1.5\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.physical.labels, LabelPresentation::Auto);
+        assert_eq!(
+            loaded.physical.zoom, 1.5,
+            "the rest of the table still loads"
+        );
+    }
+
+    #[test]
+    fn physical_labels_round_trip_through_save() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let settings = Settings {
+            theme: "classic".to_string(),
+            labels: Labels::default(),
+            latency: Latency::default(),
+            physical: Physical {
+                labels: LabelPresentation::On,
+                ..Physical::default()
+            },
+            plugins: Plugins::default(),
+            layout: Layout::default(),
+        };
+        save_to_dir(&cfg_dir, &settings).unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("labels = \"on\""), "body: {body}");
+        assert_eq!(load_at(&dir).physical.labels, LabelPresentation::On);
+    }
 }

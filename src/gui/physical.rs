@@ -1514,6 +1514,7 @@ fn band_text(state: &str, width: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LabelPresentation;
     use crate::patch::{ComponentState, HwComponent};
     use crate::physical::{ChainGaps, PlacedModule, RackMounts, RackRowPlacement};
 
@@ -1794,6 +1795,7 @@ mod tests {
                 led_state: None,
                 led_rgb: None,
                 shape: None,
+                label_clipped: false,
             });
         }
         let modules = geom
@@ -1822,6 +1824,8 @@ mod tests {
             db8e_bands,
             grid_lines: mm_grid_lines(&m, rack.total_width_mm, rack.total_height_mm, 20.0),
             performance: None,
+            annotations: Vec::new(),
+            hover: None,
             skeleton,
             paused,
         }
@@ -2261,6 +2265,7 @@ mod tests {
             led_state: None,
             led_rgb: None,
             shape: None,
+            label_clipped: false,
         }
     }
 
@@ -2351,6 +2356,7 @@ mod tests {
             led_state: None,
             led_rgb: None,
             shape: None,
+            label_clipped: false,
         }
     }
 
@@ -3402,5 +3408,605 @@ mod tests {
         for c in dimmed_none {
             assert_eq!(c.shift_color, None, "unaddressed cell never tints");
         }
+    }
+
+    // -- module-ui-labels 2.1 (red): label legibility -----------------------
+
+    /// A patch loaded from `path` with `(token, label)` preamble labels
+    /// attached, so the display-label chain (store -> layer 1 -> preamble ->
+    /// derived) resolves exactly the strings these tests budget against
+    /// without needing a dedicated fixture.
+    fn app_with_labels(path: &str, labels: &[(&str, &str)]) -> App {
+        let mut patch = crate::patch::Patch::from_ini_file(std::path::Path::new(path)).unwrap();
+        for (token, label) in labels {
+            patch
+                .preamble_labels
+                .insert((*token).to_string(), (*label).to_string());
+        }
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        app
+    }
+
+    /// The global `patch.hw_components` index of `token`.
+    fn hw_index(app: &App, token: &str) -> usize {
+        app.patch
+            .as_ref()
+            .expect("patch")
+            .hw_components
+            .iter()
+            .position(|c| c.id == token)
+            .unwrap_or_else(|| panic!("token {token} exists"))
+    }
+
+    /// The drawn `CellSpec` for `token`, matched through the patch's global hw
+    /// index (the same index the hit rects carry).
+    fn cell_for_token<'a>(app: &App, spec: &'a PhysicalSpec, token: &str) -> &'a CellSpec {
+        let idx = hw_index(app, token);
+        spec.cells
+            .iter()
+            .find(|c| c.component_index == Some(idx))
+            .unwrap_or_else(|| panic!("cell for {token}"))
+    }
+
+    /// module-ui-labels D9, the compact path: `label_is_clipped` is the same
+    /// budget `paint_cell` uses (state glyph + separator space + the label
+    /// ellipsized into the fixed `CELL_LABEL_SIZE` font).
+    #[test]
+    fn label_is_clipped_matches_the_compact_cell_budget() {
+        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
+        // 30 pt of room: budget 5 characters, minus the 1-char glyph and its
+        // separating space, so three label characters fit exactly.
+        let roomy = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(char_w * 5.0, 24.0));
+        assert!(
+            !label_is_clipped(&cell_spec(roomy, "abc")),
+            "three characters fit the compact budget"
+        );
+        assert!(
+            label_is_clipped(&cell_spec(roomy, "abcdef")),
+            "a label longer than the budget is clipped"
+        );
+        // Narrower than one character of the label font: the label is dropped
+        // entirely, which is still a clipped label.
+        let narrow = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(char_w * 0.9, 24.0));
+        assert!(
+            label_is_clipped(&cell_spec(narrow, "a")),
+            "a cell narrower than one character drops its label"
+        );
+        // An unlabelled cell (unaddressed geometry) is never 'clipped'.
+        assert!(
+            !label_is_clipped(&cell_spec(roomy, "")),
+            "an empty label is never clipped"
+        );
+    }
+
+    /// module-ui-labels D9, the composed button-face path: the label renders
+    /// only when `h - label_line >= 0.5 * w`, and then shares the same
+    /// character budget as the compact path.
+    #[test]
+    fn label_is_clipped_matches_the_composed_face_budget() {
+        // A 9 mm P2B8/P4B2 button at 1:1 is 34 pt square: 5 characters.
+        let square = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(34.0, 34.0));
+        let mut fit = cell_spec(square, "Go");
+        fit.shape = Some(CellShape::Round);
+        assert!(
+            !label_is_clipped(&fit),
+            "a two-character label fits the button face"
+        );
+        let mut long = fit.clone();
+        long.label = "Trigger input".to_string();
+        assert!(
+            label_is_clipped(&long),
+            "a thirteen-character label is clipped to five"
+        );
+        // The rect face (M4 touch plate, 12 x 18 mm) shares the budget.
+        let mut plate = long.clone();
+        plate.shape = Some(CellShape::Rect);
+        plate.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(45.0, 68.0));
+        assert!(
+            label_is_clipped(&plate),
+            "the M4 plate clips the same label"
+        );
+        // Shorter than the face test: the label row is dropped outright.
+        let mut squat = fit.clone();
+        squat.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(34.0, 17.0));
+        assert!(
+            label_is_clipped(&squat),
+            "a face with no label row hides its label"
+        );
+        assert!(
+            !label_is_clipped(&cell_spec(square, "")),
+            "an unlabelled composed cell is never clipped"
+        );
+    }
+
+    /// module-ui-labels D9, the fader path: the label lives in the column right
+    /// of the 2-10 pt track and is dropped when that column is under 6 pt.
+    #[test]
+    fn label_is_clipped_matches_the_fader_budget() {
+        // A P8S8 fader is 4.2 mm (16 pt at 1:1): the track leaves under 6 pt of
+        // text column, so the label is dropped at every zoom.
+        let mut narrow = fader_spec(0.5);
+        narrow.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(16.0, 83.0));
+        narrow.label = "Level".to_string();
+        assert!(
+            label_is_clipped(&narrow),
+            "no text column: the fader drops its label"
+        );
+        // A wide, tall fader (M4 motor fader at high zoom) gets 3 characters.
+        let mut wide = narrow.clone();
+        wide.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(64.0, 234.0));
+        wide.label = "F".to_string();
+        assert!(!label_is_clipped(&wide), "a one-character label fits");
+        wide.label = "Level".to_string();
+        assert!(
+            label_is_clipped(&wide),
+            "a five-character label is clipped to three"
+        );
+        let mut unlabelled = wide.clone();
+        unlabelled.label = String::new();
+        assert!(
+            !label_is_clipped(&unlabelled),
+            "an unlabelled fader is never clipped"
+        );
+    }
+
+    /// module-ui-labels D9 through the real spec: a P2B8 composed face at 1:1
+    /// keeps a 5-character label row, so a short label is not clipped while a
+    /// long one is.
+    #[test]
+    fn physical_spec_marks_a_clipped_composed_label_per_cell() {
+        let app = app_with_labels(
+            "fixtures/own_buttons.ini",
+            &[("B1.1", "Go"), ("B1.2", "Trigger input")],
+        );
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let fits = cell_for_token(&app, &spec, "B1.1");
+        assert_eq!(fits.label, "Go");
+        assert!(
+            !fits.label_clipped,
+            "a short label fits the composed face: {fits:?}"
+        );
+        let clipped = cell_for_token(&app, &spec, "B1.2");
+        assert_eq!(clipped.label, "Trigger input");
+        assert!(
+            clipped.label_clipped,
+            "a long label is clipped by the face budget: {clipped:?}"
+        );
+    }
+
+    /// module-ui-labels D9 through the real spec: a DB8E button keeps the
+    /// glyph path (no composed face), which spends one character on the glyph
+    /// plus its separator before the label budget.
+    #[test]
+    fn physical_spec_marks_a_clipped_compact_label_per_cell() {
+        let app = app_with_labels(
+            "fixtures/faceplate_rotary_stack.ini",
+            &[("B6.1", "Go"), ("B6.2", "Trigger input")],
+        );
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let fits = cell_for_token(&app, &spec, "B6.1");
+        assert_eq!(fits.label, "Go");
+        assert!(
+            fits.shape.is_none(),
+            "the DB8E button keeps the glyph path: {fits:?}"
+        );
+        assert!(
+            !fits.label_clipped,
+            "a short label fits the glyph row: {fits:?}"
+        );
+        let clipped = cell_for_token(&app, &spec, "B6.2");
+        assert_eq!(clipped.label, "Trigger input");
+        assert!(
+            clipped.label_clipped,
+            "a long label is clipped by the glyph-row budget: {clipped:?}"
+        );
+    }
+
+    /// Run the real pane dispatch once over an 800 x 600 band, so
+    /// `app.component_rects` is published exactly as at runtime (the same
+    /// entry point the window loop uses).
+    fn run_paint_panes(app: &mut App) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        let win = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            super::super::paint_panes(app, ui, None, &[]);
+        });
+        out.textures_delta.clear();
+        out
+    }
+
+    /// The module UI pane rect the last paint published, as an egui rect.
+    fn published_physical_pane(app: &App) -> Rect {
+        let (_, cell) = app
+            .pane_hit_rects
+            .iter()
+            .find(|(id, _)| *id == crate::panes::PaneId::BigLeft)
+            .expect("the module UI pane is published");
+        Rect::from_min_size(
+            Pos2::new(cell.x as f32, cell.y as f32),
+            Vec2::new(cell.width as f32, cell.height as f32),
+        )
+    }
+
+    /// module-ui-labels D10/`auto`: exactly the clipped addressed elements are
+    /// annotated, each as a 14 pt monospace callout outside the rack with one
+    /// leader line, and a label the cell already shows is never duplicated.
+    #[test]
+    fn auto_annotates_exactly_the_clipped_addressed_elements() {
+        let labels = &[("B1.1", "Go"), ("B1.2", "Trigger input")];
+        let mut off = app_with_labels("fixtures/own_buttons.ini", labels);
+        off.label_presentation = LabelPresentation::Off;
+        let off_spec = physical_spec(&off, perf_pane()).expect("spec");
+
+        let mut auto = app_with_labels("fixtures/own_buttons.ini", labels);
+        auto.label_presentation = LabelPresentation::Auto;
+        let spec = physical_spec(&auto, perf_pane()).expect("spec");
+        let annotated: Vec<&str> = spec.annotations.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(
+            annotated,
+            vec!["Trigger input"],
+            "only the clipped label is annotated; a fitting label never is"
+        );
+        for c in &spec.annotations {
+            assert!(
+                rects_disjoint(&c.label_rect, &spec.case_rect),
+                "annotation '{}' enters the rack: {:?}",
+                c.label,
+                c.label_rect
+            );
+        }
+        // Drawn at the performance view's callout size, with one leader line.
+        let texts = painted_texts(&spec);
+        assert!(
+            texts.iter().any(|(t, font, _)| t == "Trigger input"
+                && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)),
+            "the annotation headline paints big: {texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|(t, font, _)| t == "Go"
+                    && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)),
+            "a fitting in-cell label is never duplicated as a callout: {texts:?}"
+        );
+        assert_eq!(
+            painted_line_count(&spec),
+            painted_line_count(&off_spec) + spec.annotations.len(),
+            "one leader line per annotation"
+        );
+    }
+
+    /// module-ui-labels D10: `off` keeps the cells alone (no annotation at
+    /// all), and `on` annotates every addressed element that carries a label
+    /// with no dropping.
+    #[test]
+    fn label_presentation_off_annotates_nothing_and_on_annotates_every_labelled_element() {
+        let labels = &[("B1.1", "Go"), ("B1.2", "Trigger input")];
+
+        let mut off = app_with_labels("fixtures/own_buttons.ini", labels);
+        off.label_presentation = LabelPresentation::Off;
+        let off_spec = physical_spec(&off, perf_pane()).expect("spec");
+        assert!(
+            off_spec.annotations.is_empty(),
+            "off draws no annotation: {:?}",
+            off_spec.annotations
+        );
+        let off_texts = painted_texts(&off_spec);
+        assert!(
+            !off_texts
+                .iter()
+                .any(|(_, font, _)| font.family == egui::FontFamily::Monospace
+                    && font.size == CALLOUT_LABEL_SIZE),
+            "no callout-sized text in off: {off_texts:?}"
+        );
+
+        let mut on = app_with_labels("fixtures/own_buttons.ini", labels);
+        on.label_presentation = LabelPresentation::On;
+        let on_spec = physical_spec(&on, perf_pane()).expect("spec");
+        let labelled: Vec<&CellSpec> = on_spec
+            .cells
+            .iter()
+            .filter(|c| c.component_index.is_some() && !c.label.is_empty())
+            .collect();
+        assert!(
+            labelled.len() >= 8,
+            "the fixture addresses eight labelled buttons: {}",
+            labelled.len()
+        );
+        assert_eq!(
+            on_spec.annotations.len(),
+            labelled.len(),
+            "on annotates every labelled addressed element and drops none"
+        );
+        for cell in labelled {
+            assert!(
+                on_spec.annotations.iter().any(|a| a.label == cell.label),
+                "annotated '{}'",
+                cell.label
+            );
+        }
+    }
+
+    /// module-ui-labels D10: an element the controller declares but the patch
+    /// does not address carries no label, so no mode can annotate it — even
+    /// when a preamble label exists for the token.
+    #[test]
+    fn auto_never_annotates_an_unaddressed_element() {
+        // Fixture gap: `fixtures/unreferenced_elements.ini` is a partial B32 too,
+        // but it also carries a bare `[e4]` whose 7 mm encoder, 3 mm button and
+        // 1.8 mm ring cells all clip at 1:1, so it cannot isolate "only the
+        // addressed button is annotated". This inline patch is the same partial
+        // B32 another test in this module uses (`[notebuttons]`, 2 of 32).
+        let ini = "[notebuttons]\n    button1 = B2.1\n    button2 = B2.2\n    led1 = L2.1\n    led2 = L2.2\n";
+        let mut patch =
+            crate::patch::Patch::from_ini_str(ini, "inline-notebuttons".to_string()).unwrap();
+        // A label long enough to clip if it were ever addressable, plus a long
+        // label on an addressed button so the annotation set is not empty.
+        patch
+            .preamble_labels
+            .insert("B2.5".to_string(), "Unaddressed long label".to_string());
+        patch
+            .preamble_labels
+            .insert("B2.1".to_string(), "Start sequencer".to_string());
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        app.label_presentation = LabelPresentation::Auto;
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        assert!(
+            spec.cells
+                .iter()
+                .any(|c| c.component_index.is_none() && c.dimmed),
+            "the partial B32 leaves dimmed unaddressed cells"
+        );
+        let annotated: Vec<&str> = spec.annotations.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(
+            annotated,
+            vec!["Start sequencer"],
+            "only the addressed button's clipped label is annotated"
+        );
+        for a in &spec.annotations {
+            assert_ne!(
+                a.label, "Unaddressed long label",
+                "an unaddressed element is never annotated"
+            );
+            assert!(
+                spec.cells
+                    .iter()
+                    .any(|c| c.component_index.is_some() && c.rect.contains(a.anchor)),
+                "annotation '{}' is anchored on an addressed cell: {:?}",
+                a.label,
+                a.anchor
+            );
+        }
+    }
+
+    /// module-ui-labels D10, the 30 % band budget and the fixed drop order:
+    /// LEDs and jacks drop first, then buttons, switches, pots, and faders
+    /// last, and a protected (focused / selected-circuit emphasis) candidate
+    /// is never dropped.
+    #[test]
+    fn annotation_budget_drops_in_family_order_and_keeps_protected_cells() {
+        let pane = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 300.0));
+        let rack = Rect::from_min_size(Pos2::new(150.0, 120.0), Vec2::new(100.0, 50.0));
+        // Every host sits above the rack centre, so all seven candidates bind
+        // to the Over side; each six-character headline is wider than half the
+        // rack, so each gets its own band (`depth = 4 + k * 25.5 + (k-1) * 2`
+        // for k bands with an empty state row).
+        let candidate =
+            |kind: ComponentKind, is_fader: bool, label: &str, x: f32, highlighted: bool| {
+                let mut cell = cell_spec(
+                    Rect::from_min_size(Pos2::new(x, 20.0), Vec2::new(20.0, 9.0)),
+                    label,
+                );
+                cell.kind = kind;
+                cell.is_fader = is_fader;
+                cell.highlighted = highlighted;
+                cell.state_text = String::new();
+                cell
+            };
+        let led = candidate(ComponentKind::Led, false, "LedTop", 150.0, false);
+        let jack = candidate(ComponentKind::CvIn, false, "JackCV", 160.0, false);
+        let button = candidate(ComponentKind::Button, false, "Button", 170.0, false);
+        let switch = candidate(ComponentKind::Switch, false, "Switch", 180.0, false);
+        let pot = candidate(ComponentKind::Knob, false, "PotAAA", 190.0, false);
+        let fader = candidate(ComponentKind::Knob, true, "FaderX", 200.0, false);
+        let protected = candidate(ComponentKind::Led, false, "ProtLD", 210.0, true);
+        let cells: [&CellSpec; 7] = [&led, &jack, &button, &switch, &pot, &fader, &protected];
+
+        // Three bands fit in 300 pt (30 % = 90 pt; k = 3 is 84.5 pt, k = 4 is
+        // 112 pt), so four labels drop: both LEDs/jacks first, then the button
+        // and the switch. The protected LED and the fader stay.
+        let plan = budget_annotations(pane, rack, &cells);
+        assert_eq!(plan.dropped, 4, "four labels exceed the 30 % band budget");
+        let mut kept: Vec<&str> = plan.callouts.iter().map(|c| c.label.as_str()).collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            vec!["FaderX", "PotAAA", "ProtLD"],
+            "LEDs, jacks, buttons and switches drop before pots and faders"
+        );
+        assert!(
+            plan.callouts
+                .iter()
+                .any(|c| c.label == "ProtLD" && c.highlighted),
+            "the protected element keeps its callout"
+        );
+        for c in &plan.callouts {
+            assert!(
+                rects_disjoint(&c.label_rect, &rack),
+                "kept annotation '{}' enters the rack: {:?}",
+                c.label,
+                c.label_rect
+            );
+        }
+
+        // A pane tall enough for every band drops nothing.
+        let tall = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 800.0));
+        let plan = budget_annotations(tall, rack, &cells);
+        assert_eq!(plan.dropped, 0, "a tall pane drops nothing");
+        assert_eq!(plan.callouts.len(), 7, "every candidate is annotated");
+    }
+
+    /// module-ui-labels D10: annotations are decoration. Switching the label
+    /// presentation between `off`, `auto`, and `on` leaves the published
+    /// component hit rects, the drawn cells, and the skeleton rects identical.
+    #[test]
+    fn switching_label_presentation_leaves_hit_and_skeleton_rects_identical() {
+        type Geometry = (Rect, Vec<Rect>, Vec<Rect>);
+        let mut hits: Vec<Vec<(usize, crate::app::Rect)>> = Vec::new();
+        let mut full: Vec<Geometry> = Vec::new();
+        let mut skeleton: Vec<Geometry> = Vec::new();
+        for mode in [
+            LabelPresentation::Off,
+            LabelPresentation::Auto,
+            LabelPresentation::On,
+        ] {
+            let mut app = app_with_labels(
+                "fixtures/own_buttons.ini",
+                &[("B1.1", "Go"), ("B1.2", "Trigger input")],
+            );
+            app.label_presentation = mode;
+            let mut out = run_paint_panes(&mut app);
+            hits.push(app.component_rects.clone());
+            let pane = published_physical_pane(&app);
+            let geometry = |spec: &PhysicalSpec| -> Geometry {
+                (
+                    spec.case_rect,
+                    spec.modules.iter().map(|m| m.rect).collect(),
+                    spec.cells.iter().map(|c| c.rect).collect(),
+                )
+            };
+            app.physical_show_skeleton = false;
+            let full_spec = physical_spec(&app, pane).expect("full spec");
+            full.push(geometry(&full_spec));
+            app.physical_show_skeleton = true;
+            let skel_spec = physical_spec(&app, pane).expect("skeleton spec");
+            skeleton.push(geometry(&skel_spec));
+            out.textures_delta.clear();
+        }
+        assert!(
+            !hits[0].is_empty(),
+            "the module UI publishes component hit rects"
+        );
+        assert_eq!(hits[0], hits[1], "off and auto publish identical hit rects");
+        assert_eq!(hits[0], hits[2], "off and on publish identical hit rects");
+        assert_eq!(full[0], full[1], "off and auto draw identical cells");
+        assert_eq!(full[0], full[2], "off and on draw identical cells");
+        assert_eq!(
+            skeleton[0], skeleton[1],
+            "off and auto draw identical skeleton rects"
+        );
+        assert_eq!(
+            skeleton[0], skeleton[2],
+            "off and on draw identical skeleton rects"
+        );
+    }
+
+    /// module-ui-labels D11: hovering an addressed element reveals its full
+    /// label and state as a callout anchored to that cell, in every label
+    /// presentation and in both the full and skeleton presentations; with no
+    /// hovered element nothing is revealed.
+    #[test]
+    fn hover_reveal_shows_the_full_label_and_state_in_every_mode() {
+        for mode in [
+            LabelPresentation::Off,
+            LabelPresentation::Auto,
+            LabelPresentation::On,
+        ] {
+            for skeleton in [false, true] {
+                let mut app = app_with_labels(
+                    "fixtures/own_buttons.ini",
+                    &[("B1.1", "Gate trigger input")],
+                );
+                app.label_presentation = mode;
+                app.physical_show_skeleton = skeleton;
+
+                // No hover: no reveal.
+                app.hovered_component = None;
+                let spec = physical_spec(&app, perf_pane()).expect("spec");
+                assert!(
+                    spec.hover.is_none(),
+                    "no callout without a hovered element ({mode:?}, skeleton={skeleton})"
+                );
+
+                // Hover the clipped-label button: the full label plus state.
+                let hw = hw_index(&app, "B1.1");
+                app.hovered_component = Some(hw);
+                let spec = physical_spec(&app, perf_pane()).expect("spec");
+                let cell_rect = spec
+                    .cells
+                    .iter()
+                    .find(|c| c.component_index == Some(hw))
+                    .expect("hovered cell")
+                    .rect;
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("hover callout in {mode:?} with skeleton={skeleton}")
+                });
+                assert_eq!(
+                    hover.label, "Gate trigger input",
+                    "the full label, not the in-cell ellipsis"
+                );
+                assert!(
+                    !hover.state_text.is_empty(),
+                    "the callout carries the state row: {hover:?}"
+                );
+                assert!(
+                    rects_disjoint(&hover.label_rect, &cell_rect),
+                    "the callout never covers the cell it describes: {:?}",
+                    hover.label_rect
+                );
+                assert!(
+                    hover.anchor.x >= cell_rect.min.x - 1.0
+                        && hover.anchor.x <= cell_rect.max.x + 1.0
+                        && hover.anchor.y >= cell_rect.min.y - 1.0
+                        && hover.anchor.y <= cell_rect.max.y + 1.0,
+                    "the callout is anchored to the hovered cell edge: {:?}",
+                    hover.anchor
+                );
+                let texts = painted_texts(&spec);
+                assert!(
+                    texts.iter().any(|(t, font, _)| t == "Gate trigger input"
+                        && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)),
+                    "the reveal paints at {CALLOUT_LABEL_SIZE} pt: {texts:?}"
+                );
+            }
+        }
+    }
+
+    /// module-ui-labels D11: a hovered cell at the pane's right edge gets its
+    /// callout on the side that keeps it inside the pane.
+    #[test]
+    fn hover_callout_flips_side_to_stay_inside_the_pane() {
+        // A P2B8 rack is 25.4 mm (96 pt) wide; a pane that wide leaves the
+        // right button column (57-92 pt) no room to its right.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(96.0, 600.0));
+        let mut app = app_with_labels("fixtures/own_buttons.ini", &[("B1.2", "Trig")]);
+        app.label_presentation = LabelPresentation::Off;
+        let hw = hw_index(&app, "B1.2");
+        app.hovered_component = Some(hw);
+        let spec = physical_spec(&app, pane).expect("spec");
+        let cell_rect = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(hw))
+            .expect("hovered cell")
+            .rect;
+        let hover = spec.hover.as_ref().expect("hover callout");
+        assert!(
+            hover.label_rect.min.x >= pane.min.x - 1.0
+                && hover.label_rect.max.x <= pane.max.x + 1.0,
+            "the callout stays inside the pane: {:?}",
+            hover.label_rect
+        );
+        assert!(
+            hover.label_rect.max.x <= cell_rect.min.x + 1.0,
+            "the callout flips left of the cell: {:?} vs {cell_rect:?}",
+            hover.label_rect
+        );
     }
 }
