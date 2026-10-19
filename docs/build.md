@@ -103,8 +103,9 @@ cargo build --release --locked
 
 `--locked` turns a stale `Cargo.lock` into a failure instead of a silent
 re-resolve, so a dependency change has to be committed with its lock
-file. The short list in [Contributing](contributing.md) leaves it off
-`cargo test`; both forms pass locally, and CI uses the locked one.
+file. [Contributing](contributing.md) lists the same locked forms; the
+commands still pass locally without `--locked`, but then a stale
+lockfile would not fail.
 
 The release performance gate is a fifth command, Linux only:
 

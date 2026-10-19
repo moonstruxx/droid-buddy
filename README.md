@@ -17,6 +17,10 @@ started](docs/getting-started.md), [views](docs/views.md),
 [uploading](docs/uploading.md), [configuration](docs/config.md),
 [contributing](docs/contributing.md).
 
+Runs on Linux, Windows and macOS — [platform support](docs/platforms.md)
+for what works where, [building from source](docs/build.md) for
+prerequisites per OS and the release process.
+
 ## ⚠️ DISCLAIMER — READ THIS FIRST
 
 This software is **as-is, no responsibility whatever it causes you to do,
@@ -92,7 +96,7 @@ Curated from the capability specs under [`openspec/specs/`](openspec/specs/)
   ever read back; component state stays simulated.
 - **Configurable** ([config](docs/config.md)) — themes, label layers,
   latency costs, graph layout, rack geometry, plugin circuits
-  (`config.toml` under `$XDG_CONFIG_HOME/droid-tui/`).
+  (`config.toml` in the [platform data directory](docs/platforms.md#where-your-files-live)).
 
 ## What's next
 
@@ -116,18 +120,37 @@ Tell us what hurts:
 — one pain point per issue, with the patch (or a minimal version of it)
 attached when possible.
 
+## Install
+
+Windows and macOS have prebuilt builds on the [releases
+page](https://github.com/moonstruxx/droid-buddy/releases): a Windows
+x86_64 zip with `droid_tui.exe` at its root, and a universal macOS
+`.app` zip for Apple silicon and Intel. Unzip and run — there is no
+installer, no Start Menu entry and no uninstaller. Linux builds from
+source, below; no prebuilt Linux artifact is published.
+
+Both downloads are unsigned, so the first launch trips a one-time
+prompt — right-click **Open** on macOS, **More info → Run anyway** on
+Windows. [Platforms](docs/platforms.md#unsigned-builds) has the exact
+steps, plus the [known limits](docs/platforms.md#known-limits) and
+[where your files live](docs/platforms.md#where-your-files-live).
+
 ## Build & run
+
+Linux, and any platform from source:
 
 ```sh
 git clone <repo> && cd droid_tui
 git submodule update --init   # ext/droid-lsp: the circuit-schema source of truth
 cargo build --release
-./target/release/droid_tui [patch.ini]
+./target/release/droid_tui [patch.ini]   # droid_tui.exe on Windows
 ```
 
 With no argument the app opens an embedded demo patch. The picker (`l`)
 loads any local `.ini`; per-patch labels live outside the patch files, so
-trying things is safe.
+trying things is safe. Prerequisites differ per OS (MSVC build tools on
+Windows, Xcode command line tools on macOS, `build-essential` and
+`pkg-config` on Linux) — see [Building from source](docs/build.md).
 
 ## Contributing (short version)
 
@@ -138,7 +161,7 @@ Full onboarding: [docs/contributing.md](docs/contributing.md).
    ```sh
    cargo fmt --check
    cargo clippy --all-targets --all-features --locked -- -D warnings
-   cargo test
+   cargo test --locked
    cargo build --release --locked
    ```
 3. **Derived docs rule** — `ARCHITECTURE.md` and `DESIGN.md` are

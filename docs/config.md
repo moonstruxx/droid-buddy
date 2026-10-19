@@ -1,10 +1,13 @@
 # Configuration
 
-User config lives at `$XDG_CONFIG_HOME/droid-tui/config.toml`
-(`~/.config/droid-tui/config.toml` by default). A missing file
-silently yields defaults; a malformed file (or unknown theme) warns
-once on stderr and falls back. Per-patch labels are separate — see
-[Labels](labels.md#storage).
+User config lives at `config.toml` in the `droid-tui` data directory:
+`$XDG_CONFIG_HOME/droid-tui/` when that is an absolute path, else
+`~/.config/droid-tui/` on Linux and macOS, and `%APPDATA%\droid-tui\`
+on Windows. A missing file silently yields defaults; a malformed file
+(or unknown theme) warns once on stderr and falls back. Per-patch
+labels are separate — see [Labels](labels.md#storage). [Platforms →
+Where your files live](platforms.md#where-your-files-live) has the
+resolver rules and the directory's other files.
 
 ```toml
 theme = "classic"
@@ -70,7 +73,8 @@ default case. `+`/`-` adjust zoom at runtime.
 - `enabled` (bool, default `true`): user-supplied circuit definitions
   (`[[circuit]]` TOML files) extending the embedded schema.
 - `dir`: optional **absolute** plugin-directory override. A
-  non-absolute value is treated as unset (standard XDG plugins dir
-  applies). Files load in sorted order; later files win on name
-  collision (shadowing an embedded circuit warns once). A malformed
-  file is skipped with a warning — startup never aborts.
+  non-absolute value is treated as unset (the plugins directory inside
+  the platform data dir applies). Files load in sorted order; later
+  files win on name collision (shadowing an embedded circuit warns
+  once). A malformed file is skipped with a warning — startup never
+  aborts.
