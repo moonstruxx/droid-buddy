@@ -1,6 +1,21 @@
 //! Profiling gate: runs core pure phases over the scale-anchor workload under
 //! named wall-clock budgets so a CPU hog or endless loop fails the suite with
 //! the phase name and elapsed time instead of hanging it.
+//!
+//! The module UI's paint path has no phase, deliberately (module-ui-labels task
+//! 3.3, measured 2026-10-19 in release). It is the egui surface
+//! (`gui::physical`), every entry point of which is `pub(crate)`, so an
+//! integration test cannot reach it without widening the crate API — and a
+//! phase that cannot observe the code is noise. Measured directly instead, with
+//! a temporary in-crate harness since removed: a fitted 640×520 pane on the
+//! scale anchor builds its spec (layout + cells + annotations) in ~0.16 ms and
+//! paints warm in ~30 µs, the `budget_annotations` pass itself ~0.9 µs. The
+//! largest real patch (melody2: 214 cells, 90 clipped candidates and all 90
+//! dropped one at a time by the 30 % band budget) puts the annotation pass at
+//! ~0.63 ms and the whole spec at ~3.2 ms. That is four orders of magnitude
+//! under these budgets, and the work is bounded by construction (drops ≤
+//! candidates, each a single deterministic re-placement), so only a
+//! catastrophic blowup could trip a phase here.
 
 use std::path::Path;
 use std::sync::mpsc;
