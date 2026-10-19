@@ -11,7 +11,7 @@ carry the same abilities.
 - [x] 1 Add the documented-alternatives table and the `seen`-based satisfaction check to the `essential == 2` arm <!-- agent: rusty-engineer, depends_on: [], touches: [src/validation.rs] -->
 - [ ] 2 Add per-row unit tests (positive, negative, and the "alternative present but a different required param absent" case) plus table-sanity checks <!-- agent: horst-engineer, depends_on: [1], touches: [src/validation.rs] -->
 - [ ] 3 Add `fixtures/validation/essential_alternatives.ini` — one section per documented alternative (`lfo` with `taptempo`, `gatetool` with `inputtrigger`, `contour` with `trigger`, `compare` with `ifless`) plus one control section that sets none of them — and a validation test asserting zero `missing_required` for the first four and exactly one for the control. Do not reference `patches_remote/_droid_mpfs5drum.ini`: it is a symlink into a working tree outside the repo, so the 14 → 0 measurement stays proposal evidence, not CI material. <!-- agent: horst-engineer, depends_on: [1], touches: [fixtures/validation/**, src/validation.rs] -->
-- [ ] 4 Update ARCHITECTURE.md §3.10 to state the exception and record the upstream (`circuits.json` / `diagnostics.ts`) divergence for a follow-up report <!-- agent: rusty-engineer, depends_on: [1], touches: [ARCHITECTURE.md] -->
+- [x] 4 Update ARCHITECTURE.md §3.10 to state the exception and record the upstream (`circuits.json` / `diagnostics.ts`) divergence for a follow-up report <!-- agent: rusty-engineer, depends_on: [1], touches: [ARCHITECTURE.md] -->
 
 **Total: 4 tasks**
 **Agent assignments**: rusty-engineer (1,4), horst-engineer (2,3)
