@@ -578,6 +578,7 @@ const VALIDATION_FIXTURES: &[(&str, &str)] = &[
     ("undefined_cable", "undefined_cable"),
     ("duplicate_cable", "duplicate_cable"),
     ("unused_cable", "unused_cable"),
+    ("invalid_expression", "invalid_expression"),
     ("ram_overflow", "ram_overflow"),
 ];
 
@@ -688,6 +689,63 @@ fn regression_validation_fixture_undefined_cable() {
 }
 
 #[test]
+fn regression_validation_fixture_invalid_expression() {
+    assert_has_code("invalid_expression", "invalid_expression");
+    let issues = validation_issues_for("invalid_expression");
+    let issue = issues
+        .iter()
+        .find(|i| i.code == "invalid_expression")
+        .expect("invalid_expression");
+    // A calculation the firmware cannot parse is a load-blocking error, not a
+    // style hint: from-scratch patches would silently fail on the rack.
+    assert_eq!(issue.severity, crate::validation::Severity::Error);
+    assert!(issue.message.contains("brackets"), "{}", issue.message);
+}
+
+/// The expression check must stay quiet on patches that DROID actually
+/// accepts — a false positive here would block loading a working patch.
+#[test]
+fn regression_expression_check_accepts_the_whole_corpus() {
+    let mut dirs = vec![
+        Path::new("fixtures").to_path_buf(),
+        Path::new("corpus").to_path_buf(),
+    ];
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // fixtures/validation deliberately contains broken patches.
+                if !path.ends_with("validation") {
+                    dirs.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "ini") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(!files.is_empty(), "no .ini files found to check");
+    let schema = crate::schema::load_schema();
+    for path in &files {
+        let Ok(patch) = Patch::from_ini_file(path) else {
+            continue;
+        };
+        let issues = crate::validation::validate_patch(&patch, schema);
+        if let Some(issue) = issues.iter().find(|i| i.code == "invalid_expression") {
+            panic!(
+                "{}:{} false-positive invalid_expression: {}",
+                path.display(),
+                issue.span.line + 1,
+                issue.message
+            );
+        }
+    }
+}
+
+#[test]
 fn regression_validation_fixture_duplicate_cable() {
     assert_has_code("duplicate_cable", "duplicate_cable");
     let issues = validation_issues_for("duplicate_cable");
@@ -731,13 +789,13 @@ fn regression_validation_fixture_ram_overflow() {
 }
 
 #[test]
-fn regression_validation_fixture_matrix_all_nine_present() {
+fn regression_validation_fixture_matrix_all_present() {
     // Full matrix smoke: every fixture yields its primary code.
-    assert_eq!(VALIDATION_FIXTURES.len(), 9, "must have 9 fixtures");
+    assert_eq!(VALIDATION_FIXTURES.len(), 10, "must have 10 fixtures");
     for (fixture, code) in VALIDATION_FIXTURES {
         assert_has_code(fixture, code);
     }
-    // Cross-check: fixtures directory contains exactly these 9 files
+    // Cross-check: fixtures directory contains exactly these files
     let entries = std::fs::read_dir("fixtures/validation").unwrap();
     let mut names: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -755,7 +813,7 @@ fn regression_validation_fixture_matrix_all_nine_present() {
     expected.sort();
     assert_eq!(
         names, expected,
-        "fixtures/validation must contain exactly 9 expected files"
+        "fixtures/validation must contain exactly 10 expected files"
     );
 }
 

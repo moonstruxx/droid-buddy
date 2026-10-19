@@ -11,7 +11,7 @@ droid_tui/
 │   ├── handler.rs              # keyboard + mouse event handling
 │   ├── patch.rs                # domain model + hand-rolled .ini parser
 │   ├── schema.rs               # embedded DROID circuit schema + jack table
-│   ├── validation.rs           # 9 check patch validation (ported from droid-lsp)
+│   ├── validation.rs           # 10 check patch validation (droid-lsp + value grammar)
 │   ├── diff.rs                 # pure patch-diff model (DiffReport)
 │   ├── graph.rs                # signal-flow graph model + topology validation
 │   ├── layout.rs               # column arrangement (default) + force solver
@@ -43,7 +43,7 @@ droid_tui/
 ├── tests/
 │   └── perf_gate.rs            # profiling gate: budgeted watchdog phases over the scale anchor
 ├── fixtures/                   # test fixtures: *.ini patches, plugins/, picker_test/,
-│                               #   validation/*.ini (9-check matrix)
+│                               #   validation/*.ini (10-check matrix)
 ├── corpus/                     # patch corpus + analysis CSVs (features.csv, rendermetrics.csv)
 │                               #   + good/*.ini curated gold patches (generator variants removed)
 ├── tools/                      # developer analysis tools (Python fit/build scripts + artifacts)
@@ -84,7 +84,7 @@ droid_tui/
 
 **`fixtures/`:**
 - Purpose: `.ini` patch files and supporting data exercising every parser/graph/validation/physical path.
-- Contains: concrete patches (single-purpose and multi-feature), `plugins/*.toml` for the plugin loader, `validation/*.ini` for the 9-check matrix, `picker_test/`.
+- Contains: concrete patches (single-purpose and multi-feature), `plugins/*.toml` for the plugin loader, `validation/*.ini` for the 10-check matrix, `picker_test/`.
 - Key files: `own_scale.ini` (the scale anchor), `validation/*.ini`.
 
 **`corpus/`:**

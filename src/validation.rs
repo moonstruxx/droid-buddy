@@ -56,6 +56,238 @@ fn is_pure_cable(value: &str) -> bool {
     cables.len() == 1 && cables[0] == trimmed
 }
 
+/// Does this entry *define* the virtual cable named by its value?
+///
+/// DROID defines a cable by putting the `_NAME` where an output would go, so
+/// the parameter has to be an output of the circuit. Consulting the schema
+/// matters: `output1`/`output2` ([switch]), `or`/`and` ([logic]), `square`
+/// ([lfo]), `linear` ([slew]), `gateoutput` ([sequencer]) and friends all
+/// define cables, and a rule that only accepts the literal key `output`
+/// reports every such cable as undefined. Unknown circuits and parameters
+/// fall back to the conventional `output` key, mirroring
+/// `patch.rs::collect_cable_index` so the index and the warning list agree.
+fn is_cable_definition(schema: &Schema, section: &str, key: &str, value: &str) -> bool {
+    if !is_pure_cable(value) {
+        return false;
+    }
+    let key_lower = key.to_lowercase();
+    match schema.get_param_kind(section, &key_lower) {
+        Some(kind) => kind == "output",
+        None => key_lower == "output",
+    }
+}
+
+/// One token of a DROID parameter value.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ExprTok {
+    Operand { number: bool },
+    Mul,
+    Div,
+    Plus,
+    Minus,
+    OpenBracket,
+    CloseBracket,
+}
+
+/// Split a parameter value into DROID tokens. `None` means "not an
+/// expression" — a text value, an empty value, or anything this tokenizer does
+/// not know — and the caller then reports nothing rather than guessing.
+fn tokenize_expr(value: &str) -> Option<Vec<ExprTok>> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            '*' => {
+                out.push(ExprTok::Mul);
+                i += 1;
+            }
+            '/' => {
+                out.push(ExprTok::Div);
+                i += 1;
+            }
+            '+' => {
+                out.push(ExprTok::Plus);
+                i += 1;
+            }
+            '-' => {
+                out.push(ExprTok::Minus);
+                i += 1;
+            }
+            '(' => {
+                out.push(ExprTok::OpenBracket);
+                i += 1;
+            }
+            ')' => {
+                out.push(ExprTok::CloseBracket);
+                i += 1;
+            }
+            '_' => {
+                let start = i;
+                i += 1;
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                if i == start + 1 {
+                    return None;
+                }
+                out.push(ExprTok::Operand { number: false });
+            }
+            c if c.is_ascii_digit() => {
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+                    i += 1;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+                if i < chars.len() && (chars[i] == 'V' || chars[i] == '%') {
+                    i += 1;
+                }
+                out.push(ExprTok::Operand { number: true });
+            }
+            c if c.is_ascii_uppercase() => {
+                // register: P1.1, B3.16, G1.5, O1, L1.2 …
+                let start = i;
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i == start + 1 {
+                    // `on` / `off`
+                    let rest = &chars[start..];
+                    let is_on = rest.starts_with(&['o', 'n']) && rest.len() == 2;
+                    let is_off =
+                        rest.len() == 3 && rest[0] == 'o' && rest[1] == 'f' && rest[2] == 'f';
+                    if is_on || is_off {
+                        out.push(ExprTok::Operand { number: false });
+                        return Some(out);
+                    }
+                    return None;
+                }
+                if i < chars.len() && chars[i] == '.' {
+                    let dot = i;
+                    i += 1;
+                    let digits_start = i;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i == digits_start {
+                        i = dot;
+                    }
+                }
+                out.push(ExprTok::Operand { number: false });
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Grammar violations of DROID's parameter values (manual §5.7, "Summary and
+/// Further notes"): the format is `A * B + C` — one attenuation, one offset,
+/// in that order. Brackets, more than one multiplication, a division by
+/// anything but a fixed number, and additional operations are all rejected by
+/// the firmware as an invalid parameter value, so the patch would not load.
+///
+/// Text values (quoted) and values the tokenizer does not recognize are left
+/// alone: the check reports expressions, not arbitrary content.
+fn expression_problem(value: &str) -> Option<&'static str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('"') || trimmed.starts_with('\'') {
+        return None;
+    }
+    let toks = tokenize_expr(trimmed)?;
+    if toks.is_empty() {
+        return None;
+    }
+    // Only calculations are checked: without any operator the value is a bare
+    // number, register, cable name — or text, which is not this check's job.
+    if !toks.iter().any(|t| {
+        matches!(
+            t,
+            ExprTok::Mul
+                | ExprTok::Div
+                | ExprTok::Plus
+                | ExprTok::Minus
+                | ExprTok::OpenBracket
+                | ExprTok::CloseBracket
+        )
+    }) {
+        return None;
+    }
+    if toks
+        .iter()
+        .any(|t| matches!(t, ExprTok::OpenBracket | ExprTok::CloseBracket))
+    {
+        return Some("brackets are not allowed (DROID reads A * B + C only)");
+    }
+    let mut mults = 0usize;
+    let mut offsets = 0usize;
+    let mut expect_operand = true;
+    let mut after_div = false;
+    let mut unary_minus_ok = true;
+    for tok in toks.iter() {
+        match tok {
+            ExprTok::Operand { number } => {
+                if !expect_operand {
+                    return Some("two values without an operator between them");
+                }
+                if after_div && !number {
+                    return Some("you can only divide by a fixed number");
+                }
+                after_div = false;
+                expect_operand = false;
+                unary_minus_ok = false;
+            }
+            ExprTok::Mul | ExprTok::Div => {
+                if expect_operand {
+                    return Some("operator without a value before it");
+                }
+                if *tok == ExprTok::Div {
+                    after_div = true;
+                } else {
+                    mults += 1;
+                    if mults > 1 {
+                        return Some("only one multiplication is allowed (A * B + C)");
+                    }
+                }
+                expect_operand = true;
+                unary_minus_ok = true;
+            }
+            ExprTok::Plus | ExprTok::Minus => {
+                if expect_operand {
+                    // unary minus is the documented shorthand for -1 * x
+                    if *tok == ExprTok::Minus && unary_minus_ok {
+                        continue;
+                    }
+                    return Some("operator without a value before it");
+                }
+                offsets += 1;
+                if offsets > 1 {
+                    return Some("only one offset (+ / -) is allowed (A * B + C)");
+                }
+                expect_operand = true;
+                unary_minus_ok = true;
+            }
+            ExprTok::OpenBracket | ExprTok::CloseBracket => {
+                return Some("brackets are not allowed (DROID reads A * B + C only)");
+            }
+        }
+    }
+    if expect_operand {
+        return Some("the value ends with an operator");
+    }
+    None
+}
+
 fn extract_cables(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut out = Vec::new();
@@ -176,7 +408,7 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
 
     for (si, section) in patch.sections.iter().enumerate() {
         for (ei, entry) in section.detailed_entries.iter().enumerate() {
-            if entry.key == "output" && is_pure_cable(&entry.value) {
+            if is_cable_definition(schema, &section.name, &entry.key, &entry.value) {
                 defined
                     .entry(entry.value.trim().to_string())
                     .or_default()
@@ -189,7 +421,7 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
     // Collect sink usages (any _CABLE ref not counting pure output definitions)
     for section in &patch.sections {
         for entry in &section.detailed_entries {
-            let is_def = entry.key == "output" && is_pure_cable(&entry.value);
+            let is_def = is_cable_definition(schema, &section.name, &entry.key, &entry.value);
             if is_def {
                 continue;
             }
@@ -264,6 +496,23 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
                 }
             }
 
+            // 3b. expression grammar: DROID evaluates `A * B + C` only, so a
+            // bracketed or chained calculation is an invalid parameter value
+            // and the firmware refuses the whole patch.
+            if let Some(problem) = expression_problem(&entry.value) {
+                issues.push(ValidationIssue {
+                    span: entry.value_span,
+                    severity: Severity::Error,
+                    code: "invalid_expression".to_string(),
+                    message: format!(
+                        "Invalid value \"{}\" for \"{}\" in [{}]: {problem}",
+                        entry.value.trim(),
+                        entry.key,
+                        section.name
+                    ),
+                });
+            }
+
             // 4. invalid jack: scan value for jack tokens, validate each
             // Skip numeric and cable values: if value is pure numeric or starts with '_' skip jack check
             let trimmed = entry.value.trim();
@@ -295,7 +544,7 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
 
             // 6. undefined cable (sink references never defined)
             // For each cable in this entry's value (excluding pure output defs already considered)
-            let is_def = entry.key == "output" && is_pure_cable(&entry.value);
+            let is_def = is_cable_definition(schema, &section.name, &entry.key, &entry.value);
             if !is_def {
                 let cables = extract_cables(&entry.value);
                 // dedup per entry to avoid duplicate warnings for same cable repeated in same value expression
@@ -322,7 +571,14 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
         if is_known_circuit {
             if let Some(def) = schema.circuits.get(&lower) {
                 for input in &def.inputs {
-                    if input.essential == 2 {
+                    // Ranged params (button1 ... button32, mixer input1 ...
+                    // input8, sequencer pitch1 ... pitch8) are skipped: leaving
+                    // unused members unpatched is normal practice, and the
+                    // firmware does not require them. droid-lsp's diagnostics.ts
+                    // skips them for the same reason; expanding them here turned
+                    // one optional group into six or eight warnings per section.
+                    let is_ranged = input.prefix.is_some() && input.count.is_some();
+                    if input.essential == 2 && !is_ranged {
                         let expanded = expand_param_names(
                             input.prefix.as_ref(),
                             input.count,
@@ -582,8 +838,11 @@ mod tests {
     }
 
     #[test]
-    fn count_expanded_required_missing() {
-        // Find a circuit with essential==2 and prefix/count
+    fn ranged_required_params_are_not_reported_missing() {
+        // Ranged params are optional in practice (mixer input1 ... input8,
+        // sequencer pitch1 ... pitch8, button1 ... button32): leaving members
+        // unpatched must not produce a warning per member. droid-lsp's
+        // diagnostics.ts skips them; this test pins that parity.
         let schema = load_schema();
         let mut found: Option<(String, String)> = None;
         for (name, def) in &schema.circuits {
@@ -591,8 +850,7 @@ mod tests {
                 if inp.essential == 2 {
                     if let (Some(prefix), Some(_)) = (inp.prefix.as_ref(), inp.count) {
                         let start = inp.start_at.unwrap_or(1);
-                        let expanded = format!("{prefix}{start}");
-                        found = Some((name.clone(), expanded));
+                        found = Some((name.clone(), format!("{prefix}{start}")));
                         break;
                     }
                 }
@@ -601,21 +859,52 @@ mod tests {
                 break;
             }
         }
-        if let Some((circ, first_expanded)) = found {
-            let ini = format!("[p2b8]\n[{circ}]\n");
-            let issues = validate(&ini);
-            let misses: Vec<_> = issues
-                .iter()
-                .filter(|i| i.code == "missing_required")
-                .collect();
-            // Should have at least one missing for the expanded param
-            assert!(!misses.is_empty(), "expected missing_required for {circ}");
-            assert!(
-                misses.iter().any(|m| m.message.contains(&first_expanded)),
-                "first expanded {first_expanded} not in {:?}",
-                misses.iter().map(|m| &m.message).collect::<Vec<_>>()
-            );
-        }
+        let (circ, first_expanded) = found.expect("a ranged essential param exists");
+        // Discovery and validation share one schema instance: a parallel test
+        // may swap the process-global schema (schema::init with plugin
+        // fixtures), and then a second load_schema() could look at another one.
+        let expected = schema.circuits[&circ]
+            .inputs
+            .iter()
+            .any(|i| i.essential == 2 && i.prefix.is_some() && i.count.is_some());
+        assert!(expected);
+        let patch = Patch::from_ini_str(&format!("[p2b8]\n[{circ}]\n"), String::from("test"))
+            .expect("parses");
+        let misses: Vec<_> = validate_patch(&patch, schema)
+            .into_iter()
+            .filter(|i| i.code == "missing_required")
+            .collect();
+        assert!(
+            !misses.iter().any(|m| m.message.contains(&first_expanded)),
+            "ranged {first_expanded} of [{circ}] must not be reported missing: {misses:?}"
+        );
+    }
+
+    #[test]
+    fn singular_required_param_is_still_reported_missing() {
+        // A group with one member is a plain required parameter — skipping
+        // ranged groups must not silence it.
+        let schema = load_schema();
+        let (circ, param) = schema
+            .circuits
+            .iter()
+            .find_map(|(name, def)| {
+                def.inputs
+                    .iter()
+                    .find(|i| i.essential == 2 && i.prefix.is_none() && i.count.is_none())
+                    .map(|i| (name.clone(), i.name.clone()))
+            })
+            .expect("a singular essential param exists");
+        let patch = Patch::from_ini_str(&format!("[p2b8]\n[{circ}]\n"), String::from("test"))
+            .expect("parses");
+        let misses: Vec<_> = validate_patch(&patch, schema)
+            .into_iter()
+            .filter(|i| i.code == "missing_required")
+            .collect();
+        assert!(
+            misses.iter().any(|m| m.message.contains(&param)),
+            "[{circ}] must still require its {param}: {misses:?}"
+        );
     }
 
     #[test]
@@ -630,6 +919,185 @@ mod tests {
         // input line 2
         assert_eq!(undef.span.line, 2);
         assert!(undef.message.contains("_UNDEFINED_CABLE"));
+    }
+
+    #[test]
+    fn schema_output_params_define_cables() {
+        // DROID defines a cable by putting `_NAME` where an output goes, and
+        // most circuits name that output something other than `output`.
+        // Accepting only the literal key reported every such cable as
+        // undefined (on patches_remote/_droid_mpfs5drum.ini that was ~950 of
+        // 976 warnings while the cable index knew every producer).
+        for (label, ini) in [
+            (
+                "switch output2",
+                "[p2b8]\n[switch]\ninput1 = I1\noffset = 1\noutput2 = _SEL\n[copy]\ninput = _SEL\noutput = O1\n",
+            ),
+            (
+                "logic or",
+                "[p2b8]\n[logic]\ninput1 = I1\nor = _OR\n[copy]\ninput = _OR\noutput = O1\n",
+            ),
+            (
+                "lfo square",
+                "[p2b8]\n[lfo]\nsquare = _SQ\n[copy]\ninput = _SQ\noutput = O1\n",
+            ),
+            (
+                "slew linear",
+                "[p2b8]\n[slew]\ninput = I1\nlinear = _LIN\n[copy]\ninput = _LIN\noutput = O1\n",
+            ),
+        ] {
+            let issues = validate(ini);
+            assert!(
+                !has_code(&issues, "undefined_cable"),
+                "{label}: unexpected undefined_cable in {:?}",
+                issues.iter().map(|i| &i.message).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn non_output_param_never_defines_a_cable() {
+        // `input = _X` is a sink. The schema check must not widen definitions
+        // to every parameter that happens to hold a bare cable name.
+        let issues = validate("[p2b8]\n[copy]\ninput = _ORPHAN\noutput = O1\n");
+        assert!(has_code(&issues, "undefined_cable"));
+    }
+
+    #[test]
+    fn expression_valued_output_does_not_define_a_cable() {
+        // The name has to *replace* the output value. `output = _X * 2` reads
+        // X and leaves the output unnamed, so X stays undefined here -- the
+        // same rule `patch::collect_cable_index` applies.
+        let issues = validate(
+            "[p2b8]\n[copy]\ninput = I1\noutput = _EXP * 2\n[copy]\ninput = _EXP\noutput = O1\n",
+        );
+        assert!(has_code(&issues, "undefined_cable"));
+    }
+
+    #[test]
+    fn duplicate_and_unused_see_schema_outputs() {
+        // duplicate_cable
+        let dup = validate(
+            "[p2b8]\n[switch]\ninput1 = I1\noffset = 1\noutput2 = _DUP2\n[logic]\ninput1 = I2\nor = _DUP2\n[copy]\ninput = _DUP2\noutput = O1\n",
+        );
+        assert!(has_code(&dup, "duplicate_cable"), "{dup:?}");
+
+        // unused_cable: defined by a schema output, never read
+        let unused = validate("[p2b8]\n[switch]\ninput1 = I1\noffset = 1\noutput2 = _NEVER_READ\n");
+        assert!(has_code(&unused, "unused_cable"), "{unused:?}");
+        assert!(!has_code(&unused, "undefined_cable"), "{unused:?}");
+    }
+
+    #[test]
+    fn undefined_set_matches_the_cable_index() {
+        // The warning list must agree with patch::cable_index, which is what
+        // the signal-flow graph draws: a cable the index knows as produced is
+        // never reported undefined, and vice versa.
+        let ini = r"[p2b8]
+[switch]
+input1 = I1
+offset = 1
+output2 = _FROM_SWITCH
+[logic]
+input1 = _FROM_SWITCH
+or = _FROM_LOGIC
+[lfo]
+square = _FROM_LFO
+[copy]
+input = _FROM_LOGIC
+output = O1
+[copy]
+input = _REALLY_OPEN
+output = _STILL_OPEN * 2
+";
+        let patch = Patch::from_ini_str(ini, String::from("test")).unwrap();
+        let issues = validate_patch(&patch, load_schema());
+        let mut warned: Vec<String> = issues
+            .iter()
+            .filter(|i| i.code == "undefined_cable")
+            .filter_map(|i| {
+                let start = i.message.find('"')? + 1;
+                let end = start + i.message[start..].find('"')?;
+                Some(i.message[start..end].to_string())
+            })
+            .collect();
+        warned.sort();
+        warned.dedup();
+        let mut open: Vec<String> = patch
+            .cable_index
+            .iter()
+            .filter(|(_, e)| e.sources.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect();
+        open.sort();
+        assert_eq!(warned, open);
+        assert_eq!(
+            open,
+            vec!["_REALLY_OPEN".to_string(), "_STILL_OPEN".to_string()]
+        );
+    }
+
+    #[test]
+    fn expression_grammar_accepts_droid_shapes() {
+        // Manual §5.7: A * B + C, with the documented shorthands:
+        // -x for -1 * x, /number for * (1/number), off/on, V and % suffixes.
+        for ok in [
+            "0.5",
+            "1V",
+            "45 %",
+            "off",
+            "P1.1",
+            "_CLOCK",
+            "P1.1 * 0.5",
+            "I1 * P1.1",
+            "P1.1 * 0.8 + 0.2",
+            "0.05 * P1.2 + P1.1",
+            "_CLOCK_BPM / 15",
+            "I2 / 120 + _MENU_DEGREE",
+            "_CLOCK_BEND_RAW * 0.12 - 0.06",
+            "-P1.1",
+            "_CLOCK_RUNNING * -1 + 1",
+            "-1 * _X + 1",
+            "_A + _B",
+            "I1 - I2",
+            "\"CLK BEND (fader)\"",
+        ] {
+            assert_eq!(expression_problem(ok), None, "{ok} must be accepted");
+        }
+    }
+
+    #[test]
+    fn expression_grammar_rejects_invalid_calculations() {
+        // The firmware reads the value as A * B + C and rejects everything
+        // else as "invalid parameter value" — the whole patch then fails.
+        for (bad, why) in [
+            ("(_CLOCK_BEND_RAW - 0.5) * 0.12", "brackets"),
+            ("(I1 + I2) * 0.5", "brackets"),
+            ("_A * _B * _C", "multiplication"),
+            ("_A * _B * 2 + 1", "multiplication"),
+            ("_A / _B", "divide"),
+            ("_A + _B + _C", "offset"),
+            ("_A * ", "operator"),
+        ] {
+            let problem =
+                expression_problem(bad).unwrap_or_else(|| panic!("{bad} must be rejected"));
+            assert!(
+                problem.contains(why),
+                "{bad}: expected a reason containing {why:?}, got {problem:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_expression_is_an_error_on_the_value_span() {
+        let issues = validate("[p2b8]\n[copy]\ninput = (_SOMETHING - 0.5) * 0.12\noutput = O1\n");
+        let issue = issues
+            .iter()
+            .find(|i| i.code == "invalid_expression")
+            .expect("invalid_expression");
+        assert_eq!(issue.severity, Severity::Error);
+        assert_eq!(issue.span.line, 2);
+        assert!(issue.message.contains("brackets"), "{}", issue.message);
     }
 
     #[test]
