@@ -159,10 +159,6 @@ pub(crate) struct PhysicalSpec {
     pub db8e_bands: Vec<Db8eBand>,
     /// Vertical + horizontal mm grid lines, already mapped to points.
     pub grid_lines: Vec<(Pos2, Pos2)>,
-    /// Points per screen cell: the egui-layer scale over the shared
-    /// `ScreenMapping` (mm→cells), used to convert pointer pan deltas back
-    /// into cell units for `App::physical_offset`.
-    pub cell_scale: f32,
     /// Performance-view overlay (compact rack + exploded callouts), present
     /// exactly when `App.showing_performance` was on at spec-build time.
     pub performance: Option<PerformanceOverlay>,
@@ -173,22 +169,17 @@ pub(crate) struct PhysicalSpec {
 }
 
 /// The frame's physical-view input, reported back for the loop to apply to
-/// `App` (mirrors `WindowFrame`): middle-drag pan in screen cells, wheel
-/// zoom about the cursor, and a plain `s` skeleton toggle.
+/// `App` (mirrors `WindowFrame`): middle-drag pan in points, wheel zoom about
+/// the cursor, and a plain `s` skeleton toggle.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PhysicalFrame {
-    /// Pan delta in screen cells (`physical_offset` units).
+    /// Pan delta in points (`physical_offset` units; the mapping yields points).
     pub pan_delta: (f32, f32),
     /// Wheel zoom: factor plus the cursor anchor in points.
     pub zoom: Option<(f32, (f32, f32))>,
     /// `s` pressed this frame (no modifiers): toggle skeleton presentation.
     pub skeleton_toggle: bool,
 }
-
-/// Points per screen cell: the egui-layer scale over the shared
-/// `ScreenMapping` (mm→cells). Mirrors the test builder's 10 px/cell so the
-/// production pane and the headless paint tests share one geometry.
-const PHYSICAL_CELL_SCALE: f32 = 10.0;
 
 /// The fold is a per-controller rule (button-led-composition D2): only
 /// button-kind cells on P2B8/B32 (round face) and M4 (rect touch plate)
@@ -230,11 +221,11 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // (offset is subtracted: `screen = mm·factor·zoom − offset`). The
     // performance view ignores the user pan/zoom and centers a compact
     // (~1/4-area) rack instead; the overlay keeps label rects clear of it.
-    let pane_dx = pane.min.x as f64 / PHYSICAL_CELL_SCALE as f64;
-    let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
+    let pane_dx = pane.min.x as f64;
+    let pane_dy = pane.min.y as f64;
     let normal_mapping = || {
         ScreenMapping::new(
-            crate::physical::PHYSICAL_CELLS_PER_MM,
+            crate::physical::PHYSICAL_POINTS_PER_MM,
             app.physical_zoom as f64,
             app.physical_offset.0 as f64 - pane_dx,
             app.physical_offset.1 as f64 - pane_dy,
@@ -245,7 +236,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     } else {
         normal_mapping()
     };
-    let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
+    let geom = rack_geometry(&rack, &chain, &m);
     let mut cells = Vec::new();
 
     // The physical chain clones components per module, so the module-local cell
@@ -504,14 +495,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         modules,
         cells,
         db8e_bands,
-        grid_lines: mm_grid_lines(
-            &m,
-            PHYSICAL_CELL_SCALE,
-            rack.total_width_mm,
-            rack.total_height_mm,
-            20.0,
-        ),
-        cell_scale: PHYSICAL_CELL_SCALE,
+        grid_lines: mm_grid_lines(&m, rack.total_width_mm, rack.total_height_mm, 20.0),
         skeleton: app.physical_show_skeleton,
         paused: app.processing_paused,
     })
@@ -523,27 +507,28 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
 /// `None` on degenerate input (empty pane or rack); the caller falls back to
 /// the normal mapping. Pure math, no App dependency, so tests drive it headless.
 pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option<ScreenMapping> {
-    let cells = crate::physical::PHYSICAL_CELLS_PER_MM;
-    let pane_w = pane.width() as f64 / PHYSICAL_CELL_SCALE as f64;
-    let pane_h = pane.height() as f64 / PHYSICAL_CELL_SCALE as f64;
+    let points_per_mm = crate::physical::PHYSICAL_POINTS_PER_MM;
+    let pane_w = pane.width() as f64;
+    let pane_h = pane.height() as f64;
     if pane_w <= 0.0 || pane_h <= 0.0 {
         return None;
     }
     if rack.total_width_mm <= 0.0 || rack.total_height_mm <= 0.0 {
         return None;
     }
-    let fit = (pane_w / (rack.total_width_mm * cells)).min(pane_h / (rack.total_height_mm * cells));
+    let fit = (pane_w / (rack.total_width_mm * points_per_mm))
+        .min(pane_h / (rack.total_height_mm * points_per_mm));
     if !fit.is_finite() || fit <= 0.0 {
         return None;
     }
     let zoom = fit * 0.5;
-    // Pane-relative cells center on the pane middle; the pane origin folds in
+    // Pane-relative points center on the pane middle; the pane origin folds in
     // exactly like the normal mapping so points land window-absolute.
-    let pane_dx = pane.min.x as f64 / PHYSICAL_CELL_SCALE as f64;
-    let pane_dy = pane.min.y as f64 / PHYSICAL_CELL_SCALE as f64;
-    let offset_x = (rack.total_width_mm * 0.5) * cells * zoom - pane_dx - pane_w * 0.5;
-    let offset_y = (rack.total_height_mm * 0.5) * cells * zoom - pane_dy - pane_h * 0.5;
-    Some(ScreenMapping::new(cells, zoom, offset_x, offset_y))
+    let offset_x =
+        (rack.total_width_mm * 0.5) * points_per_mm * zoom - pane.min.x as f64 - pane_w * 0.5;
+    let offset_y =
+        (rack.total_height_mm * 0.5) * points_per_mm * zoom - pane.min.y as f64 - pane_h * 0.5;
+    Some(ScreenMapping::new(points_per_mm, zoom, offset_x, offset_y))
 }
 
 /// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
@@ -836,7 +821,7 @@ pub(crate) fn paint_physical(
     }
 
     drop(painter);
-    ui.ctx().input(|i| physical_frame(i, spec.cell_scale, pane))
+    ui.ctx().input(|i| physical_frame(i, pane))
 }
 
 /// Draw one element cell: skeleton marker, compact state cell, or the fader
@@ -1266,15 +1251,10 @@ pub(crate) fn rack_geometry(
     rack: &RackLayout,
     chain: &PhysicalLayout,
     mapping: &ScreenMapping,
-    cell_scale: f32,
 ) -> RackGeometry {
-    let scale = cell_scale as f64;
     let cell = |mm: crate::physical::RectMm| -> Rect {
         let (x, y, w, h) = mapping.mm_to_screen(mm);
-        Rect::from_min_size(
-            Pos2::new((x * scale) as f32, (y * scale) as f32),
-            Vec2::new((w * scale) as f32, (h * scale) as f32),
-        )
+        Rect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(w as f32, h as f32))
     };
     let case_rect = cell(crate::physical::RectMm {
         x_mm: 0.0,
@@ -1428,12 +1408,10 @@ pub(crate) struct RackGeometry {
 /// `step_mm` across the rack bounds (`w_mm` × `h_mm` at the origin).
 pub(crate) fn mm_grid_lines(
     mapping: &ScreenMapping,
-    cell_scale: f32,
     w_mm: f64,
     h_mm: f64,
     step_mm: f64,
 ) -> Vec<(Pos2, Pos2)> {
-    let scale = cell_scale as f64;
     let mut lines = Vec::new();
     if step_mm <= 0.0 {
         return lines;
@@ -1447,8 +1425,8 @@ pub(crate) fn mm_grid_lines(
             h_mm,
         });
         lines.push((
-            Pos2::new((px * scale) as f32, (py * scale) as f32),
-            Pos2::new((px * scale) as f32, ((py + ph) * scale) as f32),
+            Pos2::new(px as f32, py as f32),
+            Pos2::new(px as f32, (py + ph) as f32),
         ));
         x += step_mm;
     }
@@ -1461,8 +1439,8 @@ pub(crate) fn mm_grid_lines(
             h_mm: 0.0,
         });
         lines.push((
-            Pos2::new((px * scale) as f32, (py * scale) as f32),
-            Pos2::new(((px + pw) * scale) as f32, (py * scale) as f32),
+            Pos2::new(px as f32, py as f32),
+            Pos2::new((px + pw) as f32, py as f32),
         ));
         y += step_mm;
     }
@@ -1470,21 +1448,15 @@ pub(crate) fn mm_grid_lines(
 }
 
 /// The frame's physical-view input from the egui input state: middle-drag
-/// pan (points → screen cells via `cell_scale`), wheel zoom about the cursor
-/// (same sensitivity/clamp as the graph canvas), and a plain `s` skeleton
-/// toggle. `pane` maps the absolute pointer (wheel zoom anchor) into the
-/// pane-local space the spec's cells live in. Pure so input tests run
-/// without a window.
-pub(super) fn physical_frame(
-    i: &egui::InputState,
-    cell_scale: f32,
-    pane: egui::Rect,
-) -> PhysicalFrame {
+/// pan (points), wheel zoom about the cursor (same sensitivity/clamp as the
+/// graph canvas), and a plain `s` skeleton toggle. `pane` maps the absolute
+/// pointer (wheel zoom anchor) into the pane-local space the spec's points
+/// live in. Pure so input tests run without a window.
+pub(super) fn physical_frame(i: &egui::InputState, pane: egui::Rect) -> PhysicalFrame {
     let mut frame = PhysicalFrame::default();
     if i.pointer.middle_down() {
         let d = i.pointer.delta();
-        let scale = cell_scale.max(f32::EPSILON);
-        frame.pan_delta = (d.x / scale, d.y / scale);
+        frame.pan_delta = (d.x, d.y);
     }
     let pointer = i.pointer.latest_pos();
     if i.smooth_scroll_delta.y.abs() > f32::EPSILON {
@@ -1766,7 +1738,7 @@ mod tests {
     /// The same mapping at a physical zoom preset — the value
     /// `physical_spec` feeds from `app.physical_zoom`.
     fn mapping_at(zoom: f64) -> ScreenMapping {
-        ScreenMapping::new(crate::physical::PHYSICAL_CELLS_PER_MM, zoom, 0.0, 0.0)
+        ScreenMapping::new(crate::physical::PHYSICAL_POINTS_PER_MM, zoom, 0.0, 0.0)
     }
 
     /// The resolved spec the paint tests draw: geometry via `rack_geometry`,
@@ -1798,7 +1770,7 @@ mod tests {
     ) -> PhysicalSpec {
         let (rack, chain) = fx;
         let m = mapping_at(zoom);
-        let geom = rack_geometry(rack, chain, &m, 10.0);
+        let geom = rack_geometry(rack, chain, &m);
         let mut cells = Vec::new();
         for &(mi, ci, rect, mark) in &geom.cells {
             let comp = &chain.modules[mi].components[ci];
@@ -1848,8 +1820,7 @@ mod tests {
             modules,
             cells,
             db8e_bands,
-            grid_lines: mm_grid_lines(&m, 10.0, rack.total_width_mm, rack.total_height_mm, 20.0),
-            cell_scale: 10.0,
+            grid_lines: mm_grid_lines(&m, rack.total_width_mm, rack.total_height_mm, 20.0),
             performance: None,
             skeleton,
             paused,
@@ -1881,12 +1852,12 @@ mod tests {
         };
         let rack = RackLayout::pack(&chain, &rack_spec);
         let m = ScreenMapping::new(
-            crate::physical::PHYSICAL_CELLS_PER_MM,
+            crate::physical::PHYSICAL_POINTS_PER_MM,
             app.physical_zoom as f64,
             app.physical_offset.0 as f64,
             app.physical_offset.1 as f64,
         );
-        let geom = rack_geometry(&rack, &chain, &m, PHYSICAL_CELL_SCALE);
+        let geom = rack_geometry(&rack, &chain, &m);
         // A zero-origin pane keeps the spec rack-local so it matches `geom`.
         let spec = physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
         // Folded LEDs publish no cell (button-led-composition D4), so the
@@ -2045,32 +2016,33 @@ mod tests {
     #[test]
     fn rack_geometry_maps_mm_to_points() {
         let (rack, chain) = fixture();
-        let geom = rack_geometry(&rack, &chain, &mapping(), 10.0);
-        // 200×40 mm at isotropic 0.15 cells/mm × 10 px = 300×60 points (D1).
+        let geom = rack_geometry(&rack, &chain, &mapping());
+        // 200×40 mm at the true-1:1 3.7795 pt/mm baseline (D1).
+        let ppm = crate::physical::PHYSICAL_POINTS_PER_MM as f32;
         assert_eq!(
             geom.case_rect,
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 60.0))
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0 * ppm, 40.0 * ppm))
         );
         assert_eq!(geom.module_rects.len(), 1);
         assert_eq!(geom.module_rects[0].0, 0);
         assert_eq!(
             geom.module_rects[0].1,
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 60.0))
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0 * ppm, 40.0 * ppm))
         );
-        // The B1.1 cell: 20×10 mm at (10,5) mm → 3×1.5 cells at (1.5,0.75) = 30×15 px at (15,7.5).
+        // The B1.1 cell: 20×10 mm at (10,5) mm → true size in points.
         assert_eq!(geom.cells.len(), 1);
         let (_, _, rect, mark) = geom.cells[0];
         assert_eq!(mark, PortMark::Cell);
-        assert!((rect.min.x - 15.0).abs() < 1e-3);
-        assert!((rect.min.y - 7.5).abs() < 1e-3);
-        assert!((rect.width() - 30.0).abs() < 1e-3);
-        assert!((rect.height() - 15.0).abs() < 1e-3);
+        assert!((rect.min.x - 10.0 * ppm).abs() < 1e-3);
+        assert!((rect.min.y - 5.0 * ppm).abs() < 1e-3);
+        assert!((rect.width() - 20.0 * ppm).abs() < 1e-3);
+        assert!((rect.height() - 10.0 * ppm).abs() < 1e-3);
     }
 
     #[test]
     fn mm_grid_lines_span_the_rack_at_step_intervals() {
-        let lines = mm_grid_lines(&mapping(), 10.0, 200.0, 40.0, 20.0);
-        // 20mm = 3 cells = 30 px; verticals at 30..270, horizontals at 30.
+        let lines = mm_grid_lines(&mapping(), 200.0, 40.0, 20.0);
+        // 20 mm steps: verticals every 75.59 pt across 200 mm, one horizontal.
         let verts = lines.iter().filter(|(a, b)| a.x == b.x).count();
         let hors = lines.iter().filter(|(a, b)| a.y == b.y).count();
         assert_eq!(verts, 9);
@@ -2495,7 +2467,7 @@ mod tests {
     #[test]
     fn rack_geometry_derives_db8e_band_from_b_grid_top() {
         let (rack, chain) = db8e_fixture();
-        let geom = rack_geometry(&rack, &chain, &mapping(), 10.0);
+        let geom = rack_geometry(&rack, &chain, &mapping());
         assert_eq!(geom.db8e_bands.len(), 1);
         let (mi, band) = geom.db8e_bands[0];
         assert_eq!(mi, 0);
@@ -2510,8 +2482,9 @@ mod tests {
         );
         assert_eq!(band.min, module.min + egui::vec2(1.0, 1.0));
         assert!((band.max.x - (module.max.x - 1.0)).abs() < 1e-3);
-        // The band bottom sits at/above the B-grid top (y_mm 38 → 114 pt).
-        assert!(band.max.y <= 114.0 + 1e-3, "y {}", band.max.y);
+        // The band bottom sits at/above the B-grid top (y_mm 38 → true size).
+        let b_top_pt = 38.0 * crate::physical::PHYSICAL_POINTS_PER_MM as f32;
+        assert!(band.max.y <= b_top_pt + 1e-3, "y {}", band.max.y);
     }
 
     #[test]
@@ -2616,11 +2589,11 @@ mod tests {
         let mut full_output = ctx.run_ui(park, |_| {});
         full_output.textures_delta.clear();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            frame = ui.ctx().input(|i| physical_frame(i, 10.0, ui.max_rect()));
+            frame = ui.ctx().input(|i| physical_frame(i, ui.max_rect()));
         });
         full_output.textures_delta.clear();
-        // 20px drag at 10px/cell → 2 cells right, 1 down.
-        assert_eq!(frame.pan_delta, (2.0, 1.0));
+        // 20px drag in points: the mapping yields points directly.
+        assert_eq!(frame.pan_delta, (20.0, 10.0));
         // Wheel up 50px → zoom-in factor > 1 anchored at the cursor.
         let (factor, anchor) = frame.zoom.expect("wheel zoom reported");
         assert!(factor > 1.0, "wheel-up zooms in: {factor}");
@@ -3126,13 +3099,18 @@ mod tests {
     }
 
     #[test]
-    fn isotropic_mapping_maps_20x10mm_to_30x15pt() {
+    fn isotropic_mapping_maps_20x10mm_to_true_size() {
         let (rack, chain) = fixture();
-        let geom = rack_geometry(&rack, &chain, &mapping(), 10.0);
+        let geom = rack_geometry(&rack, &chain, &mapping());
         let (_, _, rect, _) = geom.cells[0];
-        assert!((rect.width() - 30.0).abs() < 1e-3, "width: {:?}", rect);
+        let ppm = crate::physical::PHYSICAL_POINTS_PER_MM as f32;
         assert!(
-            (rect.height() - 15.0).abs() < 1e-3,
+            (rect.width() - 20.0 * ppm).abs() < 1e-3,
+            "width: {:?}",
+            rect
+        );
+        assert!(
+            (rect.height() - 10.0 * ppm).abs() < 1e-3,
             "height is isotropic: {:?}",
             rect
         );
@@ -3140,7 +3118,7 @@ mod tests {
 
     #[test]
     fn mm_grid_pitch_is_isotropic_and_skeleton_matches_full() {
-        let lines = mm_grid_lines(&mapping(), 10.0, 200.0, 40.0, 20.0);
+        let lines = mm_grid_lines(&mapping(), 200.0, 40.0, 20.0);
         let mut xs: Vec<f32> = lines
             .iter()
             .filter(|(a, b)| a.x == b.x)
@@ -3148,8 +3126,9 @@ mod tests {
             .collect();
         xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pitch = xs.windows(2).map(|w| w[1] - w[0]).fold(0.0f32, f32::max);
+        let step_pt = 20.0 * crate::physical::PHYSICAL_POINTS_PER_MM as f32;
         assert!(
-            (pitch - 30.0).abs() < 1e-3,
+            (pitch - step_pt).abs() < 1e-3,
             "vertical grid pitch isotropic: {xs:?}"
         );
         let mut ys: Vec<f32> = lines
@@ -3162,7 +3141,7 @@ mod tests {
         if ys.len() >= 2 {
             let hpitch = ys[1] - ys[0];
             assert!(
-                (hpitch - 30.0).abs() < 1e-3,
+                (hpitch - step_pt).abs() < 1e-3,
                 "horizontal grid pitch isotropic: {ys:?}"
             );
         }
