@@ -165,8 +165,13 @@ skip an element.
 ### D10 — Label presentation: `off` / `auto` / `on`, default `auto`
 
 - `off` — in-cell labels only.
-- `auto` — annotate exactly the elements whose `label_clipped` is true; unaddressed
-  elements never qualify (they carry no label). Annotations are placed by
+- `auto` — annotate exactly the elements whose `label_clipped` is true **and** whose
+  label is explicitly set (a stored label or a patch preamble label); unaddressed
+  elements never qualify (they carry no label). A cell whose label is nothing but the
+  derived token name stays reveal-only even when clipped: on a dense patch those are
+  dozens of callouts carrying no information the faceplate does not already imply,
+  which is precisely the crowding `auto` exists to avoid (as-built refinement of the
+  rule; `on` still annotates them). Annotations are placed by
   `performance::place_labels` (side-bound bands, leader anchors), so they are
   disjoint from the rack and from each other by construction.
 - `on` — annotate every addressed element that carries a label.

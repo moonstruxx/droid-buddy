@@ -81,7 +81,7 @@ The module UI SHALL support the element interactions the Panels view provided: k
 The module UI SHALL provide a label presentation with three modes — `off`, `auto`, and `on` — cycled by a user action and persisted as a `[physical]` setting whose absent value is `auto`.
 
 - In `off` the view SHALL render labels inside their cells only, as the compact-cell contract describes.
-- In `auto` the view SHALL annotate exactly those addressed elements whose in-cell label is clipped or hidden at the current zoom — never an element whose label already fits inside its cell, and never an element of the patch that the controller does not address. Annotations SHALL be drawn outside the rack with a leader line to the annotated cell and SHALL use the same presentation as the performance view's callouts. When the deepest annotation band would exceed 30 % of the pane on either axis, the view SHALL drop annotations in a fixed priority order until the bands fit: LEDs and jacks first, then buttons, then switches, then pots, then faders, and never the focused element or the hardware of the selected circuit.
+- In `auto` the view SHALL annotate exactly those addressed elements whose in-cell label is clipped or hidden at the current zoom and whose label is explicitly set (a stored label or a patch preamble label) — never an element whose label already fits inside its cell, never an element of the patch that the controller does not address, and never an element whose label is only the derived token name. Annotations SHALL be drawn outside the rack with a leader line to the annotated cell and SHALL use the same presentation as the performance view's callouts. When the deepest annotation band would exceed 30 % of the pane on either axis, the view SHALL drop annotations in a fixed priority order until the bands fit: LEDs and jacks first, then buttons, then switches, then pots, then faders, and never the focused element or the hardware of the selected circuit.
 - In `on` the view SHALL annotate every addressed element that carries a label, with no dropping.
 
 Annotations SHALL be decorative: they SHALL publish no hit rect, SHALL NOT alter the drawn cell rects or the published component hit rects, and SHALL NOT change what the skeleton presentation draws. The view SHALL report how many labels are displayed and, when any were dropped or hidden, how many remain available through the hover reveal.
@@ -90,6 +90,11 @@ Annotations SHALL be decorative: they SHALL publish no hit rect, SHALL NOT alter
 
 - **WHEN** the label presentation is `auto` at true 1:1 and the rack holds a 12 mm pot whose label is short and a 9 mm button whose label is long
 - **THEN** the pot renders its label inside its cell with no annotation, and the button is annotated outside the rack with a leader line to its cell
+
+#### Scenario: Derived labels stay reveal-only
+
+- **WHEN** the label presentation is `auto` and an element carries no stored or preamble label, only its derived token name
+- **THEN** the element gets no annotation even though its cell cannot show the derived name, and the full name still appears through the hover reveal
 
 #### Scenario: Unaddressed elements are never annotated
 
