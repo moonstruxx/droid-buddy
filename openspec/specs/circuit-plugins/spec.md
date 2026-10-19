@@ -7,15 +7,23 @@ Allow users to add DROID circuit definitions (and their rendering metadata) via 
 ## Requirements
 
 ### Requirement: Plugin file discovery
-The system SHALL load circuit definitions from `*.toml` files in `$XDG_CONFIG_HOME/droid-tui/plugins/` at startup, before rendering begins. A missing plugins directory is not an error.
+
+The system SHALL load circuit definitions from `*.toml` files in the `droid-tui/plugins/` directory under the platform data directory (defined by the `configuration` capability: `$XDG_CONFIG_HOME` or `~/.config` on Linux and macOS, `%APPDATA%` on Windows), at startup, before rendering begins. A missing plugins directory is not an error.
 
 #### Scenario: Default plugin directory
-- **WHEN** the app starts and `$XDG_CONFIG_HOME/droid-tui/plugins/` does not exist
+
+- **WHEN** the app starts and the platform `droid-tui/plugins/` directory does not exist
 - **THEN** the app starts normally with only the embedded schema, and no warning is printed
 
 #### Scenario: Plugin files present
+
 - **WHEN** the app starts and `plugins/` contains `*.toml` files
 - **THEN** every parseable file contributes its circuit definitions to the active schema before the first frame renders
+
+#### Scenario: Windows plugin directory
+
+- **WHEN** the app runs on Windows with `%APPDATA%` set
+- **THEN** plugin files are discovered under `%APPDATA%\droid-tui\plugins\`
 
 ### Requirement: Plugin circuit definition format
 A plugin TOML file SHALL define circuits with: a circuit name, a category, a required `ramsize` in bytes, and input/output parameters (each with name, short, type, default, and the `prefix`/`count`/`start_at` expansion fields). Circuit names SHALL be case-insensitive like the embedded schema. A plugin file that omits a required field SHALL be skipped with a warning and must not prevent other files or circuits from loading.

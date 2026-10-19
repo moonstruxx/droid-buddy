@@ -24,11 +24,18 @@ The system SHALL store one label per `NodeId=(circuit,instance)` in `labels.toml
 - **THEN** source header for `motorfader:12` and graph node title for that instance show `T1 Accu` instead of `motorfader`
 
 ### Requirement: Per-patch isolation and atomic persistence
-The system SHALL key store buckets by canonicalized absolute patch path and SHALL persist via atomic tmp→rename with warn-once on corrupt toml (fallback empty).
+
+The system SHALL key store buckets by canonicalized absolute patch path and SHALL persist `labels.toml` in the platform data directory (`$XDG_CONFIG_HOME/droid-tui/labels.toml` or `~/.config/droid-tui/labels.toml` on Linux and macOS, `%APPDATA%\droid-tui\labels.toml` on Windows) via atomic tmp to rename, with warn-once on corrupt toml (fallback empty).
 
 #### Scenario: Two masters isolated
+
 - **WHEN** `droid_mpfs5melody2.ini` and `droid_mpfs5drum.ini` both have `B1.1`
-- **THEN** editing `B1.1` label in one patch does not affect the other file's labels
+- **THEN** a label set on one patch does not appear on the other
+
+#### Scenario: Save failure names the reason
+
+- **WHEN** no platform data directory can be resolved
+- **THEN** the save reports that the config directory cannot be determined and the in-memory edit is unchanged
 
 ### Requirement: Inline edit overlay with layer cycle
 The system SHALL open a single-field overlay on `e` for the focused datum (panels token / source header instance / hovered graph node) and allow `1..max_shift_layer` to cycle the edited HW layer inside the overlay; `Enter` saves, `Esc` cancels, and status shows `<token> / Group<N> → N ckts / M cables` in `modifier_hue`.
