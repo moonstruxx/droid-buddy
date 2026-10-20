@@ -1168,7 +1168,13 @@ impl EguiSurface {
 /// is reported on stderr so it stays diagnosable rather than silent.
 pub(crate) fn teardown_step<F: FnOnce()>(label: &str, f: F) {
     if std::panic::catch_unwind(AssertUnwindSafe(f)).is_err() {
-        eprintln!("[panic] window teardown step contained: {label}");
+        // The error is ignored: the notice must never panic while unwinding,
+        // since a second panic would abort the process this helper protects.
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "[panic] window teardown step contained: {label}"
+        );
     }
 }
 
