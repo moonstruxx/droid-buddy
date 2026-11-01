@@ -116,6 +116,19 @@ pub struct ElementCellEntry {
     /// `"touch"`); absent → `None`.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Declared 1-based element number. When present it wins over the number
+    /// the `label` would yield (`"I1"` -> 1, `"G4"` -> 4).
+    #[serde(default)]
+    pub element: Option<u32>,
+    /// Declared kind letter (`'I'`, `'G'`, ...). When present it wins over the
+    /// letter the label's first character would yield.
+    #[serde(default)]
+    pub kind_letter: Option<char>,
+    /// `false` marks a physical jack no patch token reaches (the r2m/r2c
+    /// serial bridges): the cell still renders but carries no identity, so
+    /// `cell_for` can never resolve a token to it.
+    #[serde(default)]
+    pub addressable: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +425,22 @@ fn label_element(label: &str) -> (Option<u32>, Option<char>) {
     (num, kind)
 }
 
+/// Identity `cell_for` matches a patch token against.
+///
+/// Declared `element`/`kind_letter` win, because the generator emits them for
+/// cells whose label is not the patch vocabulary; an undeclared field falls
+/// back to the label-derived one (`"B1.3"` -> 3, `"I5"` -> 5). A cell
+/// declared `addressable: false` is a physical jack no token reaches (the
+/// r2m/r2c serial bridges): it keeps its rect, label and kind so it renders,
+/// but carries no identity at all and is therefore invisible to `cell_for`.
+fn cell_identity(entry: &ElementCellEntry) -> (Option<u32>, Option<char>) {
+    if entry.addressable == Some(false) {
+        return (None, None);
+    }
+    let (element, kind_letter) = label_element(&entry.label);
+    (entry.element.or(element), entry.kind_letter.or(kind_letter))
+}
+
 /// Precompute element numbers + kind letters for a module's raw cells.
 fn preprocess_cells(
     entries: &HashMap<String, Vec<ElementCellEntry>>,
@@ -422,7 +451,7 @@ fn preprocess_cells(
             let out = cells
                 .iter()
                 .map(|c| {
-                    let (element, kind_letter) = label_element(&c.label);
+                    let (element, kind_letter) = cell_identity(c);
                     ElementCell {
                         family: family.clone(),
                         col: c.col,
@@ -649,7 +678,9 @@ impl PhysicalLayout {
     /// Matching prefers the exact (element, kind letter) pair — this is what
     /// keeps "O4" on the O-side master jack while "I4" stays on the I-side —
     /// then falls back to any cell with the same element number, then to the
-    /// 1-based positional cell within the family. Returns `None` for
+    /// 1-based positional cell within the family. Cells carrying no identity
+    /// (no declared or label-derived element, or `addressable: false` in the
+    /// geometry) are never a target, not even positionally. Returns `None` for
     /// fallback modules (no cells) and out-of-range elements.
     pub fn cell_for(&self, module_index: usize, token: &str) -> Option<&ElementCell> {
         let module = self.modules.get(module_index)?;
@@ -667,7 +698,10 @@ impl PhysicalLayout {
             .iter()
             .find(|c| c.element == Some(element) && c.kind_letter == Some(kind_letter))
             .or_else(|| cells.iter().find(|c| c.element == Some(element)))
-            .or_else(|| cells.get(element.checked_sub(1)? as usize))
+            .or_else(|| {
+                let index = cells.get(element.checked_sub(1)? as usize)?;
+                index.element.is_some().then_some(index)
+            })
     }
 }
 
@@ -2340,6 +2374,153 @@ mod tests {
         let i1 = layout.cell_for(0, "I1").expect("I1 cell");
         assert_eq!(i1.label, "I1");
         assert_eq!(i1.kind_letter, Some('I'));
+    }
+
+    // ---- module-ui-rack-inventory 4.2: geometry-declared element identity ----
+
+    /// The preprocessed cell for one synthetic `CV` entry.
+    fn preprocessed_cell(entry: ElementCellEntry) -> ElementCell {
+        let entries = HashMap::from([(String::from("CV"), vec![entry])]);
+        preprocess_cells(&entries)
+            .remove("CV")
+            .and_then(|mut cells| cells.pop())
+            .expect("one preprocessed cell")
+    }
+
+    /// A one-faceplate chain carrying `cells`, so `cell_for` can be exercised
+    /// against identity `preprocess_cells` produced.
+    fn layout_with_cells(cells: HashMap<String, Vec<ElementCell>>) -> PhysicalLayout {
+        PhysicalLayout {
+            modules: vec![PhysicalModule {
+                controller: String::from("CV I/O"),
+                module_instance: None,
+                geometry_key: String::from("master"),
+                is_fallback: false,
+                rect_mm: RectMm {
+                    x_mm: 0.0,
+                    y_mm: 0.0,
+                    w_mm: 20.0,
+                    h_mm: 128.5,
+                },
+                width_hp: 4.0,
+                he: 3,
+                cells,
+                components: Vec::new(),
+            }],
+            total_width_mm: 20.0,
+            total_height_mm: 128.5,
+            chain_gaps_mm: ChainGaps::default(),
+            hp_mm: 5.08,
+            he_mm: HashMap::new(),
+            fallback_width_mm: 20.0,
+            fallback_height_mm: 128.5,
+        }
+    }
+
+    #[test]
+    fn declared_element_identity_wins_over_a_parseable_label() {
+        // The label is patch vocabulary and parses to (1, 'O'); the geometry
+        // declares this cell as element 7 of the I side, which must win.
+        let cell = preprocessed_cell(ElementCellEntry {
+            label: String::from("O1"),
+            element: Some(7),
+            kind_letter: Some('I'),
+            ..ElementCellEntry::default()
+        });
+        assert_eq!(cell.element, Some(7), "declared element wins");
+        assert_eq!(cell.kind_letter, Some('I'), "declared kind letter wins");
+    }
+
+    #[test]
+    fn label_identity_is_the_fallback() {
+        let dotted = preprocessed_cell(ElementCellEntry {
+            label: String::from("B1.3"),
+            ..ElementCellEntry::default()
+        });
+        assert_eq!((dotted.element, dotted.kind_letter), (Some(3), Some('B')));
+
+        let plain = preprocessed_cell(ElementCellEntry {
+            label: String::from("I5"),
+            ..ElementCellEntry::default()
+        });
+        assert_eq!((plain.element, plain.kind_letter), (Some(5), Some('I')));
+    }
+
+    #[test]
+    fn cell_without_identity_stays_a_cell() {
+        // Neither declared nor label-derived identity: the cell keeps its
+        // rect and label (the painter can draw it) but carries no number and
+        // therefore no token can address it.
+        let cell = preprocessed_cell(ElementCellEntry {
+            label: String::from("USB"),
+            x_mm: 3.0,
+            y_mm: 4.0,
+            w_mm: 5.0,
+            h_mm: 6.0,
+            ..ElementCellEntry::default()
+        });
+        assert_eq!(cell.element, None, "no number in the label, none declared");
+        assert_eq!(cell.label, "USB");
+        assert_close(cell.rect_mm.x_mm, 3.0);
+        assert_close(cell.rect_mm.h_mm, 6.0);
+    }
+
+    #[test]
+    fn unaddressable_cell_never_enters_the_token_index() {
+        // The r2m/r2c serial bridges: explicit element numbers, no kind
+        // letter, `addressable: false` — they render but never resolve.
+        let cell = preprocessed_cell(ElementCellEntry {
+            label: String::from("serial in"),
+            element: Some(1),
+            addressable: Some(false),
+            ..ElementCellEntry::default()
+        });
+        assert_eq!(
+            cell.element, None,
+            "a declared number is not a token id here"
+        );
+        assert_eq!(cell.kind_letter, None, "the label's S must not become one");
+
+        let layout = layout_with_cells(HashMap::from([(String::from("CV"), vec![cell])]));
+        assert!(
+            layout.cell_for(0, "O1").is_none(),
+            "element 1 of the family must not resolve to the serial jack"
+        );
+        assert!(
+            layout.cell_for(0, "I1").is_none(),
+            "nor through the positional fallback"
+        );
+    }
+
+    #[test]
+    fn master18_gate_tokens_resolve_to_the_gate_column() {
+        let p = patch("# LABELS: master=18\n[copy]\n    input = I1\n    output = O1\n");
+        let layout = PhysicalLayout::build(&p, MasterModel::Master18);
+        assert_eq!(layout.modules[0].geometry_key, "master18");
+
+        // Gate column x = 18.5 mm; the CV-out column sits at 1.5 mm.
+        let i1 = layout.cell_for(0, "I1").expect("I1 gate-in cell");
+        assert_eq!(i1.label, "I1", "I1 must not resolve to O1");
+        assert_eq!(i1.kind.as_deref(), Some("gate_in"));
+        assert_close(i1.rect_mm.x_mm, 18.5);
+
+        let i2 = layout.cell_for(0, "I2").expect("I2 gate-in cell");
+        assert_eq!(i2.label, "I2");
+        assert_eq!(i2.kind.as_deref(), Some("gate_in"));
+
+        let g1 = layout.cell_for(0, "G1").expect("G1 gate-out cell");
+        assert_eq!(g1.label, "G1", "G1 must not resolve to O1");
+        assert_eq!(g1.kind.as_deref(), Some("gate_out"));
+        assert_close(g1.rect_mm.x_mm, 18.5);
+
+        let g4 = layout.cell_for(0, "G4").expect("G4 gate-out cell");
+        assert_eq!(g4.label, "G4");
+        assert_eq!(g4.kind.as_deref(), Some("gate_out"));
+
+        let o1 = layout.cell_for(0, "O1").expect("O1 cv-out cell");
+        assert_eq!(o1.label, "O1");
+        assert_eq!(o1.kind.as_deref(), Some("cv_out"));
+        assert_close(o1.rect_mm.x_mm, 1.5);
     }
 
     #[test]
