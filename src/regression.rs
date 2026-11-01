@@ -22,7 +22,7 @@ use crate::layout::{
     local_resettle, node_world_sizes, seed_positions, solve, SolveKnobs, LOCAL_ITERATIONS,
     LOCAL_RADIUS,
 };
-use crate::patch::{NodeId, Patch, ShiftGroup};
+use crate::patch::{ComponentKind, NodeId, Patch, ShiftGroup};
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2107,6 +2107,94 @@ fn regression_button_led_composition_faces_render_and_leds_fold() {
         cell_tokens.contains(&"P1.1"),
         "the LED-less P1.1 must still render its cell, got {cell_tokens:?}"
     );
+}
+
+// ── led-fold-cable-pairing: only a bare LED token binds ────────────────
+// One fixture (`fixtures/led_cable_pairing.ini`) whose `led`/`ledN` values are
+// cables (the drum/melody patch idiom) instead of LED tokens. A parameter
+// value names a register only when it is a bare LED token; a cable value
+// leaves the positional default in force, so every fold-rule button keeps its
+// LED folded into the face and no L cell renders as a standalone cell.
+
+#[test]
+fn regression_cable_valued_led_params_keep_every_led_folded() {
+    let path = "fixtures/led_cable_pairing.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+
+    // (a) The fixture is a valid patch, not a validation-case carrier.
+    let schema = crate::schema::load_schema();
+    let errors: Vec<_> = crate::validation::validate_patch(&patch, schema)
+        .into_iter()
+        .filter(|i| i.severity == crate::validation::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{path} must yield no Error-severity finding, got {errors:#?}"
+    );
+
+    // (b) Every button on a fold-rule faceplate resolves an LED token — the
+    // cable-valued params bind nothing, so the positional default answers.
+    let layout = crate::physical::PhysicalLayout::build(&patch);
+    for faceplate in &layout.modules {
+        for comp in faceplate
+            .components
+            .iter()
+            .filter(|c| c.kind == ComponentKind::Button)
+        {
+            let led = crate::patch::folded_led_for_element(comp)
+                .unwrap_or_else(|| panic!("{} must fold an LED", comp.id));
+            assert!(
+                led.starts_with('L'),
+                "{} must fold an LED token, got {led:?}",
+                comp.id
+            );
+            assert!(
+                comp.led.is_none() || comp.led.as_deref() == Some(led.as_str()),
+                "{} must not stay bound to a non-token value, got {:?}",
+                comp.id,
+                comp.led
+            );
+        }
+    }
+
+    // (c) No L token publishes a cell or a hit rect on the rendered spec.
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    let spec =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    let cell_tokens: Vec<&str> = spec
+        .cells
+        .iter()
+        .filter_map(|c| c.component_index)
+        .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.as_str())
+        .collect();
+    let standalone: Vec<&&str> = cell_tokens.iter().filter(|t| t.starts_with('L')).collect();
+    assert!(
+        standalone.is_empty(),
+        "no LED may render as its own cell, got {standalone:?}"
+    );
+
+    // (d) The cable-paired buttons still render their composed face.
+    for token in ["B1.1", "B2.1"] {
+        let index = app
+            .patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == token)
+            .unwrap();
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.component_index == Some(index))
+            .unwrap_or_else(|| panic!("{token} must render a cell"));
+        assert!(cell.shape.is_some(), "{token} must render a composed face");
+        assert!(
+            cell.led_state.is_some(),
+            "{token} must fold its positional LED"
+        );
+    }
 }
 
 // ── led-register-colour (task 3.1): static LED colour resolution ──────────
