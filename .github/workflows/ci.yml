@@ -81,6 +81,14 @@ jobs:
       - name: Self-test (headless)
         run: cargo run --release --locked --quiet -- --self-test fixtures/own_buttons.ini
 
+      # The screenshot harness (tools/screenshots) is a separate crate whose
+      # build script stages src/gui/mod.rs, so it silently stopped compiling
+      # when a new gui surface was added. Build it here rather than discover it
+      # a release later.
+      - name: Build the screenshot harness
+        if: runner.os == 'Linux'
+        run: cargo build --manifest-path tools/screenshots/Cargo.toml --locked
+
       # The perf gate's budgets were calibrated on Linux; tests/perf_gate.rs is
       # cfg-gated to target_os = "linux" (design decision 5).
       - name: Perf gate (release)

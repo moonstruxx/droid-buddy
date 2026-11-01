@@ -671,6 +671,28 @@ fn band_has_views(app: &App, band: crate::app::Rect) -> bool {
             .any(|(id, _)| app.layout.pane(*id).view.is_some())
 }
 
+/// Paint the main band: every pane of the arrangement when any pane holds a
+/// view (or a pane is maximized), otherwise the bare graph canvas filling the
+/// window. One entry point so the two handoffs cannot drift, and because the
+/// empty branch is what keeps hit geometry honest: it clears the lists the
+/// pane branch would have republished, so a click in an empty band never
+/// resolves against the previous frame's panes or cells (bead `droid_tui-vvt`).
+pub(crate) fn paint_band(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    scene: Option<&SceneSpec>,
+    selected: &[usize],
+) {
+    let band = to_cell_rect(ui.max_rect());
+    if band_has_views(app, band) {
+        paint_panes(app, ui, scene, selected);
+    } else {
+        app.component_rects.clear();
+        app.pane_hit_rects.clear();
+        graph::paint_scene(ui, ui.max_rect().size(), scene, selected);
+    }
+}
+
 /// Paint the class-based main band (`pane-class-layout`, design D1): every
 /// pane of the current arrangement (`App::pane_geometry` — the left big pane
 /// plus either a second big pane or two small panes, and the maximize override
@@ -991,18 +1013,11 @@ impl EguiSurface {
             .collect();
 
         let mut full_output = self.context.run_ui(raw_input, |ui| {
-            let window_rect = ui.max_rect();
-            let band = to_cell_rect(window_rect);
             // ADR 35: the arrangement decides the paint. With nothing open
             // (no view in any pane and no maximize) the whole window is the
             // bare graph canvas; otherwise every pane of the arrangement
             // paints. The module UI is a view, so it counts like any other (D2).
-            if band_has_views(app, band) {
-                paint_panes(app, ui, scene, selected);
-            } else {
-                app.component_rects.clear();
-                graph::paint_scene(ui, window_rect.size(), scene, selected);
-            }
+            paint_band(app, ui, scene, selected);
             paint_overlays(app, ui);
         });
 
@@ -1407,6 +1422,48 @@ mod tests {
             "the wheel over the source pane must move the scroll"
         );
         drop(out);
+    }
+
+    /// Run the band dispatch once over a plain `egui::Context` (no GPU), so the
+    /// empty-band and pane branches are both reachable from tests.
+    fn run_paint_band(app: &mut App) {
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let scene = scene_for(app, win);
+        let mut out = ctx.run_ui(raw, |ui| {
+            paint_band(app, ui, scene.as_ref(), &[]);
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn empty_band_publishes_no_hit_geometry() {
+        // droid_tui-vvt: the empty-band branch used to leave the previous
+        // frame's pane geometry in place, so a click could resolve against panes
+        // that are no longer drawn. Both lists must be empty.
+        let mut app = App::new();
+        app.layout.big_left.view = None;
+        app.layout.big_right.view = None;
+        app.layout.small_top.view = None;
+        app.layout.small_bottom.view = None;
+        app.layout.maximized = None;
+        // Geometry a previous frame would have published.
+        app.pane_hit_rects = vec![(
+            crate::panes::PaneId::BigLeft,
+            crate::app::Rect::new(0, 0, 10, 10),
+        )];
+        app.component_rects = vec![(0, crate::app::Rect::new(0, 0, 2, 2))];
+        run_paint_band(&mut app);
+        assert!(
+            app.pane_hit_rects.is_empty(),
+            "an empty band publishes no pane hit geometry: {:?}",
+            app.pane_hit_rects
+        );
+        assert!(app.component_rects.is_empty(), "and no component cells");
     }
 
     fn text_labels(out: &egui::FullOutput) -> Vec<String> {
