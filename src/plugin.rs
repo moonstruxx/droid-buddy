@@ -134,7 +134,7 @@ pub fn discover_plugins_from_dir(dir: &Path) -> Vec<PluginFile> {
         return Vec::new();
     };
     let mut paths: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension() == Some(OsStr::new("toml")))
         .collect();
@@ -363,7 +363,7 @@ mod tests {
 
     /// Discover plugins with every platform data-directory input pointed at
     /// `dir`. `platform.rs` prefers `%APPDATA%` on Windows and XDG elsewhere, so a
-    /// test that isolates only XDG reads the runner's AppData there.
+    /// test that isolates only XDG reads the runner's `AppData` there.
     fn discover_in(dir: &std::path::Path) -> Vec<PluginFile> {
         let env = dir.as_os_str();
         discover_plugins(Some(env), Some(env), Some(env))

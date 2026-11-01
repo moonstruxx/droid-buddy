@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     // can be built and the window paints content instead of its clear color.
     let initial_patch = first.map(std::path::PathBuf::from);
 
-    windowed::run(&settings, initial_patch)
+    windowed::run(&settings, initial_patch.as_deref())
 }
 
 /// App state seeded from `settings`, shared by the windowed event loop.
@@ -368,7 +368,7 @@ mod windowed {
     /// and drives the graph window.
     pub(super) fn run(
         settings: &config::Settings,
-        initial_patch: Option<std::path::PathBuf>,
+        initial_patch: Option<&std::path::Path>,
     ) -> Result<()> {
         // winit allows exactly one EventLoop per process, so it is created
         // here once; GraphWindow::open later creates windows on it.
@@ -377,7 +377,7 @@ mod windowed {
         })?;
         let mut app = App::new();
         seed_app(&mut app, settings);
-        load_initial_patch(&mut app, initial_patch.as_deref());
+        load_initial_patch(&mut app, initial_patch);
         // The band opens on the module UI plus the source viewer (spec
         // "Startup pane configuration"); the graph is built only when the
         // user opens it with `g g`, so no graph view is opened here.

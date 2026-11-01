@@ -44,7 +44,7 @@ impl KeyEvent {
     /// as their symbol, e.g. `?` for Shift+/), named keys map to the matching
     /// code, and Shift+Tab becomes `BackTab`.
     /// Control maps to ctrl+command (the handler treats the pair as one), Super
-    /// to mac_cmd only. Multi-character composition and unbound keys map to
+    /// to `mac_cmd` only. Multi-character composition and unbound keys map to
     /// `None`, as do release events. winit reports modifiers via
     /// `ModifiersChanged` rather than on the key event, so the loop tracks the
     /// current state and passes it in. The parts API exists because
@@ -155,7 +155,7 @@ pub enum MouseEventKind {
     ScrollDown,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MouseEvent {
     pub kind: MouseEventKind,
     pub column: u16,
@@ -163,7 +163,7 @@ pub struct MouseEvent {
     pub modifiers: Modifiers,
 }
 
-fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
@@ -177,7 +177,7 @@ fn rect_contains(rect: &Rect, col: u16, row: u16) -> bool {
 /// `value_adjust` and changes only that value; a wheel off it arrives as
 /// `zoom` and scales about the cursor. Manual pan and zoom latch the view
 /// (D4), and no gesture touches the selection or the pane focus.
-pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::App) {
+pub(crate) fn handle_physical_frame(frame: &PhysicalFrame, app: &mut crate::app::App) {
     if frame.skeleton_toggle {
         app.physical_show_skeleton = !app.physical_show_skeleton;
         app.status_message = if app.physical_show_skeleton {
@@ -217,7 +217,7 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
 /// its content column, converted to whole lines. Called by the pane dispatch
 /// (`gui::paint_panes`), which is the layer that owns `&mut App` while the
 /// painter only borrows it.
-pub(crate) fn handle_viewer_frame(frame: ViewerFrame, app: &mut crate::app::App) {
+pub(crate) fn handle_viewer_frame(frame: &ViewerFrame, app: &mut crate::app::App) {
     if frame.scroll_delta != 0.0 {
         let delta = frame.scroll_delta as isize;
         if delta > 0 {
@@ -234,7 +234,7 @@ pub(crate) fn handle_viewer_frame(frame: ViewerFrame, app: &mut crate::app::App)
 /// actually moving — a resting pointer must not fight keyboard navigation — and
 /// a click opens the row through the same `open_picker_entry` semantics as
 /// Enter.
-pub(crate) fn handle_picker_frame(frame: PickerFrame, app: &mut crate::app::App) {
+pub(crate) fn handle_picker_frame(frame: &PickerFrame, app: &mut crate::app::App) {
     if frame.scroll != 0 {
         let len = app.picker_entries.len();
         if len > 0 {
@@ -284,7 +284,7 @@ pub fn handle_window_key_event(
     // from_winit_parts filters release events; presses convert to the neutral
     // shape and run the same dispatch as the terminal key path.
     KeyEvent::from_winit_parts(logical_key, state, modifiers)
-        .is_some_and(|key| handle_event(key, app))
+        .is_some_and(|key| handle_event(&key, app))
 }
 
 use std::collections::HashMap;
@@ -307,7 +307,7 @@ const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
 /// tall, and there are at most 12. Returns `None` outside a row. The `Rect`
 /// and pointer are both in (truncated) point space, so the math matches the
 /// `paint_optimizer` layout.
-fn optimizer_row_at(pane: &Rect, col: u16, row: u16, row_count: usize) -> Option<usize> {
+fn optimizer_row_at(pane: Rect, col: u16, row: u16, row_count: usize) -> Option<usize> {
     if col < pane.x || col >= pane.x + pane.width {
         return None;
     }
@@ -368,7 +368,7 @@ fn focus_pane_at(app: &mut App, column: u16, row: u16) {
     let Some((id, _)) = app
         .pane_hit_rects
         .iter()
-        .find(|(_, rect)| rect_contains(rect, column, row))
+        .find(|(_, rect)| rect_contains(*rect, column, row))
     else {
         return;
     };
@@ -517,7 +517,7 @@ fn handle_help_open_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
 fn handle_picker_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // If file picker is showing, handle picker navigation
     if app.showing_picker {
-        return Some(handle_picker_event(key.clone(), app));
+        return Some(handle_picker_event(key, app));
     }
     None
 }
@@ -570,11 +570,7 @@ fn handle_upload_modal_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // modal stays), `n`/`Esc` cancel silently (no process, rack untouched).
     if app.upload_modal.is_some() {
         match key.code {
-            KeyCode::Esc => {
-                app.cancel_upload_modal();
-                return Some(false);
-            }
-            KeyCode::Char('n') => {
+            KeyCode::Esc | KeyCode::Char('n') => {
                 app.cancel_upload_modal();
                 return Some(false);
             }
@@ -750,11 +746,7 @@ fn handle_select_state_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 app.cycle_select_candidate(-1);
                 return Some(false);
             }
-            KeyCode::Char(']') => {
-                app.cycle_select_candidate(1);
-                return Some(false);
-            }
-            KeyCode::Enter => {
+            KeyCode::Char(']') | KeyCode::Enter => {
                 app.cycle_select_candidate(1);
                 return Some(false);
             }
@@ -880,11 +872,7 @@ fn handle_optimizer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     if app.view_focused(ViewType::Optimizer) {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                let len = app
-                    .optimizer
-                    .as_ref()
-                    .map(|s| s.candidates.len())
-                    .unwrap_or(0);
+                let len = app.optimizer.as_ref().map_or(0, |s| s.candidates.len());
                 if let Some(state) = app.optimizer.as_mut() {
                     if state.cursor + 1 < len {
                         state.cursor += 1;
@@ -901,7 +889,7 @@ fn handle_optimizer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 return Some(false);
             }
             KeyCode::Enter => {
-                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
+                let idx = app.optimizer.as_ref().map_or(0, |s| s.cursor);
                 app.optimizer_preview(idx);
                 return Some(false);
             }
@@ -910,7 +898,7 @@ fn handle_optimizer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 return Some(false);
             }
             KeyCode::Char('s') => {
-                let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
+                let idx = app.optimizer.as_ref().map_or(0, |s| s.cursor);
                 app.optimizer_export(idx);
                 return Some(false);
             }
@@ -1031,11 +1019,10 @@ fn begin_hw_label_edit(app: &mut App, index: usize) -> bool {
     let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
     let max = settings.labels.max_shift_layer.clamp(1, 8);
     let raw_layer = match app.active_shift {
-        Some(ShiftGroup::Group1) => 1,
         Some(ShiftGroup::Group2) => 2,
         Some(ShiftGroup::Group3) => 3,
         Some(ShiftGroup::Group4) => 4,
-        None => 1,
+        Some(ShiftGroup::Group1) | None => 1,
     };
     let layer = if settings.labels.layers_enabled {
         raw_layer.clamp(1, max)
@@ -1200,7 +1187,7 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                     return Some(false);
                 }
             }
-            KeyCode::Char('+') | KeyCode::Char('-') => {
+            KeyCode::Char('+' | '-') => {
                 // Zoom family (change `tiled-window-manager`, 4.2): plain
                 // scales the focused pane (graph camera zoom when the graph
                 // slot is focused), `Shift` scales the other pane. The
@@ -1215,7 +1202,7 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 }
                 return Some(false);
             }
-            KeyCode::Char('[') | KeyCode::Char(']') => {
+            KeyCode::Char('[' | ']') => {
                 // `Alt` adjusts cable tension on the focused graph pane (design
                 // D9: determinism holds per tension value); plain brackets move
                 // the left/right big-pane boundary (spec "Adaptive pane
@@ -1273,7 +1260,7 @@ fn handle_viewer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 };
                 return Some(false);
             }
-            KeyCode::Char('[') | KeyCode::Char(']') => {
+            KeyCode::Char('[' | ']') => {
                 // Plain brackets move the left/right big-pane boundary; the
                 // source viewer does not own them (spec "Adaptive pane
                 // layout").
@@ -1376,12 +1363,11 @@ fn handle_label_edit_focus_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                     .as_ref()
                     .and_then(|tok| patch.occurrence_index.get(tok))
                     .and_then(|spans| spans.first())
-                    .map(|s| s.line)
-                    .unwrap_or(0);
+                    .map_or(0, |s| s.line);
                 // Map line to section index via sections' spans - approximate: pick section containing target line.
                 let mut counts: std::collections::HashMap<String, usize> =
                     std::collections::HashMap::new();
-                for section in patch.sections.iter() {
+                for section in &patch.sections {
                     let entry = counts.entry(section.name.clone()).or_insert(0);
                     let nid = NodeId::circuit(&section.name, *entry);
                     // First section as fallback when no better mapping.
@@ -1577,7 +1563,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                     let on = app.toggle_modifier_latch(&tok);
                     app.status_message = if on {
                         app.modifier_status()
-                            .unwrap_or_else(|| format!("MOD {} latched", tok))
+                            .unwrap_or_else(|| format!("MOD {tok} latched"))
                     } else {
                         String::from("Modifier latch cleared")
                     };
@@ -1588,13 +1574,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             }
             false
         }
-        KeyCode::Esc => {
-            // Unreachable: the focus-routing Esc above handles every Esc that
-            // reaches this point (the diff/filter/select-menu/prefix/maximize
-            // paths all return earlier). Kept as a safe no-op fallback.
-            false
-        }
-        KeyCode::Char('[') | KeyCode::Char(']') => {
+        KeyCode::Char('[' | ']') => {
             // Boundary keys (spec "Adaptive pane layout"): `Alt+[`/`Alt+]`
             // move the small-pane boundary, plain `[`/`]` the left/right big
             // boundary. The optimizer (weight) and graph (tension) panes own
@@ -1645,7 +1625,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             app.status_message = format!("Labels: {}", app.label_presentation.as_str());
             false
         }
-        KeyCode::Char('+') | KeyCode::Char('-') => {
+        KeyCode::Char('+' | '-') => {
             // Zoom family (change `tiled-window-manager`, 4.2): plain scales
             // the panels pane; `Shift` would scale the other pane, which the
             // graph arm above already owns while the graph is open.
@@ -1758,6 +1738,9 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             navigate(app, 1);
             false
         }
+        // Unreachable Esc: the focus-routing Esc above handles every Esc that
+        // reaches this point (the diff/filter/select-menu/prefix/maximize paths
+        // all return earlier), so it shares the wildcard's no-op fallback.
         _ => false,
     })
 }
@@ -1777,7 +1760,7 @@ type KeyHandler = fn(&KeyEvent, &mut App) -> Option<bool>;
 /// `None` means "not this surface's key, fall through to the next step", and
 /// `Some(quit)` means the key was handled and this function returns `quit`.
 /// `handle_shared_key` is the terminal table, so it always answers `Some`.
-pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
+pub fn handle_event(key: &KeyEvent, app: &mut App) -> bool {
     // Reap a finished background upload first (non-blocking `try_wait`): the
     // verdict lands in the status line on the next event after completion.
     app.poll_upload();
@@ -1813,14 +1796,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         handle_physical_pane_key,
     ];
     for step in chain {
-        if let Some(quit) = step(&key, app) {
+        if let Some(quit) = step(key, app) {
             return quit;
         }
     }
 
     // Shared/global table (`q`, Ctrl+C, `U`, `l`, digits, ...): terminal, so it
     // answers every key that reached it.
-    handle_shared_key(&key, app).unwrap_or(false)
+    handle_shared_key(key, app).unwrap_or(false)
 }
 
 /// Handle mouse input: hover highlight, click-to-toggle, and scroll to
@@ -1838,7 +1821,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if app.showing_help {
         let inside = app
             .help_modal_rect
-            .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
+            .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !inside {
             app.close_help();
             return;
@@ -1856,7 +1839,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     // clears node hover so the graph cannot keep a stale hover highlight.
     let graph_pane = app.pane_hit_rects.iter().find(|(id, rect)| {
         app.layout.pane(*id).view == Some(ViewType::Graph)
-            && rect_contains(rect, mouse.column, mouse.row)
+            && rect_contains(*rect, mouse.column, mouse.row)
     });
     if let Some(_graph_pane) = graph_pane {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -1876,14 +1859,14 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     // precedence over panel interactions (picker already returned above).
     if app.pane_holding(ViewType::SourceViewer).is_some() {
         if let Some(rect) = app.minimap_rect {
-            if rect_contains(&rect, mouse.column, mouse.row)
+            if rect_contains(rect, mouse.column, mouse.row)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             {
                 if let Some(patch) = app.patch.as_ref() {
-                    let total_lines = if !patch.raw_lines.is_empty() {
-                        patch.raw_lines.len()
-                    } else {
+                    let total_lines = if patch.raw_lines.is_empty() {
                         patch.sections.len().max(1)
+                    } else {
+                        patch.raw_lines.len()
                     };
                     // Mirror ui.rs render_minimap: inner area excludes the
                     // 1-cell border on each side; viewport_h proxy is inner_h.
@@ -1919,7 +1902,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     let hit = app
         .component_rects
         .iter()
-        .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
+        .find(|(_, rect)| rect_contains(*rect, mouse.column, mouse.row))
         .map(|(idx, _)| *idx);
 
     match mouse.kind {
@@ -1955,7 +1938,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                         let on = app.toggle_modifier_latch(&token);
                         app.status_message = if on {
                             app.modifier_status()
-                                .unwrap_or_else(|| format!("MOD {} latched", token))
+                                .unwrap_or_else(|| format!("MOD {token} latched"))
                         } else {
                             String::from("Modifier latch cleared")
                         };
@@ -1976,10 +1959,10 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
                 // occurrence navigation keeps working there).
                 let on_minimap = app
                     .minimap_rect
-                    .is_some_and(|rect| rect_contains(&rect, mouse.column, mouse.row));
+                    .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
                 let over_viewer_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
                     app.layout.pane(*id).view == Some(ViewType::SourceViewer)
-                        && rect_contains(rect, mouse.column, mouse.row)
+                        && rect_contains(*rect, mouse.column, mouse.row)
                 });
                 if !on_minimap && !over_viewer_pane {
                     app.clear_selected_component();
@@ -2137,13 +2120,13 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         let col = px.round().max(0.0) as u16;
         let row = py.round().max(0.0) as u16;
         let in_physical_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
-            app.layout.pane(*id).view == Some(ViewType::Physical) && rect_contains(rect, col, row)
+            app.layout.pane(*id).view == Some(ViewType::Physical) && rect_contains(*rect, col, row)
         });
         if in_physical_pane {
             let hit = app
                 .component_rects
                 .iter()
-                .find(|(_, rect)| rect_contains(rect, col, row))
+                .find(|(_, rect)| rect_contains(*rect, col, row))
                 .map(|(idx, _)| *idx);
             app.hovered_component = hit;
             if frame.primary_pressed {
@@ -2191,15 +2174,11 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         let col = px.round().max(0.0) as u16;
         let row = py.round().max(0.0) as u16;
         let in_optimizer = app.pane_hit_rects.iter().find(|(id, rect)| {
-            app.layout.pane(*id).view == Some(ViewType::Optimizer) && rect_contains(rect, col, row)
+            app.layout.pane(*id).view == Some(ViewType::Optimizer) && rect_contains(*rect, col, row)
         });
         if let Some((_, rect)) = in_optimizer {
-            let row_count = app
-                .optimizer
-                .as_ref()
-                .map(|s| s.candidates.len())
-                .unwrap_or(0);
-            if let Some(ri) = optimizer_row_at(rect, col, row, row_count) {
+            let row_count = app.optimizer.as_ref().map_or(0, |s| s.candidates.len());
+            if let Some(ri) = optimizer_row_at(*rect, col, row, row_count) {
                 if let Some(state) = app.optimizer.as_mut() {
                     state.cursor = ri;
                 }
@@ -2329,7 +2308,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
                             );
                             app.graph_camera = Some(camera);
                             app.status_message =
-                                format!("Minimap click: pan to ({:.0}, {:.0})", world_x, world_y);
+                                format!("Minimap click: pan to ({world_x:.0}, {world_y:.0})");
                         }
                     }
                 }
@@ -2452,7 +2431,6 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             }
             crate::gui::WindowGraphKey::CenterGraph | crate::gui::WindowGraphKey::FitGraph => {
                 // Handled above: the camera keys act on the pane, not a node.
-                continue;
             }
         }
     }
@@ -2466,8 +2444,9 @@ fn graph_pane_origin(app: &App) -> (f32, f32) {
     app.pane_hit_rects
         .iter()
         .find(|(id, _)| app.layout.pane(*id).view == Some(crate::app::ViewType::Graph))
-        .map(|(_, rect)| (rect.x as f32, rect.y as f32))
-        .unwrap_or((0.0, 0.0))
+        .map_or((0.0, 0.0), |(_, rect)| {
+            (f32::from(rect.x), f32::from(rect.y))
+        })
 }
 
 fn adjust_value(comp: &mut HwComponent, delta: f32) {
@@ -2514,7 +2493,7 @@ fn navigate(app: &mut App, delta: i32) {
     }
 }
 
-fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
+fn handle_picker_event(key: &KeyEvent, app: &mut App) -> bool {
     match key.code {
         KeyCode::Esc => {
             app.reset_picker_filter();
@@ -2627,7 +2606,8 @@ fn handle_picker_event(key: KeyEvent, app: &mut App) -> bool {
                 // Handled before the metadata `is_dir` branch because a bare
                 // ".." path resolves against the process cwd, not picker_dir.
                 if is_picker_parent_entry(&selected_path) {
-                    if let Some(parent) = app.picker_dir.parent().map(|p| p.to_path_buf()) {
+                    if let Some(parent) = app.picker_dir.parent().map(std::path::Path::to_path_buf)
+                    {
                         app.enter_picker_dir(parent);
                     }
                     return false;
@@ -2667,10 +2647,10 @@ fn toggle_picker_favourite(app: &mut App) {
     let target_key = crate::favorites::FavoritesStore::canonical_key(&selected_path);
     let now_favourited = app.favorites.toggle(&selected_path);
     let _ = app.favorites.save();
-    let label = selected_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| selected_path.to_string_lossy().to_string());
+    let label = selected_path.file_name().map_or_else(
+        || selected_path.to_string_lossy().to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
     app.status_message = if now_favourited {
         format!("Favourited: {label}")
     } else {
@@ -2723,7 +2703,7 @@ fn open_picker_entry(app: &mut App, path: PathBuf) {
                 app.reset_picker_filter();
             }
             Err(e) => {
-                app.status_message = format!("Failed to load diff patch: {}", e);
+                app.status_message = format!("Failed to load diff patch: {e}");
             }
         }
     } else {
@@ -2742,7 +2722,7 @@ fn open_picker_entry(app: &mut App, path: PathBuf) {
                 app.reset_picker_filter();
             }
             Err(e) => {
-                app.status_message = format!("Failed to load patch: {}", e);
+                app.status_message = format!("Failed to load patch: {e}");
             }
         }
     }
@@ -2765,7 +2745,7 @@ mod tests {
     ///
     /// Both inputs are set because `platform.rs` prefers `%APPDATA%` on Windows
     /// and XDG everywhere else: isolating only `XDG_CONFIG_HOME` left the Windows
-    /// CI job writing into — and reading leftovers from — the runner's AppData,
+    /// CI job writing into — and reading leftovers from — the runner's `AppData`,
     /// which is where the favourites and plugin tests diverged on that platform.
     /// Restoring through `Drop` keeps a failed assertion from leaking the override
     /// into the next test; the `fav_lock` mutex still serialises the env access.
@@ -2921,14 +2901,14 @@ mod tests {
         // arrows already route to its pan — no `s` needed to focus it.
         // Right/Down pan positive (screen content shifts opposite, D5);
         // Left/Up reverse. Panning must not move the keyboard cursor.
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (8.0, 0.0));
         assert_eq!(app.hovered_component, None, "pan must not navigate");
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.physical_offset, (8.0, 8.0));
-        handle_event(key(KeyCode::Left), &mut app);
+        handle_event(&key(KeyCode::Left), &mut app);
         assert_eq!(app.physical_offset, (0.0, 8.0));
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
         assert_eq!(
             app.status_message,
@@ -2941,12 +2921,12 @@ mod tests {
         let mut app = app_with_fixture();
         app.note_physical_pane_rect(Rect::new(0, 0, 1000, 600));
         // Rack fits the viewport: Down/Up navigate, Left/Right stay no-ops.
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.hovered_component, Some(1));
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert_eq!(app.hovered_component, Some(0));
-        handle_event(key(KeyCode::Left), &mut app);
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Left), &mut app);
+        handle_event(&key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0));
     }
 
@@ -2954,15 +2934,15 @@ mod tests {
     fn arrow_pan_only_when_the_physical_pane_is_focused() {
         let mut app = app_with_overflowing_rack();
         // Physical IS the module UI and is focused at startup: arrows pan the overflowing rack.
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (8.0, 0.0));
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.physical_offset, (8.0, 8.0));
 
         // Switch focus to a small pane: arrows should NOT pan (source viewer
         // focused), so the offset stays exactly where the physical pane left it.
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane (SmallTop)
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane (SmallTop)
+        handle_event(&key(KeyCode::Right), &mut app);
         assert_eq!(
             app.physical_offset,
             (8.0, 8.0),
@@ -2970,8 +2950,8 @@ mod tests {
         );
 
         // Switch back to Physical: arrows pan again, from the unchanged offset.
-        handle_event(key(KeyCode::Tab), &mut app); // -> Physical pane (BigLeft)
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> Physical pane (BigLeft)
+        handle_event(&key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (16.0, 8.0));
     }
 
@@ -3011,7 +2991,7 @@ mod tests {
         let mut app = app_with_fixture();
         // `+` climbs one preset (100% → 150%) and folds the zoom into the
         // physical segment instead of the legacy "Scaling: N%" message.
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.5);
         assert_eq!(app.physical_zoom, 1.5);
         assert_eq!(
@@ -3052,7 +3032,7 @@ mod tests {
     #[test]
     fn big_u_without_patch_reports_and_opens_nothing() {
         let mut app = App::new();
-        let quit = handle_event(upload_key(), &mut app);
+        let quit = handle_event(&upload_key(), &mut app);
         assert!(!quit);
         assert!(app.upload_modal.is_none());
         assert!(app.status_message.contains("No patch loaded"));
@@ -3062,7 +3042,7 @@ mod tests {
     fn big_u_with_patch_opens_modal_with_byte_count() {
         let mut app = app_with_fixture();
         let expected = app.upload_payload().expect("fixture renders").len();
-        let quit = handle_event(upload_key(), &mut app);
+        let quit = handle_event(&upload_key(), &mut app);
         assert!(!quit);
         let confirm = app.upload_modal.as_ref().expect("modal opens");
         assert_eq!(confirm.byte_count, expected);
@@ -3072,10 +3052,10 @@ mod tests {
     fn modal_cancel_keys_are_silent() {
         for code in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut app = app_with_fixture();
-            handle_event(upload_key(), &mut app);
+            handle_event(&upload_key(), &mut app);
             assert!(app.upload_modal.is_some());
             app.status_message = String::from("steady");
-            let quit = handle_event(key(code), &mut app);
+            let quit = handle_event(&key(code), &mut app);
             assert!(!quit);
             assert!(app.upload_modal.is_none());
             assert!(app.upload_send.is_none(), "cancel spawns no process");
@@ -3087,7 +3067,7 @@ mod tests {
     fn modal_y_without_path_keeps_modal_and_names_missing() {
         let mut app = app_with_fixture();
         app.open_upload_modal_with(64, blocked_transport());
-        let quit = handle_event(key(KeyCode::Char('y')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('y')), &mut app);
         assert!(!quit);
         assert!(app.upload_modal.is_some(), "modal stays for retry/cancel");
         assert!(app.upload_send.is_none(), "no process spawns");
@@ -3099,7 +3079,7 @@ mod tests {
     fn modal_eats_other_keys() {
         let mut app = app_with_fixture();
         app.open_upload_modal_with(64, blocked_transport());
-        let quit = handle_event(key(KeyCode::Char('l')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('l')), &mut app);
         assert!(!quit);
         assert!(!app.showing_picker, "picker must not open under the modal");
         assert!(app.upload_modal.is_some());
@@ -3111,7 +3091,7 @@ mod tests {
         let payload = app.upload_payload().expect("fixture renders");
         app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
             .expect("spawn sleep");
-        let quit = handle_event(upload_key(), &mut app);
+        let quit = handle_event(&upload_key(), &mut app);
         assert!(!quit);
         assert!(app.upload_modal.is_none());
         assert_eq!(app.status_message, "Upload already in progress");
@@ -3124,7 +3104,7 @@ mod tests {
         let payload = app.upload_payload().expect("fixture renders");
         app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
             .expect("spawn sleep");
-        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('q')), &mut app);
         assert!(quit);
         assert!(app.upload_send.is_none());
     }
@@ -3140,7 +3120,7 @@ mod tests {
     fn question_mark_opens_help_from_panels() {
         let mut app = App::new();
         assert!(!app.showing_help);
-        let quit = handle_event(key(KeyCode::Char('?')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(!quit);
         assert!(app.showing_help);
     }
@@ -3150,17 +3130,17 @@ mod tests {
         // Panels (default) is covered above; exercise the other surfaces.
         let mut app = App::new();
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the viewer");
 
         let mut app = App::new();
         app.open_view(ViewType::Graph);
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the graph");
 
         let mut app = App::new();
         app.showing_validation = true;
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the validation modal");
 
         let mut app = App::new();
@@ -3169,17 +3149,17 @@ mod tests {
                 .unwrap(),
         );
         assert!(app.open_optimizer());
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the optimizer");
 
         let mut app = App::new();
         app.showing_picker = true;
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the picker");
     }
 
     #[test]
-    fn help_parity_keys_dispatch_through_handle_event() {
+    fn help_parity_keys_dispatch_through_the_handler() {
         // Task 2.2: every key synced into the help tables in 1.1-1.4 must
         // reach its handler branch without being swallowed by an earlier one,
         // and `?` must still open the modal over the surfaces those tables
@@ -3195,35 +3175,35 @@ mod tests {
             }),
         ] {
             let mut app = app;
-            handle_event(key(KeyCode::Char('?')), &mut app);
+            handle_event(&key(KeyCode::Char('?')), &mut app);
             assert!(app.showing_help, "? must open help over {label}");
         }
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "? must open help over the graph");
         let mut app = app_with_source_navigation();
         open_optimizer(&mut app);
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "? must open help over the optimizer");
 
         // Panels: `g s` opens the select menu, and Tab/Shift+Tab cycle pane
         // focus while a slot is open.
         let mut app = app_with_select_patch();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert!(app.select_state.is_some(), "g s opens the select menu");
 
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(
             app.layout.focus,
             crate::panes::PaneId::BigLeft,
             "Tab cycles forward"
         );
-        handle_event(shift_tab(), &mut app);
+        handle_event(&shift_tab(), &mut app);
         assert_eq!(
             app.layout.focus,
             crate::panes::PaneId::SmallTop,
@@ -3234,12 +3214,12 @@ mod tests {
         // the influence filter, and `Alt+[`/`Alt+]` the cable tension.
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
-        handle_event(key(KeyCode::Char('h')), &mut app);
+        handle_event(&key(KeyCode::Char('h')), &mut app);
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
         assert_eq!(app.status_message, "Layout: force");
 
         app.hovered_graph_node = Some(0);
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert!(
             app.dependency_root.is_some(),
             "f engages the dependency filter"
@@ -3250,7 +3230,7 @@ mod tests {
             app.influence.is_some(),
             "fixture seeds an influence subtree"
         );
-        handle_event(key(KeyCode::Char('i')), &mut app);
+        handle_event(&key(KeyCode::Char('i')), &mut app);
         assert!(
             app.influence_filter_active,
             "i engages the influence filter"
@@ -3259,8 +3239,8 @@ mod tests {
         // `g s` also opens the select menu from the graph surface.
         let mut app = app_with_select_patch();
         open_graph_slot(&mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert!(
             app.select_state.is_some(),
             "g s opens the select menu on the graph"
@@ -3272,49 +3252,49 @@ mod tests {
         app.layout_mode = crate::config::LayoutMode::Force;
         open_graph_slot(&mut app);
         let default = crate::layout::DEFAULT_TENSION;
-        handle_event(alt_key(KeyCode::Char(']')), &mut app);
+        handle_event(&alt_key(KeyCode::Char(']')), &mut app);
         assert_eq!(
             app.tension,
             default + crate::layout::TENSION_STEP,
             "Alt+] raises cable tension"
         );
-        handle_event(alt_key(KeyCode::Char('[')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.tension, default, "Alt+[ lowers cable tension");
 
         // Physical: `+`/`-` cycle zoom presets, arrows pan an overflowing
         // rack, and j/k navigate without panning.
         let mut app = app_with_overflowing_rack();
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.5, "+ steps the zoom preset");
-        handle_event(key(KeyCode::Char('-')), &mut app);
+        handle_event(&key(KeyCode::Char('-')), &mut app);
         assert_eq!(app.scale_factor, 1.0, "- steps the zoom preset back");
         // Focus the physical pane so arrows route to its pan.
-        handle_event(key(KeyCode::Char('s')), &mut app);
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Right), &mut app);
         assert_eq!(app.physical_offset, (8.0, 0.0), "Right pans the rack");
-        handle_event(key(KeyCode::Left), &mut app);
+        handle_event(&key(KeyCode::Left), &mut app);
         assert_eq!(app.physical_offset, (0.0, 0.0), "Left pans back");
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.hovered_component, Some(1), "j navigates");
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.hovered_component, Some(0), "k navigates");
 
         // Picker: Ctrl+f latches the filter.
         let mut app = App::new();
         app.showing_picker = true;
-        assert!(!handle_event(ctrl_f_key(), &mut app));
+        assert!(!handle_event(&ctrl_f_key(), &mut app));
         assert!(app.picker_filter_active, "Ctrl+f latches the picker filter");
 
         // Optimizer: 0/1 snap the objective weight to its endpoints.
         let mut app = app_with_source_navigation();
         open_optimizer(&mut app);
-        handle_event(key(KeyCode::Char('1')), &mut app);
+        handle_event(&key(KeyCode::Char('1')), &mut app);
         assert_eq!(
             app.optimizer.as_ref().unwrap().weight,
             1.0,
             "1 snaps the weight to 1.0"
         );
-        handle_event(key(KeyCode::Char('0')), &mut app);
+        handle_event(&key(KeyCode::Char('0')), &mut app);
         assert_eq!(
             app.optimizer.as_ref().unwrap().weight,
             0.0,
@@ -3325,9 +3305,9 @@ mod tests {
     #[test]
     fn esc_closes_help_and_returns_false() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
-        let quit = handle_event(key(KeyCode::Esc), &mut app);
+        let quit = handle_event(&key(KeyCode::Esc), &mut app);
         assert!(!quit);
         assert!(!app.showing_help);
     }
@@ -3335,10 +3315,10 @@ mod tests {
     #[test]
     fn q_closes_help_without_quitting() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         // q while help is open closes help and does NOT quit.
-        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('q')), &mut app);
         assert!(!quit, "q must not quit while help is open");
         assert!(!app.showing_help);
     }
@@ -3346,10 +3326,10 @@ mod tests {
     #[test]
     fn help_eats_other_keys() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         // A random key while help is open is swallowed (returns false, no quit).
-        let quit = handle_event(key(KeyCode::Char('l')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('l')), &mut app);
         assert!(!quit);
         assert!(app.showing_help, "help stays open on unrelated keys");
     }
@@ -3357,7 +3337,7 @@ mod tests {
     #[test]
     fn click_outside_closes_help() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         // Publish a modal rect, then click well outside it.
         app.help_modal_rect = Some(Rect::new(10, 10, 40, 20));
@@ -3371,7 +3351,7 @@ mod tests {
     #[test]
     fn click_inside_keeps_help_open() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
         app.help_modal_rect = Some(Rect::new(10, 10, 40, 20));
         handle_mouse_event(
@@ -3388,21 +3368,21 @@ mod tests {
     fn plus_and_minus_cycle_scale_presets_with_status() {
         let mut app = App::new();
         // From the 100% default, '-' steps down one preset to 75%.
-        handle_event(key(KeyCode::Char('-')), &mut app);
+        handle_event(&key(KeyCode::Char('-')), &mut app);
         assert_eq!(app.scale_factor, 0.75);
         assert_eq!(app.status_message, "Scaling: 75%");
 
         // '+' climbs back through the presets.
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.0);
         assert_eq!(app.status_message, "Scaling: 100%");
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 1.5);
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 2.0);
 
         // At the top preset, '+' wraps around to the bottom.
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.scale_factor, 0.75);
     }
 
@@ -3413,14 +3393,14 @@ mod tests {
         let mut app = App::new();
         app.physical_zoom = 0.98;
         app.scale_factor = 0.98;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_eq!(app.physical_zoom, 1.0, "0.98 steps up to 1.0");
         assert_eq!(app.scale_factor, 1.0);
 
         let mut down = App::new();
         down.physical_zoom = 0.98;
         down.scale_factor = 0.98;
-        handle_event(key(KeyCode::Char('-')), &mut down);
+        handle_event(&key(KeyCode::Char('-')), &mut down);
         assert_eq!(down.physical_zoom, 0.75, "0.98 steps down to 0.75");
         assert_eq!(down.scale_factor, 0.75);
 
@@ -3428,12 +3408,12 @@ mod tests {
         let mut high = App::new();
         high.physical_zoom = 2.6;
         high.scale_factor = 2.6;
-        handle_event(key(KeyCode::Char('+')), &mut high);
+        handle_event(&key(KeyCode::Char('+')), &mut high);
         assert_eq!(high.physical_zoom, 0.75, "past the top wraps to the floor");
         let mut high_down = App::new();
         high_down.physical_zoom = 2.6;
         high_down.scale_factor = 2.6;
-        handle_event(key(KeyCode::Char('-')), &mut high_down);
+        handle_event(&key(KeyCode::Char('-')), &mut high_down);
         assert_eq!(high_down.physical_zoom, 2.0, "steps down to the top preset");
     }
 
@@ -3446,12 +3426,12 @@ mod tests {
         assert!(app.physical_fit_zoom.is_some(), "the view opened fitted");
 
         // A manual zoom latches the view.
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert!(app.physical_nav_latched);
         assert_ne!(app.physical_zoom, fitted);
 
         // `f` on the focused module UI pane returns to the fit.
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert!(!app.physical_nav_latched, "fit clears the latch");
         assert!(
             (app.physical_zoom - fitted).abs() < 1e-6,
@@ -3481,7 +3461,7 @@ mod tests {
         app.apply_physical_fit_triggers();
 
         // `Shift+F` first, so the rack fit is not the one the trigger left.
-        handle_event(key(KeyCode::Char('F')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         let rack_fit = app.physical_zoom;
         assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Rack));
         assert!(
@@ -3492,7 +3472,7 @@ mod tests {
         assert!(!app.physical_nav_latched, "a fit clears the latch");
 
         // `f` then applies the labels fit, which on this patch lifts.
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Labels));
         assert!(
             app.status_message.contains("fit(labels)"),
@@ -3540,11 +3520,11 @@ mod tests {
         let mut app = app_with_fixture();
         assert!(app.layout.maximized.is_none());
         // Default focus is the left big pane holding the module UI.
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert_eq!(app.layout.maximized, Some(PaneId::BigLeft));
         assert_eq!(app.status_message, "Maximized");
         // A second `z` restores the arrangement with the same views.
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none());
         assert_eq!(app.status_message, "Layout restored");
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
@@ -3554,28 +3534,28 @@ mod tests {
     fn z_maximizes_the_focused_small_pane() {
         use crate::panes::PaneId;
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Tab), &mut app); // -> SmallTop (source viewer)
+        handle_event(&key(KeyCode::Tab), &mut app); // -> SmallTop (source viewer)
         assert_eq!(app.layout.focus, PaneId::SmallTop);
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert_eq!(app.layout.maximized, Some(PaneId::SmallTop));
     }
 
     #[test]
     fn focus_change_clears_the_maximize() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_some());
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert!(app.layout.maximized.is_none());
     }
 
     #[test]
     fn esc_clears_maximize_before_closing_the_view() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_some());
         let view_before = app.layout.big_left.view;
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.layout.maximized.is_none());
         assert_eq!(app.layout.big_left.view, view_before, "view must stay open");
         assert_eq!(app.status_message, "Layout restored");
@@ -3587,12 +3567,12 @@ mod tests {
         let mut app = app_with_fixture();
         // Close the source viewer so the band has no small view; the tiled Esc
         // dispatch below would not run in that state.
-        handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop
-        handle_event(key(KeyCode::Esc), &mut app); // close source viewer
+        handle_event(&key(KeyCode::Tab), &mut app); // focus SmallTop
+        handle_event(&key(KeyCode::Esc), &mut app); // close source viewer
         assert!(app.layout.small_top.view.is_none());
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert_eq!(app.layout.maximized, Some(PaneId::SmallTop));
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.layout.maximized.is_none());
         assert_eq!(app.status_message, "Layout restored");
     }
@@ -3601,9 +3581,9 @@ mod tests {
     fn alt_b_promotes_the_focused_small_view_into_the_big_pane() {
         use crate::panes::PaneId;
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop (source viewer)
+        handle_event(&key(KeyCode::Tab), &mut app); // focus SmallTop (source viewer)
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
-        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::SourceViewer));
         assert_eq!(app.layout.small_top.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::SmallTop, "focus is preserved");
@@ -3614,7 +3594,7 @@ mod tests {
         let mut app = app_with_fixture();
         // Startup small arrangement: BigLeft is the only big pane and holds focus.
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.status_message, "No swap applies");
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
@@ -3624,7 +3604,7 @@ mod tests {
     fn alt_s_exchanges_the_two_small_panes() {
         let mut app = app_with_fixture();
         // Default: SmallTop holds the source viewer, SmallBottom is empty.
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, None);
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::SourceViewer));
     }
@@ -3632,11 +3612,11 @@ mod tests {
     #[test]
     fn alt_s_exchanges_a_promoted_view_pair() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('o')), &mut app); // optimizer -> SmallBottom
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('o')), &mut app); // optimizer -> SmallBottom
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::Optimizer));
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::SourceViewer));
     }
@@ -3645,34 +3625,34 @@ mod tests {
     fn alt_s_reports_noop_without_small_panes() {
         let mut app = app_with_fixture();
         // Close the only small-class view: the right half becomes one big pane.
-        handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop
-        handle_event(key(KeyCode::Esc), &mut app); // close source viewer
+        handle_event(&key(KeyCode::Tab), &mut app); // focus SmallTop
+        handle_event(&key(KeyCode::Esc), &mut app); // close source viewer
         assert!(!app.layout.has_small_view());
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.status_message, "No swap applies");
     }
 
     #[test]
     fn help_modal_consumes_the_pane_layout_keys() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('?')), &mut app);
+        handle_event(&key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help);
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none(), "help eats z");
-        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
     }
 
     #[test]
     fn picker_consumes_the_pane_layout_keys() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('l')), &mut app);
+        handle_event(&key(KeyCode::Char('l')), &mut app);
         assert!(app.showing_picker);
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none());
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
     }
 
@@ -3684,11 +3664,11 @@ mod tests {
     fn validation_modal_consumes_the_pane_layout_keys() {
         let mut app = app_with_fixture();
         app.showing_validation = true;
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none(), "validation eats z");
-        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert!(app.showing_validation, "the modal stays open");
     }
@@ -3701,11 +3681,11 @@ mod tests {
             1,
             String::new(),
         ));
-        handle_event(key(KeyCode::Char('z')), &mut app);
+        handle_event(&key(KeyCode::Char('z')), &mut app);
         assert!(app.layout.maximized.is_none(), "label overlay eats z");
-        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        handle_event(alt_key(KeyCode::Char('s')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert!(app.editing.is_some(), "the overlay stays open");
     }
@@ -3722,7 +3702,7 @@ mod tests {
         app.layout.small_top.view = None;
         assert_eq!(app.layout.focus, PaneId::BigLeft);
 
-        handle_event(alt_key(KeyCode::Char('b')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('b')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert_eq!(app.layout.big_right.view, Some(ViewType::Physical));
         assert_eq!(app.layout.focus, PaneId::BigLeft, "focus preserved");
@@ -3739,7 +3719,7 @@ mod tests {
         seed_graph_camera(&mut app);
 
         let z0 = app.graph_camera.unwrap().zoom;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         let z1 = app.graph_camera.unwrap().zoom;
         assert!(
             (z1 - z0 * 1.5).abs() < 1e-2,
@@ -3755,11 +3735,11 @@ mod tests {
         // true fit of a large patch.
         // Step through: 1.5 -> 2.0 -> 4.0 -> 8.0 -> wrap to 0.0078125
         for _ in 0..4 {
-            handle_event(key(KeyCode::Char('+')), &mut app);
+            handle_event(&key(KeyCode::Char('+')), &mut app);
         }
         let z_wrapped = app.graph_camera.unwrap().zoom;
         assert!(
-            (z_wrapped - 0.0078125).abs() < 1e-2,
+            (z_wrapped - 0.007_812_5).abs() < 1e-2,
             "wrap from 800% to 0.78125%: {z0} -> {z_wrapped}"
         );
         assert_eq!(app.graph_zoom_preset, 0);
@@ -3776,7 +3756,7 @@ mod tests {
         // width at the fitted zoom is small).
         let before = app.graph_camera.unwrap().pan;
         app.graph_canvas_px = Some((20.0, 20.0));
-        handle_event(key(KeyCode::Right), &mut app);
+        handle_event(&key(KeyCode::Right), &mut app);
         let after = app.graph_camera.unwrap().pan;
         assert!(
             (after.0 - before.0).abs() > 1.0,
@@ -3792,8 +3772,8 @@ mod tests {
         app.open_graph();
         app.open_view(ViewType::Graph);
         assert!(app.graph_camera.is_none());
-        handle_event(key(KeyCode::Char('+')), &mut app);
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert!(app.graph_camera.is_none());
         assert!(app.pane_holding(ViewType::Graph).is_some());
     }
@@ -3828,7 +3808,7 @@ mod tests {
         app.graph_canvas_px = Some((640.0, 300.0));
         let latency_before = app.latency_coloring;
 
-        handle_event(key(KeyCode::Char('c')), &mut app);
+        handle_event(&key(KeyCode::Char('c')), &mut app);
 
         let cam = app.graph_camera.unwrap();
         assert_eq!(cam.zoom, 2.0, "centering must not change zoom");
@@ -3849,7 +3829,7 @@ mod tests {
         app.open_graph();
         assert!(app.graph_camera.is_none());
 
-        handle_event(key(KeyCode::Char('c')), &mut app);
+        handle_event(&key(KeyCode::Char('c')), &mut app);
 
         assert!(app.graph_camera.is_none());
         assert_ne!(app.status_message, "Graph centered");
@@ -3869,7 +3849,7 @@ mod tests {
         app.graph_zoom_preset = 0;
         app.graph_canvas_px = Some((640.0, 300.0));
 
-        handle_event(shift_key(KeyCode::Char('C')), &mut app);
+        handle_event(&shift_key(KeyCode::Char('C')), &mut app);
 
         assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
         assert_eq!(app.graph_canvas_px, Some((640.0, 300.0)));
@@ -3894,7 +3874,7 @@ mod tests {
         });
         assert!(app.graph_canvas_px.is_none());
 
-        handle_event(shift_key(KeyCode::Char('C')), &mut app);
+        handle_event(&shift_key(KeyCode::Char('C')), &mut app);
 
         assert_eq!(app.graph_canvas_px, Some((1280.0, 800.0)));
         assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
@@ -3908,14 +3888,14 @@ mod tests {
         open_graph_slot(&mut app);
         assert!(app.latency_coloring, "latency coloring on by default");
 
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('c')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('c')), &mut app);
 
         assert!(!app.latency_coloring);
         assert_eq!(app.status_message, "Latency coloring off (g c to toggle)");
 
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('c')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('c')), &mut app);
 
         assert!(app.latency_coloring);
         assert_eq!(app.status_message, "Latency coloring on (g c to toggle)");
@@ -3923,8 +3903,8 @@ mod tests {
 
     /// Open the graph slot via `g` then `g`.
     fn open_graph_slot(app: &mut App) {
-        handle_event(key(KeyCode::Char('g')), app);
-        handle_event(key(KeyCode::Char('g')), app);
+        handle_event(&key(KeyCode::Char('g')), app);
+        handle_event(&key(KeyCode::Char('g')), app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
     }
 
@@ -3934,7 +3914,7 @@ mod tests {
         open_graph_slot(&mut app);
         let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
         app.hovered_graph_node = Some(0);
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert_eq!(app.dependency_root, Some(root));
         assert!(!app.dependency_nodes.is_empty());
         assert!(
@@ -3956,7 +3936,7 @@ mod tests {
         open_graph_slot(&mut app);
         let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
         app.selected_circuit = Some(root.clone());
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert_eq!(app.dependency_root, Some(root));
     }
 
@@ -3964,7 +3944,7 @@ mod tests {
     fn f_without_hover_or_selection_hints_and_keeps_full_graph() {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_none());
         assert_eq!(app.status_message, "No graph node selected");
     }
@@ -3974,17 +3954,17 @@ mod tests {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
         app.hovered_graph_node = Some(0);
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_some());
         // A second `f` restores the full graph.
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_none());
         assert!(app.dependency_nodes.is_empty());
         // Re-engage, then Esc clears without closing the graph slot.
         app.hovered_graph_node = Some(0);
-        handle_event(key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         assert!(app.dependency_root.is_some());
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.dependency_root.is_none());
         assert!(
             app.pane_holding(ViewType::Graph).is_some(),
@@ -4000,7 +3980,7 @@ mod tests {
             "parent entry is the '..' sentinel"
         );
         app.picker_index = 0;
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(app.showing_picker, "picker stays open when navigating up");
         assert_eq!(app.picker_dir, std::path::PathBuf::from("fixtures"));
         assert!(app.patch.is_none());
@@ -4008,8 +3988,8 @@ mod tests {
 
     /// Open the embedded source viewer via `g` then `v`.
     fn open_viewer(app: &mut App) {
-        handle_event(key(KeyCode::Char('g')), app);
-        handle_event(key(KeyCode::Char('v')), app);
+        handle_event(&key(KeyCode::Char('g')), app);
+        handle_event(&key(KeyCode::Char('v')), app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
     }
 
@@ -4019,10 +3999,10 @@ mod tests {
         // even 0.5 default, independent of any open view.
         let mut app = App::new();
         assert_eq!(app.layout.main_split_ratio, 0.5);
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.4);
         assert_eq!(app.status_message, "Split: 40%/60%");
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.5);
     }
 
@@ -4030,13 +4010,13 @@ mod tests {
     fn close_bracket_increases_big_boundary_and_clamps_at_0_7() {
         let mut app = App::new();
         // 0.5 -> 0.6 -> 0.7 (clamp).
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.6);
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.7);
         assert_eq!(app.status_message, "Split: 70%/30%");
         // Further presses clamp at the upper bound.
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.7);
     }
 
@@ -4044,20 +4024,20 @@ mod tests {
     fn open_bracket_decreases_big_boundary_and_clamps_at_0_3() {
         let mut app = App::new();
         // 0.5 -> 0.4 -> 0.3 (clamp).
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.4);
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.3);
         assert_eq!(app.status_message, "Split: 30%/70%");
         // Further presses clamp at the lower bound.
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.3);
     }
 
     /// Open the optimizer menu via `g` then `o`.
     fn open_optimizer(app: &mut App) {
-        handle_event(key(KeyCode::Char('g')), app);
-        handle_event(key(KeyCode::Char('o')), app);
+        handle_event(&key(KeyCode::Char('g')), app);
+        handle_event(&key(KeyCode::Char('o')), app);
         assert!(app.optimizer.is_some());
     }
 
@@ -4078,8 +4058,8 @@ mod tests {
     #[test]
     fn g_o_without_patch_shows_hint_and_keeps_menu_closed() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('o')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
         assert!(app.optimizer.is_none());
         assert!(
             app.status_message.contains("No patch loaded"),
@@ -4097,9 +4077,9 @@ mod tests {
             return;
         }
         // j moves down (wraps at the end), k moves up.
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().cursor, 1);
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().cursor, 0);
 
         // Enter previews candidate 0: sections reordered, graph rebuilt.
@@ -4111,7 +4091,7 @@ mod tests {
             .iter()
             .map(|s| s.name.clone())
             .collect();
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         let previewed = app.optimizer.as_ref().unwrap().previewing;
         assert_eq!(previewed, Some(0));
         assert!(app.graph.is_some());
@@ -4122,7 +4102,7 @@ mod tests {
         );
 
         // r restores the original order.
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().previewing, None);
         let restored: Vec<String> = app
             .patch
@@ -4147,9 +4127,9 @@ mod tests {
             .iter()
             .map(|s| s.name.clone())
             .collect();
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert!(app.optimizer.as_ref().unwrap().previewing.is_some());
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.optimizer.is_none());
         let after: Vec<String> = app
             .patch
@@ -4179,7 +4159,7 @@ mod tests {
             .len();
         assert_eq!(base_len, app.graph.as_ref().unwrap().edges.len());
 
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().previewing, Some(0));
         assert!(
             app.optimizer_diff_state.is_some(),
@@ -4200,8 +4180,7 @@ mod tests {
                     .edges
                     .iter()
                     .find(|l| l.edge_index == i)
-                    .map(|l| l.latency)
-                    .unwrap_or(0.0);
+                    .map_or(0.0, |l| l.latency);
                 if (current - state.before_latency[i]).abs() > 1e-6 {
                     changed = true;
                     break;
@@ -4215,7 +4194,7 @@ mod tests {
         );
 
         // `r` restores the file order and clears the diff baseline.
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().previewing, None);
         assert!(app.optimizer_diff_state.is_none());
     }
@@ -4225,17 +4204,17 @@ mod tests {
         // Task 4.1 (optimizer-click-focus): row hit-testing — 24px header,
         // 16px rows, 12-row cap, pane bounds.
         let pane = Rect::new(10, 20, 200, 300);
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24, 3), Some(0));
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 16, 3), Some(1));
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 2 * 16, 3), Some(2));
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24, 3), Some(0));
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24 + 16, 3), Some(1));
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24 + 2 * 16, 3), Some(2));
         // Header zone, past the last row, outside the pane, no rows.
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 10, 3), None);
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 3 * 16, 3), None);
-        assert_eq!(optimizer_row_at(&pane, 5, 20 + 24, 3), None);
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24, 0), None);
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 10, 3), None);
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24 + 3 * 16, 3), None);
+        assert_eq!(optimizer_row_at(pane, 5, 20 + 24, 3), None);
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24, 0), None);
         // 12-row cap governs beyond 12 rows.
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 11 * 16, 20), Some(11));
-        assert_eq!(optimizer_row_at(&pane, 15, 20 + 24 + 12 * 16, 20), None);
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24 + 11 * 16, 20), Some(11));
+        assert_eq!(optimizer_row_at(pane, 15, 20 + 24 + 12 * 16, 20), None);
     }
 
     #[test]
@@ -4250,7 +4229,7 @@ mod tests {
         let candidates_at_0 = app.optimizer.as_ref().unwrap().candidates.clone();
 
         // `]` steps +0.1; the status line reports the new weight.
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.1);
         assert!(
             app.status_message.contains("w = 0.1"),
@@ -4266,29 +4245,29 @@ mod tests {
         );
 
         // `[` steps back down to the MinSum endpoint.
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
 
         // `0`/`1` snap straight to the endpoints.
-        handle_event(key(KeyCode::Char('1')), &mut app);
+        handle_event(&key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
-        handle_event(key(KeyCode::Char('0')), &mut app);
+        handle_event(&key(KeyCode::Char('0')), &mut app);
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
 
         // `]` past the top clamps at 1.0; `[` past the bottom clamps at 0.0.
-        handle_event(key(KeyCode::Char('1')), &mut app);
+        handle_event(&key(KeyCode::Char('1')), &mut app);
         for _ in 0..5 {
-            handle_event(key(KeyCode::Char(']')), &mut app);
+            handle_event(&key(KeyCode::Char(']')), &mut app);
         }
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 1.0);
         // Ten steps down from 1.0 reach 0.0; an eleventh `[` must stay at the floor.
         for _ in 0..11 {
-            handle_event(key(KeyCode::Char('[')), &mut app);
+            handle_event(&key(KeyCode::Char('[')), &mut app);
         }
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.0);
 
         // Esc still closes the menu; `g o` still reopens it.
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.optimizer.is_none());
         open_optimizer(&mut app);
         assert!(app.optimizer.is_some());
@@ -4300,15 +4279,15 @@ mod tests {
         // stays view-local"); closing it hands the boundary keys back.
         let mut app = app_with_fixture();
         open_optimizer(&mut app);
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(
             app.layout.main_split_ratio, 0.5,
             "optimizer `]` must not move the big boundary"
         );
         assert_eq!(app.optimizer.as_ref().unwrap().weight, 0.1);
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         // With the optimizer closed `]` moves the big boundary again.
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.6);
     }
 
@@ -4328,7 +4307,7 @@ mod tests {
         if n == 0 {
             return;
         }
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         let dest = dir.path().join("patch-latopt.ini");
         assert!(
             dest.exists(),
@@ -4347,7 +4326,7 @@ mod tests {
     fn ctrl_c_quits() {
         let mut app = App::new();
         let quit = handle_event(
-            KeyEvent::new(KeyCode::Char('c'), key_modifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('c'), key_modifiers::CONTROL),
             &mut app,
         );
         assert!(quit);
@@ -4361,7 +4340,7 @@ mod tests {
         handle_mouse_event(mouse(MouseEventKind::Moved, 20, 1), &mut app);
         assert_eq!(app.hovered_component, Some(1));
 
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.hovered_component, Some(2));
     }
 
@@ -4372,7 +4351,7 @@ mod tests {
         assert_eq!(app.hovered_component, Some(0));
 
         // Enter (keyboard) toggles whatever is currently hovered, same as a click would.
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert!(matches!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             ComponentState::On
@@ -4399,7 +4378,7 @@ mod tests {
         let btn = idx_of(&app, "B1.1");
         let led = idx_of(&app, "L1.1");
         app.hovered_component = Some(btn);
-        let quit = handle_event(ctrl_enter(), &mut app);
+        let quit = handle_event(&ctrl_enter(), &mut app);
         assert!(!quit);
         let patch = app.patch.as_ref().unwrap();
         assert!(
@@ -4424,7 +4403,7 @@ mod tests {
             let btn = idx_of(&app, "B1.1");
             let led = idx_of(&app, "L1.1");
             app.hovered_component = Some(btn);
-            handle_event(key(code.clone()), &mut app);
+            handle_event(&key(code.clone()), &mut app);
             let patch = app.patch.as_ref().unwrap();
             assert!(
                 matches!(patch.hw_components[btn].state, ComponentState::On),
@@ -4448,7 +4427,7 @@ mod tests {
         let led = idx_of(&app, "L1.1");
         app.hovered_component = Some(led);
         let before = app.status_message.clone();
-        let quit = handle_event(ctrl_enter(), &mut app);
+        let quit = handle_event(&ctrl_enter(), &mut app);
         assert!(!quit);
         let patch = app.patch.as_ref().unwrap();
         assert!(matches!(
@@ -4468,7 +4447,7 @@ mod tests {
         let led = idx_of(&app, "L1.1");
         app.hovered_component = Some(btn);
         app.processing_paused = true;
-        handle_event(ctrl_enter(), &mut app);
+        handle_event(&ctrl_enter(), &mut app);
         let patch = app.patch.as_ref().unwrap();
         assert!(
             matches!(patch.hw_components[led].state, ComponentState::Off),
@@ -4488,7 +4467,7 @@ mod tests {
         app.patch.as_mut().unwrap().hw_components[led].state =
             ComponentState::Led { value: 0.0, rgb };
         app.hovered_component = Some(led);
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         match &app.patch.as_ref().unwrap().hw_components[led].state {
             ComponentState::Led { value, rgb: kept } => {
                 assert!(
@@ -4499,7 +4478,7 @@ mod tests {
             }
             other => panic!("coloured LED must stay Led, got {other:?}"),
         }
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         match &app.patch.as_ref().unwrap().hw_components[led].state {
             ComponentState::Led { value, rgb: kept } => {
                 assert!(
@@ -4520,7 +4499,7 @@ mod tests {
         app.patch.as_mut().unwrap().hw_components[led].state =
             ComponentState::Led { value: 1.0, rgb };
         app.hovered_component = Some(led);
-        handle_event(key(KeyCode::Char(' ')), &mut app);
+        handle_event(&key(KeyCode::Char(' ')), &mut app);
         match &app.patch.as_ref().unwrap().hw_components[led].state {
             ComponentState::Led { value, rgb: kept } => {
                 assert!(value.abs() < 1e-6, "value must flip to 0.0, got {value}");
@@ -4539,7 +4518,7 @@ mod tests {
         app.patch.as_mut().unwrap().hw_components[led].state =
             ComponentState::Led { value: 0.0, rgb };
         app.hovered_component = Some(btn);
-        handle_event(ctrl_enter(), &mut app);
+        handle_event(&ctrl_enter(), &mut app);
         match &app.patch.as_ref().unwrap().hw_components[led].state {
             ComponentState::Led { value, rgb: kept } => {
                 assert!(
@@ -4562,10 +4541,10 @@ mod tests {
             ('3', ShiftGroup::Group3),
             ('4', ShiftGroup::Group4),
         ] {
-            handle_event(key(KeyCode::Char(ch)), &mut app);
+            handle_event(&key(KeyCode::Char(ch)), &mut app);
             assert_eq!(app.active_shift, Some(expected));
         }
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert_eq!(app.active_shift, None);
     }
 
@@ -4581,8 +4560,8 @@ mod tests {
     fn picker_index_of(app: &App, file_name: &str) -> usize {
         app.picker_entries
             .iter()
-            .position(|p| p.file_name().map(|n| n == file_name).unwrap_or(false))
-            .unwrap_or_else(|| panic!("no picker entry named {}", file_name))
+            .position(|p| p.file_name().is_some_and(|n| n == file_name))
+            .unwrap_or_else(|| panic!("no picker entry named {file_name}"))
     }
 
     fn ctrl_f_key() -> KeyEvent {
@@ -4591,7 +4570,7 @@ mod tests {
 
     fn type_picker_chars(app: &mut App, chars: &str) {
         for c in chars.chars() {
-            handle_picker_event(KeyEvent::new(KeyCode::Char(c), key_modifiers::NONE), app);
+            handle_picker_event(&KeyEvent::new(KeyCode::Char(c), key_modifiers::NONE), app);
         }
     }
 
@@ -4599,7 +4578,7 @@ mod tests {
     fn picker_ctrl_f_latches_filter_with_empty_string() {
         let mut app = picker_app_at("fixtures/picker_test");
         assert!(!app.picker_filter_active);
-        let quit = handle_picker_event(ctrl_f_key(), &mut app);
+        let quit = handle_picker_event(&ctrl_f_key(), &mut app);
         assert!(!quit);
         assert!(app.picker_filter_active);
         assert!(app.picker_filter.is_empty());
@@ -4611,7 +4590,7 @@ mod tests {
     #[test]
     fn picker_filter_chars_append_and_narrow_listing() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "patch_a");
         assert_eq!(app.picker_filter, "patch_a");
         let names: Vec<String> = app
@@ -4630,14 +4609,14 @@ mod tests {
     #[test]
     fn picker_backspace_pops_last_filter_char() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "abba");
         assert_eq!(app.picker_filter, "abba");
-        handle_picker_event(key(KeyCode::Backspace), &mut app);
+        handle_picker_event(&key(KeyCode::Backspace), &mut app);
         assert_eq!(app.picker_filter, "abb");
         // Backspacing down to the empty string restores the full listing.
         for _ in 0..3 {
-            handle_picker_event(key(KeyCode::Backspace), &mut app);
+            handle_picker_event(&key(KeyCode::Backspace), &mut app);
         }
         assert!(app.picker_filter.is_empty());
         assert!(app.picker_filter_active, "backspace keeps the latch on");
@@ -4659,14 +4638,14 @@ mod tests {
             ],
         };
         app.refresh_picker_entries();
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "p");
         // Out-of-range digit: silent, and NOT appended to the filter string.
-        handle_picker_event(key(KeyCode::Char('9')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('9')), &mut app);
         assert_eq!(app.picker_filter, "p");
         assert!(app.showing_picker);
         // Slot 0 fast-selects the first sorted favourite (patch_a.ini).
-        handle_picker_event(key(KeyCode::Char('0')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('0')), &mut app);
         assert!(!app.showing_picker);
         assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
         assert!(!app.picker_filter_active);
@@ -4675,10 +4654,10 @@ mod tests {
     #[test]
     fn picker_q_resets_filter_without_quitting() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "patch_a");
         assert!(app.picker_filter_active);
-        let quit = handle_picker_event(key(KeyCode::Char('q')), &mut app);
+        let quit = handle_picker_event(&key(KeyCode::Char('q')), &mut app);
         assert!(!quit, "q must not quit while the picker is open");
         assert!(app.showing_picker);
         assert!(!app.picker_filter_active);
@@ -4700,11 +4679,11 @@ mod tests {
     #[test]
     fn picker_enter_into_subdirectory_resets_filter() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "sub");
         assert!(app.picker_filter_active);
         app.picker_index = picker_index_of(&app, "subdir");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
 
         assert!(
             app.showing_picker,
@@ -4733,7 +4712,7 @@ mod tests {
     #[test]
     fn picker_parent_entry_resets_filter() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "patch");
         assert!(app.picker_filter_active);
         app.picker_index = app
@@ -4741,7 +4720,7 @@ mod tests {
             .iter()
             .position(|p| is_picker_parent_entry(p))
             .expect("parent entry present below the filesystem root");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
 
         assert_eq!(app.picker_dir, std::path::PathBuf::from("fixtures"));
         assert!(!app.picker_filter_active, "navigating up clears the latch");
@@ -4762,12 +4741,12 @@ mod tests {
             favourites: vec![String::from("fixtures/picker_test/subdir")],
         };
         app.refresh_picker_entries();
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "patch");
         assert!(app.picker_filter_active);
         // Slot 0 fast-selects the favourited directory; the digit never lands in
         // the filter string and the directory change resets it.
-        handle_picker_event(key(KeyCode::Char('0')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('0')), &mut app);
 
         assert!(
             app.showing_picker,
@@ -4784,12 +4763,12 @@ mod tests {
     #[test]
     fn picker_frame_click_directory_resets_filter() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "sub");
         assert!(app.picker_filter_active);
         let idx = picker_index_of(&app, "subdir");
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 clicked: Some(idx),
                 ..PickerFrame::default()
             },
@@ -4811,10 +4790,10 @@ mod tests {
     #[test]
     fn picker_esc_resets_filter_and_closes() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "abba");
         assert!(app.picker_filter_active);
-        let quit = handle_picker_event(key(KeyCode::Esc), &mut app);
+        let quit = handle_picker_event(&key(KeyCode::Esc), &mut app);
         assert!(!quit);
         assert!(!app.showing_picker);
         assert!(!app.picker_filter_active);
@@ -4824,10 +4803,10 @@ mod tests {
     #[test]
     fn picker_enter_resets_filter_on_patch_load() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "patch_a");
         app.picker_index = picker_index_of(&app, "patch_a.ini");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(!app.showing_picker);
         assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
         assert!(!app.picker_filter_active);
@@ -4837,7 +4816,7 @@ mod tests {
     #[test]
     fn picker_jk_bounds_hold_on_filtered_list() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "subdir");
         let len = app.picker_entries.len();
         assert_eq!(
@@ -4846,21 +4825,21 @@ mod tests {
             app.picker_entries
         );
         // j stops at the bottom bound; k stops at the top bound.
-        handle_picker_event(key(KeyCode::Char('j')), &mut app);
-        handle_picker_event(key(KeyCode::Char('j')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('j')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.picker_index, len - 1);
-        handle_picker_event(key(KeyCode::Char('k')), &mut app);
-        handle_picker_event(key(KeyCode::Char('k')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('k')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.picker_index, 0);
     }
 
     #[test]
     fn picker_ctrl_f_re_latch_clears_the_string() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         type_picker_chars(&mut app, "abba");
         // Second Ctrl+f toggles off per spec (filter latching toggles on/off).
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         assert!(!app.picker_filter_active);
         assert!(app.picker_filter.is_empty());
         assert_eq!(app.status_message, "Filter: off");
@@ -4869,7 +4848,7 @@ mod tests {
     #[test]
     fn picker_esc_cancels() {
         let mut app = picker_app_at("fixtures/picker_test");
-        let quit = handle_picker_event(key(KeyCode::Esc), &mut app);
+        let quit = handle_picker_event(&key(KeyCode::Esc), &mut app);
         assert!(!quit);
         assert!(!app.showing_picker);
     }
@@ -4878,7 +4857,7 @@ mod tests {
     fn picker_enter_on_ini_loads_and_closes() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "patch_a.ini");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(!app.showing_picker);
         assert_eq!(app.patch.as_ref().unwrap().name, "patch_a");
     }
@@ -4887,7 +4866,7 @@ mod tests {
     fn picker_enter_keys_label_store_path() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "patch_a.ini");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(!app.showing_picker);
         assert!(app.patch.is_some());
         let path = app
@@ -4906,7 +4885,7 @@ mod tests {
         app.showing_picker = true;
         app.refresh_picker_entries();
         app.picker_index = picker_index_of(&app, "ram_overflow.ini");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         // The picker closes on a gated load so the validation modal is reachable.
         assert!(!app.showing_picker);
         // Gate keeps the previously loaded patch.
@@ -4921,20 +4900,20 @@ mod tests {
     fn picker_enter_on_directory_navigates_in_without_closing() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "subdir");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(app.showing_picker);
         assert!(app.picker_dir.ends_with("subdir"));
         assert!(app
             .picker_entries
             .iter()
-            .any(|p| p.file_name().map(|n| n == "patch_b.ini").unwrap_or(false)));
+            .any(|p| p.file_name().is_some_and(|n| n == "patch_b.ini")));
     }
 
     #[test]
     fn picker_enter_on_non_ini_file_is_ignored() {
         let mut app = picker_app_at("fixtures/picker_test");
         app.picker_index = picker_index_of(&app, "readme.txt");
-        handle_picker_event(key(KeyCode::Enter), &mut app);
+        handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(app.showing_picker);
         assert!(app.patch.is_none());
     }
@@ -4944,11 +4923,11 @@ mod tests {
         let mut app = picker_app_at("fixtures/picker_test");
         let len = app.picker_entries.len();
         app.picker_index = 0;
-        handle_picker_event(key(KeyCode::Char('k')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.picker_index, 0); // clamped, doesn't go negative
 
         for _ in 0..len + 2 {
-            handle_picker_event(key(KeyCode::Char('j')), &mut app);
+            handle_picker_event(&key(KeyCode::Char('j')), &mut app);
         }
         assert_eq!(app.picker_index, len - 1); // clamped at the end
     }
@@ -4956,15 +4935,15 @@ mod tests {
     #[test]
     fn g_enters_prefix_mode() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
     }
 
     #[test]
     fn g_then_v_opens_viewer_and_clears_prefix() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert!(app.prefix.is_none());
@@ -4974,8 +4953,8 @@ mod tests {
         let mut app = app_with_source_navigation();
         // No selection -> BOF
         app.source_scroll = 99;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
@@ -4993,8 +4972,8 @@ mod tests {
         if let Some(id) = app.pane_holding(ViewType::SourceViewer) {
             app.layout.pane_mut(id).view = None;
         }
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, first);
@@ -5005,8 +4984,8 @@ mod tests {
     #[test]
     fn g_then_other_key_cancels_prefix_and_processes_key_normally() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert!(app.prefix.is_none());
         assert_eq!(app.hovered_component, Some(1));
     }
@@ -5015,8 +4994,8 @@ mod tests {
     fn g_then_esc_cancels_prefix_without_other_action() {
         let mut app = App::new();
         app.active_shift = Some(ShiftGroup::Group1);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.prefix.is_none());
         // Esc while a prefix is armed must not also clear the shift group.
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
@@ -5042,9 +5021,9 @@ mod tests {
     #[test]
     fn g_then_s_opens_select_menu_and_clears_prefix() {
         let mut app = app_with_select_patch();
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert!(app.prefix.is_none());
         assert!(app.select_state.is_some(), "g s opens the select menu");
     }
@@ -5052,20 +5031,20 @@ mod tests {
     #[test]
     fn select_menu_jk_navigate_cursor() {
         let mut app = app_with_select_patch();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.select_state.as_ref().unwrap().cursor, 0);
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.select_state.as_ref().unwrap().cursor, 1);
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().cursor,
             1,
             "cursor clamps at last"
         );
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.select_state.as_ref().unwrap().cursor, 0);
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().cursor,
             0,
@@ -5076,20 +5055,20 @@ mod tests {
     #[test]
     fn select_menu_brackets_cycle_focused_candidate() {
         let mut app = app_with_select_patch();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         // Focused signal is the first (register S1.1); default first candidate 0.
         assert_eq!(
             app.select_state.as_ref().unwrap().state.get("S1.1"),
             Some(&0.0)
         );
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().state.get("S1.1"),
             Some(&1.0),
             "] cycles to the next candidate"
         );
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(
             app.select_state.as_ref().unwrap().state.get("S1.1"),
             Some(&0.0),
@@ -5100,17 +5079,17 @@ mod tests {
     #[test]
     fn select_menu_esc_clears_state_and_restores_default_graph() {
         let mut app = app_with_select_patch();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert!(app.select_state.is_some());
         // A mismatch (S1.1=1 vs selectat 0) drops bar's controller edge.
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         let gated = app.graph.as_ref().unwrap();
         assert!(
             gated.not_selected.contains(&1),
             "bar section index 1 is NotSelected under S1.1=1"
         );
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.select_state.is_none());
         let restored = app.graph.as_ref().unwrap();
         assert!(
@@ -5122,8 +5101,8 @@ mod tests {
     #[test]
     fn g_g_opens_graph_tile() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        let quit = handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        let quit = handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(!quit);
         assert!(
             app.pane_holding(ViewType::Graph).is_some(),
@@ -5134,13 +5113,13 @@ mod tests {
     #[test]
     fn g_prefix_times_out_and_next_key_processed_normally() {
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         // Simulate an expired timeout window, then a key that should run
         // normally (navigation) instead of acting as a prefix follow-up.
         app.prefix = Some(PrefixState {
-            started: Instant::now() - Duration::from_secs(2),
+            started: Instant::now().checked_sub(Duration::from_secs(2)).unwrap(),
         });
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert!(app.prefix.is_none());
         assert_eq!(app.hovered_component, Some(1));
     }
@@ -5151,11 +5130,11 @@ mod tests {
         // clears the stale prefix and re-arms a fresh one rather than acting
         // as a follow-up key.
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         app.prefix = Some(PrefixState {
-            started: Instant::now() - Duration::from_secs(2),
+            started: Instant::now().checked_sub(Duration::from_secs(2)).unwrap(),
         });
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
         assert!(app.prefix.as_ref().unwrap().started.elapsed() < Duration::from_secs(1));
         assert!(
@@ -5169,9 +5148,9 @@ mod tests {
         // Task 4.3: a second `g` while the prefix is armed opens the graph and
         // runs a full solve, mirroring `g v` (design D7).
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some(), "first g arms the prefix");
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
         assert!(app.prefix.is_none(), "prefix cleared on open");
         let graph = app.graph.as_ref().unwrap();
@@ -5191,14 +5170,14 @@ mod tests {
         // Tension is a force-path control: the column arrangement ignores it
         // (graph-column-layout D5), so this test runs the force solver.
         app.layout_mode = crate::config::LayoutMode::Force;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
         let default = crate::layout::DEFAULT_TENSION;
         assert_eq!(app.tension, default);
         let before = app.graph_positions.clone();
 
-        handle_event(alt_key(KeyCode::Char(']')), &mut app);
+        handle_event(&alt_key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.tension, default + crate::layout::TENSION_STEP);
         assert_eq!(
             app.status_message,
@@ -5206,7 +5185,7 @@ mod tests {
         );
         assert_ne!(app.graph_positions, before, "tension change re-solves");
 
-        handle_event(alt_key(KeyCode::Char('[')), &mut app);
+        handle_event(&alt_key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.tension, default);
         assert_eq!(
             app.graph_positions, before,
@@ -5221,8 +5200,8 @@ mod tests {
         // shows no status and never re-solves (cable-tension spec clause).
         let mut app = app_with_fixture();
         app.layout_mode = crate::config::LayoutMode::Column;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
         let default = crate::layout::DEFAULT_TENSION;
         let before = app.graph_positions.clone();
@@ -5230,7 +5209,7 @@ mod tests {
         // status is stale; clear it so the column-mode silence is observable.
         app.status_message = String::new();
 
-        handle_event(alt_key(KeyCode::Char(']')), &mut app);
+        handle_event(&alt_key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.tension, default + crate::layout::TENSION_STEP);
         assert_eq!(app.status_message, String::new(), "no status on column");
         assert_eq!(app.graph_positions, before, "no re-solve on column");
@@ -5243,11 +5222,11 @@ mod tests {
         // rebuild re-solves under the new mode and the status names the mode.
         let mut app = app_with_fixture();
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
 
-        handle_event(key(KeyCode::Char('h')), &mut app);
+        handle_event(&key(KeyCode::Char('h')), &mut app);
 
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
         assert_eq!(app.status_message, "Layout: force");
@@ -5270,11 +5249,11 @@ mod tests {
         // and names it in the status; the stored selection advances so repeat
         // presses cycle Column-Strict → Column-Barycenter → Force → Sections.
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
 
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
 
         assert_eq!(app.status_message, "Arrangement: column-strict");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
@@ -5288,13 +5267,13 @@ mod tests {
         );
 
         // Repeat presses reach Sections through the user-facing `a` key.
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(app.status_message, "Arrangement: column-barycenter");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Force);
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(app.status_message, "Arrangement: force");
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(
             app.status_message, "Arrangement: sections",
             "Sections is reachable via the `a` cycle"
@@ -5314,8 +5293,8 @@ mod tests {
         // (not a fresh seed) and reports it; the mode does not advance.
         let mut app = app_with_fixture();
         app.layout_mode = crate::config::LayoutMode::Sections;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
         // Perturb one node so an anneal provably starts from here: a
         // reseed would discard the offset, the anneal keeps its influence.
@@ -5337,7 +5316,7 @@ mod tests {
             },
         );
 
-        handle_event(key(KeyCode::Char('A')), &mut app);
+        handle_event(&key(KeyCode::Char('A')), &mut app);
 
         assert_eq!(app.status_message, "Arranged (sections)");
         assert_eq!(
@@ -5363,15 +5342,15 @@ mod tests {
         // position while the remaining nodes arrange around it.
         let mut app = app_with_fixture();
         app.layout_mode = crate::config::LayoutMode::Force;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
         let before = app.graph_positions.clone();
 
         // Force -> Sections (first h) -> Column (second h)
-        handle_event(key(KeyCode::Char('h')), &mut app);
+        handle_event(&key(KeyCode::Char('h')), &mut app);
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
-        handle_event(key(KeyCode::Char('h')), &mut app);
+        handle_event(&key(KeyCode::Char('h')), &mut app);
 
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         assert_eq!(app.status_message, "Layout: column");
@@ -5398,22 +5377,22 @@ mod tests {
         // Graph pane focused: plain `+` zooms the camera, `Shift+`+`` scales
         // the module UI/rack instead.
         let mut app = app_with_fixture();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         seed_graph_camera(&mut app);
         let z0 = app.graph_camera.unwrap().zoom;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert!((app.graph_camera.unwrap().zoom - z0 * 1.5).abs() < 1e-2);
         let scale_before = app.scale_factor;
-        handle_event(shift_key(KeyCode::Char('+')), &mut app);
+        handle_event(&shift_key(KeyCode::Char('+')), &mut app);
         assert_ne!(app.scale_factor, scale_before, "other pane scales");
         assert!((app.graph_camera.unwrap().zoom - z0 * 1.5).abs() < 1e-2);
         // Focus off the graph (viewer pane): plain `+` scales the module UI,
         // the camera stays put.
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         let z1 = app.graph_camera.unwrap().zoom;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert!((app.graph_camera.unwrap().zoom - z1).abs() < 1e-9);
     }
 
@@ -5421,10 +5400,10 @@ mod tests {
     fn brackets_adjust_main_split_ratio() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        handle_event(key(KeyCode::Char(']')), &mut app);
+        handle_event(&key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.6);
         assert_eq!(app.status_message, "Split: 60%/40%");
-        handle_event(key(KeyCode::Char('[')), &mut app);
+        handle_event(&key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.5);
     }
 
@@ -5432,12 +5411,12 @@ mod tests {
     fn viewer_esc_closes_keeping_selection_and_scroll() {
         let mut app = app_with_source_navigation();
         app.select_component(String::from("B1.1"));
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         let scroll = app.source_scroll;
         let sel = app.selected_component.clone();
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_none());
         assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         assert_eq!(app.selected_component, sel, "selection kept on close");
@@ -5448,33 +5427,33 @@ mod tests {
     #[test]
     fn viewer_j_k_scroll_when_source_focused() {
         let mut app = app_with_source_navigation();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 1);
-        handle_event(key(KeyCode::Char('j')), &mut app);
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 3);
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 2);
         // Saturate at 0
-        handle_event(key(KeyCode::Char('k')), &mut app);
-        handle_event(key(KeyCode::Char('k')), &mut app);
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 0);
     }
 
     #[test]
     fn t_toggles_view_mode_when_viewer_open() {
         let mut app = app_with_source_navigation();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
-        handle_event(key(KeyCode::Char('t')), &mut app);
+        handle_event(&key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Prettified);
-        handle_event(key(KeyCode::Char('t')), &mut app);
+        handle_event(&key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
     }
 
@@ -5482,19 +5461,19 @@ mod tests {
     fn t_noop_when_viewer_closed() {
         let mut app = App::new();
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
-        handle_event(key(KeyCode::Char('t')), &mut app);
+        handle_event(&key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
     }
 
     #[test]
     fn tab_switches_focus_when_viewer_open() {
         let mut app = app_with_source_navigation();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
 
@@ -5505,7 +5484,7 @@ mod tests {
         let mut app = App::new();
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
@@ -5522,21 +5501,21 @@ mod tests {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_some());
         // The graph replaced the module UI in the left big pane and took focus.
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         // Forward: big graph pane -> viewer pane -> back (empty small skipped).
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         // Backward from the big pane lands on the viewer pane.
-        handle_event(shift_tab(), &mut app);
+        handle_event(&shift_tab(), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
@@ -5550,13 +5529,13 @@ mod tests {
         let mut app = app_with_source_navigation();
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert!(app.pane_holding(ViewType::Graph).is_some());
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert!(app.pane_holding(ViewType::Graph).is_none());
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert!(app.pane_holding(ViewType::Graph).is_some());
         // The pane keeps focus through the rotation.
@@ -5568,12 +5547,12 @@ mod tests {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app); // focus the viewer (SmallTop)
                                // Small carousel: source viewer -> optimizer in the same pane.
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.small_top.view, Some(ViewType::Optimizer));
         // Tab still cycles focus: small -> big -> small (empty pane skipped).
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        handle_event(shift_tab(), &mut app);
+        handle_event(&shift_tab(), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
     }
 
@@ -5583,7 +5562,7 @@ mod tests {
         // Focus an empty pane directly: the carousel has no current view.
         app.layout.focus = crate::panes::PaneId::SmallBottom;
         let status = app.status_message.clone();
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         assert!(app.layout.small_bottom.view.is_none());
         assert_eq!(app.status_message, status);
     }
@@ -5593,7 +5572,7 @@ mod tests {
         let mut app = app_with_fixture();
         open_optimizer(&mut app);
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
-        handle_event(key(KeyCode::Char('r')), &mut app);
+        handle_event(&key(KeyCode::Char('r')), &mut app);
         // The optimizer pane owns `r` (restore) and returns before the
         // carousel arm; the optimizer is never a carousel member.
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
@@ -5606,16 +5585,16 @@ mod tests {
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         // `s` toggles the skeleton inside the already-open physical pane.
         assert!(!app.physical_show_skeleton);
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert!(app.physical_show_skeleton);
         assert_eq!(app.status_message, "Skeleton: on");
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert!(!app.physical_show_skeleton);
         assert_eq!(app.status_message, "Skeleton: off");
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         // With focus moved away, `s` re-focuses the open physical pane.
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
-        handle_event(key(KeyCode::Char('s')), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(&key(KeyCode::Char('s')), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
     }
@@ -5624,15 +5603,15 @@ mod tests {
     fn tiled_esc_closes_focused_view_keeps_others() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(
             app.pane_holding(ViewType::Graph).is_some()
                 && app.pane_holding(ViewType::SourceViewer).is_some()
         );
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         // Graph pane focused: Esc closes it, the viewer survives.
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.pane_holding(ViewType::Graph).is_none());
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.layout.big_left.view, None, "closed pane is empty");
@@ -5645,11 +5624,11 @@ mod tests {
         app.select_component(String::from("B1.1"));
         open_viewer(&mut app);
         // Back to the module UI pane: Esc closes it, viewer stays open.
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         let sel = app.selected_component.clone();
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.layout.big_left.view, None);
         assert_eq!(app.selected_component, sel, "selection survives a close");
@@ -5661,8 +5640,8 @@ mod tests {
         // and leaves the layout untouched.
         let mut app = app_with_source_navigation();
         let layout_before = app.layout.clone();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('q')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('q')), &mut app);
         assert!(app.prefix.is_none());
         assert_eq!(app.layout, layout_before);
     }
@@ -5674,13 +5653,13 @@ mod tests {
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
 
         // Shift keys work live while source is focused.
-        handle_event(key(KeyCode::Char('1')), &mut app);
+        handle_event(&key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
         assert_eq!(app.status_message, "Shift 1 active");
 
         // Scale preset cycling works live.
         let scale_before = app.scale_factor;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_ne!(
             app.scale_factor, scale_before,
             "scale live when source focused"
@@ -5702,7 +5681,7 @@ mod tests {
         let state_before = app.patch.as_ref().unwrap().hw_components[b11_idx]
             .state
             .clone();
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert_ne!(
             app.patch.as_ref().unwrap().hw_components[b11_idx].state,
             state_before,
@@ -5712,7 +5691,7 @@ mod tests {
         assert_eq!(app.source_scroll, first_b11);
         assert_eq!(app.occurrence_cursor, 0);
         // Space toggles back, still live.
-        handle_event(key(KeyCode::Char(' ')), &mut app);
+        handle_event(&key(KeyCode::Char(' ')), &mut app);
         assert_eq!(
             app.patch.as_ref().unwrap().hw_components[b11_idx].state,
             state_before,
@@ -5722,34 +5701,34 @@ mod tests {
         // j/k and Up/Down/Home/End remain routed by focus (they would
         // otherwise conflict with panel navigation).
         let scroll = app.source_scroll;
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(
             app.source_scroll,
             scroll + 1,
             "j scrolls source when focused"
         );
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, 1, "Down navigates occurrences");
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert_eq!(app.occurrence_cursor, 0, "Up navigates occurrences");
     }
 
     #[test]
     fn viewer_focus_panels_allows_panel_keys() {
         let mut app = app_with_source_navigation();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         // Switch to panels
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
-        handle_event(key(KeyCode::Char('1')), &mut app);
+        handle_event(&key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
         let scale_before = app.scale_factor;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_ne!(app.scale_factor, scale_before);
         app.hovered_component = Some(0);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert_ne!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before
@@ -5765,31 +5744,31 @@ mod tests {
             "fixture needs at least 3 occurrences"
         );
         app.select_component(String::from("B1.1"));
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // Down -> 1
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, 1);
         assert_eq!(app.source_scroll, occurrences[1].line);
         // Down -> 2
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, 2);
         // saturate at bounds: press Down many times, should end at last
         for _ in 0..10 {
-            handle_event(key(KeyCode::Down), &mut app);
+            handle_event(&key(KeyCode::Down), &mut app);
         }
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         // Up -> back one
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 2);
         // Home -> 0
-        handle_event(key(KeyCode::Home), &mut app);
+        handle_event(&key(KeyCode::Home), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // End -> last
-        handle_event(key(KeyCode::End), &mut app);
+        handle_event(&key(KeyCode::End), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
     }
@@ -5830,7 +5809,7 @@ mod tests {
         app.select_component(String::from("B1.1"));
         open_viewer(&mut app);
         // Start from the module UI pane to prove a bare source click switches it.
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         app.pane_hit_rects = vec![
             (crate::panes::PaneId::BigLeft, Rect::new(0, 0, 60, 40)),
@@ -5889,7 +5868,7 @@ mod tests {
         app.select_component(String::from("B1.1"));
         open_viewer(&mut app);
         // Start from the module UI pane to prove a bare source click switches.
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         app.pane_hit_rects = vec![
             (crate::panes::PaneId::BigLeft, Rect::new(0, 0, 60, 40)),
@@ -5959,7 +5938,7 @@ mod tests {
         app.hovered_component = Some(idx);
         app.source_scroll = 999;
         // Panel focus (viewer closed) -> Enter should toggle + select + jump
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert_eq!(app.selected_component, Some(String::from(token)));
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, first);
@@ -5977,7 +5956,7 @@ mod tests {
         let first = app.patch.as_ref().unwrap().occurrences_for(token)[0].line;
         let idx = idx_for(&app, token);
         app.hovered_component = Some(idx);
-        handle_event(key(KeyCode::Char(' ')), &mut app);
+        handle_event(&key(KeyCode::Char(' ')), &mut app);
         assert_eq!(app.selected_component, Some(String::from(token)));
         assert_eq!(app.source_scroll, first);
         assert_eq!(app.occurrence_cursor, 0);
@@ -6009,7 +5988,7 @@ mod tests {
         // First selection via Enter on B1.1
         let b_idx = idx_for(&app, "B1.1");
         app.hovered_component = Some(b_idx);
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert_eq!(app.source_scroll, b11_first);
         // Replacement via click on P1.1
         let p_idx = idx_for(&app, "P1.1");
@@ -6026,7 +6005,7 @@ mod tests {
         assert_eq!(app.occurrence_cursor, 0);
         // And back to B1.1 via Space
         app.hovered_component = Some(b_idx);
-        handle_event(key(KeyCode::Char(' ')), &mut app);
+        handle_event(&key(KeyCode::Char(' ')), &mut app);
         assert_eq!(app.selected_component, Some(String::from("B1.1")));
         assert_eq!(app.source_scroll, b11_first);
     }
@@ -6083,19 +6062,19 @@ mod tests {
         let mut app = app_with_source_navigation();
         // Ensure no selection, viewer open and source focused
         assert!(app.selected_component.is_none());
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         app.source_scroll = 5;
         app.occurrence_cursor = 0;
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert_eq!(app.source_scroll, 5);
         assert_eq!(app.occurrence_cursor, 0);
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.source_scroll, 5);
-        handle_event(key(KeyCode::Home), &mut app);
+        handle_event(&key(KeyCode::Home), &mut app);
         assert_eq!(app.source_scroll, 5);
-        handle_event(key(KeyCode::End), &mut app);
+        handle_event(&key(KeyCode::End), &mut app);
         assert_eq!(app.source_scroll, 5);
     }
 
@@ -6105,77 +6084,77 @@ mod tests {
         app.select_component(String::from("B1.1"));
         let occurrences = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
         assert!(occurrences.len() >= 2);
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         // Already at first occurrence after select
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // Up at first saturates
-        handle_event(key(KeyCode::Up), &mut app);
+        handle_event(&key(KeyCode::Up), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, occurrences[0].line);
         // Down to last saturates
         for _ in 0..occurrences.len() + 5 {
-            handle_event(key(KeyCode::Down), &mut app);
+            handle_event(&key(KeyCode::Down), &mut app);
         }
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         assert_eq!(app.source_scroll, occurrences.last().unwrap().line);
         // Down while at last stays
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
         // Home -> first, End -> last
-        handle_event(key(KeyCode::Home), &mut app);
+        handle_event(&key(KeyCode::Home), &mut app);
         assert_eq!(app.occurrence_cursor, 0);
-        handle_event(key(KeyCode::End), &mut app);
+        handle_event(&key(KeyCode::End), &mut app);
         assert_eq!(app.occurrence_cursor, occurrences.len() - 1);
     }
 
     #[test]
     fn j_k_scroll_remains_when_viewer_open() {
         let mut app = app_with_source_navigation();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
-        handle_event(key(KeyCode::Char('j')), &mut app);
+        handle_event(&key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 1);
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 0);
         // j/k saturate at 0
-        handle_event(key(KeyCode::Char('k')), &mut app);
+        handle_event(&key(KeyCode::Char('k')), &mut app);
         assert_eq!(app.source_scroll, 0);
     }
 
     #[test]
     fn esc_clears_prefix_when_no_view_is_focused() {
         let mut app = App::new();
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.prefix.is_none());
         // When the source viewer is focused, `g` is live too and arms the prefix.
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some(), "g arms even when source focused");
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         // Esc clears the prefix first; the viewer stays open.
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(app.prefix.is_none());
         // With the module UI pane focused, `g` arms again and Esc clears it.
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        handle_event(key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(app.prefix.is_none());
         // Back to the viewer pane: Esc closes the focused view.
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_none());
     }
 
@@ -6372,8 +6351,8 @@ mod tests {
     fn regression_handler_e2e_initial_bof_and_selected_open() {
         let mut app = app_with_source_navigation();
         app.source_scroll = 77;
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0, "BOF when no selection");
@@ -6385,8 +6364,8 @@ mod tests {
         if let Some(id) = app2.pane_holding(ViewType::SourceViewer) {
             app2.layout.pane_mut(id).view = None;
         }
-        handle_event(key(KeyCode::Char('g')), &mut app2);
-        handle_event(key(KeyCode::Char('v')), &mut app2);
+        handle_event(&key(KeyCode::Char('g')), &mut app2);
+        handle_event(&key(KeyCode::Char('v')), &mut app2);
         assert_eq!(app2.source_scroll, first);
         assert_eq!(app2.occurrence_cursor, 0);
     }
@@ -6394,42 +6373,42 @@ mod tests {
     #[test]
     fn regression_handler_e2e_t_and_tab_and_picker_and_isolation() {
         let mut app = app_with_source_navigation();
-        handle_event(key(KeyCode::Char('g')), &mut app);
-        handle_event(key(KeyCode::Char('v')), &mut app);
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('v')), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         // t preserves usable content: toggles but stays in bounds
         let scroll_before = app.source_scroll;
-        handle_event(key(KeyCode::Char('t')), &mut app);
+        handle_event(&key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Prettified);
         assert_eq!(app.source_scroll, scroll_before);
-        handle_event(key(KeyCode::Char('t')), &mut app);
+        handle_event(&key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Raw);
         // Tab round-trip Source->Panels->Source
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         // picker precedence: l opens picker even when source focused
-        handle_event(key(KeyCode::Char('l')), &mut app);
+        handle_event(&key(KeyCode::Char('l')), &mut app);
         assert!(app.showing_picker, "picker overlays viewer");
         // while picker open, t is inert
         let mode_before = app.source_view_mode.clone();
-        handle_event(key(KeyCode::Char('t')), &mut app);
+        handle_event(&key(KeyCode::Char('t')), &mut app);
         assert_eq!(app.source_view_mode, mode_before);
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(!app.showing_picker);
         assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         // live interaction: panel keys work even when Source focused
         if app.viewer_focus() != ViewerFocus::Source {
-            handle_event(key(KeyCode::Tab), &mut app);
+            handle_event(&key(KeyCode::Tab), &mut app);
         }
         let scale_before = app.scale_factor;
-        handle_event(key(KeyCode::Char('+')), &mut app);
+        handle_event(&key(KeyCode::Char('+')), &mut app);
         assert_ne!(
             app.scale_factor, scale_before,
             "scale live when Source focused"
         );
-        handle_event(key(KeyCode::Char('1')), &mut app);
+        handle_event(&key(KeyCode::Char('1')), &mut app);
         assert_eq!(
             app.active_shift,
             Some(ShiftGroup::Group1),
@@ -6444,11 +6423,11 @@ mod tests {
         let mut app = app_with_fixture();
         // `p` on the Physical pane opens the performance view (change
         // `performance-view`), so pause via `p` from the viewer pane.
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused);
         assert_eq!(app.status_message, "Processing paused (p to resume)");
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(!app.processing_paused);
         assert_eq!(app.status_message, "Processing enabled (p to pause)");
     }
@@ -6466,7 +6445,7 @@ mod tests {
             !app.pinned.contains(&node.id),
             "non-tip node starts unpinned"
         );
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(app.pinned.contains(&node.id), "p pins the hovered node");
         assert!(
             app.pane_holding(ViewType::Graph).is_some(),
@@ -6480,7 +6459,7 @@ mod tests {
             app.status_message,
             format!("Pinned: {} {}", node.circuit, node.instance_index)
         );
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(!app.pinned.contains(&node.id), "second p unpins");
         assert_eq!(
             app.status_message,
@@ -6491,7 +6470,7 @@ mod tests {
     #[test]
     fn p_noop_while_picker_open() {
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(!app.processing_paused, "picker swallows p");
     }
 
@@ -6501,16 +6480,16 @@ mod tests {
         app.hovered_component = Some(0);
         // Focus off the Physical pane: `p` there opens the performance
         // view instead of pausing (change `performance-view`).
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
-        handle_event(key(KeyCode::Enter), &mut app);
+        handle_event(&key(KeyCode::Enter), &mut app);
         assert_eq!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before,
             "Enter must not toggle while paused"
         );
-        handle_event(key(KeyCode::Char(' ')), &mut app);
+        handle_event(&key(KeyCode::Char(' ')), &mut app);
         assert_eq!(
             app.patch.as_ref().unwrap().hw_components[0].state,
             state_before,
@@ -6526,8 +6505,8 @@ mod tests {
         // Focus off the Physical pane: `p` there opens the performance
         // view instead of pausing (change `performance-view`). The mouse
         // toggle path is focus-independent, so the rest is unchanged.
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         let state_before = app.patch.as_ref().unwrap().hw_components[0].state.clone();
         handle_mouse_event(
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
@@ -6552,8 +6531,8 @@ mod tests {
         app.component_rects = vec![(0, Rect::new(0, 0, 16, 2))];
         // Focus off the Physical pane: `p` there opens the performance
         // view instead of pausing (change `performance-view`).
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         handle_mouse_event(mouse(MouseEventKind::ScrollUp, 5, 1), &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
             ComponentState::Value(v) => assert!(v.abs() < 1e-6, "scroll blocked while paused"),
@@ -6571,7 +6550,7 @@ mod tests {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
         assert_eq!(app.viewer_focus(), ViewerFocus::Source);
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused, "p live in the source pane");
         assert_eq!(app.status_message, "Processing paused (p to resume)");
     }
@@ -6594,16 +6573,16 @@ mod tests {
             "the default presentation is auto"
         );
 
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(app.label_presentation, crate::config::LabelPresentation::On);
         assert_eq!(app.status_message, "Labels: on");
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(
             app.label_presentation,
             crate::config::LabelPresentation::Off
         );
         assert_eq!(app.status_message, "Labels: off");
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(
             app.label_presentation,
             crate::config::LabelPresentation::Auto,
@@ -6612,10 +6591,10 @@ mod tests {
         assert_eq!(app.status_message, "Labels: auto");
 
         // Off the module UI the key is inert (the viewer keeps its own arms).
-        handle_event(key(KeyCode::Tab), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app);
         assert!(!app.view_focused(ViewType::Physical));
         let before = app.label_presentation;
-        handle_event(key(KeyCode::Char('a')), &mut app);
+        handle_event(&key(KeyCode::Char('a')), &mut app);
         assert_eq!(
             app.label_presentation, before,
             "`a` is inert outside the module UI pane"
@@ -6628,7 +6607,7 @@ mod tests {
         // Startup focus is the Physical pane (BigLeft).
         assert!(app.view_focused(ViewType::Physical));
         assert!(!app.showing_performance);
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(
             app.showing_performance,
             "p opens the performance view on the Physical pane"
@@ -6639,13 +6618,13 @@ mod tests {
         );
         assert_eq!(app.status_message, "Performance view \u{2014} Esc to exit");
         // Esc leaves the view; the pane stays open.
-        handle_event(key(KeyCode::Esc), &mut app);
+        handle_event(&key(KeyCode::Esc), &mut app);
         assert!(!app.showing_performance);
         assert_eq!(app.status_message, "Performance view closed");
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         // `p` on any other pane keeps its exact meaning: pause on the viewer.
-        handle_event(key(KeyCode::Tab), &mut app); // -> viewer pane
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Tab), &mut app); // -> viewer pane
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(
             app.processing_paused,
             "p still pauses off the Physical pane"
@@ -6672,7 +6651,7 @@ mod tests {
         {
             let patch = app.patch.as_mut().unwrap();
             assert!(!patch.hw_components.is_empty(), "fixture needs components");
-            for comp in patch.hw_components.iter_mut() {
+            for comp in &mut patch.hw_components {
                 comp.state = match comp.kind {
                     ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
                         ComponentState::On
@@ -6690,7 +6669,7 @@ mod tests {
         app.active_shift = Some(ShiftGroup::Group2);
         assert!(app.view_focused(ViewType::Physical));
         // `R` is Shift+r: plain `r` stays the class carousel.
-        handle_event(key(KeyCode::Char('R')), &mut app);
+        handle_event(&key(KeyCode::Char('R')), &mut app);
         // Every state is back at rest ...
         for comp in &app.patch.as_ref().unwrap().hw_components {
             let expected = match comp.kind {
@@ -6735,7 +6714,7 @@ mod tests {
         let node = app.graph.as_ref().unwrap().nodes[0].clone();
         app.hovered_graph_node = Some(0);
         let before_positions = app.graph_positions.clone();
-        handle_event(key(KeyCode::Char('x')), &mut app);
+        handle_event(&key(KeyCode::Char('x')), &mut app);
         assert!(
             app.pane_holding(ViewType::Graph).is_some(),
             "x must not close the graph surface"
@@ -6765,12 +6744,12 @@ mod tests {
         let mut app = app_with_graph();
         let node = app.graph.as_ref().unwrap().nodes[0].clone();
         app.hovered_graph_node = Some(0);
-        handle_event(key(KeyCode::Char('x')), &mut app);
+        handle_event(&key(KeyCode::Char('x')), &mut app);
         assert!(app
             .disabled_circuits
             .contains(&NodeId::circuit(&node.circuit, node.instance_index)));
         // Second x on same hovered node re-enables.
-        handle_event(key(KeyCode::Char('x')), &mut app);
+        handle_event(&key(KeyCode::Char('x')), &mut app);
         assert!(
             !app.disabled_circuits
                 .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
@@ -6793,7 +6772,7 @@ mod tests {
         let status_before = app.status_message.clone();
         let disabled_before = app.disabled_circuits.clone();
         let positions_before = app.graph_positions.clone();
-        handle_event(key(KeyCode::Char('x')), &mut app);
+        handle_event(&key(KeyCode::Char('x')), &mut app);
         assert_eq!(
             app.status_message, status_before,
             "no status change when nothing hovered"
@@ -6815,7 +6794,7 @@ mod tests {
         let idx = node_count - 1; // non-tip node
         app.hovered_graph_node = Some(idx);
         let node = app.graph.as_ref().unwrap().nodes[idx].clone();
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(app.pinned.contains(&node.id), "p pins the hovered node");
         assert_eq!(
             app.status_message,
@@ -6829,7 +6808,7 @@ mod tests {
             !app.processing_paused,
             "p no longer toggles pause on the graph surface"
         );
-        handle_event(key(KeyCode::Char('p')), &mut app);
+        handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(!app.pinned.contains(&node.id), "second p unpins");
         assert!(!app.processing_paused, "pause untouched throughout");
     }
@@ -7496,7 +7475,7 @@ mod tests {
 
         // First press f -> mark favourite.
         let target_key = crate::favorites::FavoritesStore::canonical_key(&dummy);
-        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('f')), &mut app);
         assert!(
             app.favorites.is_favourite(&dummy),
             "f should mark favourite"
@@ -7523,7 +7502,7 @@ mod tests {
         assert!(body.contains("my_patch.ini"), "body: {body}");
 
         // Second press f -> unmark favourite (toggle back).
-        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('f')), &mut app);
         assert!(
             !app.favorites.is_favourite(&dummy),
             "second f should unmark favourite"
@@ -7544,12 +7523,12 @@ mod tests {
         );
 
         // Uppercase F behaves identically (case-insensitive toggle key).
-        handle_picker_event(key(KeyCode::Char('F')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('F')), &mut app);
         assert!(
             app.favorites.is_favourite(&dummy),
             "F should also mark favourite"
         );
-        handle_picker_event(key(KeyCode::Char('F')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('F')), &mut app);
         assert!(
             !app.favorites.is_favourite(&dummy),
             "second F should unmark"
@@ -7581,7 +7560,7 @@ mod tests {
             "first entry should be .."
         );
         app.picker_index = 0;
-        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('f')), &mut app);
         assert!(
             app.favorites.favourites.is_empty(),
             "f on parent must not toggle"
@@ -7598,7 +7577,7 @@ mod tests {
             .unwrap();
         app.picker_index = file_idx;
         let ctrl_f = KeyEvent::new(KeyCode::Char('f'), key_modifiers::CONTROL);
-        handle_picker_event(ctrl_f, &mut app);
+        handle_picker_event(&ctrl_f, &mut app);
         assert!(
             app.favorites.favourites.is_empty(),
             "Ctrl+f must not toggle"
@@ -7640,8 +7619,7 @@ mod tests {
         assert_eq!(
             crate::favorites::FavoritesStore::canonical_key(first),
             crate::favorites::FavoritesStore::canonical_key(&fav_path),
-            "favourite should be at index 0, got {:?}",
-            first
+            "favourite should be at index 0, got {first:?}"
         );
         assert!(
             app.is_favourite_entry(first),
@@ -7680,7 +7658,7 @@ mod tests {
 
         // Simulate Enter on the favourited entry to load the patch.
         app.picker_index = 0;
-        let quit = handle_picker_event(key(KeyCode::Enter), &mut app);
+        let quit = handle_picker_event(&key(KeyCode::Enter), &mut app);
         assert!(!quit, "Enter should not quit");
         assert!(
             !app.showing_picker,
@@ -7731,7 +7709,7 @@ mod tests {
         assert!(!app.favorites.is_favourite(&subdir));
 
         // First press f -> mark directory favourite.
-        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('f')), &mut app);
         assert!(
             app.favorites.is_favourite(&subdir),
             "f should favourite a directory"
@@ -7751,7 +7729,7 @@ mod tests {
         assert_eq!(app.picker_index, pos, "highlight follows the pinned entry");
 
         // Second press f -> unmark.
-        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('f')), &mut app);
         assert!(
             !app.favorites.is_favourite(&subdir),
             "second f should unfavourite a directory"
@@ -7792,7 +7770,7 @@ mod tests {
 
         // '1' opens favourite slot 1: patch loads, picker closes.
         app.picker_index = 0;
-        handle_picker_event(key(KeyCode::Char('1')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('1')), &mut app);
         assert!(!app.showing_picker, "digit on file favourite closes picker");
         assert!(app.patch.is_some(), "digit loads the favourite patch");
         assert!(
@@ -7824,7 +7802,7 @@ mod tests {
         app.refresh_picker_entries();
 
         // '0' on slot 0 (the directory favourite) navigates into it.
-        handle_picker_event(key(KeyCode::Char('0')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('0')), &mut app);
         assert!(app.showing_picker, "digit on directory keeps picker open");
         assert!(app.picker_dir.ends_with("subdir"));
         assert!(app.patch.is_none());
@@ -7849,18 +7827,18 @@ mod tests {
         app.refresh_picker_entries();
 
         // '9' has no slot: silent no-op, picker stays open.
-        handle_picker_event(key(KeyCode::Char('9')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('9')), &mut app);
         assert!(app.showing_picker);
         assert!(app.patch.is_none());
         assert!(app.selected_file.is_none());
 
         // Ctrl/Alt-held digits never fire (mirrors the f-handler guard).
         let ctrl_zero = KeyEvent::new(KeyCode::Char('0'), key_modifiers::CONTROL);
-        handle_picker_event(ctrl_zero, &mut app);
+        handle_picker_event(&ctrl_zero, &mut app);
         assert!(app.showing_picker, "Ctrl+digit must not open a favourite");
         assert!(app.patch.is_none());
         let alt_zero = KeyEvent::new(KeyCode::Char('0'), key_modifiers::ALT);
-        handle_picker_event(alt_zero, &mut app);
+        handle_picker_event(&alt_zero, &mut app);
         assert!(app.showing_picker, "Alt+digit must not open a favourite");
         assert!(app.patch.is_none());
     }
@@ -8284,7 +8262,7 @@ mod tests {
     fn physical_frame_toggles_skeleton_and_applies_pan_zoom() {
         let mut app = App::new();
         handle_physical_frame(
-            PhysicalFrame {
+            &PhysicalFrame {
                 skeleton_toggle: true,
                 ..PhysicalFrame::default()
             },
@@ -8294,7 +8272,7 @@ mod tests {
         assert_eq!(app.status_message, "Skeleton: on");
 
         handle_physical_frame(
-            PhysicalFrame {
+            &PhysicalFrame {
                 pan_delta: (2.0, -3.0),
                 ..PhysicalFrame::default()
             },
@@ -8304,7 +8282,7 @@ mod tests {
 
         let before = app.physical_zoom;
         handle_physical_frame(
-            PhysicalFrame {
+            &PhysicalFrame {
                 zoom: Some((2.0, (5.0, 5.0))),
                 ..PhysicalFrame::default()
             },
@@ -8328,9 +8306,9 @@ mod tests {
     #[test]
     fn viewer_frame_scroll_moves_source_scroll() {
         let mut app = app_with_source_navigation();
-        handle_viewer_frame(ViewerFrame { scroll_delta: 3.0 }, &mut app);
+        handle_viewer_frame(&ViewerFrame { scroll_delta: 3.0 }, &mut app);
         assert_eq!(app.source_scroll, 3);
-        handle_viewer_frame(ViewerFrame { scroll_delta: -2.0 }, &mut app);
+        handle_viewer_frame(&ViewerFrame { scroll_delta: -2.0 }, &mut app);
         assert_eq!(app.source_scroll, 1);
     }
 
@@ -8338,7 +8316,7 @@ mod tests {
     fn picker_frame_hover_and_click_map_to_app() {
         let mut app = picker_app_at("fixtures/picker_test");
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 hovered: Some(1),
                 pointer_moved: true,
                 ..PickerFrame::default()
@@ -8349,7 +8327,7 @@ mod tests {
         // Clicking the patch_a.ini entry loads it and closes the picker.
         let idx = picker_index_of(&app, "patch_a.ini");
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 clicked: Some(idx),
                 ..PickerFrame::default()
             },
@@ -8365,7 +8343,7 @@ mod tests {
         app.picker_index = 0;
         // A resting pointer must not fight keyboard navigation.
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 hovered: Some(2),
                 pointer_moved: false,
                 ..PickerFrame::default()
@@ -8378,7 +8356,7 @@ mod tests {
         );
         // A moving pointer (or a click) applies the hover.
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 hovered: Some(2),
                 pointer_moved: true,
                 ..PickerFrame::default()
@@ -8394,7 +8372,7 @@ mod tests {
         let len = app.picker_entries.len();
         assert!(len >= 2, "fixture listing: {:?}", app.picker_entries);
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 scroll: 1,
                 ..PickerFrame::default()
             },
@@ -8403,7 +8381,7 @@ mod tests {
         assert_eq!(app.picker_index, 1, "wheel down steps the cursor down");
         for _ in 0..len + 3 {
             handle_picker_frame(
-                PickerFrame {
+                &PickerFrame {
                     scroll: 1,
                     ..PickerFrame::default()
                 },
@@ -8412,7 +8390,7 @@ mod tests {
         }
         assert_eq!(app.picker_index, len - 1, "clamped at the bottom");
         handle_picker_frame(
-            PickerFrame {
+            &PickerFrame {
                 scroll: -1,
                 ..PickerFrame::default()
             },
@@ -8421,7 +8399,7 @@ mod tests {
         assert_eq!(app.picker_index, len - 2);
         for _ in 0..len + 3 {
             handle_picker_frame(
-                PickerFrame {
+                &PickerFrame {
                     scroll: -1,
                     ..PickerFrame::default()
                 },
@@ -8439,7 +8417,7 @@ mod tests {
         let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let mut app = picker_app_at("fixtures/picker_test");
-        handle_picker_event(ctrl_f_key(), &mut app);
+        handle_picker_event(&ctrl_f_key(), &mut app);
         // Highlight a real entry so a favourite toggle would have a target.
         app.picker_index = picker_index_of(&app, "patch_a.ini");
         let before = app.favorites.favourites.clone();
@@ -8464,7 +8442,7 @@ mod tests {
         let mut app = picker_app_at("fixtures/picker_test");
         assert!(!app.picker_filter_active);
         app.picker_index = picker_index_of(&app, "patch_a.ini");
-        handle_picker_event(key(KeyCode::Char('f')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('f')), &mut app);
         assert!(!app.picker_filter_active, "f must not latch while off");
         assert!(app.picker_filter.is_empty(), "f is not appended while off");
         assert_eq!(app.favorites.favourites.len(), 1, "f toggles the entry");
@@ -8479,7 +8457,7 @@ mod tests {
     fn picker_typing_with_filter_off_auto_latches_and_narrows() {
         let mut app = picker_app_at("fixtures/picker_test");
         assert!(!app.picker_filter_active);
-        handle_picker_event(key(KeyCode::Char('p')), &mut app);
+        handle_picker_event(&key(KeyCode::Char('p')), &mut app);
         assert!(app.picker_filter_active, "typing auto-latches the filter");
         assert_eq!(app.picker_filter, "p");
         let names: Vec<String> = app
@@ -8507,7 +8485,7 @@ mod tests {
     fn picker_q_with_filter_off_neither_latches_nor_appends() {
         let mut app = picker_app_at("fixtures/picker_test");
         let before = app.picker_entries.clone();
-        let quit = handle_picker_event(key(KeyCode::Char('q')), &mut app);
+        let quit = handle_picker_event(&key(KeyCode::Char('q')), &mut app);
         assert!(!quit, "q in the picker never quits");
         assert!(!app.picker_filter_active, "q must not auto-latch");
         assert!(app.picker_filter.is_empty(), "q must not be appended");

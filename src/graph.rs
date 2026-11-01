@@ -132,7 +132,7 @@ pub struct Graph {
     #[allow(clippy::type_complexity)]
     pub highlighted_nodes: HashSet<NodeId>,
     pub highlighted_edges: HashSet<String>,
-    /// Section indices of circuits classified NotSelected by the select-state
+    /// Section indices of circuits classified `NotSelected` by the select-state
     /// filter (change C 4.1). The renderer dims these nodes; their controller
     /// register edges are already absent from `edges`. Empty when no select
     /// state is assumed.
@@ -357,10 +357,11 @@ impl Graph {
     /// Used for FULL graph rendering: influenced edges/nodes render with
     /// `graph_edge_highlight` / `graph_node_highlight`, the rest dimmed.
     /// Pure, no IO.
+    #[must_use]
     pub fn with_highlights(&self, subtree: &InfluenceSubtree) -> Graph {
         let mut out = self.clone();
-        out.highlighted_nodes = subtree.influenced_nodes.clone();
-        out.highlighted_edges = subtree.influenced_edges.clone();
+        out.highlighted_nodes.clone_from(&subtree.influenced_nodes);
+        out.highlighted_edges.clone_from(&subtree.influenced_edges);
         out
     }
 
@@ -816,19 +817,18 @@ fn build_register_nodes_and_edges(patch: &Patch) -> (Vec<GraphNode>, Vec<GraphEd
         let circuit_node = &section_node_ids[section_idx];
 
         for (key, value) in &section.entries {
-            let is_output = schema
-                .get_param_kind(circuit, key)
-                .map(|k| k == "output")
-                .unwrap_or_else(|| {
+            let is_output = schema.get_param_kind(circuit, key).map_or_else(
+                || {
                     // Fallback: output/led families write, everything else reads.
                     let lk = key.to_lowercase();
                     lk.contains("output") || lk.contains("led")
-                });
+                },
+                |k| k == "output",
+            );
 
             for (token, unit, _pin) in scan_register_refs(value) {
-                let prefix = match token.chars().next() {
-                    Some(c) => c,
-                    None => continue,
+                let Some(prefix) = token.chars().next() else {
+                    continue;
                 };
 
                 // Classify target: controller node or jack node.
@@ -985,7 +985,7 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
                 }
                 if scorer.is_outlier(&feat) {
                     outliers.push(TopologyIssue {
-                        cable: format!("{}->{}", a, b),
+                        cable: format!("{a}->{b}"),
                         severity: TopologySeverity::Warning,
                         message: format!(
                             "wiring outlier: {} -> {} distance {:.1} hops {} (decision table)",
@@ -1001,7 +1001,7 @@ fn validate_wiring_outliers(patch: &Patch, geometry: &RackGeometry) -> Vec<Topol
 
 /// z-score band: a token whose influence-subtree size exceeds mean + 3σ for
 /// its kind is flagged as a `Warning` (design D4 second opinion). Calibrated
-/// against the corpus stats embedded from tools/build_features.py.
+/// against the corpus stats embedded from `tools/build_features.py`.
 const INFLUENCE_ZSCORE_BAND: f32 = 3.0;
 
 /// Per-token influence second opinion (design D4): every distinct hardware
@@ -1039,11 +1039,11 @@ fn validate_influence_outliers(patch: &Patch) -> Vec<TopologyIssue> {
     issues
 }
 
-/// Compute slice index for each node (mirrors layout::slice_index but operates on
+/// Compute slice index for each node (mirrors `layout::slice_index` but operates on
 /// nodes directly, without needing a full Graph).
-/// - Circuit nodes: slice index = section_index (patch order)
-/// - Controller and InputJack: fixed left outer slice (0)
-/// - OutputJack: fixed right outer slice (max circuit slice + 1)
+/// - Circuit nodes: slice index = `section_index` (patch order)
+/// - Controller and `InputJack`: fixed left outer slice (0)
+/// - `OutputJack`: fixed right outer slice (max circuit slice + 1)
 fn compute_slice_index(nodes: &[GraphNode]) -> Vec<usize> {
     let n = nodes.len();
     let mut slice = vec![0usize; n];
@@ -2131,7 +2131,7 @@ mod fixture_tests {
 
         // Canonical circuit set (single occurrence of each distinct name).
         let mut circuits: Vec<&str> = circuit_nodes.iter().map(|n| n.circuit.as_str()).collect();
-        circuits.sort();
+        circuits.sort_unstable();
         circuits.dedup();
         assert_eq!(circuits, vec!["button", "copy", "p2b8"]);
     }
@@ -2357,6 +2357,8 @@ mod fixture_tests {
 
     #[test]
     fn influence_outlier_extreme_token_flagged() {
+        use std::fmt::Write as _;
+
         // Spec scenario: a hardware token whose influence subtree is an extreme
         // outlier for its token kind → the associated cable renders with the
         // error-highlight token and the finding is a Warning. A button driving
@@ -2367,7 +2369,8 @@ mod fixture_tests {
              [button]\n    button = B1.1\n    output = _A\n",
         );
         for i in 0..24 {
-            content.push_str(&format!("[copy]\n    input = _A\n    output = _OUT{i}\n"));
+            writeln!(content, "[copy]\n    input = _A\n    output = _OUT{i}")
+                .expect("write to a String");
         }
         let patch = Patch::from_ini_str(&content, String::from("extreme")).unwrap();
         let graph =
@@ -2833,7 +2836,7 @@ mod fixture_tests {
         assert_eq!(subset.full_edges.len(), 1);
     }
 
-    /// Register edges from a NotSelected circuit to a controller are excluded
+    /// Register edges from a `NotSelected` circuit to a controller are excluded
     /// from the subset when the circuit is not in the member set (mirrors
     /// `internal_edges` behavior).
     #[test]

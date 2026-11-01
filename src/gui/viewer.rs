@@ -1077,7 +1077,7 @@ fn disambiguate_names(names: &[String]) -> Vec<String> {
         if *count == 0 {
             result.push(name.clone());
         } else {
-            result.push(format!("{} ({})", name, count));
+            result.push(format!("{name} ({count})"));
         }
         *count += 1;
     }
@@ -1087,10 +1087,10 @@ fn disambiguate_names(names: &[String]) -> Vec<String> {
 /// The minimap column (port of `ui.rs::render_minimap`'s data side): marker
 /// rows for occurrence and modifier lines with the viewport band.
 fn minimap_spec(patch: &Patch, app: &App) -> MinimapSpec {
-    let total_lines = if !patch.raw_lines.is_empty() {
-        patch.raw_lines.len()
-    } else {
+    let total_lines = if patch.raw_lines.is_empty() {
         patch.sections.len().max(1)
+    } else {
+        patch.raw_lines.len()
     };
     let mut occ = HashSet::new();
     let mut exact = HashSet::new();
@@ -1208,8 +1208,7 @@ fn viewer_status(app: &App) -> Vec<StatusFragment> {
     if !app.status_message.is_empty() {
         let status_color = app
             .active_modifier()
-            .map(crate::theme::modifier_hue)
-            .unwrap_or(t.text);
+            .map_or(t.text, crate::theme::modifier_hue);
         fragments.push(StatusFragment {
             text: " | ".into(),
             color: t.text,

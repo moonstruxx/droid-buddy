@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::schema::load_schema;
 
 /// 0-based line and byte-column span: line is 0-based, column range is
-/// [col_start, col_end) byte offsets within that raw line.
+/// [`col_start`, `col_end`) byte offsets within that raw line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Span {
     pub line: usize,
@@ -31,7 +31,7 @@ pub struct CableIndexEntry {
     /// validation (graph.rs), not by the parser.
     #[serde(default)]
     pub sources: Vec<String>,
-    /// Ordered sink references: (section_name, param_key) pairs where this cable
+    /// Ordered sink references: (`section_name`, `param_key`) pairs where this cable
     /// is referenced as a sink, in file appearance order.
     #[serde(default)]
     pub sink_refs: Vec<(String, String)>,
@@ -283,7 +283,7 @@ pub enum ModuleWidth {
 }
 
 impl ModuleWidth {
-    /// Convert ModuleWidth to character cells (each HP = 4 chars, but we use 1 cell per HP for simplicity)
+    /// Convert `ModuleWidth` to character cells (each HP = 4 chars, but we use 1 cell per HP for simplicity)
     pub fn cell_width(&self) -> usize {
         match self {
             ModuleWidth::FourHP => 4,
@@ -344,7 +344,7 @@ impl Module {
         self.components.len()
     }
 
-    /// Parse HwComponents from INI section names and group them into modules.
+    /// Parse `HwComponents` from INI section names and group them into modules.
     ///
     /// This scans INI section names (e.g. `[button]`, `[knob]`, `[led]`) and groups
     /// components by their controller assignment. Components without an explicit
@@ -413,8 +413,7 @@ impl Module {
             .map(|(controller, components)| {
                 let model_name = components
                     .first()
-                    .map(|c| c.label.clone())
-                    .unwrap_or_else(|| controller.clone());
+                    .map_or_else(|| controller.clone(), |c| c.label.clone());
 
                 Module::new(controller, model_name, ModuleWidth::EightHP)
             })
@@ -687,10 +686,10 @@ impl Patch {
     pub fn from_ini_file(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| String::from("patch"));
+        let name = path.file_stem().map_or_else(
+            || String::from("patch"),
+            |s| s.to_string_lossy().to_string(),
+        );
         Self::from_ini_str(&content, name)
     }
 
@@ -776,7 +775,10 @@ impl Patch {
             return Err(String::from("Patch file is empty"));
         }
 
-        let raw_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let raw_lines: Vec<String> = content
+            .lines()
+            .map(std::string::ToString::to_string)
+            .collect();
         let raw_uses_crlf = content.contains("\r\n");
         let raw_has_trailing_newline = content.ends_with('\n');
         let sections = parse_ini_sections(content);
@@ -834,8 +836,7 @@ impl Patch {
             let element_token: Option<String> = section
                 .entries
                 .iter()
-                .flat_map(|(_, v)| scan_hw_tokens(v).first().cloned())
-                .next();
+                .find_map(|(_, v)| scan_hw_tokens(v).first().cloned());
 
             // A bare `[p2b8]`/`[b32]`/... declaration implies the full
             // hardware token set of that controller even when it has no
@@ -963,7 +964,7 @@ impl Patch {
         }
 
         // Assign shift groups by controller number (design.md Decision 2c).
-        for comp in components.iter_mut() {
+        for comp in &mut components {
             if let Some(n) = leading_number(&comp.id) {
                 comp.shift_group = Some(match (n.saturating_sub(1)) % 4 {
                     0 => ShiftGroup::Group1,
@@ -977,43 +978,34 @@ impl Patch {
         // Assign each component to its physical controller panel (design.md
         // Decision 3). CV I/O tokens are fixed jacks, not part of a pluggable
         // controller unit, so they always share one panel regardless of number.
-        for comp in components.iter_mut() {
+        for comp in &mut components {
             comp.controller = match comp.kind {
                 ComponentKind::CvIn | ComponentKind::CvOut => String::from("CV I/O"),
-                _ => match pinned_panels.get(&comp.id) {
-                    // Bare-synthesized tokens keep the panel their own section
-                    // declared, regardless of who claimed the number first.
-                    Some(panel) => panel.clone(),
-                    None => {
+                _ => {
+                    if let Some(panel) = pinned_panels.get(&comp.id) {
+                        // Bare-synthesized tokens keep the panel their own section
+                        // declared, regardless of who claimed the number first.
+                        panel.clone()
+                    } else {
                         let num = leading_number(&comp.id);
                         match num.and_then(|n| controller_types.get(&n).cloned()) {
                             Some(name) => name,
                             None => match num {
-                                Some(n) => format!("Controller {}", n),
+                                Some(n) => format!("Controller {n}"),
                                 None => String::from("Other"),
                             },
                         }
                     }
-                },
+                }
             };
             // Per-controller device-default LED wiring (task 1.3): only when
             // the section yielded no explicit `led`/`ledN` association.
             if comp.led.is_none() {
                 comp.led = device_default_led(&comp.controller, &comp.id);
             }
-            // Assign LED capability based on controller type
-            comp.led_capability = match comp.controller.to_ascii_lowercase().as_str() {
-                "b32" | "notebuttons" => Some(LedCapability::White),
-                "p2b8" | "p4b2" => Some(LedCapability::Rgb),
-                "m4" | "motorfader" => Some(LedCapability::Rgb),
-                "e4" | "encoder" => Some(LedCapability::Rgb),
-                "p8s8" | "faderbank" => Some(LedCapability::Rgb),
-                "master" | "cv i/o" => Some(LedCapability::Rgb),
-                "g8" => Some(LedCapability::Rgb),
-                "x7" => Some(LedCapability::Rgb),
-                "master18" => Some(LedCapability::Rgb),
-                _ => None,
-            };
+            // Assign LED capability from the controller family (one table for the
+            // whole crate: `led_capability_for_controller`).
+            comp.led_capability = led_capability_for_controller(&comp.controller);
         }
 
         // Assign shift groups from modules (if modules have shift group info)
@@ -1129,8 +1121,7 @@ impl Patch {
     pub fn occurrences_for(&self, token: &str) -> &[Span] {
         self.occurrence_index
             .get(token)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[], std::vec::Vec::as_slice)
     }
 
     /// Modifier spans whose `select = X` (and optional `selectat`) transitively
@@ -1146,8 +1137,7 @@ impl Patch {
     pub fn modifier_entries_for(&self, token: &str) -> &[ModifierAffect] {
         self.modifier_index
             .get(token)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[], std::vec::Vec::as_slice)
     }
 
     /// Derive root `_VAR`(s) for a hardware token: every `_VAR` produced via
@@ -1178,7 +1168,7 @@ impl Patch {
     /// Influence-subtree size of a hardware token: the number of distinct
     /// circuit instances its root `_VAR`s reach via the forward BFS walk
     /// (`influence_subtree`), mirroring the corpus feature in
-    /// tools/build_features.py `influence_subtree_size`. Deterministic.
+    /// `tools/build_features.py` `influence_subtree_size`. Deterministic.
     pub fn influence_subtree_size_for(&self, hw_token: &str) -> usize {
         let vars = self.hw_token_to_vars(hw_token);
         self.influence_subtree(&vars).influenced_nodes.len()
@@ -1312,7 +1302,7 @@ impl Patch {
     /// circuits — the hardware cells the modifier drives (design D: per-token
     /// `hw_tokens` set). Computed on demand from a completed influence walk so
     /// the panels/physical wash and the MOD status share one mapping. Order is
-    /// deterministic (hw_components declaration order).
+    /// deterministic (`hw_components` declaration order).
     pub fn influenced_hw_tokens(&self, influence: &InfluenceSubtree) -> Vec<String> {
         // Rebuild the same occurrence-numbered node ids the walk used, then
         // keep section indices whose node is influenced.
@@ -1456,7 +1446,7 @@ impl Patch {
 
 const INFLUENCE_STATS_ARTIFACT: &str = include_str!("../tools/influence_stats.txt");
 
-/// Per-kind influence statistics: (mean, std, n) of influence_subtree size.
+/// Per-kind influence statistics: (mean, std, n) of `influence_subtree` size.
 #[derive(Debug, Default)]
 pub struct InfluenceStats {
     by_kind: HashMap<u8, (f32, f32, u32)>,
@@ -1579,7 +1569,7 @@ fn parse_ini_sections(content: &str) -> Vec<IniSection> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             let col_start = stripped.find('[').unwrap_or(0);
-            let col_end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
+            let col_end = stripped.rfind(']').map_or(stripped.len(), |i| i + 1);
             sections.push(IniSection {
                 name: line[1..line.len() - 1].trim().to_lowercase(),
                 entries: Vec::new(),
@@ -1593,9 +1583,8 @@ fn parse_ini_sections(content: &str) -> Vec<IniSection> {
             continue;
         }
         // Entry line: capture spans BEFORE lowercasing (byte columns, handle spaces around `=`).
-        let eq_pos = match stripped.find('=') {
-            Some(p) => p,
-            None => continue,
+        let Some(eq_pos) = stripped.find('=') else {
+            continue;
         };
         // Require trimmed line also contains `=` to avoid stray `=` inside comments already stripped.
         if !line.contains('=') {
@@ -1802,11 +1791,11 @@ fn synthesize_controller_tokens(
 /// P/M knob, S switch, E encoder).
 fn family_kind(family: char) -> ComponentKind {
     match family {
-        'B' => ComponentKind::Button,
         'L' => ComponentKind::Led,
         'P' | 'M' => ComponentKind::Knob,
         'S' => ComponentKind::Switch,
         'E' => ComponentKind::Encoder,
+        // `B` and anything unrecognised are buttons.
         _ => ComponentKind::Button,
     }
 }
@@ -1888,7 +1877,7 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
     let element_num = element_token
         .chars()
         .skip(1)
-        .take_while(|c| c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect::<String>()
         .parse::<u32>()
         .unwrap_or(1);
@@ -1905,30 +1894,10 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
                 vec![]
             }
         }
-        // P2B8: 8 buttons, 8 LEDs, 1:1 mapping (RGB)
-        "p2b8" => {
-            if element_kind == 'B' {
-                match dotted_instance_element(element_token, 'B') {
-                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
-                    None => vec![format!("L1.{}", element_num)],
-                }
-            } else {
-                vec![]
-            }
-        }
-        // P4B2: 2 buttons, 2 LEDs, 1:1 mapping (RGB)
-        "p4b2" => {
-            if element_kind == 'B' {
-                match dotted_instance_element(element_token, 'B') {
-                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
-                    None => vec![format!("L1.{}", element_num)],
-                }
-            } else {
-                vec![]
-            }
-        }
-        // M4: 4 faders with touch plates, each has RGB LED (L state + R color)
-        "m4" | "motorfader" => {
+        // P2B8 / P4B2 / M4: 1:1 button→LED mapping on this rack, so the LED
+        // keeps the element's instance and number (`L1.n`) when the token omits
+        // the instance.
+        "p2b8" | "p4b2" | "m4" | "motorfader" => {
             if element_kind == 'B' {
                 match dotted_instance_element(element_token, 'B') {
                     Some((inst, n)) => vec![format!("L{inst}.{n}")],
@@ -1942,7 +1911,7 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
         "e4" | "encoder" => {
             if element_kind == 'E' {
                 let start = (element_num - 1) * 32 + 1;
-                (start..start + 32).map(|n| format!("L{}", n)).collect()
+                (start..start + 32).map(|n| format!("L{n}")).collect()
             } else {
                 vec![]
             }
@@ -1979,8 +1948,7 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
                 vec![]
             }
         }
-        // Master18: no LEDs documented
-        "master18" => vec![],
+        // Master18 / any other family: no positional LED default.
         _ => vec![],
     }
 }
@@ -2016,17 +1984,21 @@ pub fn folded_led_for_element(comp: &HwComponent) -> Option<String> {
 /// periodic: every value, negatives included, wraps instead of clamping. Full
 /// saturation and value; brightness is the separate `ledvalue` channel. Pure;
 /// pinned to the manual's anchor table by the unit tests.
-pub fn led_colour_for_value(v: f64) -> [u8; 3] {
-    let hue = (240.0 - 300.0 * v).rem_euclid(360.0);
-    let x = 1.0 - ((hue / 60.0) % 2.0 - 1.0).abs();
-    let (r, g, b) = match hue as u32 {
-        0..=59 => (1.0, x, 0.0),
-        60..=119 => (x, 1.0, 0.0),
-        120..=179 => (0.0, 1.0, x),
-        180..=239 => (0.0, x, 1.0),
-        _ => (x, 0.0, 1.0),
+pub fn led_colour_for_value(value: f64) -> [u8; 3] {
+    let hue = (240.0 - 300.0 * value).rem_euclid(360.0);
+    let second = 1.0 - ((hue / 60.0) % 2.0 - 1.0).abs();
+    let (red, green, blue) = match hue as u32 {
+        0..=59 => (1.0, second, 0.0),
+        60..=119 => (second, 1.0, 0.0),
+        120..=179 => (0.0, 1.0, second),
+        180..=239 => (0.0, second, 1.0),
+        _ => (second, 0.0, 1.0),
     };
-    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
+    [
+        (red * 255.0) as u8,
+        (green * 255.0) as u8,
+        (blue * 255.0) as u8,
+    ]
 }
 
 /// Fold one static LED param value: float literal / constant expression via
@@ -2167,7 +2139,7 @@ fn resolve_led_initial(
             ranked.push((1, i));
         }
     }
-    ranked.sort();
+    ranked.sort_unstable();
     for (_, i) in ranked {
         let section = &sections[i];
         if element_suffix.is_none() {
@@ -2211,14 +2183,9 @@ fn resolve_led_initial(
 pub fn led_capability_for_controller(controller: &str) -> Option<LedCapability> {
     match controller.to_ascii_lowercase().as_str() {
         "b32" | "notebuttons" => Some(LedCapability::White),
-        "p2b8" | "p4b2" => Some(LedCapability::Rgb),
-        "m4" | "motorfader" => Some(LedCapability::Rgb),
-        "e4" | "encoder" => Some(LedCapability::Rgb),
-        "p8s8" | "faderbank" => Some(LedCapability::Rgb),
-        "master" | "cv i/o" => Some(LedCapability::Rgb),
-        "g8" => Some(LedCapability::Rgb),
-        "x7" => Some(LedCapability::Rgb),
-        "master18" => Some(LedCapability::Rgb),
+        // Every other documented controller carries RGB LEDs.
+        "p2b8" | "p4b2" | "m4" | "motorfader" | "e4" | "encoder" | "p8s8" | "faderbank"
+        | "master" | "cv i/o" | "g8" | "x7" | "master18" => Some(LedCapability::Rgb),
         _ => None,
     }
 }
@@ -2586,8 +2553,7 @@ fn find_select_span(
     let header_line = sections[section_idx].header_span.line;
     let next_header = sections
         .get(section_idx + 1)
-        .map(|s| s.header_span.line)
-        .unwrap_or(raw_lines.len());
+        .map_or(raw_lines.len(), |s| s.header_span.line);
     for line_idx in (header_line + 1)..next_header {
         let raw_line = &raw_lines[line_idx];
         let stripped = strip_comment(raw_line);
@@ -2830,7 +2796,7 @@ pub fn discover_select_signals(patch: &Patch) -> SelectDiscovery {
         }
     }
 
-    for (signal, map) in candidate_counts.iter_mut() {
+    for (signal, map) in &mut candidate_counts {
         for section in &patch.sections {
             let lname = section.name.to_lowercase();
             if lname != "buttongroup" && lname != "button" {
@@ -2914,16 +2880,15 @@ pub fn token_kind(id: &str) -> Option<ComponentKind> {
     match id.chars().next()? {
         'B' => Some(ComponentKind::Button),
         'L' => Some(ComponentKind::Led),
-        'P' => Some(ComponentKind::Knob),
-        'O' => Some(ComponentKind::CvOut),
-        'I' => Some(ComponentKind::CvIn),
-        'E' => Some(ComponentKind::Encoder),
-        'S' => Some(ComponentKind::Switch),
         // Faders (M4 motor faders) are continuous value controls; they model
         // as Knob because a dedicated Fader kind would require exhaustive
         // match updates in ui.rs/handler.rs, which is rendering task 2.2's
         // territory. graph.rs/geometry.rs already recognize M tokens.
-        'M' => Some(ComponentKind::Knob),
+        'P' | 'M' => Some(ComponentKind::Knob),
+        'O' => Some(ComponentKind::CvOut),
+        'I' => Some(ComponentKind::CvIn),
+        'E' => Some(ComponentKind::Encoder),
+        'S' => Some(ComponentKind::Switch),
         _ => None,
     }
 }
@@ -2933,7 +2898,7 @@ fn leading_number(id: &str) -> Option<u32> {
     let digits: String = id
         .chars()
         .skip(1)
-        .take_while(|c| c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect();
     digits.parse().ok()
 }
@@ -2945,8 +2910,7 @@ fn leading_digits(s: &str) -> Option<&str> {
     let start = s.find(|c: char| c.is_ascii_digit())?;
     let end = s[start..]
         .find(|c: char| !c.is_ascii_digit())
-        .map(|i| start + i)
-        .unwrap_or(s.len());
+        .map_or(s.len(), |i| start + i);
     (start < end).then(|| &s[start..end])
 }
 
@@ -3064,7 +3028,7 @@ fn block_slice_by_headers(
         .map(|(i, s)| (s.header_span.line, i))
         .collect();
     by_line.sort_unstable();
-    let first_header = by_line.first().map(|&(l, _)| l).unwrap_or(0);
+    let first_header = by_line.first().map_or(0, |&(l, _)| l);
     let preamble: Vec<usize> = (0..first_header).collect();
     // Banner start per file position: the first line of the consecutive
     // comment run immediately above each header. The first section has none
@@ -3094,8 +3058,7 @@ fn block_slice_by_headers(
         // comments and blanks included.
         let end = by_line
             .get(pos + 1)
-            .map(|&(_, _next_idx)| banner_start[pos + 1])
-            .unwrap_or(raw_lines.len());
+            .map_or(raw_lines.len(), |&(_, _next_idx)| banner_start[pos + 1]);
         block.extend(header_line + 1..end);
     }
     (preamble, blocks)
@@ -3655,14 +3618,12 @@ mod tests {
             let btn = patch
                 .hw_components
                 .iter()
-                .find(|c| c.id == format!("B1.{}", i))
-                .unwrap_or_else(|| panic!("B1.{} must exist", i));
+                .find(|c| c.id == format!("B1.{i}"))
+                .unwrap_or_else(|| panic!("B1.{i} must exist"));
             assert_eq!(
                 btn.led,
-                Some(format!("L1.{}", i)),
-                "B1.{} should be associated with L1.{}",
-                i,
-                i
+                Some(format!("L1.{i}")),
+                "B1.{i} should be associated with L1.{i}"
             );
         }
     }
@@ -3713,22 +3674,22 @@ mod tests {
             let b = patch
                 .hw_components
                 .iter()
-                .find(|c| c.id == format!("B5.{}", i))
-                .unwrap_or_else(|| panic!("B5.{} must exist", i));
-            assert_eq!(b.controller, "P2B8", "B5.{} on the P2B8 panel", i);
+                .find(|c| c.id == format!("B5.{i}"))
+                .unwrap_or_else(|| panic!("B5.{i} must exist"));
+            assert_eq!(b.controller, "P2B8", "B5.{i} on the P2B8 panel");
             let l = patch
                 .hw_components
                 .iter()
-                .find(|c| c.id == format!("L5.{}", i))
-                .unwrap_or_else(|| panic!("L5.{} must exist", i));
+                .find(|c| c.id == format!("L5.{i}"))
+                .unwrap_or_else(|| panic!("L5.{i} must exist"));
             assert_eq!(l.controller, "P2B8");
         }
         for i in 1..=2u32 {
             let p = patch
                 .hw_components
                 .iter()
-                .find(|c| c.id == format!("P5.{}", i))
-                .unwrap_or_else(|| panic!("P5.{} must exist", i));
+                .find(|c| c.id == format!("P5.{i}"))
+                .unwrap_or_else(|| panic!("P5.{i} must exist"));
             assert_eq!(p.controller, "P2B8");
         }
         assert!(
@@ -3811,10 +3772,8 @@ mod tests {
         for decl in &patch.controllers {
             let probe = match decl.name.as_str() {
                 "m4" => format!("P{}.1", decl.ordinal),
-                "b32" => format!("B{}.1", decl.ordinal),
                 "e4" => format!("E{}.1", decl.ordinal),
-                "p2b8" => format!("B{}.1", decl.ordinal),
-                "notebuttons" => format!("B{}.1", decl.ordinal),
+                "b32" | "p2b8" | "notebuttons" => format!("B{}.1", decl.ordinal),
                 other => panic!("unexpected controller {other}"),
             };
             let comp = patch
@@ -3958,9 +3917,9 @@ mod tests {
             let s = patch
                 .hw_components
                 .iter()
-                .find(|c| c.id == format!("S6.{}", i))
-                .unwrap_or_else(|| panic!("S6.{} must exist", i));
-            assert_eq!(s.controller, "S10", "S6.{} on the S10 panel", i);
+                .find(|c| c.id == format!("S6.{i}"))
+                .unwrap_or_else(|| panic!("S6.{i} must exist"));
+            assert_eq!(s.controller, "S10", "S6.{i} on the S10 panel");
         }
         assert!(
             patch
@@ -3984,7 +3943,7 @@ mod tests {
                 .iter()
                 .find(|c| c.id == format!("P3.{i}"))
                 .unwrap_or_else(|| panic!("P3.{i} must exist"));
-            assert_eq!(p.controller, "P10", "P3.{} on the P10 panel", i);
+            assert_eq!(p.controller, "P10", "P3.{i} on the P10 panel");
         }
         assert!(
             patch

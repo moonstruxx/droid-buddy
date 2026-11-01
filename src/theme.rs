@@ -552,17 +552,17 @@ fn ansi16_rgb(v: u8) -> (u8, u8, u8) {
 /// [`ansi16_rgb`], a 6×6×6 cube for 16..=231, and the 24-step gray ramp for
 /// 232..=255. `Theme::rgb` never emits a 256-color token today, but the hop
 /// must be total so the pixel path cannot panic on any `Color`.
-fn xterm256_rgb(v: u8) -> (u8, u8, u8) {
-    match v {
-        0..=15 => ansi16_rgb(v),
+fn xterm256_rgb(value: u8) -> (u8, u8, u8) {
+    match value {
+        0..=15 => ansi16_rgb(value),
         16..=231 => {
-            let n = v - 16;
-            let (r, g, b) = (n / 36, (n % 36) / 6, n % 6);
-            (cube_step(r), cube_step(g), cube_step(b))
+            let offset = value - 16;
+            let (red, green, blue) = (offset / 36, (offset % 36) / 6, offset % 6);
+            (cube_step(red), cube_step(green), cube_step(blue))
         }
         _ => {
-            let g = 8 + 10 * (v - 232);
-            (g, g, g)
+            let level = 8 + 10 * (value - 232);
+            (level, level, level)
         }
     }
 }
@@ -657,7 +657,7 @@ pub fn set_test_theme(theme: Option<Theme>) {
 pub fn modifier_hue(token: &str) -> Color {
     let mut hash: u32 = 0;
     for b in token.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+        hash = hash.wrapping_mul(31).wrapping_add(u32::from(b));
     }
     let idx = (hash % 16) as u8;
     match idx {
@@ -914,7 +914,7 @@ mod tests {
     }
 
     /// Every semantic token still in the palette, in struct order. The single
-    /// enumeration the totality tests share: the rgb() determinism test and the
+    /// enumeration the totality tests share: the `rgb()` determinism test and the
     /// egui-bridge opacity test (task 2.7).
     fn every_token(t: &Theme) -> Vec<(&'static str, Color)> {
         vec![

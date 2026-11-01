@@ -198,7 +198,7 @@ struct Derived {
 
 /// Everything a candidate evaluation needs: the derived graph plus the cost
 /// provider and schema (bundled to keep the search helpers' signatures small).
-/// Cached indices make per-candidate scoring hash-free (no HashMap rebuild).
+/// Cached indices make per-candidate scoring hash-free (no `HashMap` rebuild).
 struct EvalCtx<'a> {
     derived: &'a Derived,
     cost: &'a CostModel,
@@ -287,7 +287,7 @@ fn derive(patch: &Patch) -> Derived {
 
 /// Score a candidate `order` with the exact `forward_latency` metric: nodes
 /// keep their identities, only the per-node processing position changes.
-/// Uses the cached `EvalCtx` indices so no per-candidate HashMap is built;
+/// Uses the cached `EvalCtx` indices so no per-candidate `HashMap` is built;
 /// result is byte-identical to `forward_latency` called with the same positions.
 fn evaluate_order(order: &[usize], eval: &EvalCtx<'_>) -> LatencySummary {
     eval.scored.set(eval.scored.get() + 1);
@@ -311,18 +311,8 @@ fn evaluate_order(order: &[usize], eval: &EvalCtx<'_>) -> LatencySummary {
         let mut back = 0usize;
         for (ei, &src_idx) in eval.edge_src.iter().enumerate() {
             let sink_idx = eval.edge_sink[ei];
-            let s_section = eval
-                .derived
-                .nodes
-                .get(src_idx)
-                .map(|(_, s)| *s)
-                .unwrap_or(0);
-            let t_section = eval
-                .derived
-                .nodes
-                .get(sink_idx)
-                .map(|(_, s)| *s)
-                .unwrap_or(0);
+            let s_section = eval.derived.nodes.get(src_idx).map_or(0, |(_, s)| *s);
+            let t_section = eval.derived.nodes.get(sink_idx).map_or(0, |(_, s)| *s);
             let s = position.get(s_section).copied().unwrap_or(0);
             let t = position.get(t_section).copied().unwrap_or(0);
             let is_back = s > t;
@@ -419,10 +409,10 @@ fn better(a: &LatencySummary, b: &LatencySummary, objective: Objective) -> bool 
 
 /// FNV-1a 64-bit — a tiny deterministic hash for the search seed (no RNG).
 fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash
 }
@@ -522,13 +512,12 @@ fn fas_indegree_seed(
         #[allow(clippy::needless_range_loop)]
         for i in range.start..range.end {
             let name = sections[i].name.as_str();
-            let block = match block_of.get(name) {
-                Some(&b) => b,
-                None => {
-                    block_of.insert(name, blocks.len());
-                    blocks.push(Vec::new());
-                    blocks.len() - 1
-                }
+            let block = if let Some(&b) = block_of.get(name) {
+                b
+            } else {
+                block_of.insert(name, blocks.len());
+                blocks.push(Vec::new());
+                blocks.len() - 1
             };
             blocks[block].push(i);
         }
@@ -764,7 +753,7 @@ fn search_local_with_budget(
                 order.swap(i, i + 1);
                 let summary = evaluate_order(&order, eval);
                 if better(&summary, &best_summary, objective) {
-                    best_order = order.clone();
+                    best_order.clone_from(&order);
                     best_summary = summary;
                     improved = true;
                 } else {
@@ -786,7 +775,7 @@ fn search_local_with_budget(
                     order.swap(i, j);
                     let summary = evaluate_order(&order, eval);
                     if better(&summary, &best_summary, objective) {
-                        best_order = order.clone();
+                        best_order.clone_from(&order);
                         best_summary = summary;
                         improved = true;
                     } else {
@@ -915,7 +904,7 @@ fn search_vns_with_budget(
     let mut budget = budget_limit;
     let mut radius = domains
         .iter()
-        .map(|r| r.len())
+        .map(std::iter::ExactSizeIterator::len)
         .max()
         .unwrap_or(0)
         .clamp(1, 8);
@@ -937,7 +926,7 @@ fn search_vns_with_budget(
                     current.swap(i, j);
                     let summary = evaluate_order(&current, eval);
                     if better(&summary, &best_summary, objective) {
-                        best_order = current.clone();
+                        best_order.clone_from(&current);
                         best_summary = summary;
                         improved_in_round = true;
                     } else {
@@ -953,24 +942,24 @@ fn search_vns_with_budget(
             }
         }
         if improved_in_round {
-            current = best_order.clone();
+            current.clone_from(&best_order);
             continue;
         }
         if radius == 1 {
             break;
         }
         radius = (radius / 2).max(1);
-        current = best_order.clone();
+        current.clone_from(&best_order);
     }
     (best_order, best_summary)
 }
 
 /// splitmix64 — deterministic 64-bit PRNG, no external dependency.
 fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
 }
 
@@ -978,7 +967,7 @@ fn splitmix64(state: &mut u64) -> u64 {
 /// material as `seed_order` / `fas_indegree_seed`, so same patch same machine
 /// yields same stream.
 fn annealing_seed(domains: &[Range<usize>], sections: &[IniSection]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for (gi, range) in domains.iter().enumerate() {
         let mut items: Vec<(&str, usize)> = Vec::new();
         let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -992,16 +981,16 @@ fn annealing_seed(domains: &[Range<usize>], sections: &[IniSection]) -> u64 {
         for (name, inst) in items {
             for &b in name.as_bytes() {
                 h ^= u64::from(b);
-                h = h.wrapping_mul(0x100000001b3);
+                h = h.wrapping_mul(0x0100_0000_01b3);
             }
             h ^= inst as u64;
-            h = h.wrapping_mul(0x100000001b3);
+            h = h.wrapping_mul(0x0100_0000_01b3);
             h ^= gi as u64;
-            h = h.wrapping_mul(0x100000001b3);
+            h = h.wrapping_mul(0x0100_0000_01b3);
         }
     }
     if h == 0 {
-        h = 0x9e3779b97f4a7c15;
+        h = 0x9e37_79b9_7f4a_7c15;
     }
     h
 }
@@ -1351,16 +1340,28 @@ mod tests {
     }
 
     /// 12 distinct sections, file order scrambled, wired as one long chain
-    /// s0→s1→…→s11. Search space is 12! ≫ ENUM_LIMIT → exercises the local
+    /// s0→s1→…→s11. Search space is 12! ≫ `ENUM_LIMIT` → exercises the local
     /// search path.
     fn big_patch() -> Patch {
+        use std::fmt::Write as _;
+
         let mut content = String::from("[s5]\nbutton = B1.1\nin = _C4\noutput = _C5\n");
         for k in 6..=11 {
-            content.push_str(&format!("[s{k}]\nin = _C{}\noutput = _C{k}\n", k - 1));
+            writeln!(
+                content,
+                "[s{k}]\nin = _C{prev}\noutput = _C{k}",
+                prev = k - 1
+            )
+            .expect("write to a String");
         }
         content.push_str("[s0]\nin = _S\noutput = _C0\n");
         for k in 1..=4 {
-            content.push_str(&format!("[s{k}]\nin = _C{}\noutput = _C{k}\n", k - 1));
+            writeln!(
+                content,
+                "[s{k}]\nin = _C{prev}\noutput = _C{k}",
+                prev = k - 1
+            )
+            .expect("write to a String");
         }
         patch(&content)
     }
@@ -1727,27 +1728,45 @@ mod tests {
     /// s0→s1→…→s20 so every consecutive pair is an edge. Intra-group edges
     /// must become zero-cost at the coarse level.
     fn large_banner_patch() -> Patch {
+        use std::fmt::Write as _;
+
         let mut content = String::new();
         // Preamble group: s0..s2 (3 sections)
         for i in 0..3 {
-            content.push_str(&format!("[s{i}]\n"));
+            writeln!(content, "[s{i}]").expect("write to a String");
             if i == 0 {
                 content.push_str("output = _C0\n");
             } else {
-                content.push_str(&format!("in = _C{}\noutput = _C{i}\n", i - 1));
+                writeln!(content, "in = _C{prev}\noutput = _C{i}", prev = i - 1)
+                    .expect("write to a String");
             }
         }
         content.push_str("# ---- Alpha ----\n");
         for i in 3..9 {
-            content.push_str(&format!("[s{i}]\nin = _C{}\noutput = _C{i}\n", i - 1));
+            writeln!(
+                content,
+                "[s{i}]\nin = _C{prev}\noutput = _C{i}",
+                prev = i - 1
+            )
+            .expect("write to a String");
         }
         content.push_str("# ---- Beta ----\n");
         for i in 9..15 {
-            content.push_str(&format!("[s{i}]\nin = _C{}\noutput = _C{i}\n", i - 1));
+            writeln!(
+                content,
+                "[s{i}]\nin = _C{prev}\noutput = _C{i}",
+                prev = i - 1
+            )
+            .expect("write to a String");
         }
         content.push_str("# ---- Gamma ----\n");
         for i in 15..21 {
-            content.push_str(&format!("[s{i}]\nin = _C{}\noutput = _C{i}\n", i - 1));
+            writeln!(
+                content,
+                "[s{i}]\nin = _C{prev}\noutput = _C{i}",
+                prev = i - 1
+            )
+            .expect("write to a String");
         }
         patch(&content)
     }
@@ -2273,7 +2292,7 @@ mod tests {
 
     /// 8 distinct real circuits wired as a single chain, file order scrambled
     /// (copy→select→vca→mixer→clocktool→delay→recorder→cvlooper). 8! = 40320
-    /// ≤ ENUM_LIMIT so every strategy takes the exact path; the all-forward
+    /// ≤ `ENUM_LIMIT` so every strategy takes the exact path; the all-forward
     /// chain order is the *unique* optimum under every weight (any back edge
     /// strictly raises avg, hence the blended value), so exact-order equality
     /// with the brute force is tie-free. Real circuits give distinct AVGs

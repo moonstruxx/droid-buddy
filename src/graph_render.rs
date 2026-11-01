@@ -127,8 +127,8 @@ impl GraphCamera {
             (bounds.min_x * zoom, bounds.min_y * zoom)
         } else {
             let (cx, cy) = (
-                (bounds.min_x + bounds.max_x) / 2.0,
-                (bounds.min_y + bounds.max_y) / 2.0,
+                f32::midpoint(bounds.min_x, bounds.max_x),
+                f32::midpoint(bounds.min_y, bounds.max_y),
             );
             (
                 cx * zoom - pixel_size.0 / 2.0,
@@ -332,8 +332,8 @@ mod tests {
         // fit_zoom = min(640/40, 400/20) = 16 ≥ 4 → not clamped.
         assert_close(cam.zoom, 16.0, 1e-3);
         let (cx, cy) = (
-            (bounds.min_x + bounds.max_x) / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
+            f32::midpoint(bounds.min_x, bounds.max_x),
+            f32::midpoint(bounds.min_y, bounds.max_y),
         );
         let (px, py) = cam.world_to_pixel(cx, cy);
         assert_close(px, pixel.0 / 2.0, 1e-2);

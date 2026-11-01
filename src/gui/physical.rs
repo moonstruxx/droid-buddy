@@ -243,8 +243,7 @@ const WHEEL_VALUE_STEP: f32 = 0.05;
 /// standalone LED cells already show.
 fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
     match controller.to_ascii_lowercase().as_str() {
-        "p2b8" | "p4b2" => Some(CellShape::Round),
-        "b32" | "notebuttons" => Some(CellShape::Round),
+        "p2b8" | "p4b2" | "b32" | "notebuttons" => Some(CellShape::Round),
         "m4" | "motorfader" => Some(CellShape::Rect),
         _ => None,
     }
@@ -272,11 +271,11 @@ fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
 /// test-only `build_spec`.
 ///
 /// `pane` is the on-screen rect the rack is drawn into: the module UI can
-/// occupy any pane of the arrangement (BigLeft at startup, but BigRight or a
+/// occupy any pane of the arrangement (`BigLeft` at startup, but `BigRight` or a
 /// small pane after a swap), so the rack-local mm geometry must be translated
 /// by the pane origin — otherwise the drawn rack and the published
 /// `component_rects` hit geometry stay at the window origin and stop matching
-/// the pane (and each other) as soon as the module UI is not in BigLeft.
+/// the pane (and each other) as soon as the module UI is not in `BigLeft`.
 pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec> {
     let patch = app.patch.as_ref()?;
     let chain = PhysicalLayout::build(patch);
@@ -291,14 +290,14 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // (offset is subtracted: `screen = mm·factor·zoom − offset`). The
     // performance view ignores the user pan/zoom and centers a compact
     // (~1/4-area) rack instead; the overlay keeps label rects clear of it.
-    let pane_dx = pane.min.x as f64;
-    let pane_dy = pane.min.y as f64;
+    let pane_dx = f64::from(pane.min.x);
+    let pane_dy = f64::from(pane.min.y);
     let normal_mapping = || {
         ScreenMapping::new(
             crate::physical::PHYSICAL_POINTS_PER_MM,
-            app.physical_zoom as f64,
-            app.physical_offset.0 as f64 - pane_dx,
-            app.physical_offset.1 as f64 - pane_dy,
+            f64::from(app.physical_zoom),
+            f64::from(app.physical_offset.0) - pane_dx,
+            f64::from(app.physical_offset.1) - pane_dy,
         )
     };
     let m = if app.showing_performance {
@@ -340,7 +339,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // leave its register rendering as a standalone cell. That covers a face
     // bound to another register explicitly (L1.4 on B1.2 leaves L1.2 unfurled
     // otherwise) and any pairing the parser could not resolve.
-    for module in chain.modules.iter() {
+    for module in &chain.modules {
         for comp in &module.components {
             if comp.kind != crate::patch::ComponentKind::Button {
                 continue;
@@ -440,10 +439,9 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 .and_then(|led| module.components.iter().find(|c| c.id == *led));
             let led_state = folded_comp.map(|c| match &c.state {
                 crate::patch::ComponentState::Value(v) => *v,
-                crate::patch::ComponentState::On => 1.0,
+                crate::patch::ComponentState::On | crate::patch::ComponentState::Active => 1.0,
                 crate::patch::ComponentState::Off => 0.0,
                 crate::patch::ComponentState::Led { value, .. } => *value,
-                crate::patch::ComponentState::Active => 1.0,
             });
             let led_rgb = folded_comp.and_then(|c| match &c.state {
                 crate::patch::ComponentState::Led { value: _, rgb } => *rgb,
@@ -500,19 +498,27 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         } else {
             // Unused element - render dimmed and unlabelled
             let family = match mark {
-                crate::gui::physical::PortMark::PortIn => "CV",
-                crate::gui::physical::PortMark::PortOut => "CV",
-                _ => "B", // default
+                crate::gui::physical::PortMark::PortIn
+                | crate::gui::physical::PortMark::PortOut => "CV",
+                crate::gui::physical::PortMark::Cell => "B",
             };
             let (glyph, state_text, color) = match family {
-                "CV" => ("\u{25C0}".into(), "".into(), crate::theme::active().cv_in),
-                _ => ("\u{00B7}".into(), "".into(), crate::theme::active().muted),
+                "CV" => (
+                    "\u{25C0}".into(),
+                    String::new(),
+                    crate::theme::active().cv_in,
+                ),
+                _ => (
+                    "\u{00B7}".into(),
+                    String::new(),
+                    crate::theme::active().muted,
+                ),
             };
             (
                 glyph,
                 state_text,
                 color,
-                "".into(),
+                String::new(),
                 crate::patch::ComponentKind::Button,
                 false,
                 0.0,
@@ -692,8 +698,8 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
 /// the normal mapping. Pure math, no App dependency, so tests drive it headless.
 pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option<ScreenMapping> {
     let points_per_mm = crate::physical::PHYSICAL_POINTS_PER_MM;
-    let pane_w = pane.width() as f64;
-    let pane_h = pane.height() as f64;
+    let pane_w = f64::from(pane.width());
+    let pane_h = f64::from(pane.height());
     if pane_w <= 0.0 || pane_h <= 0.0 {
         return None;
     }
@@ -709,9 +715,9 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     // Pane-relative points center on the pane middle; the pane origin folds in
     // exactly like the normal mapping so points land window-absolute.
     let offset_x =
-        (rack.total_width_mm * 0.5) * points_per_mm * zoom - pane.min.x as f64 - pane_w * 0.5;
+        (rack.total_width_mm * 0.5) * points_per_mm * zoom - f64::from(pane.min.x) - pane_w * 0.5;
     let offset_y =
-        (rack.total_height_mm * 0.5) * points_per_mm * zoom - pane.min.y as f64 - pane_h * 0.5;
+        (rack.total_height_mm * 0.5) * points_per_mm * zoom - f64::from(pane.min.y) - pane_h * 0.5;
     Some(ScreenMapping::new(points_per_mm, zoom, offset_x, offset_y))
 }
 
@@ -1320,7 +1326,7 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         let level = led_value.clamp(0.0, 1.0).max(0.25);
         let led_color = if let Some(rgb) = cell.led_rgb {
             // Use the RGB colour from the patch, hue preserved
-            let scale = |c: u8| ((c as f32 * level).round().clamp(0.0, 255.0)) as u8;
+            let scale = |c: u8| ((f32::from(c) * level).round().clamp(0.0, 255.0)) as u8;
             egui::Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
         } else {
             // White-only LED: brightness maps to white intensity
@@ -1440,7 +1446,7 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
     let fill_color = cell.led_state.map(|v| {
         let level = v.clamp(0.0, 1.0).max(0.25);
         if let Some(rgb) = cell.led_rgb {
-            let scale = |c: u8| ((c as f32 * level).round().clamp(0.0, 255.0)) as u8;
+            let scale = |c: u8| ((f32::from(c) * level).round().clamp(0.0, 255.0)) as u8;
             egui::Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
         } else {
             let intensity = (level * 255.0) as u8;
@@ -1449,8 +1455,7 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
     });
     let extent = cell
         .led_state
-        .map(|v| 0.25 + 0.75 * v.clamp(0.0, 1.0))
-        .unwrap_or(0.0);
+        .map_or(0.0, |v| 0.25 + 0.75 * v.clamp(0.0, 1.0));
     match shape {
         CellShape::Round => {
             let radius = (diameter / 2.0 - 1.0).max(1.0);
@@ -1834,7 +1839,7 @@ pub(crate) fn rack_geometry(
                 } else {
                     0.295
                 };
-                let band_h = (module_rect.height() as f64 * ratio).round() as f32;
+                let band_h = (f64::from(module_rect.height()) * ratio).round() as f32;
                 if module_rect.width() >= 3.0 && band_h >= 3.0 {
                     db8e_bands.push((
                         placed.module_index,
@@ -2164,7 +2169,7 @@ mod tests {
         (rack, chain)
     }
 
-    /// One DB8E faceplate (6 HP, 3 HE; B-grid top at y_mm 38, real geometry
+    /// One DB8E faceplate (6 HP, 3 HE; B-grid top at `y_mm` 38, real geometry
     /// values) packed into a single row, so the band math is production-like.
     fn db8e_fixture() -> (RackLayout, PhysicalLayout) {
         let chain = PhysicalLayout {
@@ -2414,9 +2419,9 @@ mod tests {
         let rack = RackLayout::pack(&chain, &rack_spec);
         let m = ScreenMapping::new(
             crate::physical::PHYSICAL_POINTS_PER_MM,
-            app.physical_zoom as f64,
-            app.physical_offset.0 as f64,
-            app.physical_offset.1 as f64,
+            f64::from(app.physical_zoom),
+            f64::from(app.physical_offset.0),
+            f64::from(app.physical_offset.1),
         );
         let geom = rack_geometry(&rack, &chain, &m);
         // A zero-origin pane keeps the spec rack-local so it matches `geom`.
@@ -2424,7 +2429,7 @@ mod tests {
         // Folded LEDs publish no cell (button-led-composition D4), so the
         // spec holds the geometry cells minus the folded LED cells.
         let mut folded: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for module in chain.modules.iter() {
+        for module in &chain.modules {
             for comp in &module.components {
                 if comp.kind != crate::patch::ComponentKind::Button {
                     continue;
@@ -2959,7 +2964,7 @@ mod tests {
             // a ladder step.
             let label_runs: Vec<&(String, egui::FontId, f32)> = rows
                 .iter()
-                .filter(|(text, _, _)| text.chars().any(|c| c.is_alphanumeric()))
+                .filter(|(text, _, _)| text.chars().any(char::is_alphanumeric))
                 .collect();
             assert!(
                 label_runs.iter().any(|(text, _, _)| text.contains("B1.1")),
@@ -3270,10 +3275,10 @@ mod tests {
 
         let zoom_before = app.physical_zoom;
         let offset_before = app.physical_offset;
-        crate::handler::handle_physical_frame(frame, &mut app);
+        crate::handler::handle_physical_frame(&frame, &mut app);
         match app.patch.as_ref().unwrap().hw_components[0].state {
             ComponentState::Value(v) => {
-                assert!((v - WHEEL_VALUE_STEP).abs() < 1e-6, "value: {v}")
+                assert!((v - WHEEL_VALUE_STEP).abs() < 1e-6, "value: {v}");
             }
             _ => panic!("expected Value state"),
         }
@@ -3336,7 +3341,7 @@ mod tests {
         assert_eq!(anchor, (700.0, 550.0), "pane-local cursor anchor");
 
         let mut app = App::new();
-        crate::handler::handle_physical_frame(frame, &mut app);
+        crate::handler::handle_physical_frame(&frame, &mut app);
         let ratio = app.physical_zoom;
         assert!(ratio > 1.0, "wheel-up zooms in: {ratio}");
         // `offset = offset·ratio + anchor·(ratio − 1)`, so the content under
@@ -3374,7 +3379,7 @@ mod tests {
 
         let mut app = App::new();
         let zoom_before = app.physical_zoom;
-        crate::handler::handle_physical_frame(frame, &mut app);
+        crate::handler::handle_physical_frame(&frame, &mut app);
         assert_eq!(app.physical_offset, (30.0, -20.0));
         assert_eq!(app.physical_zoom, zoom_before, "pan must not zoom");
         assert!(
@@ -3800,7 +3805,7 @@ mod tests {
         // composed face paints the fill in that rgb — not the white
         // fallback. Red until the loader resolver lands (task 2.1): the LED
         // still loads as `Off`, so `led_rgb` is `None` and the fill is white.
-        let ini = r#"
+        let ini = r"
 [p2b8]
 
 [button]
@@ -3814,7 +3819,7 @@ mod tests {
     button = B1.2
     led = L1.2
     output = _OWN_B
-"#;
+";
         let patch = crate::patch::Patch::from_ini_str(ini, "led-rgb".to_string())
             .expect("test patch parses");
         let mut app = App::new();
@@ -3978,15 +3983,10 @@ mod tests {
         let geom = rack_geometry(&rack, &chain, &mapping());
         let (_, _, rect, _) = geom.cells[0];
         let ppm = crate::physical::PHYSICAL_POINTS_PER_MM as f32;
-        assert!(
-            (rect.width() - 20.0 * ppm).abs() < 1e-3,
-            "width: {:?}",
-            rect
-        );
+        assert!((rect.width() - 20.0 * ppm).abs() < 1e-3, "width: {rect:?}");
         assert!(
             (rect.height() - 10.0 * ppm).abs() < 1e-3,
-            "height is isotropic: {:?}",
-            rect
+            "height is isotropic: {rect:?}"
         );
     }
 
@@ -4613,8 +4613,10 @@ mod tests {
                 *width == 0.0 && *fill == rgb(crate::theme::active().fader_led_bar)
             })
             .max_by(|a, b| a.0.height().partial_cmp(&b.0.height()).unwrap())
-            .map(|(r, ..)| *r)
-            .unwrap_or_else(|| panic!("the amber value bar is painted: {rects:?}"));
+            .map_or_else(
+                || panic!("the amber value bar is painted: {rects:?}"),
+                |(r, ..)| *r,
+            );
         assert!(
             (lit.height() - rect.height() * 0.6).abs() < 1.0,
             "the bar fills 60 % of the track: {} vs {}",
@@ -4699,8 +4701,8 @@ mod tests {
             .find(|(id, _)| *id == crate::panes::PaneId::BigLeft)
             .expect("the module UI pane is published");
         Rect::from_min_size(
-            Pos2::new(cell.x as f32, cell.y as f32),
-            Vec2::new(cell.width as f32, cell.height as f32),
+            Pos2::new(f32::from(cell.x), f32::from(cell.y)),
+            Vec2::new(f32::from(cell.width), f32::from(cell.height)),
         )
     }
 
@@ -5435,8 +5437,7 @@ mod tests {
         let visible: String = lines
             .iter()
             .map(|(text, _, _)| text.replace('\u{2026}', ""))
-            .collect::<Vec<_>>()
-            .join("")
+            .collect::<String>()
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();

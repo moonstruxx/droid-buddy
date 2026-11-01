@@ -15,6 +15,9 @@
 
 mod graph;
 
+// `write!` into the pane title avoids a per-segment `format!` allocation.
+use std::fmt::Write as _;
+
 pub use graph::{build_scene_spec, graph_pane_rect};
 
 // The headless end-to-end smoke test (`droid_tui --self-test`): it drives the
@@ -291,10 +294,9 @@ impl GraphWindow {
                 return;
             };
             let repaint = EGUI.with(|slot| {
-                slot.borrow_mut()
-                    .as_mut()
-                    .map(|surface| surface.winit_state.on_window_event(window, event).repaint)
-                    .unwrap_or(false)
+                slot.borrow_mut().as_mut().is_some_and(|surface| {
+                    surface.winit_state.on_window_event(window, event).repaint
+                })
             });
             // egui asks for an immediate redraw (animation, focus change, ...).
             if repaint {
@@ -313,7 +315,7 @@ impl GraphWindow {
 
     /// Asks winit to schedule the next frame.
     pub fn request_redraw(&self) {
-        self.with_window(|window| window.request_redraw());
+        self.with_window(winit::window::Window::request_redraw);
     }
 
     /// Sets the scene spec the window draws on its next frame; `None` clears
@@ -517,9 +519,9 @@ fn theme_clear_color() -> wgpu::Color {
     let theme = crate::theme::active();
     let (r, g, b) = theme.rgb(theme.graph_canvas_bg);
     wgpu::Color {
-        r: r as f64 / 255.0,
-        g: g as f64 / 255.0,
-        b: b as f64 / 255.0,
+        r: f64::from(r) / 255.0,
+        g: f64::from(g) / 255.0,
+        b: f64::from(b) / 255.0,
         a: 1.0,
     }
 }
@@ -585,20 +587,18 @@ fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
         .is_some_and(|zoom| (zoom - app.physical_zoom).abs() < 1e-4)
     {
         if let Some(mode) = app.physical_fit_mode {
-            title.push_str(&format!(" {}", mode.as_str()));
+            let _ = write!(title, " {}", mode.as_str());
         }
     }
     if app.physical_offset != (0.0, 0.0) {
-        title.push_str(&format!(
+        let _ = write!(
+            title,
             " \u{B7} Pan {:.0}/{:.0}",
             app.physical_offset.0, app.physical_offset.1
-        ));
+        );
     }
     if app.label_presentation != crate::config::LabelPresentation::Off {
-        title.push_str(&format!(
-            " \u{B7} labels {}",
-            app.label_presentation.as_str()
-        ));
+        let _ = write!(title, " \u{B7} labels {}", app.label_presentation.as_str());
     }
     title.push_str(if app.physical_show_skeleton {
         " \u{B7} skeleton on"
@@ -609,7 +609,7 @@ fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
     // title's last segment, so its full label and state stay readable even when
     // the cell could only ellipsize them.
     if let Some(subject) = module_ui_status_subject(app) {
-        title.push_str(&format!(" \u{B7} {subject}"));
+        let _ = write!(title, " \u{B7} {subject}");
     }
     ellipsize_pane_title(&title, rect.width())
 }
@@ -716,8 +716,8 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
 
     for (id, cell) in panes {
         let rect = egui::Rect::from_min_size(
-            egui::pos2(cell.x as f32, cell.y as f32),
-            egui::vec2(cell.width as f32, cell.height as f32),
+            egui::pos2(f32::from(cell.x), f32::from(cell.y)),
+            egui::vec2(f32::from(cell.width), f32::from(cell.height)),
         );
         let focused = app.layout.focus == id;
         // Every pane owns its background so an empty pane reads as a
@@ -753,7 +753,7 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 // presentation straight back off.
                 if !app.showing_picker {
                     crate::handler::handle_physical_frame(
-                        PhysicalFrame {
+                        &PhysicalFrame {
                             skeleton_toggle: false,
                             ..frame
                         },
@@ -821,7 +821,7 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 // dead over the source pane (same class as the physical frame
                 // fix, ADR 50).
                 let frame = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
-                crate::handler::handle_viewer_frame(frame, app);
+                crate::handler::handle_viewer_frame(&frame, app);
             }
             Some(crate::app::ViewType::Optimizer) => {
                 // The optimizer lives in its own small pane (spec "Optimizer
@@ -873,7 +873,7 @@ fn paint_overlays(app: &mut App, ui: &mut egui::Ui) {
         // (wheel/hover/click) is applied here, and `handle_graph_window_frame`
         // early-returns so the graph beneath never drags/selects/zooms.
         let frame = picker::paint_picker(painter, canvas, ctx, Some(&spec));
-        crate::handler::handle_picker_frame(frame, app);
+        crate::handler::handle_picker_frame(&frame, app);
     }
     if let Some(spec) = overlays::label_edit_spec(app) {
         overlays::paint_label_editor(painter, canvas, ctx, Some(&spec));
@@ -885,7 +885,7 @@ fn paint_overlays(app: &mut App, ui: &mut egui::Ui) {
 
 /// Publish the window canvas size in points and seed the first-frame camera
 /// fit when none exists (design D1/D2). The window paint path runs without
-/// the loop's RedrawRequested seed, so it re-seeds the same
+/// the loop's `RedrawRequested` seed, so it re-seeds the same
 /// dependency-filter aware fit; every frame it also refreshes
 /// `graph_canvas_px` for zoom anchoring and arrow-pan gating. Mirrors the
 /// window-size fallback in main.rs.
@@ -1094,9 +1094,9 @@ impl EguiSurface {
         // resize) it falls back to the active theme's graph-canvas token so no
         // egui/wgpu default or hardcoded RGB ever shows through.
         let clear = scene.map_or(theme_clear_color(), |spec| wgpu::Color {
-            r: spec.background.0 as f64 / 255.0,
-            g: spec.background.1 as f64 / 255.0,
-            b: spec.background.2 as f64 / 255.0,
+            r: f64::from(spec.background.0) / 255.0,
+            g: f64::from(spec.background.1) / 255.0,
+            b: f64::from(spec.background.2) / 255.0,
             a: 1.0,
         });
 
@@ -1331,13 +1331,11 @@ mod tests {
         let rect = border_rect.expect("help modal border drawn");
         assert!(
             (rect.center().x - canvas.x / 2.0).abs() < 0.5,
-            "modal centered on the viewport: {:?}",
-            rect
+            "modal centered on the viewport: {rect:?}"
         );
         assert!(
             (rect.center().y - canvas.y / 2.0).abs() < 0.5,
-            "modal centered on the viewport: {:?}",
-            rect
+            "modal centered on the viewport: {rect:?}"
         );
         assert_eq!(fill_alpha, Some(255), "modal fill is opaque");
         out.textures_delta.clear();
@@ -1716,8 +1714,8 @@ mod tests {
             rect.x >= pane.x,
             "published cell rect is anchored in the pane: {rect:?} vs {pane:?}"
         );
-        let cx = rect.x as f32 + rect.width as f32 / 2.0;
-        let cy = rect.y as f32 + rect.height as f32 / 2.0;
+        let cx = f32::from(rect.x) + f32::from(rect.width) / 2.0;
+        let cy = f32::from(rect.y) + f32::from(rect.height) / 2.0;
 
         // Hover: the published center must resolve to the drawn component.
         handle_graph_window_frame(
@@ -1770,8 +1768,8 @@ mod tests {
         assert!(app.load_patch(patch));
         let mut out = run_paint_panes(&mut app);
         let (idx, rect) = app.component_rects[0];
-        let cx = rect.x as f32 + rect.width as f32 / 2.0;
-        let cy = rect.y as f32 + rect.height as f32 / 2.0;
+        let cx = f32::from(rect.x) + f32::from(rect.width) / 2.0;
+        let cy = f32::from(rect.y) + f32::from(rect.height) / 2.0;
         handle_graph_window_frame(
             &WindowFrame {
                 pointer: Some((cx, cy)),
@@ -1894,8 +1892,8 @@ mod tests {
             .find(|(id, _)| *id == crate::panes::PaneId::BigLeft)
             .expect("left big pane published");
         let pane = egui::Rect::from_min_size(
-            egui::pos2(left.x as f32, left.y as f32),
-            egui::vec2(left.width as f32, left.height as f32),
+            egui::pos2(f32::from(left.x), f32::from(left.y)),
+            egui::vec2(f32::from(left.width), f32::from(left.height)),
         );
         let spec = physical::physical_spec(&app, pane).expect("module UI spec");
         let expected: Vec<_> = spec
@@ -1991,8 +1989,8 @@ mod tests {
             .find_map(|(id, cell)| {
                 (app.layout.pane(id).view == Some(crate::app::ViewType::Graph)).then(|| {
                     egui::Rect::from_min_size(
-                        egui::pos2(cell.x as f32, cell.y as f32),
-                        egui::vec2(cell.width as f32, cell.height as f32),
+                        egui::pos2(f32::from(cell.x), f32::from(cell.y)),
+                        egui::vec2(f32::from(cell.width), f32::from(cell.height)),
                     )
                 })
             })

@@ -91,12 +91,12 @@ pub(crate) fn paint_validation_modal(
     let Some(spec) = spec else {
         return ValidationFrame::default();
     };
-    let t = crate::theme::active();
-    let w = (canvas.x * 0.60)
+    let theme = crate::theme::active();
+    let width = (canvas.x * 0.60)
         .clamp(40.0, 80.0 * 10.0)
         .min(canvas.x - 8.0)
         .max(24.0 * 8.0);
-    let h = (canvas.y * 0.70)
+    let height = (canvas.y * 0.70)
         .clamp(12.0 * 16.0, 40.0 * 16.0)
         .min(canvas.y - 8.0);
     // Fallback to canvas-relative sizing similar to ui.rs centered logic.
@@ -106,13 +106,13 @@ pub(crate) fn paint_validation_modal(
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
         Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
     );
-    let _ = (w, h);
-    painter.rect_filled(rect, 8.0, rgb(t.muted));
+    let _ = (width, height);
+    painter.rect_filled(rect, 8.0, rgb(theme.muted));
     painter.rect(
         rect,
         8.0,
         egui::Color32::TRANSPARENT,
-        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
+        egui::Stroke::new(1.5, rgb(theme.validation_modal_border)),
         egui::StrokeKind::Inside,
     );
     // Title
@@ -121,14 +121,14 @@ pub(crate) fn paint_validation_modal(
         egui::Align2::LEFT_TOP,
         &spec.title,
         egui::FontId::proportional(12.0),
-        rgb(t.text),
+        rgb(theme.text),
     );
     painter.text(
         rect.min + egui::vec2(8.0, rect.height() - 14.0),
         egui::Align2::LEFT_TOP,
         &spec.hint,
         egui::FontId::proportional(10.0),
-        rgb(t.text),
+        rgb(theme.text),
     );
     let inner_top = rect.min.y + 24.0;
     let inner_bottom = rect.max.y - 18.0;
@@ -138,27 +138,27 @@ pub(crate) fn paint_validation_modal(
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(12.0),
-            rgb(t.text),
+            rgb(theme.text),
         );
         return ValidationFrame::default();
     }
     let row_h = 16.0;
-    let mut y = inner_top;
+    let mut row_y = inner_top;
     let sev_color = |s: Severity| match s {
-        Severity::Error => t.validation_error,
-        Severity::Warning => t.validation_warning,
-        Severity::Hint => t.validation_hint,
+        Severity::Error => theme.validation_error,
+        Severity::Warning => theme.validation_warning,
+        Severity::Hint => theme.validation_hint,
     };
     for row in &spec.rows {
-        if y + row_h > inner_bottom {
+        if row_y + row_h > inner_bottom {
             break;
         }
         if row.selected {
-            let r = Rect::from_min_size(
-                Pos2::new(rect.min.x + 4.0, y),
+            let row_rect = Rect::from_min_size(
+                Pos2::new(rect.min.x + 4.0, row_y),
                 Vec2::new(rect.width() - 8.0, row_h),
             );
-            painter.rect_filled(r, 2.0, rgb(t.validation_selected_bg));
+            painter.rect_filled(row_rect, 2.0, rgb(theme.validation_selected_bg));
         }
         let sev_label = match row.severity {
             Severity::Error => "E",
@@ -170,18 +170,18 @@ pub(crate) fn paint_validation_modal(
             row.location, sev_label, row.code, row.message
         );
         let fg = if row.selected {
-            rgb(t.text)
+            rgb(theme.text)
         } else {
             rgb(sev_color(row.severity)).gamma_multiply(0.85)
         };
         painter.text(
-            Pos2::new(rect.min.x + 8.0, y + 1.0),
+            Pos2::new(rect.min.x + 8.0, row_y + 1.0),
             egui::Align2::LEFT_TOP,
             text,
             egui::FontId::monospace(11.0),
             fg,
         );
-        y += row_h;
+        row_y += row_h;
     }
     ValidationFrame::default()
 }
@@ -343,7 +343,7 @@ pub(super) fn paint_label_editor(
         return;
     };
     let t = crate::theme::active();
-    let hue = spec.hue.map(rgb).unwrap_or_else(|| rgb(t.text));
+    let hue = spec.hue.map_or_else(|| rgb(t.text), rgb);
     let cw = (canvas.x * 0.60).clamp(40.0 * 6.0, 70.0 * 6.0);
     let rect = Rect::from_center_size(
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
@@ -775,8 +775,7 @@ pub(crate) fn select_menu_spec(app: &crate::app::App) -> Option<SelectMenuSpec> 
                 .state
                 .get(&signal.signal)
                 .copied()
-                .map(|v| format!("{v}"))
-                .unwrap_or_else(|| "-".to_string());
+                .map_or_else(|| "-".to_string(), |v| format!("{v}"));
             SelectRow {
                 signal: signal.signal.clone(),
                 kind_label: kind_label.to_string(),
@@ -1427,7 +1426,7 @@ mod tests {
         let mut app = crate::app::App::new();
         app.select_state = Some(crate::app::SelectState {
             signals: vec![],
-            state: Default::default(),
+            state: std::collections::HashMap::default(),
             cursor: 0,
             hide_unselected: false,
         });

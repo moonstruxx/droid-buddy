@@ -153,6 +153,7 @@ impl LabelPresentation {
     }
 
     /// The next presentation in `off` → `auto` → `on` → `off` (D6's `a` key).
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::Auto,
@@ -454,9 +455,8 @@ pub fn load(canonicalize: ThemeCanonicalizer<'_>, catalog: &[&str]) -> Settings 
 pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&str]) -> Settings {
     // Any read error (missing file/dir being the normal fresh-machine
     // case) falls back to defaults without ceremony.
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(_) => return Settings::default(),
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Settings::default();
     };
     let mut settings: Settings = match toml::from_str(&raw) {
         Ok(parsed) => parsed,
@@ -468,17 +468,16 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
             return Settings::default();
         }
     };
-    match canonicalize(&settings.theme) {
-        Some(canonical) => settings.theme = canonical.to_string(),
-        None => {
-            eprintln!(
-                "warning: unknown theme \"{}\" in {}; valid choices: {}",
-                settings.theme,
-                path.display(),
-                catalog.join(", ")
-            );
-            settings.theme = DEFAULT_THEME.to_string();
-        }
+    if let Some(canonical) = canonicalize(&settings.theme) {
+        settings.theme = canonical.to_string();
+    } else {
+        eprintln!(
+            "warning: unknown theme \"{}\" in {}; valid choices: {}",
+            settings.theme,
+            path.display(),
+            catalog.join(", ")
+        );
+        settings.theme = DEFAULT_THEME.to_string();
     }
     settings.labels.max_shift_layer = settings
         .labels

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-pub fn evaluate_droid_expr(expr: &str, values: &HashMap<String, f64>) -> Option<f64> {
+pub fn evaluate_droid_expr(
+    expr: &str,
+    values: &HashMap<String, f64, impl std::hash::BuildHasher>,
+) -> Option<f64> {
     let bytes = expr.as_bytes();
     let len = bytes.len();
     let mut pos = 0usize;

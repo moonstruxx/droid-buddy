@@ -351,7 +351,7 @@ fn family_for(kind: char) -> Option<&'static str> {
 /// Leading digit-run of a string as a number (`"3"` -> 3, `"1.1"` -> 1,
 /// `"USB"` -> None). Mirrors `patch::leading_number`.
 fn leading_number(s: &str) -> Option<u32> {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         None
     } else {
@@ -364,7 +364,7 @@ fn leading_number(s: &str) -> Option<u32> {
 /// trailing number (`"O4"` -> element 4, `"L1"` -> element 1).
 fn token_element(token: &str) -> Option<(char, u32)> {
     let t = token.trim();
-    let kind = t.chars().next().filter(|c| c.is_ascii_alphabetic())?;
+    let kind = t.chars().next().filter(char::is_ascii_alphabetic)?;
     let rest = &t[kind.len_utf8()..];
     if let Some(dot) = rest.find('.') {
         leading_number(&rest[dot + 1..]).map(|n| (kind, n))
@@ -376,8 +376,8 @@ fn token_element(token: &str) -> Option<(char, u32)> {
 /// Same extraction for a cell label: `"B1.3"` -> element 3 kind 'B',
 /// `"I5"` -> element 5 kind 'I', `"USB"` -> (None, Some('U')).
 fn label_element(label: &str) -> (Option<u32>, Option<char>) {
-    let kind = label.chars().next().filter(|c| c.is_ascii_alphabetic());
-    let rest = &label[kind.map(char::len_utf8).unwrap_or(0)..];
+    let kind = label.chars().next().filter(char::is_ascii_alphabetic);
+    let rest = &label[kind.map_or(0, char::len_utf8)..];
     let num = if let Some(dot) = rest.find('.') {
         leading_number(&rest[dot + 1..])
     } else {
@@ -511,20 +511,17 @@ impl PhysicalLayout {
 
             let (geometry_key, is_fallback) = if comp.controller == "CV I/O" {
                 (String::from(master_key), false)
+            } else if let Some(k) = data.resolve_controller(&comp.controller) {
+                (k, false)
             } else {
-                match data.resolve_controller(&comp.controller) {
-                    Some(k) => (k, false),
-                    None => {
-                        warn_once(
-                            &CONTROLLER_WARN,
-                            &format!(
-                                "controller {:?} has no geometry entry; using fallback width",
-                                comp.controller
-                            ),
-                        );
-                        (String::new(), true)
-                    }
-                }
+                warn_once(
+                    &CONTROLLER_WARN,
+                    &format!(
+                        "controller {:?} has no geometry entry; using fallback width",
+                        comp.controller
+                    ),
+                );
+                (String::new(), true)
             };
             let entry = if is_fallback {
                 None
@@ -728,7 +725,7 @@ impl PhysicalModule {
 }
 
 /// Row height in mm for a HE value, from the loaded `he_mm` map
-/// (fallback_height_mm for unknown HE values).
+/// (`fallback_height_mm` for unknown HE values).
 fn row_height_mm(chain: &PhysicalLayout, he: u32) -> f64 {
     chain
         .he_mm
@@ -773,7 +770,7 @@ pub struct RackRowPlacement {
 pub struct FoldBar {
     /// 0-based index of the row this boundary sits after.
     pub after_row: usize,
-    /// Divider rect: spans the rows region, height = FOLD_BAR_HEIGHT_MM.
+    /// Divider rect: spans the rows region, height = `FOLD_BAR_HEIGHT_MM`.
     pub rect_mm: RectMm,
 }
 
@@ -805,7 +802,7 @@ impl RackLayout {
     ///
     /// Modules auto-pack in chain order: the current row fills left-to-right
     /// until the next module would exceed the row's HP (capacity = hp ×
-    /// hp_mm), then the next row starts; the last row accepts overflow. A
+    /// `hp_mm`), then the next row starts; the last row accepts overflow. A
     /// `spec.assign` override forces a module into a row regardless of fit;
     /// an out-of-range override falls back to auto-pack. Overrides never
     /// reorder modules within a row. An empty `spec.rows` materializes the
@@ -832,28 +829,25 @@ impl RackLayout {
                 .get(&key)
                 .copied()
                 .filter(|&r| r < spec.rows.len());
-            let row = match override_row {
-                Some(r) => r,
-                None => {
-                    let mut r = cursor;
-                    loop {
-                        let capacity = spec.rows[r].hp * hp_mm;
-                        let row_empty = fills[r] <= 0.0;
-                        let x = if row_empty { 0.0 } else { fills[r] + gap };
-                        // An empty row always accepts its first module, even
-                        // an over-wide one: otherwise a module wider than
-                        // every configured row would skip to the last row and
-                        // leave leading rows empty. A non-empty row fills
-                        // until the module fits, with the last row accepting
-                        // overflow (D10).
-                        if row_empty
-                            || x + module.rect_mm.w_mm <= capacity
-                            || r + 1 >= spec.rows.len()
-                        {
-                            break r;
-                        }
-                        r += 1;
+            let row = if let Some(r) = override_row {
+                r
+            } else {
+                let mut r = cursor;
+                loop {
+                    let capacity = spec.rows[r].hp * hp_mm;
+                    let row_empty = fills[r] <= 0.0;
+                    let x = if row_empty { 0.0 } else { fills[r] + gap };
+                    // An empty row always accepts its first module, even
+                    // an over-wide one: otherwise a module wider than
+                    // every configured row would skip to the last row and
+                    // leave leading rows empty. A non-empty row fills
+                    // until the module fits, with the last row accepting
+                    // overflow (D10).
+                    if row_empty || x + module.rect_mm.w_mm <= capacity || r + 1 >= spec.rows.len()
+                    {
+                        break r;
                     }
+                    r += 1;
                 }
             };
             let x = if fills[row] > 0.0 {
@@ -956,7 +950,7 @@ impl RackLayout {
 ///
 /// Location choice: `physical.rs` rather than `patch.rs` because the heuristic
 /// must inspect both `[db8e]` presence (patch sections) and the derived
-/// `PhysicalLayout` (geometry_key == "db8e"). `physical` already depends on
+/// `PhysicalLayout` (`geometry_key` == "db8e"). `physical` already depends on
 /// `patch` (ARCHITECTURE dependency direction), while `patch` must not import
 /// `physical`/`geometry` — keeping the helper here preserves the direction and
 /// keeps both modules pure (no terminal/UI import, no `App` dependency).
@@ -1140,6 +1134,7 @@ impl ScreenMapping {
     /// Zoom about a fixed screen anchor: returns a mapping with `new_zoom`
     /// and the offset adjusted so the mm point under `(ax, ay)` stays at the
     /// same screen position. Deterministic pure math (no RNG).
+    #[must_use]
     pub fn zoom_about(&self, new_zoom: f64, ax: f64, ay: f64) -> Self {
         let (mx, my) = self.screen_to_mm(ax, ay);
         Self {
@@ -1152,6 +1147,7 @@ impl ScreenMapping {
 
     /// Pan by `(dx, dy)` screen cells: screen coords shift linearly by
     /// exactly `(dx, dy)` (and the inverse shifts the other way).
+    #[must_use]
     pub fn pan(&self, dx: f64, dy: f64) -> Self {
         Self {
             offset_x: self.offset_x + dx,
@@ -1178,8 +1174,8 @@ pub fn fit_zoom(rack_w_mm: f64, rack_h_mm: f64, pane_w: f32, pane_h: f32) -> f64
     if rack_w_mm <= 0.0 || rack_h_mm <= 0.0 || pane_w <= 0.0 || pane_h <= 0.0 {
         return ZOOM_MIN;
     }
-    let by_width = pane_w as f64 / (rack_w_mm * PHYSICAL_POINTS_PER_MM);
-    let by_height = pane_h as f64 / (rack_h_mm * PHYSICAL_POINTS_PER_MM);
+    let by_width = f64::from(pane_w) / (rack_w_mm * PHYSICAL_POINTS_PER_MM);
+    let by_height = f64::from(pane_h) / (rack_h_mm * PHYSICAL_POINTS_PER_MM);
     by_width.min(by_height).clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
@@ -1198,8 +1194,8 @@ pub fn fit_offset(
     let rack_w = rack_w_mm * PHYSICAL_POINTS_PER_MM * zoom;
     let rack_h = rack_h_mm * PHYSICAL_POINTS_PER_MM * zoom;
     (
-        ((rack_w - pane_w as f64) / 2.0) as f32,
-        ((rack_h - pane_h as f64) / 2.0) as f32,
+        ((rack_w - f64::from(pane_w)) / 2.0) as f32,
+        ((rack_h - f64::from(pane_h)) / 2.0) as f32,
     )
 }
 
@@ -1805,21 +1801,21 @@ mod tests {
             h_mm: 4.0,
         };
         // Default mapping (offset 0, zoom 1).
-        let m = ScreenMapping::default();
-        let (x, y, w, h) = m.mm_to_screen(mm);
-        assert_close(w, mm.w_mm * m.points_per_mm);
-        assert_close(h, mm.h_mm * m.points_per_mm);
-        let (mx, my) = m.screen_to_mm(x, y);
-        assert_close(mx, mm.x_mm);
-        assert_close(my, mm.y_mm);
+        let mapping = ScreenMapping::default();
+        let (sx, sy, sw, sh) = mapping.mm_to_screen(mm);
+        assert_close(sw, mm.w_mm * mapping.points_per_mm);
+        assert_close(sh, mm.h_mm * mapping.points_per_mm);
+        let (mm_x, mm_y) = mapping.screen_to_mm(sx, sy);
+        assert_close(mm_x, mm.x_mm);
+        assert_close(mm_y, mm.y_mm);
         // With zoom + offset too.
-        let m2 = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, 1.5, 7.0, 3.0);
-        let (x2, y2, w2, h2) = m2.mm_to_screen(mm);
-        assert_close(w2, mm.w_mm * PHYSICAL_POINTS_PER_MM * 1.5);
-        assert_close(h2, mm.h_mm * PHYSICAL_POINTS_PER_MM * 1.5);
-        let (mx2, my2) = m2.screen_to_mm(x2, y2);
-        assert_close(mx2, mm.x_mm);
-        assert_close(my2, mm.y_mm);
+        let mapping_zoomed = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, 1.5, 7.0, 3.0);
+        let (sx2, sy2, sw2, sh2) = mapping_zoomed.mm_to_screen(mm);
+        assert_close(sw2, mm.w_mm * PHYSICAL_POINTS_PER_MM * 1.5);
+        assert_close(sh2, mm.h_mm * PHYSICAL_POINTS_PER_MM * 1.5);
+        let (mm_x2, mm_y2) = mapping_zoomed.screen_to_mm(sx2, sy2);
+        assert_close(mm_x2, mm.x_mm);
+        assert_close(mm_y2, mm.y_mm);
     }
 
     #[test]
@@ -2707,8 +2703,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{key} entry missing"))
             .element_cells
             .get(family)
-            .map(Vec::as_slice)
-            .unwrap_or_else(|| panic!("{key} family {family} missing"))
+            .map_or_else(|| panic!("{key} family {family} missing"), Vec::as_slice)
     }
 
     /// Elements with a label number in `1..=n` (family head).
@@ -2758,8 +2753,16 @@ mod tests {
             .fold(f64::NEG_INFINITY, f64::max);
         assert_mm(max_x - min_x, 23.88, &format!("{what}: ring x extent"));
         assert_mm(max_y - min_y, 23.88, &format!("{what}: ring y extent"));
-        assert_mm((min_x + max_x) / 2.0, cx, &format!("{what}: ring centre x"));
-        assert_mm((min_y + max_y) / 2.0, cy, &format!("{what}: ring centre y"));
+        assert_mm(
+            f64::midpoint(min_x, max_x),
+            cx,
+            &format!("{what}: ring centre x"),
+        );
+        assert_mm(
+            f64::midpoint(min_y, max_y),
+            cy,
+            &format!("{what}: ring centre y"),
+        );
     }
 
     #[test]
@@ -3105,7 +3108,7 @@ mod tests {
         );
         assert_mm(
             ecx,
-            (bxs[0] + bxs[1]) / 2.0,
+            f64::midpoint(bxs[0], bxs[1]),
             "encoder centred under the grid",
         );
 
@@ -3178,26 +3181,26 @@ mod tests {
     #[test]
     fn isotropic_round_trip_uses_single_factor() {
         // Round-trip and size re-derived against the single factor.
-        let m = ScreenMapping::default();
+        let mapping = ScreenMapping::default();
         let mm = RectMm {
             x_mm: 3.5,
             y_mm: 12.0,
             w_mm: 8.0,
             h_mm: 4.0,
         };
-        let (x, y, w, h) = m.mm_to_screen(mm);
-        assert_close(w, mm.w_mm * m.points_per_mm);
-        assert_close(h, mm.h_mm * m.points_per_mm);
-        let (mx, my) = m.screen_to_mm(x, y);
-        assert_close(mx, mm.x_mm);
-        assert_close(my, mm.y_mm);
-        let m2 = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, 1.5, 7.0, 3.0);
-        let (x2, y2, w2, h2) = m2.mm_to_screen(mm);
-        assert_close(w2, mm.w_mm * m2.points_per_mm * 1.5);
-        assert_close(h2, mm.h_mm * m2.points_per_mm * 1.5);
-        let (mx2, my2) = m2.screen_to_mm(x2, y2);
-        assert_close(mx2, mm.x_mm);
-        assert_close(my2, mm.y_mm);
+        let (sx, sy, sw, sh) = mapping.mm_to_screen(mm);
+        assert_close(sw, mm.w_mm * mapping.points_per_mm);
+        assert_close(sh, mm.h_mm * mapping.points_per_mm);
+        let (mm_x, mm_y) = mapping.screen_to_mm(sx, sy);
+        assert_close(mm_x, mm.x_mm);
+        assert_close(mm_y, mm.y_mm);
+        let mapping_zoomed = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, 1.5, 7.0, 3.0);
+        let (sx2, sy2, sw2, sh2) = mapping_zoomed.mm_to_screen(mm);
+        assert_close(sw2, mm.w_mm * mapping_zoomed.points_per_mm * 1.5);
+        assert_close(sh2, mm.h_mm * mapping_zoomed.points_per_mm * 1.5);
+        let (mm_x2, mm_y2) = mapping_zoomed.screen_to_mm(sx2, sy2);
+        assert_close(mm_x2, mm.x_mm);
+        assert_close(mm_y2, mm.y_mm);
     }
 
     #[test]
@@ -3322,7 +3325,7 @@ mod tests {
         // Bare [e4]: 128 L-family ring cells vs 4 synthesized L components.
         let layout = PhysicalLayout::build(&patch("[e4]\n"));
         let module = e4_module(&layout);
-        let rings = module.cells.get("L").map(Vec::len).unwrap_or(0);
+        let rings = module.cells.get("L").map_or(0, Vec::len);
         assert_eq!(rings, 128, "E4 L-family carries 128 ring segments");
         assert_eq!(
             module
@@ -3345,7 +3348,7 @@ mod tests {
         let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
         let layout = PhysicalLayout::build(&p);
         let module = b32_module(&layout);
-        assert_eq!(module.cells.get("B").map(Vec::len).unwrap_or(0), 32);
+        assert_eq!(module.cells.get("B").map_or(0, Vec::len), 32);
         let got: Vec<_> = module
             .unaddressed_cells()
             .into_iter()
@@ -3535,7 +3538,7 @@ mod tests {
         let zoom = fit_zoom(92.94, 128.5, FIT_PANE_W, FIT_PANE_H);
         assert_eq!((zoom * 100.0).round() as u32, 107, "got {zoom}");
         // Height-bound: the pane-height term is the minimum.
-        let by_height = FIT_PANE_H as f64 / 128.5 / PHYSICAL_POINTS_PER_MM;
+        let by_height = f64::from(FIT_PANE_H) / 128.5 / PHYSICAL_POINTS_PER_MM;
         assert!((zoom - by_height).abs() < 1e-9, "must be height-bound");
     }
 
@@ -3564,7 +3567,7 @@ mod tests {
         // A huge rack would need ~4 %: the floor binds.
         assert_eq!(fit_zoom(4000.0, 128.5, FIT_PANE_W, FIT_PANE_H), ZOOM_MIN);
         // A rack exactly at the floor stays there rather than drifting below.
-        let floor_w = FIT_PANE_W as f64 / (PHYSICAL_POINTS_PER_MM * ZOOM_MIN);
+        let floor_w = f64::from(FIT_PANE_W) / (PHYSICAL_POINTS_PER_MM * ZOOM_MIN);
         assert!(
             (fit_zoom(floor_w, 128.5, FIT_PANE_W, FIT_PANE_H) - ZOOM_MIN).abs() < 1e-9,
             "the floor is inclusive"
@@ -3579,15 +3582,15 @@ mod tests {
         let rack_w = w_mm * PHYSICAL_POINTS_PER_MM * zoom;
         let rack_h = h_mm * PHYSICAL_POINTS_PER_MM * zoom;
         assert!(
-            (ox as f64 - (rack_w - FIT_PANE_W as f64) / 2.0).abs() < 1e-3,
+            (f64::from(ox) - (rack_w - f64::from(FIT_PANE_W)) / 2.0).abs() < 1e-3,
             "x offset must centre {rack_w} pt in {FIT_PANE_W} pt, got {ox}"
         );
         assert!(
-            (oy as f64 - (rack_h - FIT_PANE_H as f64) / 2.0).abs() < 1e-3,
+            (f64::from(oy) - (rack_h - f64::from(FIT_PANE_H)) / 2.0).abs() < 1e-3,
             "y offset must centre {rack_h} pt in {FIT_PANE_H} pt, got {oy}"
         );
         // The rack's centre lands on the pane's centre under the fit mapping.
-        let m = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, zoom, ox as f64, oy as f64);
+        let m = ScreenMapping::new(PHYSICAL_POINTS_PER_MM, zoom, f64::from(ox), f64::from(oy));
         let (cx, cy, _, _) = m.mm_to_screen(RectMm {
             x_mm: w_mm / 2.0,
             y_mm: h_mm / 2.0,
@@ -3595,11 +3598,11 @@ mod tests {
             h_mm: 0.0,
         });
         assert!(
-            (cx - FIT_PANE_W as f64 / 2.0).abs() < 1e-2,
+            (cx - f64::from(FIT_PANE_W) / 2.0).abs() < 1e-2,
             "rack centre x must be the pane centre, got {cx}"
         );
         assert!(
-            (cy - FIT_PANE_H as f64 / 2.0).abs() < 1e-2,
+            (cy - f64::from(FIT_PANE_H) / 2.0).abs() < 1e-2,
             "rack centre y must be the pane centre, got {cy}"
         );
     }
@@ -3611,17 +3614,17 @@ mod tests {
         let rack = rack_extent_fixture(92.94, 128.5);
         let (w1, h1) = rack_extent_points(&rack, 1.0);
         assert!(
-            (w1 as f64 - 92.94 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3,
+            (f64::from(w1) - 92.94 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3,
             "true-size width, got {w1}"
         );
         assert!(
-            (h1 as f64 - 128.5 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3,
+            (f64::from(h1) - 128.5 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3,
             "true-size height, got {h1}"
         );
         // At 4x the same rack no longer fits the 640 × 520 pane on either axis.
         let (w4, h4) = rack_extent_points(&rack, ZOOM_MAX);
-        assert!((w4 as f64 - 4.0 * 92.94 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3);
-        assert!((h4 as f64 - 4.0 * 128.5 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3);
+        assert!((f64::from(w4) - 4.0 * 92.94 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3);
+        assert!((f64::from(h4) - 4.0 * 128.5 * PHYSICAL_POINTS_PER_MM).abs() < 1e-3);
         assert!(w4 > FIT_PANE_W && h4 > FIT_PANE_H);
         // At the fit zoom the extent is inside the pane on both axes.
         let fit = fit_zoom(92.94, 128.5, FIT_PANE_W, FIT_PANE_H);
@@ -3670,7 +3673,10 @@ mod tests {
         assert_eq!(layout.font, font, "{ctx}: the font step");
         assert_eq!(
             layout.lines,
-            lines.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+            lines
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
             "{ctx}: the lines"
         );
         assert_eq!(layout.stacked, stacked, "{ctx}: the stacked form");
@@ -3875,7 +3881,7 @@ mod tests {
             layout.lines,
             ["V", "o", "l", "u", "m", "e"]
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>(),
             "the whole label, one glyph per line: {layout:?}"
         );

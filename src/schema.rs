@@ -651,11 +651,7 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     }
     for i in 1..=m {
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
+            let cost = usize::from(a_chars[i - 1] != b_chars[j - 1]);
             dp[i][j] = (dp[i - 1][j] + 1)
                 .min(dp[i][j - 1] + 1)
                 .min(dp[i - 1][j - 1] + cost);
@@ -707,7 +703,7 @@ mod tests {
     fn cache_guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_CACHE_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -1002,7 +998,7 @@ mod tests {
 
     fn settings_with_plugins(enabled: bool, dir: Option<PathBuf>) -> Settings {
         Settings {
-            plugins: Plugins { enabled, dir },
+            plugins: Plugins { dir, enabled },
             ..Default::default()
         }
     }

@@ -9,6 +9,8 @@
 //! `camera_zoom_about`) are the window's bridge to `App::graph_camera`.
 
 use std::collections::HashMap;
+// `write!` into labels/titles avoids a per-segment `format!` allocation.
+use std::fmt::Write as _;
 
 use super::{MarqueeSelection, WindowFrame};
 use crate::app::App;
@@ -457,7 +459,7 @@ pub(crate) struct Minimap {
     pub(crate) viewport: (f32, f32, f32, f32),
     pub(crate) nodes: Vec<(f32, f32, f32, f32)>,
     /// World bounds (bx, by, bw, bh) and inner panel origin (ix, iy) + scale (sx, sy)
-    /// for click-to-world conversion: world_x = bx + (click_x - ix) / sx
+    /// for click-to-world conversion: `world_x` = bx + (`click_x` - ix) / sx
     pub(crate) transform: (f32, f32, f32, f32, f32, f32, f32, f32),
 }
 
@@ -571,10 +573,11 @@ fn node_tooltip(scene: &SceneSpec, node_index: usize) -> String {
     }
     let hot = latencies.iter().map(|l| l.ramp_stop).max().unwrap_or(0);
     let back = latencies.iter().filter(|l| l.back_edge).count();
-    label.push_str(&format!(
+    let _ = write!(
+        label,
         " · latency {hot}/4 · {back} back edge{}",
         if back == 1 { "" } else { "s" }
-    ));
+    );
     label
 }
 
@@ -1102,7 +1105,7 @@ fn edge_ctrl(start: (f32, f32), end: (f32, f32)) -> Option<(f32, f32)> {
     if dx.abs() < f32::EPSILON && dy.abs() < f32::EPSILON {
         return None;
     }
-    Some(((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0))
+    Some((f32::midpoint(start.0, end.0), f32::midpoint(start.1, end.1)))
 }
 /// The egui rect the full graph scene is painted into on the current frame:
 /// the class-layout pane holding the Graph view. Derived from
@@ -1116,8 +1119,8 @@ pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
         (app.layout.pane(id).view == Some(crate::app::ViewType::Graph)).then(|| {
             // Same cell → egui conversion `paint_panes` uses.
             egui::Rect::from_min_size(
-                egui::pos2(cell.x as f32, cell.y as f32),
-                egui::vec2(cell.width as f32, cell.height as f32),
+                egui::pos2(f32::from(cell.x), f32::from(cell.y)),
+                egui::vec2(f32::from(cell.width), f32::from(cell.height)),
             )
         })
     })
@@ -1214,6 +1217,7 @@ pub(crate) fn drawn_world_sizes(mode: crate::config::LayoutMode, graph: &Graph) 
 /// Shared scene core inputs: the graph to map through `camera`, its solved
 /// positions, and the render switches. Bundled so `build_scene` stays under
 /// the argument-count lint.
+#[derive(Clone, Copy)]
 struct SceneInput<'a> {
     graph: &'a Graph,
     positions: &'a [(f32, f32)],
@@ -1432,18 +1436,13 @@ fn build_scene(
         let opt_dir = if opt_diff_active {
             let state = app.optimizer_diff_state.as_ref().unwrap();
             if i < state.before_latency.len()
-                && state
-                    .before_cable
-                    .get(i)
-                    .map(|c| c == &edge.cable)
-                    .unwrap_or(false)
+                && state.before_cable.get(i).is_some_and(|c| c == &edge.cable)
             {
                 let current = graph
                     .latency
                     .as_ref()
                     .and_then(|lat| lat.edges.iter().find(|l| l.edge_index == i))
-                    .map(|l| l.latency)
-                    .unwrap_or(0.0);
+                    .map_or(0.0, |l| l.latency);
                 let delta = current - state.before_latency[i];
                 if delta > 1e-6 {
                     Some(OptDir::Worse)
@@ -1461,10 +1460,9 @@ fn build_scene(
         if let Some(dir) = opt_dir {
             for &j in [&si, &ti] {
                 match (node_opt_dir[j], dir) {
-                    (Some(OptDir::Worse), _) => {}
+                    (Some(OptDir::Worse), _) | (Some(OptDir::Better), OptDir::Better) => {}
                     (None, d) => node_opt_dir[j] = Some(d),
                     (Some(OptDir::Better), OptDir::Worse) => node_opt_dir[j] = Some(OptDir::Worse),
-                    (Some(OptDir::Better), OptDir::Better) => {}
                 }
             }
         }
@@ -1753,11 +1751,11 @@ mod tests {
 
     #[test]
     fn normalize_rect_orders_any_drag_direction() {
-        let a = (300.0, 50.0);
-        let b = (100.0, 200.0);
-        let (x, y, w, h) = normalize_rect(a, b);
-        assert_eq!((x, y, w, h), (100.0, 50.0, 200.0, 150.0));
-        assert_eq!(normalize_rect(b, a), normalize_rect(a, b));
+        let first = (300.0, 50.0);
+        let second = (100.0, 200.0);
+        let (left, top, width, height) = normalize_rect(first, second);
+        assert_eq!((left, top, width, height), (100.0, 50.0, 200.0, 150.0));
+        assert_eq!(normalize_rect(second, first), normalize_rect(first, second));
     }
 
     #[test]
@@ -2595,7 +2593,10 @@ mod scene_builder_tests {
         assert_eq!(e.end, (dst.x, dst.y + dst.h / 2.0));
         assert_eq!(
             e.ctrl,
-            ((e.start.0 + e.end.0) / 2.0, (e.start.1 + e.end.1) / 2.0)
+            (
+                f32::midpoint(e.start.0, e.end.0),
+                f32::midpoint(e.start.1, e.end.1)
+            )
         );
     }
 
@@ -3386,17 +3387,15 @@ mod window_paint_tests {
             "content still painted"
         );
         let panel = egui::Rect::from_min_size(egui::pos2(10.0, 170.0), egui::vec2(180.0, 120.0));
-        let panel_fill = out
-            .rects
-            .iter()
-            .find(|r| r.rect == panel)
-            .map(|r| r.fill)
-            .unwrap_or_else(|| {
+        let panel_fill = out.rects.iter().find(|r| r.rect == panel).map_or_else(
+            || {
                 panic!(
                     "minimap panel drawn bottom-left: {:?}",
                     out.rects.iter().map(|r| r.rect).collect::<Vec<_>>()
                 )
-            });
+            },
+            |r| r.fill,
+        );
         assert_ne!(panel_fill, egui::Color32::TRANSPARENT);
         assert_eq!(panel_fill.a(), 255, "minimap panel must be opaque");
     }
@@ -3804,7 +3803,7 @@ mod kittest_tests {
     }
 
     fn key(app: &mut App, code: KeyCode) {
-        handle_event(KeyEvent::new(code, key_modifiers::NONE), app);
+        handle_event(&KeyEvent::new(code, key_modifiers::NONE), app);
     }
 
     fn render_graph(app: &App) {
@@ -4093,7 +4092,7 @@ mod zz_throwaway_dump {
             );
         }
         let bounds = WorldBounds::from_positions(pos);
-        println!("== graph_fit_positions(ALL) bounds = {:?}", bounds);
+        println!("== graph_fit_positions(ALL) bounds = {bounds:?}");
         // Distinguish circuit-only vs controller/jack extents.
         let mut circuit_bounds = (
             f32::INFINITY,
@@ -4109,7 +4108,7 @@ mod zz_throwaway_dump {
                 circuit_bounds.3 = circuit_bounds.3.max(p.1);
             }
         }
-        println!("== circuit-only bounds = {:?}", circuit_bounds);
+        println!("== circuit-only bounds = {circuit_bounds:?}");
     }
 }
 
@@ -4135,7 +4134,7 @@ mod zz_throwaway_dump2 {
         let mut app = build();
         let pos = &app.graph_positions;
         let bounds = WorldBounds::from_positions(pos);
-        println!("== ALL bounds {:?}", bounds);
+        println!("== ALL bounds {bounds:?}");
         // The C fit: fit_to_world(all bounds, 512x800, GRAPH_FIT_MIN_NODE_PX=2.2)
         let cam = GraphCamera::fit_to_world(bounds, (512.0, 800.0), 2.2);
         println!("== C camera zoom={} pan={:?}", cam.zoom, cam.pan);
@@ -4425,7 +4424,7 @@ mod sliders_panel_tests {
         let above = default * 100.0;
         app.layout_cohesion_force = above;
         let out = panel_frame(&mut app, Vec::new());
-        let shown = format!("{:.*}", SLIDERS_COHESION_DECIMALS, ceiling);
+        let shown = format!("{ceiling:.SLIDERS_COHESION_DECIMALS$}");
         assert!(
             out.labels.contains(&shown),
             "the Cohesion row must clamp to its ceiling {shown}: {:?}",
@@ -4469,59 +4468,56 @@ mod sliders_panel_tests {
                 "{mode:?}: the Cable row must clamp to TENSION_MIN: {:?}",
                 out.labels
             );
-            match mode {
-                LayoutMode::Force => {
-                    for label in ["Repulsion", "Cohesion"] {
-                        assert!(
-                            shows(label),
-                            "{mode:?}: {label} row missing: {:?}",
-                            out.labels
-                        );
-                    }
-                    for stale in ["Slice", "Section"] {
-                        assert!(
-                            !shows(stale),
-                            "{mode:?}: stale row {stale}: {:?}",
-                            out.labels
-                        );
-                    }
+            if mode == LayoutMode::Force {
+                for label in ["Repulsion", "Cohesion"] {
                     assert!(
-                        shows(&format!("{:.2}", REPULSION_GAIN_MAX)),
-                        "{mode:?}: the Repulsion row must clamp to REPULSION_GAIN_MAX: {:?}",
-                        out.labels
-                    );
-                    assert!(
-                        shows(&format!("{:.*}", SLIDERS_COHESION_DECIMALS, 0.0)),
-                        "{mode:?}: the Cohesion row must clamp to its 0.0 floor: {:?}",
+                        shows(label),
+                        "{mode:?}: {label} row missing: {:?}",
                         out.labels
                     );
                 }
-                _ => {
-                    for label in ["Slice", "Section"] {
-                        assert!(
-                            shows(label),
-                            "{mode:?}: {label} row missing: {:?}",
-                            out.labels
-                        );
-                    }
-                    for stale in ["Repulsion", "Cohesion"] {
-                        assert!(
-                            !shows(stale),
-                            "{mode:?}: stale row {stale}: {:?}",
-                            out.labels
-                        );
-                    }
+                for stale in ["Slice", "Section"] {
                     assert!(
-                        shows(&format!("{:.2}", SLIDERS_FORCE_MAX)),
-                        "{mode:?}: the slice/section rows must keep clamping to SLIDERS_FORCE_MAX: {:?}",
-                        out.labels
-                    );
-                    assert!(
-                        shows(&format!("{:.2}", 0.0)),
-                        "{mode:?}: the Section row must clamp to its 0.0 floor: {:?}",
+                        !shows(stale),
+                        "{mode:?}: stale row {stale}: {:?}",
                         out.labels
                     );
                 }
+                assert!(
+                    shows(&format!("{REPULSION_GAIN_MAX:.2}")),
+                    "{mode:?}: the Repulsion row must clamp to REPULSION_GAIN_MAX: {:?}",
+                    out.labels
+                );
+                assert!(
+                    shows(&format!("{:.*}", SLIDERS_COHESION_DECIMALS, 0.0)),
+                    "{mode:?}: the Cohesion row must clamp to its 0.0 floor: {:?}",
+                    out.labels
+                );
+            } else {
+                for label in ["Slice", "Section"] {
+                    assert!(
+                        shows(label),
+                        "{mode:?}: {label} row missing: {:?}",
+                        out.labels
+                    );
+                }
+                for stale in ["Repulsion", "Cohesion"] {
+                    assert!(
+                        !shows(stale),
+                        "{mode:?}: stale row {stale}: {:?}",
+                        out.labels
+                    );
+                }
+                assert!(
+                    shows(&format!("{SLIDERS_FORCE_MAX:.2}")),
+                    "{mode:?}: the slice/section rows must keep clamping to SLIDERS_FORCE_MAX: {:?}",
+                    out.labels
+                );
+                assert!(
+                    shows(&format!("{:.2}", 0.0)),
+                    "{mode:?}: the Section row must clamp to its 0.0 floor: {:?}",
+                    out.labels
+                );
             }
             // A repaint never writes a row's clamp back onto the knob.
             assert_eq!(
