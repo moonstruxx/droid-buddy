@@ -58,17 +58,24 @@ See `proposal.md` — Why. The constraints that shape the approach:
 
 ### D1 — `label_layout` replaces `label_is_clipped`
 
-One pure function in `src/gui/physical.rs`:
+One pure function in `src/physical.rs` — the model layer, because the fit clamp in
+`App` needs the same answer and `app` must not depend on `gui`:
 
 ```
 LabelLayout { font: f32, lines: Vec<String>, stacked: bool, state_row: bool }
-label_layout(cell: &CellSpec) -> Option<LabelLayout>
+LabelBox { w: f32, h: f32, glyph_chars: usize, path: CellTextPath, has_state: bool }
+CellTextPath { Compact, Composed, Fader }
+label_layout(box: &LabelBox) -> Option<LabelLayout>
 ```
 
-It is computed once per cell in `physical_spec` and stored on `CellSpec` in place
-of `label_clipped: bool`. `label_layout(..).is_none()` is the annotation predicate,
-the painter draws `lines` at `font`, and the fit clamp asks the same function of a
-scaled rect. Rationale: five font steps × wrapped lines × two orientations is far
+`LabelBox` is the cell's drawn size in points as the painter will use it, plus the
+three facts that change the budget (the glyph prefix, which paint path applies,
+whether a state string exists). No egui type crosses the boundary, so the function
+is unit-testable without a paint and usable from the fit clamp at any candidate
+zoom. `gui::physical` builds the `LabelBox` from `CellSpec`, stores the resulting
+`LabelLayout` on `CellSpec` in place of `label_clipped: bool`, and paints it;
+`App` and `physical::label_fit_zoom` feed it scaled rects. `label_layout(..).is_none()`
+is the annotation predicate. Rationale: five font steps × wrapped lines × two orientations is far
 too much duplicated arithmetic for the three hand-written budgets to stay in step
 with the painter — the boolean exists precisely because the budgets already drift.
 
