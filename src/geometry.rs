@@ -615,35 +615,6 @@ impl WiringOutlierScorer {
 // cable_hops — via Patch.cable_index + circuit_outputs graph traversal
 // ---------------------------------------------------------------------------
 
-fn scan_internal_tokens_local(value: &str) -> Vec<String> {
-    let chars: Vec<char> = value.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '_' {
-            let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric());
-            if boundary_ok {
-                let start = i;
-                i += 1;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                if i > start + 1 {
-                    let token: String = chars[start..i].iter().collect();
-                    let clean_end =
-                        i >= chars.len() || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_');
-                    if clean_end {
-                        out.push(token);
-                    }
-                }
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
 fn section_contains_token(section: &crate::patch::IniSection, token: &str) -> bool {
     section.entries.iter().any(|(_, v)| {
         crate::patch::scan_hw_tokens_wide(v)
@@ -654,7 +625,7 @@ fn section_contains_token(section: &crate::patch::IniSection, token: &str) -> bo
 
 fn section_consumes_cable(section: &crate::patch::IniSection, cable: &str) -> bool {
     section.entries.iter().any(|(k, v)| {
-        let toks = scan_internal_tokens_local(v);
+        let toks = crate::patch::scan_internal_tokens(v);
         if !toks.iter().any(|t| t == cable) {
             return false;
         }
@@ -664,6 +635,67 @@ fn section_consumes_cable(section: &crate::patch::IniSection, cable: &str) -> bo
         }
         true
     })
+}
+
+/// Producer section → consumer sections for every cable the patch produces
+/// (a consumer being any section with a non-`output` reference to that cable).
+/// Adjacency lists are sorted and deduped so the BFS over them is
+/// deterministic. Shared by the per-pair hop count and the precomputed
+/// [`WiringContext`], so both paths see one adjacency definition.
+fn consumer_adjacency(patch: &Patch) -> HashMap<usize, Vec<usize>> {
+    let mut adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (prod_idx, outputs) in patch.circuit_outputs.iter().enumerate() {
+        if outputs.is_empty() {
+            continue;
+        }
+        for cable in outputs {
+            for (cons_idx, section) in patch.sections.iter().enumerate() {
+                if cons_idx == prod_idx {
+                    continue;
+                }
+                if section_consumes_cable(section, cable) {
+                    adjacency.entry(prod_idx).or_default().push(cons_idx);
+                }
+            }
+        }
+    }
+    for v in adjacency.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+    adjacency
+}
+
+/// Hop count from any source section to any sink section over the consumer
+/// adjacency: 0 when no sink is reachable from the sources.
+fn bfs_hops(
+    adjacency: &HashMap<usize, Vec<usize>>,
+    sources: &[usize],
+    is_sink: impl Fn(usize) -> bool,
+) -> u8 {
+    let mut queue: VecDeque<(usize, u8)> = VecDeque::new();
+    let mut visited: HashSet<usize> = HashSet::new();
+    for &s in sources {
+        queue.push_back((s, 0));
+        visited.insert(s);
+    }
+    while let Some((node, dist)) = queue.pop_front() {
+        let Some(neigh) = adjacency.get(&node) else {
+            continue;
+        };
+        for &n in neigh {
+            if visited.contains(&n) {
+                continue;
+            }
+            let next_dist = dist.saturating_add(1);
+            if is_sink(n) {
+                return next_dist;
+            }
+            visited.insert(n);
+            queue.push_back((n, next_dist));
+        }
+    }
+    0
 }
 
 fn compute_cable_hops(patch: &Patch, src_token: &str, sink_token: &str) -> u8 {
@@ -689,51 +721,9 @@ fn compute_cable_hops(patch: &Patch, src_token: &str, sink_token: &str) -> u8 {
     if src_indices.iter().any(|i| sink_indices.contains(i)) {
         return 0;
     }
-    // Build adjacency producer -> consumers via circuit_outputs + sink scan.
-    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (prod_idx, outputs) in patch.circuit_outputs.iter().enumerate() {
-        if outputs.is_empty() {
-            continue;
-        }
-        for cable in outputs {
-            for (cons_idx, section) in patch.sections.iter().enumerate() {
-                if cons_idx == prod_idx {
-                    continue;
-                }
-                if section_consumes_cable(section, cable) {
-                    adj.entry(prod_idx).or_default().push(cons_idx);
-                }
-            }
-        }
-    }
-    // Dedup adjacency lists for deterministic BFS.
-    for v in adj.values_mut() {
-        v.sort_unstable();
-        v.dedup();
-    }
-    // BFS from all src sections.
-    let mut queue: VecDeque<(usize, u8)> = VecDeque::new();
-    let mut visited: HashSet<usize> = HashSet::new();
-    for &s in &src_indices {
-        queue.push_back((s, 0));
-        visited.insert(s);
-    }
-    while let Some((node, dist)) = queue.pop_front() {
-        if let Some(neigh) = adj.get(&node) {
-            for &n in neigh {
-                if visited.contains(&n) {
-                    continue;
-                }
-                let next_dist = dist.saturating_add(1);
-                if sink_indices.contains(&n) {
-                    return next_dist;
-                }
-                visited.insert(n);
-                queue.push_back((n, next_dist));
-            }
-        }
-    }
-    0
+    bfs_hops(&consumer_adjacency(patch), &src_indices, |n| {
+        sink_indices.contains(&n)
+    })
 }
 
 /// Precomputed per-token lookups shared by every pair in one wiring-outlier
@@ -773,26 +763,7 @@ impl WiringContext {
             }
         }
 
-        let mut adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (prod_idx, outputs) in patch.circuit_outputs.iter().enumerate() {
-            if outputs.is_empty() {
-                continue;
-            }
-            for cable in outputs {
-                for (cons_idx, section) in patch.sections.iter().enumerate() {
-                    if cons_idx == prod_idx {
-                        continue;
-                    }
-                    if section_consumes_cable(section, cable) {
-                        adjacency.entry(prod_idx).or_default().push(cons_idx);
-                    }
-                }
-            }
-        }
-        for v in adjacency.values_mut() {
-            v.sort_unstable();
-            v.dedup();
-        }
+        let adjacency = consumer_adjacency(patch);
 
         let mut resolved: HashMap<String, (u8, u8)> = HashMap::new();
         let mut controller: HashMap<String, (String, String, i32, String)> = HashMap::new();
@@ -835,28 +806,7 @@ impl WiringContext {
         if src_indices.iter().any(|i| sink_indices.contains(i)) {
             return 0;
         }
-        let mut queue: VecDeque<(usize, u8)> = VecDeque::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-        for &s in src_indices {
-            queue.push_back((s, 0));
-            visited.insert(s);
-        }
-        while let Some((node, dist)) = queue.pop_front() {
-            if let Some(neigh) = self.adjacency.get(&node) {
-                for &n in neigh {
-                    if visited.contains(&n) {
-                        continue;
-                    }
-                    let next_dist = dist.saturating_add(1);
-                    if sink_indices.contains(&n) {
-                        return next_dist;
-                    }
-                    visited.insert(n);
-                    queue.push_back((n, next_dist));
-                }
-            }
-        }
-        0
+        bfs_hops(&self.adjacency, src_indices, |n| sink_indices.contains(&n))
     }
 }
 

@@ -4461,6 +4461,45 @@ impl App {
         self.rebuild_graph();
     }
 
+    /// Build the standalone graph a filtered view solves: the member nodes and
+    /// their internal edges cloned out of the full graph (no clusters,
+    /// validation, latency or highlights), plus the member-relative pin indices
+    /// that mirror `App.pinned` by `NodeId`. `None` without a graph — every
+    /// caller is a filter path with nothing to solve then.
+    fn subset_graph(
+        &self,
+        member_nodes: &[usize],
+        member_edges: &[usize],
+    ) -> Option<(Graph, Vec<usize>)> {
+        let graph = self.graph.as_ref()?;
+        let nodes: Vec<GraphNode> = member_nodes
+            .iter()
+            .map(|&i| graph.nodes[i].clone())
+            .collect();
+        let edges: Vec<GraphEdge> = member_edges
+            .iter()
+            .map(|&i| graph.edges[i].clone())
+            .collect();
+        let subset = Graph {
+            nodes,
+            edges,
+            clusters: Vec::new(),
+            validation: Vec::new(),
+            latency: None,
+            highlighted_nodes: HashSet::new(),
+            highlighted_edges: HashSet::new(),
+            not_selected: HashSet::new(),
+            section_holes: Vec::new(),
+        };
+        let pins: Vec<usize> = member_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
+            .map(|(pi, _)| pi)
+            .collect();
+        Some((subset, pins))
+    }
+
     /// Recompute the dependency subset from the frozen root over the current
     /// graph and solve it as its own layout, writing the subset positions back
     /// into the full-length array (change D tasks 2.1/3.1). Deterministic per
@@ -4484,39 +4523,10 @@ impl App {
         self.dependency_nodes = deps;
         self.dependency_edges = edges;
 
-        let (subset, pins) = {
-            let Some(graph) = &self.graph else {
-                return;
-            };
-            let nodes: Vec<GraphNode> = self
-                .dependency_nodes
-                .iter()
-                .map(|&i| graph.nodes[i].clone())
-                .collect();
-            let edges: Vec<GraphEdge> = self
-                .dependency_edges
-                .iter()
-                .map(|&i| graph.edges[i].clone())
-                .collect();
-            let subset = Graph {
-                nodes,
-                edges,
-                clusters: Vec::new(),
-                validation: Vec::new(),
-                latency: None,
-                highlighted_nodes: HashSet::new(),
-                highlighted_edges: HashSet::new(),
-                not_selected: HashSet::new(),
-                section_holes: Vec::new(),
-            };
-            let pins: Vec<usize> = self
-                .dependency_nodes
-                .iter()
-                .enumerate()
-                .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
-                .map(|(pi, _)| pi)
-                .collect();
-            (subset, pins)
+        let Some((subset, pins)) =
+            self.subset_graph(&self.dependency_nodes, &self.dependency_edges)
+        else {
+            return;
         };
         let sub_pos = crate::layout::solve(&subset, &pins, self.force_solve_knobs());
         let mut positions = vec![(0.0, 0.0); self.graph.as_ref().map_or(0, |g| g.nodes.len())];
@@ -4600,39 +4610,9 @@ impl App {
         self.influence_nodes = members;
         self.influence_edges = edges;
 
-        let (subset, pins) = {
-            let Some(graph) = &self.graph else {
-                return;
-            };
-            let nodes: Vec<GraphNode> = self
-                .influence_nodes
-                .iter()
-                .map(|&i| graph.nodes[i].clone())
-                .collect();
-            let edges: Vec<GraphEdge> = self
-                .influence_edges
-                .iter()
-                .map(|&i| graph.edges[i].clone())
-                .collect();
-            let subset = Graph {
-                nodes,
-                edges,
-                clusters: Vec::new(),
-                validation: Vec::new(),
-                latency: None,
-                highlighted_nodes: HashSet::new(),
-                highlighted_edges: HashSet::new(),
-                not_selected: HashSet::new(),
-                section_holes: Vec::new(),
-            };
-            let pins: Vec<usize> = self
-                .influence_nodes
-                .iter()
-                .enumerate()
-                .filter(|(_, &fi)| self.pinned.contains(&graph.nodes[fi].id))
-                .map(|(pi, _)| pi)
-                .collect();
-            (subset, pins)
+        let Some((subset, pins)) = self.subset_graph(&self.influence_nodes, &self.influence_edges)
+        else {
+            return;
         };
         let sub_pos = crate::layout::solve(&subset, &pins, self.force_solve_knobs());
         let mut positions = vec![(0.0, 0.0); self.graph.as_ref().map_or(0, |g| g.nodes.len())];

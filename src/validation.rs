@@ -52,7 +52,7 @@ fn is_pure_cable(value: &str) -> bool {
     if !trimmed.starts_with('_') {
         return false;
     }
-    let cables = extract_cables(trimmed);
+    let cables = crate::patch::scan_internal_tokens(trimmed);
     cables.len() == 1 && cables[0] == trimmed
 }
 
@@ -288,35 +288,6 @@ fn expression_problem(value: &str) -> Option<&'static str> {
     None
 }
 
-fn extract_cables(value: &str) -> Vec<String> {
-    let chars: Vec<char> = value.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '_' {
-            let boundary_ok = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
-            if boundary_ok {
-                let start = i;
-                i += 1;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                if i > start + 1 {
-                    let token: String = chars[start..i].iter().collect();
-                    let clean_end =
-                        i >= chars.len() || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_');
-                    if clean_end {
-                        out.push(token);
-                    }
-                }
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
 fn extract_jack_tokens(value: &str) -> Vec<String> {
     let bytes = value.as_bytes();
     let len = bytes.len();
@@ -509,7 +480,7 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
             if is_def {
                 continue;
             }
-            for cable in extract_cables(&entry.value) {
+            for cable in crate::patch::scan_internal_tokens(&entry.value) {
                 sink_cables.insert(cable);
             }
         }
@@ -630,7 +601,7 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
             // For each cable in this entry's value (excluding pure output defs already considered)
             let is_def = is_cable_definition(schema, &section.name, &entry.key, &entry.value);
             if !is_def {
-                let cables = extract_cables(&entry.value);
+                let cables = crate::patch::scan_internal_tokens(&entry.value);
                 // dedup per entry to avoid duplicate warnings for same cable repeated in same value expression
                 let mut seen_cable: HashSet<String> = HashSet::new();
                 for cable in cables {
