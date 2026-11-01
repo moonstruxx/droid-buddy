@@ -290,6 +290,12 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // One binding source (button-led-composition D3): the shared
     // `folded_led_for_element` resolver feeds both the fill and the
     // suppression, so painter and handler cannot disagree.
+    //
+    // The positional twin is suppressed as well, not only the bound LED: the
+    // LED physically sits *inside* the button, so a fold-rule face must never
+    // leave its register rendering as a standalone cell. That covers a face
+    // bound to another register explicitly (L1.4 on B1.2 leaves L1.2 unfurled
+    // otherwise) and any pairing the parser could not resolve.
     for module in chain.modules.iter() {
         for comp in &module.components {
             if comp.kind != crate::patch::ComponentKind::Button {
@@ -299,6 +305,9 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 continue;
             }
             if let Some(led_token) = crate::patch::folded_led_for_element(comp) {
+                folded_leds.insert(led_token);
+            }
+            for led_token in crate::patch::positional_leds_for_element(&comp.controller, &comp.id) {
                 folded_leds.insert(led_token);
             }
         }
@@ -3883,6 +3892,45 @@ mod tests {
                 cell.label
             );
         }
+    }
+
+    #[test]
+    fn cable_valued_led_pairing_keeps_the_led_folded() {
+        // The "some B32 buttons still show LED control" defect: a cable-valued
+        // `led`/`ledN` bound the element to a nonexistent LED, so the face lost
+        // its fill and the real L register painted as a standalone cell.
+        let ini = std::fs::read_to_string("fixtures/led_cable_pairing.ini").unwrap();
+        let app = app_from_ini(&ini);
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        for cell in &spec.cells {
+            assert!(
+                !cell.label.starts_with('L'),
+                "no standalone L cell: {}",
+                cell.label
+            );
+        }
+        let patch = app.patch.as_ref().expect("patch");
+        let cell_of = |id: &str| {
+            let index = patch
+                .hw_components
+                .iter()
+                .position(|c| c.id == id)
+                .unwrap_or_else(|| panic!("{id} must exist"));
+            spec.cells
+                .iter()
+                .find(|c| c.component_index == Some(index))
+                .unwrap_or_else(|| panic!("{id} must render a cell"))
+        };
+        // (a)+(b) cable-valued pairings still fold their positional LED; the
+        // face therefore shows the LED state (Off = 0.0 with the floor fill).
+        let b1_1 = cell_of("B1.1");
+        assert_eq!(b1_1.shape, Some(CellShape::Round));
+        assert_eq!(b1_1.led_state, Some(0.0), "B1.1 folds its positional L1.1");
+        let b2_1 = cell_of("B2.1");
+        assert_eq!(b2_1.led_state, Some(0.0), "B2.1 folds its positional L2.1");
+        // (c) an explicit bare token still binds.
+        let b1_2 = cell_of("B1.2");
+        assert_eq!(b1_2.led_state, Some(0.0));
     }
 
     #[test]
