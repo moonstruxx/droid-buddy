@@ -124,9 +124,9 @@ cargo test --release --test perf_gate --locked
 
 | Job | Runner | Timeout | Runs |
 |---|---|---|---|
-| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, tests, release build, perf gate |
-| `windows-latest` | `windows-latest` | 45 min | tests, release build |
-| `macos-latest` | `macos-latest` | 45 min | tests, release build |
+| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, tests, release build, self-test, perf gate |
+| `windows-latest` | `windows-latest` | 45 min | tests, release build, self-test |
+| `macos-latest` | `macos-latest` | 45 min | tests, release build, self-test |
 
 The matrix sets `fail-fast: false`, so a Windows or macOS failure does
 not cancel the other two jobs — one run reports all three verdicts.
@@ -150,11 +150,33 @@ Formatting, clippy, rustdoc and the perf gate carry `if: runner.os ==
 - The perf gate's budgets are Linux release timings. A shared Windows or
   macOS runner has a different CPU, and a flaky gate is worse than none.
 
-Tests and the release build do run on all three, which is what proves
-the crate compiles and its platform-neutral tests pass off Linux. CI
-never opens a window and never touches a MIDI device; [What CI
+Tests, the release build and the headless self-test do run on all three,
+which is what proves the crate compiles, its platform-neutral tests pass
+and its paint dispatch works off Linux. CI never opens a window and never
+touches a MIDI device; [What CI
 proves](platforms.md#what-ci-proves) lists what a green run therefore
 does not cover.
+
+## The headless self-test
+
+`droid_tui --self-test [patch.ini]` drives the real window-loop dispatch — the
+pane band (`paint_panes`) and the centered overlays (`paint_overlays`) — through
+a plain `egui::Context`, then checks the geometry the input layer depends on.
+There is no window, no GPU and no MIDI device, so it runs on a headless CI
+runner of any OS; with no path it uses the bundled demo patch.
+
+| Check | Catches |
+|---|---|
+| `patch loads` | a fixture that no longer parses, or one now rejected by validation |
+| `startup band paints` | a startup pane that publishes no cell, no title, or no element hit rects |
+| `published geometry drives input` | a click on a published rect that no longer selects its element |
+| `skeleton keeps hit geometry` | the skeleton presentation drifting from the full render |
+| `graph pane paints` | an unseeded camera, an unpublished canvas, a scene that loses nodes |
+| `help overlay paints` | an overlay that stops drawing over the band |
+
+One `ok`/`FAIL` line per check and a closing `N/M checks passed`; a failure exits
+non-zero with the reason. `cargo test` also runs it against the bundled demo
+patch on every platform, so it guards itself without a CI runner.
 
 ## Cutting a release
 

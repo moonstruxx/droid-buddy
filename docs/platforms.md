@@ -24,18 +24,22 @@ before you download a build. New to the app? Start with
 ### What CI proves
 
 CI compiles the crate and runs the test suite on Linux, Windows and
-macOS for every push and pull request. Only the Linux job also runs
-`cargo fmt --check`, clippy, the release build and the release
-performance gate; the gate's budgets are Linux release timings, so
-running it on a shared Windows or macOS runner would report noise.
+macOS for every push and pull request, plus the headless self-test
+(`droid_tui --self-test`, see [Building from source](build.md#the-headless-self-test)),
+which drives the real paint dispatch and the published hit geometry
+without a window. Only the Linux job also runs `cargo fmt --check`,
+clippy, rustdoc, the release build and the release performance gate; the
+gate's budgets are Linux release timings, so running it on a shared
+Windows or macOS runner would report noise.
 
-What CI cannot do: it never opens a window and never touches a MIDI
-device. So a green run proves the crate builds and its tests pass on
-each target — not that the window paints correctly, that a send
-reaches hardware, or that the downloaded artifact starts on a machine
-without the source tree. Those stay manual smoke tests, and are the
-first things to check when trying a new platform build. The build and
-release commands are on [Building from source](build.md).
+What CI still cannot do: it never opens a window and never touches a
+MIDI device. So a green run proves the crate builds, its docs resolve,
+its tests pass and its paint dispatch works on each target — not that
+the window presents correctly on your compositor, that a send reaches
+hardware, or that the downloaded artifact starts on a machine without
+the source tree. Those stay manual smoke tests, and are the first things
+to check when trying a new platform build. The build and release
+commands are on [Building from source](build.md).
 
 ## Where your files live
 

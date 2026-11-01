@@ -2863,6 +2863,42 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// Point the platform data directory at `dir` for the duration of one test.
+    ///
+    /// Both inputs are set because `platform.rs` prefers `%APPDATA%` on Windows
+    /// and XDG everywhere else: isolating only `XDG_CONFIG_HOME` left the Windows
+    /// CI job writing into — and reading leftovers from — the runner's AppData,
+    /// which is where the favourites and plugin tests diverged on that platform.
+    /// Restoring through `Drop` keeps a failed assertion from leaking the override
+    /// into the next test; the `fav_lock` mutex still serialises the env access.
+    struct DataDirIsolation {
+        xdg: Option<std::ffi::OsString>,
+        appdata: Option<std::ffi::OsString>,
+    }
+
+    impl DataDirIsolation {
+        fn new(dir: &std::path::Path) -> Self {
+            let xdg = std::env::var_os("XDG_CONFIG_HOME");
+            let appdata = std::env::var_os("APPDATA");
+            std::env::set_var("XDG_CONFIG_HOME", dir);
+            std::env::set_var("APPDATA", dir);
+            Self { xdg, appdata }
+        }
+    }
+
+    impl Drop for DataDirIsolation {
+        fn drop(&mut self) {
+            match self.xdg.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match self.appdata.take() {
+                Some(value) => std::env::set_var("APPDATA", value),
+                None => std::env::remove_var("APPDATA"),
+            }
+        }
+    }
+
     fn app_with_fixture() -> App {
         let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
         let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
@@ -7761,8 +7797,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
         // Isolate picker dir with a real .ini file on disk.
         let picker_tmp = TempDir::new().unwrap();
         let dummy = picker_tmp.path().join("my_patch.ini");
@@ -7852,10 +7887,6 @@ mod tests {
         );
 
         // Restore env.
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -7863,8 +7894,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let picker_tmp = TempDir::new().unwrap();
         let dummy = picker_tmp.path().join("a.ini");
@@ -7908,11 +7938,6 @@ mod tests {
             !app.favorites.is_favourite(&dummy),
             "file still not favourited"
         );
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -7920,8 +7945,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let picker_tmp = TempDir::new().unwrap();
         let fav_path = picker_tmp.path().join("alpha.ini");
@@ -8009,11 +8033,6 @@ mod tests {
             "status should indicate load success, got {:?}",
             app.status_message
         );
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -8021,8 +8040,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let picker_tmp = TempDir::new().unwrap();
         let subdir = picker_tmp.path().join("subdir");
@@ -8074,11 +8092,6 @@ mod tests {
             "status: {:?}",
             app.status_message
         );
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -8086,8 +8099,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let picker_tmp = TempDir::new().unwrap();
         let alpha = picker_tmp.path().join("alpha.ini");
@@ -8121,11 +8133,6 @@ mod tests {
             "selected_file: {:?}",
             app.selected_file
         );
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -8133,8 +8140,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let picker_tmp = TempDir::new().unwrap();
         let subdir = picker_tmp.path().join("subdir");
@@ -8153,11 +8159,6 @@ mod tests {
         assert!(app.showing_picker, "digit on directory keeps picker open");
         assert!(app.picker_dir.ends_with("subdir"));
         assert!(app.patch.is_none());
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -8165,8 +8166,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let picker_tmp = TempDir::new().unwrap();
         let alpha = picker_tmp.path().join("alpha.ini");
@@ -8194,11 +8194,6 @@ mod tests {
         handle_picker_event(alt_zero, &mut app);
         assert!(app.showing_picker, "Alt+digit must not open a favourite");
         assert!(app.patch.is_none());
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     // ==== Window keyboard path (task 2.6) ====
@@ -8769,8 +8764,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let mut app = picker_app_at("fixtures/picker_test");
         handle_picker_event(ctrl_f_key(), &mut app);
@@ -8786,11 +8780,6 @@ mod tests {
             "f while latched must not touch the favourites store"
         );
         assert!(app.showing_picker, "appending never closes the picker");
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
@@ -8798,8 +8787,7 @@ mod tests {
         use tempfile::TempDir;
         let _env_guard = fav_lock().lock().unwrap();
         let xdg_dir = TempDir::new().unwrap();
-        let orig_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path());
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
 
         let mut app = picker_app_at("fixtures/picker_test");
         assert!(!app.picker_filter_active);
@@ -8813,11 +8801,6 @@ mod tests {
             "status: {:?}",
             app.status_message
         );
-
-        match orig_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]

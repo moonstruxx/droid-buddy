@@ -361,6 +361,14 @@ mod tests {
         assert_eq!(err, "noramsize");
     }
 
+    /// Discover plugins with every platform data-directory input pointed at
+    /// `dir`. `platform.rs` prefers `%APPDATA%` on Windows and XDG elsewhere, so a
+    /// test that isolates only XDG reads the runner's AppData there.
+    fn discover_in(dir: &std::path::Path) -> Vec<PluginFile> {
+        let env = dir.as_os_str();
+        discover_plugins(Some(env), Some(env), Some(env))
+    }
+
     #[test]
     fn discover_plugins_reads_sorted_files_and_skips_invalid() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -378,7 +386,7 @@ mod tests {
         )
         .expect("write fixture");
 
-        let files = discover_plugins(Some(tmp.path().as_os_str()), None, None);
+        let files = discover_in(tmp.path());
 
         // Sorted filename order, invalid file skipped, valid files contribute.
         assert_eq!(files.len(), 2);
@@ -448,7 +456,7 @@ mod tests {
         fs::write(plugins.join("README.md"), "not a plugin").expect("write non-toml file");
         fs::write(plugins.join("schema.json"), "{}").expect("write non-toml file");
 
-        let files = discover_plugins(Some(tmp.path().as_os_str()), None, None);
+        let files = discover_in(tmp.path());
 
         assert_eq!(files.len(), 1);
         assert_eq!(
@@ -475,7 +483,7 @@ mod tests {
         )
         .expect("copy fixture");
 
-        let files = discover_plugins(Some(tmp.path().as_os_str()), None, None);
+        let files = discover_in(tmp.path());
 
         assert_eq!(files.len(), 2);
         assert_eq!(

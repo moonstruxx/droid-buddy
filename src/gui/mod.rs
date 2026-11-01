@@ -17,6 +17,11 @@ mod graph;
 
 pub use graph::{build_scene_spec, graph_pane_rect};
 
+// The headless end-to-end smoke test (`droid_tui --self-test`): it drives the
+// real paint dispatch below, so it lives in this module rather than in a
+// separate crate that would need the private `paint_panes`.
+pub mod self_test;
+
 // Surface ports (physical, viewer, picker, overlays — tasks 2.1-2.5)
 // are runtime surfaces: the shell dispatches to them in `EguiSurface::paint`
 // and headless egui shape/label tests exercise the same draw routines.

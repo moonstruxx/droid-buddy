@@ -914,13 +914,12 @@ fn search_vns_with_budget(
     }
     let mut current = best_order.clone();
     let mut budget = budget_limit;
-    let mut radius = domains.iter().map(|r| r.len()).max().unwrap_or(0);
-    if radius > 8 {
-        radius = 8;
-    }
-    if radius == 0 {
-        radius = 1;
-    }
+    let mut radius = domains
+        .iter()
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(0)
+        .clamp(1, 8);
     while budget > 0 {
         let mut improved_in_round = false;
         for range in domains {

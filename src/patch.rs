@@ -115,6 +115,12 @@ pub struct InfluenceSubtree {
     pub influenced_edges: HashSet<String>,
 }
 
+/// The bundled demo patch (`fixtures/own_buttons.ini`): a real one-controller
+/// patch with circuit sections, so the window and `--self-test` paint content.
+/// [`Patch::sample`] is a hand-built model with no sections, and therefore an
+/// empty signal-flow graph, so it cannot stand in for this.
+pub const DEMO_INI: &str = include_str!("../fixtures/own_buttons.ini");
+
 /// Represents a loaded DROID patch
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Patch {

@@ -25,10 +25,27 @@ fn main() -> Result<()> {
         previous_hook(info);
     }));
 
+    // `--self-test [patch.ini]` runs the headless smoke test before any window
+    // exists: CI has no display, and the point is to prove the paint dispatch
+    // works without one. It is the only flag the binary parses.
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if first.as_deref() == Some("--self-test") {
+        let patch = args.next().map(std::path::PathBuf::from);
+        let report = droid_tui::gui::self_test::run(patch.as_deref());
+        for line in report.lines() {
+            println!("{line}");
+        }
+        if !report.passed() {
+            color_eyre::eyre::bail!("self-test failed: {}", report.failures().join("; "));
+        }
+        return Ok(());
+    }
+
     // The optional `argv[1]` path is the patch the window opens with; without
     // one the bundled sample loads. A patch is always installed so the graph
     // can be built and the window paints content instead of its clear color.
-    let initial_patch = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let initial_patch = first.map(std::path::PathBuf::from);
 
     windowed::run(&settings, initial_patch)
 }
@@ -68,10 +85,10 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     app.labels = settings.labels.clone();
 }
 
-/// Bundled demo patch shown when no `argv[1]` path is given. `Patch::sample()`
-/// has no circuit sections, so its signal-flow graph is empty and the window
-/// would paint only its clear color; this fixture is a real patch with circuits.
-const DEMO_PATCH: &str = include_str!("../fixtures/own_buttons.ini");
+/// Bundled demo patch shown when no `argv[1]` path is given — the same fixture
+/// `--self-test` drives, defined once in the library so the binary and the smoke
+/// test cannot drift apart.
+const DEMO_PATCH: &str = droid_tui::patch::DEMO_INI;
 
 /// Load the patch the window opens with: the `argv[1]` path when one is given,
 /// else the bundled demo. A real patch is always installed so `open_graph` can
