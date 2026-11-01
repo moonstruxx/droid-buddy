@@ -472,32 +472,27 @@ fn open_embedded_viewer(app: &mut App) {
     }
 }
 
-/// Handle keyboard input. Returns true if the app should quit.
-/// Handle keyboard input. Returns true if the app should quit.
-pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
-    // Reap a finished background upload first (non-blocking `try_wait`): the
-    // verdict lands in the status line on the next event after completion.
-    app.poll_upload();
+fn handle_edit_overlay_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Inline label-edit overlay eats all keys (highest priority: overlay > picker > prefix > graph > source > panels).
     if app.editing.is_some() {
         match key.code {
             KeyCode::Esc => {
                 app.cancel_edit();
                 app.status_message = String::from("Edit cancelled");
-                return false;
+                return Some(false);
             }
             KeyCode::Enter => {
                 match app.commit_edit() {
                     Ok(()) => app.status_message = String::from("Label saved"),
                     Err(e) => app.status_message = format!("Save failed: {e}"),
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Backspace => {
                 if let Some(state) = app.editing.as_mut() {
                     state.draft.pop();
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char(c)
                 if key.modifiers.is_none() || key.modifiers == key_modifiers::SHIFT =>
@@ -520,17 +515,21 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         ) {
                             app.status_message = line;
                         }
-                        return false;
+                        return Some(false);
                     }
                 }
                 if let Some(state) = app.editing.as_mut() {
                     state.draft.push(c);
                 }
-                return false;
+                return Some(false);
             }
-            _ => return false,
+            _ => return Some(false),
         }
     }
+    None
+}
+
+fn handle_help_modal_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Help modal (design D1): sits directly below the edit overlay in the
     // priority chain (overlay > help > picker > validation > optimizer > ...).
     // While open it eats all keys except Esc and q, both of which close it and
@@ -540,46 +539,57 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.close_help();
-                return false;
+                return Some(false);
             }
-            _ => return false,
+            _ => return Some(false),
         }
     }
+    None
+}
+
+fn handle_help_open_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // `?` opens the help modal from any view (design D2). Matched without a
     // modifier guard because the key arrives with SHIFT (Shift+/), the same
     // convention as `+` (Shift+=). The edit overlay above already eats it.
     if matches!(key.code, KeyCode::Char('?')) {
         app.open_help();
-        return false;
+        return Some(false);
     }
+    None
+}
+
+fn handle_picker_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // If file picker is showing, handle picker navigation
     if app.showing_picker {
-        return handle_picker_event(key, app);
+        return Some(handle_picker_event(key.clone(), app));
     }
+    None
+}
 
+fn handle_validation_modal_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Validation modal overlay: priority third (overlay > picker > validation).
     // When open it eats all keys; j/k navigate, Esc/e close, Enter jumps to source.
     if app.showing_validation {
         match key.code {
             KeyCode::Esc => {
                 app.showing_validation = false;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('e') if key.modifiers.is_none() => {
                 app.showing_validation = false;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if app.validation_cursor + 1 < app.validation_issues.len() {
                     app.validation_cursor += 1;
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if app.validation_cursor > 0 {
                     app.validation_cursor -= 1;
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Enter => {
                 if let Some(issue) = app.validation_issues.get(app.validation_cursor).cloned() {
@@ -591,11 +601,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     sync_viewer_focus_from_tiles(app);
                     app.showing_validation = false;
                 }
-                return false;
+                return Some(false);
             }
-            _ => return false,
+            _ => return Some(false),
         }
     }
+    None
+}
+
+fn handle_upload_modal_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Upload confirm modal (change `midi-upload`, task 1.2): an overlay like
     // the validation modal — while open it eats all keys; `y` sends when a
     // transport path exists (else the status names what's missing and the
@@ -604,21 +618,25 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         match key.code {
             KeyCode::Esc => {
                 app.cancel_upload_modal();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('n') => {
                 app.cancel_upload_modal();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('y') => {
                 if let Err(e) = app.start_upload_send() {
                     app.status_message = format!("Upload blocked: {e}");
                 }
-                return false;
+                return Some(false);
             }
-            _ => return false,
+            _ => return Some(false),
         }
     }
+    None
+}
+
+fn handle_validation_toggle_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // `e` toggles validation modal open when not already showing and issues exist.
     // Respects label-edit priority: if a hovered node/component or source header
     // would consume `e` for label editing, let that handler run instead.
@@ -635,10 +653,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             if app.validation_cursor >= app.validation_issues.len() {
                 app.validation_cursor = 0;
             }
-            return false;
+            return Some(false);
         }
     }
+    None
+}
 
+fn handle_prefix_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Lazy prefix timeout: a prefix that outlived its window cancels itself
     // and the current key is processed normally below.
     if app
@@ -660,7 +681,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // focus with it.
                 app.open_view(ViewType::SourceViewer);
                 sync_viewer_focus_from_tiles(app);
-                return false;
+                return Some(false);
             }
             KeyCode::Char('g') => {
                 // `g g` opens the graph surface in a big pane.
@@ -669,7 +690,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 focus_tile_slot(app, ViewType::Graph);
                 sync_viewer_focus_from_tiles(app);
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('d') => {
                 // `g d` opens picker for B patch (patch-diff-viewer).
@@ -684,7 +705,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.picker_index = 0;
                 app.refresh_picker_entries();
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('o') => {
                 // `g o` opens the optimizer as a right-column pane (change
@@ -694,7 +715,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.open_view(ViewType::Optimizer);
                 sync_viewer_focus_from_tiles(app);
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('c') => {
                 // `g c` toggles cable latency coloring. The bare `c` key now
@@ -702,55 +723,61 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // this chord only.
                 app.toggle_latency_coloring();
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('q') => {
                 // Quad view is retired with the class layout: `g q` is an
                 // unbound prefix follow-up, so it just cancels the prefix.
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             KeyCode::Char('s') => {
                 if app.open_select_menu() {
                     app.prefix = None;
-                    return false;
+                    return Some(false);
                 }
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             KeyCode::Esc => {
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
             _ => {
                 app.prefix = None;
             }
         }
     }
+    None
+}
 
+fn handle_diff_overlay_esc(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Diff overlay Esc handling: clear scope first, then overlay (before viewer/graph Esc).
     if matches!(key.code, KeyCode::Esc) {
         if app.diff_scope.is_some() {
             app.diff_scope = None;
             app.status_message = String::from("Diff scope cleared");
             app.prefix = None;
-            return false;
+            return Some(false);
         }
         if app.diff_showing {
             app.diff_showing = false;
             app.status_message = String::from("Diff hidden");
             app.prefix = None;
-            return false;
+            return Some(false);
         }
     }
+    None
+}
 
+fn handle_select_state_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Select-state menu (change C 4.1): when active, j/k navigate cursor,
     // [/] cycle candidates with live rebuild, Esc clears.
     if app.select_state.is_some() {
         match key.code {
             KeyCode::Esc => {
                 app.close_select_menu();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(st) = app.select_state.as_mut() {
@@ -759,7 +786,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         st.cursor += 1;
                     }
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(st) = app.select_state.as_mut() {
@@ -767,30 +794,33 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         st.cursor -= 1;
                     }
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('[') => {
                 app.cycle_select_candidate(-1);
-                return false;
+                return Some(false);
             }
             KeyCode::Char(']') => {
                 app.cycle_select_candidate(1);
-                return false;
+                return Some(false);
             }
             KeyCode::Enter => {
                 app.cycle_select_candidate(1);
-                return false;
+                return Some(false);
             }
             _ => {}
         }
     }
+    None
+}
 
+fn handle_filter_and_performance_esc(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Dependency-filter Esc handling (change D task 2.1): Esc clears the
     // filter before the tiled Esc that would close the focused view.
     if matches!(key.code, KeyCode::Esc) && app.dependency_root.is_some() {
         app.clear_dependency_filter();
         app.prefix = None;
-        return false;
+        return Some(false);
     }
 
     // Performance-view Esc handling (change `performance-view`, task 1.1):
@@ -800,9 +830,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
         app.showing_performance = false;
         app.status_message = String::from("Performance view closed");
         app.prefix = None;
-        return false;
+        return Some(false);
     }
+    None
+}
 
+fn handle_layout_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Class-layout pane keys (change `pane-class-layout`, task 3.1). Priority
     // is overlay (help / validation / label editor) > picker > armed `g`
     // prefix > these keys > the per-view routing below, so `z`, `Alt+b`, and
@@ -820,26 +853,29 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 app.layout.maximized = None;
                 app.status_message = String::from("Layout restored");
                 app.prefix = None;
-                return false;
+                return Some(false);
             }
         } else if key.modifiers.alt {
             match key.code {
                 KeyCode::Char('b') => {
                     app.swap_big();
-                    return false;
+                    return Some(false);
                 }
                 KeyCode::Char('s') => {
                     app.swap_small();
-                    return false;
+                    return Some(false);
                 }
                 _ => {}
             }
         } else if key.code == KeyCode::Char('z') {
             app.maximize_toggle();
-            return false;
+            return Some(false);
         }
     }
+    None
+}
 
+fn handle_focus_routing_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Focus routing across panes (spec "Focus routing across panes"): exactly
     // one pane is focused; `Tab`/`Shift+Tab` cycle focus forward/backward in
     // tree order (skipping empty panes), and `Esc` closes the focused pane's
@@ -849,12 +885,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
     if key.code == KeyCode::Tab && !shift {
         app.cycle_focus(true);
         sync_viewer_focus_from_tiles(app);
-        return false;
+        return Some(false);
     }
     if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         app.cycle_focus(false);
         sync_viewer_focus_from_tiles(app);
-        return false;
+        return Some(false);
     }
     if key.code == KeyCode::Esc && key.modifiers.is_none() {
         // Spec "Esc closes the focused view": a view pane (graph, optimizer,
@@ -886,9 +922,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             }
         }
         app.prefix = None;
-        return false;
+        return Some(false);
     }
+    None
+}
 
+fn handle_optimizer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Optimizer pane (change `tiled-window-manager`, 5.1): the optimizer is
     // a right-column view, so its keys respond only while the optimizer slot
     // holds focus (mirroring the graph/viewer pane dispatch). Esc already
@@ -907,7 +946,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         state.cursor += 1;
                     }
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(state) = app.optimizer.as_mut() {
@@ -915,21 +954,21 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         state.cursor -= 1;
                     }
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Enter => {
                 let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
                 app.optimizer_preview(idx);
-                return false;
+                return Some(false);
             }
             KeyCode::Char('r') => {
                 app.optimizer_restore();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('s') => {
                 let idx = app.optimizer.as_ref().map(|s| s.cursor).unwrap_or(0);
                 app.optimizer_export(idx);
-                return false;
+                return Some(false);
             }
             // Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1`
             // snap to the endpoints. Returned here so the split-ratio
@@ -938,32 +977,35 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 if let Some(state) = app.optimizer.as_ref() {
                     app.optimizer_set_weight(state.weight - 0.1);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char(']') => {
                 if let Some(state) = app.optimizer.as_ref() {
                     app.optimizer_set_weight(state.weight + 0.1);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('0') => {
                 app.optimizer_set_weight(0.0);
-                return false;
+                return Some(false);
             }
             KeyCode::Char('1') => {
                 app.optimizer_set_weight(1.0);
-                return false;
+                return Some(false);
             }
             _ => {}
         }
     }
+    None
+}
 
+fn handle_label_edit_entry_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Label edit overlay entry: `e` (lowercase, no mods) with priority graph hover > source header > panel hover.
     if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.patch.is_some() {
         // 1) Graph hovered node -> Circuit
         if let Some(idx) = app.hovered_graph_node {
             if begin_graph_node_edit(app, idx) {
-                return false;
+                return Some(false);
             }
         }
         // 2) Source header focused -> Circuit instance at source_scroll
@@ -1011,7 +1053,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                             app.status_message =
                                 format!("Editing circuit {}:{}", nid.name(), nid.instance());
                         }
-                        return false;
+                        return Some(false);
                     }
                 }
             }
@@ -1052,12 +1094,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     } else {
                         app.status_message = format!("Editing {} / Group{}", token, layer);
                     }
-                    return false;
+                    return Some(false);
                 }
             }
         }
     }
+    None
+}
 
+fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Graph surface handling (`g g`), routed only while the graph pane holds
     // focus (spec "Keys route to the focused view"). Global keys (`q`,
     // Ctrl+C, `l`) fall through to the shared dispatch below.
@@ -1072,13 +1117,13 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 if let Some(idx) = app.hovered_graph_node {
                     graph_node_pin_toggle(app, idx);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('c') => {
                 // Bare `c` centers the graph in the visible pane (design D3);
                 // Ctrl+C (quit) is matched above with its modifier guard.
                 app.center_graph_camera();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('C') => {
                 // Shift+c (winit reports Shift+c as `Char('C')`): refit the
@@ -1090,27 +1135,27 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     "Graph zoom {:.0}%",
                     App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] * 100.0
                 );
-                return false;
+                return Some(false);
             }
             KeyCode::Char('x') => {
                 if let Some(idx) = app.hovered_graph_node {
                     graph_node_processing_toggle(app, idx);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('f') => {
                 // Change D task 2.1: `f` toggles the upstream dependency
                 // filter rooted at the hovered node (fallback: the shared
                 // circuit selection); a second `f` restores the full graph.
                 app.toggle_dependency_filter();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('i') => {
                 // Change D task 2.1: `i` toggles the influence-filtered induced
                 // subgraph rooted at the hovered node (fallback: the shared
                 // circuit selection); a second `i` restores the full graph.
                 app.toggle_influence_filter();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('h') if graph_slot_focused(app) => {
                 // graph-column-layout D5: `h` cycles through column, force, and
@@ -1134,14 +1179,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 if app.graph.is_some() {
                     app.rebuild_graph();
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('a') => {
                 // graph-arrange-cycle 2.2: `a` applies the active arrangement
                 // (rebuild + refit) and cycles layouts on repeat presses.
                 // Graph-pane-only, like `h`/`c` above.
                 app.apply_arrangement();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('A') => {
                 // sections-black-hole-solver 3.2 (design D5) +
@@ -1155,11 +1200,11 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 match app.layout_mode {
                     crate::config::LayoutMode::Sections => {
                         app.arrange_sections();
-                        return false;
+                        return Some(false);
                     }
                     crate::config::LayoutMode::Force => {
                         app.arrange_force();
-                        return false;
+                        return Some(false);
                     }
                     crate::config::LayoutMode::Column => {}
                 }
@@ -1178,12 +1223,12 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     // Column lays out no panel: there is nothing to tune, so
                     // report that rather than opening one (design D7).
                     app.status_message = String::from("Column arrangement has no forces to tune");
-                    return false;
+                    return Some(false);
                 };
                 app.showing_sliders = !app.showing_sliders;
                 let state = if app.showing_sliders { "on" } else { "off" };
                 app.status_message = format!("Sliders panel: {state} ({name})");
-                return false;
+                return Some(false);
             }
             // Lowercase `s` is the sections panel's historical toggle and stays
             // sections-only, so in the other arrangements it keeps falling
@@ -1197,7 +1242,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     } else {
                         String::from("Sliders panel: off (sections)")
                     };
-                    return false;
+                    return Some(false);
                 }
             }
             KeyCode::Char('+') | KeyCode::Char('-') => {
@@ -1213,7 +1258,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 } else {
                     app.graph_zoom_preset_step(step);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Char('[') | KeyCode::Char(']') => {
                 // `Alt` adjusts cable tension on the focused graph pane (design
@@ -1228,7 +1273,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         -1
                     };
                     app.adjust_tension(dir);
-                    return false;
+                    return Some(false);
                 }
                 let delta = if matches!(key.code, KeyCode::Char('[')) {
                     -0.1
@@ -1236,7 +1281,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     0.1
                 };
                 app.status_message = adjust_big_boundary(app, delta);
-                return false;
+                return Some(false);
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 // Task 2.3: arrows pan the graph camera on the graph surface
@@ -1252,12 +1297,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     _ => (0, 0),
                 };
                 app.graph_pan_if_overflow(dx, dy);
-                return false;
+                return Some(false);
             }
             _ => {}
         }
     }
+    None
+}
 
+fn handle_viewer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Embedded viewer pane handling, routed only while the source viewer pane
     // holds focus (spec "Keys route to the focused view"). Global keys (`q`,
     // Ctrl+C, `l`) fall through to the shared dispatch below.
@@ -1268,7 +1316,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     SourceViewMode::Raw => SourceViewMode::Prettified,
                     SourceViewMode::Prettified => SourceViewMode::Raw,
                 };
-                return false;
+                return Some(false);
             }
             KeyCode::Char('[') | KeyCode::Char(']') => {
                 // Plain brackets move the left/right big-pane boundary; the
@@ -1280,40 +1328,40 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     0.1
                 };
                 app.status_message = adjust_big_boundary(app, delta);
-                return false;
+                return Some(false);
             }
             // Pause toggle stays live when source focused (global q/l level).
             KeyCode::Char('p') => {
                 app.toggle_processing_pause();
-                return false;
+                return Some(false);
             }
             KeyCode::Char('j') => {
                 app.source_scroll = app.source_scroll.saturating_add(1);
-                return false;
+                return Some(false);
             }
             KeyCode::Char('k') => {
                 app.source_scroll = app.source_scroll.saturating_sub(1);
-                return false;
+                return Some(false);
             }
             KeyCode::Down => {
                 if app.selected_component.is_some() {
                     let next = app.occurrence_cursor.saturating_add(1);
                     app.jump_to_occurrence(next);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Up => {
                 if app.selected_component.is_some() {
                     let prev = app.occurrence_cursor.saturating_sub(1);
                     app.jump_to_occurrence(prev);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::Home => {
                 if app.selected_component.is_some() {
                     app.jump_to_occurrence(0);
                 }
-                return false;
+                return Some(false);
             }
             KeyCode::End => {
                 if let Some(token) = app.selected_component.clone() {
@@ -1325,12 +1373,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         }
                     }
                 }
-                return false;
+                return Some(false);
             }
             _ => {}
         }
     }
+    None
+}
 
+fn handle_label_edit_focus_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Label edit overlay entry (`e` on focused datum): overlay > picker > prefix > graph > source > panels.
     // Priority: graph hovered node -> viewer source header -> panel hovered token.
     if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.editing.is_none() {
@@ -1357,7 +1408,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         app.status_message =
                             format!("Editing circuit {}:{}", node.id.name(), node.id.instance());
                     }
-                    return false;
+                    return Some(false);
                 }
             }
         }
@@ -1399,7 +1450,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                             app.status_message =
                                 format!("Editing circuit {}:{}", nid.name(), nid.instance());
                         }
-                        return false;
+                        return Some(false);
                     }
                     *entry += 1;
                 }
@@ -1441,12 +1492,15 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                     } else {
                         app.status_message = format!("Editing {} / Group{}", token, layer);
                     }
-                    return false;
+                    return Some(false);
                 }
             }
         }
     }
+    None
+}
 
+fn handle_physical_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Performance view (change `performance-view`, task 1.1): `p` with the
     // Physical pane focused opens the performance view. View-scoped — `p` on
     // every other pane keeps its exact current meaning (global processing
@@ -1457,7 +1511,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             KeyCode::Char('p') => {
                 app.showing_performance = true;
                 app.status_message = String::from("Performance view \u{2014} Esc to exit");
-                return false;
+                return Some(false);
             }
             KeyCode::Char('R') => {
                 // Task 1.4: `R` (Shift+r) restores every element state to
@@ -1465,13 +1519,16 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                 // Shift+c for fit; plain `r` stays the class carousel below.
                 app.reset_element_states();
                 app.status_message = String::from("Element states reset");
-                return false;
+                return Some(false);
             }
             _ => {}
         }
     }
+    None
+}
 
-    match key.code {
+fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    Some(match key.code {
         KeyCode::Char('q') => {
             // Quitting never orphans a background send: reap the child now
             // (window-close quits are covered by `UploadSend`'s `Drop`).
@@ -1674,7 +1731,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             // the panels pane; `Shift` would scale the other pane, which the
             // graph arm above already owns while the graph is open.
             if key.modifiers.shift {
-                return false;
+                return Some(false);
             }
             cycle_panel_scale(app, matches!(key.code, KeyCode::Char('+')));
             false
@@ -1716,7 +1773,7 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
                         }
                     }
                 }
-                return false;
+                return Some(false);
             }
             if let Some(idx) = app.hovered_component {
                 // Capture token id before mutating patch to avoid borrow conflict.
@@ -1750,14 +1807,14 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             // fall back to panel navigation when the rack fits. j/k always
             // navigate.
             if physical_slot_focused(app) && app.physical_pan_if_overflow(0, -1) {
-                return false;
+                return Some(false);
             }
             navigate(app, -1);
             false
         }
         KeyCode::Down => {
             if physical_slot_focused(app) && app.physical_pan_if_overflow(0, 1) {
-                return false;
+                return Some(false);
             }
             navigate(app, 1);
             false
@@ -1783,7 +1840,68 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         _ => false,
+    })
+}
+
+/// One step of the priority chain: `None` when the key is not that surface's,
+/// `Some(quit)` when the step consumed it.
+type KeyHandler = fn(&KeyEvent, &mut App) -> Option<bool>;
+
+/// Handle one key event. Returns true if the app should quit.
+///
+/// The array below is the priority chain in its original order: overlays
+/// first, then the armed `g` prefix, the mode overlays, pane layout and focus
+/// routing, the per-pane key tables, and finally the shared/global table. The
+/// first step that answers `Some` consumes the key.
+///
+/// Handler protocol: every `handle_*_key` helper returns `Option<bool>` —
+/// `None` means "not this surface's key, fall through to the next step", and
+/// `Some(quit)` means the key was handled and this function returns `quit`.
+/// `handle_shared_key` is the terminal table, so it always answers `Some`.
+pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
+    // Reap a finished background upload first (non-blocking `try_wait`): the
+    // verdict lands in the status line on the next event after completion.
+    app.poll_upload();
+
+    let chain: [KeyHandler; 19] = [
+        // Overlays: label edit, help, `?`, picker, validation, upload,
+        // validation toggle.
+        handle_edit_overlay_key,
+        handle_help_modal_key,
+        handle_help_open_key,
+        handle_picker_key,
+        handle_validation_modal_key,
+        handle_upload_modal_key,
+        handle_validation_toggle_key,
+        // Armed `g` prefix, then the mode overlays (diff scope, select menu,
+        // dependency filter, performance view).
+        handle_prefix_key,
+        handle_diff_overlay_esc,
+        handle_select_state_key,
+        handle_filter_and_performance_esc,
+        // Pane layout (maximize / swap / Alt+b / Alt+s) and focus routing
+        // (Tab / Shift+Tab / Esc-close).
+        handle_layout_pane_key,
+        handle_focus_routing_key,
+        // Per-pane key tables: optimizer, label-edit entry (the two `e` blocks
+        // sit on both sides of the pane routing), graph, source viewer,
+        // label-edit entry from focus, physical/performance.
+        handle_optimizer_pane_key,
+        handle_label_edit_entry_key,
+        handle_graph_pane_key,
+        handle_viewer_pane_key,
+        handle_label_edit_focus_key,
+        handle_physical_pane_key,
+    ];
+    for step in chain {
+        if let Some(quit) = step(&key, app) {
+            return quit;
+        }
     }
+
+    // Shared/global table (`q`, Ctrl+C, `U`, `l`, digits, ...): terminal, so it
+    // answers every key that reached it.
+    handle_shared_key(&key, app).unwrap_or(false)
 }
 
 /// Handle mouse input: hover highlight, click-to-toggle, and scroll to
