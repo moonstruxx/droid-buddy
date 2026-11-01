@@ -91,7 +91,7 @@ pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
 /// The wrapped seed is the layout's spacing guarantee — measured worst pairwise
 /// penetration 0.00 on `fixtures/own_scale.ini` — but the force relaxation can
 /// still destroy it. Every force is clamped to the same `MAX_DISPLACEMENT`, so
-/// a node with an unbalanced cable bundle (own_scale's controller has 16 cables)
+/// a node with an unbalanced cable bundle (`own_scale`'s controller has 16 cables)
 /// drifts its entire travel budget — measured 1180 units in both axes, landing
 /// inside another row's lane for 79 units of overlap — and a banner band that
 /// spans a whole row is compressed toward its own mean the same way. The tether
@@ -142,7 +142,7 @@ const FORCE_SEPARATION_MAX_PASSES: usize = 128;
 /// Without the tether they do more than fine-tune: cable and section-hole forces
 /// are clamped to the same `MAX_DISPLACEMENT` budget as the positional springs,
 /// so a node with an unbalanced cable bundle drifts its whole travel budget —
-/// measured 1180 units in both axes on own_scale — and lands inside another
+/// measured 1180 units in both axes on `own_scale` — and lands inside another
 /// row's lane.
 ///
 /// The value is 1.5 lane gaps, chosen from both ends:
@@ -152,7 +152,7 @@ const FORCE_SEPARATION_MAX_PASSES: usize = 128;
 ///   them below their required separation.
 /// - **At most** a fraction of the row pitch: two nodes can approach each other
 ///   by at most `2 × SECTIONS_TETHER`, which the overlap-removal pass then
-///   resolves — measured worst residual 1.71 units on own_scale against a 40-unit
+///   resolves — measured worst residual 1.71 units on `own_scale` against a 40-unit
 ///   tolerance, so the slack the tether grants stays far inside the requirement.
 ///
 /// Mutable at runtime? No: unlike [`SLICE_K`] and [`SECTION_HOLE_K`] this is a
@@ -759,7 +759,7 @@ fn sections_lanes(graph: &Graph) -> SectionsLanes {
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    for s in lane.iter_mut() {
+    for s in &mut lane {
         *s = (*s).min(max_slice);
     }
     let lane_count = lane.iter().copied().max().map_or(0, |m| m + 1);
@@ -1206,7 +1206,7 @@ fn slice_index(graph: &Graph) -> Vec<usize> {
 ///
 /// `slice_index` is the output of `slice_index` (patch order for circuits,
 /// fixed outer slices for controllers/jacks). Deterministic: same graph +
-/// same slice_index → identical anchors.
+/// same `slice_index` → identical anchors.
 pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option<(f32, f32)>> {
     let n = graph.nodes.len();
     let mut holes = vec![None; n];
@@ -1229,7 +1229,7 @@ pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option
     }
 
     // Compute mean slice per cluster (only circuit nodes contribute)
-    for list in members.iter() {
+    for list in &members {
         if list.is_empty() {
             continue;
         }
@@ -1843,7 +1843,7 @@ pub(crate) fn run_iterations_with_forces(
     // cohesion piles a banner group onto one centroid, and how many sweeps that
     // pile needs is a property of the knob tuple, not of the arrangement.
     let movable: Vec<bool> = (0..n)
-        .map(|i| !pinned_mask[i] && !active.is_some_and(|act| !act[i]))
+        .map(|i| !pinned_mask[i] && active.is_none_or(|act| act[i]))
         .collect();
     if mode == LayoutMode::Sections {
         separate_overlaps(positions, &sizes, &movable, SEPARATION_PASSES);
@@ -4154,8 +4154,10 @@ mod tests {
             for b in (a + 1)..graph.nodes.len() {
                 let (aw, ah) = sizes[a];
                 let (bw, bh) = sizes[b];
-                let overlap_x = (positions[a].0 - positions[b].0).abs() < (aw + bw) / 2.0 - 1e-3;
-                let overlap_y = (positions[a].1 - positions[b].1).abs() < (ah + bh) / 2.0 - 1e-3;
+                let overlap_x =
+                    (positions[a].0 - positions[b].0).abs() < f32::midpoint(aw, bw) - 1e-3;
+                let overlap_y =
+                    (positions[a].1 - positions[b].1).abs() < f32::midpoint(ah, bh) - 1e-3;
                 assert!(
                     !(overlap_x && overlap_y),
                     "nodes {a} and {b} overlap: positions {:?} / {:?}, sizes {:?} / {:?}",
@@ -4730,7 +4732,7 @@ mod tests {
                 ..Default::default()
             };
             let sizes = node_world_sizes(&graph);
-            let required = (sizes[0].0.max(sizes[0].1) + sizes[1].0.max(sizes[1].1)) / 2.0;
+            let required = f32::midpoint(sizes[0].0.max(sizes[0].1), sizes[1].0.max(sizes[1].1));
             assert_eq!(
                 required, expected_required,
                 "{chars}-char fixture must require {expected_required}"
@@ -5588,7 +5590,7 @@ mod tests {
         for a in 0..positions.len() {
             for b in a + 1..positions.len() {
                 let d = dist(positions[a], positions[b]);
-                if best.map(|(best_d, _, _)| d < best_d).unwrap_or(true) {
+                if best.is_none_or(|(best_d, _, _)| d < best_d) {
                     best = Some((d, a, b));
                 }
             }

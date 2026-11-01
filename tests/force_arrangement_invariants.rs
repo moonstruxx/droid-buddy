@@ -26,7 +26,7 @@
 //!
 //! Replaces `tests/force_overlap_probe.rs`, the temporary recon-lane
 //! measurement probe (cancelled lane). The probe's overlap counts at HEAD
-//! (own_scale 224, graph_dependency_walk 33, …) and its cohesion/cutoff
+//! (`own_scale` 224, `graph_dependency_walk` 33, …) and its cohesion/cutoff
 //! diagnostics are historical measurements recorded in the change's `design.md`
 //! and commit messages; they are not kept here as ratchet constants.
 

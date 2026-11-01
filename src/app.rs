@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// File name of the per-patch label store inside the platform data directory.
 const LABELS_FILE_NAME: &str = "labels.toml";
 
-/// Per-patch buckets: `hw` (token → layer → label) + `circuits` (NodeId `"name:idx"` → label).
+/// Per-patch buckets: `hw` (token → layer → label) + `circuits` (`NodeId` `"name:idx"` → label).
 /// Empty-string labels are treated as absent by `Patch::display_label` / `circuit_label`
 /// and may be pruned on save; deserialization supplies empty maps when absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +246,7 @@ use crate::validation::{validate_patch, Severity, ValidationIssue};
 /// Which datum is being relabeled in the inline single-field overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditKind {
-    /// HW token at a specific shift layer (1..=max_shift_layer, clamped on read).
+    /// HW token at a specific shift layer (`1..=max_shift_layer`, clamped on read).
     Hw { token: String, layer: u8 },
     /// Circuit instance identified by `(circuit name, instance index)`.
     Circuit { node: NodeId },
@@ -1492,7 +1492,7 @@ impl App {
             let edge = graph.edges.get(l.edge_index)?;
             (edge.sink == node.id).then(|| edge.cable.clone())
         })?;
-        Some(format!("reads {} 1 loop behind", cable))
+        Some(format!("reads {cable} 1 loop behind"))
     }
 
     /// View of `diff_report` filtered through `diff_scope` (if any).
@@ -1519,13 +1519,13 @@ impl App {
         if self.diff_showing {
             if let Some(token) = self.diff_scope.as_deref() {
                 let n = self.diff_scope_cable_count();
-                return Some(format!("Diff scope: {} ({} cables)", token, n));
+                return Some(format!("Diff scope: {token} ({n} cables)"));
             }
         }
         None
     }
 
-    /// Serialize the in-memory patch to framed SysEx bytes (lossless writer
+    /// Serialize the in-memory patch to framed `SysEx` bytes (lossless writer
     /// → `sysex::build_sysex`, task 1.1). `None` with no patch loaded or an
     /// unrenderable patch — the modal and the send both gate on this.
     pub fn upload_payload(&self) -> Option<Vec<u8>> {
@@ -1694,7 +1694,7 @@ impl App {
     }
 
     pub fn load_diff_patch(&mut self, path: &Path) -> Result<(), String> {
-        let new_patch = Patch::from_ini_file(path).map_err(|e| e.to_string())?;
+        let new_patch = Patch::from_ini_file(path).map_err(|e| e.clone())?;
         let report = if let Some(base) = &self.patch {
             crate::diff::diff_patches(base, &new_patch)
         } else {
@@ -1774,8 +1774,7 @@ impl App {
                 .unwrap_or(PaneId::SmallTop),
         );
         self.status_message = format!(
-            "Optimizer w = {:.1}: j/k select · Enter preview · r restore · s export · Esc close",
-            weight
+            "Optimizer w = {weight:.1}: j/k select · Enter preview · r restore · s export · Esc close"
         );
         true
     }
@@ -1821,8 +1820,7 @@ impl App {
             state.previewing = None;
         }
         self.status_message = format!(
-            "Optimizer w = {:.1}: j/k select · Enter preview · r restore · s export · Esc close",
-            w
+            "Optimizer w = {w:.1}: j/k select · Enter preview · r restore · s export · Esc close"
         );
     }
 
@@ -1941,20 +1939,14 @@ impl App {
             if i >= state.before_latency.len() {
                 break;
             }
-            if state
-                .before_cable
-                .get(i)
-                .map(|c| c != &edge.cable)
-                .unwrap_or(true)
-            {
+            if state.before_cable.get(i) != Some(&edge.cable) {
                 continue;
             }
             let current = lat
                 .edges
                 .iter()
                 .find(|l| l.edge_index == i)
-                .map(|l| l.latency)
-                .unwrap_or(0.0);
+                .map_or(0.0, |l| l.latency);
             if (current - state.before_latency[i]).abs() > 1e-6 {
                 return Some(edge.sink.clone());
             }
@@ -1979,17 +1971,17 @@ impl App {
 
     /// Export the selected candidate (`s`, design D5/D4): write a reordered
     /// copy of the patch to `<stem>-latopt.ini` next to the source file
-    /// (write_to_ini auto-suffixes on collision). Returns the written path;
+    /// (`write_to_ini` auto-suffixes on collision). Returns the written path;
     /// `None` with a status hint when there is no source file to save next to.
     pub fn optimizer_export(&mut self, idx: usize) -> Option<PathBuf> {
         let state = self.optimizer.as_ref()?;
         let candidate = state.candidates.get(idx)?;
         let patch = self.patch.as_ref()?;
         let source = self.current_patch_path.as_ref()?;
-        let stem = source
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| String::from("patch"));
+        let stem = source.file_stem().map_or_else(
+            || String::from("patch"),
+            |s| s.to_string_lossy().to_string(),
+        );
         let dest = source.with_file_name(format!("{stem}-latopt.ini"));
         let mut out = patch.clone();
         let sections = std::mem::take(&mut out.sections);
@@ -2137,7 +2129,7 @@ impl App {
         }
     }
 
-    /// Pane ids in tree order: BigLeft, then the right half as one big pane
+    /// Pane ids in tree order: `BigLeft`, then the right half as one big pane
     /// or the two small panes (design D1).
     fn pane_order(&self) -> Vec<PaneId> {
         if self.layout.has_small_view() {
@@ -2200,7 +2192,7 @@ impl App {
 
     /// Pane a view of `view.class()` opens in (spec "Window classes route
     /// views to panes"): the focused pane when its class matches, else the
-    /// class default — BigLeft, or the first empty small pane then SmallTop.
+    /// class default — `BigLeft`, or the first empty small pane then `SmallTop`.
     fn pick_pane_for(&self, view: ViewType) -> PaneId {
         match view.class() {
             PaneClass::Big => match self.layout.focus {
@@ -2269,11 +2261,11 @@ impl App {
             return vec![(id, band)];
         }
         let main = self.layout.main_split_ratio.clamp(0.3, 0.7);
-        let split_x = band.x + (band.width as f64 * main).round() as u16;
+        let split_x = band.x + (f64::from(band.width) * main).round() as u16;
         let left = Rect::new(band.x, band.y, split_x.saturating_sub(band.x), band.height);
         if self.layout.has_small_view() {
             let small = self.layout.small_split_ratio.clamp(0.3, 0.7);
-            let split_y = band.y + (band.height as f64 * small).round() as u16;
+            let split_y = band.y + (f64::from(band.height) * small).round() as u16;
             let right_width = band.x.saturating_add(band.width).saturating_sub(split_x);
             let top = Rect::new(split_x, band.y, right_width, split_y.saturating_sub(band.y));
             let bottom = Rect::new(
@@ -2328,12 +2320,11 @@ impl App {
     }
 
     pub fn open_select_menu(&mut self) -> bool {
-        let patch = match &self.patch {
-            Some(p) => p.clone(),
-            None => {
-                self.status_message = String::from("No patch loaded. Press 'l' to load.");
-                return false;
-            }
+        let patch = if let Some(p) = &self.patch {
+            p.clone()
+        } else {
+            self.status_message = String::from("No patch loaded. Press 'l' to load.");
+            return false;
         };
         let disc = crate::patch::discover_select_signals(&patch);
         if disc.signals.is_empty() {
@@ -2367,10 +2358,7 @@ impl App {
 
     pub fn cycle_select_candidate(&mut self, delta: i32) {
         let (sig_name, candidates) = {
-            let st = match &self.select_state {
-                Some(s) => s,
-                None => return,
-            };
+            let Some(st) = &self.select_state else { return };
             if st.signals.is_empty() {
                 return;
             }
@@ -2450,8 +2438,8 @@ impl App {
         let Some(rack) = self.physical_rack_for_fit() else {
             return (false, false);
         };
-        let (w, h) = crate::physical::rack_extent_points(&rack, self.physical_zoom as f64);
-        (w > area.width as f32, h > area.height as f32)
+        let (w, h) = crate::physical::rack_extent_points(&rack, f64::from(self.physical_zoom));
+        (w > f32::from(area.width), h > f32::from(area.height))
     }
 
     /// The rack the physical view packs into: the configured `[physical.rack]`
@@ -2545,7 +2533,7 @@ impl App {
             rack.total_height_mm,
             pane_w,
             pane_h,
-            zoom as f64,
+            f64::from(zoom),
         );
         self.physical_zoom = zoom;
         self.scale_factor = zoom;
@@ -2645,7 +2633,7 @@ impl App {
     /// pane argument (D3/D4).
     pub fn physical_pane_size(&self) -> Option<(f32, f32)> {
         self.physical_pane_rect
-            .map(|r| (r.width as f32, r.height as f32))
+            .map(|r| (f32::from(r.width), f32::from(r.height)))
     }
 
     /// Apply a pending automatic fit (view open, patch load, rack change, pane
@@ -2755,7 +2743,19 @@ impl App {
     /// the canvas centre so the visible content stays anchored and the pane
     /// never empties (task 2.3).
     pub const GRAPH_ZOOM_PRESETS: [f32; 13] = [
-        0.0078125, 0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0, 8.0,
+        0.007_812_5,
+        0.015_625,
+        0.031_25,
+        0.062_5,
+        0.125,
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+        1.5,
+        2.0,
+        4.0,
+        8.0,
     ];
     /// Index of the `1.0` (fitted-zoom) entry in `GRAPH_ZOOM_PRESETS`. Reset
     /// sites and tests route through this constant instead of a literal index
@@ -2782,8 +2782,7 @@ impl App {
             return (0.0, 0.0);
         };
         self.graph_camera
-            .map(|cam| cam.pixel_to_world(pw / 2.0, ph / 2.0))
-            .unwrap_or((0.0, 0.0))
+            .map_or((0.0, 0.0), |cam| cam.pixel_to_world(pw / 2.0, ph / 2.0))
     }
 
     /// Step the graph camera's zoom preset by `dir` (±1), wrapping at both ends
@@ -2795,7 +2794,7 @@ impl App {
             return false;
         }
         let n = Self::GRAPH_ZOOM_PRESETS.len() as i32;
-        let cur = self.graph_zoom_preset as i32;
+        let cur = i32::from(self.graph_zoom_preset);
         let next = (cur + dir).rem_euclid(n) as usize;
         let factor = Self::GRAPH_ZOOM_PRESETS[next]
             / Self::GRAPH_ZOOM_PRESETS[self.graph_zoom_preset as usize];
@@ -2840,8 +2839,8 @@ impl App {
         self.graph_pan_by(dx, dy);
         self.status_message = format!(
             "Graph pan {:.0}/{:.0}",
-            self.graph_camera.map(|c| c.pan.0).unwrap_or(0.0),
-            self.graph_camera.map(|c| c.pan.1).unwrap_or(0.0)
+            self.graph_camera.map_or(0.0, |c| c.pan.0),
+            self.graph_camera.map_or(0.0, |c| c.pan.1)
         );
         true
     }
@@ -2900,7 +2899,7 @@ impl App {
         if rect.width == 0 || rect.height == 0 {
             return None;
         }
-        Some((rect.width as f32, rect.height as f32))
+        Some((f32::from(rect.width), f32::from(rect.height)))
     }
 
     /// Viewport the next graph refit must frame (graph-arrange-cycle 1.2):
@@ -3090,7 +3089,7 @@ impl App {
         if !min_x.is_finite() || !min_y.is_finite() {
             return false;
         }
-        let (cx, cy) = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        let (cx, cy) = (f32::midpoint(min_x, max_x), f32::midpoint(min_y, max_y));
         self.graph_camera = Some(GraphCamera {
             zoom: cam.zoom,
             pan: (cx * cam.zoom - pw / 2.0, cy * cam.zoom - ph / 2.0),
@@ -3321,9 +3320,8 @@ impl App {
     /// `labels.toml` via tmp→rename and clear the overlay. Returns the IO
     /// result of the atomic write; the in-memory store is always updated.
     pub fn commit_edit(&mut self) -> io::Result<()> {
-        let edit = match self.editing.clone() {
-            Some(e) => e,
-            None => return Ok(()),
+        let Some(edit) = self.editing.clone() else {
+            return Ok(());
         };
         self.apply_edit_to_store(&edit);
         let result = self.label_store.save();
@@ -3335,9 +3333,8 @@ impl App {
     /// as `commit_edit` but atomically write into `dir` instead of the XDG
     /// location. The overlay is cleared regardless of the write result.
     pub fn commit_edit_to_dir(&mut self, dir: &Path) -> io::Result<()> {
-        let edit = match self.editing.clone() {
-            Some(e) => e,
-            None => return Ok(()),
+        let Some(edit) = self.editing.clone() else {
+            return Ok(());
         };
         self.apply_edit_to_store(&edit);
         let result = self.label_store.save_to_dir(dir);
@@ -3450,11 +3447,10 @@ impl App {
     /// Used to resolve HW labels through `Patch::display_label`.
     pub fn active_shift_layer(&self) -> u8 {
         match self.active_shift {
-            Some(ShiftGroup::Group1) => 1,
             Some(ShiftGroup::Group2) => 2,
             Some(ShiftGroup::Group3) => 3,
             Some(ShiftGroup::Group4) => 4,
-            None => 1,
+            Some(ShiftGroup::Group1) | None => 1,
         }
     }
 
@@ -3499,7 +3495,7 @@ impl App {
                         inf.influenced_edges.len()
                     ))
                 } else {
-                    Some(format!("Editing {} / Group{}", token, eff))
+                    Some(format!("Editing {token} / Group{eff}"))
                 }
             }
             EditKind::Circuit { node } => {
@@ -3871,8 +3867,8 @@ impl App {
         // in sync with the current modifier selection.
         if let Some(sub) = self.influence.clone() {
             if let Some(graph) = self.graph.as_mut() {
-                graph.highlighted_nodes = sub.influenced_nodes.clone();
-                graph.highlighted_edges = sub.influenced_edges.clone();
+                graph.highlighted_nodes.clone_from(&sub.influenced_nodes);
+                graph.highlighted_edges.clone_from(&sub.influenced_edges);
             }
         }
         // A rebuild keeps the influence FILTERED-view subset in sync with the
@@ -3937,7 +3933,7 @@ impl App {
             self.tension = next;
             return;
         }
-        self.status_message = format!("Cable tension: {:.2}", next);
+        self.status_message = format!("Cable tension: {next:.2}");
         if (next - self.tension).abs() < f32::EPSILON {
             return; // already at the clamp; keep the layout untouched
         }
@@ -4239,7 +4235,7 @@ impl App {
             self.clear_influence_state();
             return;
         }
-        let Some(patch) = self.patch.as_ref().cloned() else {
+        let Some(patch) = self.patch.clone() else {
             self.clear_influence_state();
             return;
         };
@@ -4291,8 +4287,12 @@ impl App {
         }
         self.influence = Some(subtree.clone());
         if let Some(graph) = self.graph.as_mut() {
-            graph.highlighted_nodes = subtree.influenced_nodes.clone();
-            graph.highlighted_edges = subtree.influenced_edges.clone();
+            graph
+                .highlighted_nodes
+                .clone_from(&subtree.influenced_nodes);
+            graph
+                .highlighted_edges
+                .clone_from(&subtree.influenced_edges);
         }
         self.recompute_influence_subset();
         self.events.dispatch(&Event::InfluenceRecomputed(subtree));
@@ -4388,11 +4388,9 @@ impl App {
         let cables = self
             .modifier_influence
             .as_ref()
-            .map(|inf| inf.influenced_edges.len())
-            .unwrap_or(0);
+            .map_or(0, |inf| inf.influenced_edges.len());
         Some(format!(
-            "MOD {} \u{2192} {} cells / {} cables",
-            token, cells, cables
+            "MOD {token} \u{2192} {cells} cells / {cables} cables"
         ))
     }
 
@@ -4444,7 +4442,7 @@ impl App {
     /// `ComponentState` directly, so the next frame already shows rest.
     pub fn reset_element_states(&mut self) {
         if let Some(patch) = self.patch.as_mut() {
-            for comp in patch.hw_components.iter_mut() {
+            for comp in &mut patch.hw_components {
                 comp.state = match comp.kind {
                     ComponentKind::Button | ComponentKind::Switch | ComponentKind::Led => {
                         ComponentState::Off
@@ -4519,14 +4517,14 @@ impl App {
     /// layout holds the value.
     pub fn adjust_main_split_ratio(&mut self, delta: f32) {
         self.layout.main_split_ratio =
-            (self.layout.main_split_ratio + delta as f64).clamp(0.3, 0.7);
+            (self.layout.main_split_ratio + f64::from(delta)).clamp(0.3, 0.7);
     }
 
     /// Adjust the vertical boundary between the two small panes by `delta`,
     /// clamped to [0.3, 0.7] (spec "Adaptive pane layout", `Alt+[` / `Alt+]`).
     pub fn adjust_small_split_ratio(&mut self, delta: f32) {
         self.layout.small_split_ratio =
-            (self.layout.small_split_ratio + delta as f64).clamp(0.3, 0.7);
+            (self.layout.small_split_ratio + f64::from(delta)).clamp(0.3, 0.7);
     }
 
     /// Toggle the non-latching maximize on the focused pane (the `z` key;
@@ -4870,14 +4868,14 @@ mod tests {
     #[test]
     fn new_app_has_graph_defaults_closed() {
         let app = App::new();
-        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
         assert!(app.graph_settle.is_none());
         assert!(!app.graph_settle_pending);
     }
 
-    /// A fixture app with own_buttons loaded and the graph open.
+    /// A fixture app with `own_buttons` loaded and the graph open.
     fn app_with_open_graph() -> App {
         let mut app = App::new();
         let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
@@ -4951,7 +4949,10 @@ mod tests {
             crate::graph_anim::SETTLE_SEED_SCALE,
         );
         let started = Instant::now()
-            - std::time::Duration::from_millis(crate::graph_anim::SETTLE_DURATION_MS + 50);
+            .checked_sub(std::time::Duration::from_millis(
+                crate::graph_anim::SETTLE_DURATION_MS + 50,
+            ))
+            .unwrap();
         app.graph_settle = Some(crate::graph_anim::GraphSettle::with_started_at(
             seed, started,
         ));
@@ -5001,10 +5002,10 @@ mod tests {
         // the old 0.03125 minimum, and 8.0 is 4x above the old 2.0 maximum.
         // The fit index follows the 1.0 entry rather than a hardcoded position.
         assert_eq!(App::GRAPH_ZOOM_PRESETS.len(), 13);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS[0], 0.0078125);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS[1], 0.015625);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS[2], 0.03125);
-        assert_eq!(App::GRAPH_ZOOM_PRESETS[3], 0.0625);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[0], 0.007_812_5);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[1], 0.015_625);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[2], 0.031_25);
+        assert_eq!(App::GRAPH_ZOOM_PRESETS[3], 0.062_5);
         // Compile-time invariant: the fit index points at the 1.0 entry.
         const _: () = assert!(App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] == 1.0);
         assert_eq!(App::GRAPH_ZOOM_PRESETS.last(), Some(&8.0));
@@ -5166,8 +5167,8 @@ mod tests {
         // The position-bounds center is deliberately NOT the canvas center once
         // the extent is non-zero.
         let (bcx, bcy) = (
-            (bounds.min_x + bounds.max_x) / 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
+            f32::midpoint(bounds.min_x, bounds.max_x),
+            f32::midpoint(bounds.min_y, bounds.max_y),
         );
         let (bpx, bpy) = cam.world_to_pixel(bcx, bcy);
         assert!(
@@ -5193,14 +5194,14 @@ mod tests {
         app.load_patch(patch);
         app.layout_mode = crate::config::LayoutMode::Sections;
         let g = KeyEvent::new(KeyCode::Char('g'), key_modifiers::NONE);
-        handle_event(g.clone(), &mut app);
-        handle_event(g, &mut app);
+        handle_event(&g.clone(), &mut app);
+        handle_event(&g, &mut app);
         assert!(
             app.pane_holding(ViewType::Graph).is_some(),
             "`g g` opens the graph pane"
         );
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
-        let nodes = app.graph.as_ref().map(|gr| gr.nodes.len()).unwrap_or(0);
+        let nodes = app.graph.as_ref().map_or(0, |gr| gr.nodes.len());
         assert!(nodes > 20, "fixture must span many circuits, got {nodes}");
 
         let bounds = WorldBounds::from_positions(&app.graph_positions);
@@ -5226,7 +5227,7 @@ mod tests {
         // node extent) maps to the canvas center, horizontally and vertically,
         // while the zoom is untouched.
         handle_event(
-            KeyEvent::new(KeyCode::Char('c'), key_modifiers::NONE),
+            &KeyEvent::new(KeyCode::Char('c'), key_modifiers::NONE),
             &mut app,
         );
         assert_eq!(app.status_message, "Graph centered");
@@ -5248,7 +5249,7 @@ mod tests {
         // `Shift+c`: full refit against the published canvas — the world bounds
         // expanded by one node extent fit inside it and the preset resets.
         handle_event(
-            KeyEvent::new(KeyCode::Char('C'), key_modifiers::SHIFT),
+            &KeyEvent::new(KeyCode::Char('C'), key_modifiers::SHIFT),
             &mut app,
         );
         assert_eq!(app.graph_zoom_preset, App::GRAPH_ZOOM_FIT_INDEX as u8);
@@ -5557,7 +5558,7 @@ mod tests {
         app.open_graph();
         app.close_graph();
 
-        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         assert_eq!(app.selected_component, before_selection);
         assert_eq!(app.viewer_focus(), before_focus);
         assert_eq!(app.source_view_mode, before_mode);
@@ -5577,7 +5578,7 @@ mod tests {
 
         let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         app.load_patch(second);
-        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
     }
@@ -6426,7 +6427,7 @@ mod tests {
             Some("a".to_string())
         );
         // Empty draft on last layer prunes token entirely.
-        app.editing = Some(EditState::new_hw("B1.1".to_string(), 1, "".to_string()));
+        app.editing = Some(EditState::new_hw("B1.1".to_string(), 1, String::new()));
         app.commit_edit_to_dir(dir.path()).unwrap();
         assert_eq!(app.label_store.hw_label(&patch_path, "B1.1", 1), None);
         assert!(app.label_store.patch_labels(&patch_path).is_none());
@@ -7168,7 +7169,7 @@ mod tests {
         // Another big-class view replaces the graph in the same big pane.
         app.open_view(ViewType::Physical);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         // The source viewer stays in its small pane, with focus still on the
         // module UI in the left big pane.
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
@@ -7369,7 +7370,7 @@ mod tests {
         app.open_view(ViewType::Graph);
         app.cycle_view_in_slot(true); // graph -> physical (module UI)
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         app.cycle_view_in_slot(true); // physical -> graph
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert!(app.pane_holding(ViewType::Graph).is_some());
@@ -7420,7 +7421,7 @@ mod tests {
             "the big right view closes when the right half is repurposed"
         );
         assert!(app.layout.has_small_view());
-        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         let optimizer_pane = app.pane_holding(ViewType::Optimizer).unwrap();
         assert_eq!(app.layout.focus, optimizer_pane, "opened view takes focus");
     }
@@ -7690,8 +7691,8 @@ mod tests {
         let (w0, h0) = sizes[0];
         let (x1, y1) = app.graph_positions[1];
         let (w1, h1) = sizes[1];
-        let cx = (x0.min(x1) + (x0 + w0).max(x1 + w1)) / 2.0;
-        let cy = (y0.min(y1) + (y0 + h0).max(y1 + h1)) / 2.0;
+        let cx = f32::midpoint(x0.min(x1), (x0 + w0).max(x1 + w1));
+        let cy = f32::midpoint(y0.min(y1), (y0 + h0).max(y1 + h1));
         assert!(app.center_graph_camera_on_nodes(&focus));
         let cam = app.graph_camera.unwrap();
         assert!((cam.pan.0 - (cx * cam.zoom - 320.0)).abs() < 0.01);
@@ -8403,9 +8404,11 @@ mod tests {
     /// preamble lines — the only *written* label source these tests use; every
     /// other token keeps its derived name.
     fn label_fit_app(labels: &[(&str, &str)]) -> App {
+        use std::fmt::Write as _;
+
         let mut ini = String::new();
         for (token, label) in labels {
-            ini.push_str(&format!("# {token}: {label}\n"));
+            writeln!(ini, "# {token}: {label}").expect("write to a String");
         }
         ini.push_str(
             "\n[p4b2]\n    pot1 = P1.1\n    pot2 = P1.2\n    pot3 = P1.3\n    pot4 = P1.4\n    \
@@ -8429,12 +8432,17 @@ mod tests {
     /// `Shift+F` fit). Computed from the live rack, never from a literal.
     fn whole_rack_fit(app: &App, pane: Rect) -> f64 {
         let (rack_w, rack_h) = rack_extent_mm(app);
-        crate::physical::fit_zoom(rack_w, rack_h, pane.width as f32, pane.height as f32)
+        crate::physical::fit_zoom(
+            rack_w,
+            rack_h,
+            f32::from(pane.width),
+            f32::from(pane.height),
+        )
     }
 
     /// The pane in points, the shape `fit_physical_view` takes.
     fn pane_points(pane: Rect) -> (f32, f32) {
-        (pane.width as f32, pane.height as f32)
+        (f32::from(pane.width), f32::from(pane.height))
     }
 
     /// Slack for comparing a fitted zoom against the f64 rack fit: the fit is
@@ -8453,7 +8461,7 @@ mod tests {
         let (w, h) = pane_points(LABEL_FIT_PANE);
         assert!(app.fit_physical_view(w, h), "the fixture has a rack to fit");
 
-        let lifted = app.physical_zoom as f64;
+        let lifted = f64::from(app.physical_zoom);
         assert!(
             lifted > rack_fit + FIT_EPS,
             "a written label the rack fit cannot show must lift the fitted zoom \
@@ -8494,7 +8502,7 @@ mod tests {
         let (w, h) = pane_points(LABEL_FIT_PANE);
         assert!(derived.fit_physical_view(w, h));
         assert!(
-            (derived.physical_zoom as f64 - rack_fit).abs() < 1e-4,
+            (f64::from(derived.physical_zoom) - rack_fit).abs() < 1e-4,
             "derived names (B1.1, L1.1, ...) must not inflate the fit ({} vs rack {rack_fit})",
             derived.physical_zoom
         );
@@ -8528,7 +8536,7 @@ mod tests {
         let mut led = label_fit_app(&[("L1.1", unservable.as_str())]);
         assert!(led.fit_physical_view(w, h));
         assert!(
-            (led.physical_zoom as f64 - rack_fit).abs() <= FIT_EPS,
+            (f64::from(led.physical_zoom) - rack_fit).abs() <= FIT_EPS,
             "a label no zoom can draw whole must not lift the fit ({} vs rack {rack_fit})",
             led.physical_zoom
         );
@@ -8538,7 +8546,7 @@ mod tests {
         let mut short_led = label_fit_app(&[("L1.1", "Ring light")]);
         assert!(short_led.fit_physical_view(w, h));
         assert!(
-            short_led.physical_zoom as f64 > rack_fit + 0.05,
+            f64::from(short_led.physical_zoom) > rack_fit + 0.05,
             "a short label on the same 3 mm cell does lift the fit ({} vs rack {rack_fit})",
             short_led.physical_zoom
         );
@@ -8565,11 +8573,11 @@ mod tests {
         assert!(moderate.fit_physical_view(w, h));
         let lifted = moderate.physical_zoom;
         assert!(
-            lifted as f64 > rack_fit + FIT_EPS,
+            f64::from(lifted) > rack_fit + FIT_EPS,
             "the baseline label lifts the fit ({lifted} vs rack {rack_fit})"
         );
         assert!(
-            lifted as f64 <= crate::physical::ZOOM_MAX,
+            f64::from(lifted) <= crate::physical::ZOOM_MAX,
             "a fitted zoom is never above the ceiling ({lifted})"
         );
 
@@ -8579,7 +8587,7 @@ mod tests {
         let mut over = label_fit_app(&[("B1.1", "Trigger input"), ("B1.2", impossible.as_str())]);
         assert!(over.fit_physical_view(w, h));
         assert!(
-            over.physical_zoom as f64 <= crate::physical::ZOOM_MAX,
+            f64::from(over.physical_zoom) <= crate::physical::ZOOM_MAX,
             "the lift stops at ZOOM_MAX ({} vs {})",
             over.physical_zoom,
             crate::physical::ZOOM_MAX
@@ -8659,7 +8667,7 @@ mod tests {
         let (rack_w, rack_h) = rack_extent_mm(&app);
         assert_eq!(
             app.physical_offset,
-            crate::physical::fit_offset(rack_w, rack_h, w, h, rack_fit as f64),
+            crate::physical::fit_offset(rack_w, rack_h, w, h, f64::from(rack_fit)),
             "the rack fit centres the whole rack"
         );
         let hint = app.physical_status_hint().expect("patch loaded");

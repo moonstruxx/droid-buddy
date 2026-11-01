@@ -34,6 +34,9 @@ cargo build --release --locked
 `--locked` makes a stale `Cargo.lock` a failure instead of a silent
 re-resolve, so commit a dependency change together with its lock file.
 
+`Cargo.toml` `[lints.clippy]` enables `clippy::pedantic` crate-wide; its
+allow-list, one reason per entry, is the only place a lint is silenced.
+
 Tests are co-located `#[cfg(test)]` unit tests plus
 `src/regression.rs` (cross-layer stories) and `tests/perf_gate.rs`
 (budgeted scale-anchor phases). Rendering is verified by headless

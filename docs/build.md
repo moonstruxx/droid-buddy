@@ -98,7 +98,7 @@ cargo build --release --locked
 | Gate | Catches |
 |---|---|
 | `cargo fmt --check` | formatting drift; fix with plain `cargo fmt` |
-| clippy with `-D warnings` | lints over every target and feature; warnings are errors |
+| clippy with `-D warnings` | lints over every target and feature; warnings are errors. `clippy::pedantic` is on crate-wide, with a reasoned allow-list in `Cargo.toml` `[lints.clippy]` |
 | rustdoc with `-D warnings` | broken intra-doc links — how a rename silently rots the docs |
 | `cargo test --locked` | unit tests, the `src/regression.rs` stories, and the Linux perf gate |
 | `cargo build --release --locked` | release-profile breakage the test profile does not show |
@@ -108,6 +108,15 @@ re-resolve, so a dependency change has to be committed with its lock
 file. [Contributing](contributing.md) lists the same locked forms; the
 commands still pass locally without `--locked`, but then a stale
 lockfile would not fail.
+
+The `[lints.clippy]` table in `Cargo.toml` turns on `clippy::pedantic`
+for the whole crate and is the only place a lint is turned off. Every
+entry in its allow-list carries the reason it is off — the f32
+geometry casts, float equality on colours, the flag structs that mirror
+the patch format's independent options, and the prose docs — so the
+exception policy is one reviewable table rather than `#[allow]`s
+scattered through `src/`. Adding an `#[allow]` in the code needs a
+reason at the site and should stay rare.
 
 The release performance gate is a sixth command, Linux only:
 

@@ -58,10 +58,10 @@ fn fixture_app() -> App {
             {
                 // Spread them horizontally so empty-panel clicks are unambiguous.
                 let x = match tok {
-                    "B1.1" => 0,
                     "P1.1" => 20,
                     "B1.2" => 40,
                     "P1.2" => 60,
+                    // `B1.1` stays at the origin.
                     _ => 0,
                 };
                 v.push((idx, Rect::new(x, 0, 16, 2)));
@@ -84,8 +84,8 @@ fn idx_for(app: &App, token: &str) -> usize {
 }
 
 fn open_viewer(app: &mut App) {
-    handle_event(key(KeyCode::Char('g')), app);
-    handle_event(key(KeyCode::Char('v')), app);
+    handle_event(&key(KeyCode::Char('g')), app);
+    handle_event(&key(KeyCode::Char('v')), app);
     assert!(
         app.pane_holding(ViewType::SourceViewer).is_some(),
         "g v should open embedded viewer"
@@ -135,7 +135,7 @@ fn regression_first_and_replacement_jumps() {
     let b11_idx = idx_for(&app, "B1.1");
     app.hovered_component = Some(b11_idx);
     app.source_scroll = 999;
-    handle_event(key(KeyCode::Enter), &mut app);
+    handle_event(&key(KeyCode::Enter), &mut app);
     assert_eq!(app.selected_component, Some(String::from("B1.1")));
     assert_eq!(app.source_scroll, b11_first);
     assert_eq!(app.occurrence_cursor, 0);
@@ -143,7 +143,7 @@ fn regression_first_and_replacement_jumps() {
     // Replacement via Space on different component
     let p11_idx = idx_for(&app, "P1.1");
     app.hovered_component = Some(p11_idx);
-    handle_event(key(KeyCode::Char(' ')), &mut app);
+    handle_event(&key(KeyCode::Char(' ')), &mut app);
     assert_eq!(app.selected_component, Some(String::from("P1.1")));
     assert_eq!(app.source_scroll, p11_first);
 
@@ -165,10 +165,10 @@ fn regression_first_and_replacement_jumps() {
     open_viewer(&mut app);
     assert_eq!(app.source_scroll, b12_first);
     // Replacement while viewer open (Tabs to panels first)
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     app.hovered_component = Some(b11_idx);
-    handle_event(key(KeyCode::Enter), &mut app);
+    handle_event(&key(KeyCode::Enter), &mut app);
     assert_eq!(app.selected_component, Some(String::from("B1.1")));
     assert_eq!(app.source_scroll, b11_first);
 }
@@ -186,38 +186,38 @@ fn regression_occurrence_bounds() {
     assert_eq!(app.source_scroll, occ[0].line);
 
     // Up at first saturates
-    handle_event(key(KeyCode::Up), &mut app);
+    handle_event(&key(KeyCode::Up), &mut app);
     assert_eq!(app.occurrence_cursor, 0);
     assert_eq!(app.source_scroll, occ[0].line);
 
     // Down steps one
-    handle_event(key(KeyCode::Down), &mut app);
+    handle_event(&key(KeyCode::Down), &mut app);
     assert_eq!(app.occurrence_cursor, 1);
     assert_eq!(app.source_scroll, occ[1].line);
 
     // Down to last saturates
     for _ in 0..occ.len() + 5 {
-        handle_event(key(KeyCode::Down), &mut app);
+        handle_event(&key(KeyCode::Down), &mut app);
     }
     assert_eq!(app.occurrence_cursor, occ.len() - 1);
     assert_eq!(app.source_scroll, occ.last().unwrap().line);
-    handle_event(key(KeyCode::Down), &mut app);
+    handle_event(&key(KeyCode::Down), &mut app);
     assert_eq!(app.occurrence_cursor, occ.len() - 1);
 
     // Home -> first, End -> last
-    handle_event(key(KeyCode::Home), &mut app);
+    handle_event(&key(KeyCode::Home), &mut app);
     assert_eq!(app.occurrence_cursor, 0);
     assert_eq!(app.source_scroll, occ[0].line);
-    handle_event(key(KeyCode::End), &mut app);
+    handle_event(&key(KeyCode::End), &mut app);
     assert_eq!(app.occurrence_cursor, occ.len() - 1);
 
     // No-selection no-op
     app.clear_selected_component();
     let scroll_before = app.source_scroll;
-    handle_event(key(KeyCode::Up), &mut app);
-    handle_event(key(KeyCode::Down), &mut app);
-    handle_event(key(KeyCode::Home), &mut app);
-    handle_event(key(KeyCode::End), &mut app);
+    handle_event(&key(KeyCode::Up), &mut app);
+    handle_event(&key(KeyCode::Down), &mut app);
+    handle_event(&key(KeyCode::Home), &mut app);
+    handle_event(&key(KeyCode::End), &mut app);
     assert_eq!(app.source_scroll, scroll_before);
     assert_eq!(app.occurrence_cursor, 0);
 }
@@ -231,22 +231,22 @@ fn regression_deselect_keeps_position() {
     open_viewer(&mut app);
     let occ = app.patch.as_ref().unwrap().occurrences_for("B1.1").to_vec();
     // Move to middle occurrence via Down
-    handle_event(key(KeyCode::Down), &mut app);
+    handle_event(&key(KeyCode::Down), &mut app);
     let mid_line = app.source_scroll;
     assert_eq!(app.occurrence_cursor, 1);
     // Also j/k line scroll should still work but not affect occurrence cursor
-    handle_event(key(KeyCode::Char('j')), &mut app);
+    handle_event(&key(KeyCode::Char('j')), &mut app);
     assert_eq!(app.source_scroll, mid_line + 1);
     // Jump back to occurrence so deselect origin is occurrence-aligned
-    handle_event(key(KeyCode::Up), &mut app);
+    handle_event(&key(KeyCode::Up), &mut app);
     assert_eq!(app.source_scroll, occ[0].line);
-    handle_event(key(KeyCode::Down), &mut app);
+    handle_event(&key(KeyCode::Down), &mut app);
     assert_eq!(app.source_scroll, occ[1].line);
     let pos_before = app.source_scroll;
 
     // Empty-panel click clears selection without moving scroll
     // Need viewer focus on Panels for empty click to be considered
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     // Place component rects far away, click empty
     let idx = idx_for(&app, "B1.1");
@@ -275,11 +275,11 @@ fn regression_t_preserves_usable_content() {
     // Highlights usable: select then verify still raw
     app.select_component(String::from("B1.1"));
     // t -> prettified
-    handle_event(key(KeyCode::Char('t')), &mut app);
+    handle_event(&key(KeyCode::Char('t')), &mut app);
     assert_eq!(app.source_view_mode, SourceViewMode::Prettified);
     // t back to raw restores verbatim content and scroll still meaningful
     let scroll_before = app.source_scroll;
-    handle_event(key(KeyCode::Char('t')), &mut app);
+    handle_event(&key(KeyCode::Char('t')), &mut app);
     assert_eq!(app.source_view_mode, SourceViewMode::Raw);
     // scroll preserved across toggles (t does not reset scroll)
     assert_eq!(app.source_scroll, scroll_before);
@@ -348,7 +348,7 @@ fn regression_minimap_click_maps_correctly() {
     // The clamped border click below the minimap counts as empty-panel space
     // and may have handed focus to Panels; normalize before the check.
     if app.viewer_focus() != ViewerFocus::Panels {
-        handle_event(key(KeyCode::Tab), &mut app); // to Panels
+        handle_event(&key(KeyCode::Tab), &mut app); // to Panels
     }
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     let state_before = app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")]
@@ -365,7 +365,7 @@ fn regression_minimap_click_maps_correctly() {
         "minimap click should not toggle component"
     );
 
-    handle_event(key(KeyCode::Tab), &mut app); // back to Source
+    handle_event(&key(KeyCode::Tab), &mut app); // back to Source
     assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     click_at(&mut app, 0.7);
     // Still works when source focused
@@ -395,41 +395,41 @@ fn regression_tab_focus_round_trip() {
     // render shows focus emphasis (yellow border) is not directly assertable via text,
     // but we can verify state and that panel keys are live even when Source focused
     let scale_before = app.scale_factor;
-    handle_event(key(KeyCode::Char('+')), &mut app);
+    handle_event(&key(KeyCode::Char('+')), &mut app);
     assert_ne!(
         app.scale_factor, scale_before,
         "scale live when Source focused"
     );
 
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     // Now panel keys work
-    handle_event(key(KeyCode::Char('+')), &mut app);
+    handle_event(&key(KeyCode::Char('+')), &mut app);
     assert_ne!(app.scale_factor, scale_before);
     // j should move hover when panels focused (not source scroll)
     app.hovered_component = Some(idx_for(&app, "B1.1"));
     let hover_before = app.hovered_component;
-    handle_event(key(KeyCode::Char('j')), &mut app);
+    handle_event(&key(KeyCode::Char('j')), &mut app);
     assert_ne!(app.hovered_component, hover_before);
 
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     // Back to source: j scrolls source
     let scroll_before = app.source_scroll;
-    handle_event(key(KeyCode::Char('j')), &mut app);
+    handle_event(&key(KeyCode::Char('j')), &mut app);
     assert_eq!(app.source_scroll, scroll_before + 1);
 
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Source);
 
     // Esc closes keeping selection and resets focus to Panels
     app.select_component(String::from("B1.1"));
     let sel = app.selected_component.clone();
     let scroll = app.source_scroll;
-    handle_event(key(KeyCode::Esc), &mut app);
-    assert!(!app.pane_holding(ViewType::SourceViewer).is_some());
+    handle_event(&key(KeyCode::Esc), &mut app);
+    assert!(app.pane_holding(ViewType::SourceViewer).is_none());
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     assert_eq!(app.selected_component, sel);
     assert_eq!(app.source_scroll, scroll);
@@ -444,28 +444,28 @@ fn regression_picker_precedence() {
     app.source_view_mode = SourceViewMode::Raw;
     app.source_scroll = 5;
     // Open picker via l even while source focused (picker precedence)
-    handle_event(key(KeyCode::Char('l')), &mut app);
+    handle_event(&key(KeyCode::Char('l')), &mut app);
     assert!(app.showing_picker, "picker opens even when source focused");
     // While picker open, viewer keys are inert: t should not toggle view mode
     let mode_before = app.source_view_mode.clone();
-    handle_event(key(KeyCode::Char('t')), &mut app);
+    handle_event(&key(KeyCode::Char('t')), &mut app);
     assert_eq!(app.source_view_mode, mode_before);
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     // picker still open, Tab didn't switch viewer focus (picker consumes)
     assert!(app.showing_picker);
     // Picker navigation still works
     let idx_before = app.picker_index;
-    handle_event(key(KeyCode::Char('j')), &mut app);
+    handle_event(&key(KeyCode::Char('j')), &mut app);
     assert!(app.picker_index >= idx_before);
     // Esc closes picker but viewer stays open
-    handle_event(key(KeyCode::Esc), &mut app);
+    handle_event(&key(KeyCode::Esc), &mut app);
     assert!(!app.showing_picker);
     assert!(
         app.pane_holding(ViewType::SourceViewer).is_some(),
         "viewer remains after picker close"
     );
     // Picker closed, t works again
-    handle_event(key(KeyCode::Char('t')), &mut app);
+    handle_event(&key(KeyCode::Char('t')), &mut app);
     assert_ne!(app.source_view_mode, mode_before);
 }
 
@@ -484,10 +484,10 @@ fn regression_viewer_live_interaction() {
     ];
 
     // Panel keys are live while Source focused.
-    handle_event(key(KeyCode::Char('1')), &mut app);
+    handle_event(&key(KeyCode::Char('1')), &mut app);
     assert_eq!(app.active_shift, Some(ShiftGroup::Group1), "shift live");
     let scale_before = app.scale_factor;
-    handle_event(key(KeyCode::Char('+')), &mut app);
+    handle_event(&key(KeyCode::Char('+')), &mut app);
     assert_ne!(app.scale_factor, scale_before, "scale live");
 
     // Enter toggles AND selects the hovered component; selection jumps
@@ -496,7 +496,7 @@ fn regression_viewer_live_interaction() {
     app.hovered_component = Some(b11);
     let first_b11 = app.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
     let state_before = app.patch.as_ref().unwrap().hw_components[b11].state.clone();
-    handle_event(key(KeyCode::Enter), &mut app);
+    handle_event(&key(KeyCode::Enter), &mut app);
     assert_ne!(
         app.patch.as_ref().unwrap().hw_components[b11].state,
         state_before,
@@ -504,7 +504,7 @@ fn regression_viewer_live_interaction() {
     );
     assert_eq!(app.selected_component.as_deref(), Some("B1.1"));
     assert_eq!(app.source_scroll, first_b11);
-    handle_event(key(KeyCode::Char(' ')), &mut app);
+    handle_event(&key(KeyCode::Char(' ')), &mut app);
     assert_eq!(
         app.patch.as_ref().unwrap().hw_components[b11].state,
         state_before,
@@ -533,7 +533,7 @@ fn regression_viewer_live_interaction() {
 
     // Tab back to Source; a bare source-pane click re-focuses the source
     // pane without clearing the selection or toggling anything.
-    handle_event(key(KeyCode::Tab), &mut app);
+    handle_event(&key(KeyCode::Tab), &mut app);
     assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     let sel = app.selected_component.clone();
     let scroll = app.source_scroll;
@@ -554,24 +554,24 @@ fn regression_viewer_live_interaction() {
     // l still opens picker (picker precedence), j/k line scroll and
     // Up/Down occurrence navigation stay routed by focus.
     let scroll_before = app.source_scroll;
-    handle_event(key(KeyCode::Char('j')), &mut app);
+    handle_event(&key(KeyCode::Char('j')), &mut app);
     assert_eq!(app.source_scroll, scroll_before + 1);
     let occ_before = app.occurrence_cursor;
-    handle_event(key(KeyCode::Down), &mut app);
+    handle_event(&key(KeyCode::Down), &mut app);
     assert!(app.occurrence_cursor >= occ_before);
 
     // t works from both focuses (global viewer key).
     let mode_before = app.source_view_mode.clone();
-    handle_event(key(KeyCode::Char('t')), &mut app);
+    handle_event(&key(KeyCode::Char('t')), &mut app);
     assert_ne!(app.source_view_mode, mode_before);
 
     // Esc closes keeping selection and resets focus to Panels.
-    handle_event(key(KeyCode::Esc), &mut app);
-    assert!(!app.pane_holding(ViewType::SourceViewer).is_some());
+    handle_event(&key(KeyCode::Esc), &mut app);
+    assert!(app.pane_holding(ViewType::SourceViewer).is_none());
     assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     assert_eq!(app.selected_component, sel);
     // After close, normal panel handling resumes.
-    handle_event(key(KeyCode::Char('1')), &mut app);
+    handle_event(&key(KeyCode::Char('1')), &mut app);
     assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
 }
 
@@ -811,7 +811,7 @@ fn regression_validation_fixture_matrix_all_present() {
     // Cross-check: fixtures directory contains exactly these files
     let entries = std::fs::read_dir("fixtures/validation").unwrap();
     let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|e| {
             e.path()
                 .file_stem()
@@ -914,11 +914,14 @@ fn regression_solver_single_axis_on_real_multi_banner_patch() {
     // fixture is the chain it claims to be, so the axis claim holds on its own
     // merits: measured x-span 3334.07 against y-span 153.53.
     let mut content = String::from("[p2b8]\n[lfo]\n    hz = 2\n    square = _C0\n");
+    use std::fmt::Write as _;
     for i in 0..70 {
-        content.push_str(&format!(
-            "[chain{i}]\n    input = _C{i}\n    output = _C{}\n",
-            i + 1
-        ));
+        writeln!(
+            content,
+            "[chain{i}]\n    input = _C{i}\n    output = _C{next}",
+            next = i + 1
+        )
+        .expect("write to a String");
     }
     let patch = Patch::from_ini_str(&content, String::from("chain")).unwrap();
     let clusters: Vec<crate::graph::Cluster> = patch
@@ -1037,10 +1040,10 @@ fn regression_solver_cluster_cohesion_on_real_banner_groups() {
     let positions = solve(&graph, &[], SolveKnobs::default());
     let xs: Vec<f32> = members.iter().map(|&i| positions[i].0).collect();
     let ys: Vec<f32> = members.iter().map(|&i| positions[i].1).collect();
-    let min_x = xs.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let min_y = ys.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_y = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_x = xs.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let min_y = ys.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let (cw, ch) = (max_x - min_x, max_y - min_y);
     assert!(cw.is_finite() && ch.is_finite());
     assert!(cw > 0.0 && ch > 0.0);
@@ -1267,7 +1270,7 @@ fn regression_graph_anchor_no_overlap_at_every_zoom() {
             None => reserved.push((x, widths[i])),
         }
     }
-    for (_, bw) in reserved.iter_mut() {
+    for (_, bw) in &mut reserved {
         *bw = (*bw / block_units).ceil() * block_units;
     }
     for (i, &(x, _)) in anchor.positions.iter().enumerate() {
@@ -1284,7 +1287,7 @@ fn regression_graph_anchor_no_overlap_at_every_zoom() {
     }
 
     // 1c. Non-overlap at every zoom preset, on the drawn scene.
-    for &zoom in App::GRAPH_ZOOM_PRESETS.iter() {
+    for &zoom in &App::GRAPH_ZOOM_PRESETS {
         let app = anchor_app(zoom);
         let scene = crate::gui::build_scene_spec(&app, crate::theme::active(), pane)
             .expect("scene present at every preset");
@@ -1521,12 +1524,12 @@ fn regression_no_panels_help_view_variants() {
     // Exhaustive, wildcard-free: the match below is the compile-time tripwire.
     for view in variants {
         let title = match view {
-            HelpView::ModuleUi => view.title(),
-            HelpView::Viewer => view.title(),
-            HelpView::Graph => view.title(),
-            HelpView::Validation => view.title(),
-            HelpView::Optimizer => view.title(),
-            HelpView::Picker => view.title(),
+            HelpView::ModuleUi
+            | HelpView::Viewer
+            | HelpView::Graph
+            | HelpView::Validation
+            | HelpView::Optimizer
+            | HelpView::Picker => view.title(),
         };
         assert!(!title.is_empty(), "every help view has a border title");
     }
@@ -1617,8 +1620,8 @@ fn regression_warnings_only_load_hints_and_defers_modal() {
     );
 
     // App chords keep working while the modal stays closed: `g g` opens the graph.
-    handle_event(key(KeyCode::Char('g')), &mut app);
-    handle_event(key(KeyCode::Char('g')), &mut app);
+    handle_event(&key(KeyCode::Char('g')), &mut app);
+    handle_event(&key(KeyCode::Char('g')), &mut app);
     assert!(
         app.pane_holding(ViewType::Graph).is_some(),
         "`g g` must still open the graph on a warnings-only load"
@@ -1629,7 +1632,7 @@ fn regression_warnings_only_load_hints_and_defers_modal() {
     );
 
     // `e` opens the modal on demand with the list intact.
-    handle_event(key(KeyCode::Char('e')), &mut app);
+    handle_event(&key(KeyCode::Char('e')), &mut app);
     assert!(
         app.showing_validation,
         "`e` must open the validation modal on demand"
@@ -1645,7 +1648,7 @@ fn regression_warnings_only_load_hints_and_defers_modal() {
     );
 
     // Closing with `e` again leaves the patch loaded and everything else intact.
-    handle_event(key(KeyCode::Char('e')), &mut app);
+    handle_event(&key(KeyCode::Char('e')), &mut app);
     assert!(
         !app.showing_validation,
         "`e` toggles the modal closed again"
@@ -2377,7 +2380,7 @@ const LED_REGISTER_STATIC: &[(&str, f64)] = &[("L1.1", 0.5), ("L2.1", 0.8)];
 const LED_REGISTER_OFF: &[&str] = &["L1.3", "L1.4"];
 
 /// The folded LEDs bound to buttons: explicit pairs (L1.1, L1.3, L1.4) and
-/// the M4 default RGB twin (L2.1, via B2.1 per device_led_defaults.ini).
+/// the M4 default RGB twin (L2.1, via B2.1 per `device_led_defaults.ini`).
 const LED_REGISTER_FOLDED: &[&str] = &["L1.1", "L1.3", "L1.4", "L2.1"];
 
 #[test]
@@ -2766,7 +2769,7 @@ fn regression_s10_switch_kinds_glyphs() {
             cell.glyph
         );
         assert!(
-            ["\u{25A3}", "\u{25A1}"].contains(&cell.glyph.as_str()) == !rotary,
+            ["\u{25A3}", "\u{25A1}"].contains(&cell.glyph.as_str()) != rotary,
             "{token} rotary={rotary} glyph must be square iff toggle, got {:?}",
             cell.glyph
         );
@@ -3393,7 +3396,7 @@ fn regression_module_ui_labels_element_cell_is_true_millimetre_size() {
         .cells
         .iter()
         .find(|cell| cell.component_index == Some(index))
-        .unwrap_or_else(|| panic!("{} must render a cell", MODULE_UI_LABELS_FITTING));
+        .unwrap_or_else(|| panic!("{MODULE_UI_LABELS_FITTING} must render a cell"));
     let points_per_mm = crate::physical::PHYSICAL_POINTS_PER_MM as f32;
     let expected = 9.0 * points_per_mm * app.physical_zoom;
     assert!(
@@ -3893,8 +3896,8 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     let assert_mm = |token: &str, rect: egui::Rect, w_mm: f64, h_mm: f64| {
         let scale = crate::physical::PHYSICAL_POINTS_PER_MM * f64::from(app.physical_zoom);
         assert!(
-            (rect.width() as f64 - w_mm * scale).abs() < 0.1
-                && (rect.height() as f64 - h_mm * scale).abs() < 0.1,
+            (f64::from(rect.width()) - w_mm * scale).abs() < 0.1
+                && (f64::from(rect.height()) - h_mm * scale).abs() < 0.1,
             "{token} must be the {w_mm} × {h_mm} mm cell at {}%: {rect:?}",
             (app.physical_zoom * 100.0).round()
         );

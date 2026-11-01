@@ -1,9 +1,9 @@
-//! Pure SysEx payload builder for the MIDI upload (`midi-upload` task 1.1).
+//! Pure `SysEx` payload builder for the MIDI upload (`midi-upload` task 1.1).
 //!
 //! Input is rendered patch text: callers serialize `App.patch` via the
 //! existing lossless writer (`Patch::write_to_ini` / `render_ini` in
 //! `crate::patch`) and pass the text here — serialization is NOT
-//! reimplemented. Output is the framed SysEx byte string ready to hand to
+//! reimplemented. Output is the framed `SysEx` byte string ready to hand to
 //! `amidi -s` / `sendmidi syf`.
 //!
 //! The stripping rules are a line-by-line port of the reference `droidpatch`
@@ -24,17 +24,17 @@
 //! on lines without any `"` remove all remaining whitespace; then drop
 //! every byte outside `0x0A..=0x7E` (GNU `tr` parses `'\n-~'` as the range
 //! newline–`~`, so spaces inside quoted strings survive while tabs,
-//! control characters, and non-ASCII bytes are deleted — MIDI SysEx is
+//! control characters, and non-ASCII bytes are deleted — MIDI `SysEx` is
 //! 7-bit). The cleaned text is wrapped in `F0 00 66 66 50 … F7`.
 //!
 //! No process, filesystem, or UI dependency: plain functions over
 //! strings/bytes, like `crate::diff`.
 
-/// SysEx header written by the reference script (`\0360\0000\0146\0146P`):
+/// `SysEx` header written by the reference script (`\0360\0000\0146\0146P`):
 /// SOX + DROID manufacturer id + `P` (patch) command.
 pub const SYSEX_HEADER: [u8; 5] = [0xF0, 0x00, 0x66, 0x66, 0x50];
 
-/// SysEx end byte (`\0367`).
+/// `SysEx` end byte (`\0367`).
 pub const SYSEX_FOOTER: u8 = 0xF7;
 
 /// First/last byte value the `tr -c -d '\n-~'` stage keeps (inclusive).
@@ -104,7 +104,7 @@ fn collapse_equals_padding(line: &str) -> String {
     format!("{}={}", key, &right[1..])
 }
 
-/// Build the framed SysEx payload for rendered patch text.
+/// Build the framed `SysEx` payload for rendered patch text.
 ///
 /// Each source line is stripped via [`strip_line`] and re-terminated with
 /// `\n` (empty lines contribute a bare newline, as in the script pipeline;
@@ -124,7 +124,7 @@ pub fn build_sysex(rendered: &str) -> Vec<u8> {
 }
 
 /// Valentin helper for the send path: every content byte must clear the MSB
-/// (MIDI SysEx is 7-bit). Applies to the payload *body* — callers exclude
+/// (MIDI `SysEx` is 7-bit). Applies to the payload *body* — callers exclude
 /// the `F0`/`F7` framing bytes, which legitimately carry the MSB.
 /// `build_sysex` bodies always pass.
 pub fn is_seven_bit_clean(bytes: &[u8]) -> bool {

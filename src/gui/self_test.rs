@@ -241,8 +241,8 @@ fn check_click(app: &mut App) -> Result<(), String> {
         .map(|component| component.id.clone())
         .ok_or_else(|| format!("published rect {index} names no hardware component"))?;
     let center = (
-        rect.x as f32 + rect.width as f32 / 2.0,
-        rect.y as f32 + rect.height as f32 / 2.0,
+        f32::from(rect.x) + f32::from(rect.width) / 2.0,
+        f32::from(rect.y) + f32::from(rect.height) / 2.0,
     );
     let frame = super::WindowFrame {
         pointer: Some(center),
@@ -285,11 +285,7 @@ fn check_skeleton(app: &mut App) -> Result<(), String> {
 /// itself is world-space (ADR 40), so it is exercised by the scene, not by a
 /// published pixel rect.
 fn check_graph(app: &App, painted: &[String]) -> Result<(), String> {
-    let nodes = app
-        .graph
-        .as_ref()
-        .map(|graph| graph.nodes.len())
-        .unwrap_or(0);
+    let nodes = app.graph.as_ref().map_or(0, |graph| graph.nodes.len());
     if nodes == 0 {
         return Err("the graph model was never built".to_string());
     }
@@ -313,10 +309,12 @@ fn check_graph(app: &App, painted: &[String]) -> Result<(), String> {
         ));
     }
     if let Some(node) = scene.nodes.iter().find(|node| {
-        !node.x.is_finite()
-            || !node.y.is_finite()
-            || !(node.w.is_finite() && node.w > 0.0)
-            || !(node.h.is_finite() && node.h > 0.0)
+        !(node.x.is_finite()
+            && node.y.is_finite()
+            && node.w.is_finite()
+            && node.w > 0.0
+            && node.h.is_finite()
+            && node.h > 0.0)
     }) {
         return Err(format!(
             "node {:?} projects to a degenerate rect ({}, {} {}x{})",

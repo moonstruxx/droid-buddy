@@ -58,9 +58,8 @@ pub fn active_view(app: &App) -> HelpView {
         match app.layout.pane(app.layout.focus).view {
             Some(ViewType::Graph) => HelpView::Graph,
             Some(ViewType::SourceViewer) => HelpView::Viewer,
-            Some(ViewType::Physical) => HelpView::ModuleUi,
+            Some(ViewType::Physical) | None => HelpView::ModuleUi,
             Some(ViewType::Optimizer) => HelpView::Optimizer,
-            None => HelpView::ModuleUi,
         }
     }
 }
@@ -436,11 +435,10 @@ mod tests {
         // not survive on `f`.
         let table = keybindings(HelpView::ModuleUi);
         let desc = |key: &str| {
-            table
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, d)| *d)
-                .unwrap_or_else(|| panic!("Module UI table must document {key:?}"))
+            table.iter().find(|(k, _)| *k == key).map_or_else(
+                || panic!("Module UI table must document {key:?}"),
+                |(_, d)| *d,
+            )
         };
 
         let labels = desc("f");
@@ -675,7 +673,7 @@ mod tests {
 
         // Every row is a known key; a new row must be added to ALL_KNOWN_ROWS
         // (and justified against the handler) or removed.
-        for (key, desc) in table.iter() {
+        for (key, desc) in &table {
             assert!(
                 ALL_KNOWN_ROWS.contains(&(*key, *desc)),
                 "Module UI row {key:?} => {desc:?} is not a known handler binding"

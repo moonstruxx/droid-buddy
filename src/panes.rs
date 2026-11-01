@@ -134,8 +134,8 @@ mod tests {
     }
 
     /// Startup arrangement with the viewer closed and the graph in the right
-    /// big pane: BigLeft = Panels, BigRight = Graph, no small view, focus on
-    /// BigRight (the two-big-pane arrangement used by the transition tests).
+    /// big pane: `BigLeft` = Panels, `BigRight` = Graph, no small view, focus on
+    /// `BigRight` (the two-big-pane arrangement used by the transition tests).
     fn big_arrangement_graph_right() -> App {
         let mut app = app_with_patch();
         app.layout.focus = PaneId::SmallTop;

@@ -93,9 +93,9 @@ pub(super) fn favourited_label(
         return raw.to_string();
     }
     if is_dir {
-        format!("★ {}/", raw)
+        format!("★ {raw}/")
     } else {
-        format!("★ {}", raw)
+        format!("★ {raw}")
     }
 }
 
@@ -112,13 +112,22 @@ pub(super) fn favourited_label(
 /// construction) plus the dir/parent flags: directories and the `..` sentinel
 /// are selectable, and a non-directory row is selectable exactly when it names
 /// a `.ini` file (the same extension rule `App::is_entry_selectable` applies).
+///
+/// Case-sensitive on purpose: only a lowercase `.ini` name is a patch, so this
+/// matches the loader rather than accepting `.INI` on case-insensitive hosts.
+fn has_ini_extension(label: &str) -> bool {
+    std::path::Path::new(label)
+        .extension()
+        .is_some_and(|ext| ext == "ini")
+}
+
 pub(super) fn ordered_entries(
     favs: Vec<(String, bool)>,
     listing: Vec<(String, bool, bool)>,
 ) -> Vec<PickerRow> {
     let mut rows = Vec::new();
     for (label, is_dir) in favs {
-        let is_ini = !is_dir && label.ends_with(".ini");
+        let is_ini = !is_dir && has_ini_extension(&label);
         rows.push(PickerRow {
             label: favourited_label(&label, true, is_dir, false),
             is_favourite: true,
@@ -139,7 +148,7 @@ pub(super) fn ordered_entries(
                 is_selectable: true,
             });
         } else {
-            let is_ini = !is_dir && label.ends_with(".ini");
+            let is_ini = !is_dir && has_ini_extension(&label);
             rows.push(PickerRow {
                 label,
                 is_favourite: false,
@@ -228,23 +237,23 @@ pub(super) fn paint_picker(
     let Some(spec) = spec else {
         return PickerFrame::default();
     };
-    let t = crate::theme::active();
+    let theme = crate::theme::active();
 
     // Centered overlay: 70% width, 50% height, at least 40×20, centered.
-    let w = (canvas.x * 0.70).clamp(40.0, canvas.x - 4.0).max(40.0);
-    let h = (canvas.y * 0.50).clamp(20.0, canvas.y - 4.0).max(20.0);
+    let width = (canvas.x * 0.70).clamp(40.0, canvas.x - 4.0).max(40.0);
+    let height = (canvas.y * 0.50).clamp(20.0, canvas.y - 4.0).max(20.0);
     let picker_rect = Rect::from_min_size(
-        Pos2::new((canvas.x - w) / 2.0, (canvas.y - h) / 2.0),
-        Vec2::new(w, h),
+        Pos2::new((canvas.x - width) / 2.0, (canvas.y - height) / 2.0),
+        Vec2::new(width, height),
     );
 
     // Background + border (muted bg, accent border, title).
-    painter.rect_filled(picker_rect, 0.0, rgb(t.muted));
+    painter.rect_filled(picker_rect, 0.0, rgb(theme.muted));
     painter.rect(
         picker_rect,
         0.0,
         egui::Color32::TRANSPARENT,
-        egui::Stroke::new(1.0, rgb(t.accent)),
+        egui::Stroke::new(1.0, rgb(theme.accent)),
         egui::StrokeKind::Inside,
     );
     if !spec.title.is_empty() {
@@ -253,7 +262,7 @@ pub(super) fn paint_picker(
             egui::Align2::LEFT_TOP,
             &spec.title,
             egui::FontId::proportional(12.0),
-            rgb(t.accent),
+            rgb(theme.accent),
         );
     }
     // Picker directory subtitle under title, if provided.
@@ -263,7 +272,7 @@ pub(super) fn paint_picker(
             egui::Align2::LEFT_TOP,
             &spec.picker_dir,
             egui::FontId::proportional(10.0),
-            rgb(t.text),
+            rgb(theme.text),
         );
     }
 
@@ -282,7 +291,7 @@ pub(super) fn paint_picker(
             egui::Align2::LEFT_TOP,
             format!("filter: {filter}"),
             egui::FontId::proportional(10.0),
-            rgb(t.text),
+            rgb(theme.text),
         );
         inner.min.y + (filter_y - 4.0) + 16.0
     } else if spec.picker_dir.is_empty() {
@@ -299,22 +308,22 @@ pub(super) fn paint_picker(
     let separator = spec.has_favourites && spec.fav_count < spec.rows.len();
     let capacity = capacity_raw.saturating_sub(usize::from(separator)).max(1);
     let first = scroll_window(spec.selected, spec.rows.len(), capacity);
-    let mut y = content_top;
+    let mut row_y = content_top;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
 
     for (idx, row) in spec.rows.iter().enumerate().skip(first).take(capacity) {
         // Separator between favourites and listing.
-        if separator && idx == spec.fav_count && y + row_h <= inner.max.y {
+        if separator && idx == spec.fav_count && row_y + row_h <= inner.max.y {
             painter.text(
-                Pos2::new(inner.min.x + 4.0, y),
+                Pos2::new(inner.min.x + 4.0, row_y),
                 egui::Align2::LEFT_TOP,
                 "── favourites ──",
                 egui::FontId::proportional(10.0),
-                rgb(t.text),
+                rgb(theme.text),
             );
-            y += row_h;
+            row_y += row_h;
         }
-        if y + row_h > inner.max.y {
+        if row_y + row_h > inner.max.y {
             break;
         }
         let is_selected = idx == spec.selected;
@@ -322,28 +331,28 @@ pub(super) fn paint_picker(
         let text = format!("{}{}", prefix, row.label);
 
         let bg = if is_selected {
-            let mut c = rgb(t.muted);
-            c = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 90);
-            Some(c)
+            let mut tint = rgb(theme.muted);
+            tint = egui::Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 90);
+            Some(tint)
         } else {
             None
         };
         let rect = Rect::from_min_size(
-            Pos2::new(inner.min.x + 2.0, y),
+            Pos2::new(inner.min.x + 2.0, row_y),
             Vec2::new(inner.width() - 4.0, row_h),
         );
         // Background for selected row.
-        if let Some(c) = bg {
-            painter.rect_filled(rect, 0.0, c);
+        if let Some(tint) = bg {
+            painter.rect_filled(rect, 0.0, tint);
         }
         let base_fg = if row.is_favourite {
             if row.is_dir {
-                t.picker_fav_dir
+                theme.picker_fav_dir
             } else {
-                t.picker_fav_file
+                theme.picker_fav_file
             }
         } else {
-            t.text
+            theme.text
         };
         // Non-selectable file rows (anything that is not a `.ini` or a
         // directory) dim so the selectable patch files stand out; the same
@@ -356,7 +365,7 @@ pub(super) fn paint_picker(
         // Selected keeps bold emphasis; favourite colour stays.
         let font = egui::FontId::proportional(11.0);
         painter.text(
-            Pos2::new(inner.min.x + 6.0, y),
+            Pos2::new(inner.min.x + 6.0, row_y),
             egui::Align2::LEFT_TOP,
             text,
             font,
@@ -365,7 +374,7 @@ pub(super) fn paint_picker(
         // The real row index is recorded, not the on-screen position, so hover
         // and click hit-testing stay index-correct while the list is windowed.
         row_rects.push((idx, rect));
-        y += row_h;
+        row_y += row_h;
     }
 
     ctx.input(|i| picker_frame(i, &row_rects))
@@ -720,7 +729,7 @@ mod tests {
         let rows = ordered_entries(favs, listing);
         let spec = PickerSpec {
             title: " File Picker ".into(),
-            picker_dir: "".into(),
+            picker_dir: String::new(),
             filter: None,
             rows,
             selected: 1,

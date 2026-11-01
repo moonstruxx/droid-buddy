@@ -131,7 +131,7 @@ impl RenderFeatures {
         let panels = models.len();
         let modules: usize = models.iter().map(|m| m.groups.len()).sum();
 
-        let min_width: u16 = models.iter().map(|m| m.natural_width()).sum();
+        let min_width: u16 = models.iter().map(PanelModel::natural_width).sum();
         let overflow_cols = min_width.saturating_sub(width);
 
         let fallback_rate = fallback_rate(&models, width);
@@ -157,7 +157,7 @@ impl RenderFeatures {
 
 // ── learned decision table + scorer (task 2.2, design D1/D5) ─────────────
 
-/// Embedded distilled decision table (tools/render_artifact.txt, task 2.1).
+/// Embedded distilled decision table (`tools/render_artifact.txt`, task 2.1).
 /// The schema-drift check (design D1) lives in `parse_artifact`: a mismatch
 /// between the fitter and this extractor breaks a test, not a user session.
 const RENDER_ARTIFACT_JSON: &str = include_str!("../tools/render_artifact.txt");
@@ -281,22 +281,21 @@ pub(crate) fn parse_artifact(json: &str) -> Result<RenderArtifact, String> {
 
 /// One feature's value as `f64` for band matching. `min_contrast` uses the
 /// NA sentinel when the theme's tokens are unresolvable. An unknown feature
-/// is unreachable (parse_artifact validates band names) and yields NaN so
+/// is unreachable (`parse_artifact` validates band names) and yields NaN so
 /// no band can match it.
 fn feature_value(features: &RenderFeatures, name: &str) -> f64 {
     match name {
         "components" => features.components as f64,
         "panels" => features.panels as f64,
         "modules" => features.modules as f64,
-        "min_width" => features.min_width as f64,
-        "overflow_cols" => features.overflow_cols as f64,
-        "fallback_rate" => features.fallback_rate as f64,
-        "sidebar_hidden" => u8::from(features.sidebar_hidden) as f64,
-        "minimap_hidden" => u8::from(features.minimap_hidden) as f64,
+        "min_width" => f64::from(features.min_width),
+        "overflow_cols" => f64::from(features.overflow_cols),
+        "fallback_rate" => f64::from(features.fallback_rate),
+        "sidebar_hidden" => f64::from(u8::from(features.sidebar_hidden)),
+        "minimap_hidden" => f64::from(u8::from(features.minimap_hidden)),
         "min_contrast" => features
             .min_contrast
-            .map(f64::from)
-            .unwrap_or(CONTRAST_NA_SENTINEL),
+            .map_or(CONTRAST_NA_SENTINEL, f64::from),
         _ => f64::NAN,
     }
 }
@@ -369,7 +368,7 @@ struct PanelModel<'a> {
     groups: Vec<Vec<&'a HwComponent>>,
 }
 
-impl<'a> PanelModel<'a> {
+impl PanelModel<'_> {
     /// Subdivided = more than one module group (the renderer draws module
     /// sub-borders only when a panel mixes multiple circuit instances).
     fn subdivided(&self) -> bool {
@@ -382,7 +381,12 @@ impl<'a> PanelModel<'a> {
     /// on one row (`widest × COMPONENT_WIDTH + 4`).
     fn natural_width(&self) -> u16 {
         if self.subdivided() {
-            let widest = self.groups.iter().map(|g| g.len()).max().unwrap_or(0);
+            let widest = self
+                .groups
+                .iter()
+                .map(std::vec::Vec::len)
+                .max()
+                .unwrap_or(0);
             (widest as u16) * COMPONENT_WIDTH + 4
         } else {
             (self.visible.len() as u16) * COMPONENT_WIDTH + 2
@@ -600,7 +604,7 @@ fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
 
 /// WCAG 2.x relative luminance of an sRGB channel value.
 fn channel_luminance(channel: u8) -> f32 {
-    let s = channel as f32 / 255.0;
+    let s = f32::from(channel) / 255.0;
     if s <= 0.039_28 {
         s / 12.92
     } else {
@@ -1044,7 +1048,7 @@ fallback_rate,sidebar_hidden,minimap_hidden,min_contrast,degraded"
                 "overflow {line}"
             );
             assert!(
-                approx(f.fallback_rate as f64, cols[8]),
+                approx(f64::from(f.fallback_rate), cols[8]),
                 "fallback_rate {line}"
             );
             assert_eq!(
@@ -1063,13 +1067,15 @@ fallback_rate,sidebar_hidden,minimap_hidden,min_contrast,degraded"
                     "rust None but csv {}: {line}",
                     cols[11]
                 ),
-                Some(v) => assert!(approx(v as f64, cols[11]), "min_contrast {line}"),
+                Some(v) => assert!(approx(f64::from(v), cols[11]), "min_contrast {line}"),
             }
             // Label rule agreement (auditable D3 semantics): the Python label
             // is the union of the three degradation channels.
-            let rust_label = (f.overflow_cols > 0
-                || f.fallback_rate > 0.0
-                || f.min_contrast.is_some_and(|c| c < 4.5)) as u8;
+            let rust_label = u8::from(
+                f.overflow_cols > 0
+                    || f.fallback_rate > 0.0
+                    || f.min_contrast.is_some_and(|c| c < 4.5),
+            );
             assert_eq!(
                 rust_label,
                 cols[12].parse::<u8>().unwrap(),

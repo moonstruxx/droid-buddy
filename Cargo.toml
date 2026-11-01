@@ -19,3 +19,41 @@ egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Pedantic is the crate-wide baseline; CI promotes every warning to an error with
+# `-D warnings`. The allow-list below is the whole exception policy, kept here rather
+# than as `#[allow]` at the call sites so it is reviewable in one place; each entry
+# states why it is off.   Priority 0 is the group, 1 the individual overrides.
+[lints.clippy]
+pedantic = { level = "warn", priority = 0 }
+
+# TUI/graphics app: f32 geometry and exact colour equality are the semantic intent, so
+# `a != b` on floats is how visual states are told apart, not a precision bug.
+float_cmp = { level = "allow", priority = 1 }
+# Rack/controller geometry is f32 and casts down to u16/i32/usize are deliberate clamps
+# whose bound lives in the caller; no cast lint can see that bound, so all four are off.
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_precision_loss = { level = "allow", priority = 1 }
+cast_sign_loss = { level = "allow", priority = 1 }
+cast_possible_wrap = { level = "allow", priority = 1 }
+# The docs are prose for contributors, not a published library API: a missing `# Errors`
+# or `# Panics` section is a documentation style choice here, not a defect.
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+# `must_use` on every self-returning painter/name helper is noise; these are not builders
+# a caller can forget to chain, and the few that matter carry `#[must_use]` explicitly.
+must_use_candidate = { level = "allow", priority = 1 }
+# Fights the layering: `theme::Theme` and `graph::Graph` are the names ARCHITECTURE.md
+# uses, and a short local alias would be less clear at the call sites.
+module_name_repetitions = { level = "allow", priority = 1 }
+# Fires on `x_px`/`y_px`, `cx`/`cy`, `w`/`h` — the coordinate vocabulary of the geometry
+# and paint code, where the short pair is the clearest available name.
+similar_names = { level = "allow", priority = 1 }
+# Function length is a review signal for the paint and parse entry points, not a limit;
+# splitting them to satisfy a number would scatter the layout across helpers.
+too_many_lines = { level = "allow", priority = 1 }
+# Used in test and fixture helpers to keep a local helper next to the setup that reads it.
+items_after_statements = { level = "allow", priority = 1 }
+# Fires on the flag structs mirroring the patch format's independent options; one
+# bitfield enum would hide what the parser sets.
+struct_excessive_bools = { level = "allow", priority = 1 }

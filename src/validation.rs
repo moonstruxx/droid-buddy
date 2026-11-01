@@ -234,7 +234,7 @@ fn expression_problem(value: &str) -> Option<&'static str> {
     let mut expect_operand = true;
     let mut after_div = false;
     let mut unary_minus_ok = true;
-    for tok in toks.iter() {
+    for tok in &toks {
         match tok {
             ExprTok::Operand { number } => {
                 if !expect_operand {
@@ -487,7 +487,7 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
     }
 
     // --- Per-section checks ---
-    for section in patch.sections.iter() {
+    for section in &patch.sections {
         let lower = section.name.to_lowercase();
         let is_known_circuit = schema.circuits.contains_key(&lower);
         let is_known_controller = schema.controllers.contains_key(&lower);
@@ -804,7 +804,7 @@ mod tests {
         // schema only.
         let _guard = crate::schema::TEST_CACHE_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let schema = load_schema();
         assert_eq!(schema.circuits.len(), 76);
     }
@@ -1119,7 +1119,7 @@ mod tests {
         // must be checked against exactly the one the validator uses.
         let _guard = crate::schema::TEST_CACHE_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let schema = load_schema();
 
         let mut rows: HashSet<(&str, &str)> = HashSet::new();
@@ -1508,6 +1508,8 @@ output = _STILL_OPEN * 2
 
     #[test]
     fn ram_overflow_error_at_zero_span() {
+        use std::fmt::Write as _;
+
         // Find a schema with available_memory and sum > avail by adding many large circuits
         let schema = load_schema();
         // Find any master available value
@@ -1523,7 +1525,7 @@ output = _STILL_OPEN * 2
         let copies = (available / big_size.max(1) + 2) as usize;
         let mut ini = String::from("[p2b8]\n");
         for _ in 0..copies {
-            ini.push_str(&format!("[{big_name}]\n"));
+            writeln!(ini, "[{big_name}]").expect("write to a String");
             // need to satisfy required? but RAM check counts even if missing required? It's still counted. So fill minimal to avoid unknown?
             // Use valid param to avoid missing required noise? But ram check still triggers regardless.
         }
