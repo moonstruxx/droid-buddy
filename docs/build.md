@@ -118,6 +118,14 @@ exception policy is one reviewable table rather than `#[allow]`s
 scattered through `src/`. Adding an `#[allow]` in the code needs a
 reason at the site and should stay rare.
 
+The allow-list is also where a *newer* clippy on CI is handled: clippy ships
+lints over time (1.99 added `assert_is_empty`, which this suite's ~110
+`assert!(x.is_empty())` assertions trip), and a local toolchain older than the
+CI one cannot see a lint at all — so a green local `clippy` on a stale rustc
+proves less than it looks. Run `rustup update stable` when CI reports an
+unknown lint, reproduce locally, and decide once: fix the sites, or add one
+reasoned line to the table.
+
 The release performance gate is a sixth command, Linux only:
 
 ```sh

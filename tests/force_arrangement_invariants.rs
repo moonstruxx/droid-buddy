@@ -85,8 +85,8 @@ fn assert_no_overlapping_bodies(sizes: &[(f32, f32)], positions: &[(f32, f32)], 
         for b in a + 1..positions.len() {
             let dx = (positions[a].0 - positions[b].0).abs();
             let dy = (positions[a].1 - positions[b].1).abs();
-            let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
-            let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+            let need_x = sizes[a].0.midpoint(sizes[b].0);
+            let need_y = sizes[a].1.midpoint(sizes[b].1);
             assert!(
                 dx >= need_x || dy >= need_y,
                 "{what}: nodes {a} and {b} overlap — |dx|={dx} < {need_x} and \

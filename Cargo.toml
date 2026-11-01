@@ -57,3 +57,9 @@ items_after_statements = { level = "allow", priority = 1 }
 # Fires on the flag structs mirroring the patch format's independent options; one
 # bitfield enum would hide what the parser sets.
 struct_excessive_bools = { level = "allow", priority = 1 }
+# Fire on `assert!(x.is_empty())` / `assert!(!x.is_empty())`, of which this suite has
+# ~110. Clippy's rewrite is `assert_eq!(x, [] as [T; 0])`, which hides the intent behind
+# an empty-array type ascription just to improve the failure message; `is_empty()` says
+# what is being asserted. (Added when CI's clippy 1.99 shipped the lint: local toolchains
+# older than the CI one cannot see it, so update `rustup` before trusting a local pass.)
+assert_is_empty = { level = "allow", priority = 1 }

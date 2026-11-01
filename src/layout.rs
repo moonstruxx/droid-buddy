@@ -501,8 +501,8 @@ fn separation_sweep(
     for oi in 0..order.len() {
         let i = order[oi];
         for &j in &order[oi + 1..] {
-            let need_x = 0.5 * (sizes[i].0 + sizes[j].0);
-            let need_y = 0.5 * (sizes[i].1 + sizes[j].1);
+            let need_x = sizes[i].0.midpoint(sizes[j].0);
+            let need_y = sizes[i].1.midpoint(sizes[j].1);
             let dx = positions[j].0 - positions[i].0;
             let dy = positions[j].1 - positions[i].1;
             let pen_x = need_x - dx.abs();
@@ -522,12 +522,12 @@ fn separation_sweep(
             };
             // Escape along the cheaper axis (ties go to x, deterministically).
             if pen_x <= pen_y {
-                let push = (pen_x + SEPARATION_EPS) * 0.5;
+                let push = pen_x.midpoint(SEPARATION_EPS);
                 let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
                 positions[i].0 -= sign * push * share_i;
                 positions[j].0 += sign * push * share_j;
             } else {
-                let push = (pen_y + SEPARATION_EPS) * 0.5;
+                let push = pen_y.midpoint(SEPARATION_EPS);
                 let sign = if dy >= 0.0 { 1.0 } else { -1.0 };
                 positions[i].1 -= sign * push * share_i;
                 positions[j].1 += sign * push * share_j;
@@ -550,8 +550,8 @@ fn count_overlapping_pairs(positions: &[(f32, f32)], sizes: &[(f32, f32)]) -> us
     let mut overlapping = 0;
     for i in 0..n {
         for j in i + 1..n {
-            let need_x = 0.5 * (sizes[i].0 + sizes[j].0);
-            let need_y = 0.5 * (sizes[i].1 + sizes[j].1);
+            let need_x = sizes[i].0.midpoint(sizes[j].0);
+            let need_y = sizes[i].1.midpoint(sizes[j].1);
             let dx = (positions[j].0 - positions[i].0).abs();
             let dy = (positions[j].1 - positions[i].1).abs();
             if need_x - dx > 0.0 && need_y - dy > 0.0 {
@@ -1705,7 +1705,7 @@ pub(crate) fn run_iterations_with_forces(
                             if i >= j {
                                 continue;
                             }
-                            let required = 0.5 * (extent_i + extents[j]);
+                            let required = extent_i.midpoint(extents[j]);
                             let f = repulsion_force_size_aware(
                                 pos,
                                 positions[j],
@@ -1746,7 +1746,7 @@ pub(crate) fn run_iterations_with_forces(
                             if i >= j {
                                 continue;
                             }
-                            let required = 0.5 * (extent_i + extents[j]);
+                            let required = extent_i.midpoint(extents[j]);
                             let f = repulsion_force_with_falloff(
                                 pos,
                                 positions[j],
@@ -5252,8 +5252,8 @@ mod tests {
             for b in a + 1..positions.len() {
                 let dx = (positions[a].0 - positions[b].0).abs();
                 let dy = (positions[a].1 - positions[b].1).abs();
-                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
-                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                let need_x = sizes[a].0.midpoint(sizes[b].0);
+                let need_y = sizes[a].1.midpoint(sizes[b].1);
                 assert!(
                     dx >= need_x - OVERLAP_TOL || dy >= need_y - OVERLAP_TOL,
                     "nodes {a} and {b} overlap: |dx|={dx} (need {need_x}), \
@@ -5349,8 +5349,8 @@ mod tests {
             for b in a + 1..positions.len() {
                 let dx = (positions[a].0 - positions[b].0).abs();
                 let dy = (positions[a].1 - positions[b].1).abs();
-                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
-                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                let need_x = sizes[a].0.midpoint(sizes[b].0);
+                let need_y = sizes[a].1.midpoint(sizes[b].1);
                 worst = worst.max((need_x - dx).min(need_y - dy));
             }
         }
@@ -5363,8 +5363,8 @@ mod tests {
             for b in a + 1..positions.len() {
                 let dx = (positions[a].0 - positions[b].0).abs();
                 let dy = (positions[a].1 - positions[b].1).abs();
-                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
-                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                let need_x = sizes[a].0.midpoint(sizes[b].0);
+                let need_y = sizes[a].1.midpoint(sizes[b].1);
                 let penetration = (need_x - dx).min(need_y - dy);
                 assert!(
                     penetration <= tol,
@@ -5656,8 +5656,8 @@ mod tests {
                 }
                 let dx = (positions[a].0 - positions[b].0).abs();
                 let dy = (positions[a].1 - positions[b].1).abs();
-                let need_x = 0.5 * (sizes[a].0 + sizes[b].0);
-                let need_y = 0.5 * (sizes[a].1 + sizes[b].1);
+                let need_x = sizes[a].0.midpoint(sizes[b].0);
+                let need_y = sizes[a].1.midpoint(sizes[b].1);
                 let penetration = (need_x - dx).min(need_y - dy);
                 assert!(
                     penetration <= tol,
