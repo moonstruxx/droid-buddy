@@ -1309,7 +1309,7 @@ const LABEL_FIT_MILLIS_PER_ZOOM: f64 = 1000.0;
 /// measured against (D1/D5/D6). No egui type crosses this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellTextPath {
-    /// Compact cell: the cell minus [`LABEL_INSET_X`], with the state glyph and
+    /// Compact cell: the cell minus `LABEL_INSET_X`, with the state glyph and
     /// one separating space at the head of line 1 when `glyph_chars > 0`.
     Compact,
     /// Composed button face: the shape keeps the cell, the label takes the band
@@ -1345,7 +1345,7 @@ pub struct LabelBox {
 /// re-deriving a character budget.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelLayout {
-    /// The ladder step in points, never below [`LABEL_FONT_FLOOR`].
+    /// The ladder step in points, never below `LABEL_FONT_FLOOR`.
     pub font: f32,
     /// The label's lines, top to bottom: wrapped at spaces, hard-broken only for
     /// a word wider than its line, and ellipsized on the last line only at the
@@ -1359,7 +1359,7 @@ pub struct LabelLayout {
 }
 
 /// The fitted label of one cell, or `None` when the cell cannot show its label
-/// even at [`LABEL_FONT_FLOOR`] — the annotation predicate of the label
+/// even at `LABEL_FONT_FLOOR` — the annotation predicate of the label
 /// presentation (D1/D9).
 ///
 /// Passes, in order of preference (D2/D4):
@@ -1526,7 +1526,7 @@ impl LabelFitRequest {
 /// nothing to lift and the rack fit answers alone.
 ///
 /// Bounded and deterministic: one fixed ascending grid of 1 % zoom steps
-/// ([`LABEL_FIT_STEP_MILLIS`]) from [`ZOOM_MIN`] to [`ZOOM_MAX`] — at most 376
+/// (`LABEL_FIT_STEP_MILLIS`) from [`ZOOM_MIN`] to [`ZOOM_MAX`] — at most 376
 /// candidates, and the check fails fast on the first cell that does not fit, so
 /// the cost is roughly one [`label_layout`] call per candidate plus one per
 /// request. The grid is exact (thousandths of the 1:1 baseline, never a running

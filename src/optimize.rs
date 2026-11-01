@@ -34,7 +34,7 @@
 //! **Deterministic and bounded**: local search is seeded from a deterministic
 //! FAS-indegree rank (node-id-hash ties, no RNG), capped at ~2000
 //! local-search steps, and small search
-//! spaces (≤ [`ENUM_LIMIT`] valid permutations) are solved exactly by
+//! spaces (≤ `ENUM_LIMIT` valid permutations) are solved exactly by
 //! enumeration — which is what the brute-force equivalence tests (N ≤ 8)
 //! rely on.
 //!

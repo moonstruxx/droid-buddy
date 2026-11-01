@@ -18,14 +18,15 @@ demo patch. Native prerequisites per OS — MSVC build tools, Xcode
 command line tools, `build-essential` and `pkg-config` — are on
 [Building from source](build.md#prerequisites).
 
-## The four gates
+## The five gates
 
-All four must exit 0 before reporting completion. These are the exact
+All five must exit 0 before reporting completion. These are the exact
 commands CI runs:
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo test --locked
 cargo build --release --locked
 ```

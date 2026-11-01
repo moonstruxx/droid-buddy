@@ -82,14 +82,15 @@ rebuild, not a reinstall.
 Run it with `./target/release/droid_tui [patch.ini]`, or
 `droid_tui.exe [patch.ini]` on Windows.
 
-## The four gates
+## The five gates
 
-Every change must pass these, and CI runs the same four. All four must
-exit 0.
+Every change must pass these, and CI runs the same set (the doc gate on
+Linux). All must exit 0.
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo test --locked
 cargo build --release --locked
 ```
@@ -98,6 +99,7 @@ cargo build --release --locked
 |---|---|
 | `cargo fmt --check` | formatting drift; fix with plain `cargo fmt` |
 | clippy with `-D warnings` | lints over every target and feature; warnings are errors |
+| rustdoc with `-D warnings` | broken intra-doc links — how a rename silently rots the docs |
 | `cargo test --locked` | unit tests, the `src/regression.rs` stories, and the Linux perf gate |
 | `cargo build --release --locked` | release-profile breakage the test profile does not show |
 
@@ -122,23 +124,28 @@ cargo test --release --test perf_gate --locked
 
 | Job | Runner | Timeout | Runs |
 |---|---|---|---|
-| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, tests, release build, perf gate |
+| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, tests, release build, perf gate |
 | `windows-latest` | `windows-latest` | 45 min | tests, release build |
 | `macos-latest` | `macos-latest` | 45 min | tests, release build |
 
 The matrix sets `fail-fast: false`, so a Windows or macOS failure does
 not cancel the other two jobs — one run reports all three verdicts.
 
-Every job checks out with `submodules: recursive`, for the `circuits.json`
-reason above, and installs `dtolnay/rust-toolchain@stable` with the
-`clippy` and `rustfmt` components. `Swatinem/rust-cache@v2` caches cargo
+Every job checks out with `submodules: false` and then fetches the one
+submodule the build needs — `git submodule update --init ext/droid-lsp` —
+**non-recursively**. The pinned submodule commit carries a nested
+`droid-gogglepack` gitlink without a `.gitmodules` entry, and a recursive
+update aborts on it (`fatal: No url found for submodule path ...`), which
+failed every job at checkout from 2026-10-15 until the fetch was made
+explicit. The jobs then install `dtolnay/rust-toolchain@stable` with the
+`clippy` and `rustfmt` components; `Swatinem/rust-cache@v2` caches cargo
 between runs. The test and release-build steps are the same commands as
 the local gates.
 
-Formatting, clippy and the perf gate carry `if: runner.os == 'Linux'`,
-so only the Linux job runs them:
+Formatting, clippy, rustdoc and the perf gate carry `if: runner.os ==
+'Linux'`, so only the Linux job runs them:
 
-- fmt and clippy are deterministic across targets. Running them three
+- fmt, clippy and rustdoc are deterministic across targets. Running them three
   times triples the time to a verdict and adds no signal.
 - The perf gate's budgets are Linux release timings. A shared Windows or
   macOS runner has a different CPU, and a flaky gate is worse than none.
