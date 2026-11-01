@@ -25,6 +25,41 @@
 //! under these budgets, and the work is bounded by construction (drops ≤
 //! candidates, each a single deterministic re-placement), so only a
 //! catastrophic blowup could trip a phase here.
+//!
+//! The per-frame label layout the fitted labels added (module-ui-label-fit task
+//! 3.3) was measured the same way on 2026-11-01, in release, through a temporary
+//! in-crate probe since removed: a fitted 640×520 pane, `physical::label_layout`
+//! timed once per cell exactly as `gui::physical::physical_spec` calls it, then
+//! a warm headless spec build and a warm headless `paint_physical` of the spec
+//! just built.
+//!
+//! - Scale anchor (11 cells, all labelled): 1.1–1.6 µs per call, so 12–17 µs of
+//!   layout inside a 0.33–0.47 ms spec build (3.5–3.9 %); warm paint 18–25 µs.
+//! - Largest real patch (the corpus copy of `droid_mpfs5melody2.ini`: 214 cells,
+//!   90 labelled, 82 laid out, 132 not — 124 unlabelled cells plus 8 labels no
+//!   ladder step fits): 0.9–1.2 µs per call averaged over all cells and
+//!   2.1–2.2 µs over the labelled ones, because the cells that fit nothing run
+//!   the whole ladder plus the floor retry; so 190–265 µs inside a 9.4–9.9 ms
+//!   spec build (2.0–2.8 %); warm paint 154–276 µs.
+//!
+//! Against the numbers above: the layout is 2–4 % of the build on both patches.
+//! It replaces `label_is_clipped`, which was a few float comparisons per cell, so
+//! the addition is essentially the layout scan itself — and `auto` now finds no
+//! annotation candidate on either patch (module-ui-label-fit D9), so the ~0.63 ms
+//! annotation pass recorded above is no longer paid at all. Both spec builds came
+//! out 2–3× their recorded ~0.16 ms / ~3.2 ms while the phases in this file spanned
+//! 0.7–3× their own baselines in the same window (load average ~5 on 24 cores), so
+//! that delta sits in the rest of the spec build, not in these calls; the share is
+//! the figure that does not drift with the machine.
+//!
+//! Decision: no phase, and the reason is the same one as above plus the cost.
+//! ~1 µs per cell is real work, but 2–4 % of a spec build that is ~1000x under
+//! every budget here cannot trip one, and the per-frame entry point is still
+//! `pub(crate)`. A phase built on the `pub` `physical::label_layout` +
+//! `physical::label_fit_zoom` alone would time a pure function in a tight loop —
+//! a different workload from the one the frame pays — so it would guard a number
+//! nobody moves; the recording above is the baseline a future change is compared
+//! against instead.
 
 use std::path::Path;
 use std::sync::mpsc;
