@@ -622,16 +622,12 @@ fn upload_card_rect(canvas: Vec2) -> Rect {
     )
 }
 
-pub(crate) fn paint_upload_confirm(
-    painter: &Painter,
-    canvas: Vec2,
-    _ctx: &Context,
-    spec: Option<&UploadConfirmSpec>,
-) -> UploadFrame {
-    let frame = UploadFrame { hovered: None };
-    let Some(spec) = spec else {
-        return frame;
-    };
+/// Shared chrome for the two upload surfaces (confirm and in-flight progress):
+/// the card frame at the fixed size, its fill, its border and the title line.
+/// Returns the card rect after painting it, or `None` when there is no spec —
+/// the painters then return an empty frame. The two surfaces drew this prologue
+/// line for line before, so a chrome change had to be made twice.
+fn upload_card(painter: &Painter, canvas: Vec2, title: &str) -> Rect {
     let t = crate::theme::active();
     let rect = upload_card_rect(canvas);
     painter.rect_filled(rect, 8.0, rgb(t.muted));
@@ -645,10 +641,25 @@ pub(crate) fn paint_upload_confirm(
     painter.text(
         rect.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        &spec.title,
+        title,
         egui::FontId::proportional(12.0),
         rgb(t.text),
     );
+    rect
+}
+
+pub(crate) fn paint_upload_confirm(
+    painter: &Painter,
+    canvas: Vec2,
+    _ctx: &Context,
+    spec: Option<&UploadConfirmSpec>,
+) -> UploadFrame {
+    let frame = UploadFrame { hovered: None };
+    let Some(spec) = spec else {
+        return frame;
+    };
+    let t = crate::theme::active();
+    let rect = upload_card(painter, canvas, &spec.title);
     let mut y = rect.min.y + 28.0;
     for line in std::iter::once(&spec.bytes_line)
         .chain(std::iter::once(&spec.transport_line))
@@ -687,22 +698,7 @@ pub(crate) fn paint_upload_progress(
         return frame;
     };
     let t = crate::theme::active();
-    let rect = upload_card_rect(canvas);
-    painter.rect_filled(rect, 8.0, rgb(t.muted));
-    painter.rect(
-        rect,
-        8.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        rect.min + egui::vec2(8.0, 6.0),
-        egui::Align2::LEFT_TOP,
-        &spec.title,
-        egui::FontId::proportional(12.0),
-        rgb(t.text),
-    );
+    let rect = upload_card(painter, canvas, &spec.title);
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.min.y + 28.0),
         egui::Align2::LEFT_TOP,

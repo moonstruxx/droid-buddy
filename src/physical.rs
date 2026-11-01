@@ -1918,11 +1918,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn screen_mapping_multi_row_offsets_include_fold_bars() {
-        // Row 1 sits below row 0 plus exactly one fold bar: pack a two-row
-        // rack and map both rows' module rects — the screen gap must equal
-        // the mm gap × points_per_mm × zoom (D1/D11).
+    /// A two-row rack whose master (CV I/O) sits on row 1, so row 0 holds the
+    /// P2B8 and a fold bar separates the rows. The row-offset tests share it:
+    /// both measure the same gap, one in millimetres and one in points.
+    fn two_row_rack() -> RackLayout {
         let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
         let chain = PhysicalLayout::build(&p);
         let spec = RackSpec {
@@ -1941,7 +1940,15 @@ mod tests {
             assign: HashMap::from([("CV I/O".to_string(), 1)]),
             ..RackSpec::default_case(&chain)
         };
-        let rack = RackLayout::pack(&chain, &spec);
+        RackLayout::pack(&chain, &spec)
+    }
+
+    #[test]
+    fn screen_mapping_multi_row_offsets_include_fold_bars() {
+        // Row 1 sits below row 0 plus exactly one fold bar: pack a two-row
+        // rack and map both rows' module rects — the screen gap must equal
+        // the mm gap × points_per_mm × zoom (D1/D11).
+        let rack = two_row_rack();
         let fold = rack
             .fold_bars
             .iter()
@@ -3228,25 +3235,7 @@ mod tests {
     #[test]
     fn isotropic_fold_bar_and_row_offset_use_single_factor() {
         // Fold-bar gap and row offsets re-derived against the single factor.
-        let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
-        let chain = PhysicalLayout::build(&p);
-        let spec = RackSpec {
-            rows: vec![
-                RackRow {
-                    he: 3,
-                    hp: 12.0,
-                    label: None,
-                },
-                RackRow {
-                    he: 3,
-                    hp: 12.0,
-                    label: None,
-                },
-            ],
-            assign: HashMap::from([("CV I/O".to_string(), 1)]),
-            ..RackSpec::default_case(&chain)
-        };
-        let rack = RackLayout::pack(&chain, &spec);
+        let rack = two_row_rack();
         let m = ScreenMapping::default();
         assert_close(m.points_per_mm, PHYSICAL_POINTS_PER_MM);
         let row0 = &rack.rows[0];

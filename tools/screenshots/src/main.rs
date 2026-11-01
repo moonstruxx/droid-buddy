@@ -73,6 +73,11 @@ pub mod plugin;
 pub mod rendermetrics;
 #[path = "../../../src/schema.rs"]
 pub mod schema;
+// The shared on-disk store rules (`labels.toml` / `favourites.toml`): `app.rs`
+// and `favorites.rs` both call into it, so the harness needs the shadow too
+// or the staged sources stop resolving `crate::store`.
+#[path = "../../../src/store.rs"]
+pub mod store;
 #[path = "../../../src/sysex.rs"]
 pub mod sysex;
 #[path = "../../../src/theme.rs"]

@@ -1094,96 +1094,6 @@ mod tests {
         )
     }
 
-    /// Minimal schema fixture for catalog-driven edge direction: circuit `pulser`
-    /// declares a nonstandard output param `pulse` and an input param `input`.
-    /// Leaked to `&'static` for `set_test_schema`; sibling of the patch.rs one so
-    /// the graph test does not reach into that module's private fixture.
-    fn catalog_test_schema() -> &'static crate::schema::Schema {
-        let schema: crate::schema::Schema = serde_json::from_str(
-            r#"{
-            "firmware_version": "test",
-            "jacktable_initial_size": 0,
-            "available_memory": {},
-            "circuits": {
-                "pulser": {
-                    "category": "test",
-                    "title": "Pulser",
-                    "description": "test circuit",
-                    "ramsize": 100,
-                    "inputs": [
-                        {
-                            "name": "input",
-                            "short": "in",
-                            "type": "in",
-                            "description": "input",
-                            "essential": 0,
-                            "ramhint": "",
-                            "autotitle": false
-                        }
-                    ],
-                    "outputs": [
-                        {
-                            "name": "pulse",
-                            "short": "pulse",
-                            "type": "out",
-                            "description": "output",
-                            "essential": 0,
-                            "ramhint": "",
-                            "autotitle": false
-                        }
-                    ],
-                    "presets": 0,
-                    "manual": 0
-                },
-                "buttonwriter": {
-                    "category": "test",
-                    "title": "Button Writer",
-                    "description": "writes to button registers",
-                    "ramsize": 10,
-                    "inputs": [],
-                    "outputs": [
-                        {
-                            "name": "button",
-                            "short": "btn",
-                            "type": "out",
-                            "description": "button output",
-                            "essential": 0,
-                            "ramhint": "",
-                            "autotitle": false
-                        }
-                    ],
-                    "presets": 0,
-                    "manual": 0
-                },
-                "potreader": {
-                    "category": "test",
-                    "title": "Pot Reader",
-                    "description": "reads from pot registers",
-                    "ramsize": 10,
-                    "inputs": [
-                        {
-                            "name": "pot",
-                            "short": "pot",
-                            "type": "in",
-                            "description": "pot input",
-                            "essential": 0,
-                            "ramhint": "",
-                            "autotitle": false
-                        }
-                    ],
-                    "outputs": [],
-                    "presets": 0,
-                    "manual": 0
-                }
-            },
-            "controllers": {},
-            "manual_references": {}
-        }"#,
-        )
-        .unwrap();
-        Box::leak(Box::new(schema))
-    }
-
     #[test]
     fn node_set_matches_circuits_with_repeated_instances() {
         let graph = build(
@@ -1301,7 +1211,7 @@ mod tests {
         // second (catalog-unknown) circuit completes both cables so real directed
         // edges exist. Pin the fixture schema for the parse, then restore so a
         // failing assert cannot leak the override to later tests on this thread.
-        let schema = catalog_test_schema();
+        let schema = crate::test_support::catalog_schema();
         crate::schema::set_test_schema(Some(schema));
         let graph = build(
             "[p2b8]\n\
@@ -1615,7 +1525,7 @@ mod tests {
 
     #[test]
     fn register_edges_build_nodes_and_edges() {
-        let schema = catalog_test_schema();
+        let schema = crate::test_support::catalog_schema();
         crate::schema::set_test_schema(Some(schema));
         let patch = Patch::from_ini_file(std::path::Path::new("fixtures/graph_register_edges.ini"))
             .unwrap();

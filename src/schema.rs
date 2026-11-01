@@ -345,16 +345,6 @@ impl Schema {
         }
         None
     }
-
-    /// Circuit names (lowercase) from the schema.
-    pub fn circuit_names(&self) -> Vec<String> {
-        self.circuits.keys().cloned().collect()
-    }
-
-    /// Controller names (lowercase).
-    pub fn controller_names(&self) -> Vec<String> {
-        self.controllers.keys().cloned().collect()
-    }
 }
 
 /// Free function: expanded param names for a circuit, loading schema on demand.

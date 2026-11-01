@@ -2832,34 +2832,7 @@ mod scene_builder_tests {
     /// gives a sections graph clusters the solver anchors on, and that the
     /// suppression tests below share.
     fn two_group_app() -> App {
-        let graph = Graph {
-            nodes: vec![
-                circuit_node("clocktool", 0, 0),
-                circuit_node("osc", 0, 0),
-                circuit_node("vca", 0, 1),
-                circuit_node("filter", 0, 1),
-            ],
-            edges: vec![GraphEdge {
-                cable: "_CLK".into(),
-                source: NodeId::circuit("clocktool", 0),
-                sink: NodeId::circuit("osc", 0),
-            }],
-            clusters: vec![
-                Cluster {
-                    title: "Controls".into(),
-                    section_range: 0..2,
-                },
-                Cluster {
-                    title: "Audio".into(),
-                    section_range: 2..4,
-                },
-            ],
-            ..Graph::default()
-        };
-        scene_app(
-            graph,
-            &[(0.0, 0.0), (260.0, 0.0), (520.0, 0.0), (780.0, 0.0)],
-        )
+        crate::test_support::two_group_app()
     }
 
     #[test]
@@ -2964,7 +2937,7 @@ mod scene_builder_tests {
 mod window_paint_tests {
     use super::*;
     use crate::config::LayoutMode;
-    use crate::graph::{Cluster, Graph, GraphEdge, GraphNode};
+    use crate::graph::{Graph, GraphEdge, GraphNode};
     use crate::patch::NodeId;
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
@@ -3669,35 +3642,11 @@ mod window_paint_tests {
 
     /// Four nodes in two banner groups (nodes 0..2 and 2..4) at world positions
     /// a fitted camera frames.
+    /// The shared four-node, two-cluster graph the scene and window tests both
+    /// frame: one definition in `test_support`, so the two suites cannot drift
+    /// apart (they had already diverged in how they seeded the app).
     fn two_group_app() -> App {
-        let graph = Graph {
-            nodes: vec![
-                circuit_node("clocktool", 0, 0),
-                circuit_node("osc", 0, 0),
-                circuit_node("vca", 0, 1),
-                circuit_node("filter", 0, 1),
-            ],
-            edges: vec![GraphEdge {
-                cable: "_CLK".into(),
-                source: NodeId::circuit("clocktool", 0),
-                sink: NodeId::circuit("osc", 0),
-            }],
-            clusters: vec![
-                Cluster {
-                    title: "Controls".into(),
-                    section_range: 0..2,
-                },
-                Cluster {
-                    title: "Audio".into(),
-                    section_range: 2..4,
-                },
-            ],
-            ..Graph::default()
-        };
-        let mut app = App::new();
-        app.graph = Some(graph);
-        app.graph_positions = vec![(0.0, 0.0), (260.0, 0.0), (520.0, 0.0), (780.0, 0.0)];
-        app
+        crate::test_support::two_group_app()
     }
 
     fn scene_of(app: &App) -> SceneSpec {

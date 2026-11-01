@@ -25,6 +25,12 @@ droid_tui/
 │   ├── platform.rs         # the one user-data directory rule (XDG on Linux/macOS, %APPDATA% on
 │   │                       #   Windows; environment injected so tests never touch process env)
 │   │                       #   shared by config, labels, favourites and plugins + Windows drive roots
+│   ├── store.rs            # the one on-disk rule for the user TOML stores: read (missing →
+│   │                       #   default, malformed → one warning + default), atomic write
+│   │                       #   (tmp→rename in dir, or beside an explicit path), canonical path
+│   │                       #   keys; labels.toml and favourites.toml both go through it
+│   ├── test_support.rs     # cfg(test)-only shared fixtures (the catalog schema, the two-cluster
+│   │                       #   graph) that more than one module's tests build
 │   ├── app.rs              # App state struct + class-based pane layout (PaneLayout/PaneId, the only
 │   │                       #   representation of what is open) + picker/graph/
 │   │                       #   validation/diff helpers + event bus
@@ -452,7 +458,7 @@ sequenceDiagram
 | Favourites | `favourites.toml` | favourited files and directories in the picker | same resolver and atomic-write pattern as the label store |
 | Plugins | `plugins/*.toml` | user circuit definitions (`[[circuit]]`) merged over the embedded schema | never written by the app; read in sorted-filename order, malformed files skipped with one warning |
 
-The four sit beside each other by construction, so moving a setup between platforms means copying one directory. The single exception is an explicit absolute `[plugins] dir` in `config.toml`. There is no database and no migration framework: the only versioning mechanism is a marker value (`[physical] zoom_baseline`), which causes a zoom saved against the pre-1:1 scale to be ignored once and the view to open fitted.
+The four sit beside each other by construction, so moving a setup between platforms means copying one directory. The TOML stores' *mechanics* are shared too (`src/store.rs`): a missing or unreadable file reads as the default, malformed TOML warns once and reads as the default, a write lands via tmp→rename beside its target, and both stores derive their per-patch/per-file keys from `store::canonical_key` — so labels and favourites cannot disagree about what "the same file" means. The single exception is an explicit absolute `[plugins] dir` in `config.toml`. There is no database and no migration framework: the only versioning mechanism is a marker value (`[physical] zoom_baseline`), which causes a zoom saved against the pre-1:1 scale to be ignored once and the view to open fitted.
 
 **Embedded data inputs, not runtime files.** Four static inputs are compiled into the binary with `include_str!` and never read from disk at runtime: the authoritative DROID circuit schema (`ext/droid-lsp/droid-lsp/src/circuits.json` via `schema.rs`), the rack geometry (`rack_geometry.json` via `geometry.rs`), the per-controller faceplate geometry (`controller_geometry.json` via `physical.rs`), and the learned wiring-outlier decision table (`tools/outlier_artifact.txt` via `geometry.rs`). A binary copied away from the repository therefore still has schema, rack and faceplate data; editing any of them needs a rebuild, not a reinstall. Regression tests in `geometry.rs`/`physical.rs` assert that the production source contains neither `CARGO_MANIFEST_DIR` nor `std::fs`.
 

@@ -497,20 +497,6 @@ impl Theme {
         }
     }
 
-    /// The 5-stop cable latency ramp (design D2): `graph_edge_latency_0` is
-    /// the coldest (lowest forward-loop latency) end, `_4` the hottest
-    /// (back-edge) end. The graph scene builder resolves a cable's latency
-    /// index into this ramp when `App.latency_coloring` is on.
-    pub const fn graph_edge_latency_ramp(&self) -> [Color; 5] {
-        [
-            self.graph_edge_latency_0,
-            self.graph_edge_latency_1,
-            self.graph_edge_latency_2,
-            self.graph_edge_latency_3,
-            self.graph_edge_latency_4,
-        ]
-    }
-
     /// The theme → egui bridge (gpu-graph-window design D7, task 2.7): resolve
     /// a semantic token through the same [`Theme::rgb`] hop the kitty
     /// rasterizer and all ported egui surfaces use, wrapping it as an
@@ -734,55 +720,24 @@ mod tests {
 
     #[test]
     fn terminal_is_all_reset() {
+        // The terminal palette defers every token to the user's terminal except
+        // four that would be invisible or wrong as `Reset` (documented on
+        // `Theme::terminal`): the canvas must stay dark, the node fill must stay
+        // distinguishable, and the two diff edges keep their gray pair so a
+        // colourless terminal can still tell added from removed.
+        const NOT_RESET: [&str; 4] = [
+            "graph_canvas_bg",
+            "graph_node_fill",
+            "graph_edge_diff_added",
+            "graph_edge_diff_removed",
+        ];
         let t = Theme::terminal();
-        for color in [
-            t.button,
-            t.switch,
-            t.knob,
-            t.cv_in,
-            t.cv_out,
-            t.led,
-            t.fader_led_bar,
-            t.shift1,
-            t.shift2,
-            t.shift3,
-            t.shift4,
-            t.accent,
-            t.muted,
-            t.text,
-            t.picker_fav_file,
-            t.picker_fav_dir,
-            t.viewer_key,
-            t.status_bg,
-            t.focus_border,
-            t.occurrence_highlight,
-            t.modifier_boolean,
-            t.modifier_exact,
-            t.minimap_occurrence,
-            t.minimap_modifier_boolean,
-            t.minimap_modifier_exact,
-            t.minimap_combined,
-            t.graph_node_border,
-            t.graph_cluster_border,
-            t.graph_edge_control,
-            t.graph_edge_audio,
-            t.graph_edge_midi,
-            t.graph_edge_error,
-            // `graph_edge_diff_added/removed` are intentionally Gray/DarkGray
-            // (diff needs distinguishability even in the colorless terminal
-            // theme).
-            t.physical_skeleton_module_outline,
-            t.performance_leader,
-            t.pane_focus_border,
-            t.pane_unfocused_border,
-        ] {
-            assert_eq!(color, Color::Reset);
+        for (name, color) in every_token(&t) {
+            if NOT_RESET.contains(&name) {
+                continue;
+            }
+            assert_eq!(color, Color::Reset, "{name} must defer to the terminal");
         }
-        // The two diff tokens are the documented terminal exceptions: distinct
-        // grays so added/removed cables stay tellable at the terminal's
-        // default palette.
-        assert_eq!(t.graph_edge_diff_added, Color::Gray);
-        assert_eq!(t.graph_edge_diff_removed, Color::DarkGray);
     }
 
     #[test]
@@ -961,73 +916,75 @@ mod tests {
     /// Every semantic token still in the palette, in struct order. The single
     /// enumeration the totality tests share: the rgb() determinism test and the
     /// egui-bridge opacity test (task 2.7).
-    fn every_token(t: &Theme) -> Vec<Color> {
+    fn every_token(t: &Theme) -> Vec<(&'static str, Color)> {
         vec![
-            t.button,
-            t.switch,
-            t.knob,
-            t.cv_in,
-            t.cv_out,
-            t.led,
-            t.fader_led_bar,
-            t.shift1,
-            t.shift2,
-            t.shift3,
-            t.shift4,
-            t.accent,
-            t.muted,
-            t.text,
-            t.picker_fav_file,
-            t.picker_fav_dir,
-            t.viewer_key,
-            t.status_bg,
-            t.focus_border,
-            t.occurrence_highlight,
-            t.modifier_boolean,
-            t.modifier_exact,
-            t.minimap_occurrence,
-            t.minimap_modifier_boolean,
-            t.minimap_modifier_exact,
-            t.minimap_combined,
-            t.graph_node_border,
-            t.graph_node_title,
-            t.graph_cluster_border,
-            t.graph_cluster_title,
-            t.graph_canvas_bg,
-            t.graph_node_fill,
-            t.graph_edge_control,
-            t.graph_edge_audio,
-            t.graph_edge_midi,
-            t.graph_edge_unknown,
-            t.graph_edge_error,
-            t.graph_node_highlight,
-            t.graph_node_dim,
-            t.graph_edge_highlight,
-            t.graph_edge_dim,
-            t.graph_edge_diff_added,
-            t.graph_edge_diff_removed,
-            // Per-kind node frames + register edge + latency ramp.
-            t.graph_node_controller,
-            t.graph_node_jack_input,
-            t.graph_node_jack_output,
-            t.graph_edge_register,
-            t.graph_edge_latency_0,
-            t.graph_edge_latency_1,
-            t.graph_edge_latency_2,
-            t.graph_edge_latency_3,
-            t.graph_edge_latency_4,
-            t.graph_edge_latency_legend,
-            t.physical_skeleton_module_outline,
-            t.performance_leader,
-            t.validation_error,
-            t.validation_warning,
-            t.validation_hint,
-            t.validation_modal_border,
-            t.validation_selected_bg,
-            t.pane_focus_border,
-            t.pane_unfocused_border,
-            t.optimizer_selected_bg,
-            t.optimizer_weight,
+            ("button", t.button),
+            ("switch", t.switch),
+            ("knob", t.knob),
+            ("cv_in", t.cv_in),
+            ("cv_out", t.cv_out),
+            ("led", t.led),
+            ("fader_led_bar", t.fader_led_bar),
+            ("shift1", t.shift1),
+            ("shift2", t.shift2),
+            ("shift3", t.shift3),
+            ("shift4", t.shift4),
+            ("accent", t.accent),
+            ("muted", t.muted),
+            ("text", t.text),
+            ("picker_fav_file", t.picker_fav_file),
+            ("picker_fav_dir", t.picker_fav_dir),
+            ("viewer_key", t.viewer_key),
+            ("status_bg", t.status_bg),
+            ("focus_border", t.focus_border),
+            ("occurrence_highlight", t.occurrence_highlight),
+            ("modifier_boolean", t.modifier_boolean),
+            ("modifier_exact", t.modifier_exact),
+            ("minimap_occurrence", t.minimap_occurrence),
+            ("minimap_modifier_boolean", t.minimap_modifier_boolean),
+            ("minimap_modifier_exact", t.minimap_modifier_exact),
+            ("minimap_combined", t.minimap_combined),
+            ("graph_node_border", t.graph_node_border),
+            ("graph_node_title", t.graph_node_title),
+            ("graph_cluster_border", t.graph_cluster_border),
+            ("graph_cluster_title", t.graph_cluster_title),
+            ("graph_canvas_bg", t.graph_canvas_bg),
+            ("graph_node_fill", t.graph_node_fill),
+            ("graph_edge_control", t.graph_edge_control),
+            ("graph_edge_audio", t.graph_edge_audio),
+            ("graph_edge_midi", t.graph_edge_midi),
+            ("graph_edge_unknown", t.graph_edge_unknown),
+            ("graph_edge_error", t.graph_edge_error),
+            ("graph_node_highlight", t.graph_node_highlight),
+            ("graph_node_dim", t.graph_node_dim),
+            ("graph_edge_highlight", t.graph_edge_highlight),
+            ("graph_edge_dim", t.graph_edge_dim),
+            ("graph_edge_diff_added", t.graph_edge_diff_added),
+            ("graph_edge_diff_removed", t.graph_edge_diff_removed),
+            ("graph_node_controller", t.graph_node_controller),
+            ("graph_node_jack_input", t.graph_node_jack_input),
+            ("graph_node_jack_output", t.graph_node_jack_output),
+            ("graph_edge_register", t.graph_edge_register),
+            ("graph_edge_latency_0", t.graph_edge_latency_0),
+            ("graph_edge_latency_1", t.graph_edge_latency_1),
+            ("graph_edge_latency_2", t.graph_edge_latency_2),
+            ("graph_edge_latency_3", t.graph_edge_latency_3),
+            ("graph_edge_latency_4", t.graph_edge_latency_4),
+            ("graph_edge_latency_legend", t.graph_edge_latency_legend),
+            (
+                "physical_skeleton_module_outline",
+                t.physical_skeleton_module_outline,
+            ),
+            ("performance_leader", t.performance_leader),
+            ("validation_error", t.validation_error),
+            ("validation_warning", t.validation_warning),
+            ("validation_hint", t.validation_hint),
+            ("validation_modal_border", t.validation_modal_border),
+            ("validation_selected_bg", t.validation_selected_bg),
+            ("pane_focus_border", t.pane_focus_border),
+            ("pane_unfocused_border", t.pane_unfocused_border),
+            ("optimizer_selected_bg", t.optimizer_selected_bg),
+            ("optimizer_weight", t.optimizer_weight),
         ]
     }
 
@@ -1043,12 +1000,12 @@ mod tests {
         for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
             let tokens = every_token(&theme);
 
-            for token in tokens {
+            for (name, token) in tokens {
                 let rgb = theme.rgb(token);
                 assert_eq!(
                     theme.rgb(token),
                     rgb,
-                    "hop must be deterministic for {token:?}"
+                    "hop must be deterministic for {name}"
                 );
             }
         }
@@ -1245,7 +1202,7 @@ mod tests {
         // concrete, opaque Color32 in every palette (the terminal palette
         // defers to Reset, which the hop maps to the bright-white fallback).
         for theme in [Theme::classic(), Theme::terminal(), Theme::mono()] {
-            for token in every_token(&theme) {
+            for (_name, token) in every_token(&theme) {
                 let c = theme.egui_color(token);
                 assert_eq!(c.a(), 255, "egui bridge must stay opaque for {token:?}");
             }
