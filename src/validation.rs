@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::patch::{IniEntry, Patch, Span};
+use crate::patch::{IniEntry, MasterModel, Patch, Span};
+use crate::rack::MasterConflict;
 use crate::schema::{is_valid_jack, suggest_circuit_with_schema, validate_jack, Schema};
 
 // ---------------------------------------------------------------------------
@@ -448,6 +449,46 @@ fn entry_has_value(value: &str) -> bool {
     !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unpatched")
 }
 
+/// Name both sides of an unrunnable patch: the first use that needs each model.
+///
+/// `MasterPlan::conflicts` carries the requirements from both directions when
+/// `satisfiable` is `false`, so one `no_master_fits` finding can state the
+/// contradiction instead of one finding per use.
+fn no_master_fits_message(conflicts: &[MasterConflict]) -> String {
+    let first = |model: MasterModel| conflicts.iter().find(|c| c.needs == model);
+    match (first(MasterModel::Master), first(MasterModel::Master18)) {
+        (Some(master), Some(master18)) => format!(
+            "{} requires {} and {} requires {} — no master model can host this patch",
+            master.usage,
+            master.needs.label(),
+            master18.usage,
+            master18.needs.label()
+        ),
+        // Only a plan with requirements in one direction can get here, and such
+        // a plan is always satisfiable; keep a readable message rather than a
+        // panic if the resolver's contract ever changes.
+        _ => "no master model can host this patch".to_string(),
+    }
+}
+
+/// The RAM budget(s) the verdict is judged against: the resolved model's own,
+/// or — when the schema carries no budget under that model's key — every budget
+/// it does carry, so an unfamiliar schema degrades to the old per-master check
+/// instead of silently skipping the RAM verdict (design D6).
+fn ram_budgets(schema: &Schema, model: MasterModel) -> Vec<(String, u32)> {
+    match schema.available_memory.get(model.ram_key()) {
+        Some(avail) => vec![(model.label().to_string(), *avail)],
+        None => {
+            let mut masters: Vec<(&String, &u32)> = schema.available_memory.iter().collect();
+            masters.sort_by(|a, b| a.0.cmp(b.0));
+            masters
+                .into_iter()
+                .map(|(name, avail)| (name.clone(), *avail))
+                .collect()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main validator
 // ---------------------------------------------------------------------------
@@ -710,7 +751,40 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
         }
     }
 
-    // 9. RAM overflow
+    // 9. master fit: one resolution per run decides which model hosts the
+    // patch, and every use that model cannot host is reported at its own span.
+    // A conflict warns (the declaration is authoritative for what is drawn); a
+    // patch no model can host is an Error and gates the load like the others.
+    let plan = crate::rack::resolve(patch, schema);
+    if plan.satisfiable {
+        for conflict in &plan.conflicts {
+            issues.push(ValidationIssue {
+                span: conflict.span,
+                severity: Severity::Warning,
+                code: "master_conflict".to_string(),
+                message: format!(
+                    "{} requires {}, but this patch resolves to {}",
+                    conflict.usage,
+                    conflict.needs.label(),
+                    plan.model.label()
+                ),
+            });
+        }
+    } else {
+        issues.push(ValidationIssue {
+            span: Span {
+                line: 0,
+                col_start: 0,
+                col_end: 0,
+            },
+            severity: Severity::Error,
+            code: "no_master_fits".to_string(),
+            message: no_master_fits_message(&plan.conflicts),
+        });
+    }
+
+    // 10. RAM overflow, judged against the master model the patch resolved to
+    // so the verdict names the model the patch actually runs on.
     {
         let mut ram_used: u32 = 0;
         let mut unknown = false;
@@ -725,11 +799,8 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
             }
         }
         if !unknown && ram_used > 0 && !schema.available_memory.is_empty() {
-            // Sort masters for deterministic order
-            let mut masters: Vec<(&String, &u32)> = schema.available_memory.iter().collect();
-            masters.sort_by(|a, b| a.0.cmp(b.0));
-            for (master, avail) in masters {
-                if ram_used > *avail {
+            for (master, avail) in ram_budgets(schema, plan.model) {
+                if ram_used > avail {
                     issues.push(ValidationIssue {
                         span: Span {
                             line: 0,
@@ -795,6 +866,139 @@ mod tests {
         let mut want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
         want.sort();
         assert_eq!(got, want, "missing_required mismatch for:\n{ini}");
+    }
+
+    /// One of the schema's RAM budgets, so a test sizes a patch against the real
+    /// figures instead of hard-coding firmware numbers.
+    fn ram_budget(schema: &Schema, key: &str) -> u32 {
+        *schema
+            .available_memory
+            .get(key)
+            .unwrap_or_else(|| panic!("schema must carry a {key} budget"))
+    }
+
+    /// A patch (`[p2b8]` plus N copies of one circuit) whose summed RAM lands in
+    /// `(low, high]`, or `None` when no circuit's `ramsize` fits that window.
+    /// The copies carry no entries, so the patch constrains no master and the
+    /// default resolution (MASTER) applies.
+    fn ram_patch_between(schema: &Schema, low: u32, high: u32) -> Option<String> {
+        let controller_ram = schema.controllers.get("p2b8").map_or(0, |c| c.ramsize);
+        let mut circuits: Vec<(&String, u32)> = schema
+            .circuits
+            .iter()
+            .filter(|(_, c)| c.ramsize > 0)
+            .map(|(name, c)| (name, c.ramsize))
+            .collect();
+        // Largest first keeps the generated patch short.
+        circuits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        for (name, size) in circuits {
+            let copies = low.saturating_sub(controller_ram) / size + 1;
+            let total = controller_ram.saturating_add(copies.saturating_mul(size));
+            if total > low && total <= high {
+                let mut ini = String::from("[p2b8]\n");
+                for _ in 0..copies {
+                    ini.push_str(&format!("[{name}]\n"));
+                }
+                return Some(ini);
+            }
+        }
+        None
+    }
+
+    fn ram_overflow_messages(ini: &str) -> Vec<String> {
+        validate(ini)
+            .into_iter()
+            .filter(|i| i.code == "ram_overflow")
+            .map(|i| i.message)
+            .collect()
+    }
+
+    // ── master-module fit ────────────────────────────────────────────────
+
+    #[test]
+    fn declared_master18_cv_on_i3_warns_at_the_value_and_still_loads() {
+        let ini = "# LABELS: master=18\n\n[copy]\ninput = I3\n";
+        let patch = Patch::from_ini_str(ini, String::from("test")).unwrap();
+        let issues = validate_patch(&patch, load_schema());
+
+        let conflicts: Vec<&ValidationIssue> = issues
+            .iter()
+            .filter(|i| i.code == "master_conflict")
+            .collect();
+        assert_eq!(conflicts.len(), 1, "issues: {issues:#?}");
+        assert_eq!(conflicts[0].severity, Severity::Warning);
+        assert_eq!(
+            conflicts[0].span,
+            patch.sections[0].detailed_entries[0].value_span
+        );
+        assert!(
+            conflicts[0].message.contains("I3") && conflicts[0].message.contains("MASTER18"),
+            "message must name the use and the resolved model: {}",
+            conflicts[0].message
+        );
+        assert!(
+            !issues.iter().any(|i| i.severity == Severity::Error),
+            "a master conflict must not gate the load: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn declared_master18_with_vcotuner_has_no_master_finding() {
+        let issues = validate(
+            "# LABELS: master=18\n\n[vcotuner]\nconcertpitch = 440\n\n[copy]\ninput = O1\n",
+        );
+        assert!(
+            !has_code(&issues, "master_conflict") && !has_code(&issues, "no_master_fits"),
+            "MASTER18 hosts its own circuit: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn declared_master16_with_sinfonionlink_warns_once() {
+        let issues = validate("# LABELS: master=16\n\n[sinfonionlink]\n\n[copy]\ninput = O1\n");
+        let conflicts: Vec<&ValidationIssue> = issues
+            .iter()
+            .filter(|i| i.code == "master_conflict")
+            .collect();
+        assert_eq!(conflicts.len(), 1, "issues: {issues:#?}");
+        assert_eq!(conflicts[0].severity, Severity::Warning);
+        assert!(
+            conflicts[0].message.contains("sinfonionlink")
+                && conflicts[0].message.contains("MASTER18"),
+            "message must name the section and the model it needs: {}",
+            conflicts[0].message
+        );
+    }
+
+    #[test]
+    fn silence_plus_vcotuner_infers_master18_without_a_finding() {
+        let issues = validate("[vcotuner]\nconcertpitch = 440\n\n[copy]\ninput = O1\n");
+        assert!(
+            !has_code(&issues, "master_conflict") && !has_code(&issues, "no_master_fits"),
+            "an inferred master is not a conflict: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn cv_on_i6_plus_vcotuner_errors_once_and_names_both_sides() {
+        let issues = validate("[copy]\ninput = I6\n\n[vcotuner]\nconcertpitch = 440\n");
+        let fatal: Vec<&ValidationIssue> = issues
+            .iter()
+            .filter(|i| i.code == "no_master_fits")
+            .collect();
+        assert_eq!(fatal.len(), 1, "issues: {issues:#?}");
+        assert_eq!(fatal[0].severity, Severity::Error);
+        assert_eq!(fatal[0].span.line, 0);
+        assert_eq!(fatal[0].span.col_start, 0);
+        assert!(
+            fatal[0].message.contains("I6") && fatal[0].message.contains("vcotuner"),
+            "message must name both sides: {}",
+            fatal[0].message
+        );
+        assert!(
+            !has_code(&issues, "master_conflict"),
+            "an unrunnable patch reports one fatal finding, not conflicts: {issues:#?}"
+        );
     }
 
     #[test]
@@ -1508,37 +1712,68 @@ output = _STILL_OPEN * 2
 
     #[test]
     fn ram_overflow_error_at_zero_span() {
-        use std::fmt::Write as _;
-
-        // Find a schema with available_memory and sum > avail by adding many large circuits
         let schema = load_schema();
-        // Find any master available value
-        let available = *schema.available_memory.values().min().unwrap_or(&u32::MAX);
-        // Find circuit with largest ramsize
-        let (big_name, big_size) = schema
-            .circuits
-            .iter()
-            .map(|(k, v)| (k.clone(), v.ramsize))
-            .max_by_key(|(_, s)| *s)
-            .unwrap();
-        // Build patch with enough copies to exceed available
-        let copies = (available / big_size.max(1) + 2) as usize;
-        let mut ini = String::from("[p2b8]\n");
-        for _ in 0..copies {
-            writeln!(ini, "[{big_name}]").expect("write to a String");
-            // need to satisfy required? but RAM check counts even if missing required? It's still counted. So fill minimal to avoid unknown?
-            // Use valid param to avoid missing required noise? But ram check still triggers regardless.
+        // No declaration and no constraining use: the patch resolves to MASTER,
+        // so the verdict is MASTER's budget and one finding.
+        let ini = ram_patch_between(&schema, ram_budget(schema, "master16"), u32::MAX)
+            .expect("the largest circuit can exceed MASTER's budget");
+        let patch = Patch::from_ini_str(&ini, String::from("test")).unwrap();
+        let issues = validate_patch(&patch, schema);
+        let ram: Vec<&ValidationIssue> =
+            issues.iter().filter(|i| i.code == "ram_overflow").collect();
+        assert_eq!(ram.len(), 1, "one finding per patch, not per master");
+        assert_eq!(ram[0].severity, Severity::Error);
+        assert_eq!(ram[0].span.line, 0);
+        assert_eq!(ram[0].span.col_start, 0);
+        assert!(
+            ram[0].message.contains("bytes of RAM")
+                && ram[0].message.contains("MASTER only provides"),
+            "message must name the resolved master: {}",
+            ram[0].message
+        );
+    }
+
+    #[test]
+    fn ram_verdict_follows_the_resolved_master_not_every_budget() {
+        let schema = load_schema();
+        let master = ram_budget(schema, "master16");
+        let master18 = ram_budget(schema, "master18");
+        // A silent patch resolves to MASTER, so only MASTER's budget decides.
+        // Size it inside MASTER's budget while outside MASTER18's (whichever of
+        // the two the firmware figures make the smaller one).
+        let (low, high) = (master.min(master18), master.max(master18));
+        let ini = ram_patch_between(&schema, low, high).expect("schema budgets leave a window");
+
+        let messages = ram_overflow_messages(&ini);
+        if master18 < master {
+            assert!(
+                messages.is_empty(),
+                "inside MASTER's budget the old per-master loop still flagged MASTER18: {messages:?}"
+            );
+        } else {
+            assert_eq!(messages.len(), 1, "messages: {messages:?}");
+            assert!(
+                messages[0].contains("MASTER only provides"),
+                "resolved master must be named: {}",
+                messages[0]
+            );
         }
-        // If circuit needs required params, still RAM check will trigger before unknown? unknown false because all known.
-        let issues = validate(&ini);
-        let ram = issues
-            .iter()
-            .find(|i| i.code == "ram_overflow")
-            .expect("ram_overflow");
-        assert_eq!(ram.severity, Severity::Error);
-        assert_eq!(ram.span.line, 0);
-        assert_eq!(ram.span.col_start, 0);
-        assert!(ram.message.contains("bytes of RAM"));
+    }
+
+    #[test]
+    fn declared_master18_ram_overflow_names_master18() {
+        let schema = load_schema();
+        let ini = ram_patch_between(&schema, ram_budget(schema, "master18"), u32::MAX)
+            .expect("the largest circuit can exceed MASTER18's budget");
+        let ini = format!("# LABELS: master=18\n{ini}");
+
+        let messages = ram_overflow_messages(&ini);
+        assert_eq!(messages.len(), 1, "messages: {messages:?}");
+        assert!(
+            messages[0].contains("MASTER18 only provides"),
+            "declared MASTER18 verdict must name MASTER18: {}",
+            messages[0]
+        );
     }
 
     #[test]
@@ -1596,12 +1831,11 @@ output = _STILL_OPEN * 2
     #[test]
     fn plugin_circuit_participates_in_ram_overflow_check() {
         let schema = schema_with_plugin_circuit();
-        // Sum enough instances of the 16-byte plugin circuit to exceed every
-        // master's available memory; the plugin circuit is known, so the RAM
+        // Sum enough instances of the 16-byte plugin circuit to exceed the
+        // resolved master's budget; the plugin circuit is known, so the RAM
         // check must NOT be skipped the way `ram_not_checked_when_unknown_circuit`
         // documents it is for a genuinely unknown circuit.
-        let avail_min = *schema.available_memory.values().min().unwrap();
-        let copies = (avail_min / 16 + 2) as usize;
+        let copies = (ram_budget(&schema, "master16") / 16 + 2) as usize;
         let mut ini = String::from("[p2b8]\n");
         for _ in 0..copies {
             ini.push_str("[ramtestplugin]\ninput = 0\n");

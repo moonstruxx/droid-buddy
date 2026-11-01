@@ -143,10 +143,13 @@ every genuine MASTER18 MIDI/clock patch.
 ### D6 — RAM is judged against the resolved master
 
 `ram_overflow` compares the summed circuit RAM against
-`plan.model.ram_key()`'s budget and emits one finding that names that master. A patch
-over MASTER's budget but under MASTER18's now reports one finding against MASTER
-instead of two contradictory ones; if the fit also forces MASTER18, the resolution
-already accounts for it.
+`plan.model.ram_key()`'s budget and emits one finding that names that master. The
+verdict now follows the model the patch runs on rather than every master the schema
+knows: measured from the embedded `circuits.json`, MASTER has the larger budget
+(`master16` 112 867 B, `master18` 109 015 B), so a silent patch above MASTER18's
+budget but inside MASTER's is no longer warned about at all — it resolves to MASTER —
+while a declared-18 patch reports exactly one finding naming MASTER18 instead of one
+per master.
 
 *Alternative considered:* keep per-master budgets. Rejected: the message names a model
 the patch does not use, and the user cannot tell which verdict applies.

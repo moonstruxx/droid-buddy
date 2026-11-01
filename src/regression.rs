@@ -797,8 +797,14 @@ fn regression_validation_fixture_ram_overflow() {
             r.message
         );
     }
-    // Should have two (master16 + master18) or at least one
-    assert!(!ram.is_empty() && ram.len() <= 2, "ram len {:?}", ram.len());
+    // One verdict, judged against the master the patch resolved to (MASTER:
+    // the fixture declares none and constrains none), not one per schema master.
+    assert_eq!(ram.len(), 1, "ram findings: {ram:?}");
+    assert!(
+        ram[0].message.contains("MASTER only provides"),
+        "resolved master must be named: {}",
+        ram[0].message
+    );
 }
 
 #[test]
@@ -2102,7 +2108,7 @@ fn regression_faceplate_rotary_stack_all_six_declared_and_attributable() {
     // Each controller has its own faceplate, and every token it declares is
     // attributed to that faceplate and resolves to a cell on it. Presence and
     // attribution only — no coordinate is read here.
-    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let layout = crate::physical::PhysicalLayout::build(&patch, crate::patch::MasterModel::Master);
     assert_faceplate_tokens(&layout, ROTARY_STACK_FACEPLATES);
 
     // Exactly six controller faceplates beside the always-present CV I/O
@@ -2226,7 +2232,7 @@ fn regression_button_led_composition_faces_render_and_leds_fold() {
 
     // (b) All three faceplates exist and render their declared tokens:
     // each token is attributed to its faceplate and resolves to a cell.
-    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let layout = crate::physical::PhysicalLayout::build(&patch, crate::patch::MasterModel::Master);
     assert_faceplate_tokens(&layout, BUTTON_LED_FACEPLATES);
 
     // (c) No folded LED appears as a cell or in `component_rects`: the
@@ -2296,7 +2302,7 @@ fn regression_cable_valued_led_params_keep_every_led_folded() {
 
     // (b) Every button on a fold-rule faceplate resolves an LED token — the
     // cable-valued params bind nothing, so the positional default answers.
-    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let layout = crate::physical::PhysicalLayout::build(&patch, crate::patch::MasterModel::Master);
     for faceplate in &layout.modules {
         for comp in faceplate
             .components
@@ -2435,7 +2441,7 @@ fn regression_led_register_colour_resolves_static_and_falls_back() {
     // (d) Faceplate attribution: the buttons owning the fixture LEDs resolve
     // to element cells on their plates. Presence and attribution only — no
     // coordinate is read here.
-    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let layout = crate::physical::PhysicalLayout::build(&patch, crate::patch::MasterModel::Master);
     for (plate_ix, button) in [("p2b8", "B1.1"), ("m4", "B2.1")] {
         let ix = layout
             .modules
@@ -2502,7 +2508,7 @@ fn regression_unreferenced_elements_render_dimmed_without_hit_rects() {
     // declared tokens: each token is attributed to its faceplate and
     // resolves to a cell. The `[notebuttons]` section binds to the b32
     // faceplate (never the fallback); the bare `[e4]` synthesizes its front.
-    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let layout = crate::physical::PhysicalLayout::build(&patch, crate::patch::MasterModel::Master);
     let b32_ix = layout
         .modules
         .iter()
@@ -2713,7 +2719,7 @@ fn regression_s10_switch_kinds_glyphs() {
 
     // (b) The s10 faceplate exists on its geometry entry and every S token
     // lands on it. Presence and attribution only — no coordinate is read.
-    let layout = crate::physical::PhysicalLayout::build(&patch);
+    let layout = crate::physical::PhysicalLayout::build(&patch, crate::patch::MasterModel::Master);
     let s10_ix = layout
         .modules
         .iter()
@@ -3231,7 +3237,7 @@ const MODULE_UI_LABELS_DERIVED_ONLY: &str = "B1.20";
 /// `App::fit_physical_view` and `physical_spec` consume, so the story's pane
 /// is derived from the geometry that is actually drawn.
 fn module_ui_labels_rack(patch: &Patch) -> crate::physical::RackLayout {
-    let chain = crate::physical::PhysicalLayout::build(patch);
+    let chain = crate::physical::PhysicalLayout::build(patch, crate::patch::MasterModel::Master);
     let spec = crate::physical::RackSpec::default_case(&chain);
     crate::physical::RackLayout::pack(&chain, &spec)
 }
@@ -3748,7 +3754,7 @@ const MODULE_UI_LABEL_FIT_LED: &str = "L1";
 /// The rack the fixture packs into, from the same chain + default-case source
 /// the app's fit and the painter consume.
 fn module_ui_label_fit_rack(patch: &Patch) -> crate::physical::RackLayout {
-    let chain = crate::physical::PhysicalLayout::build(patch);
+    let chain = crate::physical::PhysicalLayout::build(patch, crate::patch::MasterModel::Master);
     let spec = crate::physical::RackSpec::default_case(&chain);
     crate::physical::RackLayout::pack(&chain, &spec)
 }

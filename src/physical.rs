@@ -12,7 +12,7 @@ use std::sync::Once;
 
 use serde::{Deserialize, Serialize};
 
-use crate::patch::{HwComponent, MasterRequirement, Patch};
+use crate::patch::{HwComponent, MasterModel, Patch};
 
 // ---------------------------------------------------------------------------
 // Data model — mirrors controller_geometry.json (schema from task 1.1)
@@ -231,7 +231,7 @@ impl ControllerGeometry {
     /// `[faderbank]` -> "Faderbank"). The usage names map onto the physical
     /// module that provides those elements; anything else returns `None` and
     /// the caller uses the fallback width. "CV I/O" is handled by the caller
-    /// (it resolves to master/master18 via `Patch::master_requirement`).
+    /// (it takes the resolved model's `geometry_key()`).
     pub fn resolve_controller(&self, controller: &str) -> Option<String> {
         let c = controller.trim().to_ascii_lowercase();
         if self.controllers.contains_key(&c) {
@@ -427,16 +427,22 @@ fn warn_once(gate: &Once, msg: &str) {
 }
 
 impl PhysicalLayout {
-    /// Build the ordered controller chain for a patch.
+    /// Build the ordered controller chain for a patch under `model`.
+    ///
+    /// `model` is the master model resolved for the patch by the master plan
+    /// (`rack::MasterPlan::model`): the layout draws that answer, it never
+    /// resolves one itself, so the faceplate cannot disagree with the
+    /// validated verdict and this module stays schema-free.
     ///
     /// Modules appear in the order the patch declares its hardware
     /// (`hw_components` order), grouped by (controller, module instance);
     /// repeated instances of a controller become separate side-by-side
-    /// faceplates. All CV I/O components share a single master faceplate
-    /// (master or master18 via `Patch::master_requirement`) that never
-    /// subdivides. Missing/malformed geometry data and unknown controllers
-    /// degrade to the fallback width with a one-time warning — never a panic.
-    pub fn build(patch: &Patch) -> Self {
+    /// faceplates. The chain always begins with exactly one master faceplate
+    /// — `model.geometry_key()`'s entry, carrying the `CV I/O` controller
+    /// identity — which never subdivides. Missing/malformed geometry data and
+    /// unknown controllers degrade to the fallback width with a one-time
+    /// warning — never a panic.
+    pub fn build(patch: &Patch, model: MasterModel) -> Self {
         let data = match ControllerGeometry::load() {
             Ok(d) => d,
             Err(e) => {
@@ -447,10 +453,7 @@ impl PhysicalLayout {
                 ControllerGeometry::fallback()
             }
         };
-        let master_key = match patch.master_requirement() {
-            MasterRequirement::Master => "master",
-            MasterRequirement::Master18 => "master18",
-        };
+        let master_key = model.geometry_key();
         let fallback_w = data.fallback_width_mm();
         let fallback_h = data.fallback_height_mm();
 
@@ -1873,8 +1876,10 @@ mod tests {
         // Edge-rounded spans (`round(mm0×f)..round(mm1×f)`) share the
         // boundary value, so adjacent rects abut exactly.
         // This test uses the old chain structure; create a custom chain for the test
-        let chain =
-            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
+        let chain = PhysicalLayout::build(
+            &patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"),
+            MasterModel::Master,
+        );
         let rack = RackLayout::pack(&chain, &spec(&[(3, 20.0)], &[]));
         // The supported range widened to [ZOOM_MIN, ZOOM_MAX] (D5), so the
         // abutment promise must hold at the new extremes, not only at the
@@ -1919,7 +1924,7 @@ mod tests {
     /// both measure the same gap, one in millimetres and one in points.
     fn two_row_rack() -> RackLayout {
         let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
-        let chain = PhysicalLayout::build(&p);
+        let chain = PhysicalLayout::build(&p, MasterModel::Master);
         let spec = RackSpec {
             rows: vec![
                 RackRow {
@@ -1989,7 +1994,7 @@ mod tests {
     #[test]
     fn chain_order_matches_declaration() {
         let p = patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
 
         // D5: Master faceplate at chain position 0 (replaces CV I/O group).
         // The copy section's I1/O1 are CV I/O components, so they merge into
@@ -2022,7 +2027,7 @@ mod tests {
     #[test]
     fn repeated_p2b8_instances_yield_separate_faceplates() {
         let p = patch("[p2b8]\n[p2b8]\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
 
         // Master at position 0, then two P2B8 instances
         assert_eq!(layout.modules.len(), 3);
@@ -2048,7 +2053,7 @@ mod tests {
         assert_close(layout.total_width_mm, 92.44); // 40.64 + 0.5 + 25.4 + 0.5 + 25.4
 
         // Determinism: an identical patch yields an identical chain.
-        let again = PhysicalLayout::build(&p);
+        let again = PhysicalLayout::build(&p, MasterModel::Master);
         let rects = |l: &PhysicalLayout| l.modules.iter().map(|m| m.rect_mm).collect::<Vec<_>>();
         assert_eq!(rects(&layout), rects(&again));
     }
@@ -2061,7 +2066,7 @@ mod tests {
         // "sliders addressed via P registers"). cell_for must fall back from
         // the absent "P" family to "F" so P tokens render on their cells.
         let p = patch("[p8s8]\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // Master at index 0, p8s8 at index 1
         let s1 = layout.cell_for(1, "P1.1").expect("P1.1 slider cell");
         assert_eq!(s1.label, "P1.1");
@@ -2072,7 +2077,7 @@ mod tests {
         assert!(layout.cell_for(1, "P1.9").is_none(), "8 sliders only");
 
         let p = patch("[m4]\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // Master at index 0, m4 at index 1
         let f1 = layout.cell_for(1, "P1.2").expect("M4 fader cell");
         assert_eq!(f1.family, "F");
@@ -2091,7 +2096,7 @@ mod tests {
         let p = patch(
             "[switch]\n    switch = S1.1\n    output = _OUT\n[switch]\n    switch = S1.2\n[faderbank]\n    pot = P1.1\n",
         );
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // Master at 0, Faderbank at 1
         assert_eq!(layout.modules.len(), 2);
         assert_eq!(layout.modules[1].controller, "Faderbank");
@@ -2110,7 +2115,7 @@ mod tests {
         // Pot (p10) has no S family: the switch token is omitted — cell_for
         // returns None instead of falling back to the same-numbered knob cell.
         let p = patch("[pot]\n    pot = P1.1\n[switch]\n    switch = S1.1\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // Master at 0, Pot at 1
         assert_eq!(layout.modules.len(), 2);
         assert_eq!(layout.modules[1].controller, "Pot");
@@ -2130,7 +2135,7 @@ mod tests {
         // droid_tui-2b4: a bare [p8s8] declares 8 sliders (P), 8 slider LEDs
         // (L) and 8 switches (S) — all resolvable against the p8s8 geometry.
         let p = patch("[p8s8]\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // D5: master faceplate at index 0, p8s8 faceplate at index 1.
         assert_eq!(layout.modules.len(), 2);
         assert_eq!(layout.modules[0].geometry_key, "master");
@@ -2149,7 +2154,7 @@ mod tests {
     #[test]
     fn cell_lookup_resolves_per_token_family() {
         let p = patch("[p2b8]\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // D5: master faceplate at index 0, p2b8 faceplate at index 1.
 
         let b3 = layout.cell_for(1, "B1.3").expect("B1.3 cell");
@@ -2184,7 +2189,7 @@ mod tests {
     #[test]
     fn cv_tokens_resolve_to_directional_master_cells() {
         let p = patch("[copy]\n    input = I1\n    output = O4\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
 
         assert_eq!(layout.modules.len(), 1);
         assert_eq!(layout.modules[0].geometry_key, "master");
@@ -2201,15 +2206,40 @@ mod tests {
 
     #[test]
     fn deep_cv_patch_uses_master18_geometry() {
-        let p = patch("[copy]\n    input = I9\n    output = O1\n");
-        let layout = PhysicalLayout::build(&p);
+        // The faceplate follows the patch's own declaration: a deep CV jack no
+        // longer implies MASTER18 (that heuristic is gone), the `# LABELS:
+        // master=18` preamble does.
+        let p = patch("# LABELS: master=18\n[copy]\n    input = I9\n    output = O1\n");
+        assert_eq!(p.master_declaration, Some(MasterModel::Master18));
+        let layout = PhysicalLayout::build(&p, MasterModel::Master18);
         assert_eq!(layout.modules[0].geometry_key, "master18");
+        assert_close(layout.modules[0].rect_mm.w_mm, 30.48); // master18 = 6 HP
+    }
+
+    #[test]
+    fn silent_deep_cv_patch_lays_out_master() {
+        // The deleted "CV jack > 8" guess: the same patch without a
+        // declaration takes the named default, MASTER, and the layout draws
+        // that faceplate. Reporting the missing deep jack belongs to the
+        // resolver, not to the chain geometry.
+        let p = patch("[copy]\n    input = I9\n    output = O1\n");
+        assert_eq!(p.master_declaration, None);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
+        assert_eq!(layout.modules[0].geometry_key, "master");
+        assert!(
+            layout.modules[0]
+                .cells
+                .values()
+                .flatten()
+                .all(|c| c.label != "I9"),
+            "MASTER has no ninth input jack"
+        );
     }
 
     #[test]
     fn unknown_controller_falls_back_to_default_width() {
         let p = patch("[copy]\n    button = B5.1\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
 
         // Master at 0, unknown controller at 1
         let m = &layout.modules[1];
@@ -2253,7 +2283,7 @@ mod tests {
         assert_close(fb.fallback_height_mm(), 128.5);
         // A patch with an unknown controller yields a fallback module.
         let p = patch("[copy]\n    button = B7.1\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         assert_eq!(layout.modules.len(), 2); // master + fallback
         let m = &layout.modules[1];
         assert!(m.is_fallback);
@@ -2395,7 +2425,7 @@ mod tests {
         // Model proof: a Notebuttons patch resolves to b32 and reaches the
         // last cell of the 4x8 grid; button 33 is out of range.
         let p = patch("[notebuttons]\n    button = B1.1\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         // D5: master faceplate at index 0, b32 faceplate at index 1.
         assert_eq!(layout.modules[0].geometry_key, "master");
         assert_eq!(layout.modules[1].geometry_key, "b32");
@@ -2411,9 +2441,10 @@ mod tests {
 
     /// Master (8 HP, 40.64 mm) + p2b8 (5 HP, 25.4 mm) + b32 (10 HP, 50.8 mm).
     fn three_module_chain() -> PhysicalLayout {
-        PhysicalLayout::build(&patch(
-            "[p2b8]\n[b32]\n[copy]\n    input = I1\n    output = O1\n",
-        ))
+        PhysicalLayout::build(
+            &patch("[p2b8]\n[b32]\n[copy]\n    input = I1\n    output = O1\n"),
+            MasterModel::Master,
+        )
     }
 
     fn spec(rows: &[(u32, f64)], assign: &[(&str, usize)]) -> RackSpec {
@@ -2514,8 +2545,10 @@ mod tests {
 
     #[test]
     fn fold_lines_at_row_boundaries() {
-        let chain =
-            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
+        let chain = PhysicalLayout::build(
+            &patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"),
+            MasterModel::Master,
+        );
         let rack = RackLayout::pack(&chain, &spec(&[(3, 5.0), (3, 5.0), (3, 5.0)], &[]));
         // The chain is master (40.64) + P2B8 1 (25.4) with 5 HP = 25.4 mm
         // rows: master takes the empty row 0 (an empty row always accepts its
@@ -2540,8 +2573,10 @@ mod tests {
 
     #[test]
     fn mounts_attach_as_regions() {
-        let chain =
-            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
+        let chain = PhysicalLayout::build(
+            &patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"),
+            MasterModel::Master,
+        );
         let mut s = spec(&[(3, 10.0)], &[]);
         s.top_mount_te = 2.0;
         s.side_mount_te = 1.0;
@@ -2562,8 +2597,10 @@ mod tests {
 
     #[test]
     fn rack_packing_is_deterministic() {
-        let chain =
-            PhysicalLayout::build(&patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"));
+        let chain = PhysicalLayout::build(
+            &patch("[p2b8]\n[copy]\n    input = I1\n    output = O1\n"),
+            MasterModel::Master,
+        );
         let s = spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 1)]);
         let a = RackLayout::pack(&chain, &s);
         let b = RackLayout::pack(&chain, &s);
@@ -2578,7 +2615,7 @@ mod tests {
         let p = patch("[p2b8]\n");
         assert_eq!(db8e_display_state(&p), "not used");
         assert_eq!(
-            db8e_display_state_for_layout(&PhysicalLayout::build(&p)),
+            db8e_display_state_for_layout(&PhysicalLayout::build(&p, MasterModel::Master)),
             "not used"
         );
         // Hardware mismatch marker alone must not false-positive when db8e absent.
@@ -2600,14 +2637,14 @@ mod tests {
         // yields "connected".
         let p = patch("[db8e]\n    button1 = B1.1\n");
         assert_eq!(db8e_display_state(&p), "connected");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         assert!(layout.modules.iter().any(|m| m.geometry_key == "db8e"));
         assert_eq!(db8e_display_state_for_layout(&layout), "connected");
         // With additional hardware the baseline stays "connected".
         let q = patch("[db8e]\n    button1 = B1.1\n[p2b8]\n");
         assert_eq!(db8e_display_state(&q), "connected");
         assert_eq!(
-            db8e_display_state_for_layout(&PhysicalLayout::build(&q)),
+            db8e_display_state_for_layout(&PhysicalLayout::build(&q, MasterModel::Master)),
             "connected"
         );
     }
@@ -2625,7 +2662,8 @@ mod tests {
         let p3 = patch("[db8e]\n    button1 = B1.1\n[copy]\n    input = _MISMATCH_CABLE\n");
         assert_eq!(db8e_display_state(&p3), "configuration error");
         // Layout-level stub: controller/component id containing "mismatch".
-        let layout = PhysicalLayout::build(&patch("[db8e]\n    button1 = B1.1\n"));
+        let layout =
+            PhysicalLayout::build(&patch("[db8e]\n    button1 = B1.1\n"), MasterModel::Master);
         // No layout-level mismatch by default → still "connected".
         assert_eq!(db8e_display_state_for_layout(&layout), "connected");
         // Inject a layout-level mismatch marker and verify the branch.
@@ -2785,7 +2823,7 @@ mod tests {
         }
 
         // Model path: both pots resolve onto the same column.
-        let layout = PhysicalLayout::build(&patch("[p2b8]\n"));
+        let layout = PhysicalLayout::build(&patch("[p2b8]\n"), MasterModel::Master);
         assert_eq!(layout.modules[1].geometry_key, "p2b8");
         let p1 = layout.cell_for(1, "P1.1").expect("P1.1 cell");
         let p2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
@@ -2867,7 +2905,7 @@ mod tests {
 
         // Model path: p4b2 is not bare-synthesized, so an explicit token is
         // needed to place the faceplate.
-        let layout = PhysicalLayout::build(&patch("[p4b2]\n    pot = P1.1\n"));
+        let layout = PhysicalLayout::build(&patch("[p4b2]\n    pot = P1.1\n"), MasterModel::Master);
         assert_eq!(layout.modules.len(), 2);
         assert_eq!(layout.modules[1].geometry_key, "p4b2");
         let p1 = layout.cell_for(1, "P1.1").expect("P1.1 cell");
@@ -2922,7 +2960,7 @@ mod tests {
 
         // Model path: big pots share a column; the small pots fill a complete
         // 2-column × 4-row matrix (numbering-independent).
-        let layout = PhysicalLayout::build(&patch("[p10]\n"));
+        let layout = PhysicalLayout::build(&patch("[p10]\n"), MasterModel::Master);
         assert_eq!(layout.modules[1].geometry_key, "p10");
         let b1 = layout.cell_for(1, "P1.1").expect("P1.1 cell");
         let b2 = layout.cell_for(1, "P1.2").expect("P1.2 cell");
@@ -2992,7 +3030,7 @@ mod tests {
 
         // Model path: rotaries share a column; small switches fill a complete
         // 2-column × 4-row matrix (numbering-independent).
-        let layout = PhysicalLayout::build(&patch("[s10]\n"));
+        let layout = PhysicalLayout::build(&patch("[s10]\n"), MasterModel::Master);
         assert_eq!(layout.modules[1].geometry_key, "s10");
         let r1 = layout.cell_for(1, "S1.1").expect("S1.1 cell");
         let r2 = layout.cell_for(1, "S1.2").expect("S1.2 cell");
@@ -3055,7 +3093,7 @@ mod tests {
         );
 
         // Model path.
-        let layout = PhysicalLayout::build(&patch("[e4]\n"));
+        let layout = PhysicalLayout::build(&patch("[e4]\n"), MasterModel::Master);
         assert_eq!(layout.modules[1].geometry_key, "e4");
         let e1 = layout.cell_for(1, "E1.1").expect("E1.1 cell");
         let e2 = layout.cell_for(1, "E1.2").expect("E1.2 cell");
@@ -3113,7 +3151,8 @@ mod tests {
         );
 
         // Model path: db8e is not bare-synthesized, so a token is required.
-        let layout = PhysicalLayout::build(&patch("[db8e]\n    button1 = B1.1\n"));
+        let layout =
+            PhysicalLayout::build(&patch("[db8e]\n    button1 = B1.1\n"), MasterModel::Master);
         assert_eq!(layout.modules[1].geometry_key, "db8e");
         let b1 = layout.cell_for(1, "B1.1").expect("B1.1 cell");
         let e1 = layout.cell_for(1, "E1.1").expect("E1.1 cell");
@@ -3296,7 +3335,7 @@ mod tests {
         // Partial B32 via [notebuttons] with 2 buttons: geometry resolves
         // B2.9 while no component claims it.
         let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         let ix = layout
             .modules
             .iter()
@@ -3323,7 +3362,7 @@ mod tests {
     #[test]
     fn unaddressed_cells_includes_ring_segments() {
         // Bare [e4]: 128 L-family ring cells vs 4 synthesized L components.
-        let layout = PhysicalLayout::build(&patch("[e4]\n"));
+        let layout = PhysicalLayout::build(&patch("[e4]\n"), MasterModel::Master);
         let module = e4_module(&layout);
         let rings = module.cells.get("L").map_or(0, Vec::len);
         assert_eq!(rings, 128, "E4 L-family carries 128 ring segments");
@@ -3346,7 +3385,7 @@ mod tests {
     fn unaddressed_cells_includes_unused_buttons() {
         // Partial B32 via [notebuttons]: 32 B cells, 2 claimed -> 30 unused.
         let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         let module = b32_module(&layout);
         assert_eq!(module.cells.get("B").map_or(0, Vec::len), 32);
         let got: Vec<_> = module
@@ -3362,7 +3401,7 @@ mod tests {
         // Cells with `element: None` (e.g. "USB") never match a token pair
         // and must be skipped: the surfaced set must equal total minus
         // addressed minus element-less cells.
-        let layout = PhysicalLayout::build(&patch("[e4]\n"));
+        let layout = PhysicalLayout::build(&patch("[e4]\n"), MasterModel::Master);
         let module = e4_module(&layout);
         let noneless: usize = module
             .cells
@@ -3385,7 +3424,7 @@ mod tests {
         // Fallback modules carry cells for no family, so enumeration is
         // empty *because there is nothing to enumerate*.
         let p = patch("[copy]\n    button = B7.1\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         let module = layout
             .modules
             .iter()
@@ -3402,7 +3441,7 @@ mod tests {
         // expected keys are rebuilt from the addressed-excluded set and
         // sorted independently, so the assertion pins both content and order.
         let p = patch("[notebuttons]\nbutton = B2.1\nbutton = B2.2\n");
-        let layout = PhysicalLayout::build(&p);
+        let layout = PhysicalLayout::build(&p, MasterModel::Master);
         let module = b32_module(&layout);
         let got: Vec<(String, u32, u32)> = module
             .unaddressed_cells()

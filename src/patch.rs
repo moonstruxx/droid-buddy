@@ -339,11 +339,6 @@ impl MasterModel {
     }
 }
 
-/// Transitional name for [`MasterModel`]: `src/physical.rs` still spells the
-/// type while it reads `Patch::master_requirement`. Both go away together when
-/// the physical layout takes the resolved model as a parameter (task 1.4).
-pub use MasterModel as MasterRequirement;
-
 /// A module in a DROID patch, grouping hardware components by controller type.
 /// Modules provide logical grouping for the TUI rendering and resize behavior.
 /// A module has a fixed height of 3U and a width expressed in HP (Horizontal Pins).
@@ -1130,23 +1125,6 @@ impl Patch {
             *needs.entry(comp.controller.clone()).or_insert(0) += 1;
         }
         needs
-    }
-
-    /// Legacy heuristic: MASTER18 when any CV jack numbered 9 or higher is used.
-    /// It guesses — it cannot see circuits, gate jacks or the patch's own
-    /// declaration — so it is only kept because the physical layout still reads
-    /// it; the resolved master plan replaces this call site (task 1.4), after
-    /// which this function is deleted.
-    pub fn master_requirement(&self) -> MasterModel {
-        let needs_master18 = self.hw_components.iter().any(|c| {
-            matches!(c.kind, ComponentKind::CvIn | ComponentKind::CvOut)
-                && leading_number(&c.id).is_some_and(|n| n > 8)
-        });
-        if needs_master18 {
-            MasterModel::Master18
-        } else {
-            MasterModel::Master
-        }
     }
 
     /// Project the raw `.ini` sections into the source viewer's circuit
@@ -4061,20 +4039,6 @@ mod tests {
         let needs = patch.needs_by_type();
         assert_eq!(needs.get("P2B8"), Some(&18));
         assert_eq!(needs.get("CV I/O"), Some(&1));
-    }
-
-    #[test]
-    fn master_requirement_is_master_for_patch_within_eight_cv_jacks() {
-        let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
-        let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
-        assert_eq!(patch.master_requirement(), MasterModel::Master);
-    }
-
-    #[test]
-    fn master_requirement_is_master18_when_cv_jack_beyond_eight_is_used() {
-        let content = "[copy]\n    input = I9\n    output = O1\n";
-        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        assert_eq!(patch.master_requirement(), MasterModel::Master18);
     }
 
     #[test]

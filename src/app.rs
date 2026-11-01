@@ -2456,7 +2456,13 @@ impl App {
         &self,
     ) -> Option<(crate::physical::PhysicalLayout, crate::physical::RackLayout)> {
         let patch = self.patch.as_ref()?;
-        let chain = crate::physical::PhysicalLayout::build(patch);
+        // task 1.5 replaces this with the stored resolved MasterPlan.
+        let chain = crate::physical::PhysicalLayout::build(
+            patch,
+            patch
+                .master_declaration
+                .unwrap_or(crate::patch::MasterModel::Master),
+        );
         let spec = if self.physical_rack_spec.rows.is_empty() {
             crate::physical::RackSpec::default_case(&chain)
         } else {

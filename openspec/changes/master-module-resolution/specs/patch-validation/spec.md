@@ -31,8 +31,9 @@ The system SHALL implement all 9 checks from `droid-lsp/src/diagnostics.ts` with
 - **THEN** exactly one `Severity::Error` is emitted at `Span{line:0}` (`code="ram_overflow"`), and its message names that master and its `used/available` figures — not one finding per schema master
 
 #### Scenario: A patch inside the MASTER18 budget but outside MASTER's still reports once
-- **WHEN** a patch with no declaration exceeds `master16`'s budget but fits `master18`'s
-- **THEN** one `ram_overflow` finding names MASTER
+
+- **WHEN** a patch with no declaration needs more RAM than the MASTER18 budget but stays inside MASTER's — the schema's MASTER budget is the larger one (`master16` 112 867 B vs `master18` 109 015 B)
+- **THEN** no `ram_overflow` is emitted, because the patch resolves to MASTER; judging against every schema master would have warned against MASTER18, which this patch does not run on
 
 ## ADDED Requirements
 
