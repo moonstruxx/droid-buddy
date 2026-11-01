@@ -65,6 +65,8 @@ pub mod patch;
 pub mod performance;
 #[path = "../../../src/physical.rs"]
 pub mod physical;
+#[path = "../../../src/platform.rs"]
+pub mod platform;
 #[path = "../../../src/plugin.rs"]
 pub mod plugin;
 #[path = "../../../src/rendermetrics.rs"]
@@ -131,23 +133,23 @@ struct Shot {
 
 fn setup_startup(_app: &mut App) {}
 
-/// The annotation-layer shot (change `module-ui-labels`, task 3.4): the startup
-/// arrangement at true 1:1, the size `fixtures/module_ui_labels.ini`'s preamble
-/// labels were chosen for — at 1:1 a 9 mm B32 button cell budgets five 10 pt
-/// characters, so "Trigger input" and "Clock reset" clip while "Go" fits, and
-/// the default `auto` presentation annotates exactly the two clipped labels.
+/// The rack-fit overview (change `module-ui-label-fit`, task 3.4): the module
+/// UI's `Shift+F` state — the whole rack fitted to the pane and centred, with no
+/// label lift — beside `module-ui-labels.png`'s labels fit.
 ///
-/// The startup fit would scale this ~91 mm rack past 1:1 (the harness pane is
-/// taller than one true-size rack), which both hides the clipping and leaves no
-/// side band for the callouts, so the shot pins the zoom. The camera is centred
-/// for the pinned zoom without hard-coding a layout number: the startup pane is
-/// published through the same `refresh_hit_geometry` call the first painted
-/// frame makes, one fit gives the rack's real extent (the fit offset is
-/// `(rack·zoom − pane)/2` per axis), and the pinned offset re-centres that same
-/// extent. The manual-navigation latch then keeps the pane-resize trigger from
-/// refitting over the pinned camera. Field writes before paint only —
+/// `fixtures/physical_multirow_rack.ini` packs seventeen faceplates into one
+/// ~457 mm row, so the rack fit lands at 37 % and the cells are far too small for
+/// most labels: only the 12 mm pot cells still hold a two-line floor-step label,
+/// and every 9 mm button, 3 mm LED and switch cell renders without text. That is
+/// the trade the overview makes, and the pane title says `fit(rack)` so the state
+/// reads as requested rather than as a regression.
+///
+/// The startup pane is published through the same `refresh_hit_geometry` call
+/// the first painted frame makes, so the fit measures the pane actually drawn.
+/// The manual-navigation latch then keeps the first frame's labels fit from
+/// overwriting the rack fit this shot is about. Field writes before paint only —
 /// deterministic, no input.
-fn setup_labels_auto(app: &mut App) {
+fn setup_rack_fit(app: &mut App) {
     setup_startup(app);
     app.refresh_hit_geometry(app::Rect::new(0, 0, VIEWPORT.0 as u16, VIEWPORT.1 as u16));
     let Some((_, pane)) = app
@@ -158,22 +160,7 @@ fn setup_labels_auto(app: &mut App) {
         return;
     };
     let (pane_w, pane_h) = (pane.width as f32, pane.height as f32);
-    if !app.fit_physical_view(pane_w, pane_h) {
-        return;
-    }
-    let fit = app.physical_zoom as f64;
-    let (off_x, off_y) = (app.physical_offset.0 as f64, app.physical_offset.1 as f64);
-    let rack_w = (pane_w as f64 + 2.0 * off_x) / fit;
-    let rack_h = (pane_h as f64 + 2.0 * off_y) / fit;
-    app.physical_zoom = 1.0;
-    app.scale_factor = 1.0;
-    app.physical_offset = (
-        ((rack_w - pane_w as f64) / 2.0) as f32,
-        ((rack_h - pane_h as f64) / 2.0) as f32,
-    );
-    // 1:1 is the shot's subject, not the pane's fit, so the title carries the
-    // plain zoom; the latch keeps the first frame's fit trigger inert.
-    app.physical_fit_zoom = None;
+    app.fit_physical_view_rack(pane_w, pane_h);
     app.physical_fit_pending = false;
     app.physical_nav_latched = true;
 }
@@ -261,18 +248,30 @@ fn shots() -> Vec<Shot> {
             fixture: "fixtures/own_buttons.ini",
             setup: setup_startup,
         },
-        // Label-annotation check (change `module-ui-labels`, task 3.4): the
-        // fixture's preamble labels are sized for the B32's 9 mm button cells
-        // at true 1:1, so "Trigger input" and "Clock reset" overflow their
-        // cells while "Go" fits. Under the default `auto` presentation the
-        // two clipped labels become side-bound callouts with leader lines and
-        // "Go" is never annotated, in the same frame that shows the rack at
-        // true size (fit-on-open, centred). No field write beyond the startup
-        // arrangement: the annotation layer is the shipped default.
+        // Fitted-label check (change `module-ui-label-fit`, task 3.4): the
+        // ladder-branch fixture carries one written label per outcome the
+        // per-cell ladder can reach — a 9 mm button label that wraps, a 12 mm
+        // pot label at the 10 pt top step, a 7 mm jack label that steps down, a
+        // P8S8 fader label stacked glyph-per-line beside the narrowed track, and
+        // a 3 mm LED label no supported zoom can draw whole — so the default
+        // view (the fit(labels) fit, applied by the first painted frame) shows
+        // every label inside its own cell and the one impossible label annotated
+        // outside the rack by the `auto` presentation. No field write: this is
+        // the shipped startup state.
         Shot {
             file: "module-ui-labels.png",
-            fixture: "fixtures/module_ui_labels.ini",
-            setup: setup_labels_auto,
+            fixture: "fixtures/module_ui_label_fit.ini",
+            setup: setup_startup,
+        },
+        // Rack-fit overview (same task): the same pane, `Shift+F` instead of the
+        // default `f` — seventeen faceplates fitted whole and centred, with the
+        // labels shrunk away wherever a cell can no longer hold one, and the
+        // title naming `fit(rack)`. The counterpart the docs point at when they
+        // explain which fit is which.
+        Shot {
+            file: "module-ui-fit-rack.png",
+            fixture: "fixtures/physical_multirow_rack.ini",
+            setup: setup_rack_fit,
         },
         Shot {
             file: "graph.png",
@@ -463,7 +462,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn usage() -> ! {
     eprintln!("usage: screenshots [--root DIR] [--out DIR] [--bless] [--only a,b,c]");
     eprintln!(
-        "  shots: module-ui, module-ui-labels, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, force-arrangement, large-startup, large-graph"
+        "  shots: module-ui, module-ui-labels, module-ui-fit-rack, graph, source-viewer, optimizer, faceplate-rotary-stack, button-led-composition, led-register-colour, unreferenced-elements, shift-colour, s10-switch-kinds, sections-lanes, sections-scale, force-arrangement, large-startup, large-graph"
     );
     std::process::exit(2);
 }
@@ -508,6 +507,7 @@ fn main() {
     let names = [
         "module-ui",
         "module-ui-labels",
+        "module-ui-fit-rack",
         "graph",
         "source-viewer",
         "optimizer",

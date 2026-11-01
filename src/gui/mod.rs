@@ -567,17 +567,21 @@ pub(crate) fn draw_pane_frame(
 
 /// The module-UI pane title (module-ui-labels D12): the view state rides the
 /// existing pane chrome instead of a new painted strip —
-/// `Module UI · 98% fit · labels auto · skeleton off`. `fit` appears only while
-/// the live zoom is still the last fitted value, `Pan x/y` only after a pan, and
-/// `labels` only when the presentation is not `off`. Ellipsized to the pane width
-/// so the title never paints past its own frame.
+/// `Module UI · 98% fit(labels) · labels auto · skeleton off`. The
+/// `fit(labels)` / `fit(rack)` segment appears only while the live zoom is still
+/// the last fitted value and names the fit that applied (module-ui-label-fit
+/// D8), `Pan x/y` only after a pan, and `labels` only when the presentation is
+/// not `off`. Ellipsized to the pane width so the title never paints past its
+/// own frame.
 fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
     let mut title = format!(" Module UI \u{B7} {}%", (app.physical_zoom * 100.0) as u32);
     if app
         .physical_fit_zoom
         .is_some_and(|zoom| (zoom - app.physical_zoom).abs() < 1e-4)
     {
-        title.push_str(" fit");
+        if let Some(mode) = app.physical_fit_mode {
+            title.push_str(&format!(" {}", mode.as_str()));
+        }
     }
     if app.physical_offset != (0.0, 0.0) {
         title.push_str(&format!(
@@ -1661,6 +1665,15 @@ mod tests {
         out.textures_delta.clear();
     }
 
+    /// The module-UI pane title as the app composes it, unellipsized: the
+    /// painted title is cut to the pane width, so segment assertions read the
+    /// full text through a wide rect while the caller's `text_labels` lookup
+    /// keeps covering that the title is actually painted.
+    fn full_module_ui_title(app: &App) -> String {
+        let wide = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(4000.0, 24.0));
+        module_ui_pane_title(app, wide)
+    }
+
     #[test]
     fn module_ui_pane_title_carries_the_presentation_and_skeleton_state() {
         // module-ui-labels D12: the view state rides the existing pane title (no
@@ -1674,11 +1687,16 @@ mod tests {
         app.physical_show_skeleton = false;
         let mut out = run_paint_panes(&mut app);
         let labels = text_labels(&out);
-        let title = labels
+        let painted = labels
             .iter()
             .find(|label| label.contains("Module UI"))
             .unwrap_or_else(|| panic!("module UI title missing: {labels:?}"))
             .clone();
+        assert!(
+            painted.starts_with(" Module UI"),
+            "the pane chrome paints the title: {painted}"
+        );
+        let title = full_module_ui_title(&app);
         assert!(title.contains("labels auto"), "title: {title}");
         assert!(title.contains("skeleton off"), "title: {title}");
         out.textures_delta.clear();
@@ -1687,17 +1705,52 @@ mod tests {
         app.physical_show_skeleton = true;
         let mut out = run_paint_panes(&mut app);
         let labels = text_labels(&out);
-        let title = labels
-            .iter()
-            .find(|label| label.contains("Module UI"))
-            .unwrap_or_else(|| panic!("module UI title missing: {labels:?}"))
-            .clone();
         assert!(
-            !title.contains("labels"),
-            "off hides the labels segment: {title}"
+            labels.iter().any(|label| label.contains("Module UI")),
+            "module UI title missing: {labels:?}"
+        );
+        let title = full_module_ui_title(&app);
+        assert!(
+            !title.contains("\u{B7} labels"),
+            "off hides the labels presentation segment: {title}"
         );
         assert!(title.contains("skeleton on"), "title: {title}");
         out.textures_delta.clear();
+    }
+
+    /// module-ui-label-fit 2.3 / D8: the pane title carries the fit that applied
+    /// in the same wording as the status hint, and drops it after a manual zoom.
+    #[test]
+    fn module_ui_pane_title_names_the_fit_that_applied() {
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+
+        assert!(app.fit_physical_view(640.0, 520.0));
+        let title = full_module_ui_title(&app);
+        assert!(
+            title.contains("fit(labels)"),
+            "the default fit names itself: {title}"
+        );
+
+        assert!(app.fit_physical_view_rack(640.0, 520.0));
+        let title = full_module_ui_title(&app);
+        assert!(title.contains("fit(rack)"), "Shift+F names itself: {title}");
+        assert!(!title.contains("fit(labels)"), "{title}");
+
+        // The `f` route returns to the labels fit and the title follows.
+        assert!(app.fit_physical_view(640.0, 520.0));
+        let title = full_module_ui_title(&app);
+        assert!(title.contains("fit(labels)"), "{title}");
+
+        // A manual zoom drops the segment: the title never claims a stale fit.
+        app.physical_zoom_about(1.5, (0.0, 0.0));
+        let title = full_module_ui_title(&app);
+        assert!(
+            !title.contains("fit("),
+            "a manual zoom drops the fit segment: {title}"
+        );
     }
 
     #[test]

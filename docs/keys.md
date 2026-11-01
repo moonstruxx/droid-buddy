@@ -14,7 +14,10 @@ coloring).
 | `click` | focus element across source + graph |
 | `Enter`/`Space` | toggle component |
 | `+`/`-` | zoom presets |
-| `arrows`/`wheel` | pan rack on overflow |
+| `f` / `Shift+F` | fit written labels, each in its cell (rack may pan) / fit whole rack to pane (overview) |
+| `a` | cycle label presentation |
+| `arrows` | pan rack on overflow |
+| `wheel` | adjust knob/fader, else zoom about pointer |
 | `s` | toggle skeleton presentation |
 | `m` | latch modifier on hovered component |
 | `e` | edit label / validation modal |

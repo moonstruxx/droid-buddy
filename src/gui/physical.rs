@@ -24,16 +24,28 @@ use crate::theme::Color;
 
 use super::graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
 
-/// Fixed screen-space font (points) for a module-UI cell label: the label
-/// keeps this size at every `physical_zoom`, so zooming the rack never grows
-/// or shrinks label text (label-guess-and-screen-scale, design decision 4).
-/// 10 pt sits mid-range in the old height-derived `height × 0.42` clamp
-/// (6–15 pt), matching a typical ~24 pt cell height.
-const CELL_LABEL_SIZE: f32 = 10.0;
 /// Monospace advance as a fraction of the font size (egui's monospace face is
-/// close to 0.6 em — mirrors `gui::graph`'s `MONO_ADVANCE`), used to budget
-/// the label characters that fit a cell at the fixed [`CELL_LABEL_SIZE`] font.
+/// close to 0.6 em — mirrors `gui::graph`'s `MONO_ADVANCE`), used to measure
+/// callouts and to budget the state row. Cell labels no longer derive a budget
+/// from it: every label size and every line comes from
+/// [`crate::physical::label_layout`] (module-ui-label-fit D1).
 const MONO_ADVANCE: f32 = 0.6;
+/// Left inset of a cell's label lines, in points. Mirrors `physical`'s
+/// `LABEL_INSET_X`, which measured the text box the layout was fitted against.
+const LABEL_INSET_X: f32 = 2.0;
+/// Fader track fraction of the cell width, its ceiling and its gutter
+/// (module-ui-label-fit D5). Mirrors `physical`'s `FADER_TRACK_WIDTH_FRACTION`,
+/// `FADER_TRACK_WIDTH_MAX` and `FADER_TRACK_GUTTER`, so the painter narrows the
+/// track to exactly the column the model measured the label against.
+const FADER_TRACK_WIDTH_FRACTION: f32 = 0.4;
+const FADER_TRACK_WIDTH_MAX: f32 = 10.0;
+const FADER_TRACK_GUTTER: f32 = 3.0;
+/// Compact state-glyph marker (D3): `h × 0.28` points, clamped to the 6–9 pt
+/// band, and skipped outright when the unclamped size falls below the 6 pt
+/// legibility floor — the marker never shrinks past it.
+const STATE_MARKER_SCALE: f32 = 0.28;
+const STATE_MARKER_MIN: f32 = 6.0;
+const STATE_MARKER_MAX: f32 = 9.0;
 
 /// What an element cell draws in skeleton mode: a plain cell dot or an
 /// in/out port marker (CV jacks on the master faceplate), mirroring
@@ -104,12 +116,13 @@ pub(crate) struct CellSpec {
     /// Composed-face discriminant (button-led-composition D2): `Some` on
     /// button-kind cells of P2B8/B32 (round) and M4 (rect), `None` elsewhere.
     pub shape: Option<CellShape>,
-    /// The label does not fit the budget this cell's own paint path applies
-    /// (module-ui-labels D9): `true` when the label is non-empty and would be
-    /// ellipsized or omitted. Set by `physical_spec` through the single shared
-    /// [`label_is_clipped`] budget, so the annotation layer and the painter can
-    /// never disagree about what the cell shows.
-    pub label_clipped: bool,
+    /// The fitted label of this cell (module-ui-label-fit D1), computed once by
+    /// [`cell_label_layout`] when the spec is built: `None` when the label is
+    /// empty or no ladder step can draw a character of it in this cell's own
+    /// text box. The painter draws [`crate::physical::LabelLayout::lines`]
+    /// verbatim, so the cells and the annotation layer can never disagree about
+    /// what the cell shows.
+    pub label_layout: Option<crate::physical::LabelLayout>,
 }
 
 /// Fixed screen-space font (points) for a performance-view callout headline:
@@ -217,6 +230,20 @@ fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
         "b32" | "notebuttons" => Some(CellShape::Round),
         "m4" | "motorfader" => Some(CellShape::Rect),
         _ => None,
+    }
+}
+
+/// The knob position a fader face draws (module-ui-label-fit D5): the element's
+/// own state, read the way the terminal path reads it — a `Value` is the patch's
+/// 0..1 position, an `On` button-like state is fully raised, and every state
+/// without a position (off, an LED's brightness, a CV ring) leaves the track
+/// empty rather than inventing a mid-scale value.
+fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
+    use crate::patch::ComponentState;
+    match state {
+        ComponentState::Value(v) => v.clamp(0.0, 1.0),
+        ComponentState::On => 1.0,
+        ComponentState::Off | ComponentState::Active | ComponentState::Led { .. } => 0.0,
     }
 }
 
@@ -362,9 +389,20 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             let is_shift_active = app
                 .active_shift
                 .is_some_and(|g| comp.shift_group == Some(g));
-            let switch_kind = chain.cell_for(mi, &comp.id).and_then(|c| c.kind.as_deref());
+            // The geometry cell is the one source for both faceplate facts: the
+            // `kind` the switch glyph path reads, and the family that says this
+            // element is a fader. P8S8/M4 sliders are addressed with `P`
+            // registers but live in the geometry's `F` family, so the flag
+            // cannot come from the token's own letter (module-ui-label-fit D5);
+            // the label fit already classifies the same family as
+            // `CellTextPath::Fader`, and the painter now agrees instead of
+            // drawing every fader as a compact cell.
+            let element_cell = chain.cell_for(mi, &comp.id);
+            let switch_kind = element_cell.and_then(|c| c.kind.as_deref());
+            let is_fader = element_cell.is_some_and(|c| c.family == "F");
+            let fader_value = fader_value_for(&comp.state);
             let (glyph, state_text, color) =
-                cell_visuals(comp, is_shift_active, false, switch_kind);
+                cell_visuals(comp, is_shift_active, is_fader, switch_kind);
             // The folded LED (if any) drives the inner fill.
             let folded = shape
                 .is_some()
@@ -415,7 +453,15 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 )
             } else {
                 (
-                    glyph, state_text, color, label, comp.kind, false, 0.0, led_state, led_rgb,
+                    glyph,
+                    state_text,
+                    color,
+                    label,
+                    comp.kind,
+                    is_fader,
+                    fader_value,
+                    led_state,
+                    led_rgb,
                     shape,
                 )
             }
@@ -489,12 +535,12 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             led_state,
             led_rgb,
             shape,
-            label_clipped: false,
+            label_layout: None,
         };
-        // D9: the cell's own budget answers, once, whether its label fits — the
-        // annotation layer consumes this flag instead of re-deriving a fit test
-        // that could drift from what `paint_cell` draws.
-        cell.label_clipped = label_is_clipped(&cell);
+        // D1: the cell's own box answers once what its label looks like — the
+        // painter draws these lines and the annotation filter reads the same
+        // `None` instead of re-deriving a fit test that could drift.
+        cell.label_layout = cell_label_layout(&cell);
         cells.push(cell);
     }
     let modules = geom
@@ -519,10 +565,11 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         None
     };
     // Label annotations (D10): `off` draws none, `auto` annotates exactly the
-    // addressed cells whose in-cell label is clipped, `on` every addressed label.
-    // The performance view already explodes every label big around a compact
-    // rack, so it carries no second annotation layer. Candidates are the same
-    // cells the painter consumes (rect + label + clipped flag).
+    // addressed cells whose label has no in-cell layout (the restated rule of
+    // module-ui-label-fit D9), `on` every addressed label. The performance view
+    // already explodes every label big around a compact rack, so it carries no
+    // second annotation layer. Candidates are the same cells the painter
+    // consumes (rect + label + layout).
     let annotations = if app.showing_performance {
         Vec::new()
     } else {
@@ -557,7 +604,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                     && match app.label_presentation {
                         crate::config::LabelPresentation::Off => false,
                         crate::config::LabelPresentation::Auto => {
-                            cell.label_clipped && explicitly_labelled(cell)
+                            cell.label_layout.is_none() && explicitly_labelled(cell)
                         }
                         crate::config::LabelPresentation::On => true,
                     }
@@ -631,62 +678,39 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     Some(ScreenMapping::new(points_per_mm, zoom, offset_x, offset_y))
 }
 
-/// Whether this cell's label is clipped or hidden by the budget its own paint
-/// path applies (module-ui-labels D9). One answer for all three cell families,
-/// so what the annotation layer selects is exactly what the cell cannot show:
+/// The label box a cell's own paint path measures its label against
+/// (module-ui-label-fit D1): the drawn cell rect, which paint path applies, and
+/// whether a state string exists for the label to yield to (D4).
 ///
-/// - the compact path spends one character of the fixed [`CELL_LABEL_SIZE`]
-///   font on the state glyph plus a separating space before the label budget,
-///   and hides the label outright below one character of that font;
-/// - the composed button face drops the label row when
-///   `h − label_line < 0.5 × w` and otherwise shares the same character budget;
-/// - the fader path gives the label the column right of the 2–10 pt track and
-///   drops it when that column is under 6 pt or narrower than one character of
-///   the height-derived proportional font.
+/// `glyph_chars` is always `0`: the compact state glyph is a corner marker that
+/// shares no line with the label (D3), so the label owns the cell's whole width
+/// rather than paying for a glyph prefix it no longer sits beside.
+pub(crate) fn cell_label_box(cell: &CellSpec) -> crate::physical::LabelBox {
+    crate::physical::LabelBox {
+        w: cell.rect.width(),
+        h: cell.rect.height(),
+        glyph_chars: 0,
+        path: if cell.is_fader {
+            crate::physical::CellTextPath::Fader
+        } else if cell.shape.is_some() {
+            crate::physical::CellTextPath::Composed
+        } else {
+            crate::physical::CellTextPath::Compact
+        },
+        has_state: !cell.state_text.is_empty(),
+    }
+}
+
+/// The fitted label of one cell, computed once when the spec is built
+/// (module-ui-label-fit D1). This is the single answer the painter, the
+/// annotation filter, the hover reveal and the fit clamp read instead of
+/// re-deriving a character budget per paint path.
 ///
-/// An empty label is never clipped (an unaddressed cell has nothing to show).
-pub(crate) fn label_is_clipped(cell: &CellSpec) -> bool {
-    if cell.label.is_empty() {
-        return false;
-    }
-    let rect = cell.rect;
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return true;
-    }
-    let label_chars = cell.label.chars().count();
-
-    // Fader path (`paint_fader`): label column right of the track.
-    if cell.is_fader {
-        let track_w = rect.width().clamp(2.0, 10.0);
-        let text_w = rect.width() - track_w - 3.0;
-        if text_w < 6.0 {
-            return true;
-        }
-        let font_size = (rect.height() * 0.34).clamp(8.0, 13.0);
-        let budget = (text_w / font_size).floor() as usize;
-        return budget == 0 || label_chars > budget;
-    }
-
-    // Composed button face (`paint_composed`): the label row shares the bottom
-    // of the cell only when the face leaves it room.
-    if cell.shape.is_some() {
-        let label_line = CELL_LABEL_SIZE * 1.25;
-        if rect.height() - label_line < 0.5 * rect.width() {
-            return true;
-        }
-        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
-        let budget = (rect.width() / char_w).floor() as usize;
-        return budget == 0 || label_chars > budget;
-    }
-
-    // Compact cell (`paint_cell`): glyph + separating space, then the label.
-    let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
-    if rect.width() < char_w {
-        return true;
-    }
-    let budget = (rect.width() / char_w).floor() as usize;
-    let room = budget.saturating_sub(cell.glyph.chars().count() + 1);
-    room == 0 || label_chars > room
+/// `None` means the label is empty or no ladder step — not even the 6 pt floor
+/// — can draw a character of it in this cell, so the cell shows no label and
+/// the label presentation becomes its carrier (D9).
+pub(crate) fn cell_label_layout(cell: &CellSpec) -> Option<crate::physical::LabelLayout> {
+    crate::physical::label_layout(&cell.label, &cell_label_box(cell))
 }
 
 /// The placed annotations plus how many candidates the 30 % band budget had to
@@ -1279,47 +1303,70 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         painter.rect_filled(core, led_size * 0.2, led_color);
     }
 
-    // Compact cell: state glyph always; the label shares the first row at the
-    // fixed screen-space size once the cell is at least one character of that
-    // font wide (label-guess-and-screen-scale, task 2.2); the state text
-    // takes the second row.
-    let font = egui::FontId::monospace(CELL_LABEL_SIZE);
-    let line_h = font.size * 1.25;
+    // Compact cell (module-ui-label-fit D3/D4): the state glyph is a small
+    // corner marker so it no longer shares a line with the label, then the
+    // fitted label lines, then the state row the layout kept.
     let color = dim(rgb(base), paused || cell.dimmed);
-    let mut first = cell.glyph.clone();
-    // One character of the fixed font is the hide threshold: a narrower cell
-    // renders the glyph but no label text at all.
-    let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
-    if rect.width() >= char_w && !cell.label.is_empty() {
-        let budget = (rect.width() / char_w).floor() as usize;
-        let room = budget.saturating_sub(cell.glyph.chars().count() + 1);
-        if room > 0 {
-            first.push(' ');
-            first.push_str(&clip_label(&cell.label, room));
-        }
-    }
-    painter.text(
-        rect.min + egui::vec2(2.0, 0.0),
-        egui::Align2::LEFT_TOP,
-        &first,
-        font.clone(),
-        color,
-    );
-    let state_font = egui::FontId::proportional((font.size * 0.8).max(9.0));
-    // The state line renders in the smaller proportional font, so the gate
-    // is the glyph line plus that line's height, not two glyph lines (which
-    // rejects cells that do fit both lines).
-    if rect.height() >= line_h + state_font.size * 1.25 {
-        let budget = (rect.width() / state_font.size).floor() as usize;
-        let state = clip_label(&cell.state_text, budget.max(1));
+    paint_state_marker(painter, cell, color);
+    let Some(layout) = cell.label_layout.as_ref() else {
+        return;
+    };
+    let line_h = crate::physical::label_line_height(layout.font);
+    let font = egui::FontId::monospace(layout.font);
+    for (i, line) in layout.lines.iter().enumerate() {
         painter.text(
-            rect.min + egui::vec2(2.0, line_h),
+            rect.min + egui::vec2(LABEL_INSET_X, i as f32 * line_h),
             egui::Align2::LEFT_TOP,
-            state,
-            state_font,
-            dim(rgb(crate::theme::active().muted), paused),
+            line,
+            font.clone(),
+            color,
         );
     }
+    if layout.state_row {
+        paint_state_row(painter, cell, layout, line_h, paused);
+    }
+}
+
+/// The compact cell's state glyph as a corner marker (module-ui-label-fit D3):
+/// `h × 0.28` points, never above 9 pt and never below the 6 pt legibility
+/// floor — a cell too small for 6 pt draws no marker at all. The marker yields
+/// to a cell's own LED indicator, which is then the state channel.
+fn paint_state_marker(painter: &Painter, cell: &CellSpec, color: egui::Color32) {
+    if cell.glyph.is_empty() || cell.led_state.is_some() {
+        return;
+    }
+    let raw = cell.rect.height() * STATE_MARKER_SCALE;
+    if raw < STATE_MARKER_MIN {
+        return;
+    }
+    painter.text(
+        Pos2::new(cell.rect.max.x - LABEL_INSET_X, cell.rect.min.y + 1.0),
+        egui::Align2::RIGHT_TOP,
+        &cell.glyph,
+        egui::FontId::monospace(raw.clamp(STATE_MARKER_MIN, STATE_MARKER_MAX)),
+        color,
+    );
+}
+
+/// The in-cell state row (module-ui-label-fit D4): proportional
+/// [`crate::physical::state_font_size`], one line height below the last label
+/// line, and only when the layout kept room for it.
+fn paint_state_row(
+    painter: &Painter,
+    cell: &CellSpec,
+    layout: &crate::physical::LabelLayout,
+    line_h: f32,
+    paused: bool,
+) {
+    let font = egui::FontId::proportional(crate::physical::state_font_size(layout.font));
+    let budget = (cell.rect.width() / (font.size * MONO_ADVANCE)).floor() as usize;
+    painter.text(
+        cell.rect.min + egui::vec2(LABEL_INSET_X, layout.lines.len() as f32 * line_h),
+        egui::Align2::LEFT_TOP,
+        clip_label(&cell.state_text, budget.max(1)),
+        font,
+        dim(rgb(crate::theme::active().muted), paused),
+    );
 }
 
 /// Draw the performance overlay: one leader line plus a boxed big-label
@@ -1332,18 +1379,16 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
 /// interior belongs to the folded LED as a concentric fill. The fill extent
 /// is `0.25 floor + 0.75 × level` with the patch RGB scaled by level when
 /// known, else white; an element with no bound LED renders the outline
-/// alone. The shape stays centered on the cell so the face reads at every
-/// preset; the label renders under it when the cell has room
-/// (`cell_h − label_line ≥ 0.5 × cell_w`, D7) at the fixed
-/// [`CELL_LABEL_SIZE`] font, else it is omitted. No state-text row.
+/// alone. The shape keeps the cell at every preset and is never shrunk or
+/// displaced for the label; the fitted label lines (module-ui-label-fit D6)
+/// are bottom-aligned in the band beneath the shape, at most two of them, and
+/// are omitted entirely — leaving the cell an annotation candidate — when the
+/// layout found no step that fits the band. No state-text row: the shape carries
+/// the state.
 fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Color, paused: bool) {
     let rect = cell.rect;
-    let font = egui::FontId::monospace(CELL_LABEL_SIZE);
-    let label_line = CELL_LABEL_SIZE * 1.25;
-    let has_label_room = !cell.label.is_empty() && rect.height() - label_line >= 0.5 * rect.width();
-    // The face spans the cell (D7's room test only gates the label): the
-    // outline and fill stay concentric with the cell center at every preset,
-    // and the label shares the bottom row when the cell has room for it.
+    // The face spans the cell: the outline and fill stay concentric with the
+    // cell center at every preset, and the label takes the band beneath it.
     let diameter = rect.width().min(rect.height()).max(1.0);
     let center = rect.center();
     // The outline is the state channel (D6): the build already resolved it
@@ -1402,16 +1447,20 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
             }
         }
     }
-    if has_label_room {
-        let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
-        let budget = (rect.width() / char_w).floor() as usize;
-        if budget > 0 {
+    // The label band (D6): the lines end at the cell's bottom edge, which is
+    // how the face's lower arc leaves them room without the shape shrinking.
+    if let Some(layout) = cell.label_layout.as_ref() {
+        let line_h = crate::physical::label_line_height(layout.font);
+        let font = egui::FontId::monospace(layout.font);
+        let color = dim(rgb(base), paused);
+        let top = rect.max.y - layout.lines.len() as f32 * line_h;
+        for (i, line) in layout.lines.iter().enumerate() {
             painter.text(
-                Pos2::new(rect.min.x + 2.0, rect.max.y - label_line),
+                Pos2::new(rect.min.x + LABEL_INSET_X, top + i as f32 * line_h),
                 egui::Align2::LEFT_TOP,
-                clip_label(&cell.label, budget),
-                font,
-                dim(rgb(base), paused),
+                line,
+                font.clone(),
+                color,
             );
         }
     }
@@ -1472,11 +1521,16 @@ fn paint_callouts(painter: &Painter, callouts: &[CalloutSpec], paused: bool) {
 
 /// The fader face: a bottom-up vertical LED strip filling `value × height`,
 /// lit in the amber `fader_led_bar` token with the unfilled part in muted
-/// shade, and the label + percentage sharing the columns right of the track
-/// when the cell is wide enough (port of `ui.rs::render_fader_track`).
+/// shade, and the fitted label + percentage in the column right of the track
+/// (port of `ui.rs::render_fader_track`). The track narrows to 40 % of the cell
+/// width, at most 10 pt (module-ui-label-fit D5), so a tall-narrow fader keeps a
+/// real label column beside it; the label stacks one glyph per line when the
+/// layout says the column is too narrow for a line of text.
 fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
     let rect = cell.rect;
-    let track_w = rect.width().clamp(2.0, 10.0);
+    let track_w = (rect.width() * FADER_TRACK_WIDTH_FRACTION)
+        .min(FADER_TRACK_WIDTH_MAX)
+        .min(rect.width());
     let value = cell.fader_value.clamp(0.0, 1.0);
     let fill_h = (rect.height() * value).round().clamp(0.0, rect.height());
     let track = Rect::from_min_size(rect.min, egui::vec2(track_w, rect.height()));
@@ -1516,31 +1570,32 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
         );
     }
 
-    let text_x = rect.min.x + track_w + 3.0;
-    let text_w = rect.width() - track_w - 3.0;
-    if text_w < 6.0 {
+    // The label column beside the narrowed track (D5): horizontal lines when the
+    // layout kept them, one glyph per line when it stacked them.
+    let Some(layout) = cell.label_layout.as_ref() else {
         return;
-    }
-    let font = egui::FontId::proportional((rect.height() * 0.34).clamp(8.0, 13.0));
-    let line_h = font.size * 1.25;
+    };
+    let text_x = rect.min.x + track_w + FADER_TRACK_GUTTER;
+    let line_h = crate::physical::label_line_height(layout.font);
+    let font = egui::FontId::monospace(layout.font);
     let color = dim(rgb(base), paused || cell.dimmed);
-    let budget = (text_w / font.size).floor() as usize;
-    if budget > 0 && !cell.label.is_empty() {
+    for (i, line) in layout.lines.iter().enumerate() {
         painter.text(
-            Pos2::new(text_x, rect.min.y),
+            Pos2::new(text_x, rect.min.y + i as f32 * line_h),
             egui::Align2::LEFT_TOP,
-            clip_label(&cell.label, budget),
+            line,
             font.clone(),
             color,
         );
     }
-    let state_font = egui::FontId::proportional((font.size * 0.8).max(9.0));
-    if rect.height() >= line_h + state_font.size * 1.25 {
-        let pct = clip_label(&cell.state_text, budget.max(1));
+    if layout.state_row {
+        let state_font = egui::FontId::proportional(crate::physical::state_font_size(layout.font));
+        let budget =
+            (rect.width() - track_w - FADER_TRACK_GUTTER) / (state_font.size * MONO_ADVANCE);
         painter.text(
-            Pos2::new(text_x, rect.min.y + line_h),
+            Pos2::new(text_x, rect.min.y + layout.lines.len() as f32 * line_h),
             egui::Align2::LEFT_TOP,
-            pct,
+            clip_label(&cell.state_text, (budget.floor() as usize).max(1)),
             state_font,
             dim(rgb(crate::theme::active().muted), paused),
         );
@@ -1964,6 +2019,13 @@ mod tests {
     use crate::patch::{ComponentState, HwComponent};
     use crate::physical::{ChainGaps, PlacedModule, RackMounts, RackRowPlacement};
 
+    /// The fixed cell-label size the surface drew before per-cell fitting
+    /// (label-guess-and-screen-scale, task 2.2). Kept here as the comparison
+    /// point the paint tests measure a fitted step against: the ladder's top
+    /// step is 10 pt, and every test asserts a cell never pays more than it did
+    /// under the fixed font.
+    const CELL_LABEL_SIZE: f32 = 10.0;
+
     /// One faceplate with a button + a knob, packed into a single row.
     fn fixture() -> (RackLayout, PhysicalLayout) {
         let chain = PhysicalLayout {
@@ -2209,6 +2271,14 @@ mod tests {
         build_spec((&rack, &chain), skeleton, paused, 1.0)
     }
 
+    /// A hand-built `CellSpec` with its label layout resolved exactly as
+    /// `physical_spec` resolves it, so headless paint tests draw the fitted
+    /// label the production build would draw (module-ui-label-fit D1).
+    fn resolved_cell(mut cell: CellSpec) -> CellSpec {
+        cell.label_layout = cell_label_layout(&cell);
+        cell
+    }
+
     fn build_spec(
         fx: (&RackLayout, &PhysicalLayout),
         skeleton: bool,
@@ -2223,7 +2293,7 @@ mod tests {
             let comp = &chain.modules[mi].components[ci];
             // Test fixture has no geometry loaded; kind is unresolvable here.
             let (glyph, state_text, color) = cell_visuals(comp, false, false, None);
-            cells.push(CellSpec {
+            cells.push(resolved_cell(CellSpec {
                 rect,
                 glyph,
                 label: comp.label.clone(),
@@ -2241,8 +2311,8 @@ mod tests {
                 led_state: None,
                 led_rgb: None,
                 shape: None,
-                label_clipped: false,
-            });
+                label_layout: None,
+            }));
         }
         let modules = geom
             .module_rects
@@ -2693,7 +2763,7 @@ mod tests {
 
     /// A fader cell for the contrast tests: track + strip + marker + label.
     fn fader_spec(value: f32) -> CellSpec {
-        CellSpec {
+        resolved_cell(CellSpec {
             rect: Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 100.0)),
             glyph: String::new(),
             label: "F".to_string(),
@@ -2711,8 +2781,8 @@ mod tests {
             led_state: None,
             led_rgb: None,
             shape: None,
-            label_clipped: false,
-        }
+            label_layout: None,
+        })
     }
 
     #[test]
@@ -2781,10 +2851,10 @@ mod tests {
         );
     }
 
-    /// A compact full-presentation button cell for the label tests: the
-    /// fixed-size label path, no interaction flags.
+    /// A compact full-presentation button cell for the label tests: no
+    /// interaction flags, its label layout resolved as the build resolves it.
     fn cell_spec(rect: Rect, label: &str) -> CellSpec {
-        CellSpec {
+        resolved_cell(CellSpec {
             rect,
             glyph: "\u{25CF}".to_string(),
             label: label.to_string(),
@@ -2802,8 +2872,8 @@ mod tests {
             led_state: None,
             led_rgb: None,
             shape: None,
-            label_clipped: false,
-        }
+            label_layout: None,
+        })
     }
 
     #[test]
@@ -2826,37 +2896,56 @@ mod tests {
         );
     }
 
-    /// label-guess-and-screen-scale, task 2.2: the cell label renders at the
-    /// fixed `CELL_LABEL_SIZE` at every zoom preset — the font never derives
-    /// from the (zoom-scaled) cell height — and every preset still shows a
-    /// label next to the glyph.
+    /// module-ui-label-fit D2 (overturning label-guess-and-screen-scale's fixed
+    /// font): the step is chosen from each cell's own rendered size at that
+    /// zoom — a cell that grows may take a larger step — every label run is a
+    /// ladder step, and no run (the corner state marker included) drops below
+    /// the 6 pt floor or exceeds the old fixed font.
     #[test]
-    fn cell_label_font_is_identical_across_zoom_presets() {
-        let mut sizes = Vec::new();
+    fn cell_label_step_follows_the_cell_size_across_zoom_presets() {
+        let mut widest = Vec::new();
         for &zoom in &[0.75f64, 1.0, 1.5, 2.0] {
             let spec = spec_at_zoom(zoom);
             let rows: Vec<(String, egui::FontId, f32)> = painted_texts(&spec)
                 .into_iter()
                 .filter(|(_, font, _)| font.family == egui::FontFamily::Monospace)
                 .collect();
-            assert!(!rows.is_empty(), "cell first rows drawn at zoom {zoom}");
+            assert!(!rows.is_empty(), "cell label rows drawn at zoom {zoom}");
+            // A label run carries the element's name; the state glyph is the
+            // single-character corner marker (module-ui-label-fit D3) and is not
+            // a ladder step.
+            let label_runs: Vec<&(String, egui::FontId, f32)> = rows
+                .iter()
+                .filter(|(text, _, _)| text.chars().any(|c| c.is_alphanumeric()))
+                .collect();
             assert!(
-                rows.iter().any(|(text, _, _)| text.contains(' ')),
-                "a label joins the glyph row at zoom {zoom}: {rows:?}"
+                label_runs.iter().any(|(text, _, _)| text.contains("B1.1")),
+                "the cell keeps its label at zoom {zoom}: {rows:?}"
             );
             for (text, font, _) in &rows {
-                assert_eq!(
-                    font.size, CELL_LABEL_SIZE,
-                    "fixed label font at zoom {zoom}: {text:?} painted at {} pt",
+                assert!(
+                    font.size >= LABEL_FLOOR,
+                    "no run below the floor at zoom {zoom}: {text:?} at {} pt",
                     font.size
                 );
+                assert!(
+                    font.size <= CELL_LABEL_SIZE,
+                    "nothing exceeds the old fixed font at zoom {zoom}: {text:?}"
+                );
             }
-            sizes.extend(rows.iter().map(|(_, font, _)| font.size));
+            for (text, font, _) in &label_runs {
+                assert_ladder_step(font.size, &format!("zoom {zoom} {text:?}"));
+            }
+            widest.push(
+                label_runs
+                    .iter()
+                    .map(|(_, font, _)| font.size)
+                    .fold(0.0f32, f32::max),
+            );
         }
-        // One size across all four presets, not merely four stable sizes.
         assert!(
-            sizes.iter().all(|&s| s == CELL_LABEL_SIZE),
-            "identical font across zoom presets: {sizes:?}"
+            widest[3] >= widest[0],
+            "a cell that grows may take a larger step: {widest:?}"
         );
     }
 
@@ -2890,30 +2979,30 @@ mod tests {
         );
     }
 
-    /// label-guess-and-screen-scale, task 2.2: a narrow-but-wide-enough cell
-    /// still shows the glyph row with the label ellipsized to the cell width,
-    /// never the full label and never an overflowing row.
+    /// module-ui-label-fit D2/D3 (overturning "ellipsize at the fixed font"): a
+    /// narrow-but-wide-enough cell shows its whole label wrapped onto fitted
+    /// lines, and no painted line ever overflows the cell width.
     #[test]
-    fn cell_label_ellipsizes_to_the_cell_width() {
+    fn cell_label_lines_stay_inside_the_cell_width() {
         let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
-        // Room for the glyph, the separating space, and a few label
-        // characters — but far short of the whole label.
         let rect = Rect::from_min_size(Pos2::new(4.0, 4.0), Vec2::new(char_w * 8.0, 24.0));
         let texts = painted_cell(&cell_spec(rect, "averylonglabel"));
-        let (row, _, width) = texts
+        let rows: Vec<&(String, egui::FontId, f32)> = texts
             .iter()
-            .find(|(_, font, _)| font.family == egui::FontFamily::Monospace)
-            .expect("glyph row drawn");
-        assert!(row.contains('\u{2026}'), "ellipsized: {row:?}");
+            .filter(|(_, font, _)| font.family == egui::FontFamily::Monospace)
+            .collect();
+        assert!(!rows.is_empty(), "the label is drawn: {texts:?}");
         assert!(
-            !row.contains("averylonglabel"),
-            "not the full label: {row:?}"
+            !rows.iter().any(|(row, _, _)| row.contains('\u{2026}')),
+            "the whole label fits when wrapped, so no floor ellipsis: {texts:?}"
         );
-        assert!(
-            *width <= rect.width() + 1.0,
-            "row fits the cell width: {width} pt > {} pt ({row:?})",
-            rect.width()
-        );
+        for (row, _, width) in &rows {
+            assert!(
+                *width <= rect.width() + 1.0,
+                "row fits the cell width: {width} pt > {} pt ({row:?})",
+                rect.width()
+            );
+        }
     }
 
     #[test]
@@ -4094,113 +4183,127 @@ mod tests {
             .unwrap_or_else(|| panic!("cell for {token}"))
     }
 
-    /// module-ui-labels D9, the compact path: `label_is_clipped` is the same
-    /// budget `paint_cell` uses (state glyph + separator space + the label
-    /// ellipsized into the fixed `CELL_LABEL_SIZE` font).
+    /// module-ui-label-fit D1/D9, the compact path: the cell's layout is the
+    /// annotation predicate — the label is fitted (wrapped, at a ladder step)
+    /// wherever a 6 pt character fits, and the cell reports no layout only when
+    /// even that cannot be drawn.
     #[test]
-    fn label_is_clipped_matches_the_compact_cell_budget() {
+    fn cell_label_layout_matches_the_compact_cell_box() {
         let char_w = MONO_ADVANCE * CELL_LABEL_SIZE;
-        // 30 pt of room: budget 5 characters, minus the 1-char glyph and its
-        // separating space, so three label characters fit exactly.
         let roomy = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(char_w * 5.0, 24.0));
+        let short = cell_spec(roomy, "abc");
         assert!(
-            !label_is_clipped(&cell_spec(roomy, "abc")),
-            "three characters fit the compact budget"
+            short.label_layout.is_some(),
+            "three characters fit the compact box: {:?}",
+            short.label_layout
         );
+        // A longer label is no longer "clipped": it wraps or ellipsizes in the
+        // cell, so the cell still shows it.
+        let longer = cell_spec(roomy, "abcdef");
         assert!(
-            label_is_clipped(&cell_spec(roomy, "abcdef")),
-            "a label longer than the budget is clipped"
+            longer.label_layout.is_some(),
+            "a longer label wraps instead of disappearing: {:?}",
+            longer.label_layout
         );
-        // Narrower than one character of the label font: the label is dropped
-        // entirely, which is still a clipped label.
-        let narrow = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(char_w * 0.9, 24.0));
+        // Narrower than one 6 pt character of the text box: no layout at all,
+        // so the cell is an annotation candidate.
+        let narrow = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(char_w * 0.5, 24.0));
+        let none = cell_spec(narrow, "a");
         assert!(
-            label_is_clipped(&cell_spec(narrow, "a")),
-            "a cell narrower than one character drops its label"
+            none.label_layout.is_none(),
+            "a cell narrower than one character has no layout: {:?}",
+            none.label_layout
         );
-        // An unlabelled cell (unaddressed geometry) is never 'clipped'.
-        assert!(
-            !label_is_clipped(&cell_spec(roomy, "")),
-            "an empty label is never clipped"
-        );
+        // An unlabelled cell (unaddressed geometry) has no layout either, and
+        // is never an annotation candidate.
+        assert!(cell_spec(roomy, "").label_layout.is_none());
     }
 
-    /// module-ui-labels D9, the composed button-face path: the label renders
-    /// only when `h - label_line >= 0.5 * w`, and then shares the same
-    /// character budget as the compact path.
+    /// module-ui-label-fit D6, the composed button-face path: the band beneath
+    /// the shape — `h − 0.5 × w` — decides the layout, and it holds up to two
+    /// lines. A face with no band keeps its shape and no label.
     #[test]
-    fn label_is_clipped_matches_the_composed_face_budget() {
-        // A 9 mm P2B8/P4B2 button at 1:1 is 34 pt square: 5 characters.
+    fn cell_label_layout_matches_the_composed_band() {
+        // A 9 mm P2B8/P4B2 button at 1:1 is 34 pt square: a 17 pt band.
         let square = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(34.0, 34.0));
         let mut fit = cell_spec(square, "Go");
         fit.shape = Some(CellShape::Round);
+        let fit = resolved_cell(fit);
         assert!(
-            !label_is_clipped(&fit),
-            "a two-character label fits the button face"
+            fit.label_layout.is_some(),
+            "a two-character label fits the button face: {:?}",
+            fit.label_layout
         );
+        // The same band holds a long label on two 6 pt lines rather than
+        // dropping it: the face is never eaten by the label.
         let mut long = fit.clone();
         long.label = "Trigger input".to_string();
+        let long = resolved_cell(long);
+        let layout = long.label_layout.as_ref().expect("a two-line band");
         assert!(
-            label_is_clipped(&long),
-            "a thirteen-character label is clipped to five"
+            layout.lines.len() >= 2 && layout.font >= 6.0,
+            "the long label wraps in the band: {layout:?}"
         );
-        // The rect face (M4 touch plate, 12 x 18 mm) shares the budget.
+        // The rect face (M4 touch plate, 12 x 18 mm) has a 45 pt band.
         let mut plate = long.clone();
         plate.shape = Some(CellShape::Rect);
         plate.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(45.0, 68.0));
         assert!(
-            label_is_clipped(&plate),
-            "the M4 plate clips the same label"
+            resolved_cell(plate).label_layout.is_some(),
+            "the M4 plate keeps the same label"
         );
-        // Shorter than the face test: the label row is dropped outright.
-        let mut squat = fit.clone();
-        squat.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(34.0, 17.0));
+        // A face taller than nothing: `h − 0.5 × w` is not positive, so there is
+        // no band and no label — the cell stays an annotation candidate.
+        let mut squat = cell_spec(
+            Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(34.0, 16.0)),
+            "Go",
+        );
+        squat.shape = Some(CellShape::Round);
+        let squat = resolved_cell(squat);
         assert!(
-            label_is_clipped(&squat),
-            "a face with no label row hides its label"
+            squat.label_layout.is_none(),
+            "a face with no band hides its label: {:?}",
+            squat.label_layout
         );
-        assert!(
-            !label_is_clipped(&cell_spec(square, "")),
-            "an unlabelled composed cell is never clipped"
-        );
+        assert!(cell_spec(square, "").label_layout.is_none());
     }
 
-    /// module-ui-labels D9, the fader path: the label lives in the column right
-    /// of the 2-10 pt track and is dropped when that column is under 6 pt.
+    /// module-ui-label-fit D5, the fader path: the label takes the column right
+    /// of the narrowed track and stacks one glyph per line when that column
+    /// cannot hold a line of text.
     #[test]
-    fn label_is_clipped_matches_the_fader_budget() {
-        // A P8S8 fader is 4.2 mm (16 pt at 1:1): the track leaves under 6 pt of
-        // text column, so the label is dropped at every zoom.
+    fn cell_label_layout_matches_the_fader_column() {
+        // A P8S8 fader is 4.2 mm (16 pt at 1:1): a 6.4 pt track leaves a 6.6 pt
+        // column, so the label stacks instead of disappearing.
         let mut narrow = fader_spec(0.5);
         narrow.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(16.0, 83.0));
         narrow.label = "Level".to_string();
+        let narrow = resolved_cell(narrow);
+        let layout = narrow.label_layout.as_ref().expect("a stacked column");
         assert!(
-            label_is_clipped(&narrow),
-            "no text column: the fader drops its label"
+            layout.stacked && layout.lines.len() == 5,
+            "one glyph per line beside the narrowed track: {layout:?}"
         );
-        // A wide, tall fader (M4 motor fader at high zoom) gets 3 characters.
+        // A wide, tall fader (M4 motor fader at high zoom) keeps horizontal lines.
         let mut wide = narrow.clone();
         wide.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(64.0, 234.0));
-        wide.label = "F".to_string();
-        assert!(!label_is_clipped(&wide), "a one-character label fits");
         wide.label = "Level".to_string();
+        let wide = resolved_cell(wide);
+        let layout = wide.label_layout.as_ref().expect("a horizontal column");
         assert!(
-            label_is_clipped(&wide),
-            "a five-character label is clipped to three"
+            !layout.stacked,
+            "a wide fader keeps horizontal lines: {layout:?}"
         );
         let mut unlabelled = wide.clone();
         unlabelled.label = String::new();
-        assert!(
-            !label_is_clipped(&unlabelled),
-            "an unlabelled fader is never clipped"
-        );
+        assert!(resolved_cell(unlabelled).label_layout.is_none());
     }
 
-    /// module-ui-labels D9 through the real spec: a P2B8 composed face at 1:1
-    /// keeps a 5-character label row, so a short label is not clipped while a
-    /// long one is.
+    /// module-ui-label-fit D1/D6 through the real spec: the composed face's band
+    /// fits a short label at the top step and a long one on two fitted lines,
+    /// so the layout — not a separate budget — says what the cell shows.
     #[test]
-    fn physical_spec_marks_a_clipped_composed_label_per_cell() {
+    fn physical_spec_fits_a_composed_label_per_cell() {
         let app = app_with_labels(
             "fixtures/own_buttons.ini",
             &[("B1.1", "Go"), ("B1.2", "Trigger input")],
@@ -4208,23 +4311,28 @@ mod tests {
         let spec = physical_spec(&app, perf_pane()).expect("spec");
         let fits = cell_for_token(&app, &spec, "B1.1");
         assert_eq!(fits.label, "Go");
+        let layout = fits
+            .label_layout
+            .as_ref()
+            .unwrap_or_else(|| panic!("a short label fits the composed face: {fits:?}"));
+        assert_eq!(layout.lines, vec!["Go".to_string()], "one top-step line");
+        let long = cell_for_token(&app, &spec, "B1.2");
+        assert_eq!(long.label, "Trigger input");
+        let layout = long
+            .label_layout
+            .as_ref()
+            .unwrap_or_else(|| panic!("the band holds the long label: {long:?}"));
         assert!(
-            !fits.label_clipped,
-            "a short label fits the composed face: {fits:?}"
-        );
-        let clipped = cell_for_token(&app, &spec, "B1.2");
-        assert_eq!(clipped.label, "Trigger input");
-        assert!(
-            clipped.label_clipped,
-            "a long label is clipped by the face budget: {clipped:?}"
+            layout.lines.len() >= 2 && layout.font >= 6.0,
+            "the band wraps it, never shrugs it off: {layout:?}"
         );
     }
 
-    /// module-ui-labels D9 through the real spec: a DB8E button keeps the
-    /// glyph path (no composed face), which spends one character on the glyph
-    /// plus its separator before the label budget.
+    /// module-ui-label-fit D1 through the real spec: a DB8E button keeps the
+    /// glyph path (no composed face), and its label layout is fitted across the
+    /// whole cell because the glyph is a corner marker, not a line prefix.
     #[test]
-    fn physical_spec_marks_a_clipped_compact_label_per_cell() {
+    fn physical_spec_fits_a_compact_label_per_cell() {
         let app = app_with_labels(
             "fixtures/faceplate_rotary_stack.ini",
             &[("B6.1", "Go"), ("B6.2", "Trigger input")],
@@ -4237,15 +4345,160 @@ mod tests {
             "the DB8E button keeps the glyph path: {fits:?}"
         );
         assert!(
-            !fits.label_clipped,
-            "a short label fits the glyph row: {fits:?}"
+            fits.label_layout.is_some(),
+            "a short label fits the cell: {fits:?}"
         );
-        let clipped = cell_for_token(&app, &spec, "B6.2");
-        assert_eq!(clipped.label, "Trigger input");
+        let long = cell_for_token(&app, &spec, "B6.2");
+        assert_eq!(long.label, "Trigger input");
+        let layout = long
+            .label_layout
+            .as_ref()
+            .unwrap_or_else(|| panic!("a long label wraps in the cell: {long:?}"));
         assert!(
-            clipped.label_clipped,
-            "a long label is clipped by the glyph-row budget: {clipped:?}"
+            layout.lines.len() >= 2,
+            "the whole cell takes the wrapped label: {layout:?}"
         );
+    }
+
+    /// module-ui-label-fit D5 (task 3.6), through a loaded patch: the P8S8
+    /// `P1.1` cell reaches the fader face. `is_fader` comes from the geometry
+    /// cell's `F` family — the same fact `App`'s label fit classifies as
+    /// `CellTextPath::Fader` — and the value from the element's own state, so the
+    /// narrowed track, the amber bar and the stacked label column replace the
+    /// compact cell a real patch used to paint.
+    #[test]
+    fn loaded_patch_p8s8_fader_cell_paints_the_fader_face_and_stacked_label() {
+        let mut patch = crate::patch::Patch::from_ini_file(std::path::Path::new(
+            "fixtures/module_ui_label_fit.ini",
+        ))
+        .expect("the label-fit fixture must parse");
+        // A bare `[p8s8]` synthesizes its sliders at `Value(0.0)`: give the fader
+        // a position so the state channel (the amber bar) has something to show.
+        patch
+            .hw_components
+            .iter_mut()
+            .find(|c| c.id == "P1.1")
+            .expect("the bare [p8s8] declares P1.1")
+            .state = crate::patch::ComponentState::Value(0.6);
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let cell = cell_for_token(&app, &spec, "P1.1");
+        assert_eq!(cell.label, "Volume", "the fixture's written fader label");
+        assert!(
+            cell.is_fader,
+            "a P8S8 fader cell carries the geometry `F` family flag: {cell:?}"
+        );
+        assert!(
+            (cell.fader_value - 0.6).abs() < 1e-6,
+            "the bar follows the element state, not a guess: {}",
+            cell.fader_value
+        );
+        // Fit and painter agree on the path: `App`'s label fit maps a geometry
+        // `F` cell to `CellTextPath::Fader`, and the painter's own box — built
+        // from the flag just asserted — now says the same.
+        assert_eq!(
+            cell_label_box(cell).path,
+            crate::physical::CellTextPath::Fader,
+            "the painted box is the fit's fader column"
+        );
+
+        let rect = cell.rect;
+        let layout = cell
+            .label_layout
+            .as_ref()
+            .unwrap_or_else(|| panic!("the fader column holds the label: {cell:?}"));
+        assert!(
+            layout.stacked,
+            "a 4.2 mm fader column stacks one glyph per line: {layout:?}"
+        );
+        let fitted: Vec<&str> = layout.lines.iter().map(String::as_str).collect();
+        assert_eq!(
+            fitted,
+            ["V", "o", "l", "u", "m", "e"],
+            "one glyph per line: {layout:?}"
+        );
+
+        // The fader face: a track narrowed to 40 % of the cell, the slot outline,
+        // the unlit part muted, and the amber value bar on the bottom edge.
+        let rects = painted_cell_rects(cell, false);
+        let track_w = (rect.width() * 0.4).min(10.0);
+        let (slot, ..) = rects
+            .iter()
+            .find(|(_, _, stroke, color)| {
+                *stroke == 1.0 && *color == rgb(crate::theme::active().fader_slot)
+            })
+            .unwrap_or_else(|| panic!("the fader slot outline is painted: {rects:?}"));
+        assert!(
+            (slot.width() - track_w).abs() < 0.6,
+            "the track narrows to 40 % of the cell: {} vs {track_w}",
+            slot.width()
+        );
+        let lit = rects
+            .iter()
+            .filter(|(_, fill, width, _)| {
+                *width == 0.0 && *fill == rgb(crate::theme::active().fader_led_bar)
+            })
+            .max_by(|a, b| a.0.height().partial_cmp(&b.0.height()).unwrap())
+            .map(|(r, ..)| *r)
+            .unwrap_or_else(|| panic!("the amber value bar is painted: {rects:?}"));
+        assert!(
+            (lit.height() - rect.height() * 0.6).abs() < 1.0,
+            "the bar fills 60 % of the track: {} vs {}",
+            lit.height(),
+            rect.height() * 0.6
+        );
+        assert!(
+            (lit.max.y - rect.max.y).abs() < 0.6 && lit.min.x >= rect.min.x - 0.01,
+            "the bar grows from the track's bottom edge: {lit:?}"
+        );
+        assert!(
+            rects.iter().any(|(r, fill, width, _)| *width == 0.0
+                && *fill == dim(rgb(crate::theme::active().muted), false)
+                && (r.height() - rect.height() * 0.4).abs() < 1.0),
+            "the unlit track above the bar stays muted: {rects:?}"
+        );
+
+        // The label: one monospace run per glyph, in the column right of the
+        // track (a 3 pt gutter, `FADER_TRACK_GUTTER`), top to bottom, never below
+        // the 6 pt floor.
+        let runs = label_lines(cell);
+        assert_eq!(runs.len(), 6, "one run per stacked glyph: {runs:?}");
+        let painted: String = runs.iter().map(|(text, _, _)| text.as_str()).collect();
+        assert_eq!(painted, "Volume", "every glyph in reading order: {runs:?}");
+        let mut ys: Vec<f32> = Vec::new();
+        for (text, size, pos) in &runs {
+            assert_eq!(text.chars().count(), 1, "one glyph per line: {text:?}");
+            assert_ladder_step(*size, "loaded fader");
+            assert!(
+                pos.x >= rect.min.x + track_w + 3.0 - 0.5,
+                "the column sits beside the narrowed track: {pos:?}"
+            );
+            ys.push(pos.y);
+        }
+        let mut sorted = ys.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(ys, sorted, "glyphs stack top to bottom: {ys:?}");
+        assert_floor_respected(cell, "loaded fader");
+
+        // The state row appears exactly when the layout kept room for it (D4).
+        // It is clipped to the column it shares with the stacked label, and in a
+        // column one character wide the clip marker is all that can be drawn —
+        // what matters here is that the row follows the layout, not the cell.
+        let state = state_lines(cell);
+        if layout.state_row {
+            assert_eq!(state.len(), 1, "the value row survives: {state:?}");
+            assert!(
+                cell.state_text.starts_with(state[0].as_str())
+                    || state[0].chars().all(|c| c == '\u{2026}'),
+                "the row carries the state, or the clip marker a one-character column allows: {state:?}"
+            );
+        } else {
+            assert!(
+                state.is_empty(),
+                "no state row once the label takes its line: {state:?}"
+            );
+        }
     }
 
     /// Run the real pane dispatch once over an 800 x 600 band, so
@@ -4278,11 +4531,13 @@ mod tests {
         )
     }
 
-    /// module-ui-labels D10/`auto`: exactly the clipped addressed elements are
-    /// annotated, each as a 14 pt monospace callout outside the rack with one
-    /// leader line, and a label the cell already shows is never duplicated.
+    /// module-ui-label-fit D9/`auto`: the presentation annotates exactly the
+    /// addressed elements whose label has no in-cell layout. At 1:1 the ladder
+    /// fits every written label of this fixture, so the layer stays silent and
+    /// a label the cell already draws is never duplicated; `on` still draws the
+    /// 14 pt monospace callout outside the rack with one leader line each.
     #[test]
-    fn auto_annotates_exactly_the_clipped_addressed_elements() {
+    fn auto_annotates_exactly_the_cells_with_no_in_cell_layout() {
         let labels = &[("B1.1", "Go"), ("B1.2", "Trigger input")];
         let mut off = app_with_labels("fixtures/own_buttons.ini", labels);
         off.label_presentation = LabelPresentation::Off;
@@ -4291,11 +4546,22 @@ mod tests {
         let mut auto = app_with_labels("fixtures/own_buttons.ini", labels);
         auto.label_presentation = LabelPresentation::Auto;
         let spec = physical_spec(&auto, perf_pane()).expect("spec");
-        let annotated: Vec<&str> = spec.annotations.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(
-            annotated,
-            vec!["Trigger input"],
-            "only the clipped label is annotated; a fitting label never is"
+        // The predicate, cell by cell: `auto` selects only cells with no layout.
+        for cell in spec
+            .cells
+            .iter()
+            .filter(|cell| cell.component_index.is_some() && !cell.label.is_empty())
+        {
+            assert!(
+                cell.label_layout.is_some(),
+                "the ladder fits '{}' in its own cell at 1:1: {cell:?}",
+                cell.label
+            );
+        }
+        assert!(
+            spec.annotations.is_empty(),
+            "nothing lacks an in-cell layout, so nothing is annotated: {:?}",
+            spec.annotations
         );
         for c in &spec.annotations {
             assert!(
@@ -4305,23 +4571,29 @@ mod tests {
                 c.label_rect
             );
         }
-        // Drawn at the performance view's callout size, with one leader line.
-        let texts = painted_texts(&spec);
+
+        // `on` is unchanged: the same labels are annotated, drawn at the
+        // performance view's callout size with one leader line each.
+        let mut on = app_with_labels("fixtures/own_buttons.ini", labels);
+        on.label_presentation = LabelPresentation::On;
+        let on_spec = physical_spec(&on, perf_pane()).expect("spec");
+        let texts = painted_texts(&on_spec);
         assert!(
             texts.iter().any(|(t, font, _)| t == "Trigger input"
                 && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)),
             "the annotation headline paints big: {texts:?}"
         );
-        assert!(
-            !texts
-                .iter()
-                .any(|(t, font, _)| t == "Go"
-                    && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)),
-            "a fitting in-cell label is never duplicated as a callout: {texts:?}"
-        );
+        for c in &on_spec.annotations {
+            assert!(
+                rects_disjoint(&c.label_rect, &on_spec.case_rect),
+                "annotation '{}' enters the rack: {:?}",
+                c.label,
+                c.label_rect
+            );
+        }
         assert_eq!(
-            painted_line_count(&spec),
-            painted_line_count(&off_spec) + spec.annotations.len(),
+            painted_line_count(&on_spec),
+            painted_line_count(&off_spec) + on_spec.annotations.len(),
             "one leader line per annotation"
         );
     }
@@ -4377,21 +4649,22 @@ mod tests {
         }
     }
 
-    /// module-ui-labels D10: an element the controller declares but the patch
-    /// does not address carries no label, so no mode can annotate it — even
-    /// when a preamble label exists for the token.
+    /// module-ui-label-fit D9: an element the controller declares but the patch
+    /// does not address carries no label — even when a preamble label exists for
+    /// the token — so it has no in-cell layout and no presentation annotates it.
     #[test]
     fn auto_never_annotates_an_unaddressed_element() {
         // Fixture gap: `fixtures/unreferenced_elements.ini` is a partial B32 too,
         // but it also carries a bare `[e4]` whose 7 mm encoder, 3 mm button and
-        // 1.8 mm ring cells all clip at 1:1, so it cannot isolate "only the
-        // addressed button is annotated". This inline patch is the same partial
-        // B32 another test in this module uses (`[notebuttons]`, 2 of 32).
+        // 1.8 mm ring cells have no in-cell layout at 1:1, so it cannot isolate
+        // "an unaddressed element is never annotated". This inline patch is the
+        // same partial B32 another test in this module uses (`[notebuttons]`,
+        // 2 of 32).
         let ini = "[notebuttons]\n    button1 = B2.1\n    button2 = B2.2\n    led1 = L2.1\n    led2 = L2.2\n";
         let mut patch =
             crate::patch::Patch::from_ini_str(ini, "inline-notebuttons".to_string()).unwrap();
-        // A label long enough to clip if it were ever addressable, plus a long
-        // label on an addressed button so the annotation set is not empty.
+        // A preamble label for a token the patch never addresses, plus a long
+        // label on an addressed button so the addressed set is non-empty.
         patch
             .preamble_labels
             .insert("B2.5".to_string(), "Unaddressed long label".to_string());
@@ -4402,23 +4675,33 @@ mod tests {
         assert!(app.load_patch(patch));
         app.label_presentation = LabelPresentation::Auto;
         let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let unaddressed: Vec<&CellSpec> = spec
+            .cells
+            .iter()
+            .filter(|c| c.component_index.is_none())
+            .collect();
         assert!(
-            spec.cells
-                .iter()
-                .any(|c| c.component_index.is_none() && c.dimmed),
+            unaddressed.iter().any(|c| c.dimmed),
             "the partial B32 leaves dimmed unaddressed cells"
         );
-        let annotated: Vec<&str> = spec.annotations.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(
-            annotated,
-            vec!["Start sequencer"],
-            "only the addressed button's clipped label is annotated"
+        for cell in &unaddressed {
+            assert!(
+                cell.label.is_empty(),
+                "an unaddressed cell carries no label: {cell:?}"
+            );
+            assert!(
+                cell.label_layout.is_none(),
+                "and therefore no label layout: {cell:?}"
+            );
+        }
+        assert!(
+            spec.annotations
+                .iter()
+                .all(|a| a.label != "Unaddressed long label"),
+            "an unaddressed element is never annotated: {:?}",
+            spec.annotations
         );
         for a in &spec.annotations {
-            assert_ne!(
-                a.label, "Unaddressed long label",
-                "an unaddressed element is never annotated"
-            );
             assert!(
                 spec.cells
                     .iter()
@@ -4653,5 +4936,969 @@ mod tests {
             "the callout flips left of the cell: {:?} vs {cell_rect:?}",
             hover.label_rect
         );
+    }
+    // -- module-ui-label-fit 1.1 (red): fitted label layout -------------------
+    //
+    // `label_layout` (D1) only exists from task 1.2, so these tests pin the
+    // contract through the paint surface the module already has: a cell is
+    // painted headless and the emitted `Shape::Text` runs are read back as the
+    // label lines (monospace, state glyph stripped), the state row
+    // (proportional), and the font step each carries. What they pin (D2-D6):
+    //
+    // - the label is fitted to the cell's own text box, largest step of
+    //   `10, 9, 8, 7, 6` first; the state glyph is not charged against it;
+    // - greedy word wrap happens *before* a smaller step is tried;
+    // - a word wider than the line is hard-broken (characters kept, no `…`);
+    // - `…` appears only at the 6 pt floor, and only when the whole label
+    //   cannot be drawn there;
+    // - the state row keeps its line when a step leaves room, and yields the
+    //   cell when none does;
+    // - the composed face keeps its shape and gives the label the band beneath
+    //   it (one and two lines);
+    // - the P8S8 fader narrows its track to 40 % and stacks one glyph per line;
+    // - a cell with no layout paints no in-cell label at all.
+
+    /// The descending label ladder (D2/D3) and its floor.
+    const LABEL_LADDER: [f32; 5] = [10.0, 9.0, 8.0, 7.0, 6.0];
+    const LABEL_FLOOR: f32 = 6.0;
+
+    /// Millimetres to points at the 1:1 reference: the true size of a geometry
+    /// cell, the same factor `rack_geometry` applies at zoom 1.
+    fn pt(mm: f32) -> f32 {
+        mm * crate::physical::PHYSICAL_POINTS_PER_MM as f32
+    }
+
+    /// One painted text run: its text, its font, and its painted origin/size.
+    #[derive(Debug, Clone)]
+    struct PaintedRun {
+        text: String,
+        font: egui::FontId,
+        pos: Pos2,
+        size: Vec2,
+    }
+
+    /// Paint one cell headless (full presentation) and return every
+    /// `Shape::Text` run with the geometry the label assertions need.
+    fn painted_runs(cell: &CellSpec) -> Vec<PaintedRun> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            let painter = ui.painter();
+            paint_cell(painter, cell, false, false);
+        });
+        let mut runs = Vec::new();
+        for cs in &full_output.shapes {
+            if let egui::epaint::Shape::Text(t) = &cs.shape {
+                runs.push(PaintedRun {
+                    text: t.galley.text().to_string(),
+                    font: t.galley.job.sections[0].format.font_id.clone(),
+                    pos: t.pos,
+                    size: t.galley.size(),
+                });
+            }
+        }
+        full_output.textures_delta.clear();
+        runs
+    }
+
+    /// The label lines a cell paints, in top-to-bottom paint order: every
+    /// monospace run with the state glyph and surrounding space removed, plus
+    /// its font step and painted origin. Empty (a glyph-only row, an empty
+    /// label) runs are not label lines.
+    fn label_lines(cell: &CellSpec) -> Vec<(String, f32, Pos2)> {
+        let glyph = cell.glyph.as_str();
+        let mut lines: Vec<(String, f32, Pos2)> = painted_runs(cell)
+            .into_iter()
+            .filter(|run| run.font.family == egui::FontFamily::Monospace)
+            .filter_map(|run| {
+                let text = run.text.trim();
+                let text = if glyph.is_empty() {
+                    text
+                } else {
+                    text.strip_prefix(glyph).unwrap_or(text)
+                };
+                let text = text.trim();
+                (!text.is_empty()).then(|| (text.to_string(), run.font.size, run.pos))
+            })
+            .collect();
+        lines.sort_by(|a, b| {
+            a.2.y
+                .partial_cmp(&b.2.y)
+                .unwrap()
+                .then(a.2.x.partial_cmp(&b.2.x).unwrap())
+        });
+        lines
+    }
+
+    /// The painted label text, line by line, rejoined with single spaces.
+    fn label_text(cell: &CellSpec) -> String {
+        label_lines(cell)
+            .iter()
+            .map(|(text, _, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The proportional runs a cell paints: its in-cell state row.
+    fn state_lines(cell: &CellSpec) -> Vec<String> {
+        painted_runs(cell)
+            .into_iter()
+            .filter(|run| run.font.family == egui::FontFamily::Proportional)
+            .map(|run| run.text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .collect()
+    }
+
+    fn assert_ladder_step(size: f32, ctx: &str) {
+        assert!(
+            LABEL_LADDER.contains(&size),
+            "{ctx}: {size} pt is not a ladder step"
+        );
+    }
+
+    fn assert_no_ellipsis(cell: &CellSpec, ctx: &str) {
+        for (text, _, _) in label_lines(cell) {
+            assert!(
+                !text.contains('\u{2026}'),
+                "{ctx}: the whole label fits, so no ellipsis: {text:?}"
+            );
+        }
+    }
+
+    /// The legibility floor (D3/D10): no text run anywhere below 6 pt.
+    fn assert_floor_respected(cell: &CellSpec, ctx: &str) {
+        for run in painted_runs(cell) {
+            assert!(
+                run.font.size >= LABEL_FLOOR,
+                "{ctx}: {:?} painted at {} pt, below the {LABEL_FLOOR} pt floor",
+                run.text,
+                run.font.size
+            );
+        }
+    }
+
+    /// A compact full-presentation cell at true panel size, with the glyph and
+    /// state text the element's kind renders and its label layout resolved for
+    /// that glyph/state pair.
+    fn sized_cell(w_mm: f32, h_mm: f32, glyph: &str, label: &str, state: &str) -> CellSpec {
+        let mut cell = cell_spec(
+            Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(pt(w_mm), pt(h_mm))),
+            label,
+        );
+        cell.glyph = glyph.to_string();
+        cell.state_text = state.to_string();
+        resolved_cell(cell)
+    }
+
+    /// A 12 mm pot (45.4 pt at 1:1): the roomiest element cell on the panel.
+    fn pot_cell(label: &str) -> CellSpec {
+        sized_cell(12.0, 12.0, "\u{25C9}", label, "50%")
+    }
+
+    /// A 7 mm jack (26.5 pt at 1:1): one 10 pt character is 6 pt, so the cell is
+    /// only a few characters wide.
+    fn jack_cell(label: &str) -> CellSpec {
+        sized_cell(7.0, 7.0, "\u{25C0}", label, "CV IN")
+    }
+
+    /// A composed button face: shape only, no glyph and no state row (D6).
+    fn composed_cell(w_mm: f32, h_mm: f32, label: &str, shape: CellShape) -> CellSpec {
+        let mut cell = sized_cell(w_mm, h_mm, "", label, "");
+        cell.shape = Some(shape);
+        cell.led_state = Some(1.0);
+        resolved_cell(cell)
+    }
+
+    /// The P8S8 fader cell: 4.2 x 22 mm (15.9 x 83.1 pt at 1:1), label and value.
+    fn p8s8_fader_cell(label: &str) -> CellSpec {
+        let mut cell = sized_cell(4.2, 22.0, "", label, "50%");
+        cell.is_fader = true;
+        cell.fader_value = 0.5;
+        cell.kind = ComponentKind::Knob;
+        cell.color = crate::theme::active().fader_led_bar;
+        resolved_cell(cell)
+    }
+
+    /// module-ui-label-fit D2: a roomy 12 mm pot reaches the ladder's top step.
+    /// Six characters are 36 pt of a 45.4 pt line, so the whole label holds at
+    /// 10 pt — the fixed font's glyph-plus-space budget only afforded five.
+    #[test]
+    fn wide_pot_takes_the_largest_ladder_step() {
+        let cell = pot_cell("Volume");
+        let lines = label_lines(&cell);
+        assert_eq!(
+            lines.len(),
+            1,
+            "a six-character label holds on one top-step line: {lines:?}"
+        );
+        assert_eq!(lines[0].0, "Volume", "the whole label: {lines:?}");
+        assert_eq!(lines[0].1, LABEL_LADDER[0], "the 10 pt step: {lines:?}");
+        assert_no_ellipsis(&cell, "wide pot");
+        assert_floor_respected(&cell, "wide pot");
+    }
+
+    /// module-ui-label-fit D2/D3 (spec "A small cell takes a smaller step"): a
+    /// 7 mm jack drops below the 10 pt cell font, stays on the ladder, and never
+    /// goes under the 6 pt floor. Six characters need 36 pt at 10 pt against a
+    /// 26.5 pt cell, so no larger step holds the word whole.
+    #[test]
+    fn narrow_jack_takes_a_smaller_ladder_step_and_never_below_the_floor() {
+        let cell = jack_cell("Reverb");
+        let lines = label_lines(&cell);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one word on the step that holds it: {lines:?}"
+        );
+        assert_eq!(lines[0].0, "Reverb", "the whole label: {lines:?}");
+        let size = lines[0].1;
+        assert_ladder_step(size, "narrow jack");
+        assert!(
+            size < CELL_LABEL_SIZE,
+            "a step below the 10 pt cell font: {lines:?}"
+        );
+        assert!(size >= LABEL_FLOOR, "never below the floor: {lines:?}");
+        assert!(
+            ("Reverb".chars().count() as f32) * MONO_ADVANCE * size <= cell.rect.width() + 0.5,
+            "the line fits the cell width at {size} pt: {lines:?}"
+        );
+        assert_no_ellipsis(&cell, "narrow jack");
+        assert_floor_respected(&cell, "narrow jack");
+    }
+
+    /// module-ui-label-fit D2 (spec "Wrap before shrink"): "Master out" is ten
+    /// characters, so no ladder step holds it on one 45.4 pt line (10 pt needs
+    /// 60 pt). Reaching the 10 pt step therefore requires wrapping at 10 pt
+    /// instead of stepping the font down — the assertion that fails while the
+    /// cell's single fixed line can only ellipsize.
+    #[test]
+    fn label_wraps_at_the_current_step_before_stepping_down() {
+        let cell = pot_cell("Master out");
+        let lines = label_lines(&cell);
+        assert!(
+            lines.len() >= 2,
+            "wrapped into lines, not one clipped line: {lines:?}"
+        );
+        for (text, size, _) in &lines {
+            assert_eq!(
+                *size, LABEL_LADDER[0],
+                "wrapping keeps the 10 pt step for {text:?}: {lines:?}"
+            );
+        }
+        assert_eq!(
+            label_text(&cell),
+            "Master out",
+            "the whole label: {lines:?}"
+        );
+        assert_no_ellipsis(&cell, "wrap before shrink");
+        assert_floor_respected(&cell, "wrap before shrink");
+    }
+
+    /// module-ui-label-fit D2: a single word wider than the line is hard-broken
+    /// with every character kept — no ellipsis, because an ellipsis is reserved
+    /// for the floor (D2).
+    #[test]
+    fn over_long_word_hard_breaks_instead_of_ellipsizing() {
+        // A 5 x 14 mm switch cell: 18.9 pt wide, so "Rotaryswitch" can never sit
+        // on one line at any step (twelve 6 pt characters are 43 pt).
+        let cell = sized_cell(5.0, 14.0, "\u{25A3}", "Rotaryswitch", "ON");
+        let lines = label_lines(&cell);
+        assert!(
+            lines.len() >= 2,
+            "the over-long word breaks across lines: {lines:?}"
+        );
+        assert_eq!(
+            label_text(&cell).replace(' ', ""),
+            "Rotaryswitch",
+            "every character is kept, none dropped: {lines:?}"
+        );
+        assert_no_ellipsis(&cell, "hard break");
+        for (text, size, _) in &lines {
+            assert_ladder_step(*size, "hard break");
+            assert!(
+                (text.chars().count() as f32) * MONO_ADVANCE * size <= cell.rect.width() + 0.5,
+                "line {text:?} fits the cell width at {size} pt"
+            );
+        }
+        assert_floor_respected(&cell, "hard break");
+    }
+
+    /// module-ui-label-fit D2/D3: the ellipsis is the floor's last resort — a
+    /// 23-character label on a 7 mm jack cannot be drawn whole even at 6 pt (the
+    /// cell holds three seven-character lines without the state row, 21
+    /// characters), so the ladder reaches 6 pt and ellipsizes the last line.
+    #[test]
+    fn ellipsis_appears_only_at_the_six_point_floor() {
+        let cell = jack_cell("Filter cutoff resonance");
+        let lines = label_lines(&cell);
+        assert!(
+            !lines.is_empty(),
+            "the floor still draws the label: {lines:?}"
+        );
+        for (text, size, _) in &lines {
+            assert_eq!(
+                *size, LABEL_FLOOR,
+                "the ellipsis only ever appears at the floor, not at {size} pt ({text:?})"
+            );
+        }
+        let ellipsized: Vec<&(String, f32, Pos2)> = lines
+            .iter()
+            .filter(|(text, _, _)| text.contains('\u{2026}'))
+            .collect();
+        assert_eq!(
+            ellipsized.len(),
+            1,
+            "exactly one ellipsis, on the last line: {lines:?}"
+        );
+        assert!(
+            lines.last().unwrap().0.contains('\u{2026}'),
+            "the ellipsis closes the label: {lines:?}"
+        );
+        let visible: String = lines
+            .iter()
+            .map(|(text, _, _)| text.replace('\u{2026}', ""))
+            .collect::<Vec<_>>()
+            .join("")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let whole: String = "Filter cutoff resonance"
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            whole.starts_with(&visible),
+            "the visible text is the label's prefix, never scrambled: {visible:?}"
+        );
+        assert!(
+            visible.chars().count() < whole.chars().count(),
+            "the whole label does not fit the floor: {visible:?}"
+        );
+        assert_floor_respected(&cell, "floor ellipsis");
+    }
+
+    /// module-ui-label-fit D4: a shallow cell still clears one 10 pt label line
+    /// (12.5 pt) plus the 9 pt state row (11.25 pt) in 26.5 pt, so the state row
+    /// keeps its line under the label.
+    #[test]
+    fn state_row_survives_when_the_fitted_label_leaves_room() {
+        let cell = sized_cell(12.0, 7.0, "\u{25C9}", "Volume", "50%");
+        let lines = label_lines(&cell);
+        assert_eq!(lines.len(), 1, "one 10 pt label line: {lines:?}");
+        assert_eq!(lines[0].0, "Volume", "the whole label: {lines:?}");
+        assert_eq!(lines[0].1, LABEL_LADDER[0], "the top step: {lines:?}");
+        assert_eq!(
+            state_lines(&cell),
+            vec!["50%".to_string()],
+            "the state row survives beside a label that leaves room"
+        );
+        let runs = painted_runs(&cell);
+        let label_run = runs
+            .iter()
+            .find(|run| run.font.family == egui::FontFamily::Monospace)
+            .expect("label line painted");
+        let state_run = runs
+            .iter()
+            .find(|run| run.font.family == egui::FontFamily::Proportional)
+            .expect("state row painted");
+        assert!(
+            state_run.pos.y > label_run.pos.y,
+            "the state row sits under the label line: {:?} vs {:?}",
+            state_run.pos,
+            label_run.pos
+        );
+        assert_no_ellipsis(&cell, "state row survives");
+        assert_floor_respected(&cell, "state row survives");
+    }
+
+    /// module-ui-label-fit D4 (spec "The label beats the state row"): on a 9 mm
+    /// button cell a 23-character label cannot fit alongside the state row at any
+    /// step, but it fits the whole cell at the floor — so the label takes the
+    /// cell and the state row is omitted.
+    #[test]
+    fn state_row_yields_the_cell_when_no_step_fits_alongside_it() {
+        let cell = sized_cell(9.0, 9.0, "\u{25CF}", "Filter cutoff resonance", "ON");
+        let lines = label_lines(&cell);
+        assert!(
+            lines.len() >= 3,
+            "the label takes the cell the state row gave up: {lines:?}"
+        );
+        assert_eq!(
+            label_text(&cell).replace(' ', ""),
+            "Filtercutoffresonance",
+            "the whole label, unellipsized: {lines:?}"
+        );
+        assert_no_ellipsis(&cell, "state row yields");
+        for (_, size, _) in &lines {
+            assert_eq!(
+                *size, LABEL_FLOOR,
+                "only the floor fits without the state row: {lines:?}"
+            );
+        }
+        assert!(
+            state_lines(&cell).is_empty(),
+            "the state row is dropped, not drawn over the label: {:?}",
+            state_lines(&cell)
+        );
+        assert_floor_respected(&cell, "state row yields");
+    }
+
+    /// module-ui-label-fit D6: the composed face gives the label the band beneath
+    /// the shape without shrinking it. On a 9 mm P2B8 face the band is 17 pt, so
+    /// the six-character label takes one fitted line (below 10 pt, where 36 pt of
+    /// text cannot fit 34 pt) and the state circle keeps its full diameter.
+    #[test]
+    fn composed_face_keeps_its_shape_with_a_one_line_label_band() {
+        let cell = composed_cell(9.0, 9.0, "Volume", CellShape::Round);
+        let lines = label_lines(&cell);
+        assert_eq!(lines.len(), 1, "one line in the 17 pt band: {lines:?}");
+        assert_eq!(lines[0].0, "Volume", "the whole label: {lines:?}");
+        let size = lines[0].1;
+        assert_ladder_step(size, "composed one line");
+        assert!(
+            (LABEL_FLOOR..CELL_LABEL_SIZE).contains(&size),
+            "a fitted step, never the fixed 10 pt: {lines:?}"
+        );
+        assert!(
+            lines[0].2.y >= cell.rect.min.y + 0.5 * cell.rect.width(),
+            "the label sits in the band beneath the shape: {:?}",
+            lines[0].2
+        );
+        // The face was not shrunk for the label: measure it by the ring (the
+        // stroked outline, `w/2 − 1` exactly), and by the fill staying inside it
+        // (the LED fill legitimately reaches the cell's half-width at level 1).
+        let rings: Vec<f32> = painted_shapes(&cell, false)
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::epaint::Shape::Circle(circle) if circle.stroke.width > 0.0 => {
+                    Some(circle.radius)
+                }
+                _ => None,
+            })
+            .collect();
+        let face = cell.rect.width().min(cell.rect.height()) / 2.0 - 1.0;
+        assert_eq!(rings.len(), 1, "exactly one state ring: {rings:?}");
+        assert!(
+            (rings[0] - face).abs() < 0.01,
+            "the ring keeps its full {face} pt radius for the label: {rings:?}"
+        );
+        let fills: Vec<f32> = painted_shapes(&cell, false)
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::epaint::Shape::Circle(circle)
+                    if circle.stroke.width == 0.0 && circle.fill != egui::Color32::TRANSPARENT =>
+                {
+                    Some(circle.radius)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !fills.is_empty(),
+            "the folded LED fills the face: {fills:?}"
+        );
+        for radius in fills {
+            assert!(
+                radius <= cell.rect.width().min(cell.rect.height()) / 2.0,
+                "the LED fill stays inside the face: {radius} pt"
+            );
+        }
+        assert_no_ellipsis(&cell, "composed one line");
+        assert_floor_respected(&cell, "composed one line");
+    }
+
+    /// module-ui-label-fit D6 (spec "Label under a roomy shape"): the M4 touch
+    /// plate is 12 x 18 mm, leaving a 45 pt band under its 45 pt face — two 10 pt
+    /// lines. The shape is not displaced and the label never leaves the cell.
+    #[test]
+    fn composed_face_band_holds_two_label_lines_beneath_the_shape() {
+        let cell = composed_cell(12.0, 18.0, "Master out", CellShape::Rect);
+        let lines = label_lines(&cell);
+        assert_eq!(lines.len(), 2, "two lines beneath the shape: {lines:?}");
+        for (text, size, _) in &lines {
+            assert_eq!(
+                *size, LABEL_LADDER[0],
+                "the top step holds both lines ({text:?}): {lines:?}"
+            );
+        }
+        assert_eq!(
+            label_text(&cell),
+            "Master out",
+            "the whole label: {lines:?}"
+        );
+        for (text, _, pos) in &lines {
+            assert!(
+                pos.y >= cell.rect.min.y + 0.5 * cell.rect.width(),
+                "line {text:?} stays in the band beneath the shape: {pos:?}"
+            );
+        }
+        let face = cell.rect.width().min(cell.rect.height()) - 2.0;
+        let plate = painted_cell_rects(&cell, false)
+            .into_iter()
+            .find(|(rect, _, stroke, _)| *stroke > 0.0 && (rect.width() - face).abs() < 0.6);
+        assert!(
+            plate.is_some(),
+            "the touch plate keeps its full {face} pt size: {:?}",
+            painted_cell_rects(&cell, false)
+        );
+        assert_no_ellipsis(&cell, "composed two lines");
+        assert_floor_respected(&cell, "composed two lines");
+    }
+
+    /// module-ui-label-fit D5 (spec "A fader label stacks"): the P8S8 fader
+    /// (4.2 x 22 mm) narrows its track to 40 % of the cell (6.3 pt, under the old
+    /// 10 pt clamp) and stacks the label one glyph per line in the column beside
+    /// it — the old budget left 2.9 pt of text column and drew no label at all.
+    #[test]
+    fn p8s8_fader_narrows_its_track_and_stacks_one_glyph_per_line() {
+        let cell = p8s8_fader_cell("Level");
+        let width = cell.rect.width();
+        let rects = painted_cell_rects(&cell, false);
+        let (track, _, _, _) = rects
+            .iter()
+            .find(|(_, _, stroke, color)| {
+                *stroke == 1.0 && *color == rgb(crate::theme::active().fader_slot)
+            })
+            .unwrap_or_else(|| panic!("fader slot outline painted: {rects:?}"));
+        assert!(
+            (track.width() - 0.4 * width).abs() < 0.6,
+            "the track narrows to 40 % of the cell: {} pt vs {} pt",
+            track.width(),
+            0.4 * width
+        );
+
+        let runs: Vec<PaintedRun> = painted_runs(&cell)
+            .into_iter()
+            .filter(|run| {
+                run.font.family == egui::FontFamily::Monospace && !run.text.trim().is_empty()
+            })
+            .collect();
+        assert!(
+            !runs.is_empty(),
+            "the stacked label is painted beside the track: {runs:?}"
+        );
+        let glyphs: String = runs
+            .iter()
+            .flat_map(|run| run.text.chars())
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(glyphs, "Level", "every glyph, in reading order: {runs:?}");
+        if runs.len() > 1 {
+            assert_eq!(runs.len(), 5, "one text run per glyph: {runs:?}");
+            for run in &runs {
+                assert_eq!(
+                    run.text.trim().chars().count(),
+                    1,
+                    "one glyph per line, not a horizontal run: {:?}",
+                    run.text
+                );
+            }
+            let ys: Vec<f32> = runs.iter().map(|run| run.pos.y).collect();
+            let mut stacked = ys.clone();
+            stacked.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(ys, stacked, "glyphs stack top to bottom: {ys:?}");
+            stacked.dedup();
+            assert_eq!(stacked.len(), 5, "each glyph on its own line: {ys:?}");
+            let x0 = runs[0].pos.x;
+            assert!(
+                runs.iter().all(|run| (run.pos.x - x0).abs() < 0.5),
+                "one column: {:?}",
+                runs.iter().map(|run| run.pos.x).collect::<Vec<_>>()
+            );
+        } else {
+            let lines: Vec<&str> = runs[0].text.split('\n').collect();
+            assert_eq!(lines.len(), 5, "five stacked lines: {:?}", runs[0].text);
+            assert!(
+                lines.iter().all(|line| line.trim().chars().count() == 1),
+                "one glyph per line: {:?}",
+                runs[0].text
+            );
+        }
+        for run in &runs {
+            assert!(
+                run.pos.x >= cell.rect.min.x + 0.4 * width - 0.5,
+                "the stacked column sits beside the track, never over it: {:?}",
+                run.pos
+            );
+            assert_ladder_step(run.font.size, "stacked fader");
+            assert!(
+                run.font.size >= LABEL_FLOOR,
+                "the stack never drops below the floor: {:?}",
+                run.font.size
+            );
+        }
+        assert_floor_respected(&cell, "p8s8 fader");
+    }
+
+    /// module-ui-label-fit D2/D9 (spec "A label no step can hold stays
+    /// reachable"): a 3 mm LED cell is 11.3 pt wide, so no step holds a
+    /// four-character label even at the 6 pt floor (three characters per line,
+    /// and two lines are 15 pt in an 11.3 pt cell). The cell draws its state and
+    /// no label fragment.
+    #[test]
+    fn three_millimetre_led_cell_draws_no_in_cell_label() {
+        let cell = sized_cell(3.0, 3.0, "\u{25CF}", "Gate", "ON");
+        let lines = label_lines(&cell);
+        assert!(
+            lines.is_empty(),
+            "no in-cell label where no step fits: {lines:?}"
+        );
+        for run in painted_runs(&cell) {
+            assert!(
+                !run.text.contains("Gate") && !run.text.contains('\u{2026}'),
+                "no label fragment and no floor ellipsis in place of one: {:?}",
+                run.text
+            );
+        }
+        assert_floor_respected(&cell, "3 mm LED");
+    }
+
+    /// module-ui-label-fit D1 (the no-layout case): an empty label has no layout,
+    /// so it paints no text. A composed cell has no glyph and no state row, so
+    /// its cell is text-free; a compact cell keeps its state glyph and nothing
+    /// else.
+    #[test]
+    fn empty_label_paints_no_text_run() {
+        let mut composed = composed_cell(9.0, 9.0, "", CellShape::Round);
+        composed.led_state = None;
+        let runs = painted_runs(&composed);
+        assert!(
+            runs.is_empty(),
+            "an empty label leaves no text run at all: {runs:?}"
+        );
+
+        let compact = sized_cell(9.0, 9.0, "\u{25CF}", "", "ON");
+        let lines = label_lines(&compact);
+        assert!(
+            lines.is_empty(),
+            "no label line for an empty label: {lines:?}"
+        );
+    }
+
+    // -- module-ui-label-fit 1.5: the reveal outlives the fitted cell ----------
+    //
+    // A fitted cell can lose text in three ways — ellipsize at the floor, drop
+    // the label entirely, or drop only the state row (D2/D4) — and the hover
+    // reveal must still name the element and its state in every case, in every
+    // label presentation, in the skeleton presentation, and through the pane's
+    // status subject (module-ui "Element label reveal"). The scenario is one
+    // P4B2 faceplate at true 1:1, whose cells are a roomy 12 mm pot, a 9 mm
+    // button and a 3 mm LED: one written label per text fate, plus a roomy pot
+    // whose label the cell draws whole.
+
+    /// A label too long for the 12 mm pot at the ladder floor: the last line
+    /// ellipsizes.
+    const REVEAL_ELLIPSIZED_LABEL: &str =
+        "Filter cutoff resonance envelope modulation master output stage";
+    /// A label that fits the 9 mm button only after its state row yields (D4).
+    const REVEAL_STATE_YIELDS_LABEL: &str = "Filter cutoff resonance";
+    /// A label no ladder step holds in a 3 mm LED cell: the cell draws none.
+    const REVEAL_DROPPED_LABEL: &str = "Gate";
+    /// A short label the roomy pot draws whole, so the reveal is not a
+    /// clipped-cell-only behaviour.
+    const REVEAL_WHOLE_LABEL: &str = "Trim";
+
+    /// `token -> written label` for every cell the reveal tests hover.
+    const REVEAL_SCENARIO: [(&str, &str); 4] = [
+        ("P5.1", REVEAL_ELLIPSIZED_LABEL),
+        ("B5.1", REVEAL_STATE_YIELDS_LABEL),
+        ("L5.1", REVEAL_DROPPED_LABEL),
+        ("P5.2", REVEAL_WHOLE_LABEL),
+    ];
+
+    /// The reveal scenario's P4B2 faceplate with the written labels attached as
+    /// preamble labels, at true 1:1 (the zoom the layout fates above are computed
+    /// for), in `mode`.
+    fn reveal_app(mode: LabelPresentation) -> App {
+        let mut app = app_with_labels("fixtures/faceplate_rotary_stack.ini", &REVEAL_SCENARIO);
+        app.label_presentation = mode;
+        app.physical_zoom = 1.0;
+        app.physical_offset = (0.0, 0.0);
+        app
+    }
+
+    fn reveal_modes() -> [LabelPresentation; 3] {
+        [
+            LabelPresentation::Off,
+            LabelPresentation::Auto,
+            LabelPresentation::On,
+        ]
+    }
+
+    /// Hover `token` and return the spec built for it plus the cell it draws.
+    /// The hover reveal and the cell's own layout come from the same build, so a
+    /// test cannot compare a callout against a differently-built cell.
+    fn reveal_spec(app: &mut App, token: &str) -> (PhysicalSpec, CellSpec) {
+        app.hovered_component = Some(hw_index(app, token));
+        let spec = physical_spec(app, perf_pane()).expect("spec");
+        let cell = cell_for_token(app, &spec, token).clone();
+        (spec, cell)
+    }
+
+    /// D2/D4: the roomy pot's long label ellipsizes in its cell, yet the hover
+    /// callout names all of it in every label presentation and in the skeleton.
+    #[test]
+    fn reveal_callout_names_the_whole_label_where_the_cell_ellipsized() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                let (spec, cell) = reveal_spec(&mut app, "P5.1");
+                let layout = cell
+                    .label_layout
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("the pot keeps a floor layout ({mode:?})"));
+                assert!(
+                    layout.lines.iter().any(|line| line.contains('\u{2026}')),
+                    "the long pot label ellipsizes in its cell ({mode:?}, skeleton={skeleton}): {layout:?}"
+                );
+                assert_ne!(
+                    label_text(&cell),
+                    REVEAL_ELLIPSIZED_LABEL,
+                    "the cell paints the ellipsized form, not the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("a callout for the ellipsized cell ({mode:?}, skeleton={skeleton})")
+                });
+                assert_eq!(
+                    hover.label, REVEAL_ELLIPSIZED_LABEL,
+                    "the callout names the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                // The scenario's three cells all carry a state string, so the
+                // empty-state branch is not the case asserted here.
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the pot's cell carries a state ({mode:?})"
+                );
+                assert_eq!(
+                    hover.state_text, cell.state_text,
+                    "the callout carries the cell's state ({mode:?}, skeleton={skeleton})"
+                );
+                assert!(
+                    painted_texts(&spec).iter().any(|(text, font, _)| {
+                        text == REVEAL_ELLIPSIZED_LABEL
+                            && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)
+                    }),
+                    "the reveal paints the full label at {CALLOUT_LABEL_SIZE} pt ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// D2/D9: the 3 mm LED cell holds no ladder step's worth of its label, so the
+    /// cell draws none — and the reveal still names it and its state.
+    #[test]
+    fn reveal_callout_names_the_label_where_the_cell_dropped_it_entirely() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                let (spec, cell) = reveal_spec(&mut app, "L5.1");
+                assert!(
+                    cell.label_layout.is_none(),
+                    "no ladder step holds the LED label ({mode:?}, skeleton={skeleton}): {:?}",
+                    cell.label_layout
+                );
+                assert!(
+                    label_text(&cell).is_empty(),
+                    "the cell paints no label text ({mode:?}, skeleton={skeleton}): {:?}",
+                    label_text(&cell)
+                );
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("a callout for the dropped-label cell ({mode:?}, skeleton={skeleton})")
+                });
+                assert_eq!(
+                    hover.label, REVEAL_DROPPED_LABEL,
+                    "the callout names the label the cell dropped ({mode:?}, skeleton={skeleton})"
+                );
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the LED's cell carries a state ({mode:?})"
+                );
+                assert_eq!(
+                    hover.state_text, cell.state_text,
+                    "the callout carries the cell's state ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// D4: the 9 mm button fits its label only by giving up the state row, so the
+    /// cell paints no state — and the callout still reports the state value.
+    #[test]
+    fn reveal_callout_carries_the_state_the_cell_dropped_from_its_row() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                let (spec, cell) = reveal_spec(&mut app, "B5.1");
+                let layout = cell.label_layout.as_ref().unwrap_or_else(|| {
+                    panic!("the button still draws its label ({mode:?}, skeleton={skeleton})")
+                });
+                assert!(
+                    !layout.state_row,
+                    "the label took the cell and the state row yielded ({mode:?}, skeleton={skeleton}): {layout:?}"
+                );
+                assert!(
+                    state_lines(&cell).is_empty(),
+                    "the cell paints no state row ({mode:?}, skeleton={skeleton}): {:?}",
+                    state_lines(&cell)
+                );
+                assert_eq!(
+                    label_text(&cell).replace(' ', ""),
+                    "Filtercutoffresonance",
+                    "the cell still draws the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("a callout for the state-yielding cell ({mode:?}, skeleton={skeleton})")
+                });
+                assert_eq!(
+                    hover.label, REVEAL_STATE_YIELDS_LABEL,
+                    "the callout names the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the button's cell carries a state ({mode:?})"
+                );
+                assert_eq!(
+                    hover.state_text, cell.state_text,
+                    "the callout carries the state the cell's row could not ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// module-ui "Element label reveal": the reveal is not a clipped-cell-only
+    /// behaviour — a cell that draws its whole label still reveals it on hover.
+    #[test]
+    fn reveal_also_fires_for_a_label_the_cell_draws_whole() {
+        for mode in reveal_modes() {
+            let mut app = reveal_app(mode);
+            let (spec, cell) = reveal_spec(&mut app, "P5.2");
+            let layout = cell
+                .label_layout
+                .as_ref()
+                .unwrap_or_else(|| panic!("the short pot label fits its cell ({mode:?})"));
+            assert_eq!(
+                layout.lines,
+                vec![REVEAL_WHOLE_LABEL.to_string()],
+                "the whole label is drawn in the cell ({mode:?})"
+            );
+            assert_no_ellipsis(&cell, "whole label");
+            assert_eq!(
+                label_text(&cell),
+                REVEAL_WHOLE_LABEL,
+                "the cell already names the element ({mode:?})"
+            );
+            let hover = spec
+                .hover
+                .as_ref()
+                .unwrap_or_else(|| panic!("a callout for the whole-label cell ({mode:?})"));
+            assert_eq!(
+                hover.label, REVEAL_WHOLE_LABEL,
+                "the reveal fires for a label the cell draws whole ({mode:?})"
+            );
+            assert_eq!(
+                hover.state_text, cell.state_text,
+                "the callout carries the cell's state ({mode:?})"
+            );
+        }
+    }
+
+    /// The skeleton presentation draws no fitted cell text, but the reveal still
+    /// names the element — and its callout is the same one the full view draws.
+    #[test]
+    fn reveal_is_identical_in_the_skeleton_presentation() {
+        for mode in reveal_modes() {
+            let mut app = reveal_app(mode);
+            app.physical_show_skeleton = false;
+            let (full, _) = reveal_spec(&mut app, "P5.1");
+            let full_hover = full.hover.clone().expect("full reveal");
+
+            app.physical_show_skeleton = true;
+            let (skeleton, _) = reveal_spec(&mut app, "P5.1");
+            let skeleton_hover = skeleton.hover.clone().expect("skeleton reveal");
+
+            assert_eq!(
+                skeleton_hover.label, REVEAL_ELLIPSIZED_LABEL,
+                "the skeleton reveal still names the element ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.label, full_hover.label,
+                "the skeleton reveals the same label as the full view ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.state_text, full_hover.state_text,
+                "the skeleton reveals the same state as the full view ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.label_rect, full_hover.label_rect,
+                "the skeleton callout is placed identically ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.anchor, full_hover.anchor,
+                "the skeleton callout anchors identically ({mode:?})"
+            );
+        }
+    }
+
+    /// No element under the pointer: no callout, in every mode and in the
+    /// skeleton presentation.
+    #[test]
+    fn reveal_is_absent_with_no_hovered_component() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                app.hovered_component = None;
+                let spec = physical_spec(&app, perf_pane()).expect("spec");
+                assert!(
+                    spec.hover.is_none(),
+                    "no callout without a hovered element ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// The pane's status subject names the same element and state as the callout:
+    /// for every cell whose layout lost text, and in every label presentation.
+    #[test]
+    fn reveal_status_subject_names_the_full_label_and_state_in_every_mode() {
+        for mode in reveal_modes() {
+            let mut app = reveal_app(mode);
+            for (token, label) in REVEAL_SCENARIO {
+                let (spec, cell) = reveal_spec(&mut app, token);
+                let hover = spec
+                    .hover
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("a callout for {token} ({mode:?})"));
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the scenario's {token} cell carries a state ({mode:?})"
+                );
+                let subject = crate::gui::module_ui_status_subject(&app)
+                    .unwrap_or_else(|| panic!("a status subject for {token} ({mode:?})"));
+                assert_eq!(
+                    subject,
+                    format!("{label}: {}", cell.state_text),
+                    "the status subject names the full label and state ({token}, {mode:?})"
+                );
+                assert!(
+                    subject.starts_with(label),
+                    "the status subject names the element, not a cell fragment ({token}, {mode:?}): {subject:?}"
+                );
+                assert_eq!(
+                    subject,
+                    format!("{}: {}", hover.label, hover.state_text),
+                    "the status subject and the callout agree ({token}, {mode:?})"
+                );
+            }
+        }
     }
 }

@@ -1213,6 +1213,574 @@ pub fn rack_extent_points(rack: &RackLayout, zoom: f64) -> (f32, f32) {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Per-cell label layout (module-ui-label-fit D1–D6)
+// ---------------------------------------------------------------------------
+
+/// The descending label font ladder in points (module-ui-label-fit D2/D3):
+/// every cell takes the largest step at which its whole label fits its own text
+/// box, wrapping at word boundaries before it considers a smaller step.
+const LABEL_FONT_LADDER: [f32; 5] = [10.0, 9.0, 8.0, 7.0, 6.0];
+
+/// The ladder's floor in points — the smallest text the surface may draw
+/// (D3/D10). 6 pt is roughly 8 px on a 1x display, and it is the smallest size
+/// at which a 3.6 pt character advance still fits inside a 7 mm jack at 100 %
+/// zoom. A cell that cannot hold 6 pt keeps its state and loses its in-cell
+/// label, which stays reachable through the annotation layer and the hover
+/// reveal (D9) instead of shrinking further.
+const LABEL_FONT_FLOOR: f32 = 6.0;
+
+/// Monospace advance as a fraction of the font size (egui's monospace face is
+/// close to 0.6 em — mirrors `gui::physical`'s `MONO_ADVANCE`). Every budget is
+/// a multiplication of this, which is what keeps [`label_layout`] free of any
+/// rendered-text measurement and therefore pure.
+const LABEL_MONO_ADVANCE: f32 = 0.6;
+
+/// Line height as a multiple of the font size (the painter's `× 1.25`).
+const LABEL_LINE_HEIGHT: f32 = 1.25;
+
+/// Left inset of a cell's text box in points: the compact and the composed
+/// paint path both draw their text at `rect.min.x + 2.0`.
+const LABEL_INSET_X: f32 = 2.0;
+
+/// Composed face (D6): the state shape occupies the cell's top `0.5 × w`, so the
+/// label's band beneath it is `h − 0.5 × w` tall and starts at the cell's bottom
+/// edge. The shape itself is never shrunk for the label.
+const COMPOSED_FACE_HEIGHT_FRACTION: f32 = 0.5;
+
+/// Fader (D5): the track may claim at most this fraction of the cell width, so a
+/// tall-narrow fader leaves the label a real column beside it.
+const FADER_TRACK_WIDTH_FRACTION: f32 = 0.4;
+
+/// Fader (D5): the narrowed track never exceeds the 10 pt the paint path has
+/// always clamped it to, so a wide fader keeps its present face.
+const FADER_TRACK_WIDTH_MAX: f32 = 10.0;
+
+/// Gutter between the fader's narrowed track and its label column, in points.
+const FADER_TRACK_GUTTER: f32 = 3.0;
+
+/// Fader (D5): a column narrower than this many character advances cannot hold
+/// a line of text — two glyphs is the shortest run that still reads as text
+/// rather than as a stray mark — so the label stacks one glyph per line instead.
+const FADER_HORIZONTAL_MIN_CHARS: f32 = 2.0;
+
+/// State row (D4): the state text is proportional at `max(9, 0.8 × label font)`.
+const STATE_FONT_SCALE: f32 = 0.8;
+
+/// State row (D4): the floor of the proportional state font, in points.
+const STATE_FONT_MIN: f32 = 9.0;
+
+/// State row (D4/D5): the narrowest text column that can carry a value, in
+/// character advances of the state font. One advance is not a value — a column
+/// that holds a single glyph makes the painter emit the glyph plus its ellipsis
+/// (`…`), which names no number — so a cell whose column holds fewer than two
+/// advances reports `state_row = false` and hands the room back to the label.
+/// Compact and composed cells never hit this gate; it exists for the fader,
+/// whose label column the track and gutter can narrow past a usable value.
+const STATE_ROW_MIN_CHARS: f32 = 2.0;
+
+/// Tolerance in points for the box comparisons: a line exactly as wide or tall
+/// as the box still fits, so float rounding never costs a cell its last
+/// character.
+const LABEL_FIT_TOLERANCE: f32 = 0.01;
+
+/// The mark appended to the last line when only the floor is left (D2).
+const LABEL_ELLIPSIS: char = '\u{2026}';
+
+/// The ellipsized form's legibility floor (D2/D10): the last line keeps at
+/// least this many visible characters ahead of its ellipsis. A one- or
+/// two-character fragment names nothing — `G…` is not `Gate`, it is noise on a
+/// faceplate — so a box too small to show three characters plus the mark gets no
+/// in-cell layout at all. The cell then draws its state alone and the whole
+/// label stays reachable through the annotation layer and the hover reveal (D9),
+/// which is the same fallback every other unserved cell uses.
+const LABEL_ELLIPSIS_MIN_VISIBLE: usize = 3;
+
+/// The fit's candidate grid (D7) in thousandths of the 1:1 baseline: the scan
+/// walks [`ZOOM_MIN`]..=[`ZOOM_MAX`] in 1 % steps, so at most 376 candidates
+/// bound it and the answer never lands on a division the user could not also
+/// dial by hand — no bisection tolerance, no drift between two calls.
+const LABEL_FIT_STEP_MILLIS: u32 = 10;
+
+/// One whole zoom (100 %) in the fit grid's units.
+const LABEL_FIT_MILLIS_PER_ZOOM: f64 = 1000.0;
+
+/// Which paint path owns a cell's label, i.e. which text box the label is
+/// measured against (D1/D5/D6). No egui type crosses this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellTextPath {
+    /// Compact cell: the cell minus [`LABEL_INSET_X`], with the state glyph and
+    /// one separating space at the head of line 1 when `glyph_chars > 0`.
+    Compact,
+    /// Composed button face: the shape keeps the cell, the label takes the band
+    /// beneath it.
+    Composed,
+    /// Fader: the label column right of the narrowed track, stacked one glyph
+    /// per line when the column is too narrow for a line of text.
+    Fader,
+}
+
+/// One cell's label box as the painter will use it, plus the three facts that
+/// change the budget (D1): the glyph occupying the head of line 1, the paint
+/// path, and whether a state string exists. Pure geometry — the label text is a
+/// separate argument to [`label_layout`], so the same box can be evaluated for
+/// the label's current value or for any candidate zoom.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LabelBox {
+    /// Drawn cell width in points.
+    pub w: f32,
+    /// Drawn cell height in points.
+    pub h: f32,
+    /// Characters of the state glyph drawn at the head of line 1 (`0` when the
+    /// cell has no glyph, e.g. a composed face).
+    pub glyph_chars: usize,
+    /// Which paint path's text box applies.
+    pub path: CellTextPath,
+    /// Whether the cell has a state string the label may have to yield to (D4).
+    pub has_state: bool,
+}
+
+/// The resolved label for one cell (D1): the single source the painter, the
+/// annotation layer, the hover reveal and the fit clamp all read instead of
+/// re-deriving a character budget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelLayout {
+    /// The ladder step in points, never below [`LABEL_FONT_FLOOR`].
+    pub font: f32,
+    /// The label's lines, top to bottom: wrapped at spaces, hard-broken only for
+    /// a word wider than its line, and ellipsized on the last line only at the
+    /// floor. In the stacked form each entry is one glyph.
+    pub lines: Vec<String>,
+    /// One glyph per line beside a narrowed fader track (D5).
+    pub stacked: bool,
+    /// A state line still fits with the label (D4); `false` when the label
+    /// needed the room and the state row yielded.
+    pub state_row: bool,
+}
+
+/// The fitted label of one cell, or `None` when the cell cannot show its label
+/// even at [`LABEL_FONT_FLOOR`] — the annotation predicate of the label
+/// presentation (D1/D9).
+///
+/// Passes, in order of preference (D2/D4):
+///
+/// 1. every ladder step with one state line reserved, when the cell has state
+///    *and* its column can carry a value (see [`state_row_can_show_a_value`]);
+/// 2. every ladder step across the whole text box (the state row yields);
+/// 3. the floor, ellipsized on the last line — only here may text be dropped,
+///    because only here does no step hold the whole label (D2).
+///
+/// `None` means not even one character fits the box at the floor (a 3 mm LED
+/// cell at fit zoom, the glyph leaving no room on line 1) or the label is empty;
+/// the label then stays reachable through the annotation layer and hover.
+/// Pure and deterministic: no egui, no paint state, same input → same output.
+pub fn label_layout(label: &str, area: &LabelBox) -> Option<LabelLayout> {
+    if label.trim().is_empty() {
+        return None;
+    }
+    let (_, height) = label_text_box(area)?;
+
+    // D4: the state row is the first thing tried and the first thing given up —
+    // and it is not tried at all when the column cannot carry a value (D5).
+    if area.has_state {
+        for &font in &LABEL_FONT_LADDER {
+            if !state_row_can_show_a_value(area, font) {
+                break;
+            }
+            let reserved = label_line_height(state_font_size(font));
+            if let Some((lines, stacked)) = fit_at(label, area, font, height - reserved) {
+                return Some(LabelLayout {
+                    font,
+                    lines,
+                    stacked,
+                    state_row: true,
+                });
+            }
+        }
+    }
+
+    for &font in &LABEL_FONT_LADDER {
+        if let Some((lines, stacked)) = fit_at(label, area, font, height) {
+            return Some(LabelLayout {
+                font,
+                lines,
+                stacked,
+                state_row: false,
+            });
+        }
+    }
+
+    ellipsized_layout(label, area, height)
+}
+
+/// Line height in points for a label font step (`1.25 × font`).
+///
+/// Public so the painter stacks lines and the state row at exactly the geometry
+/// the layout was fitted against instead of re-deriving it.
+pub fn label_line_height(font: f32) -> f32 {
+    font * LABEL_LINE_HEIGHT
+}
+
+/// The proportional state-row font for a fitted label step (D4):
+/// `max(9, 0.8 × label font)`. Shared with the painter for the same reason.
+pub fn state_font_size(label_font: f32) -> f32 {
+    (label_font * STATE_FONT_SCALE).max(STATE_FONT_MIN)
+}
+
+/// Whether this cell's text column can carry a state value at all (D4/D5),
+/// measured in advances of the state font for the candidate label step.
+///
+/// Compact and composed cells always qualify: their state row shares the label's
+/// own line width, which the ladder has already shown holds text. A fader's
+/// column is separately narrowed by the 40 % track and the gutter, so it can be
+/// narrower than one usable value while still stacking the label beside it —
+/// that cell reports no state row rather than painting `…`.
+pub fn state_row_can_show_a_value(area: &LabelBox, font: f32) -> bool {
+    match area.path {
+        CellTextPath::Compact | CellTextPath::Composed => true,
+        CellTextPath::Fader => {
+            let column = fader_column_width(area.w);
+            column + LABEL_FIT_TOLERANCE
+                >= STATE_ROW_MIN_CHARS * label_char_advance(state_font_size(font))
+        }
+    }
+}
+
+/// One written label's claim on the fit (D7): the cell's drawn size **at 100 %
+/// zoom** plus the facts [`LabelBox`] needs, and the label text. The fit scales
+/// `w`/`h` by each candidate zoom and asks [`label_layout`], so one request
+/// answers every candidate and the caller never rebuilds boxes per zoom.
+///
+/// Only *written* labels become requests (`Patch::explicit_hw_label`, D7): a
+/// derived token name is text nobody asked the surface to show, and letting it
+/// lift the fit would zoom the view for a label that only exists on hover.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelFitRequest {
+    /// Cell width in points at 100 % zoom.
+    pub w: f32,
+    /// Cell height in points at 100 % zoom.
+    pub h: f32,
+    /// Characters of the state glyph at the head of line 1 (D1), `0` when the
+    /// cell has no glyph.
+    pub glyph_chars: usize,
+    /// Which paint path's text box applies (D1/D5/D6).
+    pub path: CellTextPath,
+    /// Whether the cell has a state string the label may have to yield to (D4).
+    pub has_state: bool,
+    /// The written label.
+    pub label: String,
+}
+
+impl LabelFitRequest {
+    /// This request's label box at one candidate zoom: the 100 % size scaled by
+    /// `zoom`, the same isotropic factor the painter maps the cell through.
+    fn label_box_at(&self, zoom: f64) -> LabelBox {
+        let scale = zoom as f32;
+        LabelBox {
+            w: self.w * scale,
+            h: self.h * scale,
+            glyph_chars: self.glyph_chars,
+            path: self.path,
+            has_state: self.has_state,
+        }
+    }
+
+    /// Whether this cell draws its **whole** label at `zoom` (D2/D7).
+    ///
+    /// [`label_layout`] answers `Some` even when it had to ellipsize the last
+    /// line or drop lines it could not place — that is D2's "no step holds it"
+    /// state, i.e. a cell painting `…` instead of a name. Whole-ness of the text
+    /// is therefore the predicate the fit needs, not `is_some`: a zoom only
+    /// earns its place in the fit when the label is actually drawn.
+    fn draws_whole_label_at(&self, zoom: f64) -> bool {
+        let Some(layout) = label_layout(&self.label, &self.label_box_at(zoom)) else {
+            return false;
+        };
+        layout
+            .lines
+            .iter()
+            .flat_map(|line| line.chars())
+            .filter(|c| !c.is_whitespace())
+            .eq(self.label.chars().filter(|c| !c.is_whitespace()))
+    }
+}
+
+/// The label fit (D7): the smallest zoom in [`ZOOM_MIN`]..=[`ZOOM_MAX`] at which
+/// every written label's cell yields a layout from the same [`label_layout`] the
+/// painter uses **and draws that label whole**, or `None` when no request
+/// constrains the fit.
+///
+/// "The label fit" is the zoom at which the ladder no longer has to give up on
+/// a label the rack fit shrank away, i.e. the readable zoom: the app takes the
+/// greater of it and [`fit_zoom`], so a label that only fits when zoomed in
+/// lifts the default view and the rack overflows and pans instead of the text
+/// vanishing. Drawing the label whole is the point — an ellipsized floor layout
+/// (D2's "no step holds it") already appears at zooms far below the rack fit and
+/// would report every cell as served while painting `…`.
+///
+/// A request that no zoom up to `ZOOM_MAX` draws whole is *ignored*, not
+/// clamped (D7/D9): no supported zoom can serve that cell, so it must neither
+/// reach the ceiling nor drag the fit above a label that does fit. It stays an
+/// annotation candidate, and the fit is decided by the labels that can be
+/// served. A fit the floor already serves is reported as `None` — there is
+/// nothing to lift and the rack fit answers alone.
+///
+/// Bounded and deterministic: one fixed ascending grid of 1 % zoom steps
+/// ([`LABEL_FIT_STEP_MILLIS`]) from [`ZOOM_MIN`] to [`ZOOM_MAX`] — at most 376
+/// candidates, and the check fails fast on the first cell that does not fit, so
+/// the cost is roughly one [`label_layout`] call per candidate plus one per
+/// request. The grid is exact (thousandths of the 1:1 baseline, never a running
+/// float sum), so the same input always answers the same zoom.
+pub fn label_fit_zoom(requests: &[LabelFitRequest]) -> Option<f64> {
+    let first = (ZOOM_MIN * LABEL_FIT_MILLIS_PER_ZOOM).round() as u32;
+    let cap = (ZOOM_MAX * LABEL_FIT_MILLIS_PER_ZOOM).round() as u32;
+    let cap_zoom = f64::from(cap) / LABEL_FIT_MILLIS_PER_ZOOM;
+
+    // D7/D9: no whole layout at the ceiling means no zoom can serve the cell —
+    // it is ignored rather than clamped, so it can neither push the fit to the
+    // cap nor hold it above a label that does fit.
+    let served: Vec<&LabelFitRequest> = requests
+        .iter()
+        .filter(|request| request.draws_whole_label_at(cap_zoom))
+        .collect();
+    if served.is_empty() {
+        return None;
+    }
+
+    let mut millis = first;
+    loop {
+        let zoom = f64::from(millis) / LABEL_FIT_MILLIS_PER_ZOOM;
+        if served
+            .iter()
+            .all(|request| request.draws_whole_label_at(zoom))
+        {
+            // A fit the floor already serves constrains nothing.
+            return (zoom > ZOOM_MIN).then_some(zoom);
+        }
+        if millis >= cap {
+            // Unreachable: every surviving request fits at the ceiling, which is
+            // the last candidate. Kept so the function stays total.
+            return None;
+        }
+        millis = (millis + LABEL_FIT_STEP_MILLIS).min(cap);
+    }
+}
+
+/// One character of a monospace label font step, in points.
+fn label_char_advance(font: f32) -> f32 {
+    font * LABEL_MONO_ADVANCE
+}
+
+/// The fader's track width under the narrowed contract (D5).
+fn fader_track_width(w: f32) -> f32 {
+    (w * FADER_TRACK_WIDTH_FRACTION).min(FADER_TRACK_WIDTH_MAX)
+}
+
+/// The label column right of a fader's narrowed track and its gutter (D5).
+fn fader_column_width(w: f32) -> f32 {
+    w - fader_track_width(w) - FADER_TRACK_GUTTER
+}
+
+/// The text box a path leaves for the label, in points (D1/D5/D6).
+fn label_text_box(area: &LabelBox) -> Option<(f32, f32)> {
+    let width = match area.path {
+        CellTextPath::Compact | CellTextPath::Composed => area.w - LABEL_INSET_X,
+        CellTextPath::Fader => fader_column_width(area.w),
+    };
+    let height = match area.path {
+        CellTextPath::Compact | CellTextPath::Fader => area.h,
+        CellTextPath::Composed => area.h - COMPOSED_FACE_HEIGHT_FRACTION * area.w,
+    };
+    if width <= 0.0 || height <= 0.0 {
+        None
+    } else {
+        Some((width, height))
+    }
+}
+
+/// Characters a line holds at `font`: the first line of a compact cell also
+/// carries the state glyph and one separating space, so it is shorter by that
+/// prefix (D1). Returns `(head_capacity, capacity)`.
+fn line_capacities(width: f32, font: f32, glyph_chars: usize) -> (usize, usize) {
+    let advance = label_char_advance(font);
+    if advance <= 0.0 || width <= 0.0 {
+        return (0, 0);
+    }
+    let chars = |w: f32| ((w / advance) + LABEL_FIT_TOLERANCE).floor().max(0.0) as usize;
+    let capacity = chars(width);
+    let head = if glyph_chars == 0 {
+        capacity
+    } else {
+        let prefix = (glyph_chars + 1) as f32 * advance;
+        chars(width - prefix)
+    };
+    (head, capacity)
+}
+
+/// Greedy word wrap at spaces (D2): a line is filled until the next whole word
+/// no longer fits, and a word wider than a line on its own is hard-broken so no
+/// character is lost. `None` when no text can be placed at all — the first line
+/// has no room after the glyph prefix.
+fn wrap_lines(label: &str, head_cap: usize, capacity: usize) -> Option<Vec<String>> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line: Vec<char> = Vec::new();
+    let mut cap_now = head_cap;
+    for word in label.split_whitespace() {
+        let word: Vec<char> = word.chars().collect();
+        let mut taken = 0;
+        while taken < word.len() {
+            if line.is_empty() {
+                if cap_now == 0 {
+                    return None;
+                }
+                // A word that exceeds a line on its own is broken here; a word
+                // that fits is placed whole.
+                let take = cap_now.min(word.len() - taken);
+                line.extend_from_slice(&word[taken..taken + take]);
+                taken += take;
+            } else if line.len() + 1 + (word.len() - taken) <= cap_now {
+                line.push(' ');
+                line.extend_from_slice(&word[taken..]);
+                taken = word.len();
+            } else {
+                // The whole word does not fit behind the space: close the line
+                // and retry it on a fresh, full-width one.
+                lines.push(line.iter().collect());
+                line.clear();
+                cap_now = capacity;
+                continue;
+            }
+            if taken < word.len() {
+                // The line filled up mid-word: close it and continue the word on
+                // the next line.
+                lines.push(line.iter().collect());
+                line.clear();
+                cap_now = capacity;
+            }
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line.iter().collect());
+    }
+    Some(lines)
+}
+
+/// The stacked form (D5): one glyph per line, whitespace dropped because a
+/// column one character wide cannot show a space.
+fn stacked_lines(label: &str) -> Vec<String> {
+    label
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_string())
+        .collect()
+}
+
+/// The lines one font step produces for a box, ignoring height: `(lines,
+/// stacked)`. `None` when the step leaves no room for text.
+fn wrapped_lines(label: &str, area: &LabelBox, font: f32) -> Option<(Vec<String>, bool)> {
+    let (width, _) = label_text_box(area)?;
+    let advance = label_char_advance(font);
+    if advance <= 0.0 {
+        return None;
+    }
+    if area.path == CellTextPath::Fader && width < FADER_HORIZONTAL_MIN_CHARS * advance {
+        // D5: the column cannot hold a line of text, so it stacks one glyph per
+        // line — the only orientation that fits a tall-narrow cell.
+        if width + LABEL_FIT_TOLERANCE < advance {
+            return None;
+        }
+        return Some((stacked_lines(label), true));
+    }
+    let (head, capacity) = line_capacities(width, font, area.glyph_chars);
+    wrap_lines(label, head, capacity).map(|lines| (lines, false))
+}
+
+/// Whether `lines` fit `avail_h` at `font`.
+fn lines_fit_height(lines: &[String], font: f32, avail_h: f32) -> bool {
+    let line_h = label_line_height(font);
+    if line_h <= 0.0 || avail_h <= 0.0 {
+        return false;
+    }
+    lines.len() as f32 * line_h <= avail_h + LABEL_FIT_TOLERANCE
+}
+
+/// One ladder step against one available height: the wrapped lines when they
+/// fit, else `None`.
+fn fit_at(label: &str, area: &LabelBox, font: f32, avail_h: f32) -> Option<(Vec<String>, bool)> {
+    let (lines, stacked) = wrapped_lines(label, area, font)?;
+    if lines_fit_height(&lines, font, avail_h) {
+        Some((lines, stacked))
+    } else {
+        None
+    }
+}
+
+/// A line truncated to `capacity` characters with the floor ellipsis closing it;
+/// `None` when the line cannot hold [`LABEL_ELLIPSIS_MIN_VISIBLE`] visible
+/// characters plus the ellipsis itself — such a fragment identifies nothing, so
+/// the cell is better left to the annotation and hover reveal (D9).
+fn truncate_with_ellipsis(line: &str, capacity: usize) -> Option<String> {
+    // One character of the capacity belongs to the ellipsis itself.
+    let keep = capacity.checked_sub(1)?;
+    if keep < LABEL_ELLIPSIS_MIN_VISIBLE {
+        return None;
+    }
+    let mut chars: Vec<char> = line.chars().take(keep).collect();
+    while chars.last().is_some_and(|c| c.is_whitespace()) {
+        chars.pop();
+    }
+    // A line that only has a word-break's worth of text left is not a name
+    // either, so the shortfall is the same answer as a short box.
+    if chars.len() < LABEL_ELLIPSIS_MIN_VISIBLE {
+        return None;
+    }
+    chars.push(LABEL_ELLIPSIS);
+    Some(chars.iter().collect())
+}
+
+/// The last resort (D2): the floor, keeping only the lines the box holds and
+/// ellipsizing the final one. Reached only when no ladder step holds the whole
+/// label, so the ellipsis means "nothing fits" rather than "the first try was
+/// tight".
+///
+/// `None` closes the last resort too: when that final line cannot show
+/// [`LABEL_ELLIPSIS_MIN_VISIBLE`] visible characters plus the ellipsis (a 3 mm
+/// LED cell's two-character budget, or a one-glyph-wide stacked fader column),
+/// the cell gets no in-cell layout and waits for the annotation and hover
+/// reveal instead of painting a fragment.
+fn ellipsized_layout(label: &str, area: &LabelBox, height: f32) -> Option<LabelLayout> {
+    let font = LABEL_FONT_FLOOR;
+    let (width, _) = label_text_box(area)?;
+    let (mut lines, stacked) = wrapped_lines(label, area, font)?;
+    let line_h = label_line_height(font);
+    if line_h <= 0.0 {
+        return None;
+    }
+    let max_lines = ((height / line_h) + LABEL_FIT_TOLERANCE).floor().max(0.0) as usize;
+    if max_lines == 0 {
+        return None;
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        let (head_cap, capacity) = line_capacities(width, font, area.glyph_chars);
+        let last_cap = if stacked {
+            1
+        } else if max_lines == 1 {
+            head_cap
+        } else {
+            capacity
+        };
+        let last = lines.last_mut()?;
+        *last = truncate_with_ellipsis(last, last_cap)?;
+    }
+    Some(LabelLayout {
+        font,
+        lines,
+        stacked,
+        state_row: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3072,6 +3640,614 @@ mod tests {
         assert!(
             wf <= FIT_PANE_W + 1e-2 && hf <= FIT_PANE_H + 1e-2,
             "fit must not overflow: {wf} × {hf}"
+        );
+    }
+
+    // -- module-ui-label-fit 1.2: the pure label layout (D1-D6) --------------
+
+    /// Points for a millimetre span at the true-1:1 reference zoom, the same
+    /// factor the geometry cells are built from.
+    fn label_pt(mm: f32) -> f32 {
+        mm * PHYSICAL_POINTS_PER_MM as f32
+    }
+
+    /// A label box at one cell's drawn size.
+    fn label_box(
+        w: f32,
+        h: f32,
+        glyph_chars: usize,
+        path: CellTextPath,
+        has_state: bool,
+    ) -> LabelBox {
+        LabelBox {
+            w,
+            h,
+            glyph_chars,
+            path,
+            has_state,
+        }
+    }
+
+    /// Assert a layout's step, lines, form and state row, and that the step is on
+    /// the ladder and never below the floor (D3/D10).
+    fn assert_label_layout(
+        layout: &LabelLayout,
+        font: f32,
+        lines: &[&str],
+        stacked: bool,
+        state_row: bool,
+        ctx: &str,
+    ) {
+        assert_eq!(layout.font, font, "{ctx}: the font step");
+        assert_eq!(
+            layout.lines,
+            lines.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+            "{ctx}: the lines"
+        );
+        assert_eq!(layout.stacked, stacked, "{ctx}: the stacked form");
+        assert_eq!(layout.state_row, state_row, "{ctx}: the state row");
+        assert!(
+            LABEL_FONT_LADDER.contains(&layout.font),
+            "{ctx}: {} pt is not a ladder step",
+            layout.font
+        );
+        assert!(
+            layout.font >= LABEL_FONT_FLOOR,
+            "{ctx}: {} pt is below the floor",
+            layout.font
+        );
+    }
+
+    /// D2/D3: every step of the ladder is reachable — shrinking the box moves the
+    /// same label one step down, and never past the floor.
+    #[test]
+    fn label_layout_reaches_every_ladder_step() {
+        // `(box w, expected font)`: the box just holds four characters of the
+        // expected step and only one line of it, so the next-higher step either
+        // wraps into two lines (too tall) or hard-breaks.
+        let cases = [
+            (26.5, 10.0),
+            (24.1, 9.0),
+            (21.7, 8.0),
+            (19.3, 7.0),
+            (16.9, 6.0),
+        ];
+        for (w, font) in cases {
+            let area = label_box(w, 1.6 * font, 0, CellTextPath::Compact, false);
+            let layout = label_layout("abcd", &area).expect("a four-character label fits");
+            assert_label_layout(&layout, font, &["abcd"], false, false, &format!("w={w}"));
+        }
+    }
+
+    /// D2 (spec "Wrap before shrink"): a label that wraps at the current step is
+    /// wrapped there instead of being stepped down to fit one line.
+    #[test]
+    fn label_layout_wraps_before_stepping_down() {
+        // Two 10 pt lines of three characters: one line would need the 6 pt step.
+        let area = label_box(20.0, 25.0, 0, CellTextPath::Compact, false);
+        let layout = label_layout("ab cd", &area).expect("wraps at the top step");
+        assert_label_layout(&layout, 10.0, &["ab", "cd"], false, false, "wrap first");
+    }
+
+    /// D2: a single word wider than the line is hard-broken, every character
+    /// kept — an ellipsis is not spent on it while a step still holds it whole.
+    #[test]
+    fn label_layout_hard_breaks_a_word_wider_than_a_line() {
+        // Five two-character lines at 10 pt (12.5 pt each) fill a 63 pt cell.
+        let area = label_box(14.0, 63.0, 0, CellTextPath::Compact, false);
+        let layout = label_layout("abcdefghij", &area).expect("hard-broken, not dropped");
+        assert_label_layout(
+            &layout,
+            10.0,
+            &["ab", "cd", "ef", "gh", "ij"],
+            false,
+            false,
+            "hard break",
+        );
+    }
+
+    /// D2: the ellipsis is the floor's last resort — a label no step holds whole
+    /// reaches 6 pt, keeps the lines the box holds and closes the last one.
+    #[test]
+    fn label_layout_ellipsizes_only_at_the_floor() {
+        // Two 6 pt lines of four characters: 20 characters cannot fit.
+        let area = label_box(16.9, 16.0, 0, CellTextPath::Compact, false);
+        let layout = label_layout("abcdefghijklmnopqrst", &area).expect("the floor still draws");
+        assert_label_layout(
+            &layout,
+            6.0,
+            &["abcd", "efg\u{2026}"],
+            false,
+            false,
+            "floor ellipsis",
+        );
+        // The line including the ellipsis stays inside the four-character box.
+        let last = layout.lines.last().expect("a last line");
+        assert_eq!(last.chars().count(), 4, "the ellipsis replaces a character");
+    }
+
+    /// D4: a step that leaves room for the state row keeps it.
+    #[test]
+    fn label_layout_keeps_the_state_row_when_it_fits() {
+        let area = label_box(60.0, 60.0, 1, CellTextPath::Compact, true);
+        let layout = label_layout("Reverb", &area).expect("a roomy cell");
+        assert_label_layout(&layout, 10.0, &["Reverb"], false, true, "state kept");
+    }
+
+    /// D4 (spec "The label beats the state row"): when the reserved state line
+    /// leaves no step any room, the label takes the cell and the row is dropped.
+    #[test]
+    fn label_layout_drops_the_state_row_when_no_step_leaves_room() {
+        // One 10 pt line plus the 9 pt state row is 23.75 pt; 16 pt holds the
+        // label line only.
+        let area = label_box(60.0, 16.0, 1, CellTextPath::Compact, true);
+        let layout = label_layout("Reverb", &area).expect("the label takes the cell");
+        assert_label_layout(&layout, 10.0, &["Reverb"], false, false, "state yielded");
+    }
+
+    /// D4's order of preference: the whole state-reserved ladder is tried before
+    /// the label is allowed the full cell, so a smaller step beats losing the
+    /// state row.
+    #[test]
+    fn label_layout_prefers_the_state_row_over_a_larger_step() {
+        let area = label_box(26.5, 30.0, 0, CellTextPath::Compact, true);
+        let layout = label_layout("Reverb", &area).expect("a step fits with the row");
+        assert_label_layout(&layout, 7.0, &["Rever", "b"], false, true, "state first");
+    }
+
+    /// D6: the composed face gives the label the band beneath the shape — one
+    /// line when the band is a single line tall.
+    #[test]
+    fn label_layout_composed_band_holds_one_line() {
+        let area = label_box(30.0, 30.0, 0, CellTextPath::Composed, false);
+        let layout = label_layout("Rev", &area).expect("one line in the band");
+        assert_label_layout(&layout, 10.0, &["Rev"], false, false, "composed one line");
+    }
+
+    /// D6: a roomier band holds two lines at the top step.
+    #[test]
+    fn label_layout_composed_band_holds_two_lines() {
+        // `h − 0.5 × w` = 30 pt of band under a 30 pt plate.
+        let area = label_box(30.0, 45.0, 0, CellTextPath::Composed, false);
+        let layout = label_layout("Reverb", &area).expect("two lines in the band");
+        assert_label_layout(
+            &layout,
+            10.0,
+            &["Reve", "rb"],
+            false,
+            false,
+            "composed two lines",
+        );
+    }
+
+    /// D6: a face that leaves no band keeps the shape and gets no label — the
+    /// cell stays an annotation candidate rather than eating the face.
+    #[test]
+    fn label_layout_composed_without_a_band_has_no_layout() {
+        let area = label_box(30.0, 15.0, 0, CellTextPath::Composed, false);
+        assert_eq!(label_layout("Reverb", &area), None);
+    }
+
+    /// D5 (spec "A fader label stacks"): the P8S8's 6.5 pt column holds one
+    /// glyph per line, at the largest step whose glyphs fit the cell height.
+    #[test]
+    fn label_layout_fader_stacks_a_narrow_column() {
+        let w = label_pt(4.2);
+        let h = label_pt(22.0);
+        // Six glyphs fit at the top step (6 × 12.5 = 75 of 83 pt).
+        let short = label_layout("Volume", &label_box(w, h, 0, CellTextPath::Fader, false))
+            .expect("a stacked column");
+        assert_label_layout(
+            &short,
+            10.0,
+            &["V", "o", "l", "u", "m", "e"],
+            true,
+            false,
+            "fader stack",
+        );
+        // D5's own measurement: ten glyphs need the 6 pt stack (75 of 83 pt).
+        let long = label_layout(
+            "Resonances",
+            &label_box(w, h, 0, CellTextPath::Fader, false),
+        )
+        .expect("a floor stack");
+        assert_eq!(long.font, 6.0, "ten glyphs only fit the floor");
+        assert!(long.stacked, "still one glyph per line");
+        assert_eq!(long.lines.len(), 10);
+        // The 6.5 pt column cannot carry a value (see
+        // `label_layout_fader_column_too_narrow_for_a_value`), so the label takes
+        // the full height: six glyphs at the top step, no state row.
+        let with_state = label_layout("Volume", &label_box(w, h, 0, CellTextPath::Fader, true))
+            .expect("six glyphs, whole cell");
+        assert_label_layout(
+            &with_state,
+            10.0,
+            &["V", "o", "l", "u", "m", "e"],
+            true,
+            false,
+            "fader stack, no room for a value",
+        );
+    }
+
+    /// D4/D5 (task 3.7): the state row is only reported where a value can exist.
+    /// At 1:1 the P8S8 is 4.2 mm × 22 mm (15.9 × 83.2 pt); its track narrows to
+    /// `min(0.4 × 15.9, 10) = 6.36 pt`, leaving a `15.9 − 6.36 − 3 = 6.5 pt`
+    /// column — short of the two advances of the 9 pt state font (10.8 pt) the
+    /// painter needs, so it would paint a bare `…`. The label still stacks.
+    #[test]
+    fn label_layout_fader_column_too_narrow_for_a_value_has_no_state_row() {
+        let p8s8 = label_box(label_pt(4.2), label_pt(22.0), 0, CellTextPath::Fader, true);
+        let layout = label_layout("Volume", &p8s8).expect("the label still stacks");
+        assert!(
+            layout.stacked,
+            "the narrow column still stacks one glyph per line: {layout:?}"
+        );
+        assert_eq!(
+            layout.lines,
+            ["V", "o", "l", "u", "m", "e"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "the whole label, one glyph per line: {layout:?}"
+        );
+        assert!(
+            !layout.state_row,
+            "no value fits 6.5 pt at 9 pt, so no state row: {layout:?}"
+        );
+        // The gate is width, not height: the same cell with the label's room
+        // reserved still has plenty of height to spare.
+        assert!(
+            layout.font >= LABEL_FONT_FLOOR,
+            "the label keeps a legal step: {layout:?}"
+        );
+    }
+
+    /// D4/D5 (task 3.7): a fader wide enough for a value keeps its state row —
+    /// the M4's 7 mm cell is 26.5 pt, so its track clamps to 10 pt and leaves
+    /// `26.5 − 10 − 3 = 13.5 pt`, which holds two advances of the 9 pt state font
+    /// (10.8 pt) with room to spare.
+    #[test]
+    fn label_layout_wide_fader_keeps_the_state_row() {
+        let m4 = label_box(label_pt(7.0), label_pt(62.0), 0, CellTextPath::Fader, true);
+        let layout = label_layout("Volume", &m4).expect("a horizontal fader label");
+        assert!(
+            !layout.stacked,
+            "a 13.5 pt column wraps horizontally: {layout:?}"
+        );
+        assert!(
+            layout.state_row,
+            "two 9 pt advances fit 13.5 pt, so the row stays: {layout:?}"
+        );
+        assert_label_layout(
+            &layout,
+            10.0,
+            &["Vo", "lu", "me"],
+            false,
+            true,
+            "M4 fader with state",
+        );
+    }
+
+    /// D5: a fader wide enough for a line of text keeps a horizontal label — the
+    /// M4's 13.5 pt column holds two 10 pt characters per line.
+    #[test]
+    fn label_layout_fader_keeps_a_horizontal_line_when_wide() {
+        let area = label_box(label_pt(7.0), label_pt(62.0), 0, CellTextPath::Fader, false);
+        let layout = label_layout("Volume", &area).expect("a horizontal fader label");
+        assert_label_layout(&layout, 10.0, &["Vo", "lu", "me"], false, false, "M4 fader");
+    }
+
+    /// D9/D10: a 3 mm LED cell cannot hold a label at any step, at 1:1 or at a
+    /// typical fit zoom, so the cell reports no layout and the label stays
+    /// annotation/hover territory.
+    ///
+    /// Both wirings answer `None`: with the state glyph charged at the head of
+    /// line 1 (nothing reaches the label at all) and with `glyph_chars` 0 as the
+    /// module UI paints it today (the box's two-character budget is below the
+    /// ellipsized form's legibility floor, so `G…` is not emitted).
+    #[test]
+    fn label_layout_returns_none_for_a_3mm_led_cell() {
+        for zoom in [1.0f32, 0.66] {
+            let side = label_pt(3.0) * zoom;
+            for glyph_chars in [0usize, 1] {
+                let area = label_box(side, side, glyph_chars, CellTextPath::Compact, true);
+                assert_eq!(
+                    label_layout("Gate", &area),
+                    None,
+                    "a 3 mm LED cell at zoom {zoom} (glyph {glyph_chars}) has no room for a label"
+                );
+            }
+        }
+    }
+
+    /// D2/D10: the ellipsized form needs three visible characters — a two-character
+    /// budget names nothing, so it is no layout at all, while a four-character
+    /// budget draws exactly three and closes the line.
+    #[test]
+    fn label_layout_ellipsis_needs_three_visible_characters() {
+        // Text boxes of exactly two and four 6 pt characters, one line tall.
+        let two = label_box(9.2, 8.0, 0, CellTextPath::Compact, false);
+        assert_eq!(
+            label_layout("Gate", &two),
+            None,
+            "two characters plus the ellipsis would be a fragment"
+        );
+        let four = label_box(16.4, 8.0, 0, CellTextPath::Compact, false);
+        let layout = label_layout("Gatekeeper", &four).expect("three characters plus the ellipsis");
+        assert_label_layout(
+            &layout,
+            6.0,
+            &["Gat\u{2026}"],
+            false,
+            false,
+            "three visible",
+        );
+        let last = layout.lines.last().expect("a last line");
+        assert_eq!(
+            last.chars().filter(|c| *c != LABEL_ELLIPSIS).count(),
+            3,
+            "exactly three visible characters: {last:?}"
+        );
+    }
+
+    /// D2/D9: the acceptance case behind the rule — a 3 × 3 mm cell carrying
+    /// `Gate` used to paint `G…`; it now has no in-cell layout, so the paint path
+    /// draws the state alone and the label comes from the annotation and hover
+    /// reveal.
+    #[test]
+    fn label_layout_three_millimetre_gate_cell_has_no_layout() {
+        let side = label_pt(3.0);
+        assert_eq!(
+            label_layout(
+                "Gate",
+                &label_box(side, side, 0, CellTextPath::Compact, true)
+            ),
+            None
+        );
+        // The same box still serves a label of two characters, which needs no
+        // ellipsis at all: the rule is about fragments, not tiny cells.
+        let short = label_layout("Go", &label_box(side, side, 0, CellTextPath::Compact, true))
+            .expect("a two-character label fits a 3 mm cell");
+        assert_label_layout(&short, 7.0, &["Go"], false, false, "short label");
+    }
+
+    /// An empty or blank label has nothing to draw, in any path.
+    #[test]
+    fn label_layout_returns_none_for_an_empty_label() {
+        let roomy = label_box(80.0, 80.0, 1, CellTextPath::Compact, true);
+        assert_eq!(label_layout("", &roomy), None);
+        assert_eq!(label_layout("   ", &roomy), None);
+        let fader = label_box(label_pt(7.0), label_pt(62.0), 0, CellTextPath::Fader, true);
+        assert_eq!(label_layout("", &fader), None);
+    }
+
+    /// Determinism: the layout is a pure function of the box and the label, so
+    /// repeated and independently built inputs answer identically.
+    #[test]
+    fn label_layout_is_deterministic() {
+        let cases = [
+            label_box(26.5, 16.0, 0, CellTextPath::Compact, false),
+            label_box(16.9, 16.0, 0, CellTextPath::Compact, false),
+            label_box(30.0, 45.0, 0, CellTextPath::Composed, false),
+            label_box(label_pt(4.2), label_pt(22.0), 0, CellTextPath::Fader, true),
+            label_box(11.34, 11.34, 1, CellTextPath::Compact, true),
+        ];
+        for area in cases {
+            let first = label_layout("Filter cutoff resonance", &area);
+            let second = label_layout("Filter cutoff resonance", &area);
+            assert_eq!(first, second, "same box, same answer: {area:?}");
+            let rebuilt = label_box(area.w, area.h, area.glyph_chars, area.path, area.has_state);
+            assert_eq!(
+                label_layout("Filter cutoff resonance", &rebuilt),
+                first,
+                "an equal box answers equally: {area:?}"
+            );
+        }
+    }
+
+    // -- module-ui-label-fit 2.2: the label fit (D7) --------------------------
+
+    /// One written label on one cell, sized in millimetres at 100 % zoom.
+    fn fit_request(
+        label: &str,
+        w_mm: f32,
+        h_mm: f32,
+        glyph_chars: usize,
+        path: CellTextPath,
+        has_state: bool,
+    ) -> LabelFitRequest {
+        LabelFitRequest {
+            w: label_pt(w_mm),
+            h: label_pt(h_mm),
+            glyph_chars,
+            path,
+            has_state,
+            label: label.to_string(),
+        }
+    }
+
+    /// A 9 mm button cell (34 pt at 100 %) with its glyph and press state.
+    fn button_fit_request(label: &str) -> LabelFitRequest {
+        fit_request(label, 9.0, 9.0, 1, CellTextPath::Compact, true)
+    }
+
+    /// The grid candidate `steps` 1 % steps below `zoom`, computed the way the
+    /// scan computes its candidates so a test compares grid points instead of
+    /// float neighbours.
+    fn grid_below(zoom: f64, steps: u32) -> f64 {
+        let millis = (zoom * LABEL_FIT_MILLIS_PER_ZOOM).round() as u32;
+        f64::from(millis - steps * LABEL_FIT_STEP_MILLIS) / LABEL_FIT_MILLIS_PER_ZOOM
+    }
+
+    /// D7: an empty request list constrains nothing, so the rack fit answers
+    /// alone and the label fit reports `None`.
+    #[test]
+    fn label_fit_zoom_is_none_without_requests() {
+        assert_eq!(label_fit_zoom(&[]), None, "nothing to serve");
+    }
+
+    /// D7: when the floor already draws every label whole there is nothing to
+    /// lift, and `None` lets the rack fit decide the view.
+    #[test]
+    fn label_fit_zoom_is_none_when_the_floor_already_serves_the_label() {
+        // A 20 mm cell (75.6 pt at 100 %) draws `Rev` whole at the 0.25 floor.
+        let roomy = fit_request("Rev", 20.0, 20.0, 1, CellTextPath::Compact, true);
+        assert!(
+            roomy.draws_whole_label_at(ZOOM_MIN),
+            "the fixture must be served by the floor"
+        );
+        assert_eq!(
+            label_fit_zoom(std::slice::from_ref(&roomy)),
+            None,
+            "a label the floor already serves does not constrain the fit"
+        );
+    }
+
+    /// D7/D2: a long label on a small cell lifts the fit above true size, and the
+    /// reported zoom is the *first* grid point that draws the label whole — one
+    /// step lower does not, so the answer is the smallest fit, not a rounding.
+    #[test]
+    fn label_fit_zoom_lifts_a_long_label_on_a_small_cell() {
+        let button = button_fit_request("Trigger input threshold resonance filter cutoff");
+        let zoom = label_fit_zoom(std::slice::from_ref(&button))
+            .expect("a 46-character label on a 9 mm button needs a lift");
+        assert!(zoom > 1.0, "the lift is above true size ({zoom})");
+        assert!(zoom <= ZOOM_MAX, "the lift stays inside the range ({zoom})");
+        assert!(
+            button.draws_whole_label_at(zoom),
+            "the answer draws the whole label ({zoom})"
+        );
+        let below = grid_below(zoom, 1);
+        assert!(
+            !button.draws_whole_label_at(below),
+            "one grid step below {zoom} the label does not fit whole yet ({below})"
+        );
+    }
+
+    /// D7/D9: a label no supported zoom can draw whole is *ignored*, not
+    /// clamped — it neither lifts the fit to the ceiling nor holds it above a
+    /// label that does fit, and on its own it constrains nothing.
+    #[test]
+    fn label_fit_zoom_ignores_a_label_no_zoom_can_serve() {
+        let button = button_fit_request("Trigger input");
+        let alone = label_fit_zoom(std::slice::from_ref(&button)).expect("a servable label");
+
+        // A composed face whose band is empty at every zoom (D6, h = 0.5 w), and
+        // a blank label: neither draws anything whole at the ceiling.
+        let no_band = fit_request(
+            "Trigger input",
+            30.0,
+            15.0,
+            0,
+            CellTextPath::Composed,
+            false,
+        );
+        let blank = button_fit_request("   ");
+        assert!(
+            !no_band.draws_whole_label_at(ZOOM_MAX),
+            "the fixture must be unservable even at the ceiling"
+        );
+        assert!(
+            !blank.draws_whole_label_at(ZOOM_MAX),
+            "a blank label draws nothing"
+        );
+
+        assert_eq!(
+            label_fit_zoom(&[no_band.clone(), blank.clone()]),
+            None,
+            "ignored labels alone leave the fit to the rack"
+        );
+        let together = label_fit_zoom(&[button.clone(), no_band, blank])
+            .expect("the servable label still decides the fit");
+        assert_eq!(
+            together, alone,
+            "an unservable label neither lifts the fit nor drags it to the cap"
+        );
+    }
+
+    /// D7: the reported fit is always a zoom the view can actually take — never
+    /// above the ceiling, never below the floor — across every paint path.
+    #[test]
+    fn label_fit_zoom_never_leaves_the_supported_range() {
+        let cases = [
+            button_fit_request("Trigger input"),
+            button_fit_request("Trigger input threshold"),
+            button_fit_request("Trigger input threshold resonance filter cutoff"),
+            fit_request("Ring light", 3.0, 3.0, 1, CellTextPath::Compact, true),
+            fit_request("Volume", 4.2, 22.0, 0, CellTextPath::Fader, true),
+            fit_request("Volume", 7.0, 62.0, 0, CellTextPath::Fader, false),
+            fit_request("Reverb", 30.0, 45.0, 0, CellTextPath::Composed, false),
+        ];
+        for request in cases {
+            if let Some(zoom) = label_fit_zoom(std::slice::from_ref(&request)) {
+                assert!(
+                    (ZOOM_MIN..=ZOOM_MAX).contains(&zoom),
+                    "{:?} reported {zoom}, outside {ZOOM_MIN}..={ZOOM_MAX}",
+                    request.label
+                );
+                assert!(zoom.is_finite(), "{:?} reported {zoom}", request.label);
+            }
+        }
+        // No fit is ever reported above the ceiling for an unservable label.
+        let no_band = fit_request(
+            "Trigger input",
+            30.0,
+            15.0,
+            0,
+            CellTextPath::Composed,
+            false,
+        );
+        assert_eq!(label_fit_zoom(&[no_band]), None);
+    }
+
+    /// D7: the fit serves *every* request, so it is the hardest label's own fit.
+    #[test]
+    fn label_fit_zoom_takes_the_hardest_label() {
+        let short = button_fit_request("Trigger input");
+        let long = button_fit_request("Trigger input threshold resonance filter cutoff");
+        let short_fit = label_fit_zoom(std::slice::from_ref(&short)).expect("the short label");
+        let long_fit = label_fit_zoom(std::slice::from_ref(&long)).expect("the long label");
+        assert!(
+            short_fit < long_fit,
+            "the fixture must span two fits ({short_fit} vs {long_fit})"
+        );
+        assert_eq!(
+            label_fit_zoom(&[short, long]),
+            Some(long_fit),
+            "the harder label decides the fit"
+        );
+    }
+
+    /// Determinism: the same requests answer the same zoom on every call, an
+    /// independently built list answers it too, and request order is irrelevant.
+    #[test]
+    fn label_fit_zoom_is_deterministic() {
+        let requests = vec![
+            button_fit_request("Trigger input"),
+            fit_request("Ring light", 3.0, 3.0, 1, CellTextPath::Compact, true),
+            fit_request("Volume", 4.2, 22.0, 0, CellTextPath::Fader, true),
+        ];
+        let first = label_fit_zoom(&requests);
+        assert!(first.is_some(), "the fixture constrains the fit");
+        assert_eq!(label_fit_zoom(&requests), first, "same input, same answer");
+
+        let rebuilt = vec![
+            button_fit_request("Trigger input"),
+            fit_request("Ring light", 3.0, 3.0, 1, CellTextPath::Compact, true),
+            fit_request("Volume", 4.2, 22.0, 0, CellTextPath::Fader, true),
+        ];
+        assert_eq!(
+            label_fit_zoom(&rebuilt),
+            first,
+            "an equal list answers equally"
+        );
+
+        let mut reversed = rebuilt;
+        reversed.reverse();
+        assert_eq!(
+            label_fit_zoom(&reversed),
+            first,
+            "request order is irrelevant"
         );
     }
 }

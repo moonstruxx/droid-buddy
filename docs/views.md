@@ -23,6 +23,41 @@ element of a declared controller renders at its faceplate position;
 unused elements are drawn dimmed and unlabelled. LEDs fold into their
 element and render the patch's LED color/brightness.
 
+**Labels are fitted per cell.** A cell's label is drawn at the largest
+step of a 10, 9, 8, 7, 6 pt monospace ladder at which the whole label
+fits the cell's text box, wrapping at word boundaries, breaking a word
+only when a single word is too long for a line, and ellipsizing only
+when even the 6 pt floor cannot hold the label. Nothing on the surface
+is drawn below 6 pt. A cell that cannot fit its label at the floor — a
+3 mm LED, or anything at an extreme zoom — draws no text and leaves the
+label to the hover reveal and the label presentation. In-cell state text
+yields to the label: when a cell cannot hold both, the label is drawn
+and the state row is dropped, with the full label and the state still in
+the hover reveal and the pane's status segment (fader and LED state stay
+graphical either way). A tall narrow fader cell narrows its track and
+stacks its label one glyph per line in the column beside it.
+
+**The view opens at the labels fit.** Fitting happens when the view
+opens, when a patch loads, when the rack changes, and when the pane is
+resized — until you zoom or pan yourself, which the view then leaves
+alone until you ask for a fit again. Both fits scale the rack and centre
+it. `f` is the labels fit: the fitted zoom is the greater of the
+whole-rack fit and the zoom every written label needs to be drawn whole,
+so a dense patch opens zoomed past the pane and pans rather than
+shrinking its labels away. `Shift+F` is the rack fit, the overview — the
+whole rack in the pane, with labels shrinking away wherever the cells
+become too small. The pane title and the status line name the fit that
+ran (`fit(labels)` / `fit(rack)`), and drop the name once you zoom or
+pan yourself.
+
+`a` cycles the label presentation. `off` draws in-cell labels only; `on`
+annotates every addressed element that carries a written label, outside
+the rack with a leader line; `auto` — the default — annotates exactly the
+written labels whose cell cannot draw them whole at the current zoom,
+which after the labels fit is nearly always none, so `auto` stays silent
+on a patch whose labels fit. Annotations add no hit rects and never move
+the drawn cells.
+
 - `j`/`k` and arrows navigate, `Enter`/`Space` toggles the hovered
   component, the mouse wheel adjusts knobs/faders.
 - Click an element to **focus** it across surfaces: the cell stays
@@ -34,11 +69,14 @@ element and render the patch's LED color/brightness.
 - Hold or latch a modifier to wash the influenced cells: mouse-down on
   a modifier-eligible cell holds momentarily; `m` on the hovered
   component (or `Ctrl+Shift+Click`) latches until `Esc`.
-- `+`/`-` cycle zoom presets (75–200 %), arrows/wheel pan when the
-  rack overflows, `s` toggles the skeleton reference presentation,
-  `p` opens the [performance view](#performance-view), `R` resets all
-  element states, `e` edits the label (or opens validation).
+- `+`/`-` cycle zoom presets (75–200 %), arrows pan when the rack
+  overflows, the wheel adjusts a knob/fader and zooms about the pointer
+  elsewhere, `s` toggles the skeleton reference presentation, `p` opens
+  the [performance view](#performance-view), `R` resets all element
+  states, `e` edits the label (or opens validation).
   ![Module UI](assets/module-ui.png)
+  ![Module UI at the labels fit](assets/module-ui-labels.png)
+  ![Module UI at the rack fit](assets/module-ui-fit-rack.png)
 
 ## Source viewer (`g v`)
 

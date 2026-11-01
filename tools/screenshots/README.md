@@ -7,8 +7,9 @@ through the app's real egui dispatch — headless, no window, no hand captures.
 
 | PNG | Fixture | Arrangement |
 |---|---|---|
-| `module-ui.png` | `fixtures/own_buttons.ini` | startup: module UI (left big) at its fit zoom + source viewer (small) |
-| `module-ui-labels.png` | `fixtures/module_ui_labels.ini` | startup at a pinned true 1:1 camera (`setup_labels_auto`): module UI (left big) + source viewer (small); the default `auto` presentation annotates the two clipped preamble labels as side-bound callouts while the fitting label stays in its cell |
+| `module-ui.png` | `fixtures/own_buttons.ini` | startup: module UI (left big) at its labels fit + source viewer (small) |
+| `module-ui-labels.png` | `fixtures/module_ui_label_fit.ini` | startup: module UI (left big) at its labels fit + source viewer (small); one written label per ladder outcome — a wrapped button label, a top-step pot label, a stepped-down jack label, a stacked fader column — plus the 3 mm LED label the default `auto` presentation annotates outside the rack |
+| `module-ui-fit-rack.png` | `fixtures/physical_multirow_rack.ini` | startup at the rack fit (`setup_rack_fit`): module UI (left big) + source viewer (small); seventeen faceplates in one ~457 mm row fitted whole at 37 %, where only the 12 mm pot cells still hold a label |
 | `graph.png` | `fixtures/own_buttons.ini` | + signal-flow graph (right big) |
 | `source-viewer.png` | `fixtures/source_navigation.ini` | source viewer maximized |
 | `optimizer.png` | `fixtures/optimizer_latency.ini` | + latency optimizer (small) |
@@ -39,27 +40,40 @@ rendering 38 px wide at the old nominal scale.
 Every module-UI-bearing shot now renders at true 1:1 (change
 `module-ui-labels`, task 3.4): 100 % zoom is 3.7795 pt per millimetre, so a
 9 mm button cell is 34 pt and a 12 mm pot 45 pt, and the pane fits and centres
-the rack itself on its first frame. Each shot's pane title carries the live
-state (`Module UI · 161% fit · labels auto · skeleton off`), so the fit
-percentage printed in the image is the evidence. The `setup_faceplate_stack`
-2x seed is now superseded by that fit (207 mm at 2x would overflow the pane);
-it stays as the pre-fit camera. The graph, optimizer, and source-viewer panes
-are unaffected: every graph-bearing shot's right pane is pixel-identical to
-its pre-change render, and `source-viewer.png` is byte-identical.
+the rack itself on its first frame — at the labels fit since change
+`module-ui-label-fit` (task 3.4), which may exceed the pane. Each shot's pane
+title carries the live state (`Module UI · 161% fit(labels) · labels auto ·
+skeleton off`), so the fit percentage printed in the image is the evidence. The
+`setup_faceplate_stack` 2x seed is now superseded by that fit (207 mm at 2x
+would overflow the pane); it stays as the pre-fit camera. The graph, optimizer,
+and source-viewer panes are unaffected: every graph-bearing shot's right pane is
+pixel-identical to its pre-change render, and `source-viewer.png` is
+byte-identical.
 
-`module-ui-labels.png` is the visual check for change `module-ui-labels`
-(task 3.4) and the only shot that pins the camera instead of taking the fit.
-`fixtures/module_ui_labels.ini`'s three preamble labels are chosen for the
-B32's 9 mm buttons at true 1:1 — "Go" fits the cell's five-character budget
-while "Trigger input" and "Clock reset" clip — so at 1:1 the default `auto`
-presentation annotates exactly the two clipped labels as side-bound callouts
-with leader lines and the resolved state, and leaves "Go" alone on the rack.
-The camera is centred at 1:1 (`setup_labels_auto`) because the fitted zoom
-would both scale the rack past the size the fixture measures and leave no side
-band for the callouts. The other two modes need no shot: `off` draws no
-annotations and `on` annotates every addressed label, both pinned by the
-`src/gui/physical.rs` and `src/regression.rs` tests, so this shot carries the
-clipping-driven rule that makes `auto` the default.
+`module-ui-labels.png` and `module-ui-fit-rack.png` are the visual check for
+change `module-ui-label-fit` (task 3.4), one shot per fit. The labels shot runs
+`fixtures/module_ui_label_fit.ini`, whose preamble labels reach every outcome the
+per-cell ladder can produce at the zoom the view opens with: the 9 mm button
+label wraps to three lines, the 12 mm pot label keeps the 10 pt top step, the
+7 mm jack label steps down, the P8S8 fader label stacks one glyph per line
+beside its narrowed track, and the 3 mm LED label — which no supported zoom can
+draw whole — is the one label the default `auto` presentation annotates, outside
+the rack with a leader line. The shot is plain startup: the fit triggers run on
+the first painted frame, so 149 % and the `fit(labels)` title are the shipped
+default, not a seeded camera.
+
+`module-ui-fit-rack.png` is the same pane after `Shift+F` (`setup_rack_fit`,
+which publishes the pane through `refresh_hit_geometry` and then applies
+`App::fit_physical_view_rack`, latching the view so the first frame's labels fit
+cannot overwrite it). Its fixture is the only one big enough to make the two
+fits differ: `fixtures/physical_multirow_rack.ini` packs seventeen faceplates
+into one ~457 mm row, so the rack fit is 37 % and the cells are far too small
+for most labels — every 9 mm button, 3 mm LED and switch cell renders without
+text, and only the 12 mm pot cells still hold a two-line floor-step label. That
+is the trade the overview makes, and the `fit(rack)` title says it was asked
+for. The other two presentation modes need no shot: `off` draws no annotations
+and `on` annotates every written label, both pinned by the `src/gui/physical.rs`
+and `src/regression.rs` tests.
 
 Resolved gap (change `unreferenced-elements`, task 3.2): the E4 32-LED rings
 now render complete — unreferenced ring segments paint dimmed and unlabelled,
