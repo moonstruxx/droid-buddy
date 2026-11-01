@@ -18,7 +18,7 @@
 use egui::{Painter, Pos2, Rect, Vec2};
 
 use crate::app::App;
-use crate::patch::{ComponentKind, ComponentState, MasterModel, NodeId, ShiftGroup};
+use crate::patch::{ComponentKind, ComponentState, NodeId, ShiftGroup};
 use crate::physical::{PhysicalLayout, RackLayout, RackSpec, ScreenMapping};
 use crate::theme::Color;
 
@@ -278,11 +278,9 @@ fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
 /// the pane (and each other) as soon as the module UI is not in `BigLeft`.
 pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec> {
     let patch = app.patch.as_ref()?;
-    // task 1.5 threads the resolved MasterPlan here
-    let chain = PhysicalLayout::build(
-        patch,
-        patch.master_declaration.unwrap_or(MasterModel::Master),
-    );
+    // The resolved master model, never a guess: `App::master_model` is the same
+    // accessor `App::physical_chain_and_rack` reads (design D3/D7).
+    let chain = PhysicalLayout::build(patch, app.master_model());
     let rack_spec = if app.physical_rack_spec.rows.is_empty() {
         RackSpec::default_case(&chain)
     } else {
@@ -2414,10 +2412,7 @@ mod tests {
         // cells resolves to the first module's components.
         let app = app_with_patch("fixtures/multi_module_p2b8.ini");
         let patch = app.patch.as_ref().unwrap();
-        let chain = PhysicalLayout::build(
-            patch,
-            patch.master_declaration.unwrap_or(MasterModel::Master),
-        );
+        let chain = PhysicalLayout::build(patch, app.master_model());
         let rack_spec = if app.physical_rack_spec.rows.is_empty() {
             RackSpec::default_case(&chain)
         } else {

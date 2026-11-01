@@ -812,6 +812,12 @@ fn label_fit_path(
 /// Application state
 pub struct App {
     pub patch: Option<Patch>,
+    /// The master resolution verdict for `patch` (design D3): computed once by
+    /// `load_patch_impl` through `crate::rack::resolve`, then read by every
+    /// consumer — [`App::master_model`] feeds the module UI's chain, and the
+    /// stored plan keeps the RAM/conflict verdicts and the drawn faceplate on
+    /// the same answer. `None` until a patch installs.
+    pub master_plan: Option<crate::rack::MasterPlan>,
     pub active_shift: Option<ShiftGroup>,
     pub hovered_component: Option<usize>,
     pub status_message: String,
@@ -1185,6 +1191,7 @@ impl App {
         let force_knobs = crate::layout::SolveKnobs::default();
         Self {
             patch: None,
+            master_plan: None,
             active_shift: None,
             hovered_component: None,
             status_message: String::from("No patch loaded. Press 'l' to load."),
@@ -2449,6 +2456,18 @@ impl App {
         self.physical_chain_and_rack().map(|(_, rack)| rack)
     }
 
+    /// The master model the module UI draws (design D3/D7): the loaded patch's
+    /// resolved plan, or MASTER when no plan is stored (no patch yet). This is
+    /// the single accessor both physical call sites read — the chain the app
+    /// sizes for the fit and the chain the pane paints — so the two cannot pick
+    /// different masters from the same patch.
+    pub fn master_model(&self) -> crate::patch::MasterModel {
+        self.master_plan
+            .as_ref()
+            .map(|plan| plan.model)
+            .unwrap_or(crate::patch::MasterModel::Master)
+    }
+
     /// The controller chain and the packed rack in one pass: what the painter
     /// builds, resolved once for the caller that needs both. `None` without a
     /// patch.
@@ -2456,13 +2475,7 @@ impl App {
         &self,
     ) -> Option<(crate::physical::PhysicalLayout, crate::physical::RackLayout)> {
         let patch = self.patch.as_ref()?;
-        // task 1.5 replaces this with the stored resolved MasterPlan.
-        let chain = crate::physical::PhysicalLayout::build(
-            patch,
-            patch
-                .master_declaration
-                .unwrap_or(crate::patch::MasterModel::Master),
-        );
+        let chain = crate::physical::PhysicalLayout::build(patch, self.master_model());
         let spec = if self.physical_rack_spec.rows.is_empty() {
             crate::physical::RackSpec::default_case(&chain)
         } else {
@@ -3214,7 +3227,12 @@ impl App {
                 .dispatch(&Event::ValidationCompleted { count, error_count });
             return false;
         }
+        // One resolution per load (design D3): the renderer reads this plan
+        // instead of guessing from `master_declaration`, so the drawn
+        // faceplate is the verdict the findings were computed against.
+        let master_plan = crate::rack::resolve(&patch, load_schema());
         self.install_loaded_patch(patch, patch_path);
+        self.master_plan = Some(master_plan);
         self.validation_issues = issues;
         // Warnings/Hints never auto-open the modal: report the count with the
         // `e` hint and let the user open the list on demand. The same holds for a
@@ -3245,6 +3263,9 @@ impl App {
     /// is cleared before `patch` is installed again.
     fn install_loaded_patch(&mut self, patch: Patch, patch_path: Option<PathBuf>) {
         self.reset_graph_state();
+        // The plan describes the previous patch too; it is installed again right
+        // after this reset, from the patch being loaded.
+        self.master_plan = None;
         self.clear_influence_state();
         // The latch names a token of the previous patch; drop it with the load
         // (not via clear_influence_state, which also runs on selection moves).
@@ -5716,6 +5737,43 @@ mod tests {
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, 0);
         assert!(app.minimap_rect.is_none());
+    }
+
+    #[test]
+    fn load_patch_draws_the_resolved_master_model() {
+        // The module UI must draw the plan's master, never a fresh guess from
+        // `master_declaration`: `App::master_model` is the one accessor both
+        // physical call sites read, so this assertion pins the hand-off the
+        // two paths could otherwise disagree on.
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "droid-tui-master-declaration-{}.ini",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "# LABELS: master=18\n[copy]\n    input = I1\n    output = O1\n",
+        )
+        .expect("stage the declaring patch");
+        let patch = Patch::from_ini_file(&path).expect("parse the temp patch");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        let plan = app.master_plan.as_ref().expect("a load stores the plan");
+        assert_eq!(
+            plan.source,
+            crate::rack::MasterSource::Declared,
+            "a declaration is authoritative"
+        );
+        assert_eq!(app.master_model(), crate::patch::MasterModel::Master18);
+        let (chain, _) = app
+            .physical_chain_and_rack()
+            .expect("a loaded patch yields a chain");
+        assert_eq!(
+            chain.modules[0].geometry_key, "master18",
+            "the chain the painter builds follows the plan"
+        );
     }
 
     #[test]
