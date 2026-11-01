@@ -119,7 +119,8 @@ pub(crate) struct CellSpec {
     /// LED RGB colour folded into this element (if any)
     pub led_rgb: Option<[u8; 3]>,
     /// Composed-face discriminant (button-led-composition D2): `Some` on
-    /// button-kind cells of P2B8/B32 (round) and M4 (rect), `None` elsewhere.
+    /// button-kind cells of P2B8/P4B2/B32 (round) and M4 (rect), `None`
+    /// elsewhere.
     pub shape: Option<CellShape>,
     /// The fitted label of this cell (module-ui-label-fit D1), computed once by
     /// [`cell_label_layout`] when the spec is built: `None` when the label is
@@ -226,12 +227,23 @@ pub(crate) struct PhysicalFrame {
 const WHEEL_VALUE_STEP: f32 = 0.05;
 
 /// The fold is a per-controller rule (button-led-composition D2): only
-/// button-kind cells on P2B8/B32 (round face) and M4 (rect touch plate)
+/// button-kind cells on P2B8/B32/P4B2 (round face) and M4 (rect touch plate)
 /// fold their LED into the face. Every other controller keeps the glyph
 /// rendering and standalone LED cells.
+///
+/// P4B2 joined the rule in `droid_tui-y57`: its faceplate carries two buttons
+/// (B1.x) with a 3 mm RGB LED centred in each 9 mm face and a documented 1:1
+/// B→L pairing (`manifest`-measured `controller_geometry.json`, and
+/// `patch::positional_leds_for_element` already maps `p4b2`), so it is the
+/// P2B8 case at a different size. The other three controllers named in that
+/// bead have **no** LED-bearing buttons and therefore nothing to compose:
+/// master has one unaddressed system button (`SD reload`) and its 16 LEDs sit
+/// beside the CV jacks, G8 has only gate jacks, and X7 has a USB switch plus
+/// four gate outputs — their `R` registers resolve jack-side, which the
+/// standalone LED cells already show.
 fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
     match controller.to_ascii_lowercase().as_str() {
-        "p2b8" => Some(CellShape::Round),
+        "p2b8" | "p4b2" => Some(CellShape::Round),
         "b32" | "notebuttons" => Some(CellShape::Round),
         "m4" | "motorfader" => Some(CellShape::Rect),
         _ => None,
@@ -5766,17 +5778,20 @@ mod tests {
 
     /// `token -> written label` for every cell the reveal tests hover.
     const REVEAL_SCENARIO: [(&str, &str); 4] = [
-        ("P5.1", REVEAL_ELLIPSIZED_LABEL),
-        ("B5.1", REVEAL_STATE_YIELDS_LABEL),
-        ("L5.1", REVEAL_DROPPED_LABEL),
-        ("P5.2", REVEAL_WHOLE_LABEL),
+        ("P2.1", REVEAL_ELLIPSIZED_LABEL),
+        ("B3.1", REVEAL_STATE_YIELDS_LABEL),
+        ("L1", REVEAL_DROPPED_LABEL),
+        ("P2.2", REVEAL_WHOLE_LABEL),
     ];
 
-    /// The reveal scenario's P4B2 faceplate with the written labels attached as
-    /// preamble labels, at true 1:1 (the zoom the layout fates above are computed
-    /// for), in `mode`.
+    /// The reveal scenario's cells with the written labels attached as preamble
+    /// labels, at true 1:1 (the zoom the layout fates above are computed for), in
+    /// `mode`. The carriers are the P10 (two 12 mm pots) and the DB8E (a 9 mm
+    /// button and the 1.8 mm LED row): the bracket faces fold a button's LED into
+    /// it, so a wrapped compact button and a standalone tiny LED both need
+    /// controllers outside that rule (bead `droid_tui-y57`).
     fn reveal_app(mode: LabelPresentation) -> App {
-        let mut app = app_with_labels("fixtures/faceplate_rotary_stack.ini", &REVEAL_SCENARIO);
+        let mut app = app_with_labels("fixtures/module_ui_label_fit.ini", &REVEAL_SCENARIO);
         app.label_presentation = mode;
         app.physical_zoom = 1.0;
         app.physical_offset = (0.0, 0.0);
@@ -5809,7 +5824,7 @@ mod tests {
             for skeleton in [false, true] {
                 let mut app = reveal_app(mode);
                 app.physical_show_skeleton = skeleton;
-                let (spec, cell) = reveal_spec(&mut app, "P5.1");
+                let (spec, cell) = reveal_spec(&mut app, "P2.1");
                 let layout = cell
                     .label_layout
                     .as_ref()
@@ -5859,7 +5874,7 @@ mod tests {
             for skeleton in [false, true] {
                 let mut app = reveal_app(mode);
                 app.physical_show_skeleton = skeleton;
-                let (spec, cell) = reveal_spec(&mut app, "L5.1");
+                let (spec, cell) = reveal_spec(&mut app, "L1");
                 assert!(
                     cell.label_layout.is_none(),
                     "no ladder step holds the LED label ({mode:?}, skeleton={skeleton}): {:?}",
@@ -5897,7 +5912,7 @@ mod tests {
             for skeleton in [false, true] {
                 let mut app = reveal_app(mode);
                 app.physical_show_skeleton = skeleton;
-                let (spec, cell) = reveal_spec(&mut app, "B5.1");
+                let (spec, cell) = reveal_spec(&mut app, "B3.1");
                 let layout = cell.label_layout.as_ref().unwrap_or_else(|| {
                     panic!("the button still draws its label ({mode:?}, skeleton={skeleton})")
                 });
@@ -5940,7 +5955,7 @@ mod tests {
     fn reveal_also_fires_for_a_label_the_cell_draws_whole() {
         for mode in reveal_modes() {
             let mut app = reveal_app(mode);
-            let (spec, cell) = reveal_spec(&mut app, "P5.2");
+            let (spec, cell) = reveal_spec(&mut app, "P2.2");
             let layout = cell
                 .label_layout
                 .as_ref()
@@ -5978,11 +5993,11 @@ mod tests {
         for mode in reveal_modes() {
             let mut app = reveal_app(mode);
             app.physical_show_skeleton = false;
-            let (full, _) = reveal_spec(&mut app, "P5.1");
+            let (full, _) = reveal_spec(&mut app, "P2.1");
             let full_hover = full.hover.clone().expect("full reveal");
 
             app.physical_show_skeleton = true;
-            let (skeleton, _) = reveal_spec(&mut app, "P5.1");
+            let (skeleton, _) = reveal_spec(&mut app, "P2.1");
             let skeleton_hover = skeleton.hover.clone().expect("skeleton reveal");
 
             assert_eq!(

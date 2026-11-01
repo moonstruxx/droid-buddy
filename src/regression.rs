@@ -2129,6 +2129,72 @@ const BUTTON_LED_FACEPLATES: &[(&str, &[&str])] = &[
 /// The LEDs bound to the declared buttons via explicit `led = L.N` pairs.
 const BUTTON_LED_FOLDED_LEDS: &[&str] = &["L1.1", "L1.2", "L2.1", "L2.2", "L3.1"];
 
+// ── button-led-composition follow-up (droid_tui-y57): P4B2 parity ──────
+// The composed face was a P2B8/B32/M4 whitelist. P4B2 is the same case at a
+// different size — two 9 mm buttons with a 3 mm RGB LED centred in each and a
+// documented 1:1 B→L pairing — so its buttons must compose too, and the LED
+// register must stop publishing a standalone cell. master, G8 and X7 were
+// named in the same bead but carry no LED-bearing buttons at all: master has
+// one unaddressed `SD reload` button with its 16 LEDs beside the CV jacks, G8
+// only gate jacks, X7 a USB switch plus gate outputs. For them "parity" would
+// mean inventing a face that the hardware does not have, so the rule stays
+// keyed on the controllers that actually fold.
+#[test]
+fn regression_p4b2_buttons_compose_their_leds_like_p2b8() {
+    let path = "fixtures/faceplate_rotary_stack.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture patch must load");
+    let spec =
+        crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("a loaded patch yields a spec");
+    let component = |id: &str| {
+        app.patch
+            .as_ref()
+            .unwrap()
+            .hw_components
+            .iter()
+            .position(|c| c.id == id)
+    };
+    let cell = |id: &str| {
+        let index = component(id).unwrap_or_else(|| panic!("{id} must exist"));
+        spec.cells
+            .iter()
+            .find(|c| c.component_index == Some(index))
+            .unwrap_or_else(|| panic!("{id} must publish a cell"))
+    };
+    for button in ["B5.1", "B5.2"] {
+        let cell = cell(button);
+        assert_eq!(
+            cell.shape,
+            Some(crate::gui::CellShape::Round),
+            "{button} must render the composed round face"
+        );
+        assert_eq!(
+            cell.glyph, "",
+            "{button} carries its state on the composed outline, not a glyph"
+        );
+    }
+    // The paired LEDs are inside the faces now: no cell, no hit rect.
+    let tokens: Vec<&str> = spec
+        .cells
+        .iter()
+        .filter_map(|c| c.component_index)
+        .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.as_str())
+        .collect();
+    for led in ["L5.1", "L5.2"] {
+        assert!(
+            !tokens.contains(&led),
+            "the LED {led} folds into its P4B2 button and must not publish a cell"
+        );
+    }
+    // The pots on the same faceplate keep the compact cell (only buttons compose).
+    assert_ne!(
+        cell("P5.1").shape,
+        Some(crate::gui::CellShape::Round),
+        "a P4B2 pot is not a composed button face"
+    );
+}
+
 #[test]
 fn regression_button_led_composition_faces_render_and_leds_fold() {
     let path = "fixtures/button_led_composition.ini";
@@ -3659,16 +3725,16 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
 // reaches every outcome the per-cell ladder can produce, through the production
 // load + fit triggers, the real spec builder and the real paint path:
 //
-//   B2.1 (9 mm button, P4B2)  wraps to two or three lines at a step below the
+//   B3.1 (9 mm button, DB8E)  wraps to two or three lines at a step below the
 //                             top — the "a long label wraps instead of
 //                             disappearing" branch, drawn whole, no ellipsis.
-//   P2.1 (12 mm pot, P4B2)    draws whole on one line at the 10 pt top step — a
+//   P2.1 (12 mm pot, P10)     draws whole on one line at the 10 pt top step — a
 //                             cell with room never shrinks.
 //   I1   (7 mm jack, master)  takes a step below the top — the "a small cell
 //                             takes a smaller step" branch, never below the floor.
 //   P1.1 (P8S8 fader cell)    stacks one glyph per line in the column beside the
 //                             narrowed track (D5).
-//   L2.1 (3 mm LED, P4B2)     has no in-cell layout at any supported zoom, so
+//   L1   (1.8 mm LED, DB8E)   has no in-cell layout at any supported zoom, so
 //                             `auto` must annotate it — the fallback branch.
 //
 // The story also pins the change's three cross-layer promises: no painted run
@@ -3688,10 +3754,10 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
 /// The fixture compiled in: five written labels, one per ladder outcome.
 const MODULE_UI_LABEL_FIT_FIXTURE: &str = include_str!("../fixtures/module_ui_label_fit.ini");
 
-/// The 9 mm button cell whose written label wraps (`B2.1`, P4B2).
-const MODULE_UI_LABEL_FIT_BUTTON: &str = "B2.1";
+/// The 9 mm button cell whose written label wraps (`B3.1`, DB8E).
+const MODULE_UI_LABEL_FIT_BUTTON: &str = "B3.1";
 
-/// The 12 mm pot cell whose short written label still takes the top step.
+/// The 12 mm pot cell whose short written label still takes the top step (`P10`).
 const MODULE_UI_LABEL_FIT_POT: &str = "P2.1";
 
 /// The 7 mm master jack whose written label steps down.
@@ -3700,8 +3766,8 @@ const MODULE_UI_LABEL_FIT_JACK: &str = "I1";
 /// The P8S8 fader cell (4.2 × 22 mm) whose written label stacks.
 const MODULE_UI_LABEL_FIT_FADER: &str = "P1.1";
 
-/// The 3 mm LED cell whose written label no supported zoom can draw whole.
-const MODULE_UI_LABEL_FIT_LED: &str = "L2.1";
+/// The 1.8 mm LED cell whose written label no supported zoom can draw whole.
+const MODULE_UI_LABEL_FIT_LED: &str = "L1";
 
 /// The rack the fixture packs into, from the same chain + default-case source
 /// the app's fit and the painter consume.
@@ -3711,12 +3777,15 @@ fn module_ui_label_fit_rack(patch: &Patch) -> crate::physical::RackLayout {
     crate::physical::RackLayout::pack(&chain, &spec)
 }
 
-/// A pane 1.25 true-size racks tall and 640 pt wide: the fit is height-bound and
+/// A pane 1.25 true-size racks tall and 1600 pt wide: the fit is height-bound and
 /// lands a quarter above 1:1, which leaves the 9 mm cells room for a mid-ladder
-/// step (not the floor) while the 12 mm pot still takes the top step.
+/// step (not the floor) while the 12 mm pot still takes the top step. The width is
+/// generous on purpose — the one annotation the `auto` branch places must fit the
+/// 30 % band budget beside the rack, and this fixture's rack is wide (P8S8 + P10 +
+/// DB8E); a narrow pane would drop the callout and take the assertion with it.
 fn module_ui_label_fit_pane(rack: &crate::physical::RackLayout) -> egui::Rect {
     let (_, height) = crate::physical::rack_extent_points(rack, 1.0);
-    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(640.0, height * 1.25))
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1600.0, height * 1.25))
 }
 
 /// Whether a layout draws its whole label: the concatenated, whitespace-free
@@ -3845,9 +3914,9 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
             .unwrap_or_else(|| panic!("{token} must render a cell"))
     };
 
-    // The five labels sit on the cells the fixture chose: a 9 mm button, a
-    // 12 mm pot and a 3 mm LED on the P4B2, the P8S8 fader cell, and a 7 mm
-    // master jack. Sizes are measured against the drawn zoom, not stored.
+    // The five labels sit on the cells the fixture chose: a 9 mm button and a
+    // 1.8 mm LED on the DB8E, a 12 mm pot on the P10, the P8S8 fader cell, and a
+    // 7 mm master jack. Sizes are measured against the drawn zoom, not stored.
     let assert_mm = |token: &str, rect: egui::Rect, w_mm: f64, h_mm: f64| {
         let scale = crate::physical::PHYSICAL_POINTS_PER_MM * f64::from(app.physical_zoom);
         assert!(
@@ -3867,10 +3936,10 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     assert_mm(MODULE_UI_LABEL_FIT_POT, pot.rect, 12.0, 12.0);
     assert_mm(MODULE_UI_LABEL_FIT_JACK, jack.rect, 7.0, 7.0);
     assert_mm(MODULE_UI_LABEL_FIT_FADER, fader.rect, 4.2, 22.0);
-    assert_mm(MODULE_UI_LABEL_FIT_LED, led.rect, 3.0, 3.0);
+    assert_mm(MODULE_UI_LABEL_FIT_LED, led.rect, 1.8, 1.8);
     assert!(
         button.shape.is_none(),
-        "a P4B2 button is outside the fold rule and keeps the glyph path"
+        "a DB8E button is outside the fold rule and keeps the glyph path"
     );
 
     let top_step = MODULE_UI_LABEL_LADDER[0];
@@ -4041,7 +4110,7 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     assert_eq!(
         annotated,
         vec![led.label.as_str()],
-        "`auto` must annotate the unlaid written label and only it"
+        "`auto` must annotate the unlaid written label and only it (got {annotated:?})"
     );
 
     // Now the paint: the real `paint_physical` over the same spec.
