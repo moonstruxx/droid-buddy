@@ -8832,26 +8832,46 @@ mod tests {
         );
     }
 
-    /// module-ui-label-fit 2.1 (c) / D7 / D9: a cell no supported zoom can
-    /// serve — the 3 mm LED — never lifts the fit and stays an annotation
-    /// candidate. Control: the same label on a 9 mm button does lift.
+    /// module-ui-label-fit 2.1 (c) / D7 (corrected): the clamp ignores exactly
+    /// the labels no supported zoom can draw whole — of any family. A 3 mm LED
+    /// cell scales with the zoom, so a short LED label *does* lift the fit; only
+    /// a label too long to be drawn whole at `ZOOM_MAX` is ignored and stays an
+    /// annotation candidate. Controls: a short label on the same LED cell does
+    /// lift, and a label on a 9 mm button lifts — the ignore rule follows the
+    /// label, not the cell family.
     #[test]
-    fn a_written_label_on_a_3mm_led_never_lifts_the_fit() {
-        let mut led = label_fit_app(&[("L1.1", "Ring light")]);
-        let rack_fit = whole_rack_fit(&led, LABEL_FIT_PANE);
+    fn an_unservable_label_never_lifts_the_fit() {
         let (w, h) = pane_points(LABEL_FIT_PANE);
+        let rack_fit = whole_rack_fit(&label_fit_app(&[]), LABEL_FIT_PANE);
+
+        // ~220 characters on a 3 mm cell: even at the 4.0 ceiling (45 pt square,
+        // ~12 characters per 6 pt line, ~6 lines) no step draws it whole, so the
+        // request is ignored.
+        let unservable = "unservable ".repeat(20);
+        let mut led = label_fit_app(&[("L1.1", unservable.as_str())]);
         assert!(led.fit_physical_view(w, h));
         assert!(
-            (led.physical_zoom as f64 - rack_fit).abs() < 1e-4,
-            "an LED label no zoom can hold must not lift the fit ({} vs rack {rack_fit})",
+            (led.physical_zoom as f64 - rack_fit).abs() <= FIT_EPS,
+            "a label no zoom can draw whole must not lift the fit ({} vs rack {rack_fit})",
             led.physical_zoom
         );
 
-        let mut button = label_fit_app(&[("B1.1", "Ring light")]);
+        // The same LED cell with a short label does lift: the ignore set is not
+        // the LED family (a 3 mm cell draws "Ring light" whole near 2.0x).
+        let mut short_led = label_fit_app(&[("L1.1", "Ring light")]);
+        assert!(short_led.fit_physical_view(w, h));
+        assert!(
+            short_led.physical_zoom as f64 > rack_fit + 0.05,
+            "a short label on the same 3 mm cell does lift the fit ({} vs rack {rack_fit})",
+            short_led.physical_zoom
+        );
+
+        // A label a 9 mm button can hold lifts too: the rule follows the label.
+        let mut button = label_fit_app(&[("B1.1", "Trigger input")]);
         assert!(button.fit_physical_view(w, h));
         assert!(
             button.physical_zoom > rack_fit as f32 + 0.05,
-            "the same label lifts the fit on a cell that can hold it ({} vs rack {rack_fit})",
+            "a label a 9 mm button can hold lifts the fit ({} vs rack {rack_fit})",
             button.physical_zoom
         );
     }
