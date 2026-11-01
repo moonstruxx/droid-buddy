@@ -98,6 +98,18 @@ LED rendering SHALL reflect the brightness and colour the patch writes to the LE
 
 A static colour source SHALL be resolved at load from the owning circuit section's `ledcolor*` param (same-suffix pairing first, else the section's single `ledcolor` for single-LED circuits) and brightness from `ledvalue*` the same way. A source value SHALL resolve when it is a float literal, a constant expression, or a single-hop cable ref to a constant producer output; anything dynamic SHALL fall back to the previous rendering (white fill at the floor). Toggling an LED SHALL preserve its resolved colour.
 
+A scalar colour value SHALL map through the manual's colour wheel, the same encoding the `R` registers use: full-saturation, full-value hues on a wheel of period 1.2 running backwards through the hue circle with red at 0.8 — so 0.2 is cyan, 0.4 green, 0.6 yellow, 0.73 orange, 0.8 red, 1.0 magenta, 1.1 violet, 1.2 blue. The wheel SHALL repeat, so a value plus or minus 1.2 renders the same colour as the value itself (the manual's `1.4` equals `0.2`), and values outside the usual range SHALL wrap rather than clamp.
+
+#### Scenario: The colour wheel follows the manual
+
+- **WHEN** a patch sets `ledcolor = 0.8`, `0.4`, or `1.2` on an RGB LED
+- **THEN** the LED renders red, green, and blue respectively
+
+#### Scenario: The colour wheel repeats
+
+- **WHEN** a patch sets `ledcolor = 1.4`
+- **THEN** the LED renders the same cyan as `ledcolor = 0.2`, and negative values wrap the same way
+
 #### Scenario: RGB colour on M4
 
 - **WHEN** a patch sets an M4 touch-plate LED to a colour
