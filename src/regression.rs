@@ -3578,13 +3578,13 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
 // labels-first fit lands at the rack fit with the pot's and button's labels
 // drawn whole — the LED's impossible label must not climb towards the zoom cap.
 //
-// NOTE (open defect, reported with task 3.2): `gui::physical::physical_spec`
-// builds every `CellSpec` with `is_fader: false`, so a loaded patch's fader cell
-// is currently painted through the compact branch and the D5 paint path is
-// unreachable from a real patch. The fader assertion below therefore pins the
-// branch the *fit* measures — `App`'s label fit maps an F-family cell to
-// `CellTextPath::Fader` — and the painted-run checks stay branch-agnostic, so
-// nothing here weakens once the one-line flag is wired.
+// NOTE (closed by task 3.6): `gui::physical::physical_spec` now derives
+// `CellSpec::is_fader` from the geometry cell's `F` family and `fader_value`
+// from the element's state, so a loaded patch's fader cell paints through the D5
+// face — the narrowed track, the amber value bar and the stacked label column —
+// and its own `label_layout` is the fader column below. The fader assertions pin
+// both sides of that: the box the *fit* measures, and the layout the *painter*
+// reads, which is the same `CellTextPath::Fader` box on the drawn cell.
 
 /// The fixture compiled in: five written labels, one per ladder outcome.
 const MODULE_UI_LABEL_FIT_FIXTURE: &str = include_str!("../fixtures/module_ui_label_fit.ini");
@@ -3839,8 +3839,7 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     );
 
     // Fader: the stacked branch (D5). This is the box the label *fit* measures
-    // for an F-family cell — no state row, no glyph charge — see the NOTE above
-    // on the painter's own branch.
+    // for an F-family cell — no state row, no glyph charge.
     let fader_box = crate::physical::LabelBox {
         w: fader.rect.width(),
         h: fader.rect.height(),
@@ -3869,6 +3868,45 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     assert!(
         module_ui_label_fit_draws_whole(&fader.label, &fader_layout),
         "the stacked column still draws the whole label: {fader_layout:?}"
+    );
+
+    // The paint side of the same branch (task 3.6): the geometry `F` family sets
+    // `CellSpec::is_fader`, so the cell paints the fader face and its own layout
+    // is the fader column's — not the compact box a loaded patch used to get.
+    assert!(
+        fader.is_fader,
+        "a loaded P8S8 fader cell must take the fader path: {fader:?}"
+    );
+    let painter_box = crate::physical::LabelBox {
+        w: fader.rect.width(),
+        h: fader.rect.height(),
+        glyph_chars: 0,
+        path: fader_box.path,
+        has_state: !fader.state_text.is_empty(),
+    };
+    assert_eq!(
+        fader.label_layout,
+        crate::physical::label_layout(&fader.label, &painter_box),
+        "the painted layout is the fader column the fit measured, not the compact box"
+    );
+    let painted_fader_layout = fader
+        .label_layout
+        .as_ref()
+        .expect("the fader cell fits its written label in its own column");
+    assert!(
+        painted_fader_layout.stacked,
+        "the painted cell stacks its label: {painted_fader_layout:?}"
+    );
+    assert!(
+        painted_fader_layout
+            .lines
+            .iter()
+            .all(|line| line.chars().count() == 1),
+        "one glyph per line: {painted_fader_layout:?}"
+    );
+    assert!(
+        module_ui_label_fit_draws_whole(&fader.label, painted_fader_layout),
+        "the painted stack still draws the whole label: {painted_fader_layout:?}"
     );
 
     // LED: the fallback branch. A 3 mm cell cannot show three characters plus an
@@ -3939,6 +3977,22 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
                 layout.font
             );
         }
+    }
+
+    // The stacked column is painted, not merely laid out: one monospace run per
+    // glyph, inside the fader cell and to the right of the narrowed track.
+    for line in &painted_fader_layout.lines {
+        let font = egui::FontId::monospace(painted_fader_layout.font);
+        let (_, _, run_rect) = runs
+            .iter()
+            .find(|(text, run_font, run_rect)| {
+                text == line && *run_font == font && fader.rect.expand(1.0).contains_rect(*run_rect)
+            })
+            .unwrap_or_else(|| panic!("the fader must paint {line:?} inside its cell: {runs:?}"));
+        assert!(
+            run_rect.min.x >= fader.rect.min.x + 0.4 * fader.rect.width() - 0.5,
+            "the stacked column sits beside the narrowed track: {run_rect:?}"
+        );
     }
 
     // The cell the ladder cannot serve paints no text at all; its label lives in

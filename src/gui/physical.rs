@@ -233,6 +233,20 @@ fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
     }
 }
 
+/// The knob position a fader face draws (module-ui-label-fit D5): the element's
+/// own state, read the way the terminal path reads it — a `Value` is the patch's
+/// 0..1 position, an `On` button-like state is fully raised, and every state
+/// without a position (off, an LED's brightness, a CV ring) leaves the track
+/// empty rather than inventing a mid-scale value.
+fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
+    use crate::patch::ComponentState;
+    match state {
+        ComponentState::Value(v) => v.clamp(0.0, 1.0),
+        ComponentState::On => 1.0,
+        ComponentState::Off | ComponentState::Active | ComponentState::Led { .. } => 0.0,
+    }
+}
+
 /// The app-driven physical spec: build the controller chain from the loaded
 /// patch (`PhysicalLayout::build`), pack it into the configured rack (or the
 /// default case when none is set), and resolve cells/geometry under the
@@ -375,9 +389,20 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             let is_shift_active = app
                 .active_shift
                 .is_some_and(|g| comp.shift_group == Some(g));
-            let switch_kind = chain.cell_for(mi, &comp.id).and_then(|c| c.kind.as_deref());
+            // The geometry cell is the one source for both faceplate facts: the
+            // `kind` the switch glyph path reads, and the family that says this
+            // element is a fader. P8S8/M4 sliders are addressed with `P`
+            // registers but live in the geometry's `F` family, so the flag
+            // cannot come from the token's own letter (module-ui-label-fit D5);
+            // the label fit already classifies the same family as
+            // `CellTextPath::Fader`, and the painter now agrees instead of
+            // drawing every fader as a compact cell.
+            let element_cell = chain.cell_for(mi, &comp.id);
+            let switch_kind = element_cell.and_then(|c| c.kind.as_deref());
+            let is_fader = element_cell.is_some_and(|c| c.family == "F");
+            let fader_value = fader_value_for(&comp.state);
             let (glyph, state_text, color) =
-                cell_visuals(comp, is_shift_active, false, switch_kind);
+                cell_visuals(comp, is_shift_active, is_fader, switch_kind);
             // The folded LED (if any) drives the inner fill.
             let folded = shape
                 .is_some()
@@ -428,7 +453,15 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 )
             } else {
                 (
-                    glyph, state_text, color, label, comp.kind, false, 0.0, led_state, led_rgb,
+                    glyph,
+                    state_text,
+                    color,
+                    label,
+                    comp.kind,
+                    is_fader,
+                    fader_value,
+                    led_state,
+                    led_rgb,
                     shape,
                 )
             }
@@ -4325,6 +4358,147 @@ mod tests {
             layout.lines.len() >= 2,
             "the whole cell takes the wrapped label: {layout:?}"
         );
+    }
+
+    /// module-ui-label-fit D5 (task 3.6), through a loaded patch: the P8S8
+    /// `P1.1` cell reaches the fader face. `is_fader` comes from the geometry
+    /// cell's `F` family — the same fact `App`'s label fit classifies as
+    /// `CellTextPath::Fader` — and the value from the element's own state, so the
+    /// narrowed track, the amber bar and the stacked label column replace the
+    /// compact cell a real patch used to paint.
+    #[test]
+    fn loaded_patch_p8s8_fader_cell_paints_the_fader_face_and_stacked_label() {
+        let mut patch = crate::patch::Patch::from_ini_file(std::path::Path::new(
+            "fixtures/module_ui_label_fit.ini",
+        ))
+        .expect("the label-fit fixture must parse");
+        // A bare `[p8s8]` synthesizes its sliders at `Value(0.0)`: give the fader
+        // a position so the state channel (the amber bar) has something to show.
+        patch
+            .hw_components
+            .iter_mut()
+            .find(|c| c.id == "P1.1")
+            .expect("the bare [p8s8] declares P1.1")
+            .state = crate::patch::ComponentState::Value(0.6);
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let cell = cell_for_token(&app, &spec, "P1.1");
+        assert_eq!(cell.label, "Volume", "the fixture's written fader label");
+        assert!(
+            cell.is_fader,
+            "a P8S8 fader cell carries the geometry `F` family flag: {cell:?}"
+        );
+        assert!(
+            (cell.fader_value - 0.6).abs() < 1e-6,
+            "the bar follows the element state, not a guess: {}",
+            cell.fader_value
+        );
+        // Fit and painter agree on the path: `App`'s label fit maps a geometry
+        // `F` cell to `CellTextPath::Fader`, and the painter's own box — built
+        // from the flag just asserted — now says the same.
+        assert_eq!(
+            cell_label_box(cell).path,
+            crate::physical::CellTextPath::Fader,
+            "the painted box is the fit's fader column"
+        );
+
+        let rect = cell.rect;
+        let layout = cell
+            .label_layout
+            .as_ref()
+            .unwrap_or_else(|| panic!("the fader column holds the label: {cell:?}"));
+        assert!(
+            layout.stacked,
+            "a 4.2 mm fader column stacks one glyph per line: {layout:?}"
+        );
+        let fitted: Vec<&str> = layout.lines.iter().map(String::as_str).collect();
+        assert_eq!(
+            fitted,
+            ["V", "o", "l", "u", "m", "e"],
+            "one glyph per line: {layout:?}"
+        );
+
+        // The fader face: a track narrowed to 40 % of the cell, the slot outline,
+        // the unlit part muted, and the amber value bar on the bottom edge.
+        let rects = painted_cell_rects(cell, false);
+        let track_w = (rect.width() * 0.4).min(10.0);
+        let (slot, ..) = rects
+            .iter()
+            .find(|(_, _, stroke, color)| {
+                *stroke == 1.0 && *color == rgb(crate::theme::active().fader_slot)
+            })
+            .unwrap_or_else(|| panic!("the fader slot outline is painted: {rects:?}"));
+        assert!(
+            (slot.width() - track_w).abs() < 0.6,
+            "the track narrows to 40 % of the cell: {} vs {track_w}",
+            slot.width()
+        );
+        let lit = rects
+            .iter()
+            .filter(|(_, fill, width, _)| {
+                *width == 0.0 && *fill == rgb(crate::theme::active().fader_led_bar)
+            })
+            .max_by(|a, b| a.0.height().partial_cmp(&b.0.height()).unwrap())
+            .map(|(r, ..)| *r)
+            .unwrap_or_else(|| panic!("the amber value bar is painted: {rects:?}"));
+        assert!(
+            (lit.height() - rect.height() * 0.6).abs() < 1.0,
+            "the bar fills 60 % of the track: {} vs {}",
+            lit.height(),
+            rect.height() * 0.6
+        );
+        assert!(
+            (lit.max.y - rect.max.y).abs() < 0.6 && lit.min.x >= rect.min.x - 0.01,
+            "the bar grows from the track's bottom edge: {lit:?}"
+        );
+        assert!(
+            rects.iter().any(|(r, fill, width, _)| *width == 0.0
+                && *fill == dim(rgb(crate::theme::active().muted), false)
+                && (r.height() - rect.height() * 0.4).abs() < 1.0),
+            "the unlit track above the bar stays muted: {rects:?}"
+        );
+
+        // The label: one monospace run per glyph, in the column right of the
+        // track (a 3 pt gutter, `FADER_TRACK_GUTTER`), top to bottom, never below
+        // the 6 pt floor.
+        let runs = label_lines(cell);
+        assert_eq!(runs.len(), 6, "one run per stacked glyph: {runs:?}");
+        let painted: String = runs.iter().map(|(text, _, _)| text.as_str()).collect();
+        assert_eq!(painted, "Volume", "every glyph in reading order: {runs:?}");
+        let mut ys: Vec<f32> = Vec::new();
+        for (text, size, pos) in &runs {
+            assert_eq!(text.chars().count(), 1, "one glyph per line: {text:?}");
+            assert_ladder_step(*size, "loaded fader");
+            assert!(
+                pos.x >= rect.min.x + track_w + 3.0 - 0.5,
+                "the column sits beside the narrowed track: {pos:?}"
+            );
+            ys.push(pos.y);
+        }
+        let mut sorted = ys.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(ys, sorted, "glyphs stack top to bottom: {ys:?}");
+        assert_floor_respected(cell, "loaded fader");
+
+        // The state row appears exactly when the layout kept room for it (D4).
+        // It is clipped to the column it shares with the stacked label, and in a
+        // column one character wide the clip marker is all that can be drawn —
+        // what matters here is that the row follows the layout, not the cell.
+        let state = state_lines(cell);
+        if layout.state_row {
+            assert_eq!(state.len(), 1, "the value row survives: {state:?}");
+            assert!(
+                cell.state_text.starts_with(state[0].as_str())
+                    || state[0].chars().all(|c| c == '\u{2026}'),
+                "the row carries the state, or the clip marker a one-character column allows: {state:?}"
+            );
+        } else {
+            assert!(
+                state.is_empty(),
+                "no state row once the label takes its line: {state:?}"
+            );
+        }
     }
 
     /// Run the real pane dispatch once over an 800 x 600 band, so
