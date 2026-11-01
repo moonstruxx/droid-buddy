@@ -85,6 +85,20 @@ def grid(cols, rows, x0, y0, px, py, w, h, order="row_wise", labels=None, **kw):
     return out
 
 
+def identity(cells, kind_letter=None, start=1):
+    """Attach declared element identity to `cells` (design D5).
+
+    The Rust side prefers these fields over parsing the label, so a cell whose
+    label is not a hardware token (or is a token in more than one jack kind per
+    family) still carries a stable (element, kind letter) pair. `kind_letter`
+    is omitted for cells that have no token kind (the R2M/R2C serial jacks)."""
+    for i, c in enumerate(cells):
+        c["element"] = start + i
+        if kind_letter is not None:
+            c["kind_letter"] = kind_letter
+    return cells
+
+
 def measured_grid(family, cols, rows, cx0, cy0, px, py, w, h,
                   order="row_wise", labels=None, cell_kw=None, decl_kw=None):
     """Cells + matching `grids` entry for one grid of MEASURED elements.
@@ -239,10 +253,14 @@ def _build():
     cells, grids = {}, []
     cv = grid(2, 4, 1.5, 30, 8.5, 13, 7, 7, labels=[f"O{i}" for i in range(1, 9)],
               kind="cv_out")
-    cv += grid(1, 2, 18.5, 30, 0, 13, 7, 7, labels=["Gin1", "Gin2"],
-               kind="gate_in")
-    cv += grid(1, 4, 18.5, 56, 0, 13, 7, 7,
-               labels=["Gout1", "Gout2", "Gout3", "Gout4"], kind="gate_out")
+    # Gate column: labels are the patch tokens themselves (I1/I2 logic inputs,
+    # G1..G4 gate outputs) plus an explicit element/kind pair, so identity does
+    # not depend on label parsing and cell_for("I1") stops falling back to O1.
+    cv += identity(grid(1, 2, 18.5, 30, 0, 13, 7, 7, labels=["I1", "I2"],
+                        kind="gate_in"), kind_letter="I")
+    cv += identity(grid(1, 4, 18.5, 56, 0, 13, 7, 7,
+                        labels=[f"G{i}" for i in range(1, 5)],
+                        kind="gate_out"), kind_letter="G")
     cells["CV"] = cv
     grids.append({"family": "CV", "cols": 2, "rows": 4, "order": "row_wise",
                   "x0_mm": 1.5, "y0_mm": 30, "pitch_x_mm": 8.5, "pitch_y_mm": 13,
@@ -260,9 +278,10 @@ def _build():
     CTRLS["master18"] = ctrl(
         "master18", 3, 6, cells,
         {"CV": 14, "B": 1}, grids,
-        "Manual-documented: 6 HP; 8 CV out (O1..O8), 2 gate inputs, 4 gate "
-        "outputs (G1.1..G1.4 on the master18, see G8 chapter register "
-        "numbering), MicroSD reload button. No LEDs (manual lists none). "
+        "Manual-documented: 6 HP; 8 CV out (O1..O8), 2 logic inputs (I1/I2), "
+        "4 gate outputs (G1..G4), MicroSD reload button. Gate cells carry "
+        "explicit element identity (I1/I2 element 1..2, G1..G4 element 1..4). "
+        "No LEDs (manual lists none). "
         "Assumed: pitches/margins; gate in/out jack grouping (right column).")
 
     # --- g8 (4 HP) -----------------------------------------------------------
@@ -314,17 +333,23 @@ def _build():
 
     # --- r2m / r2c (2 HP each) ------------------------------------------------
     for name in ("r2m", "r2c"):
-        cells = {"CV": grid(1, 2, 1.58, 45, 0, 13, 7, 7, dir="serial",
-                            labels=["serial in", "serial out"])}
+        # The serial bridge jacks render but no patch token reaches them: they
+        # carry explicit element numbers with no kind letter and stay
+        # non-addressable (design D5), so token_counts stays at zero.
+        cells = {"CV": identity(
+            grid(1, 2, 1.58, 45, 0, 13, 7, 7, dir="serial",
+                 labels=["serial in", "serial out"], addressable=False))}
         grids = [{"family": "CV", "cols": 1, "rows": 2, "order": "row_wise",
                   "x0_mm": 1.58, "y0_mm": 45, "pitch_x_mm": 0, "pitch_y_mm": 13,
                   "w_mm": 7, "h_mm": 7,
-                  "note": "3.5 mm serial bridge jacks — transparent to patches, no tokens"}]
+                  "note": "3.5 mm serial bridge jacks — transparent to patches, "
+                          "explicit element numbers 1..2 but no addressable tokens"}]
         CTRLS[name] = ctrl(
-            name, 3, 2, cells, {"CV": 2}, grids,
+            name, 3, 2, cells, {"CV": 0}, grids,
             "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo "
             "patch-cable bridge, transparent to patches — no hardware tokens "
-            "exist). Assumed: pitches/margins.")
+            "exist; cells are declared element 1..2, addressable: false, so "
+            "they render without resolving). Assumed: pitches/margins.")
 
     # --- p2b8 (5 HP) — measured from the manual faceplate images -------------
     cells, grids = {}, []
@@ -654,14 +679,18 @@ def verify(ctrls, schema_types):
                     errors.append(f"[{name}] {fam} cell {i} size "
                                   f"({c_['w_mm']}x{c_['h_mm']}) != grid "
                                   f"({g['w_mm']}x{g['h_mm']})")
-        # families with declared grids: sum of grid dims == token count
+        # families with declared grids: the grids must cover every cell of the
+        # family. Non-addressable cells (R2M/R2C serial jacks) still occupy a
+        # position, so this counts cells, not tokens; token_counts vs the
+        # addressable-cell count is checked above.
         fam_grid_total = defaultdict(int)
         for g in c.get("grids", []):
             fam_grid_total[g["family"]] += g["cols"] * g["rows"]
         for fam, n in fam_grid_total.items():
-            if fam in c["token_counts"] and n != c["token_counts"][fam]:
+            present = len(c["element_cells"].get(fam, []))
+            if n != present:
                 errors.append(f"[{name}] declared grids for '{fam}' sum to {n} "
-                              f"but token_counts says {c['token_counts'][fam]}")
+                              f"but {present} cells are present")
 
     return errors, warnings
 

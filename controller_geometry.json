@@ -553,7 +553,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "kind": "gate_in",
-            "label": "Gin1"
+            "label": "I1",
+            "element": 1,
+            "kind_letter": "I"
           },
           {
             "col": 0,
@@ -563,7 +565,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "kind": "gate_in",
-            "label": "Gin2"
+            "label": "I2",
+            "element": 2,
+            "kind_letter": "I"
           },
           {
             "col": 0,
@@ -573,7 +577,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "kind": "gate_out",
-            "label": "Gout1"
+            "label": "G1",
+            "element": 1,
+            "kind_letter": "G"
           },
           {
             "col": 0,
@@ -583,7 +589,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "kind": "gate_out",
-            "label": "Gout2"
+            "label": "G2",
+            "element": 2,
+            "kind_letter": "G"
           },
           {
             "col": 0,
@@ -593,7 +601,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "kind": "gate_out",
-            "label": "Gout3"
+            "label": "G3",
+            "element": 3,
+            "kind_letter": "G"
           },
           {
             "col": 0,
@@ -603,7 +613,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "kind": "gate_out",
-            "label": "Gout4"
+            "label": "G4",
+            "element": 4,
+            "kind_letter": "G"
           }
         ],
         "B": [
@@ -618,7 +630,7 @@
           }
         ]
       },
-      "notes": "Manual-documented: 6 HP; 8 CV out (O1..O8), 2 gate inputs, 4 gate outputs (G1.1..G1.4 on the master18, see G8 chapter register numbering), MicroSD reload button. No LEDs (manual lists none). Assumed: pitches/margins; gate in/out jack grouping (right column)."
+      "notes": "Manual-documented: 6 HP; 8 CV out (O1..O8), 2 logic inputs (I1/I2), 4 gate outputs (G1..G4), MicroSD reload button. Gate cells carry explicit element identity (I1/I2 element 1..2, G1..G4 element 1..4). No LEDs (manual lists none). Assumed: pitches/margins; gate in/out jack grouping (right column)."
     },
     "g8": {
       "he": 3,
@@ -1005,7 +1017,7 @@
       "width_mm": 10.16,
       "height_mm": 128.5,
       "token_counts": {
-        "CV": 2
+        "CV": 0
       },
       "grids": [
         {
@@ -1019,7 +1031,7 @@
           "pitch_y_mm": 13,
           "w_mm": 7,
           "h_mm": 7,
-          "note": "3.5 mm serial bridge jacks \u2014 transparent to patches, no tokens"
+          "note": "3.5 mm serial bridge jacks \u2014 transparent to patches, explicit element numbers 1..2 but no addressable tokens"
         }
       ],
       "element_cells": {
@@ -1032,7 +1044,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "dir": "serial",
-            "label": "serial in"
+            "addressable": false,
+            "label": "serial in",
+            "element": 1
           },
           {
             "col": 0,
@@ -1042,11 +1056,13 @@
             "w_mm": 7,
             "h_mm": 7,
             "dir": "serial",
-            "label": "serial out"
+            "addressable": false,
+            "label": "serial out",
+            "element": 2
           }
         ]
       },
-      "notes": "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo patch-cable bridge, transparent to patches \u2014 no hardware tokens exist). Assumed: pitches/margins."
+      "notes": "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo patch-cable bridge, transparent to patches \u2014 no hardware tokens exist; cells are declared element 1..2, addressable: false, so they render without resolving). Assumed: pitches/margins."
     },
     "r2c": {
       "he": 3,
@@ -1054,7 +1070,7 @@
       "width_mm": 10.16,
       "height_mm": 128.5,
       "token_counts": {
-        "CV": 2
+        "CV": 0
       },
       "grids": [
         {
@@ -1068,7 +1084,7 @@
           "pitch_y_mm": 13,
           "w_mm": 7,
           "h_mm": 7,
-          "note": "3.5 mm serial bridge jacks \u2014 transparent to patches, no tokens"
+          "note": "3.5 mm serial bridge jacks \u2014 transparent to patches, explicit element numbers 1..2 but no addressable tokens"
         }
       ],
       "element_cells": {
@@ -1081,7 +1097,9 @@
             "w_mm": 7,
             "h_mm": 7,
             "dir": "serial",
-            "label": "serial in"
+            "addressable": false,
+            "label": "serial in",
+            "element": 1
           },
           {
             "col": 0,
@@ -1091,11 +1109,13 @@
             "w_mm": 7,
             "h_mm": 7,
             "dir": "serial",
-            "label": "serial out"
+            "addressable": false,
+            "label": "serial out",
+            "element": 2
           }
         ]
       },
-      "notes": "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo patch-cable bridge, transparent to patches \u2014 no hardware tokens exist). Assumed: pitches/margins."
+      "notes": "Manual-documented: 2 HP; 2 serial line drivers (3.5 mm stereo patch-cable bridge, transparent to patches \u2014 no hardware tokens exist; cells are declared element 1..2, addressable: false, so they render without resolving). Assumed: pitches/margins."
     },
     "p2b8": {
       "he": 3,
