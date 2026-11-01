@@ -476,17 +476,15 @@ fn no_master_fits_message(conflicts: &[MasterConflict]) -> String {
 /// it does carry, so an unfamiliar schema degrades to the old per-master check
 /// instead of silently skipping the RAM verdict (design D6).
 fn ram_budgets(schema: &Schema, model: MasterModel) -> Vec<(String, u32)> {
-    match schema.available_memory.get(model.ram_key()) {
-        Some(avail) => vec![(model.label().to_string(), *avail)],
-        None => {
-            let mut masters: Vec<(&String, &u32)> = schema.available_memory.iter().collect();
-            masters.sort_by(|a, b| a.0.cmp(b.0));
-            masters
-                .into_iter()
-                .map(|(name, avail)| (name.clone(), *avail))
-                .collect()
-        }
+    if let Some(avail) = schema.available_memory.get(model.ram_key()) {
+        return vec![(model.label().to_string(), *avail)];
     }
+    let mut masters: Vec<(&String, &u32)> = schema.available_memory.iter().collect();
+    masters.sort_by(|a, b| a.0.cmp(b.0));
+    masters
+        .into_iter()
+        .map(|(name, avail)| (name.clone(), *avail))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +831,7 @@ mod tests {
     use crate::patch::Patch;
     use crate::plugin::{PluginCircuit, PluginFile, PluginParam};
     use crate::schema::{load_schema, merge_plugins};
+    use std::fmt::Write as _;
     use std::path::PathBuf;
 
     fn validate(ini: &str) -> Vec<ValidationIssue> {
@@ -897,7 +896,7 @@ mod tests {
             if total > low && total <= high {
                 let mut ini = String::from("[p2b8]\n");
                 for _ in 0..copies {
-                    ini.push_str(&format!("[{name}]\n"));
+                    let _ = writeln!(ini, "[{name}]");
                 }
                 return Some(ini);
             }
@@ -1814,7 +1813,7 @@ output = _STILL_OPEN * 2
         let schema = load_schema();
         // No declaration and no constraining use: the patch resolves to MASTER,
         // so the verdict is MASTER's budget and one finding.
-        let ini = ram_patch_between(&schema, ram_budget(schema, "master16"), u32::MAX)
+        let ini = ram_patch_between(schema, ram_budget(schema, "master16"), u32::MAX)
             .expect("the largest circuit can exceed MASTER's budget");
         let patch = Patch::from_ini_str(&ini, String::from("test")).unwrap();
         let issues = validate_patch(&patch, schema);
@@ -1841,7 +1840,7 @@ output = _STILL_OPEN * 2
         // Size it inside MASTER's budget while outside MASTER18's (whichever of
         // the two the firmware figures make the smaller one).
         let (low, high) = (master.min(master18), master.max(master18));
-        let ini = ram_patch_between(&schema, low, high).expect("schema budgets leave a window");
+        let ini = ram_patch_between(schema, low, high).expect("schema budgets leave a window");
 
         let messages = ram_overflow_messages(&ini);
         if master18 < master {
@@ -1862,7 +1861,7 @@ output = _STILL_OPEN * 2
     #[test]
     fn declared_master18_ram_overflow_names_master18() {
         let schema = load_schema();
-        let ini = ram_patch_between(&schema, ram_budget(schema, "master18"), u32::MAX)
+        let ini = ram_patch_between(schema, ram_budget(schema, "master18"), u32::MAX)
             .expect("the largest circuit can exceed MASTER18's budget");
         let ini = format!("# LABELS: master=18\n{ini}");
 

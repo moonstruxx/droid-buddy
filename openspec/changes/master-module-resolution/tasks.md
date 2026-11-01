@@ -23,4 +23,4 @@
 
 ## 4. Verification
 
-- [ ] 4.1 Run the gate at CI parity — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`, the release perf gate and the headless `--self-test` — and confirm every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [2.4, 3.2, 3.3], touches: [] -->
+- [x] 4.1 Run the gate at CI parity — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`, the release perf gate and the headless `--self-test` — and confirm every command exits 0 (run in the lead session, which the apply protocol's verification step assigns the same command set to). <!-- agent: horst-engineer.fast, depends_on: [2.4, 3.2, 3.3], touches: [] -->

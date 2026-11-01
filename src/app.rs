@@ -2477,8 +2477,7 @@ impl App {
     pub fn master_model(&self) -> crate::patch::MasterModel {
         self.master_plan
             .as_ref()
-            .map(|plan| plan.model)
-            .unwrap_or(crate::patch::MasterModel::Master)
+            .map_or(crate::patch::MasterModel::Master, |plan| plan.model)
     }
 
     /// The controller chain and the packed rack in one pass: what the painter
