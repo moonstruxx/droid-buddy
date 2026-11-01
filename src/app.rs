@@ -780,6 +780,19 @@ impl FitMode {
     }
 }
 
+/// The load status's master clause: which model the patch is drawn for and
+/// where that answer came from (`master-module-resolution` D3). The wording
+/// lives here only, so the status cannot disagree with the plan every other
+/// consumer reads.
+fn master_status_segment(plan: &crate::rack::MasterPlan) -> String {
+    let source = match plan.source {
+        crate::rack::MasterSource::Declared => "declared",
+        crate::rack::MasterSource::Inferred => "inferred",
+        crate::rack::MasterSource::Default => "default",
+    };
+    format!("{} ({source})", plan.model.label())
+}
+
 /// The physical-view label-fit claim of one written label (module-ui-label-fit
 /// D7): the paint path the painter will use for that cell, mirrored here so the
 /// fit measures the same text box the paint does.
@@ -3231,6 +3244,9 @@ impl App {
         // instead of guessing from `master_declaration`, so the drawn
         // faceplate is the verdict the findings were computed against.
         let master_plan = crate::rack::resolve(&patch, load_schema());
+        // Formatted before the plan is stored: the status quotes the same plan
+        // the renderer reads, and `MasterPlan` is not `Copy`.
+        let master_segment = master_status_segment(&master_plan);
         self.install_loaded_patch(patch, patch_path);
         self.master_plan = Some(master_plan);
         self.validation_issues = issues;
@@ -3248,12 +3264,15 @@ impl App {
                 .as_ref()
                 .map(|p| p.name.trim().to_string())
                 .unwrap_or_default();
+            let master = master_segment;
             if name.is_empty() {
                 "Ready".to_string()
             } else if !has_hard_error && count > 0 {
-                format!("Loaded {name} \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
+                format!(
+                    "Loaded {name} \u{2014} {master} \u{2014} {count} warnings/hints \u{2014} press 'e' to view"
+                )
             } else {
-                format!("Loaded {name}")
+                format!("Loaded {name} \u{2014} {master}")
             }
         };
         true
@@ -7885,7 +7904,9 @@ mod tests {
         let count = app.validation_issues.len();
         assert_eq!(
             app.status_message,
-            format!("Loaded warn_only \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
+            format!(
+                "Loaded warn_only \u{2014} MASTER (default) \u{2014} {count} warnings/hints \u{2014} press 'e' to view"
+            )
         );
     }
 
@@ -7913,7 +7934,9 @@ mod tests {
         let count = app.validation_issues.len();
         assert_eq!(
             app.status_message,
-            format!("Loaded warn_only \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
+            format!(
+                "Loaded warn_only \u{2014} MASTER (default) \u{2014} {count} warnings/hints \u{2014} press 'e' to view"
+            )
         );
     }
 
@@ -7927,7 +7950,94 @@ mod tests {
             app.validation_issues
         );
         assert!(!app.showing_validation);
-        assert_eq!(app.status_message, "Loaded clean_patch");
+        assert_eq!(
+            app.status_message,
+            "Loaded clean_patch \u{2014} MASTER (default)"
+        );
+    }
+
+    /// Stage `content` as a temp `.ini`, parse it, and load it through
+    /// `App::load_patch` — the same path a patch opened from disk takes (see
+    /// `load_patch_draws_the_resolved_master_model`). The file name fixes the
+    /// patch name the status quotes.
+    fn load_status_app(content: &str, file_stem: &str) -> App {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(format!("{file_stem}.ini"));
+        std::fs::write(&path, content).expect("stage the temp patch");
+        let patch = Patch::from_ini_file(&path).expect("parse the temp patch");
+        let mut app = App::new();
+        assert!(app.load_patch(patch), "the fixture loads");
+        app
+    }
+
+    #[test]
+    fn load_status_names_declared_master18() {
+        // A declared MASTER18 that reads `I1` as CV is the spec's warning-only
+        // case: the model is declared, and the conflict does not gate the load.
+        let app = load_status_app(
+            "# LABELS: master=18\n[copy]\n    input = I1\n    output = O1\n",
+            "declared18",
+        );
+        let plan = app.master_plan.as_ref().expect("a load stores the plan");
+        assert_eq!(plan.source, crate::rack::MasterSource::Declared);
+        let count = app.validation_issues.len();
+        assert!(count > 0, "I1 as CV on a declared MASTER18 is reported");
+        assert_eq!(
+            app.status_message,
+            format!(
+                "Loaded declared18 \u{2014} MASTER18 (declared) \u{2014} {count} warnings/hints \u{2014} press 'e' to view"
+            )
+        );
+    }
+
+    #[test]
+    fn load_status_names_inferred_master18() {
+        // No declaration; `vcotuner` exists only on MASTER18, so exactly one
+        // model hosts the patch and the status has to say it was inferred.
+        let app = load_status_app("[p2b8]\n[vcotuner]\n", "inferred18");
+        let plan = app.master_plan.as_ref().expect("a load stores the plan");
+        assert_eq!(plan.source, crate::rack::MasterSource::Inferred);
+        assert_eq!(plan.model, crate::patch::MasterModel::Master18);
+        assert_eq!(
+            app.status_message,
+            "Loaded inferred18 \u{2014} MASTER18 (inferred)"
+        );
+    }
+
+    #[test]
+    fn load_status_names_default_master() {
+        // No declaration and nothing to infer from: MASTER, the named default.
+        let app = load_status_app(
+            "[p2b8]\n[copy]\n    input = 0\n    output = O1\n",
+            "defaultmaster",
+        );
+        let plan = app.master_plan.as_ref().expect("a load stores the plan");
+        assert_eq!(plan.source, crate::rack::MasterSource::Default);
+        assert_eq!(plan.model, crate::patch::MasterModel::Master);
+        assert_eq!(
+            app.status_message,
+            "Loaded defaultmaster \u{2014} MASTER (default)"
+        );
+    }
+
+    #[test]
+    fn load_status_names_master_on_a_clean_declared_load() {
+        // A clean load (no findings) carries the same segment in the same
+        // position: `I1` as CV on a declared MASTER is no conflict at all.
+        let app = load_status_app(
+            "# LABELS: master=16\n[copy]\n    input = I1\n    output = O1\n",
+            "declaredclean",
+        );
+        assert!(
+            app.validation_issues.is_empty(),
+            "the fixture has no findings: {:?}",
+            app.validation_issues
+        );
+        assert_eq!(
+            app.status_message,
+            "Loaded declaredclean \u{2014} MASTER (declared)"
+        );
     }
 
     #[test]
