@@ -8710,4 +8710,228 @@ mod tests {
         assert!(!app.physical_nav_latched);
         assert_eq!(app.physical_fit_zoom, Some(app.physical_zoom));
     }
+
+    // ---- module-ui-label-fit 2.1 (red): the labels-first fit clamp ----
+
+    /// The fit pane these tests measure in: small enough that the fixture
+    /// rack's whole-rack fit lands near the supported floor (0.41), well below
+    /// what a written two-word label needs on a 9 mm button cell (~0.6).
+    const LABEL_FIT_PANE: Rect = Rect::new(0, 0, 260, 200);
+
+    /// The clamp fixture: the always-present 8 HP master plus one P4B2
+    /// faceplate declared with its own entries (P4B2 is not bare-synthesized),
+    /// so the rack carries 9 mm button cells (`B1.1`/`B1.2`, glyph path) and
+    /// standalone 3 mm LED cells (`L1.1`/`L1.2`, not folded on this
+    /// controller) in one small rack. `labels` become `# TOKEN: label`
+    /// preamble lines — the only *written* label source these tests use; every
+    /// other token keeps its derived name.
+    fn label_fit_app(labels: &[(&str, &str)]) -> App {
+        let mut ini = String::new();
+        for (token, label) in labels {
+            ini.push_str(&format!("# {token}: {label}\n"));
+        }
+        ini.push_str(
+            "\n[p4b2]\n    pot1 = P1.1\n    pot2 = P1.2\n    pot3 = P1.3\n    pot4 = P1.4\n    \
+             button1 = B1.1\n    led1 = L1.1\n    button2 = B1.2\n    led2 = L1.2\n",
+        );
+        let patch = Patch::from_ini_str(&ini, String::from("label-fit"))
+            .expect("the label-fit fixture parses");
+        let mut app = App::new();
+        assert!(app.load_patch(patch), "the label-fit fixture loads clean");
+        app
+    }
+
+    /// The live rack's extent in millimetres.
+    fn rack_extent_mm(app: &App) -> (f64, f64) {
+        let rack = app.physical_rack_for_fit().expect("patch loaded");
+        (rack.total_width_mm, rack.total_height_mm)
+    }
+
+    /// The whole-rack fit of `app`'s live rack in `pane` — the baseline the
+    /// labels-first clamp is measured against (`physical::fit_zoom`, i.e. the
+    /// `Shift+F` fit). Computed from the live rack, never from a literal.
+    fn whole_rack_fit(app: &App, pane: Rect) -> f64 {
+        let (rack_w, rack_h) = rack_extent_mm(app);
+        crate::physical::fit_zoom(rack_w, rack_h, pane.width as f32, pane.height as f32)
+    }
+
+    /// The pane in points, the shape `fit_physical_view` takes.
+    fn pane_points(pane: Rect) -> (f32, f32) {
+        (pane.width as f32, pane.height as f32)
+    }
+
+    /// Slack for comparing a fitted zoom against the f64 rack fit: the fit is
+    /// stored as f32, so a bare `as f64` comparison sits ~1e-8 above the same
+    /// value and would report an unlifted fit as lifted.
+    const FIT_EPS: f64 = 1e-3;
+
+    /// module-ui-label-fit 2.1 (a) / D7: a written label on a small cell lifts
+    /// the fitted zoom above the whole-rack fit, so the default view is the
+    /// readable one and the rack overflows the pane instead of shrinking the
+    /// text away.
+    #[test]
+    fn a_written_label_on_a_9mm_button_lifts_the_fit_above_the_rack_fit() {
+        let mut app = label_fit_app(&[("B1.1", "Trigger input")]);
+        let rack_fit = whole_rack_fit(&app, LABEL_FIT_PANE);
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        assert!(app.fit_physical_view(w, h), "the fixture has a rack to fit");
+
+        let lifted = app.physical_zoom as f64;
+        assert!(
+            lifted > rack_fit + FIT_EPS,
+            "a written label the rack fit cannot show must lift the fitted zoom \
+             ({lifted} vs rack {rack_fit})"
+        );
+        assert!(
+            lifted >= rack_fit * 1.25,
+            "the lift is a legibility step, not rounding noise ({lifted} vs rack {rack_fit})"
+        );
+        assert!(
+            lifted <= crate::physical::ZOOM_MAX,
+            "the lift stays inside the supported range ({lifted})"
+        );
+        assert_eq!(
+            app.scale_factor, app.physical_zoom,
+            "the painter's scale follows the lifted fit"
+        );
+        assert_eq!(app.physical_fit_zoom, Some(app.physical_zoom));
+        let (rack_w, rack_h) = rack_extent_mm(&app);
+        assert_eq!(
+            app.physical_offset,
+            crate::physical::fit_offset(rack_w, rack_h, w, h, lifted),
+            "the lifted fit centres the lifted rack, not the unlifted one"
+        );
+        assert!(
+            app.physical_overflow(LABEL_FIT_PANE).1,
+            "at the label fit the rack overflows the pane and pans"
+        );
+    }
+
+    /// module-ui-label-fit 2.1 (b) / D7: only *written* labels participate. A
+    /// patch whose labels are all derived token names fits exactly the
+    /// whole-rack fit; the same cell with a written label does lift.
+    #[test]
+    fn derived_only_labels_never_lift_the_fit() {
+        let mut derived = label_fit_app(&[]);
+        let rack_fit = whole_rack_fit(&derived, LABEL_FIT_PANE);
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        assert!(derived.fit_physical_view(w, h));
+        assert!(
+            (derived.physical_zoom as f64 - rack_fit).abs() < 1e-4,
+            "derived names (B1.1, L1.1, ...) must not inflate the fit ({} vs rack {rack_fit})",
+            derived.physical_zoom
+        );
+
+        let mut written = label_fit_app(&[("B1.1", "Trigger input")]);
+        assert!(written.fit_physical_view(w, h));
+        assert!(
+            written.physical_zoom > derived.physical_zoom + 0.05,
+            "the same cell with a written label does lift ({} vs {})",
+            written.physical_zoom,
+            derived.physical_zoom
+        );
+    }
+
+    /// module-ui-label-fit 2.1 (c) / D7 / D9: a cell no supported zoom can
+    /// serve — the 3 mm LED — never lifts the fit and stays an annotation
+    /// candidate. Control: the same label on a 9 mm button does lift.
+    #[test]
+    fn a_written_label_on_a_3mm_led_never_lifts_the_fit() {
+        let mut led = label_fit_app(&[("L1.1", "Ring light")]);
+        let rack_fit = whole_rack_fit(&led, LABEL_FIT_PANE);
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        assert!(led.fit_physical_view(w, h));
+        assert!(
+            (led.physical_zoom as f64 - rack_fit).abs() < 1e-4,
+            "an LED label no zoom can hold must not lift the fit ({} vs rack {rack_fit})",
+            led.physical_zoom
+        );
+
+        let mut button = label_fit_app(&[("B1.1", "Ring light")]);
+        assert!(button.fit_physical_view(w, h));
+        assert!(
+            button.physical_zoom > rack_fit as f32 + 0.05,
+            "the same label lifts the fit on a cell that can hold it ({} vs rack {rack_fit})",
+            button.physical_zoom
+        );
+    }
+
+    /// module-ui-label-fit 2.1 (d) / D7: the lift is the smallest zoom that
+    /// serves every written label and it stops at `ZOOM_MAX`. A label beyond
+    /// the cap contributes nothing — it is annotated instead — so it can never
+    /// push the fit past the ceiling or drag it above a label that does fit.
+    #[test]
+    fn the_lift_stops_at_zoom_max_and_an_unfittable_label_is_ignored() {
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        let mut moderate = label_fit_app(&[("B1.1", "Trigger input")]);
+        let rack_fit = whole_rack_fit(&moderate, LABEL_FIT_PANE);
+        assert!(moderate.fit_physical_view(w, h));
+        let lifted = moderate.physical_zoom;
+        assert!(
+            lifted as f64 > rack_fit + FIT_EPS,
+            "the baseline label lifts the fit ({lifted} vs rack {rack_fit})"
+        );
+        assert!(
+            lifted as f64 <= crate::physical::ZOOM_MAX,
+            "a fitted zoom is never above the ceiling ({lifted})"
+        );
+
+        // ~1000 characters on a 9 mm button: no ladder step holds it even at
+        // the 4.0 ceiling (136 pt square), so it is a no-layout cell.
+        let impossible = "wide ".repeat(200);
+        let mut over = label_fit_app(&[("B1.1", "Trigger input"), ("B1.2", impossible.as_str())]);
+        assert!(over.fit_physical_view(w, h));
+        assert!(
+            over.physical_zoom as f64 <= crate::physical::ZOOM_MAX,
+            "the lift stops at ZOOM_MAX ({} vs {})",
+            over.physical_zoom,
+            crate::physical::ZOOM_MAX
+        );
+        assert!(
+            (over.physical_zoom - lifted).abs() < 1e-6,
+            "a label no zoom can hold is ignored, not clamped into the fit ({} vs {lifted})",
+            over.physical_zoom
+        );
+    }
+
+    /// module-ui-label-fit 2.1 (e) / D8: the status hint names the fit that
+    /// applied. The default/labels fit reports `fit(labels)` whether it had to
+    /// lift or not (the rack-fits-pane case is *reported as the label fit*),
+    /// and a manual zoom drops the marker as today. The `fit(rack)` wording
+    /// and the pane-title segment need the rack-mode entry point and the pane
+    /// title; both are asserted in task 2.3.
+    #[test]
+    fn physical_status_hint_names_the_fit_that_applied() {
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        let mut lifted = label_fit_app(&[("B1.1", "Trigger input")]);
+        assert!(lifted.fit_physical_view(w, h));
+        let hint = lifted.physical_status_hint().expect("patch loaded");
+        assert!(
+            hint.contains("fit(labels)"),
+            "a lifted fit names the labels fit: {hint}"
+        );
+        assert!(
+            !hint.contains("fit(rack)"),
+            "a labels fit never claims the rack fit: {hint}"
+        );
+
+        // Every written label fits at the rack fit: still the labels fit,
+        // because that is the fit the view performed.
+        let mut plain = label_fit_app(&[]);
+        assert!(plain.fit_physical_view(w, h));
+        let hint = plain.physical_status_hint().expect("patch loaded");
+        assert!(
+            hint.contains("fit(labels)"),
+            "an unlifted fit still names the fit it performed: {hint}"
+        );
+        assert!(!hint.contains("fit(rack)"), "{hint}");
+
+        // A manual zoom drops the fit marker exactly as today.
+        lifted.physical_zoom_about(1.5, (0.0, 0.0));
+        let hint = lifted.physical_status_hint().expect("patch loaded");
+        assert!(
+            !hint.contains("fit("),
+            "a manual zoom drops the fit marker: {hint}"
+        );
+    }
 }
