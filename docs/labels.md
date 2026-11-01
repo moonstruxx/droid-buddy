@@ -24,6 +24,14 @@ A hardware label resolves through four layers, first hit wins:
 So a `# B1.1: [KICK]` comment at the top of your patch names `B1.1`
 without any store entry, and a stored layer-1 label beats it.
 
+## The master declaration
+
+One preamble line is not a label at all: `# LABELS: master=16|18` is the
+DROID Forge's master selection, saved into the patch. `droid_tui` reads
+it as the patch's master model — `16` is `MASTER`, `18` is `MASTER18` —
+and it never appears as an element label in the store or the overlay.
+The [Module UI](views.md#module-ui) draws the master it names.
+
 ## Shift layers
 
 With `[labels] layers_enabled` (default on), each `B*`/`P*`/`S*`/

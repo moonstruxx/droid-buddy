@@ -23,6 +23,21 @@ element of a declared controller renders at its faceplate position;
 unused elements are drawn dimmed and unlabelled. LEDs fold into their
 element and render the patch's LED color/brightness.
 
+**The rack always starts with exactly one master faceplate**, and the
+pane title names which one is drawn:
+
+- `MASTER` — 8 HP, `I1..I8` CV inputs, `O1..O8` outputs, and the 4×4
+  LED matrix beside the jacks.
+- `MASTER18` — 6 HP, `O1..O8` outputs, `I1`/`I2` as gate inputs,
+  `G1..G4` gate outputs, no LED matrix.
+
+The model comes from the patch's DROID Forge declaration
+(`# LABELS: master=16|18`, see [Labels](labels.md#the-master-declaration)) or,
+when the patch declares none, from the one model that can host the patch;
+a patch no use constrains falls back to `MASTER`. An element the drawn
+master has no cell for draws no cell — the validation modal's
+`master_conflict` finding names it instead.
+
 **Labels are fitted per cell.** A cell's label is drawn at the largest
 step of a 10, 9, 8, 7, 6 pt monospace ladder at which the whole label
 fits the cell's text box, wrapping at word boundaries, breaking a word
@@ -131,6 +146,15 @@ badges (E/W/H). `j`/`k` navigate, `Enter` jumps the source viewer to
 the issue's `line:col`, `Esc`/`e` closes. Any `Error`-severity finding
 gates the load (the patch is rejected); warnings and hints load with
 a `press 'e' to view` status hint.
+
+Two findings report the master fit:
+
+- `master_conflict` (W) — the resolved master cannot host a jack or
+  circuit the patch uses (a `MASTER18` patch reading `I3`, a `MASTER`
+  patch with a `[vcotuner]` section). The finding names the use and
+  the model that would host it, and the patch still loads.
+- `no_master_fits` (E) — no master model can host the patch, so the
+  load is refused.
 
 ## Patch diff (`g d`, then `d`)
 
