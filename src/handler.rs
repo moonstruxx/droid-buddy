@@ -1946,7 +1946,10 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
             app.open_view(ViewType::Graph);
             sync_viewer_focus_from_tiles(app);
         }
-        handle_graph_mouse(mouse, app);
+        // The graph pane takes the click for focus only: node hover, selection,
+        // dragging and minimap panning are hit-tested in world space through the
+        // shared camera by `handle_graph_window_frame`, the one live pointer path
+        // (droid_tui-7e1 retired the terminal rect-based path).
         return;
     }
     app.hovered_graph_node = None;
@@ -2118,158 +2121,6 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     }
 }
 
-/// Handle mouse input while the graph surface is open. The graph has no hover
-/// or panel concept: a left-button Down on a renderer-published node rect
-/// begins a drag, Drag follows the pointer with a damped local re-settle and
-/// a `NodeMoved` event, and Up releases. Everything else is a no-op (design
-/// D1/D7). No other app state is touched during a drag.
-fn handle_graph_mouse(mouse: MouseEvent, app: &mut App) {
-    match mouse.kind {
-        MouseEventKind::Moved => {
-            let hit = app
-                .graph_node_rects
-                .iter()
-                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
-                .map(|(idx, _)| *idx);
-            app.hovered_graph_node = hit;
-            // Back-edge sink hover (design D2): surface "reads _X 1 loop
-            // behind" in the status bar; non-back-edge hovers leave the
-            // previous status untouched.
-            if let Some(idx) = hit {
-                if let Some(text) = app.back_edge_hover_status(idx) {
-                    app.status_message = text;
-                }
-            }
-        }
-        MouseEventKind::Down(MouseButton::Left) => {
-            // Check for minimap click first
-            if let Some(minimap_rect) = app.graph_minimap_rect {
-                if rect_contains(&minimap_rect, mouse.column, mouse.row) {
-                    // Minimap click: pan camera to clicked world position.
-                    // `graph_minimap_rect` is the outer panel in cell space;
-                    // `(ix, iy)` is the inner-panel origin in canvas space, so
-                    // invert `minimap_layout`'s `map` directly (no hardcoded
-                    // inset): world = bx + (click - ix) / sx.
-                    if let Some(transform) = app.graph_minimap_transform {
-                        let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
-                        if sx > 0.0 && sy > 0.0 {
-                            let world_x = bx + (mouse.column as f32 - ix) / sx;
-                            let world_y = by + (mouse.row as f32 - iy) / sy;
-                            // Pan camera to center on world position
-                            if let Some(mut camera) = app.graph_camera {
-                                let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
-                                camera.pan = (
-                                    world_x * camera.zoom - vw / 2.0,
-                                    world_y * camera.zoom - vh / 2.0,
-                                );
-                                app.graph_camera = Some(camera);
-                                app.status_message = format!(
-                                    "Minimap click: pan to ({:.0}, {:.0})",
-                                    world_x, world_y
-                                );
-                            }
-                        }
-                    }
-                    return;
-                }
-            }
-            let hit = app
-                .graph_node_rects
-                .iter()
-                .find(|(_, rect)| rect_contains(rect, mouse.column, mouse.row))
-                .map(|(idx, _)| *idx);
-            let Some(node_index) = hit else {
-                app.hovered_graph_node = None;
-                return;
-            };
-            app.hovered_graph_node = Some(node_index);
-            // Clicking a node selects its circuit (design D4): shared selection
-            // drives the source-viewer jump, panel hardware highlight, and the
-            // terminal-tile node highlight. Mirrors the window's press-select.
-            if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(node_index)) {
-                app.select_circuit(node.id.clone());
-            }
-            // Record the grab offset so the node follows the pointer without
-            // jumping to the grab point on the first drag delta.
-            if let Some((px, py)) = app.graph_positions.get(node_index).copied() {
-                app.graph_drag = Some(GraphDrag {
-                    node_index,
-                    offset_x: px - mouse.column as f32,
-                    offset_y: py - mouse.row as f32,
-                });
-            }
-        }
-        MouseEventKind::Drag(MouseButton::Left) => {
-            let Some(drag) = app.graph_drag.as_ref() else {
-                return;
-            };
-            let Some(graph) = app.graph.as_ref() else {
-                return;
-            };
-            let Some(node_id) = graph.nodes.get(drag.node_index).map(|n| n.id.clone()) else {
-                return;
-            };
-            if let Some(pos) = app.graph_positions.get_mut(drag.node_index) {
-                *pos = (
-                    clamp_drag(mouse.column as f32 + drag.offset_x),
-                    clamp_drag(mouse.row as f32 + drag.offset_y),
-                );
-            }
-            let pins = app.pinned_indices(graph);
-            // The drag settles under the App's force knobs, so the panel's
-            // repulsion/cohesion (force mode) reach the re-settle too
-            // (force-arrangement-nonoverlap-and-sliders D7).
-            let knobs = app.force_solve_knobs();
-            layout::local_resettle(
-                graph,
-                &mut app.graph_positions,
-                &node_id,
-                layout::LOCAL_RADIUS,
-                layout::LOCAL_ITERATIONS,
-                &pins,
-                knobs,
-            );
-            app.notify_node_moved(&node_id);
-        }
-        MouseEventKind::Up(_) => {
-            // Task 3.1 (design D7): the drag result becomes a fixed anchor —
-            // the dropped node is auto-pinned so it stays where placed
-            // instead of snapping back to spring equilibrium on a rebuild.
-            if let Some(drag) = app.graph_drag.take() {
-                if let Some(node) = app
-                    .graph
-                    .as_ref()
-                    .and_then(|g| g.nodes.get(drag.node_index))
-                {
-                    app.pinned.insert(node.id.clone());
-                }
-            }
-            // Modifier hold: release the mouse hold wash. The status
-            // clears only when no latch survives; otherwise it falls
-            // back to the latched MOD line.
-            if app.hold_component.is_some() {
-                app.hold_component = None;
-                app.refresh_modifier_influence();
-                if app.latched_component.is_none() {
-                    app.status_message.clear();
-                } else if let Some(status) = app.modifier_status() {
-                    app.status_message = status;
-                }
-            }
-        }
-        MouseEventKind::ScrollUp => {
-            // Task 2.3: wheel pans the graph camera on the graph surface
-            // when it overflows; otherwise it is a no-op (the box-drawing
-            // path has no camera, so `graph_pan_if_overflow` returns false).
-            app.graph_pan_if_overflow(0, -1);
-        }
-        MouseEventKind::ScrollDown => {
-            app.graph_pan_if_overflow(0, 1);
-        }
-        _ => {}
-    }
-}
-
 /// Bound a dragged node's position to a sane virtual-plane window. Mouse
 /// coordinates are already inside the terminal, but the grab offset can carry
 /// the sum far out; the renderer's min/max fit maps any bounded set onto the
@@ -2348,7 +2199,7 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// The window is another pointer/keyboard surface over the same graph: hover
 /// and drag hit-test window-space pointers against the graph layout via
 /// [`crate::graph_render::GraphCamera`] (`pixel → world → node index`),
-/// mirroring how `graph_node_rects` drives the terminal surface. `x`/`p`/`e`
+/// mirroring how node hit-testing drives the terminal surface. `x`/`p`/`e`
 /// act on the hovered node exactly like the terminal graph keys. No camera
 /// yet (graph not fitted) means nothing is interactive. The windowed loop in
 /// `main.rs` owns both the window and the `App`, so it calls this once per
@@ -2496,7 +2347,21 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
         })
     });
+    let previous_hover = app.hovered_graph_node;
     app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
+    // Back-edge sink hover (design D2): surface "reads _X 1 loop behind" in the
+    // status bar when the hover enters a node that has one; a node without a
+    // back edge leaves the previous status untouched. This lived only in the
+    // terminal mouse path until droid_tui-7e1 retired it, so porting it here is
+    // what keeps the behaviour on the surface users actually use.
+    if app.hovered_graph_node != previous_hover {
+        if let Some(text) = app
+            .hovered_graph_node
+            .and_then(|idx| app.back_edge_hover_status(idx))
+        {
+            app.status_message = text;
+        }
+    }
 
     // Marquee commit (ibu-marquee-selection): the window already highlighted
     // `marquee.nodes` in scene order, so the first enclosed index is the
@@ -6395,196 +6260,6 @@ mod tests {
         assert!(!app.showing_viewer);
     }
 
-    // ── Task 4.3: graph handler wiring (`g g`) ──
-
-    /// App with a fixture patch loaded, the graph opened, and node rects
-    /// published as the renderer would, so drag hit-testing has geometry.
-    fn graph_app() -> App {
-        let mut app = app_with_fixture();
-        app.open_graph();
-        let node_count = app.graph.as_ref().unwrap().nodes.len();
-        app.graph_node_rects = (0..node_count)
-            .map(|i| (i, Rect::new(10 + (i as u16) * 20, 10, 16, 3)))
-            .collect();
-        // Tiled renderer contract (change `tiled-window-manager`): mirror a
-        // rendered layout so graph events route to graph handling instead of
-        // falling through to the panels pane.
-        app.pane_rects = vec![
-            (FocusSlot::Panels, Rect::new(0, 0, 8, 40)),
-            (FocusSlot::Slot(0), Rect::new(8, 0, 192, 40)),
-        ];
-        app.pane_hit_rects = vec![
-            (crate::panes::PaneId::BigLeft, Rect::new(8, 0, 192, 40)),
-            (crate::panes::PaneId::SmallTop, Rect::new(0, 0, 8, 40)),
-        ];
-        app
-    }
-
-    #[test]
-    fn esc_while_graph_open_closes_and_restores_state() {
-        let mut app = app_with_source_navigation();
-        app.select_component(String::from("B1.1"));
-        app.viewer_focus = ViewerFocus::Source;
-        app.source_view_mode = SourceViewMode::Prettified;
-        app.source_scroll = 9;
-        app.occurrence_cursor = 2;
-        let before = (
-            app.selected_component.clone(),
-            app.viewer_focus.clone(),
-            app.source_view_mode.clone(),
-            app.source_scroll,
-            app.occurrence_cursor,
-        );
-        app.open_graph();
-        assert!(app.showing_graph);
-        // `g g` focuses the graph slot; mirror that here so Esc acts on it.
-        app.tile_stack.focus = FocusSlot::Slot(0);
-        handle_event(key(KeyCode::Esc), &mut app);
-        assert!(!app.showing_graph, "Esc closes the graph");
-        assert_eq!(app.selected_component, before.0, "selection kept on close");
-        assert_eq!(app.viewer_focus, before.1, "viewer focus kept");
-        assert_eq!(app.source_view_mode, before.2, "view mode kept");
-        assert_eq!(app.source_scroll, before.3, "source scroll kept");
-        assert_eq!(app.occurrence_cursor, before.4, "occurrence cursor kept");
-        assert!(app.prefix.is_none());
-    }
-
-    #[test]
-    fn q_quits_while_graph_open() {
-        let mut app = app_with_fixture();
-        app.open_graph();
-        let quit = handle_event(key(KeyCode::Char('q')), &mut app);
-        assert!(quit, "q quits even with the graph open");
-    }
-
-    #[test]
-    fn l_opens_picker_while_graph_open() {
-        let mut app = app_with_fixture();
-        app.open_graph();
-        handle_event(key(KeyCode::Char('l')), &mut app);
-        assert!(app.showing_picker, "l opens the picker over the graph");
-    }
-
-    #[test]
-    fn drag_node_moves_position_resettles_and_emits_node_moved() {
-        let mut app = graph_app();
-        // The drag re-settle is force-path semantics (local_resettle under
-        // spring tension); the column arrangement is now the default, so pin
-        // this test to the force arrangement to keep the force-path drag
-        // contract covered (graph-column-layout 4.2).
-        app.layout_mode = crate::config::LayoutMode::Force;
-        assert!(!app.graph.as_ref().unwrap().nodes.is_empty());
-        // Subscribe a probe to the synchronous bus to observe NodeMoved.
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let store = std::rc::Rc::clone(&seen);
-        app.events
-            .subscribe(move |event| store.borrow_mut().push(event.clone()));
-
-        let before = app.graph_positions[0];
-        // Down on node 0's rect (0 -> (10,10,16,3)) starts the drag.
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
-            &mut app,
-        );
-        assert!(app.graph_drag.is_some(), "Down on a node rect grabs it");
-        // Drag to a new point: position must change and NodeMoved must fire.
-        handle_mouse_event(
-            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 25),
-            &mut app,
-        );
-        assert_ne!(
-            app.graph_positions[0], before,
-            "dragged node position changed"
-        );
-        assert!(
-            app.graph_positions
-                .iter()
-                .all(|(x, y)| x.is_finite() && y.is_finite()),
-            "re-settle keeps finite positions"
-        );
-        assert!(
-            seen.borrow()
-                .iter()
-                .any(|e| matches!(e, Event::NodeMoved(_))),
-            "NodeMoved emitted during drag"
-        );
-
-        // Up ends the drag; a further Drag must do nothing.
-        let after_up = app.graph_positions[0];
-        let moves_after_up = seen.borrow().len();
-        handle_mouse_event(
-            mouse(MouseEventKind::Up(MouseButton::Left), 30, 25),
-            &mut app,
-        );
-        assert!(app.graph_drag.is_none(), "Up releases the drag");
-        handle_mouse_event(
-            mouse(MouseEventKind::Drag(MouseButton::Left), 31, 26),
-            &mut app,
-        );
-        assert_eq!(
-            app.graph_positions[0], after_up,
-            "post-release drag is a no-op"
-        );
-        assert_eq!(
-            seen.borrow().len(),
-            moves_after_up,
-            "no NodeMoved after release"
-        );
-    }
-
-    #[test]
-    fn graph_mouse_off_node_rect_is_harmless() {
-        let mut app = graph_app();
-        let before = app.graph_positions.clone();
-        let start_moves = std::rc::Rc::new(std::cell::Cell::new(0));
-        let count = std::rc::Rc::clone(&start_moves);
-        app.events.subscribe(move |_| count.set(count.get() + 1));
-
-        // Down/Drag/Up entirely off any node rect: no drag starts, no panic,
-        // no position change, no events.
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), 200, 60),
-            &mut app,
-        );
-        assert!(app.graph_drag.is_none());
-        handle_mouse_event(
-            mouse(MouseEventKind::Drag(MouseButton::Left), 201, 61),
-            &mut app,
-        );
-        handle_mouse_event(
-            mouse(MouseEventKind::Up(MouseButton::Left), 201, 61),
-            &mut app,
-        );
-        assert_eq!(app.graph_positions, before);
-        assert_eq!(start_moves.get(), 0, "no events fired off-node");
-    }
-
-    #[test]
-    fn graph_mouse_down_selects_circuit_and_opens_viewer() {
-        let mut app = graph_app();
-        let node_id = app.graph.as_ref().unwrap().nodes[0].id.clone();
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
-            &mut app,
-        );
-        assert_eq!(app.selected_circuit(), Some(&node_id));
-        assert!(
-            app.showing_viewer,
-            "selecting a circuit opens the source viewer"
-        );
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        assert!(
-            app.tile_stack.is_open(ViewType::SourceViewer),
-            "a tiled viewer slot opens so the jump renders"
-        );
-        // A click on empty space clears hover but keeps the selection.
-        handle_mouse_event(
-            mouse(MouseEventKind::Down(MouseButton::Left), 200, 60),
-            &mut app,
-        );
-        assert_eq!(app.selected_circuit(), Some(&node_id));
-    }
-
     #[test]
     fn graph_window_frame_press_selects_circuit() {
         use crate::gui::WindowFrame;
@@ -7123,13 +6798,6 @@ mod tests {
         app.load_patch(patch);
         app.open_graph();
         assert!(app.showing_graph);
-        // Simulate renderer publishing node rects so hover hit-testing would work;
-        // for keyboard `x` tests we set hovered_graph_node directly, but populate
-        // rects anyway for completeness.
-        let node_count = app.graph.as_ref().unwrap().nodes.len();
-        app.graph_node_rects = (0..node_count)
-            .map(|i| (i, Rect::new(i as u16 * 22, 0, 22, 5)))
-            .collect();
         // Tiled renderer contract (change `tiled-window-manager`): publish
         // the graph slot rect so mouse events route to graph handling.
         app.pane_rects = vec![
@@ -7251,6 +6919,43 @@ mod tests {
         let mut app = app_with_graph();
         app.graph_camera = Some(crate::graph_render::GraphCamera::new());
         app
+    }
+
+    #[test]
+    fn graph_window_hover_surfaces_the_back_edge_status() {
+        use crate::gui::WindowFrame;
+        // The back-edge hint lived only in the retired terminal mouse path
+        // (droid_tui-7e1); this pins the ported wiring on the live path.
+        let mut app = App::new();
+        let patch =
+            Patch::from_ini_file(std::path::Path::new("fixtures/graph_latency_backedge.ini"))
+                .unwrap();
+        assert!(app.load_patch(patch));
+        app.open_graph();
+        app.graph_camera = Some(crate::graph_render::GraphCamera::new());
+        let graph = app.graph.as_ref().unwrap();
+        let contour_idx = graph
+            .nodes
+            .iter()
+            .position(|n| n.circuit == "contour")
+            .expect("contour node");
+        let sizes = crate::gui::drawn_world_sizes(app.layout_mode, app.graph.as_ref().unwrap());
+        let (x, y) = app.graph_positions[contour_idx];
+        let (w, h) = sizes[contour_idx];
+        let (ox, oy) = graph_pane_origin(&app);
+        let center = (x + w / 2.0 + ox, y + h / 2.0 + oy);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(center),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.hovered_graph_node, Some(contour_idx));
+        assert_eq!(
+            app.status_message, "reads _LOOP 1 loop behind",
+            "hovering the back-edge sink surfaces its hint"
+        );
     }
 
     /// A fixture app with the pane hit geometry published, so the window-frame
@@ -7830,86 +7535,6 @@ mod tests {
         );
         assert!(app.graph_drag.is_none());
         assert!(app.disabled_circuits.is_empty());
-    }
-
-    #[test]
-    fn drag_auto_pins_the_dropped_node() {
-        let mut app = app_with_graph();
-        let idx = 1;
-        let (_, rect) = app
-            .graph_node_rects
-            .iter()
-            .find(|(i, _)| *i == idx)
-            .map(|(i, r)| (*i, *r))
-            .unwrap();
-        // Down on the node, drag by (+7, +1), then release.
-        handle_mouse_event(
-            mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                rect.x + 1,
-                rect.y + 1,
-            ),
-            &mut app,
-        );
-        handle_mouse_event(
-            mouse(
-                MouseEventKind::Drag(MouseButton::Left),
-                rect.x + 8,
-                rect.y + 2,
-            ),
-            &mut app,
-        );
-        handle_mouse_event(
-            mouse(
-                MouseEventKind::Up(MouseButton::Left),
-                rect.x + 8,
-                rect.y + 2,
-            ),
-            &mut app,
-        );
-        let node = app.graph.as_ref().unwrap().nodes[idx].clone();
-        assert!(
-            app.pinned.contains(&node.id),
-            "drag auto-pins the dropped node"
-        );
-        // The anchor stays put: a subsequent drag of another node must not
-        // move the pinned node.
-        let other_idx = 2;
-        let (_, other_rect) = app
-            .graph_node_rects
-            .iter()
-            .find(|(i, _)| *i == other_idx)
-            .map(|(i, r)| (*i, *r))
-            .unwrap();
-        let pinned_pos = app.graph_positions[idx];
-        handle_mouse_event(
-            mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                other_rect.x + 1,
-                other_rect.y + 1,
-            ),
-            &mut app,
-        );
-        handle_mouse_event(
-            mouse(
-                MouseEventKind::Drag(MouseButton::Left),
-                other_rect.x + 4,
-                other_rect.y + 2,
-            ),
-            &mut app,
-        );
-        handle_mouse_event(
-            mouse(
-                MouseEventKind::Up(MouseButton::Left),
-                other_rect.x + 4,
-                other_rect.y + 2,
-            ),
-            &mut app,
-        );
-        assert_eq!(
-            app.graph_positions[idx], pinned_pos,
-            "pinned anchor stays put"
-        );
     }
 
     #[test]

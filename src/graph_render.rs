@@ -64,7 +64,7 @@ impl WorldBounds {
 /// Transform: `pixel = world × zoom − pan` — `zoom` is pixels per world unit
 /// and `pan` is the pixel-space offset of the world origin. The inverse
 /// (`pixel_to_world`) feeds hit-testing: world → pixel → cell derives
-/// `graph_node_rects` so the existing drag/hover apparatus works unchanged.
+/// world extents so the drag/hover apparatus works unchanged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GraphCamera {
     /// Pixels per world unit (solver coordinate).
@@ -429,7 +429,7 @@ mod tests {
     fn cell_center_round_trips_back_to_the_same_cell() {
         // Task 3.2: a world→cell round trip must be stable — the center of a
         // cell, converted back to world and re-projected, lands in the same
-        // cell. This is what keeps drag hit-testing on `graph_node_rects`
+        // cell. This is what keeps drag hit-testing on the world extents
         // aligned with the pixels the window painter draws.
         let cam = GraphCamera::fit_to_world(
             WorldBounds {

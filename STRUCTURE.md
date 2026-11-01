@@ -74,7 +74,7 @@ droid_tui/
 
 **`src/gui/`:**
 - Purpose: every egui surface — the class-based pane band (big/small panes) and centered overlays.
-- Contains: paint routines that emit `egui::Shape` and publish per-frame geometry (`component_rects`, `graph_node_rects`, `pane_hit_rects`, `graph_canvas_px`) back to `App`.
+- Contains: paint routines that emit `egui::Shape` and publish per-frame geometry (`component_rects`, `pane_hit_rects`, `graph_canvas_px`) back to `App`.
 - Key files: `mod.rs` (dispatch + `WindowFrame`), `physical.rs`, `graph.rs`, `viewer.rs`, `picker.rs`, `overlays.rs`.
 
 **`tests/`:**
