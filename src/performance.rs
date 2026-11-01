@@ -145,49 +145,29 @@ pub fn place_labels(rack: Rect, inputs: &[LabelInput]) -> Vec<PlacedLabel> {
 
     // Order within a side by host coordinate along that side (host id
     // tiebreak keeps it total); this minimizes leader-line crossings.
-    let by_id = |a: &usize, b: &usize| a.cmp(b);
-    over.sort_by(|a, b| {
-        let ha = sorted.iter().find(|i| i.host_id == *a).unwrap();
-        let hb = sorted.iter().find(|i| i.host_id == *b).unwrap();
-        ha.host_rect
-            .center()
-            .x
-            .partial_cmp(&hb.host_rect.center().x)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| by_id(a, b))
-    });
-    under.sort_by(|a, b| {
-        let ha = sorted.iter().find(|i| i.host_id == *a).unwrap();
-        let hb = sorted.iter().find(|i| i.host_id == *b).unwrap();
-        ha.host_rect
-            .center()
-            .x
-            .partial_cmp(&hb.host_rect.center().x)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| by_id(a, b))
-    });
-    left.sort_by(|a, b| {
-        let ha = sorted.iter().find(|i| i.host_id == *a).unwrap();
-        let hb = sorted.iter().find(|i| i.host_id == *b).unwrap();
-        ha.host_rect
-            .center()
-            .y
-            .partial_cmp(&hb.host_rect.center().y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| by_id(a, b))
-    });
-    right.sort_by(|a, b| {
-        let ha = sorted.iter().find(|i| i.host_id == *a).unwrap();
-        let hb = sorted.iter().find(|i| i.host_id == *b).unwrap();
-        ha.host_rect
-            .center()
-            .y
-            .partial_cmp(&hb.host_rect.center().y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| by_id(a, b))
-    });
+    // Horizontal sides (over/under) order along `x`, vertical sides (left/
+    // right) along `y`.
+    let centers: std::collections::HashMap<usize, Point> = sorted
+        .iter()
+        .map(|input| (input.host_id, input.host_rect.center()))
+        .collect();
+    let order_side = |ids: &mut Vec<usize>, along_x: bool| {
+        ids.sort_by(|a, b| {
+            let (ca, cb) = (centers[a], centers[b]);
+            let (ka, kb) = if along_x { (ca.x, cb.x) } else { (ca.y, cb.y) };
+            ka.partial_cmp(&kb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.cmp(b))
+        });
+    };
+    order_side(&mut over, true);
+    order_side(&mut under, true);
+    order_side(&mut left, false);
+    order_side(&mut right, false);
 
-    let lookup = |id: usize| *sorted.iter().find(|i| i.host_id == id).unwrap();
+    let hosts: std::collections::HashMap<usize, &LabelInput> =
+        sorted.iter().map(|input| (input.host_id, input)).collect();
+    let lookup = |id: usize| *hosts[&id];
     let mut placed: Vec<PlacedLabel> = Vec::with_capacity(sorted.len());
     // Horizontal sides stack bands vertically outward from the rack edge;
     // vertical sides stack bands horizontally outward.
