@@ -30,13 +30,13 @@ Then the prefix is cleared
 And `h` processes as a normal key event
 
 ### Requirement: Source viewer shortcut
-The system SHALL open the embedded source pane via `g` + `v`: while the prefix is armed, pressing `v` sets `app.showing_viewer = true`, clears the prefix, focuses the source pane, and initializes source state from the loaded patch. The initial position follows the selection rule (selected component's first occurrence, otherwise beginning of file).
+The system SHALL open the embedded source pane via `g` + `v`: while the prefix is armed, pressing `v` clears the prefix, opens the source viewer through `App::open_view` (it takes a small-class pane and focus), and initializes source state from the loaded patch. The initial position follows the selection rule (selected component's first occurrence, otherwise beginning of file).
 
 #### Scenario: Open viewer with prefix
 Given no prefix is armed
 And a patch is loaded
 When user presses `g` then `v`
-Then `app.showing_viewer` becomes true
+Then `app.pane_holding(ViewType::SourceViewer)` is `Some`
 And the source pane is focused with source content from the patch
 And `app.prefix` is `None`
 

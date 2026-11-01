@@ -104,7 +104,6 @@ pub mod gui {
         if band_has_views(app, band) {
             paint_panes(app, ui, scene.as_ref(), &[]);
         } else {
-            app.pane_rects.clear();
             app.component_rects.clear();
             graph::paint_scene(ui, window_rect.size(), scene.as_ref(), &[]);
         }

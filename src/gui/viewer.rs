@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
-use crate::app::{App, FocusSlot, SourceViewMode, ViewType};
+use crate::app::{App, SourceViewMode, ViewType};
 use crate::patch::{ModifierAffect, NodeId, Patch, Span};
 use crate::theme::Color;
 
@@ -864,12 +864,8 @@ pub(crate) fn viewer_spec(app: &App) -> ViewerSpec {
         SourceViewMode::Raw => " Source [raw] ".to_string(),
         SourceViewMode::Prettified => " Source [prettified] ".to_string(),
     };
-    // Focus mirrors the handler's `sync_viewer_focus_from_tiles`: the viewer
-    // slot holds tile focus.
-    let focused = match app.tile_stack.focus {
-        FocusSlot::Slot(i) => app.tile_stack.slots.get(i) == Some(&ViewType::SourceViewer),
-        FocusSlot::Panels => false,
-    };
+    // The viewer surface is focused when its pane owns keyboard focus.
+    let focused = app.view_focused(ViewType::SourceViewer);
     let Some(patch) = app.patch.as_ref() else {
         return ViewerSpec {
             title,
@@ -1703,12 +1699,15 @@ mod tests {
     }
 
     #[test]
-    fn viewer_spec_focus_follows_tile_stack() {
+    fn viewer_spec_focus_follows_the_focused_pane() {
+        use crate::panes::PaneId;
         let mut app = App::new();
-        app.tile_stack.slots = vec![ViewType::SourceViewer];
-        app.tile_stack.focus = FocusSlot::Slot(0);
+        // Startup layout: the viewer occupies SmallTop, focus starts on the
+        // module UI in BigLeft.
+        assert!(!viewer_spec(&app).focused);
+        app.layout.focus = PaneId::SmallTop;
         assert!(viewer_spec(&app).focused);
-        app.tile_stack.focus = FocusSlot::Panels;
+        app.layout.focus = PaneId::BigLeft;
         assert!(!viewer_spec(&app).focused);
     }
 }

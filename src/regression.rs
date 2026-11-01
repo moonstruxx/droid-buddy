@@ -86,7 +86,10 @@ fn idx_for(app: &App, token: &str) -> usize {
 fn open_viewer(app: &mut App) {
     handle_event(key(KeyCode::Char('g')), app);
     handle_event(key(KeyCode::Char('v')), app);
-    assert!(app.showing_viewer, "g v should open embedded viewer");
+    assert!(
+        app.pane_holding(ViewType::SourceViewer).is_some(),
+        "g v should open embedded viewer"
+    );
 }
 
 // ── regression: initial BOF vs selected-open ───────────────────────────
@@ -97,7 +100,7 @@ fn regression_initial_bof_vs_selected_open() {
     let mut app = fixture_app();
     app.source_scroll = 99;
     open_viewer(&mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     assert_eq!(app.source_scroll, 0, "BOF when no selection");
     assert_eq!(app.occurrence_cursor, 0);
 
@@ -107,7 +110,9 @@ fn regression_initial_bof_vs_selected_open() {
     app2.select_component(String::from("B1.1"));
     app2.source_scroll = 999;
     // close then reopen through handle_event so initial-position rule reapplies
-    app2.showing_viewer = false;
+    if let Some(id) = app2.pane_holding(ViewType::SourceViewer) {
+        app2.layout.pane_mut(id).view = None;
+    }
     open_viewer(&mut app2);
     assert_eq!(
         app2.source_scroll, first_b11,
@@ -161,7 +166,7 @@ fn regression_first_and_replacement_jumps() {
     assert_eq!(app.source_scroll, b12_first);
     // Replacement while viewer open (Tabs to panels first)
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     app.hovered_component = Some(b11_idx);
     handle_event(key(KeyCode::Enter), &mut app);
     assert_eq!(app.selected_component, Some(String::from("B1.1")));
@@ -242,7 +247,7 @@ fn regression_deselect_keeps_position() {
     // Empty-panel click clears selection without moving scroll
     // Need viewer focus on Panels for empty click to be considered
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     // Place component rects far away, click empty
     let idx = idx_for(&app, "B1.1");
     app.component_rects = vec![(idx, Rect::new(0, 0, 16, 2))];
@@ -342,10 +347,10 @@ fn regression_minimap_click_maps_correctly() {
     // Minimap click works regardless of focus (Panels vs Source) and takes precedence over panel toggle
     // The clamped border click below the minimap counts as empty-panel space
     // and may have handed focus to Panels; normalize before the check.
-    if app.viewer_focus != ViewerFocus::Panels {
+    if app.viewer_focus() != ViewerFocus::Panels {
         handle_event(key(KeyCode::Tab), &mut app); // to Panels
     }
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     let state_before = app.patch.as_ref().unwrap().hw_components[idx_for(&app, "B1.1")]
         .state
         .clone();
@@ -361,7 +366,7 @@ fn regression_minimap_click_maps_correctly() {
     );
 
     handle_event(key(KeyCode::Tab), &mut app); // back to Source
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     click_at(&mut app, 0.7);
     // Still works when source focused
     assert!(app.source_scroll > 0);
@@ -386,7 +391,7 @@ fn regression_minimap_click_maps_correctly() {
 fn regression_tab_focus_round_trip() {
     let mut app = fixture_app();
     open_viewer(&mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     // render shows focus emphasis (yellow border) is not directly assertable via text,
     // but we can verify state and that panel keys are live even when Source focused
     let scale_before = app.scale_factor;
@@ -397,7 +402,7 @@ fn regression_tab_focus_round_trip() {
     );
 
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     // Now panel keys work
     handle_event(key(KeyCode::Char('+')), &mut app);
     assert_ne!(app.scale_factor, scale_before);
@@ -408,24 +413,24 @@ fn regression_tab_focus_round_trip() {
     assert_ne!(app.hovered_component, hover_before);
 
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     // Back to source: j scrolls source
     let scroll_before = app.source_scroll;
     handle_event(key(KeyCode::Char('j')), &mut app);
     assert_eq!(app.source_scroll, scroll_before + 1);
 
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
 
     // Esc closes keeping selection and resets focus to Panels
     app.select_component(String::from("B1.1"));
     let sel = app.selected_component.clone();
     let scroll = app.source_scroll;
     handle_event(key(KeyCode::Esc), &mut app);
-    assert!(!app.showing_viewer);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert!(!app.pane_holding(ViewType::SourceViewer).is_some());
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     assert_eq!(app.selected_component, sel);
     assert_eq!(app.source_scroll, scroll);
 }
@@ -455,7 +460,10 @@ fn regression_picker_precedence() {
     // Esc closes picker but viewer stays open
     handle_event(key(KeyCode::Esc), &mut app);
     assert!(!app.showing_picker);
-    assert!(app.showing_viewer, "viewer remains after picker close");
+    assert!(
+        app.pane_holding(ViewType::SourceViewer).is_some(),
+        "viewer remains after picker close"
+    );
     // Picker closed, t works again
     handle_event(key(KeyCode::Char('t')), &mut app);
     assert_ne!(app.source_view_mode, mode_before);
@@ -467,7 +475,7 @@ fn regression_picker_precedence() {
 fn regression_viewer_live_interaction() {
     let mut app = fixture_app();
     open_viewer(&mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     // Class layout: mouse clicks focus the pane they land in, so publish the
     // pane hit rects the renderer would (module UI left, source viewer right).
     app.pane_hit_rects = vec![
@@ -518,7 +526,7 @@ fn regression_viewer_live_interaction() {
         "mouse click toggles while viewer open"
     );
     assert_eq!(
-        app.viewer_focus,
+        app.viewer_focus(),
         ViewerFocus::Panels,
         "component click hands focus to panels"
     );
@@ -526,7 +534,7 @@ fn regression_viewer_live_interaction() {
     // Tab back to Source; a bare source-pane click re-focuses the source
     // pane without clearing the selection or toggling anything.
     handle_event(key(KeyCode::Tab), &mut app);
-    assert_eq!(app.viewer_focus, ViewerFocus::Source);
+    assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     let sel = app.selected_component.clone();
     let scroll = app.source_scroll;
     app.minimap_rect = None;
@@ -536,7 +544,7 @@ fn regression_viewer_live_interaction() {
         &mut app,
     );
     assert_eq!(
-        app.viewer_focus,
+        app.viewer_focus(),
         ViewerFocus::Source,
         "bare source-pane click focuses source"
     );
@@ -559,8 +567,8 @@ fn regression_viewer_live_interaction() {
 
     // Esc closes keeping selection and resets focus to Panels.
     handle_event(key(KeyCode::Esc), &mut app);
-    assert!(!app.showing_viewer);
-    assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+    assert!(!app.pane_holding(ViewType::SourceViewer).is_some());
+    assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
     assert_eq!(app.selected_component, sel);
     // After close, normal panel handling resumes.
     handle_event(key(KeyCode::Char('1')), &mut app);
@@ -1148,7 +1156,10 @@ fn anchor_graph() -> &'static AnchorGraph {
         let mut app = App::new();
         app.load_patch(patch);
         app.open_graph();
-        assert!(app.showing_graph, "open_graph must open the graph pane");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "open_graph must open the graph pane"
+        );
         assert!(
             app.graph.as_ref().is_some_and(|g| !g.nodes.is_empty()),
             "scale anchor must build a non-empty graph"
@@ -1609,7 +1620,7 @@ fn regression_warnings_only_load_hints_and_defers_modal() {
     handle_event(key(KeyCode::Char('g')), &mut app);
     handle_event(key(KeyCode::Char('g')), &mut app);
     assert!(
-        app.showing_graph,
+        app.pane_holding(ViewType::Graph).is_some(),
         "`g g` must still open the graph on a warnings-only load"
     );
     assert!(

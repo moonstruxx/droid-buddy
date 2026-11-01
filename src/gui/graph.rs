@@ -1107,10 +1107,9 @@ fn edge_ctrl(start: (f32, f32), end: (f32, f32)) -> Option<(f32, f32)> {
 /// The egui rect the full graph scene is painted into on the current frame:
 /// the class-layout pane holding the Graph view. Derived from
 /// `App::pane_geometry` — the ADR 35 single geometry source the render
-/// dispatch (`paint_panes`) draws from and publishes as `pane_hit_rects` —
-/// not the legacy `tile_stack` slot mirror, so the scene origin, the
-/// first-frame fit, the mouse origin, and the paint path all agree on the
-/// same rect. `None` when no pane holds the Graph view.
+/// dispatch (`paint_panes`) draws from and publishes as `pane_hit_rects` — so
+/// the scene origin, the first-frame fit, the mouse origin, and the paint path
+/// all agree on the same rect. `None` when no pane holds the Graph view.
 pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
     let band = super::to_cell_rect(window);
     app.pane_geometry(band).into_iter().find_map(|(id, cell)| {
@@ -3841,7 +3840,7 @@ mod fit_tests {
 
 #[cfg(test)]
 mod kittest_tests {
-    use crate::app::App;
+    use crate::app::{App, ViewType};
     use crate::handler::{handle_event, key_modifiers, KeyCode, KeyEvent};
     use crate::patch::Patch;
     use crate::theme;
@@ -3912,7 +3911,10 @@ mod kittest_tests {
         // `g g` through the same seam opens the graph view.
         winit_key(&winit::keyboard::Key::Character("g".into()), &mut app);
         winit_key(&winit::keyboard::Key::Character("g".into()), &mut app);
-        assert!(app.showing_graph, "g g must open the graph view");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "g g must open the graph view"
+        );
 
         // Repaint and resolve a graph node by its AccessKit label. `get_by_label`
         // panics when the label is absent, so a clean return proves the repaint
@@ -3944,7 +3946,7 @@ mod kittest_tests {
         let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         render_graph(&app);
     }
 
@@ -3963,15 +3965,15 @@ mod kittest_tests {
         let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         render_graph(&app);
 
         key(&mut app, KeyCode::Esc);
-        assert!(!app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_none());
 
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         render_graph(&app);
     }
 
@@ -3982,12 +3984,15 @@ mod kittest_tests {
         // a small pane, so `g v` routes focus to that pane instead of opening a
         // second copy.
         assert!(
-            app.showing_viewer,
+            app.pane_holding(ViewType::SourceViewer).is_some(),
             "the startup pane config opens the source viewer"
         );
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(app.showing_viewer, "the viewer stays open (no duplicate)");
+        assert!(
+            app.pane_holding(ViewType::SourceViewer).is_some(),
+            "the viewer stays open (no duplicate)"
+        );
         assert_eq!(
             app.layout.pane(app.layout.focus).view,
             Some(crate::app::ViewType::SourceViewer),
@@ -4000,9 +4005,9 @@ mod kittest_tests {
         let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         key(&mut app, KeyCode::Esc);
-        assert!(!app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_none());
     }
 
     #[test]
@@ -4020,11 +4025,11 @@ mod kittest_tests {
         let mut app = setup("own_buttons.ini");
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
 
         let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
-        assert!(!app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_none());
     }
 
     // ── Journey tests ────────────────────────────────────────────────────────
@@ -4035,16 +4040,25 @@ mod kittest_tests {
         // Open graph via keyboard (g g)
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('g'));
-        assert!(app.showing_graph, "graph should be present after open");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "graph should be present after open"
+        );
         assert!(app.graph.is_some(), "graph data should exist after open");
         // Render while open
         render_graph(&app);
         // Close graph — close_graph hides the view but preserves graph data
         app.close_graph();
-        assert!(!app.showing_graph, "graph should be hidden after close");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_none(),
+            "graph should be hidden after close"
+        );
         // Reopen — graph rebuilds from the same patch
         app.open_graph();
-        assert!(app.showing_graph, "graph should be present after reopen");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "graph should be present after reopen"
+        );
         assert!(app.graph.is_some(), "graph data should exist after reopen");
         render_graph(&app);
     }
@@ -4055,14 +4069,23 @@ mod kittest_tests {
         // Open source viewer via g v
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(app.showing_viewer, "viewer should be showing");
+        assert!(
+            app.pane_holding(ViewType::SourceViewer).is_some(),
+            "viewer should be showing"
+        );
         // Close viewer via Esc
         key(&mut app, KeyCode::Esc);
-        assert!(!app.showing_viewer, "viewer should be hidden after close");
+        assert!(
+            app.pane_holding(ViewType::SourceViewer).is_none(),
+            "viewer should be hidden after close"
+        );
         // Reopen
         key(&mut app, KeyCode::Char('g'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(app.showing_viewer, "viewer should be showing after reopen");
+        assert!(
+            app.pane_holding(ViewType::SourceViewer).is_some(),
+            "viewer should be showing after reopen"
+        );
     }
 
     #[test]

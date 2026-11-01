@@ -264,7 +264,7 @@ use crate::latency::CostModel;
 /// Cell-grid rectangle (u16 columns/rows), the geometry handoff between the
 /// renderer and the handler's hit-testing (replaces the terminal stack's `Rect` after
 /// the native teardown). The egui surfaces work in pixels via `egui::Rect`;
-/// this is the app-level cell geometry `component_rects`/`pane_rects` carry.
+/// this is the app-level cell geometry `component_rects`/`pane_hit_rects` carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
     pub x: u16,
@@ -492,9 +492,9 @@ pub enum SourceViewMode {
     Prettified,
 }
 
-/// Right-column view slot kind (change `tiled-window-manager`, D1); the
-/// module UI is a view too (`Panels`, change `pane-class-layout`, D2).
-/// Panels is retired (change `module-ui-physical`); Physical is the module UI.
+/// View kind occupying a pane (change `pane-class-layout`); the module UI is a
+/// view too (D2). Panels is retired (change `module-ui-physical`); Physical is
+/// the module UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewType {
     Graph,
@@ -503,52 +503,11 @@ pub enum ViewType {
     Optimizer,
 }
 
-/// Focused pane in the tiled layout: the left panel pane or a right-column
-/// slot by index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FocusSlot {
-    #[default]
-    Panels,
-    Slot(usize),
-}
-
 /// Carousel order for `cycle_view_in_slot` per pane class (change
 /// `pane-class-layout`, 1.4): big panes cycle graph and physical;
 /// small panes cycle source viewer and the optimizer.
 const BIG_CAROUSEL: [ViewType; 2] = [ViewType::Graph, ViewType::Physical];
 const SMALL_CAROUSEL: [ViewType; 2] = [ViewType::SourceViewer, ViewType::Optimizer];
-
-/// Right-column view stack (change `tiled-window-manager`, D1): the new home
-/// for which views are open. The legacy `showing_*` bools mirror it until
-/// handler/ui migrate (tasks 4.1/6.1); `App` methods update both.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct TileStack {
-    /// Open right-column views, top to bottom.
-    pub slots: Vec<ViewType>,
-    /// Focused pane (`Panels` = left pane).
-    pub focus: FocusSlot,
-}
-
-impl TileStack {
-    pub fn is_open(&self, view: ViewType) -> bool {
-        self.slots.contains(&view)
-    }
-
-    pub fn open(&mut self, view: ViewType) {
-        if !self.slots.contains(&view) {
-            self.slots.push(view);
-        }
-    }
-
-    pub fn close(&mut self, view: ViewType) {
-        self.slots.retain(|v| *v != view);
-        if let FocusSlot::Slot(i) = self.focus {
-            if i >= self.slots.len() {
-                self.focus = FocusSlot::Panels;
-            }
-        }
-    }
-}
 
 /// A pending native-window action: queued at startup by
 /// `main.rs::queue_startup_window_open` and consumed (with reset) by the
@@ -924,24 +883,13 @@ pub struct App {
     /// renderer — not the event handler — knows where things actually ended
     /// up on screen.
     pub component_rects: Vec<(usize, Rect)>,
-    /// Right-column view stack (change `tiled-window-manager`, D1). Open-view
-    /// state lives here; the `showing_*` bools mirror it transitionally.
-    pub tile_stack: TileStack,
-    /// Class-based pane layout (change `pane-class-layout`): the layout source
-    /// of truth. `tile_stack` and the `showing_*` bools are compat mirrors
-    /// derived from it until handler/ui migrate (tasks 2.x/3.x).
+    /// Class-based pane layout (change `pane-class-layout`): the single
+    /// representation of what is open and which pane has focus (ADR 37).
     pub layout: PaneLayout,
-    /// Tiled-pane rects published by `render_tiled_main` each frame, keyed by
-    /// focused-pane identity (`Panels` = left pane). Hit-testing input for
-    /// focus routing; rebuilt every frame like `component_rects`.
-    pub pane_rects: Vec<(FocusSlot, Rect)>,
     /// Pane rects the renderer drew this frame, keyed by pane id (ADR 35:
     /// drawn geometry and hit geometry share one source). Written each frame
-    /// by `refresh_hit_geometry` from `pane_geometry`; `pane_rects` (the
-    /// legacy `FocusSlot` mirror for handler/main) derives from it.
+    /// by `refresh_hit_geometry` from `pane_geometry`.
     pub pane_hit_rects: Vec<(PaneId, Rect)>,
-    /// True when the signal-flow graph view (`g g`) is open.
-    pub showing_graph: bool,
     /// The signal-flow graph built from the current patch. `None` until a
     /// patch is loaded and the graph is opened.
     pub graph: Option<Graph>,
@@ -999,7 +947,7 @@ pub struct App {
     /// stiffness (`layout::SPRING_K`). `[`/`]` on the graph surface step it by
     /// `layout::TENSION_STEP` within `[TENSION_MIN, TENSION_MAX]` and re-solve
     /// the layout live. Persists across patch loads (a view preference, like
-    /// `viewer_split_ratio`); determinism holds per value (same patch + same
+    /// the band split ratio); determinism holds per value (same patch + same
     /// machine + same tension → same layout).
     pub tension: f32,
     /// Graph-arrangement mode (graph-column-layout D5): the deterministic
@@ -1043,8 +991,6 @@ pub struct App {
     /// Vim-style prefix mode: `g` was pressed and the app waits for a
     /// follow-up key within `PREFIX_TIMEOUT`; `None` when none is armed.
     pub prefix: Option<PrefixState>,
-    /// True when `g` + `v` opened the embedded source pane.
-    pub showing_viewer: bool,
     /// Which component is explicitly selected (distinct from hover). Holds the
     /// hardware token id (e.g. "B1.1") so it can be looked up directly in
     /// `Patch::occurrence_index`.
@@ -1055,8 +1001,6 @@ pub struct App {
     /// terminal tile node highlight. Lives here, not in the window, so selection
     /// survives surface switches and a window close.
     pub selected_circuit: Option<NodeId>,
-    /// Which pane has keyboard focus while the viewer is open.
-    pub viewer_focus: ViewerFocus,
     /// Raw vs prettified rendering for the source pane. Defaults to Raw.
     pub source_view_mode: SourceViewMode,
     /// Index into `occurrences_for(selected_component)` for Up/Down/Home/End
@@ -1081,14 +1025,6 @@ pub struct App {
     pub source_pane_rect: Option<Rect>,
     /// Scale factor for rendering (1.0 = default). Used for progressive scaling.
     pub scale_factor: f32,
-    /// Split ratio for viewer/source pane division (0.3 to 0.7).
-    /// 0.6 means panels get 60%, source gets 40%.
-    /// This is a view preference that persists across patch loads.
-    pub viewer_split_ratio: f32,
-    /// Canonical left/right split (change `tiled-window-manager`, D2): the
-    /// renamed, view-agnostic `viewer_split_ratio`. Kept equal to it until
-    /// handler migrates (task 4.2).
-    pub main_split_ratio: f32,
     /// Synchronous observer event bus (design D6). Re-solve triggers and
     /// topology errors are emitted here for subscribers (renderer, status).
     pub events: EventBus,
@@ -1252,9 +1188,10 @@ pub struct App {
     /// coherently.
     pub cost_model: CostModel,
     /// Whether cable edges are colored by the forward-loop latency ramp on the
-    /// graph surface (`c` toggles). A view preference: like `viewer_split_ratio`
-    /// it persists across `load_patch` (unlike `processing_paused`/`disabled_circuits`,
-    /// which reset because they describe transient processing state).
+    /// graph surface (`c` toggles). A view preference: like the band split
+    /// ratio (`layout.main_split_ratio`) it persists across `load_patch`
+    /// (unlike `processing_paused`/`disabled_circuits`, which reset because
+    /// they describe transient processing state).
     pub latency_coloring: bool,
     /// Optional component-scoped filter token (`None` = patch-wide).
     pub diff_scope: Option<String>,
@@ -1296,7 +1233,7 @@ impl App {
         // is the single source of truth for their defaults, so retuning
         // `COHESION_K` never leaves a stale literal behind here.
         let force_knobs = crate::layout::SolveKnobs::default();
-        let mut app = Self {
+        Self {
             patch: None,
             active_shift: None,
             hovered_component: None,
@@ -1310,10 +1247,7 @@ impl App {
             picker_filter: String::new(),
             component_rects: Vec::new(),
             layout: PaneLayout::default(),
-            tile_stack: TileStack::default(),
-            pane_rects: Vec::new(),
             pane_hit_rects: Vec::new(),
-            showing_graph: false,
             graph: None,
             guessed_labels: HashMap::new(),
             graph_positions: Vec::new(),
@@ -1333,10 +1267,8 @@ impl App {
             layout_cohesion_force: force_knobs.cohesion,
             showing_sliders: false,
             prefix: None,
-            showing_viewer: false,
             selected_component: None,
             selected_circuit: None,
-            viewer_focus: ViewerFocus::Panels,
             source_view_mode: SourceViewMode::Raw,
             occurrence_cursor: 0,
             source_scroll: 0,
@@ -1346,8 +1278,6 @@ impl App {
             graph_minimap_transform: None,
             source_pane_rect: None,
             scale_factor: 1.0,
-            viewer_split_ratio: 0.6,
-            main_split_ratio: 0.6,
             events: EventBus::default(),
             processing_paused: false,
             physical_show_skeleton: false,
@@ -1401,13 +1331,7 @@ impl App {
             select_state: None,
             upload_modal: None,
             upload_send: None,
-        };
-        // The mirror fields (tile_stack, showing_*, split ratios) are derived
-        // from the layout, so the constructor seeds them in one pass. The
-        // startup configuration (spec: module UI in the left big pane, source
-        // viewer in a small pane) leaves `showing_viewer` true.
-        app.sync_mirror();
-        app
+        }
     }
 
     /// Favourited `.ini` files and directories as sorted absolute `PathBuf`s
@@ -2143,8 +2067,8 @@ impl App {
     }
 
     /// Drop optimizer menu state, restoring file order after a preview. The
-    /// flag-only half of `optimizer_close`; the tile entry is removed by the
-    /// caller (in-place slot replacement) or `optimizer_close`.
+    /// flag-only half of `optimizer_close`; the pane entry is cleared by the
+    /// caller (in-place pane replacement) or `optimizer_close`.
     fn drop_optimizer_state(&mut self) {
         let was_previewing = self
             .optimizer
@@ -2156,12 +2080,6 @@ impl App {
         }
         self.optimizer = None;
         self.optimizer_diff_state = None;
-    }
-
-    /// Compat: optimizer-open state from the tile stack (no `showing_optimizer`
-    /// bool ever existed; handler/ui migrate to this in task 5.1).
-    pub fn showing_optimizer(&self) -> bool {
-        self.tile_stack.is_open(ViewType::Optimizer)
     }
 
     /// Open `view` (spec "Window classes route views to panes"): an
@@ -2185,7 +2103,6 @@ impl App {
         if let Some(id) = self.pane_holding(view) {
             self.set_focus(id);
         }
-        self.sync_mirror();
     }
 
     /// Close the focused pane's view (`Esc`, spec "Esc closes the focused
@@ -2194,11 +2111,9 @@ impl App {
     /// right half to a single big pane (the arrangement derives from
     /// `has_small_view`, so that happens automatically).
     pub fn close_focused_view(&mut self) {
-        self.reconcile_from_mirror();
         if self.layout.maximized.is_some() {
             self.layout.maximized = None;
             self.status_message = String::from("Layout restored");
-            self.sync_mirror();
             return;
         }
         let id = self.layout.focus;
@@ -2208,7 +2123,6 @@ impl App {
         };
         self.close_view_state(view);
         self.layout.pane_mut(id).view = None;
-        self.sync_mirror();
         self.status_message = format!("Closed {view:?}");
     }
 
@@ -2216,7 +2130,6 @@ impl App {
     /// tree order (`Tab` forward, `Shift+Tab` backward), skipping empty panes
     /// (spec "Focus routing across panes").
     pub fn cycle_focus(&mut self, forward: bool) {
-        self.reconcile_from_mirror();
         let ids: Vec<PaneId> = self
             .pane_order()
             .into_iter()
@@ -2242,7 +2155,6 @@ impl App {
     /// in another pane takes focus instead of duplicating; the Physical/Panels
     /// pair stays exclusive.
     pub fn cycle_view_in_slot(&mut self, forward: bool) {
-        self.reconcile_from_mirror();
         let id = self.layout.focus;
         let Some(current) = self.layout.pane(id).view else {
             return;
@@ -2278,7 +2190,6 @@ impl App {
             self.open_graph();
             self.recompute_influence();
         }
-        self.sync_mirror();
     }
 
     /// Pane ids in tree order: BigLeft, then the right half as one big pane
@@ -2298,99 +2209,36 @@ impl App {
             .find(|&id| self.layout.pane(id).view == Some(view))
     }
 
-    /// Re-derive the compat mirrors from the layout: `tile_stack` slots/focus,
-    /// the `showing_*` bools, and the legacy split-ratio fields. Physical
-    /// (the module UI) is the implicit left pane in the mirror, so it never
-    /// appears in `slots`.
-    fn sync_mirror(&mut self) {
-        let mut slots = Vec::new();
-        for id in self.pane_order() {
-            if let Some(view) = self.layout.pane(id).view {
-                // Physical is the module UI and is the implicit left pane
-                if view != ViewType::Physical {
-                    slots.push(view);
-                }
-            }
-        }
-        self.tile_stack.slots = slots;
-        self.tile_stack.focus = self.projected_focus();
-        self.showing_graph = self.pane_holding(ViewType::Graph).is_some();
-        self.showing_viewer = self.pane_holding(ViewType::SourceViewer).is_some();
-        self.main_split_ratio = self.layout.main_split_ratio as f32;
-        self.viewer_split_ratio = self.main_split_ratio;
+    /// The view of the focused pane, or `None` when the focused pane is empty
+    /// (spec "Focus routing across panes": keyboard input routes to the focused
+    /// pane's view). The single focus source for the per-view key sets.
+    pub fn focused_view(&self) -> Option<ViewType> {
+        self.layout.pane(self.layout.focus).view
     }
 
-    /// The mirror focus the current layout projects to: module UI (Physical)
-    /// when the focused pane is empty or holds the module UI, else the slot of its
-    /// view. Shared by `sync_mirror` and `reconcile_from_mirror` so an empty
-    /// focused pane's projection is not mistaken for a deliberate
-    /// external focus write.
-    fn projected_focus(&self) -> FocusSlot {
-        match self.layout.pane(self.layout.focus).view {
-            Some(ViewType::Physical) | None => FocusSlot::Panels,
-            Some(view) => self
-                .tile_stack
-                .slots
-                .iter()
-                .position(|v| *v == view)
-                .map(FocusSlot::Slot)
-                .unwrap_or(FocusSlot::Panels),
+    /// Whether the focused pane holds `view`.
+    pub fn view_focused(&self, view: ViewType) -> bool {
+        self.focused_view() == Some(view)
+    }
+
+    /// Which surface owns keys while both the module UI and the source viewer
+    /// may be open: `Source` while the focused pane holds the viewer, else
+    /// `Panels`. Derived from the layout (ADR 37), never stored.
+    pub fn viewer_focus(&self) -> ViewerFocus {
+        if self.view_focused(ViewType::SourceViewer) {
+            ViewerFocus::Source
+        } else {
+            ViewerFocus::Panels
         }
     }
 
     /// Focus `id`, clearing the non-latching maximize when focus actually
-    /// moves (spec: maximize clears on focus change), then re-derive mirrors.
+    /// moves (spec: maximize clears on focus change).
     fn set_focus(&mut self, id: PaneId) {
         if self.layout.focus != id {
             self.layout.focus = id;
             self.layout.maximized = None;
         }
-        self.sync_mirror();
-    }
-
-    /// Adopt direct `tile_stack` writes from the pre-migration consumers
-    /// (handler.rs `focus_tile_slot`/`tile_stack.open/close`, main.rs
-    /// `focus_startup_graph_slot`) into the layout before a public mutator
-    /// runs: open mirror-only views class-routed, close layout views the
-    /// mirror dropped (Panels stays implicit), and map the mirror focus onto
-    /// the layout. This keeps those external writes idempotent in the common
-    /// paths (`g v`, `g g`, validation-Enter).
-    fn reconcile_from_mirror(&mut self) {
-        let mirror_views: Vec<ViewType> = self.tile_stack.slots.clone();
-        for view in mirror_views.iter().copied() {
-            if self.pane_holding(view).is_none() {
-                self.place_view(view);
-            }
-        }
-        for id in [
-            PaneId::BigLeft,
-            PaneId::BigRight,
-            PaneId::SmallTop,
-            PaneId::SmallBottom,
-        ] {
-            if let Some(view) = self.layout.pane(id).view {
-                // Physical is the module UI (implicit left pane), never close it via mirror reconciliation
-                if view != ViewType::Physical && !mirror_views.contains(&view) {
-                    self.close_view_state(view);
-                    self.layout.pane_mut(id).view = None;
-                }
-            }
-        }
-        let projected = self.projected_focus();
-        if self.tile_stack.focus != projected {
-            let before = self.layout.focus;
-            self.layout.focus = match self.tile_stack.focus {
-                FocusSlot::Panels => PaneId::BigLeft,
-                FocusSlot::Slot(i) => match self.tile_stack.slots.get(i).copied() {
-                    Some(view) => self.pane_holding(view).unwrap_or(PaneId::BigLeft),
-                    None => PaneId::BigLeft,
-                },
-            };
-            if self.layout.focus != before {
-                self.layout.maximized = None;
-            }
-        }
-        self.sync_mirror();
     }
 
     /// Drop a view's state without touching the pane (view replacement and
@@ -2398,12 +2246,10 @@ impl App {
     fn close_view_state(&mut self, view: ViewType) {
         match view {
             ViewType::Graph => {
-                self.showing_graph = false;
                 self.hovered_graph_node = None;
             }
-            ViewType::SourceViewer => self.showing_viewer = false,
-            ViewType::Physical => {}
             ViewType::Optimizer => self.drop_optimizer_state(),
+            ViewType::Physical | ViewType::SourceViewer => {}
         }
     }
 
@@ -2463,13 +2309,13 @@ impl App {
             // only the state hook runs here.
             self.build_graph_state();
         }
-        self.sync_mirror();
     }
 
     /// Pane geometry for the current arrangement (task 1.3, spec "Adaptive
-    /// pane layout"): the left big pane at `main_split_ratio`, the right half
-    /// as one big pane or two small panes split at `small_split_ratio`, and
-    /// the maximize override returning only the maximized pane at full band.
+    /// pane layout"): the left big pane at `layout.main_split_ratio`, the
+    /// right half as one big pane or two small panes split at
+    /// `small_split_ratio`, and the maximize override returning only the
+    /// maximized pane at full band.
     /// Returns every arrangement pane in tree order, empty panes included.
     /// The single geometry source (ADR 35): the renderer draws from it and
     /// publishes it as `pane_hit_rects` via `refresh_hit_geometry`.
@@ -2508,29 +2354,9 @@ impl App {
     }
 
     /// Publish the pane geometry the renderer drew this frame (ADR 35: drawn
-    /// geometry and hit geometry share one source) and derive the legacy
-    /// `FocusSlot` mirror `pane_rects` from it for handler/main compat. Runs
-    /// `sync_mirror` first so a fresh `App` (whose mirror is not yet derived
-    /// from the layout) publishes complete pane rects from frame one. Panels
-    /// maps to `FocusSlot::Panels`, any other open view to its slot index,
-    /// and empty panes are dropped (nothing to hit-test).
+    /// geometry and hit geometry share one source).
     pub fn refresh_hit_geometry(&mut self, band: Rect) {
-        self.sync_mirror();
         self.pane_hit_rects = self.pane_geometry(band);
-        self.pane_rects = self
-            .pane_hit_rects
-            .iter()
-            .filter_map(|(id, rect)| {
-                let slot = match self.layout.pane(*id).view {
-                    Some(ViewType::Physical) => FocusSlot::Panels,
-                    Some(view) => {
-                        FocusSlot::Slot(self.tile_stack.slots.iter().position(|v| *v == view)?)
-                    }
-                    None => return None,
-                };
-                Some((slot, *rect))
-            })
-            .collect();
     }
 
     /// Open the `?` help modal. Works from any view; the modal is a top-level
@@ -2954,7 +2780,7 @@ impl App {
     /// The pan applies only while the physical view's pane holds focus: the
     /// graph pane and the source pane keep their own arrow semantics. Change
     /// `pane-class-layout`: the source viewer is co-visible from startup, so
-    /// the gate is the focused pane, not the legacy `showing_viewer` flag.
+    /// the gate is the focused pane, never a view-open flag.
     pub fn physical_pan_if_overflow(&mut self, dir_x: i32, dir_y: i32) -> bool {
         if let Some(graph) = self.pane_holding(crate::app::ViewType::Graph) {
             if self.layout.focus == graph {
@@ -3437,7 +3263,6 @@ impl App {
             self.occurrence_cursor = 0;
             self.source_scroll = 0;
             self.source_view_mode = SourceViewMode::Raw;
-            self.viewer_focus = ViewerFocus::Panels;
             self.minimap_rect = None;
             self.source_pane_rect = None;
             self.processing_paused = false;
@@ -3495,14 +3320,12 @@ impl App {
         if let Some(id) = self.pane_holding(ViewType::Optimizer) {
             self.layout.pane_mut(id).view = None;
         }
-        self.sync_mirror();
         self.patch = Some(patch);
         self.selected_component = None;
         self.selected_circuit = None;
         self.occurrence_cursor = 0;
         self.source_scroll = 0;
         self.source_view_mode = SourceViewMode::Raw;
-        self.viewer_focus = ViewerFocus::Panels;
         self.minimap_rect = None;
         self.source_pane_rect = None;
         self.processing_paused = false;
@@ -3587,7 +3410,6 @@ impl App {
             self.occurrence_cursor = 0;
             self.source_scroll = 0;
             self.source_view_mode = SourceViewMode::Raw;
-            self.viewer_focus = ViewerFocus::Panels;
             self.minimap_rect = None;
             self.source_pane_rect = None;
             self.processing_paused = false;
@@ -3643,14 +3465,12 @@ impl App {
         if let Some(id) = self.pane_holding(ViewType::Optimizer) {
             self.layout.pane_mut(id).view = None;
         }
-        self.sync_mirror();
         self.patch = Some(patch);
         self.selected_component = None;
         self.selected_circuit = None;
         self.occurrence_cursor = 0;
         self.source_scroll = 0;
         self.source_view_mode = SourceViewMode::Raw;
-        self.viewer_focus = ViewerFocus::Panels;
         self.minimap_rect = None;
         self.source_pane_rect = None;
         self.processing_paused = false;
@@ -4190,12 +4010,12 @@ impl App {
         self.guessed_labels = guessed;
     }
 
+    /// Build the graph state and place the graph in a big pane
+    /// (class-routed), replacing the target's view. Focus-neutral: a caller
+    /// that wants the graph to own keys opens it through `open_view`, which
+    /// focuses the pane it already occupies.
     pub fn open_graph(&mut self) {
         self.build_graph_state();
-        self.showing_graph = true;
-        // Place the graph in a big pane (class-routed), replacing the target's
-        // view. Focus-neutral: the caller (handler `focus_tile_slot`, main.rs
-        // `focus_startup_graph_slot`) focuses, matching the old slot behavior.
         if self.pane_holding(ViewType::Graph).is_none() {
             let target = self.pick_pane_for(ViewType::Graph);
             if let Some(existing) = self.layout.pane(target).view {
@@ -4205,7 +4025,6 @@ impl App {
             }
             self.layout.pane_mut(target).view = Some(ViewType::Graph);
         }
-        self.sync_mirror();
     }
 
     /// Queue a native-window action for the windowed run-loop. The handler
@@ -4243,17 +4062,15 @@ impl App {
 
     /// Close the graph view, leaving panel/source-viewer state untouched.
     pub fn close_graph(&mut self) {
-        self.showing_graph = false;
         if let Some(id) = self.pane_holding(ViewType::Graph) {
             self.layout.pane_mut(id).view = None;
         }
         self.hovered_graph_node = None;
-        self.sync_mirror();
     }
 
-    /// Rebuild the graph from the current patch without toggling
-    /// `showing_graph`. Used after a per-circuit toggle so the renderer
-    /// reflects the new disabled state while staying on the surface.
+    /// Rebuild the graph from the current patch without closing the graph
+    /// pane. Used after a per-circuit toggle so the renderer reflects the new
+    /// disabled state while staying on the surface.
     pub fn rebuild_graph(&mut self) {
         let graph = match &self.patch {
             Some(patch) => {
@@ -4287,7 +4104,7 @@ impl App {
         // hover stays as-is (still valid index) but will be re-resolved
         // on next mouse move; keep it so `x` status can reference it.
         self.emit_graph_built();
-        // Re-apply influence highlights after rebuild so the graph tile stays
+        // Re-apply influence highlights after rebuild so the graph pane stays
         // in sync with the current modifier selection.
         if let Some(sub) = self.influence.clone() {
             if let Some(graph) = self.graph.as_mut() {
@@ -4623,7 +4440,6 @@ impl App {
     /// Reset graph-view state on patch load: the graph is rebuilt from a fresh
     /// solve the next time it opens.
     fn reset_graph_state(&mut self) {
-        self.showing_graph = false;
         if let Some(id) = self.pane_holding(ViewType::Graph) {
             self.layout.pane_mut(id).view = None;
         }
@@ -4654,7 +4470,6 @@ impl App {
         self.influence_nodes.clear();
         self.influence_edges.clear();
         self.influence_filter_active = false;
-        self.sync_mirror();
     }
 
     /// Recompute the influence subtree for the currently selected hardware token.
@@ -4686,10 +4501,10 @@ impl App {
             patch.influence_subtree_with_disabled(&vars, &self.disabled_circuits)
         };
         // Only (re)build full-graph state when a graph already exists or the
-        // graph tile is open. Otherwise keep influence without eagerly
+        // graph pane is open. Otherwise keep influence without eagerly
         // constructing a graph so plain panel interactions don't emit
         // GraphRebuilt.
-        let needs_graph = self.graph.is_some() || self.tile_stack.is_open(ViewType::Graph);
+        let needs_graph = self.graph.is_some() || self.pane_holding(ViewType::Graph).is_some();
         if needs_graph && self.graph.is_none() {
             let clusters = clusters_from_patch(&patch);
             let graph = Graph::build_from_patch(
@@ -4947,11 +4762,10 @@ impl App {
 
     /// Adjust the left/right split by `delta`, clamped to [0.3, 0.7] (spec
     /// "Adaptive pane layout": even split default, 10 percent steps). The
-    /// layout holds the value; the legacy fields mirror it.
+    /// layout holds the value.
     pub fn adjust_main_split_ratio(&mut self, delta: f32) {
         self.layout.main_split_ratio =
             (self.layout.main_split_ratio + delta as f64).clamp(0.3, 0.7);
-        self.sync_mirror();
     }
 
     /// Adjust the vertical boundary between the two small panes by `delta`,
@@ -4965,7 +4779,6 @@ impl App {
     /// task 3.1 wires it): press again to restore, and focus change or `Esc`
     /// clears it (spec "Non-latching maximize").
     pub fn maximize_toggle(&mut self) {
-        self.reconcile_from_mirror();
         let id = self.layout.focus;
         self.layout.maximized = if self.layout.maximized == Some(id) {
             None
@@ -4977,7 +4790,6 @@ impl App {
         } else {
             String::from("Layout restored")
         };
-        self.sync_mirror();
     }
 
     /// Panels is retired; Physical is the module UI. No mutual exclusion.
@@ -4991,7 +4803,6 @@ impl App {
     /// only big pane is a no-op. Focus is preserved; a swap that would leave
     /// Physical and module UI open together is refused.
     pub fn swap_big(&mut self) {
-        self.reconcile_from_mirror();
         let focused = self.layout.focus;
         let big_panes: Vec<PaneId> = if self.layout.has_small_view() {
             vec![PaneId::BigLeft]
@@ -5014,7 +4825,6 @@ impl App {
         }
         self.layout.pane_mut(focused).view = b;
         self.layout.pane_mut(other).view = a;
-        self.sync_mirror();
     }
 
     /// `Alt+s`: exchange the views of the two small panes (spec "Same-class
@@ -5022,7 +4832,6 @@ impl App {
     /// (the one view moves across). Focus is preserved; a swap that would
     /// leave Physical and module UI open together is refused.
     pub fn swap_small(&mut self) {
-        self.reconcile_from_mirror();
         if !self.layout.has_small_view() {
             self.status_message = String::from("No swap applies");
             return;
@@ -5036,7 +4845,6 @@ impl App {
         }
         self.layout.small_top.view = b;
         self.layout.small_bottom.view = a;
-        self.sync_mirror();
     }
 
     pub fn load_sample_patch(&mut self) {
@@ -5083,10 +4891,8 @@ impl App {
         }
         self.occurrence_cursor = 0;
         // Open + focus the source viewer so the jump is visible (design D4).
-        // `open_view` inserts a tiled slot (deduping if one is already open)
-        // and sets `showing_viewer`, mirroring the validation-modal Enter jump
-        // — a bare `showing_viewer = true` renders nothing once tiles are up.
-        self.viewer_focus = ViewerFocus::Source;
+        // `open_view` places the viewer in a small pane and focuses it, which
+        // is also what makes the source pane own keys (`App::viewer_focus`).
         self.open_view(ViewType::SourceViewer);
     }
 
@@ -5310,7 +5116,7 @@ mod tests {
     #[test]
     fn new_app_has_graph_defaults_closed() {
         let app = App::new();
-        assert!(!app.showing_graph);
+        assert!(!app.pane_holding(ViewType::Graph).is_some());
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
         assert!(app.graph_settle.is_none());
@@ -5635,7 +5441,10 @@ mod tests {
         let g = KeyEvent::new(KeyCode::Char('g'), key_modifiers::NONE);
         handle_event(g.clone(), &mut app);
         handle_event(g, &mut app);
-        assert!(app.showing_graph, "`g g` opens the graph pane");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "`g g` opens the graph pane"
+        );
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Sections);
         let nodes = app.graph.as_ref().map(|gr| gr.nodes.len()).unwrap_or(0);
         assert!(nodes > 20, "fixture must span many circuits, got {nodes}");
@@ -5706,7 +5515,7 @@ mod tests {
         app.load_patch(patch);
         app.open_graph();
 
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         let graph = app.graph.as_ref().unwrap();
         assert!(
             !graph.nodes.is_empty(),
@@ -5965,7 +5774,7 @@ mod tests {
     fn open_graph_without_patch_yields_empty_graph() {
         let mut app = App::new();
         app.open_graph();
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         let graph = app.graph.as_ref().unwrap();
         assert!(graph.nodes.is_empty());
         assert!(app.graph_positions.is_empty());
@@ -5977,13 +5786,16 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         app.load_patch(patch);
         app.select_component(String::from("B1.1"));
-        app.viewer_focus = ViewerFocus::Source;
+        let viewer_pane = app
+            .pane_holding(ViewType::SourceViewer)
+            .expect("startup layout holds the viewer");
+        app.layout.focus = viewer_pane;
         app.source_view_mode = SourceViewMode::Prettified;
         app.source_scroll = 9;
         app.occurrence_cursor = 2;
 
         let before_selection = app.selected_component.clone();
-        let before_focus = app.viewer_focus.clone();
+        let before_focus = app.viewer_focus().clone();
         let before_mode = app.source_view_mode.clone();
         let before_scroll = app.source_scroll;
         let before_cursor = app.occurrence_cursor;
@@ -5991,9 +5803,9 @@ mod tests {
         app.open_graph();
         app.close_graph();
 
-        assert!(!app.showing_graph);
+        assert!(!app.pane_holding(ViewType::Graph).is_some());
         assert_eq!(app.selected_component, before_selection);
-        assert_eq!(app.viewer_focus, before_focus);
+        assert_eq!(app.viewer_focus(), before_focus);
         assert_eq!(app.source_view_mode, before_mode);
         assert_eq!(app.source_scroll, before_scroll);
         assert_eq!(app.occurrence_cursor, before_cursor);
@@ -6005,13 +5817,13 @@ mod tests {
         let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
         app.load_patch(patch);
         app.open_graph();
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         assert!(app.graph.is_some());
         assert!(!app.graph_positions.is_empty());
 
         let second = Patch::from_ini_file(Path::new("fixtures/source_navigation.ini")).unwrap();
         app.load_patch(second);
-        assert!(!app.showing_graph);
+        assert!(!app.pane_holding(ViewType::Graph).is_some());
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
     }
@@ -6082,20 +5894,21 @@ mod tests {
         assert!(app.prefix.is_none());
         // Startup configuration (spec "Startup pane configuration"): module
         // UI in the left big pane, source viewer in a small pane.
-        assert!(app.showing_viewer, "startup opens the source viewer");
+        assert!(
+            app.pane_holding(ViewType::SourceViewer).is_some(),
+            "startup opens the source viewer"
+        );
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
         assert_eq!(app.layout.small_bottom.view, None);
         assert_eq!(app.layout.focus, PaneId::BigLeft);
-        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
     }
 
     #[test]
     fn new_app_has_source_navigation_defaults() {
         let app = App::new();
         assert!(app.selected_component.is_none());
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, 0);
@@ -6109,7 +5922,6 @@ mod tests {
         let mut app = App::new();
         // Put app into a non-default navigation state first
         app.selected_component = Some(String::from("B1.1"));
-        app.viewer_focus = ViewerFocus::Source;
         app.source_view_mode = SourceViewMode::Prettified;
         app.occurrence_cursor = 5;
         app.source_scroll = 42;
@@ -6126,7 +5938,7 @@ mod tests {
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, 0);
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         assert!(app.minimap_rect.is_none());
         // patch itself is set, hover is intentionally not cleared here
         assert!(app.patch.is_some());
@@ -6139,7 +5951,7 @@ mod tests {
         app.load_sample_patch();
         assert!(app.selected_component.is_none());
         assert_eq!(app.source_view_mode, SourceViewMode::Raw);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.source_scroll, 0);
         assert!(app.minimap_rect.is_none());
@@ -6167,10 +5979,11 @@ mod tests {
     #[test]
     fn physical_pan_if_overflow_gates_on_the_pressed_axis() {
         let mut app = App::new();
-        // The startup viewer is open; panning belongs to the physical pane and
-        // the legacy gate suppresses it while a view surface is open, so close
-        // the viewer to exercise the pan axis itself.
-        app.showing_viewer = false;
+        // The startup viewer is open; panning belongs to the physical pane, so
+        // close the viewer to exercise the pan axis itself.
+        if let Some(id) = app.pane_holding(ViewType::SourceViewer) {
+            app.layout.pane_mut(id).view = None;
+        }
         app.patch = Some(Patch::from_ini_str("[a]\n    out1 = B1.1\n", String::from("a")).unwrap());
         app.note_physical_pane_rect(Rect::new(0, 3, 80, 24));
         // Both axes overflow: panning works along each.
@@ -6312,15 +6125,15 @@ mod tests {
         );
         assert_eq!(app.occurrence_cursor, 0);
         assert!(
-            app.showing_viewer,
+            app.pane_holding(ViewType::SourceViewer).is_some(),
             "source viewer opens so the jump is visible"
         );
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        assert!(
-            app.tile_stack.is_open(ViewType::SourceViewer),
-            "a tiled source-viewer slot opens so the jump renders in the tiled layout"
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
+        assert_eq!(
+            app.layout.focus,
+            app.pane_holding(ViewType::SourceViewer).unwrap(),
+            "the viewer pane owns focus so the jump renders there"
         );
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
     }
 
     #[test]
@@ -6333,11 +6146,8 @@ mod tests {
         app.select_circuit(NodeId::circuit("nope", 99));
         assert_eq!(app.selected_circuit(), Some(&NodeId::circuit("nope", 99)));
         assert_eq!(app.source_scroll, 7, "unknown node must not move scroll");
-        assert!(app.showing_viewer);
-        assert!(
-            app.tile_stack.is_open(ViewType::SourceViewer),
-            "selection still opens the viewer slot even for an unknown node"
-        );
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        // An unknown node still opens the viewer pane.
     }
 
     #[test]
@@ -6368,14 +6178,14 @@ mod tests {
         app.select_circuit(node.clone());
         let first_scroll = app.source_scroll;
         // Re-selecting the same node keeps selection, scroll, cursor, and the
-        // open viewer slot put: no re-jump or state churn.
+        // open viewer pane put: no re-jump or state churn.
         app.select_circuit(node.clone());
         assert_eq!(app.selected_circuit(), Some(&node));
         assert_eq!(app.source_scroll, first_scroll);
         assert_eq!(app.source_scroll, header_line);
         assert_eq!(app.occurrence_cursor, 0);
-        assert!(app.showing_viewer);
-        assert!(app.tile_stack.is_open(ViewType::SourceViewer));
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
 
     #[test]
@@ -6508,11 +6318,9 @@ mod tests {
     }
 
     #[test]
-    fn viewer_split_ratio_defaults_to_even_split() {
+    fn main_split_ratio_defaults_to_even_split() {
         let app = App::new();
         assert_eq!(app.layout.main_split_ratio, 0.5);
-        assert_eq!(app.main_split_ratio, 0.5);
-        assert_eq!(app.viewer_split_ratio, 0.5);
     }
 
     #[test]
@@ -6522,7 +6330,6 @@ mod tests {
         // +0.2 from 0.5 clamps at 0.7.
         app.adjust_main_split_ratio(0.2);
         assert_eq!(app.layout.main_split_ratio, 0.7);
-        assert_eq!(app.main_split_ratio, 0.7);
 
         // -0.5 from 0.7 clamps at 0.3.
         app.adjust_main_split_ratio(-0.5);
@@ -6533,10 +6340,6 @@ mod tests {
         assert!(
             (app.layout.main_split_ratio - 0.4).abs() < 1e-6,
             "layout ratio steps by 0.1"
-        );
-        assert!(
-            (app.main_split_ratio - 0.4).abs() < 1e-5,
-            "mirror tracks the layout ratio"
         );
 
         // Bounds hold under further adjustment.
@@ -6623,7 +6426,7 @@ mod tests {
 
     #[test]
     fn latency_coloring_persists_across_patch_loads() {
-        // A view preference like `viewer_split_ratio`: the choice of how to
+        // A view preference like the band split ratio: the choice of how to
         // color the graph surface survives loading a different patch, unlike
         // transient processing state (`processing_paused`/`disabled_circuits`).
         let mut app = App::new();
@@ -7607,17 +7410,15 @@ mod tests {
         app.open_view(ViewType::Graph);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert_eq!(app.layout.focus, PaneId::BigLeft);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         // Another big-class view replaces the graph in the same big pane.
         app.open_view(ViewType::Physical);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(!app.showing_graph);
-        // The source viewer stays in its small pane; tree-order mirror.
-        // Physical is the module UI (implicit left pane), so it doesn't appear in slots.
+        assert!(!app.pane_holding(ViewType::Graph).is_some());
+        // The source viewer stays in its small pane, with focus still on the
+        // module UI in the left big pane.
         assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
-        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
-        // Physical is the module UI (implicit left pane), so focus projects to Panels
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert_eq!(app.layout.focus, PaneId::BigLeft);
     }
 
     #[test]
@@ -7626,11 +7427,10 @@ mod tests {
         app.open_view(ViewType::Graph);
         app.open_view(ViewType::SourceViewer);
         app.open_view(ViewType::Graph);
-        assert_eq!(
-            app.tile_stack.slots,
-            vec![ViewType::Graph, ViewType::SourceViewer]
-        );
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        // Each view keeps its pane: one graph (big), one viewer (small).
+        assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        assert_eq!(app.layout.focus, PaneId::BigLeft);
     }
 
     #[test]
@@ -7643,31 +7443,29 @@ mod tests {
         // optimizer takes the second small pane.
         app.open_view(ViewType::Optimizer);
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
-        assert!(app.showing_optimizer());
+        assert!(app.pane_holding(ViewType::Optimizer).is_some());
         // Opening physical replaces the graph in the big pane (class routing,
         // no fourth-slot eviction).
         app.open_view(ViewType::Physical);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(!app.showing_graph);
-        // Physical is the module UI (implicit left pane), not in tile_stack.slots
-        assert_eq!(
-            app.tile_stack.slots,
-            vec![ViewType::SourceViewer, ViewType::Optimizer]
-        );
+        assert!(app.pane_holding(ViewType::Graph).is_none());
+        // Physical is the module UI, so the small panes keep their views.
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
     }
 
     // Physical IS the module UI now - no separate Panels view
 
     #[test]
-    fn close_focused_view_removes_slot_and_mirrors_flags() {
+    fn close_focused_view_removes_the_view_from_its_pane() {
         let mut app = App::new();
         app.open_view(ViewType::Graph);
         app.open_view(ViewType::SourceViewer);
         app.close_focused_view();
-        assert_eq!(app.tile_stack.slots, vec![ViewType::Graph]);
-        assert!(!app.showing_viewer);
-        assert!(app.showing_graph);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert_eq!(app.layout.small_top.view, None);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_none());
+        assert!(app.pane_holding(ViewType::Graph).is_some());
+        assert_eq!(app.layout.focus, PaneId::SmallTop);
     }
 
     #[test]
@@ -7684,8 +7482,8 @@ mod tests {
             app.layout.big_left.view.is_none(),
             "Esc closes the module UI, leaving the pane empty"
         );
-        assert_eq!(app.tile_stack.slots, vec![ViewType::SourceViewer]);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert_eq!(app.layout.small_top.view, Some(ViewType::SourceViewer));
+        assert_eq!(app.layout.focus, PaneId::BigLeft);
     }
 
     #[test]
@@ -7697,20 +7495,18 @@ mod tests {
         // and skipped. Focus cycles BigLeft <-> SmallTop.
         app.cycle_focus(true);
         assert_eq!(app.layout.focus, PaneId::SmallTop);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(1));
         app.cycle_focus(true);
         assert_eq!(app.layout.focus, PaneId::BigLeft);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
         app.cycle_focus(false);
         assert_eq!(app.layout.focus, PaneId::SmallTop);
     }
 
     #[test]
-    fn cycle_focus_without_slots_stays_on_panels() {
+    fn cycle_focus_with_a_single_filled_pane_stays_put() {
         let mut app = App::new();
         app.cycle_focus(true);
         app.cycle_focus(false);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Panels);
+        assert_eq!(app.layout.focus, PaneId::BigLeft);
     }
 
     #[test]
@@ -7819,10 +7615,10 @@ mod tests {
         app.open_view(ViewType::Graph);
         app.cycle_view_in_slot(true); // graph -> physical (module UI)
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(!app.showing_graph);
+        assert!(!app.pane_holding(ViewType::Graph).is_some());
         app.cycle_view_in_slot(true); // physical -> graph
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         app.cycle_view_in_slot(false); // graph -> physical
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
     }
@@ -7870,7 +7666,7 @@ mod tests {
             "the big right view closes when the right half is repurposed"
         );
         assert!(app.layout.has_small_view());
-        assert!(!app.showing_graph);
+        assert!(!app.pane_holding(ViewType::Graph).is_some());
         let optimizer_pane = app.pane_holding(ViewType::Optimizer).unwrap();
         assert_eq!(app.layout.focus, optimizer_pane, "opened view takes focus");
     }
@@ -7886,8 +7682,7 @@ mod tests {
         assert_eq!(app.layout.small_bottom.view, None);
         // The right half is now a single (empty) big pane.
         assert_eq!(app.layout.big_right.view, None);
-        assert_eq!(app.tile_stack.slots, Vec::<ViewType>::new());
-        assert!(!app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_none());
     }
 
     #[test]
@@ -7905,7 +7700,6 @@ mod tests {
     fn pane_geometry_big_arrangement_has_two_equal_panes() {
         let mut app = App::new();
         app.layout.small_top.view = None;
-        app.sync_mirror();
         let band = Rect::new(0, 0, 100, 100);
         let rects = app.pane_geometry(band);
         assert_eq!(rects.len(), 2);
@@ -8036,7 +7830,6 @@ mod tests {
     fn swap_small_is_noop_without_small_panes() {
         let mut app = App::new();
         app.layout.small_top.view = None;
-        app.sync_mirror();
         app.swap_small();
         assert_eq!(app.layout.small_top.view, None);
         assert!(app.status_message.contains("No swap applies"));

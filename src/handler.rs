@@ -292,7 +292,7 @@ use std::path::PathBuf;
 
 use crate::app::{
     is_entry_selectable, is_picker_parent_entry, App, GraphDrag, PrefixState, SourceViewMode,
-    ViewType, ViewerFocus,
+    ViewType,
 };
 use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, NodeId, Patch, ShiftGroup};
@@ -301,36 +301,6 @@ use crate::patch::{ComponentKind, ComponentState, HwComponent, NodeId, Patch, Sh
 /// cancelling. The timeout is lazy: it is checked only when the next event
 /// arrives, so no timer thread or event-loop change is needed.
 const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Compat mirror: `viewer_focus` follows the focused pane so pre-class-layout
-/// consumers (gui viewer focus, source navigation) stay in sync. The class
-/// layout is the source of truth; this derives the legacy enum from it.
-fn sync_viewer_focus_from_tiles(app: &mut App) {
-    app.viewer_focus = if focused_view(app) == Some(ViewType::SourceViewer) {
-        ViewerFocus::Source
-    } else {
-        ViewerFocus::Panels
-    };
-}
-
-/// The view of the focused pane, or `None` when the focused pane is empty
-/// (spec "Focus routing across panes": keyboard input routes to the focused
-/// pane's view). This is the single focus source for the per-view key sets.
-fn focused_view(app: &App) -> Option<ViewType> {
-    app.layout.pane(app.layout.focus).view
-}
-
-/// True when keys should act on the graph pane: the focused pane shows the
-/// signal-flow graph (spec "Keys route to the focused view").
-fn graph_slot_focused(app: &App) -> bool {
-    focused_view(app) == Some(ViewType::Graph)
-}
-
-/// True when keys should act on the optimizer pane: the focused pane shows the
-/// latency optimizer.
-fn optimizer_slot_focused(app: &App) -> bool {
-    focused_view(app) == Some(ViewType::Optimizer)
-}
 
 /// Map a window-space pointer to an optimizer candidate row (change
 /// `optimizer-click-focus`): rows start 24px below the pane top, are 16px
@@ -350,12 +320,6 @@ fn optimizer_row_at(pane: &Rect, col: u16, row: u16, row_count: usize) -> Option
     }
     let r = (local_y - 24) / 16;
     (r < row_count.min(12) as u16).then_some(r as usize)
-}
-
-/// True when keys should act on the Physical pane: the focused pane shows the
-/// rack view.
-fn physical_slot_focused(app: &App) -> bool {
-    focused_view(app) == Some(ViewType::Physical)
 }
 
 /// Cycle the physical panel scale presets (shared by the panels arm and the
@@ -397,15 +361,6 @@ fn next_scale_preset(current: f32, plus: bool) -> f32 {
     }
 }
 
-/// Focus the pane holding `view` (no-op when the view is not open). The class
-/// layout owns placement, so `open_view` on an already-open view only moves
-/// focus to that pane.
-fn focus_tile_slot(app: &mut App, view: ViewType) {
-    if app.pane_holding(view).is_some() {
-        app.open_view(view);
-    }
-}
-
 /// Focus the pane under the pointer, if any (spec "Focus routing across
 /// panes": a mouse click inside a pane focuses that pane). An empty pane has
 /// no view to focus, so it is left alone.
@@ -429,8 +384,6 @@ fn adjust_big_boundary(app: &mut App, delta: f32) -> String {
     app.adjust_main_split_ratio(delta);
     let ratio = (app.layout.main_split_ratio * 10.0).round() / 10.0;
     app.layout.main_split_ratio = ratio;
-    app.main_split_ratio = ratio as f32;
-    app.viewer_split_ratio = ratio as f32;
     format!("Split: {:.0}%/{:.0}%", ratio * 100.0, 100.0 - ratio * 100.0)
 }
 
@@ -449,8 +402,9 @@ fn adjust_small_boundary(app: &mut App, delta: f32) -> String {
 }
 
 fn open_embedded_viewer(app: &mut App) {
-    app.showing_viewer = true;
-    app.viewer_focus = ViewerFocus::Source;
+    // Class-routed open: the source viewer takes a small pane and focus with
+    // it (which is what makes the source pane own keys).
+    app.open_view(ViewType::SourceViewer);
     app.prefix = None;
     // Initial-position rule: BOF when nothing selected, else first occurrence
     // of the selected component.
@@ -598,9 +552,7 @@ fn handle_validation_modal_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                     app.source_scroll = issue.span.line;
                     // Open the source viewer pane and focus it so the jumped
                     // span is visible (class-routed open).
-                    app.showing_viewer = true;
                     app.open_view(ViewType::SourceViewer);
-                    sync_viewer_focus_from_tiles(app);
                     app.showing_validation = false;
                 }
                 return Some(false);
@@ -649,7 +601,7 @@ fn handle_validation_toggle_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     {
         let has_label_target = app.hovered_graph_node.is_some()
             || app.hovered_component.is_some()
-            || focused_view(app) == Some(ViewType::SourceViewer);
+            || app.view_focused(ViewType::SourceViewer);
         if !has_label_target {
             app.showing_validation = true;
             if app.validation_cursor >= app.validation_issues.len() {
@@ -678,19 +630,16 @@ fn handle_prefix_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     if app.prefix.is_some() {
         match key.code {
             KeyCode::Char('v') => {
-                open_embedded_viewer(app);
                 // Class-routed open: the source viewer takes a small pane and
                 // focus with it.
-                app.open_view(ViewType::SourceViewer);
-                sync_viewer_focus_from_tiles(app);
+                open_embedded_viewer(app);
                 return Some(false);
             }
             KeyCode::Char('g') => {
                 // `g g` opens the graph surface in a big pane.
                 app.open_graph();
                 // Focus follows it so Esc/keys act on the graph pane.
-                focus_tile_slot(app, ViewType::Graph);
-                sync_viewer_focus_from_tiles(app);
+                app.open_view(ViewType::Graph);
                 app.prefix = None;
                 return Some(false);
             }
@@ -715,7 +664,6 @@ fn handle_prefix_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 // already-open focus case and the slot cap, and lands focus
                 // on the pane.
                 app.open_view(ViewType::Optimizer);
-                sync_viewer_focus_from_tiles(app);
                 app.prefix = None;
                 return Some(false);
             }
@@ -849,8 +797,8 @@ fn handle_layout_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
         if key.code == KeyCode::Esc && key.modifiers.is_none() {
             // Spec "Esc clears maximize first": restore the arrangement
             // instead of closing the focused view; the view stays open. This
-            // path also covers the mirror's empty-slot case where the tiled
-            // dispatch below would never run.
+            // path runs even when the band has no other open view, where the
+            // focus-routing Esc below would be a no-op.
             if app.layout.maximized.is_some() {
                 app.layout.maximized = None;
                 app.status_message = String::from("Layout restored");
@@ -886,12 +834,10 @@ fn handle_focus_routing_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     let shift = key.modifiers.shift;
     if key.code == KeyCode::Tab && !shift {
         app.cycle_focus(true);
-        sync_viewer_focus_from_tiles(app);
         return Some(false);
     }
     if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         app.cycle_focus(false);
-        sync_viewer_focus_from_tiles(app);
         return Some(false);
     }
     if key.code == KeyCode::Esc && key.modifiers.is_none() {
@@ -900,13 +846,9 @@ fn handle_focus_routing_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
         // physical rack view (module-ui design D1) and keeps the old Panels
         // modifier-wash meaning: a held shift group or latched modifier clears
         // first, otherwise the module UI closes like any other view.
-        match focused_view(app) {
+        match app.focused_view() {
             Some(ViewType::Graph | ViewType::Optimizer | ViewType::SourceViewer) => {
-                let closed_viewer = focused_view(app) == Some(ViewType::SourceViewer);
                 app.close_focused_view();
-                if closed_viewer {
-                    app.viewer_focus = ViewerFocus::Panels;
-                }
             }
             _ => {
                 if app.active_shift.is_some() || app.latched_component.is_some() {
@@ -935,7 +877,7 @@ fn handle_optimizer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // holds focus (mirroring the graph/viewer pane dispatch). Esc already
     // closed the slot above via `close_focused_view`; unhandled keys fall
     // through so q/Ctrl+C quit and `l` still opens the picker.
-    if optimizer_slot_focused(app) {
+    if app.view_focused(ViewType::Optimizer) {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 let len = app
@@ -1011,7 +953,7 @@ fn handle_label_edit_entry_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             }
         }
         // 2) Source header focused -> Circuit instance at source_scroll
-        let source_focused = focused_view(app) == Some(ViewType::SourceViewer);
+        let source_focused = app.focused_view() == Some(ViewType::SourceViewer);
         if source_focused {
             if let Some(patch) = app.patch.as_ref() {
                 let line = app.source_scroll;
@@ -1108,7 +1050,7 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Graph surface handling (`g g`), routed only while the graph pane holds
     // focus (spec "Keys route to the focused view"). Global keys (`q`,
     // Ctrl+C, `l`) fall through to the shared dispatch below.
-    if graph_slot_focused(app) {
+    if app.view_focused(ViewType::Graph) {
         match key.code {
             KeyCode::Char('p') => {
                 // Task 3.1 (design D7): `p` toggles pin/unpin on the hovered
@@ -1159,7 +1101,7 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 app.toggle_influence_filter();
                 return Some(false);
             }
-            KeyCode::Char('h') if graph_slot_focused(app) => {
+            KeyCode::Char('h') if app.view_focused(ViewType::Graph) => {
                 // graph-column-layout D5: `h` cycles through column, force, and
                 // sections modes on the focused graph pane. Flipping the mode
                 // then rebuilding re-solves under the new arrangement
@@ -1255,7 +1197,7 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 // image on the next draw (drag/hover/x/e are unchanged).
                 let plus = matches!(key.code, KeyCode::Char('+'));
                 let step = if plus { 1 } else { -1 };
-                if key.modifiers.shift == graph_slot_focused(app) {
+                if key.modifiers.shift == app.view_focused(ViewType::Graph) {
                     cycle_panel_scale(app, plus);
                 } else {
                     app.graph_zoom_preset_step(step);
@@ -1311,7 +1253,7 @@ fn handle_viewer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Embedded viewer pane handling, routed only while the source viewer pane
     // holds focus (spec "Keys route to the focused view"). Global keys (`q`,
     // Ctrl+C, `l`) fall through to the shared dispatch below.
-    if focused_view(app) == Some(ViewType::SourceViewer) {
+    if app.view_focused(ViewType::SourceViewer) {
         match key.code {
             KeyCode::Char('t') => {
                 app.source_view_mode = match app.source_view_mode {
@@ -1388,7 +1330,7 @@ fn handle_label_edit_focus_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Priority: graph hovered node -> viewer source header -> panel hovered token.
     if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.editing.is_none() {
         // Graph surface takes precedence when it holds focus.
-        if graph_slot_focused(app) {
+        if app.view_focused(ViewType::Graph) {
             if let Some(idx) = app.hovered_graph_node {
                 if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() {
                     let draft = app
@@ -1415,7 +1357,7 @@ fn handle_label_edit_focus_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             }
         }
         // Source header (viewer) — resolve to section instance at source focus.
-        if focused_view(app) == Some(ViewType::SourceViewer) {
+        if app.view_focused(ViewType::SourceViewer) {
             if let Some(patch) = app.patch.as_ref() {
                 // Use selected component's section or fallback to first section.
                 let target_idx = app
@@ -1508,7 +1450,7 @@ fn handle_physical_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // every other pane keeps its exact current meaning (global processing
     // pause, pin/unpin on the graph pane), which the arms above and below
     // still own. Unhandled keys fall through to the shared dispatch.
-    if physical_slot_focused(app) {
+    if app.view_focused(ViewType::Physical) {
         match key.code {
             KeyCode::Char('p') => {
                 app.showing_performance = true;
@@ -1565,7 +1507,6 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // source viewer/optimizer for small). No-op on an empty pane and
             // for the optimizer pane, which owns `r` (restore) above.
             app.cycle_view_in_slot(true);
-            sync_viewer_focus_from_tiles(app);
             false
         }
         KeyCode::Char('s') => {
@@ -1575,7 +1516,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // presentation switch (mirroring how `p` acts on the graph
             // surface). Free in the normal-key path — the optimizer
             // overlay's `s` (export) returns earlier.
-            if physical_slot_focused(app) {
+            if app.view_focused(ViewType::Physical) {
                 app.physical_show_skeleton = !app.physical_show_skeleton;
                 app.status_message = if app.physical_show_skeleton {
                     String::from("Skeleton: on")
@@ -1584,7 +1525,6 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 };
             } else {
                 app.open_view(ViewType::Physical);
-                sync_viewer_focus_from_tiles(app);
             }
             false
         }
@@ -1694,7 +1634,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             };
             false
         }
-        KeyCode::Char('f') if physical_slot_focused(app) => {
+        KeyCode::Char('f') if app.view_focused(ViewType::Physical) => {
             // module-ui-label-fit D8: `f` performs the *labels* fit and centres
             // the module UI, clearing the manual-navigation latch. Free here
             // because the graph's `f` is graph-scoped and returns in the arm
@@ -1706,7 +1646,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             }
             false
         }
-        KeyCode::Char('F') if physical_slot_focused(app) => {
+        KeyCode::Char('F') if app.view_focused(ViewType::Physical) => {
             // module-ui-label-fit D8: `Shift+F` performs the *rack* fit — the
             // whole-rack overview beside `f`'s readable-by-default label fit.
             // Shifted glyphs arrive as their symbol, and the file picker owns
@@ -1718,7 +1658,7 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             }
             false
         }
-        KeyCode::Char('a') if physical_slot_focused(app) => {
+        KeyCode::Char('a') if app.view_focused(ViewType::Physical) => {
             // module-ui-labels D6/D10: `a` cycles the label presentation
             // off -> auto -> on while the module UI pane holds focus, and
             // reports the new mode. Free here because the graph's `a`
@@ -1808,27 +1748,27 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // pane holds focus (spec "Keys route to the focused view"), and
             // fall back to panel navigation when the rack fits. j/k always
             // navigate.
-            if physical_slot_focused(app) && app.physical_pan_if_overflow(0, -1) {
+            if app.view_focused(ViewType::Physical) && app.physical_pan_if_overflow(0, -1) {
                 return Some(false);
             }
             navigate(app, -1);
             false
         }
         KeyCode::Down => {
-            if physical_slot_focused(app) && app.physical_pan_if_overflow(0, 1) {
+            if app.view_focused(ViewType::Physical) && app.physical_pan_if_overflow(0, 1) {
                 return Some(false);
             }
             navigate(app, 1);
             false
         }
         KeyCode::Left => {
-            if physical_slot_focused(app) {
+            if app.view_focused(ViewType::Physical) {
                 app.physical_pan_if_overflow(-1, 0);
             }
             false
         }
         KeyCode::Right => {
-            if physical_slot_focused(app) {
+            if app.view_focused(ViewType::Physical) {
                 app.physical_pan_if_overflow(1, 0);
             }
             false
@@ -1944,7 +1884,6 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     if let Some(_graph_pane) = graph_pane {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             app.open_view(ViewType::Graph);
-            sync_viewer_focus_from_tiles(app);
         }
         // The graph pane takes the click for focus only: node hover, selection,
         // dragging and minimap panning are hit-tested in world space through the
@@ -1958,7 +1897,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
     // (indicator: scroll * inner_h / total_lines). Click must work whenever
     // the embedded viewer is visible, regardless of focus, and takes
     // precedence over panel interactions (picker already returned above).
-    if app.showing_viewer {
+    if app.pane_holding(ViewType::SourceViewer).is_some() {
         if let Some(rect) = app.minimap_rect {
             if rect_contains(&rect, mouse.column, mouse.row)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -2014,7 +1953,6 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
             // A click inside a pane focuses that pane (spec "Focus routing
             // across panes"); an empty pane has no view to focus.
             focus_pane_at(app, mouse.column, mouse.row);
-            sync_viewer_focus_from_tiles(app);
             if let Some(idx) = hit {
                 app.hovered_component = Some(idx);
                 let token_id = app
@@ -2233,7 +2171,6 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             app.hovered_component = hit;
             if frame.primary_pressed {
                 focus_pane_at(app, col, row);
-                sync_viewer_focus_from_tiles(app);
                 if let Some(idx) = hit {
                     let token_id = app
                         .patch
@@ -2837,8 +2774,7 @@ fn open_picker_entry(app: &mut App, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::FocusSlot;
-    use crate::app::Rect;
+    use crate::app::{Rect, ViewerFocus};
     use crate::events::Event;
     use crate::patch::Patch;
     use std::sync::{Mutex, OnceLock};
@@ -3236,12 +3172,12 @@ mod tests {
     fn question_mark_opens_help_from_every_view() {
         // Panels (default) is covered above; exercise the other surfaces.
         let mut app = App::new();
-        app.showing_viewer = true;
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the viewer");
 
         let mut app = App::new();
-        app.showing_graph = true;
+        app.open_view(ViewType::Graph);
         handle_event(key(KeyCode::Char('?')), &mut app);
         assert!(app.showing_help, "help must open over the graph");
 
@@ -3303,17 +3239,17 @@ mod tests {
 
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        assert_eq!(app.tile_stack.focus, FocusSlot::Slot(0));
+        assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(
-            app.tile_stack.focus,
-            FocusSlot::Panels,
+            app.layout.focus,
+            crate::panes::PaneId::BigLeft,
             "Tab cycles forward"
         );
         handle_event(shift_tab(), &mut app);
         assert_eq!(
-            app.tile_stack.focus,
-            FocusSlot::Slot(0),
+            app.layout.focus,
+            crate::panes::PaneId::SmallTop,
             "Shift+Tab cycles backward"
         );
 
@@ -3669,14 +3605,14 @@ mod tests {
     }
 
     #[test]
-    fn esc_clears_maximize_even_with_an_empty_mirror_slot_set() {
+    fn esc_clears_maximize_even_with_no_other_open_view() {
         use crate::panes::PaneId;
         let mut app = app_with_fixture();
-        // Close the source viewer so the mirror has no slots; the tiled Esc
+        // Close the source viewer so the band has no small view; the tiled Esc
         // dispatch below would not run in that state.
         handle_event(key(KeyCode::Tab), &mut app); // focus SmallTop
         handle_event(key(KeyCode::Esc), &mut app); // close source viewer
-        assert!(app.tile_stack.slots.is_empty());
+        assert!(app.layout.small_top.view.is_none());
         handle_event(key(KeyCode::Char('z')), &mut app);
         assert_eq!(app.layout.maximized, Some(PaneId::SmallTop));
         handle_event(key(KeyCode::Esc), &mut app);
@@ -3803,13 +3739,10 @@ mod tests {
     fn alt_b_exchanges_the_two_big_panes_through_dispatch() {
         use crate::panes::PaneId;
         let mut app = app_with_fixture();
-        // Two big panes (no small view): module UI left, graph right. Set the
-        // arrangement and its mirror together so `reconcile_from_mirror` keeps
-        // it, then exercise the real Alt+b dispatch.
+        // Two big panes (no small view): module UI left, graph right. Exercise
+        // the real Alt+b dispatch on that arrangement.
         app.layout.big_right.view = Some(ViewType::Graph);
         app.layout.small_top.view = None;
-        app.tile_stack.slots = vec![ViewType::Graph];
-        app.tile_stack.focus = FocusSlot::Panels;
         assert_eq!(app.layout.focus, PaneId::BigLeft);
 
         handle_event(alt_key(KeyCode::Char('b')), &mut app);
@@ -3822,9 +3755,10 @@ mod tests {
     fn graph_plus_cycles_zoom_presets_and_wraps() {
         let mut app = app_with_fixture();
         app.open_graph();
-        // Direct `open_graph` leaves focus on panels; `g g` focuses the
-        // graph slot, which the zoom arm requires.
-        app.tile_stack.focus = FocusSlot::Slot(0);
+        // Direct `open_graph` leaves focus on the pane it placed the graph in;
+        // focus it through `open_view` as `g g` does, since the zoom arm
+        // requires the graph pane to own focus.
+        app.open_view(ViewType::Graph);
         seed_graph_camera(&mut app);
 
         let z0 = app.graph_camera.unwrap().zoom;
@@ -3879,12 +3813,12 @@ mod tests {
         // panic and must leave the camera None (old navigation preserved).
         let mut app = app_with_fixture();
         app.open_graph();
-        app.tile_stack.focus = FocusSlot::Slot(0);
+        app.open_view(ViewType::Graph);
         assert!(app.graph_camera.is_none());
         handle_event(key(KeyCode::Char('+')), &mut app);
         handle_event(key(KeyCode::Up), &mut app);
         assert!(app.graph_camera.is_none());
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
     }
 
     #[test]
@@ -4014,7 +3948,7 @@ mod tests {
     fn open_graph_slot(app: &mut App) {
         handle_event(key(KeyCode::Char('g')), app);
         handle_event(key(KeyCode::Char('g')), app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
     }
 
     #[test]
@@ -4075,7 +4009,10 @@ mod tests {
         assert!(app.dependency_root.is_some());
         handle_event(key(KeyCode::Esc), &mut app);
         assert!(app.dependency_root.is_none());
-        assert!(app.showing_graph, "Esc clears the filter, not the graph");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "Esc clears the filter, not the graph"
+        );
     }
 
     #[test]
@@ -4096,7 +4033,7 @@ mod tests {
     fn open_viewer(app: &mut App) {
         handle_event(key(KeyCode::Char('g')), app);
         handle_event(key(KeyCode::Char('v')), app);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
     }
 
     #[test]
@@ -4120,7 +4057,6 @@ mod tests {
         assert_eq!(app.layout.main_split_ratio, 0.6);
         handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.7);
-        assert_eq!(app.main_split_ratio, 0.7, "mirror stays synced");
         assert_eq!(app.status_message, "Split: 70%/30%");
         // Further presses clamp at the upper bound.
         handle_event(key(KeyCode::Char(']')), &mut app);
@@ -5052,8 +4988,8 @@ mod tests {
         let mut app = App::new();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert!(app.showing_viewer);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert!(app.prefix.is_none());
     }
     #[test]
@@ -5063,8 +4999,8 @@ mod tests {
         app.source_scroll = 99;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert!(app.showing_viewer);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
         assert_eq!(app.occurrence_cursor, 0);
         assert!(app.selected_component.is_none());
@@ -5077,11 +5013,13 @@ mod tests {
         app.select_component(String::from("B1.1"));
         // Move scroll away to prove jump
         app.source_scroll = 999;
-        app.showing_viewer = false;
+        if let Some(id) = app.pane_holding(ViewType::SourceViewer) {
+            app.layout.pane_mut(id).view = None;
+        }
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert!(app.showing_viewer);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, first);
         assert_eq!(app.occurrence_cursor, 0);
         assert_eq!(app.selected_component, Some(String::from("B1.1")));
@@ -5210,7 +5148,10 @@ mod tests {
         handle_event(key(KeyCode::Char('g')), &mut app);
         let quit = handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(!quit);
-        assert!(app.showing_graph, "`g g` opens the graph tile");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "`g g` opens the graph tile"
+        );
     }
 
     #[test]
@@ -5241,7 +5182,7 @@ mod tests {
         assert!(app.prefix.is_some());
         assert!(app.prefix.as_ref().unwrap().started.elapsed() < Duration::from_secs(1));
         assert!(
-            !app.showing_graph,
+            app.pane_holding(ViewType::Graph).is_none(),
             "timed-out prefix must not open the graph"
         );
     }
@@ -5254,7 +5195,7 @@ mod tests {
         handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some(), "first g arms the prefix");
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         assert!(app.prefix.is_none(), "prefix cleared on open");
         let graph = app.graph.as_ref().unwrap();
         assert!(!graph.nodes.is_empty(), "graph holds the patch's circuits");
@@ -5275,7 +5216,7 @@ mod tests {
         app.layout_mode = crate::config::LayoutMode::Force;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         let default = crate::layout::DEFAULT_TENSION;
         assert_eq!(app.tension, default);
         let before = app.graph_positions.clone();
@@ -5305,7 +5246,7 @@ mod tests {
         app.layout_mode = crate::config::LayoutMode::Column;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         let default = crate::layout::DEFAULT_TENSION;
         let before = app.graph_positions.clone();
         // The fixture sets `patch` directly, so the starter "No patch loaded"
@@ -5327,7 +5268,7 @@ mod tests {
         assert_eq!(app.layout_mode, crate::config::LayoutMode::Column);
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
 
         handle_event(key(KeyCode::Char('h')), &mut app);
 
@@ -5354,7 +5295,7 @@ mod tests {
         let mut app = app_with_fixture();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
 
         handle_event(key(KeyCode::Char('a')), &mut app);
 
@@ -5398,7 +5339,7 @@ mod tests {
         app.layout_mode = crate::config::LayoutMode::Sections;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         // Perturb one node so an anneal provably starts from here: a
         // reseed would discard the offset, the anneal keeps its influence.
         app.graph_positions[0].0 += 500.0;
@@ -5447,7 +5388,7 @@ mod tests {
         app.layout_mode = crate::config::LayoutMode::Force;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         let before = app.graph_positions.clone();
 
         // Force -> Sections (first h) -> Column (second h)
@@ -5505,8 +5446,6 @@ mod tests {
         open_viewer(&mut app);
         handle_event(key(KeyCode::Char(']')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.6);
-        assert_eq!(app.main_split_ratio, 0.6, "mirror stays synced");
-        assert_eq!(app.viewer_split_ratio, 0.6, "legacy mirror stays synced");
         assert_eq!(app.status_message, "Split: 60%/40%");
         handle_event(key(KeyCode::Char('[')), &mut app);
         assert_eq!(app.layout.main_split_ratio, 0.5);
@@ -5518,12 +5457,12 @@ mod tests {
         app.select_component(String::from("B1.1"));
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         let scroll = app.source_scroll;
         let sel = app.selected_component.clone();
         handle_event(key(KeyCode::Esc), &mut app);
-        assert!(!app.showing_viewer);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_none());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         assert_eq!(app.selected_component, sel, "selection kept on close");
         assert_eq!(app.source_scroll, scroll, "scroll kept on close");
         assert!(app.prefix.is_none());
@@ -5534,7 +5473,7 @@ mod tests {
         let mut app = app_with_source_navigation();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
         handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 1);
@@ -5575,11 +5514,11 @@ mod tests {
         let mut app = app_with_source_navigation();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         handle_event(key(KeyCode::Tab), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         handle_event(key(KeyCode::Tab), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
 
     #[test]
@@ -5588,11 +5527,11 @@ mod tests {
         // the first small pane. Tab moves focus to the viewer pane.
         let mut app = App::new();
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
-        assert!(app.showing_viewer);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
     }
 
     // ── Focused-pane dispatch (change `pane-class-layout`) ──
@@ -5608,21 +5547,21 @@ mod tests {
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         // The graph replaced the module UI in the left big pane and took focus.
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         // Forward: big graph pane -> viewer pane -> back (empty small skipped).
         handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         // Backward from the big pane lands on the viewer pane.
         handle_event(shift_tab(), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
 
     #[test]
@@ -5636,13 +5575,13 @@ mod tests {
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         handle_event(key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         handle_event(key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
-        assert!(!app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_none());
         handle_event(key(KeyCode::Char('r')), &mut app);
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         // The pane keeps focus through the rotation.
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
     }
@@ -5710,12 +5649,15 @@ mod tests {
         open_viewer(&mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('g')), &mut app);
-        assert!(app.showing_graph && app.showing_viewer);
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some()
+                && app.pane_holding(ViewType::SourceViewer).is_some()
+        );
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         // Graph pane focused: Esc closes it, the viewer survives.
         handle_event(key(KeyCode::Esc), &mut app);
-        assert!(!app.showing_graph);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::Graph).is_none());
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.layout.big_left.view, None, "closed pane is empty");
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
     }
@@ -5731,7 +5673,7 @@ mod tests {
         assert_eq!(app.layout.big_left.view, Some(ViewType::Physical));
         let sel = app.selected_component.clone();
         handle_event(key(KeyCode::Esc), &mut app);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert_eq!(app.layout.big_left.view, None);
         assert_eq!(app.selected_component, sel, "selection survives a close");
     }
@@ -5741,18 +5683,18 @@ mod tests {
         // Quad view is retired with the class layout: `g q` cancels the prefix
         // and leaves the layout untouched.
         let mut app = app_with_source_navigation();
-        let slots_before = app.tile_stack.slots.clone();
+        let layout_before = app.layout.clone();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('q')), &mut app);
         assert!(app.prefix.is_none());
-        assert_eq!(app.tile_stack.slots, slots_before);
+        assert_eq!(app.layout, layout_before);
     }
 
     #[test]
     fn viewer_focus_source_live_panel_keys() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
 
         // Shift keys work live while source is focused.
         handle_event(key(KeyCode::Char('1')), &mut app);
@@ -5822,7 +5764,7 @@ mod tests {
         handle_event(key(KeyCode::Char('v')), &mut app);
         // Switch to panels
         handle_event(key(KeyCode::Tab), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         handle_event(key(KeyCode::Char('1')), &mut app);
         assert_eq!(app.active_shift, Some(ShiftGroup::Group1));
         let scale_before = app.scale_factor;
@@ -5879,7 +5821,7 @@ mod tests {
     fn mouse_click_component_works_when_source_focused() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         // The module UI occupies the left big pane; the source viewer the first
         // small pane. Publish the pane hit rects the renderer would.
         app.pane_hit_rects = vec![
@@ -5898,7 +5840,7 @@ mod tests {
             "mouse click toggles even when source focused"
         );
         assert_eq!(
-            app.viewer_focus,
+            app.viewer_focus(),
             ViewerFocus::Panels,
             "component click hands focus to panels"
         );
@@ -5926,7 +5868,7 @@ mod tests {
             &mut app,
         );
         assert_eq!(
-            app.viewer_focus,
+            app.viewer_focus(),
             ViewerFocus::Source,
             "bare source-pane click focuses source"
         );
@@ -5986,7 +5928,7 @@ mod tests {
             crate::panes::PaneId::SmallTop,
             "source-pane click focuses the source pane"
         );
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
 
     #[test]
@@ -6166,7 +6108,7 @@ mod tests {
         assert!(app.selected_component.is_none());
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         app.source_scroll = 5;
         app.occurrence_cursor = 0;
         handle_event(key(KeyCode::Up), &mut app);
@@ -6216,7 +6158,7 @@ mod tests {
         let mut app = app_with_source_navigation();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0);
         handle_event(key(KeyCode::Char('j')), &mut app);
         assert_eq!(app.source_scroll, 1);
@@ -6237,13 +6179,13 @@ mod tests {
         // When the source viewer is focused, `g` is live too and arms the prefix.
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert!(app.showing_viewer);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some(), "g arms even when source focused");
         handle_event(key(KeyCode::Esc), &mut app);
         // Esc clears the prefix first; the viewer stays open.
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(app.prefix.is_none());
         // With the module UI pane focused, `g` arms again and Esc clears it.
         handle_event(key(KeyCode::Tab), &mut app);
@@ -6251,13 +6193,13 @@ mod tests {
         handle_event(key(KeyCode::Char('g')), &mut app);
         assert!(app.prefix.is_some());
         handle_event(key(KeyCode::Esc), &mut app);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(app.prefix.is_none());
         // Back to the viewer pane: Esc closes the focused view.
         handle_event(key(KeyCode::Tab), &mut app);
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
         handle_event(key(KeyCode::Esc), &mut app);
-        assert!(!app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_none());
     }
 
     #[test]
@@ -6279,10 +6221,10 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.selected_circuit(), Some(&node_id));
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(
-            app.tile_stack.is_open(ViewType::SourceViewer),
-            "window press opens a tiled viewer slot"
+            app.layout.small_top.view == Some(ViewType::SourceViewer),
+            "window press opens the source viewer pane"
         );
     }
 
@@ -6395,10 +6337,10 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.selected_circuit(), Some(&primary));
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(
-            app.tile_stack.is_open(ViewType::SourceViewer),
-            "marquee commit opens a tiled viewer slot"
+            app.layout.small_top.view == Some(ViewType::SourceViewer),
+            "marquee commit opens the source viewer pane"
         );
     }
 
@@ -6455,15 +6397,17 @@ mod tests {
         app.source_scroll = 77;
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert!(app.showing_viewer);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert_eq!(app.source_scroll, 0, "BOF when no selection");
         // selected-open jumps to first occurrence
         let mut app2 = app_with_source_navigation();
         let first = app2.patch.as_ref().unwrap().occurrences_for("B1.1")[0].line;
         app2.select_component(String::from("B1.1"));
         app2.source_scroll = 999;
-        app2.showing_viewer = false;
+        if let Some(id) = app2.pane_holding(ViewType::SourceViewer) {
+            app2.layout.pane_mut(id).view = None;
+        }
         handle_event(key(KeyCode::Char('g')), &mut app2);
         handle_event(key(KeyCode::Char('v')), &mut app2);
         assert_eq!(app2.source_scroll, first);
@@ -6475,7 +6419,7 @@ mod tests {
         let mut app = app_with_source_navigation();
         handle_event(key(KeyCode::Char('g')), &mut app);
         handle_event(key(KeyCode::Char('v')), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         // t preserves usable content: toggles but stays in bounds
         let scroll_before = app.source_scroll;
         handle_event(key(KeyCode::Char('t')), &mut app);
@@ -6485,9 +6429,9 @@ mod tests {
         assert_eq!(app.source_view_mode, crate::app::SourceViewMode::Raw);
         // Tab round-trip Source->Panels->Source
         handle_event(key(KeyCode::Tab), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Panels);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Panels);
         handle_event(key(KeyCode::Tab), &mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         // picker precedence: l opens picker even when source focused
         handle_event(key(KeyCode::Char('l')), &mut app);
         assert!(app.showing_picker, "picker overlays viewer");
@@ -6497,9 +6441,9 @@ mod tests {
         assert_eq!(app.source_view_mode, mode_before);
         handle_event(key(KeyCode::Esc), &mut app);
         assert!(!app.showing_picker);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         // live interaction: panel keys work even when Source focused
-        if app.viewer_focus != ViewerFocus::Source {
+        if app.viewer_focus() != ViewerFocus::Source {
             handle_event(key(KeyCode::Tab), &mut app);
         }
         let scale_before = app.scale_factor;
@@ -6547,7 +6491,10 @@ mod tests {
         );
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.pinned.contains(&node.id), "p pins the hovered node");
-        assert!(app.showing_graph, "p must not close the graph");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "p must not close the graph"
+        );
         assert!(
             !app.processing_paused,
             "p no longer toggles pause on the graph surface"
@@ -6646,7 +6593,7 @@ mod tests {
     fn p_toggles_pause_while_viewer_open_source_focused() {
         let mut app = app_with_source_navigation();
         open_viewer(&mut app);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(app.processing_paused, "p live in the source pane");
         assert_eq!(app.status_message, "Processing paused (p to resume)");
@@ -6661,7 +6608,7 @@ mod tests {
         // reports the mode; every other pane keeps its own `a` meaning.
         let mut app = app_with_fixture();
         assert!(
-            physical_slot_focused(&app),
+            app.view_focused(ViewType::Physical),
             "startup focus is the module UI"
         );
         assert_eq!(
@@ -6689,7 +6636,7 @@ mod tests {
 
         // Off the module UI the key is inert (the viewer keeps its own arms).
         handle_event(key(KeyCode::Tab), &mut app);
-        assert!(!physical_slot_focused(&app));
+        assert!(!app.view_focused(ViewType::Physical));
         let before = app.label_presentation;
         handle_event(key(KeyCode::Char('a')), &mut app);
         assert_eq!(
@@ -6702,7 +6649,7 @@ mod tests {
     fn p_opens_performance_view_on_physical_pane_only_and_esc_exits() {
         let mut app = app_with_fixture();
         // Startup focus is the Physical pane (BigLeft).
-        assert!(physical_slot_focused(&app));
+        assert!(app.view_focused(ViewType::Physical));
         assert!(!app.showing_performance);
         handle_event(key(KeyCode::Char('p')), &mut app);
         assert!(
@@ -6764,7 +6711,7 @@ mod tests {
         app.selected_component = Some(String::from("B1.1"));
         let focus_before = app.layout.focus;
         app.active_shift = Some(ShiftGroup::Group2);
-        assert!(physical_slot_focused(&app));
+        assert!(app.view_focused(ViewType::Physical));
         // `R` is Shift+r: plain `r` stays the class carousel.
         handle_event(key(KeyCode::Char('R')), &mut app);
         // Every state is back at rest ...
@@ -6797,13 +6744,7 @@ mod tests {
         let mut app = App::new();
         app.load_patch(patch);
         app.open_graph();
-        assert!(app.showing_graph);
-        // Tiled renderer contract (change `tiled-window-manager`): publish
-        // the graph slot rect so mouse events route to graph handling.
-        app.pane_rects = vec![
-            (FocusSlot::Panels, Rect::new(0, 0, 8, 40)),
-            (FocusSlot::Slot(0), Rect::new(8, 0, 192, 40)),
-        ];
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         app.pane_hit_rects = vec![
             (crate::panes::PaneId::BigLeft, Rect::new(8, 0, 192, 40)),
             (crate::panes::PaneId::SmallTop, Rect::new(0, 0, 8, 40)),
@@ -6818,7 +6759,10 @@ mod tests {
         app.hovered_graph_node = Some(0);
         let before_positions = app.graph_positions.clone();
         handle_event(key(KeyCode::Char('x')), &mut app);
-        assert!(app.showing_graph, "x must not close the graph surface");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "x must not close the graph surface"
+        );
         assert!(
             app.disabled_circuits
                 .contains(&NodeId::circuit(&node.circuit, node.instance_index)),
@@ -6862,7 +6806,7 @@ mod tests {
                 node.circuit, node.instance_index
             )
         );
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
     }
 
     #[test]
@@ -6882,7 +6826,7 @@ mod tests {
             app.graph_positions, positions_before,
             "no rebuild when no hover"
         );
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
     }
 
     #[test]
@@ -6900,7 +6844,10 @@ mod tests {
             app.status_message,
             format!("Pinned: {} {}", node.circuit, node.instance_index)
         );
-        assert!(app.showing_graph, "p must not close the graph");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "p must not close the graph"
+        );
         assert!(
             !app.processing_paused,
             "p no longer toggles pause on the graph surface"
@@ -8100,7 +8047,7 @@ mod tests {
             ModifiersState::empty(),
             &mut app
         ));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         assert!(app.prefix.is_none(), "prefix cleared on open");
         let graph = app.graph.as_ref().unwrap();
         assert!(!graph.nodes.is_empty(), "graph holds the patch's circuits");
@@ -8209,7 +8156,7 @@ mod tests {
             ModifiersState::empty(),
             &mut app
         ));
-        assert!(app.showing_graph);
+        assert!(app.pane_holding(ViewType::Graph).is_some());
         // `g g` focuses the graph pane in the left big slot.
         assert_eq!(app.layout.focus, crate::panes::PaneId::BigLeft);
         // Shift+Tab cycles backward to the viewer pane.
@@ -8219,7 +8166,7 @@ mod tests {
             &mut app
         ));
         assert_eq!(app.layout.focus, crate::panes::PaneId::SmallTop);
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
     }
 
     #[test]
@@ -8282,7 +8229,7 @@ mod tests {
         // A plain `q` press quits and leaves the app unmutated otherwise
         // (the startup source viewer stays open).
         assert!(!app.showing_picker);
-        assert!(app.showing_viewer);
+        assert!(app.pane_holding(ViewType::SourceViewer).is_some());
         assert!(app.prefix.is_none());
         assert_eq!(app.active_shift, None);
     }
@@ -8312,12 +8259,15 @@ mod tests {
             ModifiersState::empty(),
             &mut app
         ));
-        assert!(app.showing_viewer, "g v opens the source viewer");
         assert!(
-            app.tile_stack.is_open(ViewType::SourceViewer),
-            "the viewer takes a right-column slot"
+            app.pane_holding(ViewType::SourceViewer).is_some(),
+            "g v opens the source viewer"
         );
-        assert_eq!(app.viewer_focus, ViewerFocus::Source);
+        assert!(
+            app.layout.small_top.view == Some(ViewType::SourceViewer),
+            "the viewer occupies a pane"
+        );
+        assert_eq!(app.viewer_focus(), ViewerFocus::Source);
         assert!(app.prefix.is_none(), "prefix cleared on open");
     }
 
