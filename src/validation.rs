@@ -1001,6 +1001,105 @@ mod tests {
         );
     }
 
+    /// Load a validation fixture the way the app does, so the matrix exercises
+    /// the parser's spans rather than hand-written ones.
+    fn master_fixture(name: &str) -> Patch {
+        let path = PathBuf::from(format!("fixtures/validation/{name}.ini"));
+        Patch::from_ini_file(&path).unwrap_or_else(|e| panic!("{} must parse: {e}", path.display()))
+    }
+
+    fn master_conflicts(issues: &[ValidationIssue]) -> Vec<&ValidationIssue> {
+        issues
+            .iter()
+            .filter(|i| i.code == "master_conflict")
+            .collect()
+    }
+
+    #[test]
+    fn master_conflict_18_fixture_warns_at_the_cv_entry() {
+        let patch = master_fixture("master_conflict_18");
+        let issues = validate_patch(&patch, load_schema());
+
+        let conflicts = master_conflicts(&issues);
+        assert_eq!(conflicts.len(), 1, "issues: {issues:#?}");
+        assert_eq!(conflicts[0].severity, Severity::Warning);
+
+        let offending = patch
+            .sections
+            .iter()
+            .flat_map(|section| section.detailed_entries.iter())
+            .find(|entry| entry.value.trim() == "I3")
+            .expect("fixture binds a cv parameter to I3");
+        assert_eq!(
+            conflicts[0].span, offending.value_span,
+            "the conflict belongs on the offending entry's value"
+        );
+        assert!(
+            conflicts[0].message.contains("I3")
+                && conflicts[0].message.contains("requires MASTER")
+                && conflicts[0].message.contains("resolves to MASTER18"),
+            "message must name the use, the model that would host it and the resolved one: {}",
+            conflicts[0].message
+        );
+        assert!(
+            !issues.iter().any(|i| i.severity == Severity::Error),
+            "a declared-master conflict must not gate the load: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn master_conflict_circuit_fixture_warns_at_the_section_header() {
+        let patch = master_fixture("master_conflict_circuit");
+        let issues = validate_patch(&patch, load_schema());
+
+        let conflicts = master_conflicts(&issues);
+        assert_eq!(conflicts.len(), 1, "issues: {issues:#?}");
+        assert_eq!(conflicts[0].severity, Severity::Warning);
+
+        let section = patch
+            .sections
+            .iter()
+            .find(|section| section.name.eq_ignore_ascii_case("sinfonionlink"))
+            .expect("fixture carries a [sinfonionlink] section");
+        assert_eq!(
+            conflicts[0].span, section.header_span,
+            "a circuit-level conflict belongs on the section header"
+        );
+        assert!(
+            conflicts[0].message.contains("sinfonionlink")
+                && conflicts[0].message.contains("MASTER18"),
+            "message must name the section and the model it needs: {}",
+            conflicts[0].message
+        );
+        assert!(
+            !issues.iter().any(|i| i.severity == Severity::Error),
+            "a declared-master conflict must not gate the load: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn master_no_fit_fixture_errors_once_and_names_both_sides() {
+        let issues = validate_patch(&master_fixture("master_no_fit"), load_schema());
+
+        let fatal: Vec<&ValidationIssue> = issues
+            .iter()
+            .filter(|i| i.code == "no_master_fits")
+            .collect();
+        assert_eq!(fatal.len(), 1, "issues: {issues:#?}");
+        assert_eq!(fatal[0].severity, Severity::Error);
+        assert_eq!(fatal[0].span.line, 0);
+        assert_eq!(fatal[0].span.col_start, 0);
+        assert!(
+            fatal[0].message.contains("I6") && fatal[0].message.contains("vcotuner"),
+            "message must name both uses: {}",
+            fatal[0].message
+        );
+        assert!(
+            master_conflicts(&issues).is_empty(),
+            "an unrunnable patch reports one fatal finding, not conflicts: {issues:#?}"
+        );
+    }
+
     #[test]
     fn schema_still_has_76_circuits() {
         // Exclude the schema::init tests' merged-schema window (see

@@ -593,6 +593,13 @@ const VALIDATION_FIXTURES: &[(&str, &str)] = &[
     ("unused_cable", "unused_cable"),
     ("invalid_expression", "invalid_expression"),
     ("ram_overflow", "ram_overflow"),
+    // Master-module fit (master-module-resolution 2.2): the two conflict
+    // fixtures keep loading (Warning), only the no-fit fixture gates (Error).
+    // Their spans, severities and the load/no-load split are pinned in
+    // `validation::tests`.
+    ("master_conflict_18", "master_conflict"),
+    ("master_conflict_circuit", "master_conflict"),
+    ("master_no_fit", "no_master_fits"),
 ];
 
 fn validation_issues_for(fixture: &str) -> Vec<crate::validation::ValidationIssue> {
@@ -810,7 +817,7 @@ fn regression_validation_fixture_ram_overflow() {
 #[test]
 fn regression_validation_fixture_matrix_all_present() {
     // Full matrix smoke: every fixture yields its primary code.
-    assert_eq!(VALIDATION_FIXTURES.len(), 11, "must have 11 fixtures");
+    assert_eq!(VALIDATION_FIXTURES.len(), 14, "must have 14 fixtures");
     for (fixture, code) in VALIDATION_FIXTURES {
         assert_has_code(fixture, code);
     }
@@ -832,7 +839,7 @@ fn regression_validation_fixture_matrix_all_present() {
     expected.sort();
     assert_eq!(
         names, expected,
-        "fixtures/validation must contain exactly 11 expected files"
+        "fixtures/validation must contain exactly 14 expected files"
     );
 }
 
