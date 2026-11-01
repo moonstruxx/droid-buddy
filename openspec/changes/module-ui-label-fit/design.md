@@ -132,10 +132,13 @@ would remove a different signal instead of adding one.
 
 ### D7 — Fit = max(rack fit, written-label fit), capped
 
-`physical::label_fit_zoom(cells, labels) -> Option<f64>` returns the smallest zoom
-at which every written label's cell yields a layout: a bounded, deterministic
-ascending scan over the same `label_layout` applied to the cell rect scaled by the
-candidate zoom, capped at `ZOOM_MAX`. Cells that produce no layout at the cap are
+`physical::label_fit_zoom(requests) -> Option<f64>` returns the smallest zoom at
+which every written label is **drawn whole**: a bounded, deterministic ascending
+scan over the same `label_layout` applied to the cell rect scaled by the candidate
+zoom, capped at `ZOOM_MAX`. "Drawn whole" is the predicate, not `Some(layout)` —
+the floor-ellipsis path returns a layout from a far lower zoom (the 9 mm button
+takes `Some` at 0.376 where it paints a bare `…`), and accepting that would make
+the clamp a no-op. Requests that still cannot be drawn whole at `ZOOM_MAX` are
 ignored — they stay annotation candidates and never inflate the zoom. Then
 
 ```
@@ -143,7 +146,17 @@ fit = max(fit_zoom(rack, pane), label_fit_zoom(...)).clamp(ZOOM_MIN, ZOOM_MAX)
 ```
 
 Only *written* labels participate (`Patch::explicit_hw_label`), matching the
-annotation rule and keeping derived token names from zooming the view.
+annotation rule and keeping derived token names from zooming the view. The whole
+fit uses one `LabelBox` shape: `glyph_chars` is 0, because the module UI paints the
+state glyph as a corner marker rather than charging it against a label line — the
+request type keeps the field so fit and paint cannot silently disagree, and the
+module-UI caller always passes the same 0 the painter passes.
+
+Consequence worth stating: the ignore set is not "3 mm LEDs" — a 3 mm cell scales
+with the zoom and holds a short written label at ~2.0, so a labelled LED *does*
+lift the fit (up to the cap). Only labels that no supported zoom can draw whole
+remain annotations. If a single dot's label lifting the view to 2× proves jarring
+in review, a lift-factor bound relative to the rack fit is the knob to add.
 
 ### D8 — `f` fits labels, `Shift+F` fits the rack
 
@@ -161,10 +174,11 @@ a large rack can see that the zoom is the readable one, not a bug.
 ### D9 — The annotation rule keeps its intent and goes quiet
 
 `auto` becomes: annotate exactly those addressed elements whose label is
-explicitly set and whose cell has no in-cell layout. With the fit clamp, at open
-that set is only the cells no zoom can serve (3 mm LEDs) — so the crowding the
-30 % budget was written to contain mostly disappears, and the budget stays in
-place for `on` and for manual zoom-in. `on` and `off` are untouched.
+explicitly set and whose cell cannot draw it whole at the current zoom. With the
+fit clamp, at open that set is only the labels no supported zoom can serve — a
+very long label on a tiny cell, of any family — so the crowding the 30 % budget
+was written to contain mostly disappears, and the budget stays in place for `on`
+and for manual zoom-in. `on` and `off` are untouched.
 
 ### D10 — The legibility floor is a documented trade
 

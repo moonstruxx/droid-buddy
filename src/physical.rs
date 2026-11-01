@@ -1278,6 +1278,15 @@ const LABEL_FIT_TOLERANCE: f32 = 0.01;
 /// The mark appended to the last line when only the floor is left (D2).
 const LABEL_ELLIPSIS: char = '\u{2026}';
 
+/// The fit's candidate grid (D7) in thousandths of the 1:1 baseline: the scan
+/// walks [`ZOOM_MIN`]..=[`ZOOM_MAX`] in 1 % steps, so at most 376 candidates
+/// bound it and the answer never lands on a division the user could not also
+/// dial by hand — no bisection tolerance, no drift between two calls.
+const LABEL_FIT_STEP_MILLIS: u32 = 10;
+
+/// One whole zoom (100 %) in the fit grid's units.
+const LABEL_FIT_MILLIS_PER_ZOOM: f64 = 1000.0;
+
 /// Which paint path owns a cell's label, i.e. which text box the label is
 /// measured against (D1/D5/D6). No egui type crosses this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1393,6 +1402,126 @@ pub fn label_line_height(font: f32) -> f32 {
 /// `max(9, 0.8 × label font)`. Shared with the painter for the same reason.
 pub fn state_font_size(label_font: f32) -> f32 {
     (label_font * STATE_FONT_SCALE).max(STATE_FONT_MIN)
+}
+
+/// One written label's claim on the fit (D7): the cell's drawn size **at 100 %
+/// zoom** plus the facts [`LabelBox`] needs, and the label text. The fit scales
+/// `w`/`h` by each candidate zoom and asks [`label_layout`], so one request
+/// answers every candidate and the caller never rebuilds boxes per zoom.
+///
+/// Only *written* labels become requests (`Patch::explicit_hw_label`, D7): a
+/// derived token name is text nobody asked the surface to show, and letting it
+/// lift the fit would zoom the view for a label that only exists on hover.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelFitRequest {
+    /// Cell width in points at 100 % zoom.
+    pub w: f32,
+    /// Cell height in points at 100 % zoom.
+    pub h: f32,
+    /// Characters of the state glyph at the head of line 1 (D1), `0` when the
+    /// cell has no glyph.
+    pub glyph_chars: usize,
+    /// Which paint path's text box applies (D1/D5/D6).
+    pub path: CellTextPath,
+    /// Whether the cell has a state string the label may have to yield to (D4).
+    pub has_state: bool,
+    /// The written label.
+    pub label: String,
+}
+
+impl LabelFitRequest {
+    /// This request's label box at one candidate zoom: the 100 % size scaled by
+    /// `zoom`, the same isotropic factor the painter maps the cell through.
+    fn label_box_at(&self, zoom: f64) -> LabelBox {
+        let scale = zoom as f32;
+        LabelBox {
+            w: self.w * scale,
+            h: self.h * scale,
+            glyph_chars: self.glyph_chars,
+            path: self.path,
+            has_state: self.has_state,
+        }
+    }
+
+    /// Whether this cell draws its **whole** label at `zoom` (D2/D7).
+    ///
+    /// [`label_layout`] answers `Some` even when it had to ellipsize the last
+    /// line or drop lines it could not place — that is D2's "no step holds it"
+    /// state, i.e. a cell painting `…` instead of a name. Whole-ness of the text
+    /// is therefore the predicate the fit needs, not `is_some`: a zoom only
+    /// earns its place in the fit when the label is actually drawn.
+    fn draws_whole_label_at(&self, zoom: f64) -> bool {
+        let Some(layout) = label_layout(&self.label, &self.label_box_at(zoom)) else {
+            return false;
+        };
+        layout
+            .lines
+            .iter()
+            .flat_map(|line| line.chars())
+            .filter(|c| !c.is_whitespace())
+            .eq(self.label.chars().filter(|c| !c.is_whitespace()))
+    }
+}
+
+/// The label fit (D7): the smallest zoom in [`ZOOM_MIN`]..=[`ZOOM_MAX`] at which
+/// every written label's cell yields a layout from the same [`label_layout`] the
+/// painter uses **and draws that label whole**, or `None` when no request
+/// constrains the fit.
+///
+/// "The label fit" is the zoom at which the ladder no longer has to give up on
+/// a label the rack fit shrank away, i.e. the readable zoom: the app takes the
+/// greater of it and [`fit_zoom`], so a label that only fits when zoomed in
+/// lifts the default view and the rack overflows and pans instead of the text
+/// vanishing. Drawing the label whole is the point — an ellipsized floor layout
+/// (D2's "no step holds it") already appears at zooms far below the rack fit and
+/// would report every cell as served while painting `…`.
+///
+/// A request that no zoom up to `ZOOM_MAX` draws whole is *ignored*, not
+/// clamped (D7/D9): no supported zoom can serve that cell, so it must neither
+/// reach the ceiling nor drag the fit above a label that does fit. It stays an
+/// annotation candidate, and the fit is decided by the labels that can be
+/// served. A fit the floor already serves is reported as `None` — there is
+/// nothing to lift and the rack fit answers alone.
+///
+/// Bounded and deterministic: one fixed ascending grid of 1 % zoom steps
+/// ([`LABEL_FIT_STEP_MILLIS`]) from [`ZOOM_MIN`] to [`ZOOM_MAX`] — at most 376
+/// candidates, and the check fails fast on the first cell that does not fit, so
+/// the cost is roughly one [`label_layout`] call per candidate plus one per
+/// request. The grid is exact (thousandths of the 1:1 baseline, never a running
+/// float sum), so the same input always answers the same zoom.
+pub fn label_fit_zoom(requests: &[LabelFitRequest]) -> Option<f64> {
+    let first = (ZOOM_MIN * LABEL_FIT_MILLIS_PER_ZOOM).round() as u32;
+    let cap = (ZOOM_MAX * LABEL_FIT_MILLIS_PER_ZOOM).round() as u32;
+    let cap_zoom = f64::from(cap) / LABEL_FIT_MILLIS_PER_ZOOM;
+
+    // D7/D9: no whole layout at the ceiling means no zoom can serve the cell —
+    // it is ignored rather than clamped, so it can neither push the fit to the
+    // cap nor hold it above a label that does fit.
+    let served: Vec<&LabelFitRequest> = requests
+        .iter()
+        .filter(|request| request.draws_whole_label_at(cap_zoom))
+        .collect();
+    if served.is_empty() {
+        return None;
+    }
+
+    let mut millis = first;
+    loop {
+        let zoom = f64::from(millis) / LABEL_FIT_MILLIS_PER_ZOOM;
+        if served
+            .iter()
+            .all(|request| request.draws_whole_label_at(zoom))
+        {
+            // A fit the floor already serves constrains nothing.
+            return (zoom > ZOOM_MIN).then_some(zoom);
+        }
+        if millis >= cap {
+            // Unreachable: every surviving request fits at the ceiling, which is
+            // the last candidate. Kept so the function stays total.
+            return None;
+        }
+        millis = (millis + LABEL_FIT_STEP_MILLIS).min(cap);
+    }
 }
 
 /// One character of a monospace label font step, in points.
@@ -3747,5 +3876,211 @@ mod tests {
                 "an equal box answers equally: {area:?}"
             );
         }
+    }
+
+    // -- module-ui-label-fit 2.2: the label fit (D7) --------------------------
+
+    /// One written label on one cell, sized in millimetres at 100 % zoom.
+    fn fit_request(
+        label: &str,
+        w_mm: f32,
+        h_mm: f32,
+        glyph_chars: usize,
+        path: CellTextPath,
+        has_state: bool,
+    ) -> LabelFitRequest {
+        LabelFitRequest {
+            w: label_pt(w_mm),
+            h: label_pt(h_mm),
+            glyph_chars,
+            path,
+            has_state,
+            label: label.to_string(),
+        }
+    }
+
+    /// A 9 mm button cell (34 pt at 100 %) with its glyph and press state.
+    fn button_fit_request(label: &str) -> LabelFitRequest {
+        fit_request(label, 9.0, 9.0, 1, CellTextPath::Compact, true)
+    }
+
+    /// The grid candidate `steps` 1 % steps below `zoom`, computed the way the
+    /// scan computes its candidates so a test compares grid points instead of
+    /// float neighbours.
+    fn grid_below(zoom: f64, steps: u32) -> f64 {
+        let millis = (zoom * LABEL_FIT_MILLIS_PER_ZOOM).round() as u32;
+        f64::from(millis - steps * LABEL_FIT_STEP_MILLIS) / LABEL_FIT_MILLIS_PER_ZOOM
+    }
+
+    /// D7: an empty request list constrains nothing, so the rack fit answers
+    /// alone and the label fit reports `None`.
+    #[test]
+    fn label_fit_zoom_is_none_without_requests() {
+        assert_eq!(label_fit_zoom(&[]), None, "nothing to serve");
+    }
+
+    /// D7: when the floor already draws every label whole there is nothing to
+    /// lift, and `None` lets the rack fit decide the view.
+    #[test]
+    fn label_fit_zoom_is_none_when_the_floor_already_serves_the_label() {
+        // A 20 mm cell (75.6 pt at 100 %) draws `Rev` whole at the 0.25 floor.
+        let roomy = fit_request("Rev", 20.0, 20.0, 1, CellTextPath::Compact, true);
+        assert!(
+            roomy.draws_whole_label_at(ZOOM_MIN),
+            "the fixture must be served by the floor"
+        );
+        assert_eq!(
+            label_fit_zoom(std::slice::from_ref(&roomy)),
+            None,
+            "a label the floor already serves does not constrain the fit"
+        );
+    }
+
+    /// D7/D2: a long label on a small cell lifts the fit above true size, and the
+    /// reported zoom is the *first* grid point that draws the label whole — one
+    /// step lower does not, so the answer is the smallest fit, not a rounding.
+    #[test]
+    fn label_fit_zoom_lifts_a_long_label_on_a_small_cell() {
+        let button = button_fit_request("Trigger input threshold resonance filter cutoff");
+        let zoom = label_fit_zoom(std::slice::from_ref(&button))
+            .expect("a 46-character label on a 9 mm button needs a lift");
+        assert!(zoom > 1.0, "the lift is above true size ({zoom})");
+        assert!(zoom <= ZOOM_MAX, "the lift stays inside the range ({zoom})");
+        assert!(
+            button.draws_whole_label_at(zoom),
+            "the answer draws the whole label ({zoom})"
+        );
+        let below = grid_below(zoom, 1);
+        assert!(
+            !button.draws_whole_label_at(below),
+            "one grid step below {zoom} the label does not fit whole yet ({below})"
+        );
+    }
+
+    /// D7/D9: a label no supported zoom can draw whole is *ignored*, not
+    /// clamped — it neither lifts the fit to the ceiling nor holds it above a
+    /// label that does fit, and on its own it constrains nothing.
+    #[test]
+    fn label_fit_zoom_ignores_a_label_no_zoom_can_serve() {
+        let button = button_fit_request("Trigger input");
+        let alone = label_fit_zoom(std::slice::from_ref(&button)).expect("a servable label");
+
+        // A composed face whose band is empty at every zoom (D6, h = 0.5 w), and
+        // a blank label: neither draws anything whole at the ceiling.
+        let no_band = fit_request(
+            "Trigger input",
+            30.0,
+            15.0,
+            0,
+            CellTextPath::Composed,
+            false,
+        );
+        let blank = button_fit_request("   ");
+        assert!(
+            !no_band.draws_whole_label_at(ZOOM_MAX),
+            "the fixture must be unservable even at the ceiling"
+        );
+        assert!(
+            !blank.draws_whole_label_at(ZOOM_MAX),
+            "a blank label draws nothing"
+        );
+
+        assert_eq!(
+            label_fit_zoom(&[no_band.clone(), blank.clone()]),
+            None,
+            "ignored labels alone leave the fit to the rack"
+        );
+        let together = label_fit_zoom(&[button.clone(), no_band, blank])
+            .expect("the servable label still decides the fit");
+        assert_eq!(
+            together, alone,
+            "an unservable label neither lifts the fit nor drags it to the cap"
+        );
+    }
+
+    /// D7: the reported fit is always a zoom the view can actually take — never
+    /// above the ceiling, never below the floor — across every paint path.
+    #[test]
+    fn label_fit_zoom_never_leaves_the_supported_range() {
+        let cases = [
+            button_fit_request("Trigger input"),
+            button_fit_request("Trigger input threshold"),
+            button_fit_request("Trigger input threshold resonance filter cutoff"),
+            fit_request("Ring light", 3.0, 3.0, 1, CellTextPath::Compact, true),
+            fit_request("Volume", 4.2, 22.0, 0, CellTextPath::Fader, true),
+            fit_request("Volume", 7.0, 62.0, 0, CellTextPath::Fader, false),
+            fit_request("Reverb", 30.0, 45.0, 0, CellTextPath::Composed, false),
+        ];
+        for request in cases {
+            if let Some(zoom) = label_fit_zoom(std::slice::from_ref(&request)) {
+                assert!(
+                    (ZOOM_MIN..=ZOOM_MAX).contains(&zoom),
+                    "{:?} reported {zoom}, outside {ZOOM_MIN}..={ZOOM_MAX}",
+                    request.label
+                );
+                assert!(zoom.is_finite(), "{:?} reported {zoom}", request.label);
+            }
+        }
+        // No fit is ever reported above the ceiling for an unservable label.
+        let no_band = fit_request(
+            "Trigger input",
+            30.0,
+            15.0,
+            0,
+            CellTextPath::Composed,
+            false,
+        );
+        assert_eq!(label_fit_zoom(&[no_band]), None);
+    }
+
+    /// D7: the fit serves *every* request, so it is the hardest label's own fit.
+    #[test]
+    fn label_fit_zoom_takes_the_hardest_label() {
+        let short = button_fit_request("Trigger input");
+        let long = button_fit_request("Trigger input threshold resonance filter cutoff");
+        let short_fit = label_fit_zoom(std::slice::from_ref(&short)).expect("the short label");
+        let long_fit = label_fit_zoom(std::slice::from_ref(&long)).expect("the long label");
+        assert!(
+            short_fit < long_fit,
+            "the fixture must span two fits ({short_fit} vs {long_fit})"
+        );
+        assert_eq!(
+            label_fit_zoom(&[short, long]),
+            Some(long_fit),
+            "the harder label decides the fit"
+        );
+    }
+
+    /// Determinism: the same requests answer the same zoom on every call, an
+    /// independently built list answers it too, and request order is irrelevant.
+    #[test]
+    fn label_fit_zoom_is_deterministic() {
+        let requests = vec![
+            button_fit_request("Trigger input"),
+            fit_request("Ring light", 3.0, 3.0, 1, CellTextPath::Compact, true),
+            fit_request("Volume", 4.2, 22.0, 0, CellTextPath::Fader, true),
+        ];
+        let first = label_fit_zoom(&requests);
+        assert!(first.is_some(), "the fixture constrains the fit");
+        assert_eq!(label_fit_zoom(&requests), first, "same input, same answer");
+
+        let rebuilt = vec![
+            button_fit_request("Trigger input"),
+            fit_request("Ring light", 3.0, 3.0, 1, CellTextPath::Compact, true),
+            fit_request("Volume", 4.2, 22.0, 0, CellTextPath::Fader, true),
+        ];
+        assert_eq!(
+            label_fit_zoom(&rebuilt),
+            first,
+            "an equal list answers equally"
+        );
+
+        let mut reversed = rebuilt;
+        reversed.reverse();
+        assert_eq!(
+            label_fit_zoom(&reversed),
+            first,
+            "request order is irrelevant"
+        );
     }
 }
