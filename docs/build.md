@@ -109,7 +109,7 @@ file. [Contributing](contributing.md) lists the same locked forms; the
 commands still pass locally without `--locked`, but then a stale
 lockfile would not fail.
 
-The release performance gate is a fifth command, Linux only:
+The release performance gate is a sixth command, Linux only:
 
 ```sh
 cargo test --release --test perf_gate --locked
