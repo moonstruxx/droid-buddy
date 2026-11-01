@@ -7,8 +7,8 @@
 //! unit tests). Task 2.3 adds rack/row packing on top of the public chain
 //! types (`PhysicalLayout` / `PhysicalModule`).
 
-use std::collections::HashMap;
-use std::sync::Once;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, Once, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +125,44 @@ pub struct ElementCellEntry {
 /// Compiled in so a binary copied away from the repo still has its faceplates.
 const CONTROLLER_GEOMETRY_JSON: &str = include_str!("../controller_geometry.json");
 
+/// Controller names that are themselves a geometry-data key.
+///
+/// The one vocabulary for "this name is a controller": `resolve_controller`
+/// uses it so a name still resolves when the data file is absent, and the rack
+/// inventory uses it to reject a typo instead of drawing a mystery faceplate.
+/// `master`/`master18` are master models rather than rack modules, but they are
+/// keys `resolve_controller` has always accepted, so they stay here.
+const CONTROLLER_KEYS: &[&str] = &[
+    "p2b8", "b32", "e4", "m4", "p8s8", "p10", "s10", "db8e", "g8", "x7", "r2m", "r2c", "p4b2",
+    "master", "master18",
+];
+
+/// Usage-based controller section names -> the physical module that provides
+/// their elements (`[faderbank]` -> "Faderbank" -> p8s8).
+const CONTROLLER_ALIASES: &[(&str, &str)] = &[
+    ("notebuttons", "b32"),
+    ("faderbank", "p8s8"),
+    ("encoder", "e4"),
+    ("pot", "p10"),
+    ("motorfader", "m4"),
+];
+
+/// Lowercase geometry key for a controller name, or `None` when the name is
+/// not a controller this module knows.
+fn controller_geometry_key(name: &str) -> Option<&'static str> {
+    let c = name.trim().to_ascii_lowercase();
+    CONTROLLER_KEYS
+        .iter()
+        .copied()
+        .find(|key| *key == c.as_str())
+        .or_else(|| {
+            CONTROLLER_ALIASES
+                .iter()
+                .find(|(alias, _)| *alias == c.as_str())
+                .map(|(_, key)| *key)
+        })
+}
+
 impl ControllerGeometry {
     /// Parse the embedded `controller_geometry.json`, mirroring
     /// `RackGeometry::load` in `src/geometry.rs`. Malformed data returns a
@@ -237,19 +275,7 @@ impl ControllerGeometry {
         if self.controllers.contains_key(&c) {
             return Some(c);
         }
-        match c.as_str() {
-            // Direct module names (also resolvable when the data file is
-            // absent and `controllers` is empty).
-            "p2b8" | "b32" | "e4" | "m4" | "p8s8" | "p10" | "s10" | "db8e" | "g8" | "x7"
-            | "r2m" | "r2c" | "p4b2" | "master" | "master18" => Some(c),
-            // Usage-based controller sections -> physical module.
-            "notebuttons" => Some(String::from("b32")),
-            "faderbank" => Some(String::from("p8s8")),
-            "encoder" => Some(String::from("e4")),
-            "pot" => Some(String::from("p10")),
-            "motorfader" => Some(String::from("m4")),
-            _ => None,
-        }
+        controller_geometry_key(&c).map(String::from)
     }
 }
 
@@ -421,9 +447,26 @@ fn preprocess_cells(
 
 static DATA_WARN: Once = Once::new();
 static CONTROLLER_WARN: Once = Once::new();
+static UNKNOWN_MODULE_WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn warn_once(gate: &Once, msg: &str) {
     gate.call_once(|| eprintln!("[warn] physical: {msg}"));
+}
+
+/// One warning per distinct unknown controller name, for the process lifetime:
+/// the inventory is resolved on every fit and paint, so a per-call warning
+/// would flood the terminal a frame at a time.
+fn warn_unknown_module(controller: &str) {
+    let warned = UNKNOWN_MODULE_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut names = match warned.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if names.insert(controller.to_owned()) {
+        eprintln!(
+            "[warn] physical: controller {controller:?} in the rack inventory is unknown; entry skipped"
+        );
+    }
 }
 
 impl PhysicalLayout {
@@ -636,6 +679,66 @@ impl PhysicalLayout {
 /// constant the renderer maps with the same formula as the rows.
 pub const FOLD_BAR_HEIGHT_MM: f64 = 5.0;
 
+/// Names an inventory may use for the master faceplate. They are aliases, not
+/// modules: whichever `MasterModel` the rack draws, the inventory names it once
+/// and cannot pin the model by key.
+const MASTER_ALIASES: &[&str] = &["master", "master18", "cv i/o"];
+
+/// Canonical identity of the master faceplate in an inventory. One key for
+/// every alias so a config need not know which master model is installed.
+const MASTER_CONTROLLER_KEY: &str = "master";
+
+/// One module named by the rack inventory: a controller plus its 1-based
+/// circuit instance.
+///
+/// Canonical form: `controller` is a lowercase geometry key ("p2b8", "b32")
+/// and the master faceplate is `{ controller: "master", instance: 1 }`,
+/// whatever `MasterModel` the chain actually draws — `MASTER_ALIASES` covers
+/// "master", "master18" and the patch vocabulary "CV I/O".
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModuleKey {
+    /// Lowercase geometry key of the controller.
+    pub controller: String,
+    /// 1-based circuit instance within that controller.
+    pub instance: usize,
+}
+
+impl ModuleKey {
+    /// Parse one inventory entry: `"{controller} {instance}"` with a 1-based
+    /// instance, or the bare controller for a single-instance module.
+    ///
+    /// Syntax only — the controller is lowercased but not checked against
+    /// `CONTROLLER_KEYS`, so `RackSpec::module_keys` can report an unknown
+    /// name by name instead of it vanishing here. An instance of 0, a
+    /// non-numeric suffix, or a third field (a controller name with a space
+    /// that is not a master alias) is invalid.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let lowered = raw.trim().to_ascii_lowercase();
+        if MASTER_ALIASES.contains(&lowered.as_str()) {
+            return Some(Self {
+                controller: String::from(MASTER_CONTROLLER_KEY),
+                instance: 1,
+            });
+        }
+        let mut parts = lowered.split_whitespace();
+        let controller = parts.next()?;
+        let instance = match parts.next() {
+            None => 1,
+            Some(n) => {
+                let parsed: usize = n.parse().ok()?;
+                if parsed == 0 || parts.next().is_some() {
+                    return None;
+                }
+                parsed
+            }
+        };
+        Some(Self {
+            controller: String::from(controller),
+            instance,
+        })
+    }
+}
+
 /// One case row. Height in HE (1 or 3), width in HP, optional label.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct RackRow {
@@ -645,6 +748,12 @@ pub struct RackRow {
     pub hp: f64,
     #[serde(default)]
     pub label: Option<String>,
+    /// Modules mounted in this row, left to right, as module keys (see
+    /// `ModuleKey::parse`). Empty means today's behaviour: the row is filled
+    /// from the chain. Skipped on save while empty so an existing config does
+    /// not gain the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
 }
 
 /// The case/rack definition (D9/D10). Pure data — the `[physical.rack]`
@@ -683,11 +792,38 @@ impl RackSpec {
                 he,
                 hp,
                 label: None,
+                modules: Vec::new(),
             }],
             top_mount_te: 0.0,
             side_mount_te: 0.0,
             assign: HashMap::new(),
         }
+    }
+
+    /// Flat inventory: row order, then list order.
+    ///
+    /// The single reader of `RackRow.modules`. A malformed entry is skipped
+    /// silently; a controller outside the registry is skipped with one
+    /// process-wide warning per distinct name (see `warn_unknown_module`).
+    /// Each resolved controller is stored as its canonical geometry key, which
+    /// is what `PhysicalModule::geometry_key` carries for the same hardware.
+    pub fn module_keys(&self) -> Vec<ModuleKey> {
+        let mut keys = Vec::new();
+        for row in &self.rows {
+            for entry in &row.modules {
+                let Some(parsed) = ModuleKey::parse(entry) else {
+                    continue;
+                };
+                match controller_geometry_key(&parsed.controller) {
+                    Some(key) => keys.push(ModuleKey {
+                        controller: String::from(key),
+                        instance: parsed.instance,
+                    }),
+                    None => warn_unknown_module(&parsed.controller),
+                }
+            }
+        }
+        keys
     }
 }
 
@@ -1931,11 +2067,13 @@ mod tests {
                     he: 3,
                     hp: 12.0,
                     label: None,
+                    modules: Vec::new(),
                 },
                 RackRow {
                     he: 3,
                     hp: 12.0,
                     label: None,
+                    modules: Vec::new(),
                 },
             ],
             assign: HashMap::from([("CV I/O".to_string(), 1)]),
@@ -2455,6 +2593,7 @@ mod tests {
                     he,
                     hp,
                     label: None,
+                    modules: Vec::new(),
                 })
                 .collect(),
             top_mount_te: 0.0,
@@ -4283,5 +4422,95 @@ mod tests {
             first,
             "request order is irrelevant"
         );
+    }
+
+    // ---- rack inventory (task 1.1) ----
+
+    fn module(controller: &str, instance: usize) -> ModuleKey {
+        ModuleKey {
+            controller: String::from(controller),
+            instance,
+        }
+    }
+
+    #[test]
+    fn module_key_parses_a_qualified_controller_and_one_based_instance() {
+        assert_eq!(ModuleKey::parse("P2B8 2"), Some(module("p2b8", 2)));
+        assert_eq!(ModuleKey::parse("  b32   12 "), Some(module("b32", 12)));
+    }
+
+    #[test]
+    fn module_key_parses_a_bare_controller_as_instance_one() {
+        assert_eq!(ModuleKey::parse("P2B8"), Some(module("p2b8", 1)));
+        assert_eq!(ModuleKey::parse("p8s8"), Some(module("p8s8", 1)));
+    }
+
+    #[test]
+    fn module_key_maps_every_master_alias_to_the_master_key() {
+        for alias in ["master", "Master", "MASTER18", "CV I/O", " cv i/o "] {
+            assert_eq!(
+                ModuleKey::parse(alias),
+                Some(module("master", 1)),
+                "alias {alias:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_key_rejects_an_invalid_instance() {
+        for raw in ["P2B8 0", "P2B8 x", "P2B8 -1", "P2B8 1 2", "", "   "] {
+            assert_eq!(ModuleKey::parse(raw), None, "entry {raw:?}");
+        }
+    }
+
+    #[test]
+    fn inventory_skips_an_unknown_controller_without_panicking() {
+        let spec = RackSpec {
+            rows: vec![
+                RackRow {
+                    modules: vec![String::from("P2B8 1"), String::from("Nonsense 2")],
+                    ..RackRow::default()
+                },
+                RackRow {
+                    modules: vec![String::from("B32")],
+                    ..RackRow::default()
+                },
+            ],
+            ..RackSpec::default()
+        };
+        assert_eq!(
+            spec.module_keys(),
+            vec![module("p2b8", 1), module("b32", 1)]
+        );
+        assert_eq!(
+            spec.module_keys(),
+            spec.module_keys(),
+            "the warning is once, the answer stable"
+        );
+    }
+
+    #[test]
+    fn inventory_resolves_a_usage_controller_to_its_module() {
+        let spec = RackSpec {
+            rows: vec![RackRow {
+                modules: vec![String::from("Faderbank 2")],
+                ..RackRow::default()
+            }],
+            ..RackSpec::default()
+        };
+        assert_eq!(spec.module_keys(), vec![module("p8s8", 2)]);
+    }
+
+    #[test]
+    fn rack_rows_without_modules_still_deserialize() {
+        let spec: RackSpec =
+            toml::from_str("[[rows]]\nhe = 3\nhp = 84.0\nlabel = \"Main\"\n").unwrap();
+        assert_eq!(spec.rows.len(), 1);
+        assert_eq!(spec.rows[0].label.as_deref(), Some("Main"));
+        assert!(
+            spec.rows[0].modules.is_empty(),
+            "an absent key must load as no inventory"
+        );
+        assert!(spec.module_keys().is_empty());
     }
 }
