@@ -191,6 +191,11 @@ pub struct Patch {
     /// `from_ini_str`; hand-built patches (e.g. `sample()`) carry none.
     #[serde(default)]
     pub controllers: Vec<ControllerDecl>,
+    /// The Forge's master selection from the preamble, `# LABELS: master=16|18`
+    /// (`16` → MASTER, `18` → MASTER18). `None` when the preamble carries no
+    /// valid declaration; never derived from the hardware tokens.
+    #[serde(default)]
+    pub master_declaration: Option<MasterModel>,
 }
 
 /// One controller-declaring section the parser recognized: the section name
@@ -296,14 +301,48 @@ impl ModuleWidth {
     }
 }
 
-/// Which MASTER model a patch requires. MASTER18 has more CV jacks/RAM
-/// than MASTER; a patch that addresses jacks beyond MASTER's 8 CV in/out
-/// needs MASTER18. See `Patch::master_requirement`.
+/// Which master module a patch is written for. The two models differ in what a
+/// patch can address and in how much RAM it has, and the codebase names that one
+/// fact three ways: `master`/`master18` (embedded rack geometry),
+/// `master16`/`master18` (the schema's RAM budgets) and `MASTER`/`MASTER18`
+/// (what a human reads). The accessors below are the only place each spelling
+/// lives, so the three cannot drift apart again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MasterRequirement {
+pub enum MasterModel {
     Master,
     Master18,
 }
+
+impl MasterModel {
+    /// Key of this model's faceplate in the embedded rack geometry.
+    pub fn geometry_key(self) -> &'static str {
+        match self {
+            MasterModel::Master => "master",
+            MasterModel::Master18 => "master18",
+        }
+    }
+
+    /// Key of this model's budget in the schema's `available_memory` map.
+    pub fn ram_key(self) -> &'static str {
+        match self {
+            MasterModel::Master => "master16",
+            MasterModel::Master18 => "master18",
+        }
+    }
+
+    /// Human-readable model name, as shown in the module UI and load status.
+    pub fn label(self) -> &'static str {
+        match self {
+            MasterModel::Master => "MASTER",
+            MasterModel::Master18 => "MASTER18",
+        }
+    }
+}
+
+/// Transitional name for [`MasterModel`]: `src/physical.rs` still spells the
+/// type while it reads `Patch::master_requirement`. Both go away together when
+/// the physical layout takes the resolved model as a parameter (task 1.4).
+pub use MasterModel as MasterRequirement;
 
 /// A module in a DROID patch, grouping hardware components by controller type.
 /// Modules provide logical grouping for the TUI rendering and resize behavior.
@@ -521,6 +560,7 @@ impl Patch {
             circuit_outputs: Vec::new(),
             preamble_labels: HashMap::new(),
             controllers: Vec::new(),
+            master_declaration: None,
         }
     }
 
@@ -1017,6 +1057,7 @@ impl Patch {
         let banner_groups = collect_banner_groups(&raw_lines, &sections);
         let circuit_outputs = collect_circuit_outputs(&sections);
         let preamble_labels = parse_preamble_labels(&raw_lines);
+        let master_declaration = parse_master_declaration(&raw_lines);
 
         // Static LED colour/brightness at load (led-register-colour D4): upgrade
         // LEDs with a resolved source to `Led { value, rgb }`; all others keep
@@ -1062,6 +1103,7 @@ impl Patch {
             circuit_outputs,
             preamble_labels,
             controllers,
+            master_declaration,
         })
     }
 
@@ -1090,18 +1132,20 @@ impl Patch {
         needs
     }
 
-    /// Whether this patch requires MASTER or MASTER18. Heuristic: MASTER18
-    /// carries more jacks/RAM than MASTER; a patch that addresses CV jack
-    /// 9 or higher needs MASTER18.
-    pub fn master_requirement(&self) -> MasterRequirement {
+    /// Legacy heuristic: MASTER18 when any CV jack numbered 9 or higher is used.
+    /// It guesses — it cannot see circuits, gate jacks or the patch's own
+    /// declaration — so it is only kept because the physical layout still reads
+    /// it; the resolved master plan replaces this call site (task 1.4), after
+    /// which this function is deleted.
+    pub fn master_requirement(&self) -> MasterModel {
         let needs_master18 = self.hw_components.iter().any(|c| {
             matches!(c.kind, ComponentKind::CvIn | ComponentKind::CvOut)
                 && leading_number(&c.id).is_some_and(|n| n > 8)
         });
         if needs_master18 {
-            MasterRequirement::Master18
+            MasterModel::Master18
         } else {
-            MasterRequirement::Master
+            MasterModel::Master
         }
     }
 
@@ -2950,6 +2994,50 @@ fn is_preamble_token(s: &str) -> bool {
     }
 }
 
+/// Read the Forge's master selection (`# LABELS: master=16|18`) from the leading
+/// comment block.
+///
+/// Only lines before the first `[section]` header are considered; blank lines do
+/// not end the block, any non-comment line does. `16` → MASTER, `18` → MASTER18,
+/// the first valid declaration wins, and any other value is ignored: the field
+/// belongs to the Forge, so a patch must never fail to load (or gain a finding)
+/// because of it.
+fn parse_master_declaration(raw_lines: &[String]) -> Option<MasterModel> {
+    for raw in raw_lines {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            break;
+        }
+        let Some(after_hash) = trimmed.strip_prefix('#') else {
+            // A non-comment line ends the leading comment block.
+            break;
+        };
+        let after_hash = after_hash.trim_start();
+        let Some((key, value)) = after_hash.split_once(':') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("LABELS") {
+            continue;
+        }
+        let Some((name, number)) = value.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("master") {
+            continue;
+        }
+        match number.trim() {
+            "16" => return Some(MasterModel::Master),
+            "18" => return Some(MasterModel::Master18),
+            // Unrecognised values are Forge business, not ours.
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_preamble_labels(raw_lines: &[String]) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
     for raw in raw_lines {
@@ -3979,14 +4067,106 @@ mod tests {
     fn master_requirement_is_master_for_patch_within_eight_cv_jacks() {
         let content = std::fs::read_to_string("fixtures/own_buttons.ini").unwrap();
         let patch = Patch::from_ini_str(&content, String::from("own_buttons")).unwrap();
-        assert_eq!(patch.master_requirement(), MasterRequirement::Master);
+        assert_eq!(patch.master_requirement(), MasterModel::Master);
     }
 
     #[test]
     fn master_requirement_is_master18_when_cv_jack_beyond_eight_is_used() {
         let content = "[copy]\n    input = I9\n    output = O1\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
-        assert_eq!(patch.master_requirement(), MasterRequirement::Master18);
+        assert_eq!(patch.master_requirement(), MasterModel::Master18);
+    }
+
+    #[test]
+    fn master_model_accessors_name_each_vocabulary() {
+        assert_eq!(MasterModel::Master.geometry_key(), "master");
+        assert_eq!(MasterModel::Master18.geometry_key(), "master18");
+        assert_eq!(MasterModel::Master.ram_key(), "master16");
+        assert_eq!(MasterModel::Master18.ram_key(), "master18");
+        assert_eq!(MasterModel::Master.label(), "MASTER");
+        assert_eq!(MasterModel::Master18.label(), "MASTER18");
+    }
+
+    #[test]
+    fn master_model_round_trips_through_serde() {
+        for model in [MasterModel::Master, MasterModel::Master18] {
+            let json = serde_json::to_string(&model).unwrap();
+            let back: MasterModel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, model);
+        }
+    }
+
+    #[test]
+    fn master_declaration_master18_is_parsed() {
+        let content = "# LABELS: master=18\n[copy]\n    input = I1\n    output = O1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, Some(MasterModel::Master18));
+    }
+
+    #[test]
+    fn master_declaration_master16_is_parsed() {
+        let content = "# LABELS: master=16\n[copy]\n    input = I1\n    output = O1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, Some(MasterModel::Master));
+    }
+
+    #[test]
+    fn master_declaration_tolerates_spacing_and_case() {
+        let content = "#  labels :  MASTER =  18  \n[copy]\n    input = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, Some(MasterModel::Master18));
+    }
+
+    #[test]
+    fn master_declaration_first_valid_wins_over_later_unknown_value() {
+        let content = "# LABELS: master=20\n#\n# LABELS: master=18\n[copy]\n    input = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, Some(MasterModel::Master18));
+    }
+
+    #[test]
+    fn master_declaration_is_absent_without_the_line() {
+        let content = "# ---- Controls ----\n[copy]\n    input = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, None);
+    }
+
+    #[test]
+    fn master_declaration_ignores_unrecognised_value() {
+        let content = "# LABELS: master=20\n[copy]\n    input = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, None);
+    }
+
+    #[test]
+    fn master_declaration_after_first_section_is_not_read() {
+        let content = "# ---- Controls ----\n[copy]\n    input = I1\n# LABELS: master=18\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert_eq!(patch.master_declaration, None);
+    }
+
+    #[test]
+    fn master_declaration_is_never_a_preamble_label() {
+        let content = "# LABELS: master=18\n# I4: Cutoff\n[copy]\n    input = I1\n";
+        let patch = Patch::from_ini_str(content, String::from("t")).unwrap();
+        assert!(
+            !patch.preamble_labels.contains_key("LABELS"),
+            "LABELS must never become a hardware label: {:?}",
+            patch.preamble_labels
+        );
+        assert!(
+            !patch
+                .preamble_labels
+                .values()
+                .any(|label| label.contains("master")),
+            "no element label may resolve from the declaration: {:?}",
+            patch.preamble_labels
+        );
+        assert_eq!(
+            patch.preamble_labels.get("I4").map(String::as_str),
+            Some("Cutoff")
+        );
+        assert!(!is_preamble_token("LABELS"));
     }
 
     #[test]
