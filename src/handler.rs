@@ -5,7 +5,6 @@ use egui::{Modifiers, PointerButton};
 use winit::event::WindowEvent;
 use winit::keyboard::NamedKey;
 
-#[cfg(test)]
 use crate::gui::ViewerFrame;
 // Production: the module UI's and the picker overlay's input reports are applied
 // from the paint layer (`gui::paint_panes` / `gui::paint_overlays`), not from the
@@ -214,7 +213,10 @@ pub(crate) fn handle_physical_frame(frame: PhysicalFrame, app: &mut crate::app::
     }
 }
 
-#[cfg(test)]
+/// Apply the source pane's per-frame input report: the wheel delta it saw over
+/// its content column, converted to whole lines. Called by the pane dispatch
+/// (`gui::paint_panes`), which is the layer that owns `&mut App` while the
+/// painter only borrows it.
 pub(crate) fn handle_viewer_frame(frame: ViewerFrame, app: &mut crate::app::App) {
     if frame.scroll_delta != 0.0 {
         let delta = frame.scroll_delta as isize;

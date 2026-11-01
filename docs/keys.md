@@ -31,6 +31,7 @@ coloring).
 | Key | Action |
 |---|---|
 | `j`/`k` | scroll source |
+| `wheel` | scroll source (pointer over the source column) |
 | `Up`/`Down`, `Home`/`End` | navigate occurrences |
 | `t` | toggle raw/prettified |
 | `[`/`]` | adjust pane split |

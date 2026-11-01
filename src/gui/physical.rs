@@ -15,7 +15,7 @@
 //! the [`ScreenMapping`] (mm↔screen cells, also pure), and the display
 //! labels from `Patch::display_label` semantics.
 
-use egui::{Context, Painter, Pos2, Rect, Vec2};
+use egui::{Painter, Pos2, Rect, Vec2};
 
 use crate::app::App;
 use crate::patch::{ComponentKind, ComponentState, NodeId, ShiftGroup};
@@ -5129,13 +5129,12 @@ mod tests {
         mm * crate::physical::PHYSICAL_POINTS_PER_MM as f32
     }
 
-    /// One painted text run: its text, its font, and its painted origin/size.
+    /// One painted text run: its text, its font, and its painted origin.
     #[derive(Debug, Clone)]
     struct PaintedRun {
         text: String,
         font: egui::FontId,
         pos: Pos2,
-        size: Vec2,
     }
 
     /// Paint one cell headless (full presentation) and return every
@@ -5160,7 +5159,6 @@ mod tests {
                     text: t.galley.text().to_string(),
                     font: t.galley.job.sections[0].format.font_id.clone(),
                     pos: t.pos,
-                    size: t.galley.size(),
                 });
             }
         }
