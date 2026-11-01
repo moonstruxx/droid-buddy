@@ -1800,19 +1800,26 @@ fn regression_anchor_graph_label_fonts_constant_across_zoom() {
     );
 }
 
-/// Monospace font sizes painted for the *in-cell labels* of a module-UI spec
-/// at one physical zoom.
+/// One cell's ladder step: the cell's index in the painted spec and the step in
+/// points the painter drew (or the layout resolved) for it.
+type CellLabelStep = (usize, f32);
+
+/// The painted in-cell label runs of a module-UI spec at one physical zoom:
+/// `(painted, fitted)` where the first element lists `(cell index, painted step)`
+/// once per painted *line* (a wrapped label therefore appears once per line) and
+/// the second lists `(cell index, step)` for every cell the spec fitted a label
+/// for.
 ///
-/// Scoped to cell labels on purpose: `paint_physical` also paints 14 pt
-/// monospace callout headlines for the label annotations, the performance
-/// overlay and the hover reveal. Those are a separate typographic role
-/// (fixed callout size, placed outside the rack cells), so counting them here
-/// would compare the cell-label size against the callout size rather than
-/// measuring whether cell labels stay constant across zoom presets. A shape
-/// counts only when it is monospace and its painted rect fits a cell's rect
-/// (expanded by 1 pt for egui's monospace advance differing slightly from the
-/// 0.6 em budget used to clip labels).
-fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
+/// The match is deliberately narrow, because `paint_physical` also paints
+/// monospace text inside a cell that is not that cell's label: the compact
+/// cell's state is a corner-marker glyph sized from the cell height (6–9 pt, so
+/// not necessarily a ladder step at all), and every callout headline is 14 pt
+/// outside the rack. A run counts only when its text is one of the cell's own
+/// `label_layout` lines and its painted rect fits the cell (expanded by 1 pt for
+/// egui's monospace advance differing slightly from the 0.6 em the layout
+/// budgets with). The step is read off the painted shape rather than the layout,
+/// so the story can compare the two.
+fn painted_physical_label_sizes(zoom: f32) -> (Vec<CellLabelStep>, Vec<CellLabelStep>) {
     use egui::epaint::Shape;
     use egui::RawInput;
 
@@ -1822,6 +1829,17 @@ fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
     app.physical_zoom = zoom;
     let pane = anchor_pane();
     let spec = crate::gui::physical_spec(&app, pane).expect("physical spec present");
+    let fitted: Vec<(usize, f32)> = spec
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(cell, spec_cell)| {
+            spec_cell
+                .label_layout
+                .as_ref()
+                .map(|layout| (cell, layout.font))
+        })
+        .collect();
     let ctx = egui::Context::default();
     let mut out = ctx.run_ui(
         RawInput {
@@ -1832,51 +1850,142 @@ fn painted_physical_label_sizes(zoom: f32) -> Vec<f32> {
             crate::gui::paint_physical(ui, pane, Some(&spec));
         },
     );
-    let mut sizes = Vec::new();
+    let mut painted: Vec<(usize, f32)> = Vec::new();
     for cs in &out.shapes {
-        if let Shape::Text(t) = &cs.shape {
-            let font = t
-                .galley
-                .job
-                .sections
-                .first()
-                .map(|s| s.format.font_id.clone())
-                .unwrap_or_default();
-            if font.family != egui::FontFamily::Monospace {
-                continue;
-            }
-            // Cell labels paint LEFT_TOP from a point inside their cell, so
-            // the painted rect starts at `t.pos`. Annotations and other
-            // callouts paint inside their own label rect, outside the cells.
-            let text_rect = egui::Rect::from_min_size(t.pos, t.galley.size());
-            let inside_a_cell = spec
-                .cells
-                .iter()
-                .any(|cell| cell.rect.expand(1.0).contains_rect(text_rect));
-            if inside_a_cell {
-                sizes.push(font.size);
-            }
+        let Shape::Text(t) = &cs.shape else {
+            continue;
+        };
+        let font = t
+            .galley
+            .job
+            .sections
+            .first()
+            .map(|s| s.format.font_id.clone())
+            .unwrap_or_default();
+        if font.family != egui::FontFamily::Monospace {
+            continue;
+        }
+        let text = t.galley.text();
+        let text_rect = egui::Rect::from_min_size(t.pos, t.galley.size());
+        let host = spec.cells.iter().position(|cell| {
+            cell.label_layout
+                .as_ref()
+                .is_some_and(|layout| layout.lines.iter().any(|line| line == text))
+                && cell.rect.expand(1.0).contains_rect(text_rect)
+        });
+        if let Some(cell) = host {
+            painted.push((cell, font.size));
         }
     }
     out.textures_delta.clear();
-    sizes
+    (painted, fitted)
 }
 
+/// The label ladder (module-ui-label-fit D2/D3): the largest step a cell can
+/// hold, never below the 6 pt floor.
+const MODULE_UI_LABEL_LADDER: [f32; 5] = [10.0, 9.0, 8.0, 7.0, 6.0];
+
 #[test]
-fn regression_anchor_module_ui_label_fonts_constant_across_zoom() {
-    let mut sizes = Vec::new();
+fn regression_anchor_module_ui_label_fonts_follow_the_ladder_per_cell() {
+    let mut matrices: Vec<(f32, Vec<(usize, f32)>)> = Vec::new();
     for zoom in [0.75f32, 1.0, 1.5, 2.0] {
-        let at_zoom = painted_physical_label_sizes(zoom);
+        let (runs, fitted) = painted_physical_label_sizes(zoom);
         assert!(
-            !at_zoom.is_empty(),
+            !runs.is_empty(),
             "anchor module UI paints cell labels at zoom {zoom}"
         );
-        sizes.extend(at_zoom);
+
+        // One step per cell: a wrapped label's lines all share the cell's step, so
+        // two different steps for one cell mean the painter disagreed with its own
+        // layout.
+        let mut step_per_cell: Vec<(usize, f32)> = Vec::new();
+        for &(cell, font) in &runs {
+            match step_per_cell.iter_mut().find(|(seen, _)| *seen == cell) {
+                Some((_, seen_step)) => assert_eq!(
+                    *seen_step, font,
+                    "cell {cell} paints two steps at zoom {zoom}: {runs:?}"
+                ),
+                None => step_per_cell.push((cell, font)),
+            }
+        }
+        step_per_cell.sort_unstable_by_key(|&(cell, _)| cell);
+
+        // The ladder and the floor: every painted run is a step of the ladder and
+        // nothing is painted below 6 pt.
+        for &(cell, font) in &runs {
+            assert!(
+                MODULE_UI_LABEL_LADDER.contains(&font),
+                "cell {cell} paints {font} pt at zoom {zoom}, off the 10/9/8/7/6 ladder: {runs:?}"
+            );
+            assert!(
+                font >= 6.0,
+                "cell {cell} paints {font} pt at zoom {zoom}, below the 6 pt floor"
+            );
+        }
+
+        // And the step is the one the cell's own geometry allows: the cells that
+        // paint a label are exactly the cells the spec fitted one for, and the
+        // painted step is that layout's step.
+        let mut painted_cells: Vec<usize> = step_per_cell.iter().map(|&(cell, _)| cell).collect();
+        painted_cells.sort_unstable();
+        let mut fitted_cells: Vec<usize> = fitted.iter().map(|&(cell, _)| cell).collect();
+        fitted_cells.sort_unstable();
+        assert_eq!(
+            painted_cells, fitted_cells,
+            "cells with an in-cell layout and cells painting a label must coincide at zoom {zoom}"
+        );
+        for &(cell, step) in &fitted {
+            assert!(
+                step_per_cell
+                    .iter()
+                    .any(|&(painted_cell, font)| painted_cell == cell && font == step),
+                "cell {cell} must draw its own layout step {step} at zoom {zoom}: {runs:?}"
+            );
+        }
+
+        matrices.push((zoom, step_per_cell));
     }
-    assert!(!sizes.is_empty(), "anchor module UI paints cell labels");
+
+    // A growing cell may take a larger step, and never a smaller one: the same
+    // cell's step is non-decreasing as the zoom grows, because its whole text box
+    // scales with it, so any step that fit before still fits.
+    for pair in matrices.windows(2) {
+        let (low_zoom, low) = &pair[0];
+        let (high_zoom, high) = &pair[1];
+        for &(cell, low_font) in low {
+            if let Some(&(_, high_font)) = high.iter().find(|(c, _)| *c == cell) {
+                assert!(
+                    high_font >= low_font,
+                    "cell {cell} steps down from {low_font} pt at {low_zoom} to {high_font} pt at {high_zoom}"
+                );
+            }
+        }
+    }
+
+    // The matrix is a ladder, not one constant: several steps appear across the
+    // presets, the smallest zoom takes a step below the top one, and at least one
+    // cell answers a larger cell with a larger step.
+    let (_, lowest) = &matrices[0];
+    let (_, highest) = matrices.last().expect("four presets");
+    let mut steps: Vec<f32> = matrices
+        .iter()
+        .flat_map(|(_, painted)| painted.iter().map(|&(_, font)| font))
+        .collect();
+    steps.sort_by(f32::total_cmp);
+    steps.dedup();
     assert!(
-        sizes.iter().all(|&s| s == sizes[0]),
-        "one cell-label font at every zoom preset: {sizes:?}"
+        steps.len() >= 2,
+        "cell labels take more than one ladder step across the presets: {steps:?}"
+    );
+    assert!(
+        lowest.iter().any(|&(_, font)| font < 10.0),
+        "at the smallest preset a cell takes a step below the ladder's top: {lowest:?}"
+    );
+    assert!(
+        lowest.iter().any(|&(cell, low_font)| highest
+            .iter()
+            .any(|&(other, high_font)| other == cell && high_font > low_font)),
+        "a cell that grows with the zoom takes a larger ladder step: {lowest:?} -> {highest:?}"
     );
 }
 
@@ -2940,13 +3049,14 @@ fn regression_sections_mode_clusters_around_section_holes() {
     );
 }
 
-// ── module-ui-labels (task 3.1): label presentation on a real rack ─────────
+// ── module-ui-labels / module-ui-label-fit (task 3.1): labels on a real rack ─
 // One fixture (`fixtures/module_ui_labels.ini`) is a partial B32 front whose
-// preamble labels both fit and overflow their 9 mm cells. The stories drive
-// the production load + fit triggers and the real spec/paint path: the rack
-// opens fitted at true size, its element cells are their millimetre size,
-// `auto` annotates exactly the clipped labels, and switching the label
-// presentation leaves the hit and skeleton geometry untouched.
+// preamble labels both fit and overflow their 9 mm cells. The stories drive the
+// production load + fit triggers and the real spec/paint path: the rack opens
+// fitted at true size, its element cells are their millimetre size, every cell
+// label follows the per-cell ladder, `auto` annotates exactly the written labels
+// whose cell has no in-cell layout, and switching the label presentation leaves
+// the hit and skeleton geometry untouched.
 
 const MODULE_UI_LABELS_FIXTURE: &str = "fixtures/module_ui_labels.ini";
 
@@ -2954,9 +3064,27 @@ const MODULE_UI_LABELS_FIXTURE: &str = "fixtures/module_ui_labels.ini";
 /// (`Go`, two characters against the composed face's five-character budget).
 const MODULE_UI_LABELS_FITTING: &str = "B1.18";
 
-/// The addressed buttons whose preamble labels the cell budget clips at 1:1
-/// (`Trigger input`, `Clock reset`).
+/// The addressed buttons whose preamble labels the composed face's band cannot
+/// draw whole at 1:1 (`Trigger input`, `Clock reset`) — the labels the ladder
+/// wraps or ellipsizes, and the ones [`MODULE_UI_LABELS_DELIBERATE_ZOOM`] pushes
+/// below the floor altogether.
 const MODULE_UI_LABELS_CLIPPED: &[&str] = &["B1.19", "B1.20"];
+
+/// The zoom the `auto` story drives deliberately: inside the window where the
+/// composed B32 band (`h − 0.5 w`) still holds "Go" on one 6 pt line while the
+/// longer written labels have no in-cell layout at all. At the fitted zoom the
+/// labels-first clamp guarantees every written label has a layout, so a forced
+/// zoom is what keeps the `auto` selection observable.
+const MODULE_UI_LABELS_DELIBERATE_ZOOM: f32 = 0.46;
+
+/// The written label the `auto` story expects to see annotated at the deliberate
+/// zoom: 13 characters, so no ladder step holds it at that cell size.
+const MODULE_UI_LABELS_UNLAID_WRITTEN: &str = "B1.19";
+
+/// The addressed button the `auto` story strips of its written label, so that
+/// element carries only its derived token name — the one case this fixture does
+/// not declare, because it labels every element it addresses.
+const MODULE_UI_LABELS_DERIVED_ONLY: &str = "B1.20";
 
 /// The rack the fixture packs into, from the same chain + default-case source
 /// `App::fit_physical_view` and `physical_spec` consume, so the story's pane
@@ -2977,10 +3105,17 @@ fn module_ui_labels_pane(rack: &crate::physical::RackLayout) -> egui::Rect {
 
 /// An `App` opened on the fixture through the production load + fit triggers,
 /// with the module UI pane published at `pane` (the same trigger the pane
-/// dispatch runs each frame).
-fn module_ui_labels_app(pane: egui::Rect) -> App {
-    let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
+/// dispatch runs each frame). `strip` removes that token's written label from
+/// the patch preamble first, so the element falls back to its derived name.
+fn module_ui_labels_loaded_app(pane: egui::Rect, strip: Option<&str>) -> App {
+    let mut patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
         .expect("module_ui_labels fixture must parse");
+    if let Some(token) = strip {
+        assert!(
+            patch.preamble_labels.remove(token).is_some(),
+            "{token} must carry a written label before it is stripped"
+        );
+    }
     let mut app = App::new();
     assert!(app.load_patch(patch), "module_ui_labels fixture must load");
     app.note_physical_pane_rect(Rect::new(
@@ -2990,6 +3125,23 @@ fn module_ui_labels_app(pane: egui::Rect) -> App {
         pane.height().round() as u16,
     ));
     app.apply_physical_fit_triggers();
+    app
+}
+
+/// An `App` opened on the fixture through the production load + fit triggers,
+/// with the module UI pane published at `pane` (the same trigger the pane
+/// dispatch runs each frame).
+fn module_ui_labels_app(pane: egui::Rect) -> App {
+    module_ui_labels_loaded_app(pane, None)
+}
+
+/// The fitted app moved to a deliberate zoom with no pan — the same state the
+/// user reaches with the wheel, used where the labels-first fit leaves `auto`
+/// with nothing to annotate.
+fn module_ui_labels_app_at(pane: egui::Rect, zoom: f32, strip: Option<&str>) -> App {
+    let mut app = module_ui_labels_loaded_app(pane, strip);
+    app.physical_zoom = zoom;
+    app.physical_offset = (0.0, 0.0);
     app
 }
 
@@ -3128,12 +3280,22 @@ fn regression_module_ui_labels_element_cell_is_true_millimetre_size() {
 }
 
 #[test]
-fn regression_module_ui_labels_auto_annotates_clipped_not_fitting() {
+fn regression_module_ui_labels_auto_annotates_only_unlaid_written_labels() {
     let patch = Patch::from_ini_file(Path::new(MODULE_UI_LABELS_FIXTURE))
         .expect("module_ui_labels fixture must parse");
     let rack = module_ui_labels_rack(&patch);
     let pane = module_ui_labels_pane(&rack);
-    let app = module_ui_labels_app(pane);
+    // The fixture's own three labels all fit at the labels-first fit, so `auto`
+    // has nothing to annotate at the zoom the view opens on. The story therefore
+    // drives a deliberate zoom inside the window where the composed B32 band
+    // (`h − 0.5 w`) still holds "Go" on one 6 pt line while the longer written
+    // label has no in-cell layout at all, and strips one written label so that
+    // element carries only its derived token name.
+    let app = module_ui_labels_app_at(
+        pane,
+        MODULE_UI_LABELS_DELIBERATE_ZOOM,
+        Some(MODULE_UI_LABELS_DERIVED_ONLY),
+    );
 
     // `auto` is the default presentation; the pane opens with it.
     assert_eq!(
@@ -3151,23 +3313,42 @@ fn regression_module_ui_labels_auto_annotates_clipped_not_fitting() {
             .unwrap_or_else(|| panic!("{token} must render a cell"))
             .clone()
     };
+    let zoom_pct = (MODULE_UI_LABELS_DELIBERATE_ZOOM * 100.0).round();
+
+    // The four states the rule discriminates, each a fact of this zoom:
+    // a written label that fits, a written label no step holds, a label that is
+    // only the derived token name, and a cell the patch never addresses.
     let fitting = cell_for(MODULE_UI_LABELS_FITTING);
     assert_eq!(fitting.label, "Go");
     assert!(
-        !fitting.label_clipped,
-        "a two-character label fits a 9 mm B32 cell at 1:1: {fitting:?}"
+        fitting.label_layout.is_some(),
+        "a two-character label still fits the composed band at {zoom_pct}%: {fitting:?}"
     );
-    for token in MODULE_UI_LABELS_CLIPPED {
-        let clipped = cell_for(token);
-        assert!(
-            clipped.label_clipped,
-            "{token}'s label '{}' must be clipped by its cell at 1:1",
-            clipped.label
-        );
-    }
+    let unlaid = cell_for(MODULE_UI_LABELS_UNLAID_WRITTEN);
+    assert_eq!(unlaid.label, "Trigger input");
+    assert!(
+        unlaid.label_layout.is_none(),
+        "'{}' must have no in-cell layout at {zoom_pct}%: {unlaid:?}",
+        unlaid.label
+    );
+    let derived = cell_for(MODULE_UI_LABELS_DERIVED_ONLY);
+    assert!(
+        derived.label != "Clock reset" && derived.label.contains("B1.20"),
+        "the stripped label must fall back to the derived token name: {:?}",
+        derived.label
+    );
+    assert!(
+        derived.label_layout.is_none(),
+        "the derived name is too long for the band at {zoom_pct}% too: {derived:?}"
+    );
+    assert!(
+        spec.cells.iter().any(|cell| cell.component_index.is_none()),
+        "the partial B32 front must leave unaddressed cells to test against"
+    );
 
-    // Exactly the clipped, explicitly labelled cells are annotated — the
-    // fitting "Go" is not duplicated beside the rack.
+    // `auto` annotates exactly the written labels with no in-cell layout: the
+    // unlaid written label, never the fitting one, never the derived-only one,
+    // and never an unaddressed cell.
     let mut annotated: Vec<&str> = spec
         .annotations
         .iter()
@@ -3176,8 +3357,16 @@ fn regression_module_ui_labels_auto_annotates_clipped_not_fitting() {
     annotated.sort_unstable();
     assert_eq!(
         annotated,
-        vec!["Clock reset", "Trigger input"],
-        "auto must annotate exactly the clipped labels"
+        vec!["Trigger input"],
+        "auto must annotate the written label no step can show, and only it"
+    );
+    assert!(
+        !annotated.contains(&fitting.label.as_str()),
+        "a fitting in-cell label is never annotated: {annotated:?}"
+    );
+    assert!(
+        !annotated.contains(&derived.label.as_str()),
+        "a derived-only label is reveal-only, never annotated: {annotated:?}"
     );
     for callout in &spec.annotations {
         assert!(
@@ -3186,42 +3375,53 @@ fn regression_module_ui_labels_auto_annotates_clipped_not_fitting() {
             callout.label,
             callout.label_rect
         );
-        let on_host = spec.cells.iter().any(|cell| {
-            let r = cell.rect;
-            cell.component_index.is_some()
-                && callout.anchor.x >= r.min.x - 0.5
-                && callout.anchor.x <= r.max.x + 0.5
-                && callout.anchor.y >= r.min.y - 0.5
-                && callout.anchor.y <= r.max.y + 0.5
-        });
+        let covers = |cell_rect: egui::Rect| {
+            callout.anchor.x >= cell_rect.min.x - 0.5
+                && callout.anchor.x <= cell_rect.max.x + 0.5
+                && callout.anchor.y >= cell_rect.min.y - 0.5
+                && callout.anchor.y <= cell_rect.max.y + 0.5
+        };
         assert!(
-            on_host,
+            spec.cells
+                .iter()
+                .any(|cell| cell.component_index.is_some() && covers(cell.rect)),
             "annotation '{}' must be anchored on an addressed cell",
+            callout.label
+        );
+        assert!(
+            !spec
+                .cells
+                .iter()
+                .any(|cell| cell.component_index.is_none() && covers(cell.rect)),
+            "annotation '{}' must not be anchored on an unaddressed cell",
             callout.label
         );
     }
 
-    // The real paint path draws the clipped labels at the performance view's
-    // 14 pt callout size and never promotes the fitting in-cell label.
+    // The real paint path draws that label at the performance view's 14 pt
+    // callout size and promotes neither the fitting label nor the derived name.
     let texts = module_ui_labels_painted_texts(pane, |ui| {
         crate::gui::paint_physical(ui, pane, Some(&spec));
     });
     let callout_font = egui::FontId::monospace(14.0);
-    for clipped in MODULE_UI_LABELS_CLIPPED {
-        let label = cell_for(clipped).label;
+    assert!(
+        texts
+            .iter()
+            .any(|(text, font)| *text == unlaid.label && *font == callout_font),
+        "the unlaid label '{}' must paint as a 14 pt callout: {texts:?}",
+        unlaid.label
+    );
+    for (label, why) in [
+        (fitting.label.as_str(), "a fitting in-cell label"),
+        (derived.label.as_str(), "a derived-only label"),
+    ] {
         assert!(
-            texts
+            !texts
                 .iter()
-                .any(|(text, font)| *text == label && *font == callout_font),
-            "the clipped label '{label}' must paint as a 14 pt callout: {texts:?}"
+                .any(|(text, font)| text == label && *font == callout_font),
+            "{why} must not be duplicated as a callout: {texts:?}"
         );
     }
-    assert!(
-        !texts
-            .iter()
-            .any(|(text, font)| *text == fitting.label && *font == callout_font),
-        "a fitting in-cell label must not be duplicated as a callout: {texts:?}"
-    );
 }
 
 #[test]
@@ -3249,6 +3449,32 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
         let mut app = module_ui_labels_app(pane);
         app.label_presentation = mode;
         let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+
+        // Derive the expected callout count from the selection rule rather than
+        // hardcoding it: `off` annotates nothing, `auto` exactly the written
+        // labels with no in-cell layout, `on` every written label. This fixture
+        // labels every element it addresses, and the labels-first fit leaves none
+        // of them without a layout — so `auto` is silent at the zoom the view
+        // opens on and the annotation layer's only visible mode here is `on`.
+        let written_labels = 1 + MODULE_UI_LABELS_CLIPPED.len();
+        let addressed: Vec<&str> = spec
+            .cells
+            .iter()
+            .filter(|cell| cell.component_index.is_some())
+            .map(|cell| cell.label.as_str())
+            .collect();
+        assert_eq!(
+            addressed.len(),
+            written_labels,
+            "the fixture must address exactly its written labels: {addressed:?}"
+        );
+        assert!(
+            spec.cells
+                .iter()
+                .filter(|cell| cell.component_index.is_some())
+                .all(|cell| cell.label_layout.is_some()),
+            "at the labels-first fit every written label has an in-cell layout, so `auto` has no candidate"
+        );
 
         hits.push(
             spec.cells
@@ -3323,7 +3549,7 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
     );
     assert_eq!(
         callout_counts,
-        vec![0, 2, 3],
-        "off annotates nothing, auto the two clipped labels, on all three"
+        vec![0, 0, 1 + MODULE_UI_LABELS_CLIPPED.len()],
+        "off annotates nothing, auto nothing at the labels-first fit (every written label has a layout), on all three written labels"
     );
 }

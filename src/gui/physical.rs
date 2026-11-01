@@ -123,12 +123,6 @@ pub(crate) struct CellSpec {
     /// verbatim, so the cells and the annotation layer can never disagree about
     /// what the cell shows.
     pub label_layout: Option<crate::physical::LabelLayout>,
-    /// Cache of `label_layout.is_none()`: the label has no in-cell layout, so
-    /// the label presentation is its only carrier beside the hover reveal
-    /// (D1/D9). Kept for `regression.rs`, whose auto-annotation story is restated
-    /// in task 3.1; the annotation filter itself reads the layout directly.
-    #[allow(dead_code)]
-    pub label_clipped: bool,
 }
 
 /// Fixed screen-space font (points) for a performance-view callout headline:
@@ -509,13 +503,11 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             led_rgb,
             shape,
             label_layout: None,
-            label_clipped: false,
         };
         // D1: the cell's own box answers once what its label looks like — the
         // painter draws these lines and the annotation filter reads the same
         // `None` instead of re-deriving a fit test that could drift.
         cell.label_layout = cell_label_layout(&cell);
-        cell.label_clipped = cell.label_layout.is_none();
         cells.push(cell);
     }
     let modules = geom
@@ -2251,7 +2243,6 @@ mod tests {
     /// label the production build would draw (module-ui-label-fit D1).
     fn resolved_cell(mut cell: CellSpec) -> CellSpec {
         cell.label_layout = cell_label_layout(&cell);
-        cell.label_clipped = cell.label_layout.is_none();
         cell
     }
 
@@ -2288,7 +2279,6 @@ mod tests {
                 led_rgb: None,
                 shape: None,
                 label_layout: None,
-                label_clipped: false,
             }));
         }
         let modules = geom
@@ -2759,7 +2749,6 @@ mod tests {
             led_rgb: None,
             shape: None,
             label_layout: None,
-            label_clipped: false,
         })
     }
 
@@ -2851,7 +2840,6 @@ mod tests {
             led_rgb: None,
             shape: None,
             label_layout: None,
-            label_clipped: false,
         })
     }
 
@@ -4176,7 +4164,6 @@ mod tests {
             "three characters fit the compact box: {:?}",
             short.label_layout
         );
-        assert!(!short.label_clipped);
         // A longer label is no longer "clipped": it wraps or ellipsizes in the
         // cell, so the cell still shows it.
         let longer = cell_spec(roomy, "abcdef");
@@ -4194,7 +4181,6 @@ mod tests {
             "a cell narrower than one character has no layout: {:?}",
             none.label_layout
         );
-        assert!(none.label_clipped);
         // An unlabelled cell (unaddressed geometry) has no layout either, and
         // is never an annotation candidate.
         assert!(cell_spec(roomy, "").label_layout.is_none());
@@ -4215,7 +4201,6 @@ mod tests {
             "a two-character label fits the button face: {:?}",
             fit.label_layout
         );
-        assert!(!fit.label_clipped);
         // The same band holds a long label on two 6 pt lines rather than
         // dropping it: the face is never eaten by the label.
         let mut long = fit.clone();
@@ -4247,7 +4232,6 @@ mod tests {
             "a face with no band hides its label: {:?}",
             squat.label_layout
         );
-        assert!(squat.label_clipped);
         assert!(cell_spec(square, "").label_layout.is_none());
     }
 
@@ -4267,7 +4251,6 @@ mod tests {
             layout.stacked && layout.lines.len() == 5,
             "one glyph per line beside the narrowed track: {layout:?}"
         );
-        assert!(!narrow.label_clipped);
         // A wide, tall fader (M4 motor fader at high zoom) keeps horizontal lines.
         let mut wide = narrow.clone();
         wide.rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(64.0, 234.0));
@@ -4300,7 +4283,6 @@ mod tests {
             .as_ref()
             .unwrap_or_else(|| panic!("a short label fits the composed face: {fits:?}"));
         assert_eq!(layout.lines, vec!["Go".to_string()], "one top-step line");
-        assert!(!fits.label_clipped);
         let long = cell_for_token(&app, &spec, "B1.2");
         assert_eq!(long.label, "Trigger input");
         let layout = long
@@ -4333,7 +4315,6 @@ mod tests {
             fits.label_layout.is_some(),
             "a short label fits the cell: {fits:?}"
         );
-        assert!(!fits.label_clipped);
         let long = cell_for_token(&app, &spec, "B6.2");
         assert_eq!(long.label, "Trigger input");
         let layout = long
