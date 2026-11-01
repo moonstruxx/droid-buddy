@@ -192,6 +192,7 @@ Every element renders as a compact cell from one shared paint routine, so an ele
 - A composed button face (P2B8/B32 circle, M4 rectangle) instead draws its state outline with the folded LED as inner fill and its label beneath the shape when the cell has room for a label line; it draws no state-text row, because the shape carries the state.
 - Fader-marked knobs and encoders skip the two rows and draw a bottom-up strip filled to the component's value in the `fader_led_bar` token.
 - Over-long labels truncate with an ellipsis while cell geometry and hit rects stay unchanged.
+- **Label colour**: a label paints in the element's own token — the component-kind token, tinted by the active shift group — and never in a state colour. On a composed face that distinction is visible: the outline turns `muted` when the button is off while its label stays the bright kind token. Callout headlines (annotation, performance view, hover reveal) follow the same label colour; only their state row is muted.
 
 LEDs are never drawn as standalone cells. A pure model resolver (`Patch::folded_led_for_element`, shared by the painter and the key handler) maps each LED token to its owning element — an explicit patch pairing first (a bare `led = L.N` entry, or a numbered `ledN = L.M` paired by numeric suffix with a same-suffix element entry such as `buttonN`, `potN`, `encoderN`, `switchN`, or `faderN`), then the controller's positional default (see the module UI section). A folded LED publishes no hit rect of its own.
 

@@ -270,7 +270,17 @@ The module UI SHALL support the element interactions the Panels view provided: k
 
 ### Requirement: Button face and LED composition
 
-A button-kind element whose controller lights its LED in the button face SHALL render as a state shape instead of a state glyph: an outline whose colour carries the button's on/off state, with the folded LED drawn as an inner fill whose extent and colour follow the LED level. A round face (P2B8, B32) SHALL render a circle and a rectangular face (the M4 touch plate) SHALL render a rectangle. The element's label SHALL render in the band beneath the shape at the largest font-ladder step that fits that band, in up to two lines when the band's height allows, and SHALL be omitted from the cell — remaining an annotation candidate — when no step fits; the shape SHALL NOT be shrunk or displaced to make room for the label. The element's state text SHALL NOT render in the cell, because the shape carries the state. An element with no bound LED SHALL render the shape alone. A button on any other controller SHALL keep the glyph rendering.
+A button-kind element whose controller lights its LED in the button face SHALL render as a state shape instead of a state glyph: an outline whose colour carries the button's on/off state, with the folded LED drawn as an inner fill whose extent and colour follow the LED level. A round face (P2B8, B32) SHALL render a circle and a rectangular face (the M4 touch plate) SHALL render a rectangle. The element's label SHALL render in the band beneath the shape at the largest font-ladder step that fits that band, in up to two lines when the band's height allows, and SHALL be omitted from the cell — remaining an annotation candidate — when no step fits; the shape SHALL NOT be shrunk or displaced to make room for the label. The label SHALL paint in the element's own colour token (tinted by the active shift group) and SHALL NOT inherit the shape's state outline colour, so an off button's label stays legible instead of turning muted. The element's state text SHALL NOT render in the cell, because the shape carries the state. An element with no bound LED SHALL render the shape alone. A button on any other controller SHALL keep the glyph rendering.
+
+#### Scenario: An off face keeps its label bright
+
+- **WHEN** a composed button is off, so its outline paints in the muted state token
+- **THEN** the label in the band beneath the shape paints in the element's own colour token, not in the muted outline colour
+
+#### Scenario: An annotation of an off face stays legible
+
+- **WHEN** an off composed button's label is annotated outside the rack
+- **THEN** the callout headline paints in the element's own colour token, and only its state row is muted
 
 #### Scenario: P2B8 button renders a state circle
 
