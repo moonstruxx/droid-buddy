@@ -70,7 +70,7 @@ The module UI SHALL render every hardware element of a declared controller, incl
 
 ### Requirement: LEDs fold into their element
 
-An LED that belongs to an element SHALL render as part of that element and SHALL NOT render as a standalone cell. The binding SHALL follow the controller's physical design: B32, P2B8, and P4B2 button LEDs light the button face; each M4 LED lights the touch plate below its fader; each E4 encoder carries a ring of 32 LEDs around it; P8S8 slider LEDs light the slider track; master, G8, and X7 LEDs render beside their jack. An explicit LED pairing in the patch (`led = L.N` or a same-suffix `ledN = L.M`) SHALL override the positional default. Where the LED lights the element's own face — the P2B8 and B32 button faces and the M4 touch plate — the fold SHALL render as the element face's inner fill per "Button face and LED composition", and that LED SHALL NOT publish a hit rect of its own.
+An LED that belongs to an element SHALL render as part of that element and SHALL NOT render as a standalone cell. The binding SHALL follow the controller's physical design: B32, P2B8, and P4B2 button LEDs light the button face; each M4 LED lights the touch plate below its fader; each E4 encoder carries a ring of 32 LEDs around it; P8S8 slider LEDs light the slider track; master, G8, and X7 LEDs render beside their jack. An explicit LED pairing in the patch (`led = L.N` or a same-suffix `ledN = L.M`) SHALL override the positional default. Where the LED lights the element's own face — the P2B8, P4B2 and B32 button faces and the M4 touch plate — the fold SHALL render as the element face's inner fill per "Button face and LED composition", and that LED SHALL NOT publish a hit rect of its own.
 
 #### Scenario: B32 has no LED cells
 
@@ -326,7 +326,7 @@ A button-kind element whose controller lights its LED in the button face SHALL r
 
 #### Scenario: Out-of-scope controller keeps its glyph
 
-- **WHEN** a patch declares a button on a controller whose LED does not light the button face (P4B2, master, G8, X7)
+- **WHEN** a patch declares a button on a controller whose LED does not light the button face (master's unaddressed `SD reload` button; G8 and X7 carry no buttons at all — their registers light a jack-side LED)
 - **THEN** the cell renders the state glyph as before
 
 ### Requirement: Label presentation modes

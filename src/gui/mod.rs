@@ -48,7 +48,7 @@ pub(crate) use graph::{camera_pan, camera_zoom_about, drawn_world_sizes};
 #[allow(unused_imports)]
 pub(crate) use physical::PhysicalFrame;
 #[cfg(test)]
-pub(crate) use physical::{paint_physical, physical_spec};
+pub(crate) use physical::{paint_physical, physical_spec, CellShape};
 #[allow(unused_imports)]
 pub(crate) use picker::PickerFrame;
 #[cfg(test)]
