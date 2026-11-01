@@ -91,8 +91,8 @@ pub enum OptimizeScope {
     Banner,
     /// Banner-preserving + whole-file min-sum: up to 2 candidates.
     Global,
-    /// All three strategies: banner min-sum, global min-sum, min-max:
-    /// up to 3 candidates.
+    /// All three strategies: banner min-sum, global min-sum, and the
+    /// min-max objective search (annealing): up to 3 candidates.
     MinMax,
 }
 
@@ -123,13 +123,11 @@ impl Objective {
     }
 }
 
-/// The candidate strategies (task 1.3 adds Annealing).
+/// The candidate strategies.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 enum Strategy {
     BannerMinSum,
     GlobalMinSum,
-    MinMax,
     Annealing,
 }
 
@@ -138,14 +136,13 @@ impl Strategy {
         match self {
             Strategy::BannerMinSum => "banner (default)",
             Strategy::GlobalMinSum => "global min-sum",
-            Strategy::MinMax => "min-max",
             Strategy::Annealing => "annealing",
         }
     }
 
     fn objective(self) -> Objective {
         match self {
-            Strategy::MinMax | Strategy::Annealing => Objective::MinMax,
+            Strategy::Annealing => Objective::MinMax,
             _ => Objective::MinSum,
         }
     }
@@ -168,9 +165,7 @@ impl Strategy {
                         .collect()
                 }
             }
-            Strategy::GlobalMinSum | Strategy::MinMax => {
-                std::iter::once(0..patch.sections.len()).collect()
-            }
+            Strategy::GlobalMinSum => std::iter::once(0..patch.sections.len()).collect(),
         }
     }
 }
@@ -468,9 +463,9 @@ fn valid_permutation_count(domain: &[usize], sections: &[IniSection]) -> u128 {
 /// instance)` — same-named sections keep their instance order (valid
 /// permutation), different names are ordered by hash.
 ///
-/// Retained for tasks 1.2/1.3 (VNS and SA reuse it as the fallback seed);
-/// the local-search variants now seed from [`fas_indegree_seed`].
-#[allow(dead_code)]
+/// Test-only: production seeds from `fas_indegree_seed`. Kept as the reference
+/// ordering the FAS pass is asserted to be no worse than.
+#[cfg(test)]
 fn seed_order(domains: &[Range<usize>], sections: &[IniSection]) -> Vec<usize> {
     let mut order = Vec::with_capacity(sections.len());
     for range in domains {
@@ -717,12 +712,9 @@ fn search_exact(
     })
 }
 
-/// Heuristic search: seeded from the FAS-indegree rank (producers before
-/// consumers, design D1), then first-improvement hill-climbing over safe swaps
-/// within each domain, bounded by `SEARCH_STEPS`. Tracks the best order seen;
-/// the identity order is always a candidate, so the result is never worse than
-/// the original under `objective`.
-#[allow(dead_code)]
+/// Test-only shorthand for `search_local_with_budget` at the default
+/// `SEARCH_STEPS` budget.
+#[cfg(test)]
 fn search_local(
     domains: &[Range<usize>],
     sections: &[IniSection],
@@ -732,6 +724,11 @@ fn search_local(
     search_local_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
 }
 
+/// Heuristic search: seeded from the FAS-indegree rank (producers before
+/// consumers, design D1), then first-improvement hill-climbing over safe swaps
+/// within each domain, bounded by the caller's `budget_limit`. Tracks the best
+/// order seen; the identity order is always a candidate, so the result is never
+/// worse than the original under `objective`.
 fn search_local_with_budget(
     domains: &[Range<usize>],
     sections: &[IniSection],
@@ -870,13 +867,9 @@ fn coarsen_by_banner(
     }
 }
 
-/// VNS over `safe_swap` neighborhoods with a shrinking radius, bounded by
-/// `SEARCH_STEPS`. Coarsens by banner groups, solves the coarse problem with
-/// `search_local` (per-group singletons for banner scope), then uncoarsens and
-/// refines with successive radii, halving the radius after each no-improvement
-/// round. Deterministic, banner-scope preserving (only swaps inside `domains`),
-/// and same-name order preserving via `safe_swap`.
-#[allow(dead_code)]
+/// Test-only shorthand for `search_vns_with_budget` at the default
+/// `SEARCH_STEPS` budget.
+#[cfg(test)]
 fn search_vns(
     domains: &[Range<usize>],
     sections: &[IniSection],
@@ -886,6 +879,12 @@ fn search_vns(
     search_vns_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
 }
 
+/// VNS over `safe_swap` neighborhoods with a shrinking radius, bounded by the
+/// caller's `budget_limit`. Coarsens by banner groups, solves the coarse problem
+/// with the local search (per-group singletons for banner scope), then uncoarsens
+/// and refines with successive radii, halving the radius after each
+/// no-improvement round. Deterministic, banner-scope preserving (only swaps
+/// inside `domains`), and same-name order preserving via `safe_swap`.
 fn search_vns_with_budget(
     domains: &[Range<usize>],
     sections: &[IniSection],
@@ -1053,8 +1052,8 @@ fn objective_value(summary: &LatencySummary, objective: Objective) -> f64 {
     }
 }
 
-/// `true` when the SA burn-in cannot fit `SEARCH_STEPS` — fall back to
-/// `search_local`. Pure and deterministic.
+/// `true` when the SA burn-in cannot fit the search budget — fall back to the
+/// local search. Pure and deterministic.
 fn is_large_for_sa(domains: &[Range<usize>], sections: &[IniSection]) -> bool {
     let total_valid: u128 = domains
         .iter()
@@ -1067,12 +1066,9 @@ fn is_large_for_sa(domains: &[Range<usize>], sections: &[IniSection]) -> bool {
     domains.iter().any(|r| r.len() > 10)
 }
 
-/// SA over `safe_swap` neighbours with geometric cooling over `SEARCH_STEPS`.
-/// Seed from `annealing_seed` (same material as `seed_order`), Metropolis
-/// acceptance on the (possibly weighted) objective delta, every move a
-/// `safe_swap`. Deterministic and bounded. Falls back to `search_local` when
-/// `is_large_for_sa`.
-#[allow(dead_code)]
+/// Test-only shorthand for `search_sa_with_budget` at the default
+/// `SEARCH_STEPS` budget.
+#[cfg(test)]
 fn search_sa(
     domains: &[Range<usize>],
     sections: &[IniSection],
@@ -1082,6 +1078,11 @@ fn search_sa(
     search_sa_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
 }
 
+/// SA over `safe_swap` neighbours with geometric cooling over the caller's
+/// `budget_limit`. Seed from `annealing_seed` (same material as
+/// `fas_indegree_seed`), Metropolis acceptance on the (possibly weighted)
+/// objective delta, every move a `safe_swap`. Deterministic and bounded. Falls
+/// back to the local search when `is_large_for_sa`.
 fn search_sa_with_budget(
     domains: &[Range<usize>],
     sections: &[IniSection],

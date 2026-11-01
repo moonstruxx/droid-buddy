@@ -792,7 +792,14 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
             Some(crate::app::ViewType::SourceViewer) => {
                 let painter = ui.painter().with_clip_rect(rect);
                 let spec = viewer::viewer_spec(app);
-                let _ = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
+                // The viewer reports the wheel delta it saw over its content
+                // column instead of mutating `source_scroll` itself (the painter
+                // only borrows `&App`), so the pane dispatch is the one place
+                // that applies it — dropping the report silently made the wheel
+                // dead over the source pane (same class as the physical frame
+                // fix, ADR 50).
+                let frame = viewer::paint_viewer(&painter, rect, ui.ctx(), Some(&spec));
+                crate::handler::handle_viewer_frame(frame, app);
             }
             Some(crate::app::ViewType::Optimizer) => {
                 // The optimizer lives in its own small pane (spec "Optimizer
@@ -1352,6 +1359,56 @@ mod tests {
         // assertion below into a process abort that hides every other result.
         out.textures_delta.clear();
         out
+    }
+
+    /// Run `paint_panes` once with the pointer parked at `pos` and one wheel
+    /// event of `delta` lines, so a pane's per-frame input report runs for real.
+    fn run_paint_panes_with_wheel(app: &mut App, pos: egui::Pos2, delta: f32) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, delta),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let scene = scene_for(app, win);
+        let mut out = ctx.run_ui(raw, |ui| {
+            paint_panes(app, ui, scene.as_ref(), &[]);
+        });
+        out.textures_delta.clear();
+        out
+    }
+
+    #[test]
+    fn paint_panes_applies_the_viewer_wheel_report() {
+        // cxj: `paint_viewer` reports the wheel delta it saw over its content
+        // column and the pane dispatch applies it; the report used to be dropped,
+        // which left the wheel dead over the source pane.
+        let mut app = App::new();
+        let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
+            .unwrap();
+        assert!(app.load_patch(patch));
+        assert!(
+            app.pane_holding(crate::app::ViewType::SourceViewer)
+                .is_some(),
+            "the source viewer is open in a pane"
+        );
+        app.source_scroll = 4;
+        // The source viewer sits in the small top pane: 400..800 × 0..300.
+        let out = run_paint_panes_with_wheel(&mut app, egui::pos2(600.0, 140.0), -3.0);
+        assert_ne!(
+            app.source_scroll, 4,
+            "the wheel over the source pane must move the scroll"
+        );
+        drop(out);
     }
 
     fn text_labels(out: &egui::FullOutput) -> Vec<String> {

@@ -53,8 +53,6 @@ struct RawParam {
     prefix: Option<String>,
     count: Option<u32>,
     start_at: Option<u32>,
-    #[allow(dead_code)]
-    essential_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
