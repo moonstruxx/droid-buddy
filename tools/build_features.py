@@ -66,55 +66,46 @@ HW_TOKEN_LETTERS_GEOM = ['B','L','P','O','I','E','S','M','R','G']
 # For patch scan (7 letters) — used for binding extraction? Use same as patch.rs 7 for component extraction but geometry resolve handles broader.
 HW_TOKEN_LETTERS_PATCH = ['B','L','P','O','I','E','S']
 
-def scan_hw_tokens_local(value: str):
-    """mirrors geometry.rs scan_hw_tokens_local (10 letters)."""
+def _scan_tokens(value: str, letters):
+    """The one token scanner: mirror of `patch::scan_token_ranges`.
+
+    A match starts at a letter in `letters` immediately followed by a digit and
+    not preceded by an alphanumeric or underscore character, may carry a `.pin`
+    suffix and must end cleanly. The Rust side has one implementation too; the
+    two callers below differ only in their letter set, so keeping one scanner
+    here is what stops this fixture builder from counting tokens by a rule the
+    app no longer has.
+    """
     chars = list(value)
-    tokens=[]
-    i=0
+    tokens = []
+    i = 0
     while i < len(chars):
         c = chars[i]
-        boundary_ok = i==0 or not (chars[i-1].isalnum() or chars[i-1]=='_')
-        starts = c in HW_TOKEN_LETTERS_GEOM and i+1 < len(chars) and chars[i+1].isdigit() and boundary_ok
+        boundary_ok = i == 0 or not (chars[i-1].isalnum() or chars[i-1] == '_')
+        starts = c in letters and i+1 < len(chars) and chars[i+1].isdigit() and boundary_ok
         if starts:
-            start=i
-            i+=1
+            start = i
+            i += 1
             while i < len(chars) and chars[i].isdigit():
-                i+=1
-            if i < len(chars) and chars[i]=='.' and i+1 < len(chars) and chars[i+1].isdigit():
-                i+=1
+                i += 1
+            if i < len(chars) and chars[i] == '.' and i+1 < len(chars) and chars[i+1].isdigit():
+                i += 1
                 while i < len(chars) and chars[i].isdigit():
-                    i+=1
-            clean_end = i >= len(chars) or not (chars[i].isalnum() or chars[i]=='_' or chars[i]=='.')
+                    i += 1
+            clean_end = i >= len(chars) or not (chars[i].isalnum() or chars[i] == '_' or chars[i] == '.')
             if clean_end:
                 tokens.append(''.join(chars[start:i]))
             continue
-        i+=1
+        i += 1
     return tokens
 
+def scan_hw_tokens_local(value: str):
+    """geometry.rs / graph.rs token set (10 letters)."""
+    return _scan_tokens(value, HW_TOKEN_LETTERS_GEOM)
+
 def scan_hw_tokens_patch(value: str):
-    """patch.rs 7 letters."""
-    chars=list(value)
-    tokens=[]
-    i=0
-    while i < len(chars):
-        c=chars[i]
-        boundary_ok = i==0 or not (chars[i-1].isalnum() or chars[i-1]=='_')
-        starts = c in ['B','L','P','O','I','E','S'] and i+1 < len(chars) and chars[i+1].isdigit() and boundary_ok
-        if starts:
-            start=i
-            i+=1
-            while i < len(chars) and chars[i].isdigit():
-                i+=1
-            if i < len(chars) and chars[i]=='.' and i+1 < len(chars) and chars[i+1].isdigit():
-                i+=1
-                while i < len(chars) and chars[i].isdigit():
-                    i+=1
-            clean_end = i>=len(chars) or not (chars[i].isalnum() or chars[i]=='_' or chars[i]=='.')
-            if clean_end:
-                tokens.append(''.join(chars[start:i]))
-            continue
-        i+=1
-    return tokens
+    """patch.rs component-token set (7 letters)."""
+    return _scan_tokens(value, HW_TOKEN_LETTERS_PATCH)
 
 def scan_internal_tokens(value: str):
     chars=list(value)

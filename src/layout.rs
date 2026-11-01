@@ -3900,13 +3900,11 @@ mod tests {
 
     // ── graph-column-layout: ordering switch (task 1.2) ─────────────────────
 
-    #[test]
-    fn both_orderings_assign_identical_columns() {
-        // Task 1.2 contract: strict and barycenter produce the SAME column
-        // assignment; only the within-column vertical order may differ. The
-        // crossed A→D / B→C fixture (depth 0 = [A, B], depth 1 = [C, D]) keeps
-        // both nodes of a layer in one column under either ordering.
-        let graph = Graph {
+    /// The crossed A→D / B→C fixture: two sources in the first column, two sinks
+    /// in the second, crossed by file order. Shared by the ordering tests, which
+    /// differ only in what they then assert about the same graph.
+    fn crossed_layer_graph() -> Graph {
+        Graph {
             nodes: vec![node("A", 0), node("B", 1), node("C", 2), node("D", 3)],
             edges: vec![
                 GraphEdge {
@@ -3921,7 +3919,16 @@ mod tests {
                 },
             ],
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn both_orderings_assign_identical_columns() {
+        // Task 1.2 contract: strict and barycenter produce the SAME column
+        // assignment; only the within-column vertical order may differ. The
+        // crossed A→D / B→C fixture (depth 0 = [A, B], depth 1 = [C, D]) keeps
+        // both nodes of a layer in one column under either ordering.
+        let graph = crossed_layer_graph();
         let widths = vec![20.0; 4];
         let strict = solve_columns(&graph, &widths, LayoutOrdering::Strict);
         let bary = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
@@ -3940,22 +3947,7 @@ mod tests {
         // The crossed A→D / B→C fixture crosses under file order; the
         // barycenter sweeps re-order layer 1 to [D, C], so the within-column
         // vertical order differs from strict while columns stay identical.
-        let graph = Graph {
-            nodes: vec![node("A", 0), node("B", 1), node("C", 2), node("D", 3)],
-            edges: vec![
-                GraphEdge {
-                    cable: "_X".to_string(),
-                    source: NodeId::circuit("A", 0),
-                    sink: NodeId::circuit("D", 0),
-                },
-                GraphEdge {
-                    cable: "_Y".to_string(),
-                    source: NodeId::circuit("B", 0),
-                    sink: NodeId::circuit("C", 0),
-                },
-            ],
-            ..Default::default()
-        };
+        let graph = crossed_layer_graph();
         let widths = vec![20.0; 4];
         let strict = solve_columns(&graph, &widths, LayoutOrdering::Strict);
         let bary = solve_columns(&graph, &widths, LayoutOrdering::Barycenter);
@@ -4051,40 +4043,10 @@ mod tests {
         // Task 1.3: the no-overlap property holds when the placement feeds on
         // the estimator's widths instead of hand-chosen ones. Mixed title
         // lengths exercise wide and narrow blocks together.
-        let graph = Graph {
-            nodes: vec![
-                node("osc", 0),
-                node("mixer", 1),
-                node("clocktool", 2),
-                node("p8s8", 3),
-                node("resonant_filter", 4),
-                node("copy", 5),
-                node("copy", 6),
-            ],
-            edges: vec![
-                GraphEdge {
-                    cable: "_CLK".to_string(),
-                    source: NodeId::circuit("clocktool", 0),
-                    sink: NodeId::circuit("osc", 0),
-                },
-                GraphEdge {
-                    cable: "_OSC".to_string(),
-                    source: NodeId::circuit("osc", 0),
-                    sink: NodeId::circuit("mixer", 0),
-                },
-                GraphEdge {
-                    cable: "_P".to_string(),
-                    source: NodeId::circuit("p8s8", 0),
-                    sink: NodeId::circuit("mixer", 0),
-                },
-                GraphEdge {
-                    cable: "_F".to_string(),
-                    source: NodeId::circuit("resonant_filter", 0),
-                    sink: NodeId::circuit("mixer", 0),
-                },
-            ],
-            ..Default::default()
-        };
+        // The same seven-node fan-in the width-estimator tests use, so the
+        // no-overlap property and the reserved-block property are asserted on
+        // one graph instead of two hand-copied ones.
+        let graph = world_size_graph();
         let widths = estimated_widths(&graph);
         let positions = solve_columns(&graph, &widths, LayoutOrdering::Strict);
         assert_columns_do_not_overlap(&graph, &widths, &positions);

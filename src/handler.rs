@@ -1004,46 +1004,57 @@ fn handle_label_edit_entry_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
         }
         // 3) Panel hovered component -> HW token with current shift layer
         if let Some(hover) = app.hovered_component {
-            if let Some(patch) = app.patch.as_ref() {
-                if let Some(comp) = patch.hw_components.get(hover) {
-                    let token = comp.id.clone();
-                    let settings = crate::config::load(
-                        &crate::theme::canonical_theme_name,
-                        crate::theme::THEMES,
-                    );
-                    let max = settings.labels.max_shift_layer.clamp(1, 8);
-                    let raw_layer = match app.active_shift {
-                        Some(crate::patch::ShiftGroup::Group1) => 1,
-                        Some(crate::patch::ShiftGroup::Group2) => 2,
-                        Some(crate::patch::ShiftGroup::Group3) => 3,
-                        Some(crate::patch::ShiftGroup::Group4) => 4,
-                        None => 1,
-                    };
-                    let layer = if settings.labels.layers_enabled {
-                        raw_layer.clamp(1, max)
-                    } else {
-                        1
-                    };
-                    let draft = app
-                        .current_patch_path
-                        .as_ref()
-                        .and_then(|p| app.label_store.hw_label(p, &token, layer))
-                        .unwrap_or_default();
-                    app.editing = Some(crate::app::EditState::new_hw(token.clone(), layer, draft));
-                    if let Some(line) = app.editing_status_line(
-                        settings.labels.layers_enabled,
-                        settings.labels.max_shift_layer,
-                    ) {
-                        app.status_message = line;
-                    } else {
-                        app.status_message = format!("Editing {} / Group{}", token, layer);
-                    }
-                    return Some(false);
-                }
+            if begin_hw_label_edit(app, hover) {
+                return Some(false);
             }
         }
     }
     None
+}
+
+/// Open the HW label overlay for `app.patch.hw_components[index]`, which two
+/// surfaces reach: an `e` over the module UI's hovered element and an `e` over
+/// the source pane with a hovered token. The edit starts at the layer the active
+/// shift implies, clamped by the `[labels]` policy (a disabled policy shows layer
+/// 1), seeded with the stored label as the draft. One helper, because the two
+/// copies had drifted apart in exactly the ways a copy drifts: they loaded the
+/// settings twice and formatted the status twice.
+fn begin_hw_label_edit(app: &mut App, index: usize) -> bool {
+    let Some(comp) = app
+        .patch
+        .as_ref()
+        .and_then(|patch| patch.hw_components.get(index))
+    else {
+        return false;
+    };
+    let token = comp.id.clone();
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    let max = settings.labels.max_shift_layer.clamp(1, 8);
+    let raw_layer = match app.active_shift {
+        Some(ShiftGroup::Group1) => 1,
+        Some(ShiftGroup::Group2) => 2,
+        Some(ShiftGroup::Group3) => 3,
+        Some(ShiftGroup::Group4) => 4,
+        None => 1,
+    };
+    let layer = if settings.labels.layers_enabled {
+        raw_layer.clamp(1, max)
+    } else {
+        1
+    };
+    let draft = app
+        .current_patch_path
+        .as_ref()
+        .and_then(|p| app.label_store.hw_label(p, &token, layer))
+        .unwrap_or_default();
+    app.editing = Some(crate::app::EditState::new_hw(token.clone(), layer, draft));
+    app.status_message = app
+        .editing_status_line(
+            settings.labels.layers_enabled,
+            settings.labels.max_shift_layer,
+        )
+        .unwrap_or_else(|| format!("Editing {token} / Group{layer}"));
+    true
 }
 
 fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
@@ -1402,42 +1413,8 @@ fn handle_label_edit_focus_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
         }
         // Panel hovered token (fallback) - requires patch and hover.
         if let Some(idx) = app.hovered_component {
-            if let Some(patch) = app.patch.as_ref() {
-                if let Some(comp) = patch.hw_components.get(idx) {
-                    let token = comp.id.clone();
-                    let settings = crate::config::load(
-                        &crate::theme::canonical_theme_name,
-                        crate::theme::THEMES,
-                    );
-                    let max = settings.labels.max_shift_layer.clamp(1, 8);
-                    let raw_layer = match app.active_shift {
-                        Some(ShiftGroup::Group1) => 1,
-                        Some(ShiftGroup::Group2) => 2,
-                        Some(ShiftGroup::Group3) => 3,
-                        Some(ShiftGroup::Group4) => 4,
-                        None => 1,
-                    };
-                    let layer = if settings.labels.layers_enabled {
-                        raw_layer.clamp(1, max)
-                    } else {
-                        1
-                    };
-                    let draft = app
-                        .current_patch_path
-                        .as_ref()
-                        .and_then(|p| app.label_store.hw_label(p, &token, layer))
-                        .unwrap_or_default();
-                    app.editing = Some(crate::app::EditState::new_hw(token.clone(), layer, draft));
-                    if let Some(line) = app.editing_status_line(
-                        settings.labels.layers_enabled,
-                        settings.labels.max_shift_layer,
-                    ) {
-                        app.status_message = line;
-                    } else {
-                        app.status_message = format!("Editing {} / Group{}", token, layer);
-                    }
-                    return Some(false);
-                }
+            if begin_hw_label_edit(app, idx) {
+                return Some(false);
             }
         }
     }

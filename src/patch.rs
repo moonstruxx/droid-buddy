@@ -436,17 +436,6 @@ pub enum ShiftGroup {
     Group4,
 }
 
-impl ShiftGroup {
-    pub fn key_label(&self) -> &'static str {
-        match self {
-            ShiftGroup::Group1 => "1",
-            ShiftGroup::Group2 => "2",
-            ShiftGroup::Group3 => "3",
-            ShiftGroup::Group4 => "4",
-        }
-    }
-}
-
 impl Patch {
     /// Sample patch for development/testing
     pub fn sample() -> Self {
@@ -692,14 +681,6 @@ impl Patch {
     ) -> String {
         self.circuit_label(node, circuit_store)
             .unwrap_or_else(|| node.name().to_string())
-    }
-
-    /// Get components belonging to a specific shift group
-    pub fn components_in_group(&self, group: ShiftGroup) -> Vec<&HwComponent> {
-        self.hw_components
-            .iter()
-            .filter(|c| c.shift_group == Some(group))
-            .collect()
     }
 
     /// Load and parse a DROID `.ini` patch file from disk.
@@ -1525,11 +1506,6 @@ impl InfluenceStats {
         TABLE.get_or_init(|| InfluenceStats::parse(INFLUENCE_STATS_ARTIFACT).unwrap_or_default())
     }
 
-    /// Number of kinds with baked stats (test aid).
-    pub fn kind_count(&self) -> usize {
-        self.by_kind.len()
-    }
-
     /// z-score of `size` for `kind`, or `None` when the kind has no stats or
     /// its std is ~0 (no signal — never flagged).
     pub fn z_score(&self, kind: u8, size: usize) -> Option<f32> {
@@ -2261,57 +2237,17 @@ const HW_TOKEN_LETTERS_WIDE: [char; 10] = ['B', 'L', 'P', 'O', 'I', 'E', 'S', 'M
 /// Like `scan_hw_tokens` but also matches `R`/`G`-led tokens. Shared by the
 /// graph topology scan and the wiring-outlier context so the wide letter set
 /// lives in exactly one place.
-fn scan_hw_tokens_with_letters(value: &str, letters: &[char]) -> Vec<String> {
-    let chars: Vec<char> = value.chars().collect();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
-        let starts_token = letters.contains(&c)
-            && i + 1 < chars.len()
-            && chars[i + 1].is_ascii_digit()
-            && boundary_ok;
-        if starts_token {
-            let start = i;
-            i += 1;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < chars.len()
-                && chars[i] == '.'
-                && i + 1 < chars.len()
-                && chars[i + 1].is_ascii_digit()
-            {
-                i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let clean_end = i >= chars.len()
-                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
-            if clean_end {
-                tokens.push(chars[start..i].iter().collect());
-            }
-            continue;
-        }
-        i += 1;
-    }
-    tokens
-}
-
-pub(crate) fn scan_hw_tokens_wide(value: &str) -> Vec<String> {
-    scan_hw_tokens_with_letters(value, &HW_TOKEN_LETTERS_WIDE)
-}
-
-pub(crate) fn scan_hw_tokens(value: &str) -> Vec<String> {
-    scan_hw_tokens_with_letters(value, &HW_TOKEN_LETTERS)
-}
-
-/// Like `scan_hw_tokens` but returns spans (line + column range) for each hit.
-/// `value` is the trimmed value string, `line` the 0-based line index,
-/// `col_offset` the byte column where `value` starts in the raw line.
-fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec<(String, Span)> {
+/// Byte ranges of hardware-token-shaped runs over `letters` — the one token
+/// scanner every hardware scan is built on (component tokens, the span-carrying
+/// parser scan, and the graph's register references).
+///
+/// A match starts at a letter in `letters` immediately followed by a digit and
+/// not preceded by an alphanumeric or underscore character, so an internal
+/// variable like `_ENV1_DECAY_POT` is not mistaken for a token (design.md
+/// Decision 2); it may carry a `.pin` suffix and must end cleanly, so `B1.1.2`
+/// and `B1.1x` are rejected. Scanning is byte-based: every token character is
+/// ASCII, so a range always lands on `&str` boundaries.
+fn scan_token_ranges(value: &str, letters: &[char]) -> Vec<(usize, usize)> {
     let bytes = value.as_bytes();
     let len = bytes.len();
     let mut out = Vec::new();
@@ -2320,7 +2256,7 @@ fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec
         let c = bytes[i] as char;
         let boundary_ok =
             i == 0 || !((bytes[i - 1] as char).is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-        let starts_token = HW_TOKEN_LETTERS.contains(&c)
+        let starts_token = letters.contains(&c)
             && i + 1 < len
             && (bytes[i + 1] as char).is_ascii_digit()
             && boundary_ok;
@@ -2342,21 +2278,47 @@ fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec
                     || bytes[i] == b'_'
                     || bytes[i] == b'.');
             if clean_end {
-                let token = value[start..i].to_string();
-                out.push((
-                    token,
-                    Span {
-                        line,
-                        col_start: col_offset + start,
-                        col_end: col_offset + i,
-                    },
-                ));
+                out.push((start, i));
             }
             continue;
         }
         i += 1;
     }
     out
+}
+
+fn scan_hw_tokens_with_letters(value: &str, letters: &[char]) -> Vec<String> {
+    scan_token_ranges(value, letters)
+        .into_iter()
+        .map(|(start, end)| value[start..end].to_string())
+        .collect()
+}
+
+pub(crate) fn scan_hw_tokens_wide(value: &str) -> Vec<String> {
+    scan_hw_tokens_with_letters(value, &HW_TOKEN_LETTERS_WIDE)
+}
+
+pub(crate) fn scan_hw_tokens(value: &str) -> Vec<String> {
+    scan_hw_tokens_with_letters(value, &HW_TOKEN_LETTERS)
+}
+
+/// Like `scan_hw_tokens` but returns spans (line + column range) for each hit.
+/// `value` is the trimmed value string, `line` the 0-based line index,
+/// `col_offset` the byte column where `value` starts in the raw line.
+fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec<(String, Span)> {
+    scan_token_ranges(value, &HW_TOKEN_LETTERS)
+        .into_iter()
+        .map(|(start, end)| {
+            (
+                value[start..end].to_string(),
+                Span {
+                    line,
+                    col_start: col_offset + start,
+                    col_end: col_offset + end,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Like `scan_hw_tokens` but for the graph's register-edge pass: scans a
@@ -2370,7 +2332,6 @@ fn scan_hw_tokens_with_spans(value: &str, line: usize, col_offset: usize) -> Vec
 /// with a clean end, so `_ENV1_DECAY_POT`-style internal variables and cable
 /// names are not matched.
 pub(crate) fn scan_register_refs(value: &str) -> Vec<(String, u32, Option<u32>)> {
-    let chars: Vec<char> = value.chars().collect();
     // Letter set read from the schema's jack table (single source of truth,
     // read-only) rather than mirrored here; patch.rs already imports schema
     // for `load_schema`.
@@ -2378,65 +2339,21 @@ pub(crate) fn scan_register_refs(value: &str) -> Vec<(String, u32, Option<u32>)>
         .iter()
         .filter_map(|rule| rule.prefix.chars().next())
         .collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let boundary_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
-        let starts_token = prefixes.contains(&c)
-            && i + 1 < chars.len()
-            && chars[i + 1].is_ascii_digit()
-            && boundary_ok;
-
-        if starts_token {
-            let start = i;
-            i += 1;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < chars.len()
-                && chars[i] == '.'
-                && i + 1 < chars.len()
-                && chars[i + 1].is_ascii_digit()
-            {
-                i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let clean_end = i >= chars.len()
-                || !(chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.');
-            if clean_end {
-                let token: String = chars[start..i].iter().collect();
-                let unit_end = start
-                    + 1
-                    + chars[start + 1..i]
-                        .iter()
-                        .take_while(|c| c.is_ascii_digit())
-                        .count();
-                let unit: u32 = chars[start + 1..unit_end]
-                    .iter()
-                    .collect::<String>()
-                    .parse()
-                    .unwrap_or(0);
-                let pin = if unit_end < i {
-                    Some(
-                        chars[unit_end + 1..i]
-                            .iter()
-                            .collect::<String>()
-                            .parse()
-                            .unwrap_or(0),
-                    )
-                } else {
-                    None
-                };
-                out.push((token, unit, pin));
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out
+    scan_token_ranges(value, &prefixes)
+        .into_iter()
+        .map(|(start, end)| {
+            let token = &value[start..end];
+            let (unit, pin) = match token[1..].split_once('.') {
+                Some((unit, pin)) => (unit, Some(pin)),
+                None => (&token[1..], None),
+            };
+            (
+                token.to_string(),
+                unit.parse().unwrap_or(0),
+                pin.map(|p| p.parse().unwrap_or(0)),
+            )
+        })
+        .collect()
 }
 
 /// Build the virtual-cable index from parsed sections.
@@ -4409,55 +4326,6 @@ mod tests {
         );
     }
 
-    /// Minimal schema fixture for catalog-driven producer classification:
-    /// circuit `pulser` declares a nonstandard output param `pulse` and an
-    /// input param `input`. Leaked to `&'static` for `set_test_schema`.
-    fn catalog_test_schema() -> &'static crate::schema::Schema {
-        let schema: crate::schema::Schema = serde_json::from_str(
-            r#"{
-            "firmware_version": "test",
-            "jacktable_initial_size": 0,
-            "available_memory": {},
-            "circuits": {
-                "pulser": {
-                    "category": "test",
-                    "title": "Pulser",
-                    "description": "test circuit",
-                    "ramsize": 100,
-                    "inputs": [
-                        {
-                            "name": "input",
-                            "short": "in",
-                            "type": "in",
-                            "description": "input",
-                            "essential": 0,
-                            "ramhint": "",
-                            "autotitle": false
-                        }
-                    ],
-                    "outputs": [
-                        {
-                            "name": "pulse",
-                            "short": "pulse",
-                            "type": "out",
-                            "description": "output",
-                            "essential": 0,
-                            "ramhint": "",
-                            "autotitle": false
-                        }
-                    ],
-                    "presets": 0,
-                    "manual": 0
-                }
-            },
-            "controllers": {},
-            "manual_references": {}
-        }"#,
-        )
-        .unwrap();
-        Box::leak(Box::new(schema))
-    }
-
     #[test]
     fn cable_index_catalog_driven_producer_classification() {
         // A catalog output param with a non-`output` key produces a source, a
@@ -4465,7 +4333,7 @@ mod tests {
         // `output` convention. Pin the fixture schema for the parse, then
         // restore immediately so a failing assert cannot leave the override
         // behind for later tests on this thread.
-        let schema = catalog_test_schema();
+        let schema = crate::test_support::catalog_schema();
         crate::schema::set_test_schema(Some(schema));
         let content = "[p2b8]\n[pulser]\n    pulse = _OUT\n    input = _IN\n[unknowncircuit]\n    output = _Z\n";
         let patch = Patch::from_ini_str(content, String::from("t")).unwrap();

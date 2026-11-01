@@ -2021,6 +2021,49 @@ const ROTARY_STACK_FACEPLATES: &[(&str, &[&str])] = &[
     ("db8e", &["B6.1", "B6.8", "E6.1"]),
 ];
 
+/// Attribution guard shared by the faceplate regressions: every token in
+/// `expected` is attributed to its declared controller faceplate and resolves to
+/// an element cell there. Presence and attribution only — no coordinate is read,
+/// which is what lets one guard serve several faceplate fixtures.
+fn assert_faceplate_tokens(layout: &crate::physical::PhysicalLayout, expected: &[(&str, &[&str])]) {
+    for (key, tokens) in expected {
+        let ix = layout
+            .modules
+            .iter()
+            .position(|m| m.geometry_key == *key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no faceplate for {key}; faceplates = {:?}",
+                    layout
+                        .modules
+                        .iter()
+                        .map(|m| m.geometry_key.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let faceplate = &layout.modules[ix];
+        assert!(
+            !faceplate.is_fallback,
+            "{key} faceplate must use its geometry entry, not the fallback"
+        );
+        for token in *tokens {
+            assert!(
+                faceplate.components.iter().any(|c| c.id == *token),
+                "{token} must be attributed to the {key} faceplate, got {:?}",
+                faceplate
+                    .components
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                layout.cell_for(ix, token).is_some(),
+                "{token} must resolve to an element cell on the {key} faceplate"
+            );
+        }
+    }
+}
+
 #[test]
 fn regression_faceplate_rotary_stack_all_six_declared_and_attributable() {
     let path = "fixtures/faceplate_rotary_stack.ini";
@@ -2057,42 +2100,7 @@ fn regression_faceplate_rotary_stack_all_six_declared_and_attributable() {
     // attributed to that faceplate and resolves to a cell on it. Presence and
     // attribution only — no coordinate is read here.
     let layout = crate::physical::PhysicalLayout::build(&patch);
-    for (key, tokens) in ROTARY_STACK_FACEPLATES {
-        let ix = layout
-            .modules
-            .iter()
-            .position(|m| m.geometry_key == *key)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no faceplate for {key}; faceplates = {:?}",
-                    layout
-                        .modules
-                        .iter()
-                        .map(|m| m.geometry_key.clone())
-                        .collect::<Vec<_>>()
-                )
-            });
-        let faceplate = &layout.modules[ix];
-        assert!(
-            !faceplate.is_fallback,
-            "{key} faceplate must use its geometry entry, not the fallback"
-        );
-        for token in *tokens {
-            assert!(
-                faceplate.components.iter().any(|c| c.id == *token),
-                "{token} must be attributed to the {key} faceplate, got {:?}",
-                faceplate
-                    .components
-                    .iter()
-                    .map(|c| c.id.clone())
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                layout.cell_for(ix, token).is_some(),
-                "{token} must resolve to an element cell on the {key} faceplate"
-            );
-        }
-    }
+    assert_faceplate_tokens(&layout, ROTARY_STACK_FACEPLATES);
 
     // Exactly six controller faceplates beside the always-present CV I/O
     // master: no controller merged into another's plate and none is missing.
@@ -2216,42 +2224,7 @@ fn regression_button_led_composition_faces_render_and_leds_fold() {
     // (b) All three faceplates exist and render their declared tokens:
     // each token is attributed to its faceplate and resolves to a cell.
     let layout = crate::physical::PhysicalLayout::build(&patch);
-    for (key, tokens) in BUTTON_LED_FACEPLATES {
-        let ix = layout
-            .modules
-            .iter()
-            .position(|m| m.geometry_key == *key)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no faceplate for {key}; faceplates = {:?}",
-                    layout
-                        .modules
-                        .iter()
-                        .map(|m| m.geometry_key.clone())
-                        .collect::<Vec<_>>()
-                )
-            });
-        let faceplate = &layout.modules[ix];
-        assert!(
-            !faceplate.is_fallback,
-            "{key} faceplate must use its geometry entry, not the fallback"
-        );
-        for token in *tokens {
-            assert!(
-                faceplate.components.iter().any(|c| c.id == *token),
-                "{token} must be attributed to the {key} faceplate, got {:?}",
-                faceplate
-                    .components
-                    .iter()
-                    .map(|c| c.id.clone())
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                layout.cell_for(ix, token).is_some(),
-                "{token} must resolve to an element cell on the {key} faceplate"
-            );
-        }
-    }
+    assert_faceplate_tokens(&layout, BUTTON_LED_FACEPLATES);
 
     // (c) No folded LED appears as a cell or in `component_rects`: the
     // published spec cells resolve to token ids via the global

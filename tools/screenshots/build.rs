@@ -30,6 +30,7 @@ fn main() {
         "plugin",
         "rendermetrics",
         "schema",
+        "store",
         "sysex",
         "theme",
         "validation",

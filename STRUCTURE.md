@@ -24,7 +24,9 @@ droid_tui/
 │   ├── optimize.rs             # latency-optimized patch generation
 │   ├── panes.rs                # class-based pane layout model (PaneLayout/PaneId)
 │   ├── performance.rs          # pure side-bound callout layout (performance view)
+│   ├── store.rs                # shared on-disk rules for the user TOML stores
 │   ├── sysex.rs                # pure MIDI SysEx payload builder
+│   ├── test_support.rs         # cfg(test) shared fixtures (catalog schema, two-cluster graph)
 │   ├── config.rs               # XDG config.toml load/save
 │   ├── favorites.rs            # FavoritesStore (XDG favourites.toml)
 │   ├── plugin.rs               # plugin-circuit TOML discovery + parse

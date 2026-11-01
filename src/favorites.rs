@@ -1,7 +1,5 @@
-use std::env;
 #[cfg(test)]
 use std::ffi::OsStr;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -28,17 +26,7 @@ impl FavoritesStore {
     /// Canonicalize `path` to an absolute string key: real canonical path when
     /// the file exists, otherwise an absolute join against `current_dir`.
     pub fn canonical_key(path: &Path) -> String {
-        if let Ok(canonical) = path.canonicalize() {
-            return canonical.to_string_lossy().to_string();
-        }
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(path)
-        };
-        absolute.to_string_lossy().to_string()
+        crate::store::canonical_key(path)
     }
 
     /// Whether `path` is favourited (canonicalized comparison).
@@ -71,68 +59,29 @@ impl FavoritesStore {
     /// Load from an explicit file path (test injection point). Warn-once
     /// contract: each call emits at most one stderr warning.
     pub fn load_from(path: &Path) -> Self {
-        let raw = match fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(_) => return Self::default(),
-        };
-        match toml::from_str(&raw) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                eprintln!(
-                    "warning: ignoring malformed favourites file {}: {err}",
-                    path.display()
-                );
-                Self::default()
-            }
-        }
+        crate::store::load_toml(path, "favourites")
     }
 
     /// Save to the discovered platform path.
     pub fn save(&self) -> io::Result<()> {
-        let dir = crate::platform::config_dir().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "cannot determine the platform data directory (XDG_CONFIG_HOME, HOME or APPDATA)",
-            )
-        })?;
-        self.save_to_dir(&dir)
+        self.save_to_dir(&crate::store::data_dir_or_error()?)
     }
 
     /// Atomically write as `favourites.toml` inside `dir` (tmp→rename), creating
     /// the directory tree on demand.
     pub fn save_to_dir(&self, dir: &Path) -> io::Result<()> {
-        fs::create_dir_all(dir)?;
-        let body = toml::to_string(self)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        let target = dir.join(FAVOURITES_FILE_NAME);
-        let tmp = dir.join(format!("{FAVOURITES_FILE_NAME}.tmp"));
-        fs::write(&tmp, body)?;
-        if let Err(err) = fs::rename(&tmp, &target) {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-        Ok(())
+        let body = crate::store::to_toml_string(self)?;
+        crate::store::write_in_dir(dir, FAVOURITES_FILE_NAME, &body)
     }
 
     /// Save to an explicit file path (atomic tmp→rename beside the file).
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() {
-                fs::create_dir_all(dir)?;
-            }
             if path.file_name().is_some_and(|n| n == FAVOURITES_FILE_NAME) {
                 return self.save_to_dir(dir);
             }
         }
-        let body = toml::to_string(self)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, body)?;
-        if let Err(err) = fs::rename(&tmp, path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-        Ok(())
+        crate::store::write_beside_file(path, &crate::store::to_toml_string(self)?)
     }
 }
 

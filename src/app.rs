@@ -45,17 +45,7 @@ impl LabelStore {
     /// Canonicalize `path` to an absolute string key: real canonical path when
     /// the file exists, otherwise an absolute join against `current_dir`.
     pub fn canonical_key(path: &Path) -> String {
-        if let Ok(canonical) = path.canonicalize() {
-            return canonical.to_string_lossy().to_string();
-        }
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(path)
-        };
-        absolute.to_string_lossy().to_string()
+        crate::store::canonical_key(path)
     }
 
     /// Encode a `(circuit, instance)` pair as the TOML key `"circuit:instance"`.
@@ -94,31 +84,12 @@ impl LabelStore {
     /// Load from an explicit file path (test injection point). Warn-once
     /// contract: each call emits at most one stderr warning.
     pub fn load_from(path: &Path) -> Self {
-        let raw = match fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(_) => return Self::default(),
-        };
-        match toml::from_str(&raw) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                eprintln!(
-                    "warning: ignoring malformed labels file {}: {err}",
-                    path.display()
-                );
-                Self::default()
-            }
-        }
+        crate::store::load_toml(path, "labels")
     }
 
     /// Save to the discovered platform path.
     pub fn save(&self) -> io::Result<()> {
-        let dir = crate::platform::config_dir().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "cannot determine the platform data directory (XDG_CONFIG_HOME, HOME or APPDATA)",
-            )
-        })?;
-        self.save_to_dir(&dir)
+        self.save_to_dir(&crate::store::data_dir_or_error()?)
     }
 
     /// Atomically write as `labels.toml` inside `dir` (tmp→rename), creating
@@ -169,42 +140,21 @@ impl LabelStore {
                 .patches
                 .insert(k.clone(), PatchLabels { hw, circuits });
         }
-        let body = toml::to_string(&pruned)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        let target = dir.join(LABELS_FILE_NAME);
-        let tmp = dir.join(format!("{LABELS_FILE_NAME}.tmp"));
-        fs::write(&tmp, body)?;
-        if let Err(err) = fs::rename(&tmp, &target) {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-        Ok(())
+        let body = crate::store::to_toml_string(&pruned)?;
+        crate::store::write_in_dir(dir, LABELS_FILE_NAME, &body)
     }
 
     /// Convenience: save to an explicit file path (atomic tmp→rename beside the file).
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() {
-                fs::create_dir_all(dir)?;
-            }
             // Delegate to dir-based writer when path is inside an XDG-style dir;
             // otherwise write beside `path` atomically.
             if path.file_name().is_some_and(|n| n == LABELS_FILE_NAME) {
                 return self.save_to_dir(dir);
             }
         }
-        let pruned = Self {
-            patches: self.patches.clone(),
-        };
-        let body = toml::to_string(&pruned)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, body)?;
-        if let Err(err) = fs::rename(&tmp, path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-        Ok(())
+        let body = crate::store::to_toml_string(self)?;
+        crate::store::write_beside_file(path, &body)
     }
 
     /// Convenience for HW: get label for `(patch, token, layer)` respecting
@@ -1743,11 +1693,6 @@ impl App {
         }
     }
 
-    /// Elapsed time of the in-flight send, for the waiting-bar display.
-    pub fn upload_elapsed(&self) -> Option<std::time::Duration> {
-        self.upload_send.as_ref().map(|s| s.started.elapsed())
-    }
-
     pub fn load_diff_patch(&mut self, path: &Path) -> Result<(), String> {
         let new_patch = Patch::from_ini_file(path).map_err(|e| e.to_string())?;
         let report = if let Some(base) = &self.patch {
@@ -3217,6 +3162,25 @@ impl App {
     }
 
     pub fn load_patch(&mut self, patch: Patch) -> bool {
+        self.load_patch_impl(patch, None)
+    }
+
+    /// Load a patch that originated from `path`, remembering the path as the
+    /// per-patch `LabelStore` bucket key. Canonicalization uses
+    /// `LabelStore::canonical_key` (canonicalize when the file exists, else
+    /// absolute).
+    ///
+    /// Both entry points share one implementation: the only difference is the
+    /// stored path, and keeping them apart had already let them drift (this path
+    /// dropped a stale upload modal, the other kept it).
+    pub fn load_patch_at(&mut self, path: &Path, patch: Patch) -> bool {
+        self.load_patch_impl(patch, Some(path.to_path_buf()))
+    }
+
+    /// Install `patch` after validation: gate on an `Error` finding, otherwise
+    /// replace the loaded patch and reset every per-patch view/selection state.
+    /// `patch_path` is the label-store bucket key (`None` for a synthetic patch).
+    fn load_patch_impl(&mut self, patch: Patch, patch_path: Option<PathBuf>) -> bool {
         let issues = validate_patch(&patch, load_schema());
         // Gate only on hard errors (unknown_circuit, ram_overflow). Legacy
         // fixtures like source_navigation.ini contain unknown_param for
@@ -3226,18 +3190,16 @@ impl App {
         let has_hard_error = issues
             .iter()
             .any(|i| i.severity == Severity::Error && i.code != "unknown_param");
-        let has_error = has_hard_error;
+        let error_count = issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .count();
+        let count = issues.len();
         // Hard-gate on Error, but allow the very first load to succeed so
         // existing fixtures (e.g. source_navigation.ini) that pre-date the
         // validator still bootstrap tests. Subsequent loads with Error still
         // preserve the previous patch.
-        let should_gate = has_hard_error && self.patch.is_some();
-        if should_gate {
-            let error_count = issues
-                .iter()
-                .filter(|i| i.severity == Severity::Error)
-                .count();
-            let count = issues.len();
+        if has_hard_error && self.patch.is_some() {
             self.validation_issues = issues;
             self.showing_validation = true;
             self.validation_cursor = 0;
@@ -3247,104 +3209,12 @@ impl App {
                 .dispatch(&Event::ValidationCompleted { count, error_count });
             return false;
         }
-        if has_error {
-            // First load with errors: still install patch so tests/fixtures
-            // bootstrap, but surface the errors via validation modal/status.
-            self.reset_graph_state();
-            self.clear_influence_state();
-            // The latch names a token of the previous patch; drop it with the
-            // load (not via clear_influence_state, which also runs on selection moves).
-            self.latched_component = None;
-            self.modifier_influence = None;
-            self.clear_diff();
-            self.patch = Some(patch);
-            self.selected_component = None;
-            self.selected_circuit = None;
-            self.occurrence_cursor = 0;
-            self.source_scroll = 0;
-            self.source_view_mode = SourceViewMode::Raw;
-            self.minimap_rect = None;
-            self.source_pane_rect = None;
-            self.processing_paused = false;
-            self.physical_show_skeleton = false;
-            self.showing_performance = false;
-            self.physical_offset = (0.0, 0.0);
-            self.physical_zoom = 1.0;
-            // module-ui-labels D4: a load is a fit trigger; the pane dispatch
-            // fits once it knows the pane size.
-            self.physical_fit_zoom = None;
-            self.physical_fit_mode = None;
-            self.physical_nav_latched = false;
-            self.physical_fit_pending = true;
-            self.disabled_circuits.clear();
-            self.editing = None;
-            // A confirm modal snapshots the previous patch's byte count; drop it
-            // with the load. An in-flight send survives (payload is snapshotted).
-            self.upload_modal = None;
-            self.current_patch_path = None;
-            let error_count = issues
-                .iter()
-                .filter(|i| i.severity == Severity::Error)
-                .count();
-            let count = issues.len();
-            self.validation_issues = issues;
-            // Do not auto-show modal for first-load error either; keep
-            // snapshots stable. User can press 'e' to view.
-            self.showing_validation = false;
-            self.validation_cursor = 0;
-            self.events
-                .dispatch(&Event::ValidationCompleted { count, error_count });
-            self.status_message = {
-                let name = self
-                    .patch
-                    .as_ref()
-                    .map(|p| p.name.trim().to_string())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    "Ready".to_string()
-                } else {
-                    format!("Loaded {name}")
-                }
-            };
-            return true;
-        }
-        // No Error: install patch and keep warnings/hints.
-        self.reset_graph_state();
-        self.clear_influence_state();
-        // The latch names a token of the previous patch; drop it with the
-        // load (not via clear_influence_state, which also runs on selection moves).
-        self.latched_component = None;
-        self.modifier_influence = None;
-        self.clear_diff();
-        self.optimizer = None;
-        if let Some(id) = self.pane_holding(ViewType::Optimizer) {
-            self.layout.pane_mut(id).view = None;
-        }
-        self.patch = Some(patch);
-        self.selected_component = None;
-        self.selected_circuit = None;
-        self.occurrence_cursor = 0;
-        self.source_scroll = 0;
-        self.source_view_mode = SourceViewMode::Raw;
-        self.minimap_rect = None;
-        self.source_pane_rect = None;
-        self.processing_paused = false;
-        self.physical_show_skeleton = false;
-        self.showing_performance = false;
-        self.physical_offset = (0.0, 0.0);
-        self.physical_zoom = 1.0;
-        self.physical_fit_zoom = None;
-        self.physical_fit_mode = None;
-        self.physical_nav_latched = false;
-        self.physical_fit_pending = true;
-        self.disabled_circuits.clear();
-        self.editing = None;
-        self.current_patch_path = None;
-        let error_count = 0;
-        let count = issues.len();
+        self.install_loaded_patch(patch, patch_path);
         self.validation_issues = issues;
         // Warnings/Hints never auto-open the modal: report the count with the
-        // `e` hint and let the user open the list on demand.
+        // `e` hint and let the user open the list on demand. The same holds for a
+        // first load that carries hard errors — the patch is installed so tests
+        // and fixtures bootstrap, and the snapshot stays stable.
         self.showing_validation = false;
         self.validation_cursor = 0;
         self.events
@@ -3357,7 +3227,7 @@ impl App {
                 .unwrap_or_default();
             if name.is_empty() {
                 "Ready".to_string()
-            } else if count > 0 {
+            } else if !has_hard_error && count > 0 {
                 format!("Loaded {name} \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
             } else {
                 format!("Loaded {name}")
@@ -3366,98 +3236,13 @@ impl App {
         true
     }
 
-    /// Load a patch that originated from `path`, remembering the canonical path
-    /// key for per-patch `LabelStore` bucket lookup. Otherwise identical to
-    /// `load_patch` (BOF, no selection, overlay cleared). Canonicalization uses
-    /// `LabelStore::canonical_key` (canonicalize when file exists, else absolute).
-    ///
-    /// Gating mirrors `load_patch`: `Error` issues keep the previous patch and
-    /// return `false`; otherwise the new patch is installed and `true` is
-    /// returned.
-    pub fn load_patch_at(&mut self, path: &Path, patch: Patch) -> bool {
-        let issues = validate_patch(&patch, load_schema());
-        let has_hard_error = issues
-            .iter()
-            .any(|i| i.severity == Severity::Error && i.code != "unknown_param");
-        let has_error = has_hard_error;
-        let should_gate = has_hard_error && self.patch.is_some();
-        if should_gate {
-            let error_count = issues
-                .iter()
-                .filter(|i| i.severity == Severity::Error)
-                .count();
-            let count = issues.len();
-            self.validation_issues = issues;
-            self.showing_validation = true;
-            self.validation_cursor = 0;
-            self.status_message =
-                format!("Load failed: {error_count} error(s) \u{2014} press 'e' to view");
-            self.events
-                .dispatch(&Event::ValidationCompleted { count, error_count });
-            return false;
-        }
-        if has_error {
-            self.reset_graph_state();
-            self.clear_influence_state();
-            // The latch names a token of the previous patch; drop it with the
-            // load (not via clear_influence_state, which also runs on selection moves).
-            self.latched_component = None;
-            self.modifier_influence = None;
-            self.clear_diff();
-            self.patch = Some(patch);
-            self.selected_component = None;
-            self.selected_circuit = None;
-            self.occurrence_cursor = 0;
-            self.source_scroll = 0;
-            self.source_view_mode = SourceViewMode::Raw;
-            self.minimap_rect = None;
-            self.source_pane_rect = None;
-            self.processing_paused = false;
-            self.physical_show_skeleton = false;
-            self.showing_performance = false;
-            self.physical_offset = (0.0, 0.0);
-            self.physical_zoom = 1.0;
-            // module-ui-labels D4: a load is a fit trigger; the pane dispatch
-            // fits once it knows the pane size.
-            self.physical_fit_zoom = None;
-            self.physical_fit_mode = None;
-            self.physical_nav_latched = false;
-            self.physical_fit_pending = true;
-            self.disabled_circuits.clear();
-            self.editing = None;
-            // A confirm modal snapshots the previous patch's byte count; drop it
-            // with the load. An in-flight send survives (payload is snapshotted).
-            self.upload_modal = None;
-            self.current_patch_path = Some(path.to_path_buf());
-            let error_count = issues
-                .iter()
-                .filter(|i| i.severity == Severity::Error)
-                .count();
-            let count = issues.len();
-            self.validation_issues = issues;
-            self.showing_validation = false;
-            self.validation_cursor = 0;
-            self.events
-                .dispatch(&Event::ValidationCompleted { count, error_count });
-            self.status_message = {
-                let name = self
-                    .patch
-                    .as_ref()
-                    .map(|p| p.name.trim().to_string())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    "Ready".to_string()
-                } else {
-                    format!("Loaded {name}")
-                }
-            };
-            return true;
-        }
-        // No Error: install patch and keep warnings/hints.
+    /// The one per-patch reset: every field that describes *the previous patch*
+    /// is cleared before `patch` is installed again.
+    fn install_loaded_patch(&mut self, patch: Patch, patch_path: Option<PathBuf>) {
         self.reset_graph_state();
         self.clear_influence_state();
-        // The latch names a token of the previous patch; drop it with the
-        // load (not via clear_influence_state, which also runs on selection moves).
+        // The latch names a token of the previous patch; drop it with the load
+        // (not via clear_influence_state, which also runs on selection moves).
         self.latched_component = None;
         self.modifier_influence = None;
         self.clear_diff();
@@ -3478,40 +3263,18 @@ impl App {
         self.showing_performance = false;
         self.physical_offset = (0.0, 0.0);
         self.physical_zoom = 1.0;
+        // module-ui-labels D4: a load is a fit trigger; the pane dispatch fits
+        // once it knows the pane size.
         self.physical_fit_zoom = None;
         self.physical_fit_mode = None;
         self.physical_nav_latched = false;
         self.physical_fit_pending = true;
         self.disabled_circuits.clear();
         self.editing = None;
-        // A confirm modal snapshots the previous patch's byte count; drop it
-        // with the load. An in-flight send survives (payload is snapshotted).
+        // A confirm modal snapshots the previous patch's byte count; drop it with
+        // the load. An in-flight send survives (payload is snapshotted).
         self.upload_modal = None;
-        self.current_patch_path = Some(path.to_path_buf());
-        let error_count = 0;
-        let count = issues.len();
-        self.validation_issues = issues;
-        // Warnings/Hints never auto-open the modal: report the count with the
-        // `e` hint and let the user open the list on demand.
-        self.showing_validation = false;
-        self.validation_cursor = 0;
-        self.events
-            .dispatch(&Event::ValidationCompleted { count, error_count });
-        self.status_message = {
-            let name = self
-                .patch
-                .as_ref()
-                .map(|p| p.name.trim().to_string())
-                .unwrap_or_default();
-            if name.is_empty() {
-                "Ready".to_string()
-            } else if count > 0 {
-                format!("Loaded {name} \u{2014} {count} warnings/hints \u{2014} press 'e' to view")
-            } else {
-                format!("Loaded {name}")
-            }
-        };
-        true
+        self.current_patch_path = patch_path;
     }
 
     /// HW bucket for the currently loaded patch, if any (cloned, empty when no
@@ -4333,24 +4096,9 @@ impl App {
         self.graph_positions = positions;
     }
 
-    /// Display label of the frozen dependency root for the status line: the
-    /// circuit name (+ instance), the controller name, or the jack token.
+    /// Display label of the frozen dependency root for the status line.
     fn dependency_root_label(&self) -> String {
-        let Some(graph) = &self.graph else {
-            return String::new();
-        };
-        let Some(root) = &self.dependency_root else {
-            return String::new();
-        };
-        let Some(node) = graph.nodes.iter().find(|n| &n.id == root) else {
-            return format!("{root:?}");
-        };
-        match &node.kind {
-            NodeKind::Circuit if node.instance_index > 0 => {
-                format!("{} {}", node.circuit, node.instance_index + 1)
-            }
-            _ => node.circuit.clone(),
-        }
+        self.root_label(self.dependency_root.as_ref())
     }
 
     /// Clear the influence filter and restore the full graph solve (change D
@@ -4417,13 +4165,19 @@ impl App {
         self.graph_positions = positions;
     }
 
-    /// Display label of the frozen influence root for the status line: the
-    /// circuit name (+ instance), the controller name, or the jack token.
+    /// Display label of the frozen influence root for the status line.
     fn influence_root_label(&self) -> String {
+        self.root_label(self.influence_root.as_ref())
+    }
+
+    /// Shared root-label rule for both graph filters: the circuit name (+
+    /// instance, 1-based), else the jack token, with the raw `NodeId` debug form
+    /// when the node is gone from the current graph.
+    fn root_label(&self, root: Option<&NodeId>) -> String {
         let Some(graph) = &self.graph else {
             return String::new();
         };
-        let Some(root) = &self.influence_root else {
+        let Some(root) = root else {
             return String::new();
         };
         let Some(node) = graph.nodes.iter().find(|n| &n.id == root) else {

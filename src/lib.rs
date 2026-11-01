@@ -22,7 +22,10 @@ pub mod platform;
 pub mod plugin;
 pub mod rendermetrics;
 pub mod schema;
+pub mod store;
 pub mod sysex;
+#[cfg(test)]
+pub mod test_support;
 pub mod theme;
 pub mod validation;
 
