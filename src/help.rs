@@ -70,7 +70,10 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
     match view {
         HelpView::ModuleUi => vec![
             ("+/-", "zoom presets"),
-            ("f", "fit rack to pane"),
+            // module-ui-label-fit D8: two fits — `f` is the readable one (the
+            // rack may then overflow and pan), `Shift+F` the overview.
+            ("f", "fit written labels (each in its cell; rack may pan)"),
+            ("Shift+F", "fit whole rack to pane (overview)"),
             ("a", "cycle label presentation"),
             ("wheel", "adjust knob/fader value, else zoom about pointer"),
             ("Ctrl+wheel", "zoom about pointer"),
@@ -402,7 +405,14 @@ mod tests {
         // binds, the skeleton toggle, and Esc closing the view.
         let module_ui = keybindings(HelpView::ModuleUi);
         assert!(module_ui.contains(&("+/-", "zoom presets")));
-        assert!(module_ui.contains(&("f", "fit rack to pane")));
+        // module-ui-label-fit 2.4 / D8: `f` fits the written labels (the rack
+        // may then exceed the pane), `Shift+F` fits the whole rack.
+        assert!(module_ui.contains(&("f", "fit written labels (each in its cell; rack may pan)")));
+        assert!(module_ui.contains(&("Shift+F", "fit whole rack to pane (overview)")));
+        assert!(
+            !module_ui.contains(&("f", "fit rack to pane")),
+            "`f` is the labels fit, not the single rack fit it used to be"
+        );
         assert!(module_ui.contains(&("a", "cycle label presentation")));
         assert!(module_ui.contains(&("wheel", "adjust knob/fader value, else zoom about pointer")));
         assert!(module_ui.contains(&("Ctrl+wheel", "zoom about pointer")));
@@ -415,6 +425,45 @@ mod tests {
         assert!(module_ui.contains(&("j/k", "navigate")));
         assert!(module_ui.contains(&("s", "toggle skeleton presentation")));
         assert!(module_ui.contains(&("Esc", "close Module UI view")));
+    }
+
+    #[test]
+    fn module_ui_fit_rows_name_the_two_fits() {
+        // module-ui-label-fit 2.4 / D8: the two fit rows must name the fits the
+        // status reports (`app::FitMode::as_str`) — `f` the labels fit (every
+        // written label in its cell, the rack may then overflow and pan),
+        // `Shift+F` the whole-rack overview. The retired single-fit wording must
+        // not survive on `f`.
+        let table = keybindings(HelpView::ModuleUi);
+        let desc = |key: &str| {
+            table
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, d)| *d)
+                .unwrap_or_else(|| panic!("Module UI table must document {key:?}"))
+        };
+
+        let labels = desc("f");
+        assert!(
+            labels.contains("labels") && labels.contains("cell"),
+            "`f` is the labels fit — each written label in its cell: {labels:?}"
+        );
+        assert!(
+            labels.contains("may pan"),
+            "`f` must say the rack may exceed the pane and pan: {labels:?}"
+        );
+
+        let rack = desc("Shift+F");
+        assert!(rack.contains("rack"), "`Shift+F` is the rack fit: {rack:?}");
+        assert!(
+            rack.contains("overview"),
+            "`Shift+F` must name the overview it is: {rack:?}"
+        );
+
+        // The status names the same two fits; a rename on either side is a
+        // parity break, so pin both here (handler: src/handler.rs).
+        assert_eq!(crate::app::FitMode::Labels.as_str(), "fit(labels)");
+        assert_eq!(crate::app::FitMode::Rack.as_str(), "fit(rack)");
     }
 
     #[test]
@@ -485,7 +534,8 @@ mod tests {
         ("Tab/Shift+Tab", "cycle pane focus"),
         // Module UI (the physical faceplate surface).
         ("+/-", "zoom presets"),
-        ("f", "fit rack to pane"),
+        ("f", "fit written labels (each in its cell; rack may pan)"),
+        ("Shift+F", "fit whole rack to pane (overview)"),
         ("a", "cycle label presentation"),
         ("wheel", "adjust knob/fader value, else zoom about pointer"),
         ("Ctrl+wheel", "zoom about pointer"),
@@ -582,7 +632,10 @@ mod tests {
             ("j/k", "navigate"),
             ("click", "focus element across source + graph"),
             ("+/-", "zoom presets"),
-            ("f", "fit rack to pane"),
+            // module-ui-label-fit 2.4: the handler binds `f` to the labels fit
+            // and `Shift+F` to the rack fit while the module UI holds focus.
+            ("f", "fit written labels (each in its cell; rack may pan)"),
+            ("Shift+F", "fit whole rack to pane (overview)"),
             ("a", "cycle label presentation"),
             ("wheel", "adjust knob/fader value, else zoom about pointer"),
             ("Ctrl+wheel", "zoom about pointer"),
@@ -678,6 +731,7 @@ mod tests {
             "l",
             "middle-drag",
             "R",
+            "Shift+F",
             "m",
             "U",
             "n",
