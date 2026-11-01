@@ -836,11 +836,14 @@ impl Patch {
         for section in &sections {
             // --- LED association: scan this section for a `led = L.N` entry
             // and identify the "element" (first hardware token in the section).
+            // Only a bare LED token names the register the circuit drives; a
+            // cable or expression value names a *value* and binds nothing (see
+            // `led_token_from_value`).
             let led_token: Option<String> = section
                 .entries
                 .iter()
                 .find(|(k, _)| *k == "led")
-                .map(|(_, v)| v.clone());
+                .and_then(|(_, v)| led_token_from_value(v));
             let element_token: Option<String> = section
                 .entries
                 .iter()
@@ -937,7 +940,11 @@ impl Patch {
             // deriving it. Match suffix against any hardware-token-valued
             // sibling entry (buttonN, potN, encoderN, switchN, faderN, ...)
             // in the same section, covering every schema ledN group.
-            let mut element_by_suffix: HashMap<&str, &str> = HashMap::new();
+            // The element side stores its first hardware token, not the raw
+            // value: circuit inputs are commonly scaled or gated
+            // (`button1 = B4.17 * _CONTROL`), and the token is what the
+            // component list keys on.
+            let mut element_by_suffix: HashMap<&str, String> = HashMap::new();
             for (key, value) in &section.entries {
                 // A `led*` key is the LED side of a pair, never the element
                 // being driven — exclude it so a lone `ledN` can't pair with
@@ -946,16 +953,18 @@ impl Patch {
                     continue;
                 }
                 if let Some(suffix) = leading_digits(key) {
-                    if token_kind(value).is_some() {
-                        element_by_suffix.entry(suffix).or_insert(value);
+                    if let Some(element) = scan_hw_tokens(value).into_iter().next() {
+                        element_by_suffix.entry(suffix).or_insert(element);
                     }
                 }
             }
             for (key, led) in &section.entries {
                 if let Some(led_suffix) = key.strip_prefix("led").and_then(leading_digits) {
-                    if let Some(element) = element_by_suffix.get(led_suffix) {
-                        if let Some(comp) = components.iter_mut().find(|c| c.id == **element) {
-                            comp.led = Some(led.clone());
+                    if let (Some(element), Some(led_token)) =
+                        (element_by_suffix.get(led_suffix), led_token_from_value(led))
+                    {
+                        if let Some(comp) = components.iter_mut().find(|c| c.id == *element) {
+                            comp.led = Some(led_token);
                         }
                     }
                 }
@@ -1817,6 +1826,28 @@ fn family_kind(family: char) -> ComponentKind {
         'S' => ComponentKind::Switch,
         'E' => ComponentKind::Encoder,
         _ => ComponentKind::Button,
+    }
+}
+
+/// The LED hardware token a `led`/`ledN` parameter names, if it names one.
+///
+/// The parameter is an OUTPUT: its value is what the circuit writes to the
+/// register (`button.led`: "Usually you wire that output to a LED register,
+/// e.g. to L1.1"). A bare LED token therefore names the register to drive and
+/// is the only form that binds an element to an LED. A cable reference
+/// (`led = _LED3_2_DRUMSEQ_STATE`) or an expression (`led = L4.29 + 1`) names a
+/// value, not a register: it binds nothing, leaving the positional/device
+/// default in force. Binding the raw string instead would point the element at
+/// a nonexistent LED, so the button face loses its fill and the real LED
+/// register renders as a standalone cell beside it.
+fn led_token_from_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let tokens = scan_hw_tokens(trimmed);
+    match tokens.as_slice() {
+        [token] if token == trimmed && token_kind(token) == Some(ComponentKind::Led) => {
+            Some(token.clone())
+        }
+        _ => None,
     }
 }
 
@@ -3583,6 +3614,56 @@ mod tests {
         let patch = Patch::from_ini_str(b32_explicit, String::from("b32_explicit_led")).unwrap();
         let b1_1 = patch.hw_components.iter().find(|c| c.id == "B1.1").unwrap();
         assert_eq!(b1_1.led.as_deref(), Some("L7.7"));
+    }
+
+    #[test]
+    fn cable_valued_led_param_binds_no_led_token() {
+        // A `led`/`ledN` value that is not a bare LED token names a value, not
+        // a register, so it must not bind the element: the positional LED
+        // stays in force and the face keeps its fold (led-fold-cable-pairing).
+        let content = std::fs::read_to_string("fixtures/led_cable_pairing.ini").unwrap();
+        let patch = Patch::from_ini_str(&content, String::from("led_cable_pairing")).unwrap();
+        let find = |id: &str| patch.hw_components.iter().find(|c| c.id == id).unwrap();
+        // (a) bare `led` holding a cable.
+        assert_eq!(find("B1.1").led, None, "cable-valued `led` binds nothing");
+        assert_eq!(
+            folded_led_for_element(find("B1.1")).as_deref(),
+            Some("L1.1"),
+            "B1.1 falls back to its positional LED"
+        );
+        // (b) numbered `ledN` paired by suffix, holding a cable.
+        assert_eq!(find("B2.1").led, None, "cable-valued `ledN` binds nothing");
+        assert_eq!(
+            folded_led_for_element(find("B2.1")).as_deref(),
+            Some("L2.1")
+        );
+        // (c)+(d) a bare LED token still binds explicitly.
+        assert_eq!(find("B1.2").led.as_deref(), Some("L1.4"));
+        assert_eq!(find("B2.2").led.as_deref(), Some("L2.2"));
+    }
+
+    #[test]
+    fn led_param_expression_binds_no_led_token() {
+        // `led = L1.4 + 1` writes a computed value; the register is not named.
+        let ini = "[b32]\n[button]\n    button = B1.3\n    led = L1.4 + 1\n    output = _E\n";
+        let patch = Patch::from_ini_str(ini, String::from("led_expr")).unwrap();
+        let b1_3 = patch.hw_components.iter().find(|c| c.id == "B1.3").unwrap();
+        assert_eq!(b1_3.led, None);
+        assert_eq!(folded_led_for_element(b1_3).as_deref(), Some("L1.3"));
+    }
+
+    #[test]
+    fn numbered_led_pairs_through_a_scaled_element_value() {
+        // `button1 = B1.29 * _CONTROL` is the common gated form; the pair must
+        // resolve through the element's hardware token, not its raw value.
+        let ini = "[b32]\n[buttongroup]\n    button1 = B1.29 * _CONTROL\n    led1 = L1.30\n    output = _BG\n";
+        let patch = Patch::from_ini_str(ini, String::from("led_gated")).unwrap();
+        let b1_29 = patch
+            .hw_components
+            .iter()
+            .find(|c| c.id == "B1.29")
+            .unwrap();
+        assert_eq!(b1_29.led.as_deref(), Some("L1.30"));
     }
 
     #[test]
