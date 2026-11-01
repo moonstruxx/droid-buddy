@@ -488,9 +488,10 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
 }
 
 /// Clamp view/rack values to the model's valid domain on the way in: zoom to
-/// the preset ladder, mount widths to non-negative, and row dimensions off
-/// their degenerate floors (`RackSpec::default_case` also floors `he` at 1).
-/// Row overrides are validated at pack time, so `assign` is left untouched.
+/// the preset ladder, mount widths to non-negative, row dimensions off their
+/// degenerate floors (`RackSpec::default_case` also floors `he` at 1), and each
+/// row inventory into canonical keys. Row overrides are validated at pack time,
+/// so `assign` is left untouched.
 fn sanitize_physical(physical: &mut Physical) {
     physical.zoom = physical.zoom.clamp(MIN_PHYSICAL_ZOOM, MAX_PHYSICAL_ZOOM);
     physical.rack.top_mount_te = physical.rack.top_mount_te.max(0.0);
@@ -498,7 +499,26 @@ fn sanitize_physical(physical: &mut Physical) {
     for row in &mut physical.rack.rows {
         row.he = row.he.max(1);
         row.hp = row.hp.max(1.0);
+        sanitize_row_modules(row);
     }
+}
+
+/// Rewrite one row's inventory into the single spelling the rack understands:
+/// keep every entry `ModuleKey::parse` accepts, re-emitted from the parsed key,
+/// and drop the rest.
+///
+/// Re-emitting rather than merely trimming the raw text is what makes
+/// load -> save -> load a fixed point: the stored form is already canonical, so
+/// re-reading a saved file cannot drift, and an alias such as "CV I/O" is
+/// written back as `master 1`. Entries the parser rejects are dropped instead
+/// of failing the load — a bad entry costs one module, not the whole config.
+fn sanitize_row_modules(row: &mut crate::physical::RackRow) {
+    row.modules = row
+        .modules
+        .iter()
+        .filter_map(|entry| crate::physical::ModuleKey::parse(entry))
+        .map(|key| format!("{} {}", key.controller, key.instance))
+        .collect();
 }
 
 /// Save settings to the discovered user config path.
@@ -1129,6 +1149,76 @@ mod tests {
         assert_eq!(loaded.physical.rack.side_mount_te, 0.0);
         assert_eq!(loaded.physical.rack.rows[0].he, 1);
         assert_eq!(loaded.physical.rack.rows[0].hp, 1.0);
+    }
+
+    #[test]
+    fn physical_rack_modules_sanitized_on_load() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[physical.rack]\n[[physical.rack.rows]]\nhe = 3\nhp = 84.0\n\
+             modules = [\" P2B8 2 \", \"\", \"master\", \"b32 0\", \"B32 x\"]\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        // Trimmed, empty and syntactically invalid entries dropped, controller
+        // lowercased, instance kept, and the alias resolved to its canonical key.
+        assert_eq!(
+            loaded.physical.rack.rows[0].modules,
+            vec!["p2b8 2".to_string(), "master 1".to_string()]
+        );
+    }
+
+    #[test]
+    fn physical_rack_modules_round_trip_through_save_is_identical() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            "theme = \"classic\"\n[physical.rack]\n[[physical.rack.rows]]\nhe = 3\nhp = 84.0\n\
+             modules = [\" P2B8 2 \", \"CV I/O\", \"b32 0\"]\n\
+             [[physical.rack.rows]]\nhe = 1\nhp = 24.0\n\
+             modules = [\"p8s8\"]\n",
+        )
+        .unwrap();
+        let first = load_from(&path, &test_canonical, &TEST_CATALOG);
+        save_to_dir(dir.path(), &first).unwrap();
+        let second = load_from(&path, &test_canonical, &TEST_CATALOG);
+        assert_eq!(second.physical.rack, first.physical.rack);
+        assert_eq!(
+            second.physical.rack.rows[0].modules,
+            vec!["p2b8 2".to_string(), "master 1".to_string()]
+        );
+        assert_eq!(
+            second.physical.rack.rows[1].modules,
+            vec!["p8s8 1".to_string()]
+        );
+    }
+
+    #[test]
+    fn physical_rack_without_modules_gains_no_key_and_round_trips_byte_stable() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            "theme = \"classic\"\n[physical.rack]\n[[physical.rack.rows]]\nhe = 3\nhp = 84.0\n",
+        )
+        .unwrap();
+        let first = load_from(&path, &test_canonical, &TEST_CATALOG);
+        save_to_dir(dir.path(), &first).unwrap();
+        let body_once = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body_once.contains("modules"),
+            "an inventory-free row must not gain the key: {body_once}"
+        );
+        let second = load_from(&path, &test_canonical, &TEST_CATALOG);
+        save_to_dir(dir.path(), &second).unwrap();
+        let body_twice = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body_once, body_twice);
+        assert_eq!(second.physical.rack, first.physical.rack);
+        assert!(second.physical.rack.rows[0].modules.is_empty());
     }
 
     #[test]
