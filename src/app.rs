@@ -1672,7 +1672,7 @@ impl App {
     /// Open the upload confirm modal (`U`, change `midi-upload` task 1.2):
     /// byte count over the in-memory patch plus the preflight transport
     /// probe. `false` (with a status hint) when no patch is loaded or a send
-    /// is already in flight. Test seam: [`App::open_upload_modal_with`]
+    /// is already in flight. Test seam: `App::open_upload_modal_with`
     /// injects the transport so tests never depend on real MIDI hardware.
     pub fn open_upload_modal(&mut self) -> bool {
         if self.upload_send.is_some() {
@@ -1718,7 +1718,7 @@ impl App {
     /// Send the confirmed payload in the background (`y` in the modal): pick
     /// the sender from the probed transport (`amidi -p <port> -s` preferred,
     /// `sendmidi dev <port> syf` fallback) and fork it via
-    /// [`App::spawn_upload`]. `Err` names the failure and leaves the modal
+    /// `App::spawn_upload`. `Err` names the failure and leaves the modal
     /// open so the user can retry or cancel.
     pub fn start_upload_send(&mut self) -> Result<(), String> {
         let confirm = self
@@ -2738,7 +2738,7 @@ impl App {
     /// the rack fit shrinks away stay reachable through the label presentation
     /// and the hover reveal.
     ///
-    /// Shares [`Self::apply_physical_fit`] with the labels fit, so the centring
+    /// Shares `Self::apply_physical_fit` with the labels fit, so the centring
     /// and the latch handling cannot drift between the two keys.
     pub fn fit_physical_view_rack(&mut self, pane_w: f32, pane_h: f32) -> bool {
         self.apply_physical_fit(pane_w, pane_h, FitMode::Rack)
@@ -3246,7 +3246,7 @@ impl App {
     /// (force-arrangement-nonoverlap-and-sliders D7): the panel's Arrange button
     /// and `Shift+A` in force mode. Unlike [`Self::arrange_sections`] — which
     /// anneals from the positions the user currently sees — this discards them
-    /// and re-runs the seed solve through [`Self::force_solve_knobs`], so it is
+    /// and re-runs the seed solve through `Self::force_solve_knobs`, so it is
     /// the force arrangement's "start over" action and the repulsion/cohesion
     /// sliders show on a layout the user did not drag. Refits the camera and
     /// reports `Arranged (force)`. Silent no-op (false) without a built graph.

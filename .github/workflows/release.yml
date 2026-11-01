@@ -52,7 +52,13 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
           # ext/droid-lsp provides circuits.json, compiled in with include_str!.
-          submodules: recursive
+          # Fetched non-recursively in the next step: the pinned submodule commit
+          # has a nested gitlink with no .gitmodules entry, which aborts a
+          # recursive submodule update.
+          submodules: false
+
+      - name: Fetch the schema submodule
+        run: git submodule update --init ext/droid-lsp
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -92,7 +98,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-          submodules: recursive
+          # ext/droid-lsp provides circuits.json, compiled in with include_str!.
+          # Fetched non-recursively in the next step: the pinned submodule commit
+          # has a nested gitlink with no .gitmodules entry, which aborts a
+          # recursive submodule update.
+          submodules: false
+
+      - name: Fetch the schema submodule
+        run: git submodule update --init ext/droid-lsp
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

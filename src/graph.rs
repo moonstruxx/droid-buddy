@@ -116,7 +116,7 @@ pub struct Graph {
     /// Reserved for task 2.2 (design D4): the slot is always empty today so
     /// validation results can travel with the graph once the pass is added.
     pub validation: Vec<TopologyIssue>,
-    /// Forward-loop latency (design D1/D2): one [`EdgeLatency`] per edge,
+    /// Forward-loop latency (design D1/D2): one [`LatencyData`] per edge,
     /// parallel to `edges` by index, plus the aggregate summary. Computed at
     /// build time by [`Graph::build_from_patch`] like `validate_topology`;
     /// `None` for hand-built or empty graphs (no nodes or no edges).

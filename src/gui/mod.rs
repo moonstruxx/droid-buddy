@@ -7,9 +7,9 @@
 //! here and interaction mapping is task 3.x. Nothing here is ever constructed
 //! under `cargo test`: the window is created only by explicit lifecycle calls.
 //!
-//! Surface dispatch: [`EguiSurface::paint`] is the one-frame entry point that
+//! Surface dispatch: `EguiSurface::paint` is the one-frame entry point that
 //! delegates to the per-surface draw routines; the graph canvas lives in
-//! [`graph`]. Later surface ports (physical, viewer, picker, overlays,
+//! `graph`. Later surface ports (physical, viewer, picker, overlays,
 //! tasks 2.1-2.5) add their own draw routines alongside `graph::paint_scene`
 //! without touching this shell.
 
@@ -97,7 +97,7 @@ pub enum WindowGraphKey {
 
 /// Raw window-frame input the loop turns into `App` mutations (task 3.1).
 /// Pointer positions are egui points, which the painter maps 1:1 to spec
-/// pixels (one spec pixel = one egui point, see [`EguiSurface::paint`]);
+/// pixels (one spec pixel = one egui point, see `EguiSurface::paint`);
 /// `None` means the pointer is not over the window. `keys` holds the
 /// [`WindowGraphKey`]s pressed during the frame.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1195,7 +1195,7 @@ pub(crate) fn reset_teardown_guard() {
 /// One-shot: after the first call the window is gone, and a repeated call
 /// returns without touching thread-locals that may already be destroyed.
 ///
-/// Each slot clear is a contained [`teardown_step`], so a source of panic the
+/// Each slot clear is a contained `teardown_step`, so a source of panic the
 /// `try_borrow_mut` check cannot cover (destroyed TLS, or a wgpu drop during
 /// unwinding) does not skip the remaining steps. `try_borrow_mut` is kept so a
 /// borrowed slot still cannot recurse; unwinding drops the surface anyway.

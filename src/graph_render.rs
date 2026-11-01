@@ -138,7 +138,7 @@ impl GraphCamera {
         Self { zoom, pan }
     }
 
-    /// Extent-aware initial fit (design decision 4): like [`fit_to_world`], but
+    /// Extent-aware initial fit (design decision 4): like [`Self::fit_to_world`], but
     /// frames whole node *bodies* rather than node center points. Node positions
     /// are the node box's top-left corner, so the drawn content spans
     /// `[min_x, max_x + node_w] × [min_y, max_y + node_h]`; the fit zoom is
@@ -146,12 +146,12 @@ impl GraphCamera {
     ///
     /// `min_node_px` is reinterpreted as the minimum *drawn* node pixel size,
     /// applied to the node height: `floor_zoom = min_node_px / node_h`. As in
-    /// [`fit_to_world`], the `floor_frames` guard is preserved — the floor may
+    /// [`Self::fit_to_world`], the `floor_frames` guard is preserved — the floor may
     /// apply only when the floored content still fits the viewport on both axes,
     /// so a large floor can never push content off-canvas (framing wins over
     /// legibility). The guard implies `binding_floor <= fit_zoom`, so the floor
     /// only ever *binds* (and anchors the content's top-left, matching the
-    /// clamped branch of [`fit_to_world`]) when it meets the fit exactly;
+    /// clamped branch of [`Self::fit_to_world`]) when it meets the fit exactly;
     /// otherwise the fit centers the content. Degenerate zero-span bounds and a
     /// `node_world` of `(0, 0)` stay finite via the `MIN_SPAN` guard.
     pub fn fit_to_world_with_nodes(

@@ -68,7 +68,7 @@ const MAX_DISPLACEMENT: f32 = 20.0;
 
 /// Spring stiffness for slice springs in sections mode (design D1 + 3.8):
 /// pulls each node toward its own seed target `(slot_x, slot_y + rank · stack
-/// pitch)` — see [`sections_seed`]. Mutable at runtime so sliders can tune it
+/// pitch)` — see `sections_seed`. Mutable at runtime so sliders can tune it
 /// (like `tension`).
 pub const SLICE_K: f32 = DEFAULT_SLICE_K;
 /// Default slice spring stiffness — strong enough to hold non-clustered nodes
@@ -76,7 +76,7 @@ pub const SLICE_K: f32 = DEFAULT_SLICE_K;
 pub const DEFAULT_SLICE_K: f32 = 0.1;
 /// Spring stiffness for section-hole springs in sections mode (design D1):
 /// pulls banner-group members toward their fixed section hole anchor — the mean
-/// seed target of their (banner group, row) band ([`section_hole_anchors_lanes`]).
+/// seed target of their (banner group, row) band (`section_hole_anchors_lanes`).
 /// Mutable at runtime so sliders can tune it (like `tension`).
 pub const SECTION_HOLE_K: f32 = DEFAULT_SECTION_HOLE_K;
 /// Default section-hole spring stiffness — anchors members strongly.
@@ -90,7 +90,7 @@ pub const DEFAULT_SECTION_HOLE_K: f32 = 0.15;
 ///
 /// The wrapped seed is the layout's spacing guarantee — measured worst pairwise
 /// penetration 0.00 on `fixtures/own_scale.ini` — but the force relaxation can
-/// still destroy it. Every force is clamped to the same [`MAX_DISPLACEMENT`], so
+/// still destroy it. Every force is clamped to the same `MAX_DISPLACEMENT`, so
 /// a node with an unbalanced cable bundle (own_scale's controller has 16 cables)
 /// drifts its entire travel budget — measured 1180 units in both axes, landing
 /// inside another row's lane for 79 units of overlap — and a banner band that
@@ -140,13 +140,13 @@ const FORCE_SEPARATION_MAX_PASSES: usize = 128;
 /// measured overlap-free (worst pairwise penetration 0.00 on
 /// `fixtures/own_scale.ini`). The springs then only fine-tune inside that space.
 /// Without the tether they do more than fine-tune: cable and section-hole forces
-/// are clamped to the same [`MAX_DISPLACEMENT`] budget as the positional springs,
+/// are clamped to the same `MAX_DISPLACEMENT` budget as the positional springs,
 /// so a node with an unbalanced cable bundle drifts its whole travel budget —
 /// measured 1180 units in both axes on own_scale — and lands inside another
 /// row's lane.
 ///
 /// The value is 1.5 lane gaps, chosen from both ends:
-/// - **At least** 43 units: [`sections_mode_keeps_large_nodes_beyond_their_size_required_distance`]
+/// - **At least** 43 units: `sections_mode_keeps_large_nodes_beyond_their_size_required_distance`
 ///   needs two capped-lane neighbours (lane pitch 360, required 496) to escape
 ///   ~43 units each for size-aware repulsion to win. A tighter tether would glue
 ///   them below their required separation.
@@ -248,7 +248,7 @@ const NODE_ESTIMATE_PORT_WIDTH: f32 = 14.0;
 /// World-space (solver-unit) body height of a graph node — **not pixels**.
 /// The renderer projects it through the graph camera (`pixel = world × zoom`),
 /// so a node's drawn frame scales with the zoom instead of staying a fixed
-/// pixel size. Deliberately below [`VERTICAL_SPACING`] so nodes stacked in one
+/// pixel size. Deliberately below `VERTICAL_SPACING` so nodes stacked in one
 /// column keep a visible gap between their bodies at every zoom
 /// (graph-zoom-node-scaling, design decision 1).
 pub const NODE_WORLD_H: f32 = 80.0;
@@ -273,7 +273,7 @@ const _: () = assert!(NODE_WORLD_H < VERTICAL_SPACING);
 pub const SECTIONS_LANE_MAX_NODE_W: f32 = 240.0;
 
 /// Target row width in world units for the wrapped sections seed
-/// (sections-black-hole-solver 3.8). [`sections_lanes`] packs lanes left→right
+/// (sections-black-hole-solver 3.8). `sections_lanes` packs lanes left→right
 /// while they fit under this width and wraps to a new row otherwise. Chosen so
 /// a ~500-lane patch (e.g. `fixtures/own_scale.ini`, 510 lanes) wraps into a
 /// roughly square grid (measured 2732 × 2500, aspect 1.09) instead of the
@@ -287,7 +287,7 @@ pub const SECTIONS_LANE_GAP: f32 = 40.0;
 pub const SECTIONS_ROW_GAP: f32 = 80.0;
 
 /// Vertical gap between nodes stacked inside one lane. `NODE_WORLD_H` + this
-/// equals [`VERTICAL_SPACING`] (120) — the in-lane pitch earlier seeds used,
+/// equals `VERTICAL_SPACING` (120) — the in-lane pitch earlier seeds used,
 /// so a multi-node lane starts on the same rhythm.
 const SECTIONS_STACK_GAP: f32 = 40.0;
 
@@ -331,7 +331,7 @@ pub const SOLVE_ITERATIONS: usize = 60;
 /// same patch + same machine + same knobs → same layout.
 ///
 /// Beyond the tuned force, the solve runs the **non-overlap post-condition**
-/// (design D3): the result passes through the bounded [`separate_overlaps`]
+/// (design D3): the result passes through the bounded `separate_overlaps`
 /// pass, which resolves the residual penetration a clamped integrator leaves
 /// between drawn bodies. The pass is bounded and pairwise-greedy, not a packing
 /// algorithm, so it clears the layouts the solver produces whenever bodies are
@@ -383,7 +383,7 @@ pub fn solve_sections(graph: &Graph, pinned: &[usize], knobs: SolveKnobs) -> Vec
 /// neighbourhood. Returns whether the moved node was found. `knobs` is the
 /// solver's knob tuple ([`SolveKnobs`]; see [`solve`]).
 ///
-/// The separation post-condition ([`separate_overlaps`]) runs with
+/// The separation post-condition (`separate_overlaps`) runs with
 /// `movable = active ∧ unpinned` (design D4): a drag can push its own
 /// neighbourhood apart, but the anchors outside `radius` never move, so the
 /// whole layout can never shift under a drag.
@@ -593,7 +593,7 @@ fn separation_order(positions: &[(f32, f32)], pass: usize) -> Vec<usize> {
                 .then_with(|| a.cmp(&b))
         }),
         // pass 0 (and every third pass): node-index order, the same order
-        // [`separate_overlaps`] uses, so the first sweep matches it exactly.
+        // `separate_overlaps` uses, so the first sweep matches it exactly.
         _ => {}
     }
     order
@@ -604,7 +604,7 @@ fn separation_order(positions: &[(f32, f32)], pass: usize) -> Vec<usize> {
 /// bounded by `max_passes` sweeps.
 ///
 /// This is the force path's half of the non-overlap post-condition (design D3).
-/// Unlike [`separate_overlaps`] it makes no promise about *how many* sweeps a
+/// Unlike `separate_overlaps` it makes no promise about *how many* sweeps a
 /// layout needs — cohesion can pile a banner group onto a point, and the packet
 /// of sweeps a pile needs is a property of the knob tuple. What it does promise
 /// is the exit condition: the loop returns only when a full read of the pair set
@@ -679,7 +679,7 @@ pub(crate) fn seed_positions(graph: &Graph) -> Vec<(f32, f32)> {
 ///
 /// A *lane* is one patch-order slice: circuits chain in patch order, controller
 /// and input-jack nodes share the fixed left outer lane, output jacks the fixed
-/// right outer lane (see [`slice_index`]). Lanes are packed left→right into rows
+/// right outer lane (see `slice_index`). Lanes are packed left→right into rows
 /// of at most [`SECTIONS_ROW_TARGET_W`], so a 500-lane patch reads roughly
 /// square instead of as a long diagonal ribbon.
 struct SectionsLanes {
@@ -727,7 +727,7 @@ struct SectionsSeed {
 /// Assign every node a lane and pack the lanes into wrapped rows
 /// (sections-black-hole-solver 3.8).
 ///
-/// Lane index comes from [`slice_index`] (patch order for circuits, fixed outer
+/// Lane index comes from `slice_index` (patch order for circuits, fixed outer
 /// lanes for controllers/jacks). Lane width is the widest member's
 /// `min(estimated_widths[i], SECTIONS_LANE_MAX_NODE_W)` — width *tracking*, so a
 /// 240-wide body still fits the lane the solver reserved, while a wider one is
@@ -830,7 +830,7 @@ fn sections_lanes(graph: &Graph) -> SectionsLanes {
 /// ```
 ///
 /// Narrower nodes sit left in their lane; multi-node lanes stack downward at the
-/// full [`VERTICAL_SPACING`] pitch. Deterministic: no RNG, no hash iteration
+/// full `VERTICAL_SPACING` pitch. Deterministic: no RNG, no hash iteration
 /// order.
 fn sections_seed(graph: &Graph) -> SectionsSeed {
     let lanes = sections_lanes(graph);
@@ -868,7 +868,7 @@ fn sections_seed(graph: &Graph) -> SectionsSeed {
 /// toward one distant point (worst residual body overlap 79.19).
 ///
 /// Now the anchor a member feels is the mean **seed target**
-/// ([`sections_seed`]) of *its own group's circuit members in the same row*: a
+/// (`sections_seed`) of *its own group's circuit members in the same row*: a
 /// wrapped group gets one local anchor per row band, so the hole spring
 /// compacts each band in place instead of yanking members across the grid. The
 /// anchor's y is the mean stacked target y of that band's members, not the
@@ -928,13 +928,13 @@ fn section_hole_anchors_lanes(graph: &Graph, seed: &SectionsSeed) -> Vec<Option<
 /// the slice spring targets this same per-node target.
 ///
 /// Per node the target is its own seed position `(slot_x, seed_y)` — see
-/// [`sections_seed`] for the per-node formula; this is the very same vector the
+/// `sections_seed` for the per-node formula; this is the very same vector the
 /// slice springs pull toward, so seed and spring can never disagree. The extent
 /// is proportional to patch size (lanes × lane width over the row target), never
 /// to cycle length — unlike the raw Bellman-Ford depth the layered seed used to
 /// consume, which grows with cycle length on a cyclic patch (measured 245,281
 /// on `fixtures/own_scale.ini`). The layered seed now dense-normalizes that
-/// depth ([`dense_columns`]) before multiplying by [`HORIZONTAL_SPACING`], so it
+/// depth ([`dense_columns`]) before multiplying by `HORIZONTAL_SPACING`, so it
 /// is bounded by the distinct-layer count in the same way.
 ///
 /// Deterministic: no RNG, no hash iteration order.
@@ -992,8 +992,8 @@ fn dense_columns(depth: &[usize]) -> Vec<usize> {
 /// are assigned to columns by the capped Bellman-Ford topological depth,
 /// dense-normalized to `0..N-1`, then placed width-aware. Each column is a
 /// block as wide as its widest member; blocks run left to right separated by
-/// [`HORIZONTAL_SPACING`]; every node sits centered on its block's center
-/// line; nodes stack vertically on distinct [`VERTICAL_SPACING`] slots, so
+/// `HORIZONTAL_SPACING`; every node sits centered on its block's center
+/// line; nodes stack vertically on distinct `VERTICAL_SPACING` slots, so
 /// nodes in a column never share vertical space. All coordinates land on the
 /// [`GRID_SNAP`] grid. Unlike [`solve`] this path never runs force relaxation.
 ///
@@ -1199,12 +1199,12 @@ fn slice_index(graph: &Graph) -> Vec<usize> {
 /// deliberately unchanged. The *solver* no longer uses it: since task 3.8 the
 /// seed and the slice springs work in wrapped-lane slots, so sections mode
 /// derives its own fixed anchors in that space via
-/// [`section_hole_anchors_lanes`] (mean seed target per group *and row*).
+/// `section_hole_anchors_lanes` (mean seed target per group *and row*).
 /// Anchoring members
 /// at a `mean_slice * HORIZONTAL_SPACING` x would fight the lane grid on any
 /// wrapped layout.
 ///
-/// `slice_index` is the output of [`slice_index`] (patch order for circuits,
+/// `slice_index` is the output of `slice_index` (patch order for circuits,
 /// fixed outer slices for controllers/jacks). Deterministic: same graph +
 /// same slice_index → identical anchors.
 pub fn compute_section_holes(graph: &Graph, slice_index: &[usize]) -> Vec<Option<(f32, f32)>> {
@@ -1335,9 +1335,9 @@ fn estimated_title(name: &str, index: usize, repeats: Option<usize>) -> String {
 /// Estimated width of every node (graph-column-layout D3, task 1.3): the
 /// renderer-input sizes that feed the column placement, so wide nodes widen
 /// their column. Each width is title characters at
-/// [`NODE_ESTIMATE_CHAR_WIDTH`] each, frame padding ([`NODE_ESTIMATE_PADDING`]),
+/// `NODE_ESTIMATE_CHAR_WIDTH` each, frame padding (`NODE_ESTIMATE_PADDING`),
 /// plus a fixed marker width per input/output port the node has edges for
-/// ([`NODE_ESTIMATE_PORT_WIDTH`]) — the same inputs the renderer uses (title
+/// (`NODE_ESTIMATE_PORT_WIDTH`) — the same inputs the renderer uses (title
 /// from `instance_title`, port presence from incidence). Non-circuit nodes
 /// (controllers/jacks) have no instance suffix, mirroring the renderer.
 /// Deterministic; rendering remains size-authoritative.
@@ -1546,7 +1546,7 @@ fn crossing_minimized_orders(graph: &Graph, depth: &[usize]) -> Vec<usize> {
 /// the only source of stiffness and gain values.
 ///
 /// Both models end with the same **non-overlap post-condition** (design D3):
-/// the bounded [`separate_overlaps`] pass, so the invariant comes from an
+/// the bounded `separate_overlaps` pass, so the invariant comes from an
 /// explicit pass rather than from tuning the forces. Pinned nodes, and (for a
 /// drag) inactive nodes, are immovable in that pass, so only bodies free to
 /// move are ever pushed.
@@ -1887,7 +1887,7 @@ fn repulsion_force(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
 
 /// Magnitude of the size-aware penetration ramp both arrangements share
 /// (design D1/D3): linear in the penetration `required - d`, saturating at the
-/// per-axis step budget [`MAX_DISPLACEMENT`] after one [`REPULSION_RADIUS`] of
+/// per-axis step budget `MAX_DISPLACEMENT` after one [`REPULSION_RADIUS`] of
 /// penetration. Normalizing by that constant radius (not by `required` or
 /// `required²`) keeps both regimes in budget, and it is the one formula behind
 /// the force and the sections path, so both arrangements speak one separation
@@ -1956,7 +1956,7 @@ fn repulsion_force_size_aware(
 /// term that spaces neighbours that are already clear, so removing it would
 /// change the whole layout rather than add the missing separation. The ramp
 /// engages only where two `node_world_sizes()` bodies actually intersect (ADR
-/// 40) and is bounded by [`MAX_DISPLACEMENT`], so it can only push an overlapping
+/// 40) and is bounded by `MAX_DISPLACEMENT`, so it can only push an overlapping
 /// pair apart — never blow the layout up. Where `d < required`, the ramp
 /// *replaces* the falloff (which at those distances is both weak and, for wide
 /// pairs, below the cutoff entirely).
@@ -3786,7 +3786,7 @@ mod tests {
 
     /// No-overlap property (design D3), verified against the solver's own
     /// column assignment: nodes in the same column stack on distinct
-    /// [`VERTICAL_SPACING`] slots (never sharing vertical space), and every
+    /// `VERTICAL_SPACING` slots (never sharing vertical space), and every
     /// node's horizontal extent stays inside its column block, so blocks (and
     /// the nodes in them) never overlap. Shared by the fractional-width,
     /// estimated-width, and mixed-kind tests so the property is checked the
@@ -5419,7 +5419,7 @@ mod tests {
     /// exactly the exported lane cap ([`SECTIONS_LANE_MAX_NODE_W`] = 240) and every
     /// lane is one cap-wide lane: the packing arithmetic is then exact, and no lane
     /// is narrower than its neighbour (the one seed-level shortfall the wrapped
-    /// grid can have — see [`separate_overlaps`]).
+    /// grid can have — see `separate_overlaps`).
     ///
     /// Node layout: 0..2 are the outer-lane stack (two controllers + an input
     /// jack, all `section_index` 0 → lane 0), 3..18 are the sixteen circuits
@@ -5881,7 +5881,7 @@ mod tests {
         graph
     }
 
-    /// Nine nodes in one banner group, no edges, seeded one [`VERTICAL_SPACING`]
+    /// Nine nodes in one banner group, no edges, seeded one `VERTICAL_SPACING`
     /// apart in a single column — the cluster-tightness fixture for the cohesion
     /// knob. The group is wide enough (a 266-unit mean radius at zero cohesion)
     /// that the pull is a smooth contraction across the knob's live range instead
