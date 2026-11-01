@@ -92,6 +92,11 @@ pub(crate) struct CellSpec {
     pub label: String,
     pub state_text: String,
     pub color: Color,
+    /// The colour the element's label and its callout headline paint in. Kept
+    /// apart from [`CellSpec::color`] because a composed face's `color` is the
+    /// *state* outline (`muted` when off), and a label inheriting that outline
+    /// read as dark grey on every off button.
+    pub label_color: Color,
     pub is_fader: bool,
     pub fader_value: f32,
     pub component_index: Option<usize>,
@@ -379,6 +384,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             led_state,
             led_rgb,
             shape,
+            label_color,
         ) = if ci < module.components.len() {
             let comp = &module.components[ci];
             let shape = if comp.kind == crate::patch::ComponentKind::Button {
@@ -450,6 +456,10 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                     led_state,
                     led_rgb,
                     shape,
+                    // The label keeps the element's own token: the shape's
+                    // outline alone carries the state, so an off face does not
+                    // drag its label down to `muted`.
+                    color,
                 )
             } else {
                 (
@@ -463,6 +473,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                     led_state,
                     led_rgb,
                     shape,
+                    color,
                 )
             }
         } else {
@@ -487,6 +498,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 None,
                 None,
                 None,
+                color,
             )
         };
 
@@ -512,6 +524,9 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         } else {
             None
         };
+        // The active shift tints the label too, on every kind (the shift slot
+        // is built for all of them, not only buttons).
+        let label_color = shift_color.unwrap_or(label_color);
         let is_dimmed = label.is_empty(); // unused elements are dimmed
         let mut cell = CellSpec {
             rect,
@@ -519,6 +534,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             label,
             state_text,
             color,
+            label_color,
             is_fader,
             fader_value,
             component_index,
@@ -906,7 +922,7 @@ fn hover_callout(pane: Rect, cell: &CellSpec) -> Option<CalloutSpec> {
         anchor: Pos2::new(anchor_x, cell.rect.center().y),
         label: cell.label.clone(),
         state_text: cell.state_text.clone(),
-        color: cell.color,
+        color: cell.label_color,
         highlighted: cell.highlighted,
     })
 }
@@ -1052,7 +1068,7 @@ pub(crate) fn performance_overlay(
             label_w: w,
             label_h: h,
         });
-        meta.push((headline, state_text, cell.color, cell.highlighted));
+        meta.push((headline, state_text, cell.label_color, cell.highlighted));
     }
     let mut callouts: Vec<CalloutSpec> = crate::performance::place_labels(rack, &inputs)
         .into_iter()
@@ -1255,10 +1271,13 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         painter.rect_filled(rect, 0.0, bg);
     }
 
+    // The composed face's outline is the state channel; every other path's
+    // `base` is already the element's own colour. Labels never read this — they
+    // use `cell.label_color`, which an off face keeps at the kind token.
     let base = cell.shift_color.unwrap_or(cell.color);
 
     if cell.is_fader {
-        paint_fader(painter, cell, base, paused);
+        paint_fader(painter, cell, paused);
         return;
     }
 
@@ -1306,7 +1325,7 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     // Compact cell (module-ui-label-fit D3/D4): the state glyph is a small
     // corner marker so it no longer shares a line with the label, then the
     // fitted label lines, then the state row the layout kept.
-    let color = dim(rgb(base), paused || cell.dimmed);
+    let color = dim(rgb(cell.label_color), paused || cell.dimmed);
     paint_state_marker(painter, cell, color);
     let Some(layout) = cell.label_layout.as_ref() else {
         return;
@@ -1452,7 +1471,7 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
     if let Some(layout) = cell.label_layout.as_ref() {
         let line_h = crate::physical::label_line_height(layout.font);
         let font = egui::FontId::monospace(layout.font);
-        let color = dim(rgb(base), paused);
+        let color = dim(rgb(cell.label_color), paused);
         let top = rect.max.y - layout.lines.len() as f32 * line_h;
         for (i, line) in layout.lines.iter().enumerate() {
             painter.text(
@@ -1526,7 +1545,7 @@ fn paint_callouts(painter: &Painter, callouts: &[CalloutSpec], paused: bool) {
 /// width, at most 10 pt (module-ui-label-fit D5), so a tall-narrow fader keeps a
 /// real label column beside it; the label stacks one glyph per line when the
 /// layout says the column is too narrow for a line of text.
-fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
+fn paint_fader(painter: &Painter, cell: &CellSpec, paused: bool) {
     let rect = cell.rect;
     let track_w = (rect.width() * FADER_TRACK_WIDTH_FRACTION)
         .min(FADER_TRACK_WIDTH_MAX)
@@ -1578,7 +1597,7 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
     let text_x = rect.min.x + track_w + FADER_TRACK_GUTTER;
     let line_h = crate::physical::label_line_height(layout.font);
     let font = egui::FontId::monospace(layout.font);
-    let color = dim(rgb(base), paused || cell.dimmed);
+    let color = dim(rgb(cell.label_color), paused || cell.dimmed);
     for (i, line) in layout.lines.iter().enumerate() {
         painter.text(
             Pos2::new(text_x, rect.min.y + i as f32 * line_h),
@@ -2299,6 +2318,7 @@ mod tests {
                 label: comp.label.clone(),
                 state_text,
                 color,
+                label_color: color,
                 is_fader: false,
                 fader_value: 0.0,
                 component_index: Some(ci),
@@ -2769,6 +2789,7 @@ mod tests {
             label: "F".to_string(),
             state_text: "50%".to_string(),
             color: crate::theme::active().knob,
+            label_color: crate::theme::active().knob,
             is_fader: true,
             fader_value: value,
             component_index: Some(0),
@@ -2860,6 +2881,7 @@ mod tests {
             label: label.to_string(),
             state_text: "ON".to_string(),
             color: crate::theme::active().button,
+            label_color: crate::theme::active().button,
             is_fader: false,
             fader_value: 0.0,
             component_index: Some(0),
@@ -3656,6 +3678,97 @@ mod tests {
         assert!(
             !hits.is_empty(),
             "concentric state-outline circle: {shapes:?}"
+        );
+    }
+
+    #[test]
+    fn off_composed_face_keeps_its_label_bright_while_the_outline_carries_the_state() {
+        // The composed outline is the state channel (`muted` when off). A label
+        // must not inherit it: that painted every off button's label dark grey.
+        let app = app_with_patch("fixtures/own_buttons.ini");
+        let spec = physical_spec(&app, egui::Rect::ZERO).expect("spec");
+        let t = crate::theme::active();
+        let cell = spec
+            .cells
+            .iter()
+            .find(|c| c.shape.is_some() && c.component_index.is_some())
+            .expect("a composed element cell");
+        assert_eq!(
+            cell.color, t.muted,
+            "an off face's outline is the muted state token"
+        );
+        assert_eq!(
+            cell.label_color, t.button,
+            "the label keeps the element's own token, not the state outline"
+        );
+        assert_ne!(cell.label_color, t.muted, "labels never go dark grey");
+    }
+
+    #[test]
+    fn composed_label_text_paints_in_the_label_colour() {
+        let t = crate::theme::active();
+        let mut cell = composed_cell(12.0, 12.0, "Trig", CellShape::Round);
+        // An off face: muted outline, element token for the label.
+        cell.color = t.muted;
+        cell.label_color = t.button;
+        let painted: Vec<(String, egui::Color32)> = painted_shapes(&cell, false)
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Text(text) => {
+                    Some((text.galley.text().to_string(), text.fallback_color))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !painted.is_empty(),
+            "the composed band draws its fitted label"
+        );
+        for (text, color) in &painted {
+            assert_eq!(
+                *color,
+                rgb(t.button),
+                "label {text:?} paints in the label colour: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shift_tints_the_label_as_well_as_the_face() {
+        let t = crate::theme::active();
+        let mut cell = composed_cell(12.0, 12.0, "Trig", CellShape::Round);
+        cell.color = t.shift2;
+        cell.shift_color = Some(t.shift2);
+        cell.label_color = t.shift2;
+        let colors: Vec<egui::Color32> = painted_shapes(&cell, false)
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Text(text) => Some(text.fallback_color),
+                _ => None,
+            })
+            .collect();
+        assert!(!colors.is_empty(), "a label line is drawn");
+        assert!(
+            colors.iter().all(|c| *c == rgb(t.shift2)),
+            "shift tint reaches the label: {colors:?}"
+        );
+    }
+
+    #[test]
+    fn callout_headline_takes_the_label_colour_not_the_state_outline() {
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+        let t = crate::theme::active();
+        let mut cell = pot_cell("Volume");
+        cell.color = t.muted;
+        cell.label_color = t.knob;
+        let callout = hover_callout(pane, &cell).expect("callout for an addressed cell");
+        assert_eq!(
+            callout.color, t.knob,
+            "the callout headline follows the label colour"
+        );
+        assert_ne!(
+            callout.color, t.muted,
+            "a callout never inherits a muted state outline"
         );
     }
 
@@ -5122,6 +5235,7 @@ mod tests {
         cell.fader_value = 0.5;
         cell.kind = ComponentKind::Knob;
         cell.color = crate::theme::active().fader_led_bar;
+        cell.label_color = crate::theme::active().fader_led_bar;
         resolved_cell(cell)
     }
 
