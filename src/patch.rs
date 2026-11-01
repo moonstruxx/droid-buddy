@@ -2016,26 +2016,33 @@ pub fn folded_led_for_element(comp: &HwComponent) -> Option<String> {
         .next()
 }
 
-/// Scalar `ledcolor` value → RGB hue table (led-register-colour D3).
+/// Scalar LED colour value (`ledcolor*`, and the encoding the `R` registers use)
+/// → RGB, per the manual's colour wheel.
 ///
-/// OUR mapping over the observed corpus range 0–1.2 (clamped outside),
-/// not manual truth: corpus evidence is `ledcolor` float literals `0`–`1.2`,
-/// constant expressions and cable refs (`ext/droid-lsp/droid_meta_mpfs/
-/// droid_mpfs5melody2.ini:440-500`, `motokit.ini`). The manual's R-channel
-/// table could not be verified (dead manual URLs, unowned RAGFlow dataset),
-/// so hardware verification rides a follow-up bead. Pure; pinned by unit tests.
+/// The blue-7 manual documents the wheel twice, and identically: its `ledgauge`
+/// colour examples state that the value "works as with the R registers for the
+/// LEDs on the master module" and list 0.2 cyan, 0.4 green, 0.6 yellow,
+/// 0.73 orange, 0.8 red, 1.0 magenta, 1.1 violet, 1.2 blue, adding "the colors
+/// repeat over in a kind of wheel at 1.2, so e.g. 1.4 creates the same color as
+/// 0.2" (manual, LED colours / `ledgauge`).
+///
+/// Those anchors are one uniform wheel: 1.2 units per full turn is 300°/unit,
+/// running backwards through the hue circle with red parked at 0.8, so
+/// `hue = (240 − 300·v) mod 360` lands every documented value exactly on its
+/// colour — 0.2→180 cyan, 0.4→120 green, 0.6→60 yellow, 0.8→0 red,
+/// 1.0→300 magenta, 1.1→270 violet, 1.2→240 blue — and makes the wheel
+/// periodic: every value, negatives included, wraps instead of clamping. Full
+/// saturation and value; brightness is the separate `ledvalue` channel. Pure;
+/// pinned to the manual's anchor table by the unit tests.
 pub fn led_colour_for_value(v: f64) -> [u8; 3] {
-    let clamped = v.clamp(0.0, 1.2);
-    // Hue wheel red → … → magenta over the corpus range.
-    let h = (clamped / 1.2) * 300.0;
-    let c = 1.0f64;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let (r, g, b) = match h as u32 {
-        0..=59 => (c, x, 0.0),
-        60..=119 => (x, c, 0.0),
-        120..=179 => (0.0, c, x),
-        180..=239 => (0.0, x, c),
-        _ => (x, 0.0, c),
+    let hue = (240.0 - 300.0 * v).rem_euclid(360.0);
+    let x = 1.0 - ((hue / 60.0) % 2.0 - 1.0).abs();
+    let (r, g, b) = match hue as u32 {
+        0..=59 => (1.0, x, 0.0),
+        60..=119 => (x, 1.0, 0.0),
+        120..=179 => (0.0, 1.0, x),
+        180..=239 => (0.0, x, 1.0),
+        _ => (x, 0.0, 1.0),
     };
     [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
 }
@@ -3382,13 +3389,50 @@ mod tests {
     }
 
     #[test]
-    fn led_colour_hue_table_is_pinned() {
-        // D3: our mapping over the corpus range 0-1.2, clamped outside.
-        assert_eq!(led_colour_for_value(0.0), [255, 0, 0]);
-        assert_eq!(led_colour_for_value(-1.0), led_colour_for_value(0.0));
-        assert_eq!(led_colour_for_value(99.0), led_colour_for_value(1.2));
-        // Distinct scalars map to distinct colours across the wheel.
-        assert_ne!(led_colour_for_value(0.0), led_colour_for_value(0.6));
+    fn led_colour_wheel_matches_the_manual_anchors() {
+        // blue-7 manual: the ledgauge/R-register colour wheel — period 1.2,
+        // running backwards through the hue circle with red at 0.8.
+        let anchors = [
+            (0.2, [0, 255, 255]), // cyan
+            (0.4, [0, 255, 0]),   // green
+            (0.6, [255, 255, 0]), // yellow
+            (0.8, [255, 0, 0]),   // red
+            (1.0, [255, 0, 255]), // magenta
+            (1.2, [0, 0, 255]),   // blue
+        ];
+        for (v, want) in anchors {
+            assert_eq!(led_colour_for_value(v), want, "manual anchor {v}");
+        }
+        // The two non-primary anchors sit where the manual puts them: violet
+        // between blue and magenta, orange between yellow and red.
+        let violet = led_colour_for_value(1.1);
+        assert_eq!(
+            (violet[0], violet[2]),
+            (127, 255),
+            "violet at 1.1 is halfway from blue to magenta: {violet:?}"
+        );
+        let orange = led_colour_for_value(0.73);
+        assert_eq!((orange[0], orange[2]), (255, 0), "orange: {orange:?}");
+        assert!(
+            orange[1] > 0 && orange[1] < 128,
+            "orange sits between yellow and red, not past either: {orange:?}"
+        );
+        // One full turn of 1.2 reproduces the colour exactly, in both
+        // directions (the manual's "1.4 creates the same color as 0.2").
+        for v in [0.0_f64, 0.2, 0.55, 0.8, 1.19] {
+            assert_eq!(
+                led_colour_for_value(v),
+                led_colour_for_value(v + 1.2),
+                "wheel period at {v}"
+            );
+            assert_eq!(
+                led_colour_for_value(v),
+                led_colour_for_value(v - 1.2),
+                "wheel period below {v}"
+            );
+        }
+        // Neighbouring values stay distinct: the wheel is not degenerate.
+        assert_ne!(led_colour_for_value(0.2), led_colour_for_value(0.4));
         assert_ne!(led_colour_for_value(0.6), led_colour_for_value(1.2));
     }
 
