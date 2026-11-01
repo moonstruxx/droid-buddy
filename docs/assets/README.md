@@ -3,6 +3,8 @@
 PNG screenshots referenced by the manual live here:
 
 - `module-ui.png` — Module UI + source viewer (getting-started, views)
+- `module-ui-labels.png` — Module UI at the labels fit, one label per ladder outcome (views)
+- `module-ui-fit-rack.png` — Module UI at the rack fit, whole rack at 37 % (views)
 - `graph.png` — signal-flow graph (getting-started, views)
 - `source-viewer.png` — source viewer close-up (views)
 - `optimizer.png` — latency optimizer pane (views)
