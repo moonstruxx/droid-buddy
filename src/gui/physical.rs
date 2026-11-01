@@ -5406,4 +5406,325 @@ mod tests {
             "no label line for an empty label: {lines:?}"
         );
     }
+
+    // -- module-ui-label-fit 1.5: the reveal outlives the fitted cell ----------
+    //
+    // A fitted cell can lose text in three ways — ellipsize at the floor, drop
+    // the label entirely, or drop only the state row (D2/D4) — and the hover
+    // reveal must still name the element and its state in every case, in every
+    // label presentation, in the skeleton presentation, and through the pane's
+    // status subject (module-ui "Element label reveal"). The scenario is one
+    // P4B2 faceplate at true 1:1, whose cells are a roomy 12 mm pot, a 9 mm
+    // button and a 3 mm LED: one written label per text fate, plus a roomy pot
+    // whose label the cell draws whole.
+
+    /// A label too long for the 12 mm pot at the ladder floor: the last line
+    /// ellipsizes.
+    const REVEAL_ELLIPSIZED_LABEL: &str =
+        "Filter cutoff resonance envelope modulation master output stage";
+    /// A label that fits the 9 mm button only after its state row yields (D4).
+    const REVEAL_STATE_YIELDS_LABEL: &str = "Filter cutoff resonance";
+    /// A label no ladder step holds in a 3 mm LED cell: the cell draws none.
+    const REVEAL_DROPPED_LABEL: &str = "Gate";
+    /// A short label the roomy pot draws whole, so the reveal is not a
+    /// clipped-cell-only behaviour.
+    const REVEAL_WHOLE_LABEL: &str = "Trim";
+
+    /// `token -> written label` for every cell the reveal tests hover.
+    const REVEAL_SCENARIO: [(&str, &str); 4] = [
+        ("P5.1", REVEAL_ELLIPSIZED_LABEL),
+        ("B5.1", REVEAL_STATE_YIELDS_LABEL),
+        ("L5.1", REVEAL_DROPPED_LABEL),
+        ("P5.2", REVEAL_WHOLE_LABEL),
+    ];
+
+    /// The reveal scenario's P4B2 faceplate with the written labels attached as
+    /// preamble labels, at true 1:1 (the zoom the layout fates above are computed
+    /// for), in `mode`.
+    fn reveal_app(mode: LabelPresentation) -> App {
+        let mut app = app_with_labels("fixtures/faceplate_rotary_stack.ini", &REVEAL_SCENARIO);
+        app.label_presentation = mode;
+        app.physical_zoom = 1.0;
+        app.physical_offset = (0.0, 0.0);
+        app
+    }
+
+    fn reveal_modes() -> [LabelPresentation; 3] {
+        [
+            LabelPresentation::Off,
+            LabelPresentation::Auto,
+            LabelPresentation::On,
+        ]
+    }
+
+    /// Hover `token` and return the spec built for it plus the cell it draws.
+    /// The hover reveal and the cell's own layout come from the same build, so a
+    /// test cannot compare a callout against a differently-built cell.
+    fn reveal_spec(app: &mut App, token: &str) -> (PhysicalSpec, CellSpec) {
+        app.hovered_component = Some(hw_index(app, token));
+        let spec = physical_spec(app, perf_pane()).expect("spec");
+        let cell = cell_for_token(app, &spec, token).clone();
+        (spec, cell)
+    }
+
+    /// D2/D4: the roomy pot's long label ellipsizes in its cell, yet the hover
+    /// callout names all of it in every label presentation and in the skeleton.
+    #[test]
+    fn reveal_callout_names_the_whole_label_where_the_cell_ellipsized() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                let (spec, cell) = reveal_spec(&mut app, "P5.1");
+                let layout = cell
+                    .label_layout
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("the pot keeps a floor layout ({mode:?})"));
+                assert!(
+                    layout.lines.iter().any(|line| line.contains('\u{2026}')),
+                    "the long pot label ellipsizes in its cell ({mode:?}, skeleton={skeleton}): {layout:?}"
+                );
+                assert_ne!(
+                    label_text(&cell),
+                    REVEAL_ELLIPSIZED_LABEL,
+                    "the cell paints the ellipsized form, not the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("a callout for the ellipsized cell ({mode:?}, skeleton={skeleton})")
+                });
+                assert_eq!(
+                    hover.label, REVEAL_ELLIPSIZED_LABEL,
+                    "the callout names the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                // The scenario's three cells all carry a state string, so the
+                // empty-state branch is not the case asserted here.
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the pot's cell carries a state ({mode:?})"
+                );
+                assert_eq!(
+                    hover.state_text, cell.state_text,
+                    "the callout carries the cell's state ({mode:?}, skeleton={skeleton})"
+                );
+                assert!(
+                    painted_texts(&spec).iter().any(|(text, font, _)| {
+                        text == REVEAL_ELLIPSIZED_LABEL
+                            && *font == egui::FontId::monospace(CALLOUT_LABEL_SIZE)
+                    }),
+                    "the reveal paints the full label at {CALLOUT_LABEL_SIZE} pt ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// D2/D9: the 3 mm LED cell holds no ladder step's worth of its label, so the
+    /// cell draws none — and the reveal still names it and its state.
+    #[test]
+    fn reveal_callout_names_the_label_where_the_cell_dropped_it_entirely() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                let (spec, cell) = reveal_spec(&mut app, "L5.1");
+                assert!(
+                    cell.label_layout.is_none(),
+                    "no ladder step holds the LED label ({mode:?}, skeleton={skeleton}): {:?}",
+                    cell.label_layout
+                );
+                assert!(
+                    label_text(&cell).is_empty(),
+                    "the cell paints no label text ({mode:?}, skeleton={skeleton}): {:?}",
+                    label_text(&cell)
+                );
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("a callout for the dropped-label cell ({mode:?}, skeleton={skeleton})")
+                });
+                assert_eq!(
+                    hover.label, REVEAL_DROPPED_LABEL,
+                    "the callout names the label the cell dropped ({mode:?}, skeleton={skeleton})"
+                );
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the LED's cell carries a state ({mode:?})"
+                );
+                assert_eq!(
+                    hover.state_text, cell.state_text,
+                    "the callout carries the cell's state ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// D4: the 9 mm button fits its label only by giving up the state row, so the
+    /// cell paints no state — and the callout still reports the state value.
+    #[test]
+    fn reveal_callout_carries_the_state_the_cell_dropped_from_its_row() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                let (spec, cell) = reveal_spec(&mut app, "B5.1");
+                let layout = cell.label_layout.as_ref().unwrap_or_else(|| {
+                    panic!("the button still draws its label ({mode:?}, skeleton={skeleton})")
+                });
+                assert!(
+                    !layout.state_row,
+                    "the label took the cell and the state row yielded ({mode:?}, skeleton={skeleton}): {layout:?}"
+                );
+                assert!(
+                    state_lines(&cell).is_empty(),
+                    "the cell paints no state row ({mode:?}, skeleton={skeleton}): {:?}",
+                    state_lines(&cell)
+                );
+                assert_eq!(
+                    label_text(&cell).replace(' ', ""),
+                    "Filtercutoffresonance",
+                    "the cell still draws the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                let hover = spec.hover.as_ref().unwrap_or_else(|| {
+                    panic!("a callout for the state-yielding cell ({mode:?}, skeleton={skeleton})")
+                });
+                assert_eq!(
+                    hover.label, REVEAL_STATE_YIELDS_LABEL,
+                    "the callout names the whole label ({mode:?}, skeleton={skeleton})"
+                );
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the button's cell carries a state ({mode:?})"
+                );
+                assert_eq!(
+                    hover.state_text, cell.state_text,
+                    "the callout carries the state the cell's row could not ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// module-ui "Element label reveal": the reveal is not a clipped-cell-only
+    /// behaviour — a cell that draws its whole label still reveals it on hover.
+    #[test]
+    fn reveal_also_fires_for_a_label_the_cell_draws_whole() {
+        for mode in reveal_modes() {
+            let mut app = reveal_app(mode);
+            let (spec, cell) = reveal_spec(&mut app, "P5.2");
+            let layout = cell
+                .label_layout
+                .as_ref()
+                .unwrap_or_else(|| panic!("the short pot label fits its cell ({mode:?})"));
+            assert_eq!(
+                layout.lines,
+                vec![REVEAL_WHOLE_LABEL.to_string()],
+                "the whole label is drawn in the cell ({mode:?})"
+            );
+            assert_no_ellipsis(&cell, "whole label");
+            assert_eq!(
+                label_text(&cell),
+                REVEAL_WHOLE_LABEL,
+                "the cell already names the element ({mode:?})"
+            );
+            let hover = spec
+                .hover
+                .as_ref()
+                .unwrap_or_else(|| panic!("a callout for the whole-label cell ({mode:?})"));
+            assert_eq!(
+                hover.label, REVEAL_WHOLE_LABEL,
+                "the reveal fires for a label the cell draws whole ({mode:?})"
+            );
+            assert_eq!(
+                hover.state_text, cell.state_text,
+                "the callout carries the cell's state ({mode:?})"
+            );
+        }
+    }
+
+    /// The skeleton presentation draws no fitted cell text, but the reveal still
+    /// names the element — and its callout is the same one the full view draws.
+    #[test]
+    fn reveal_is_identical_in_the_skeleton_presentation() {
+        for mode in reveal_modes() {
+            let mut app = reveal_app(mode);
+            app.physical_show_skeleton = false;
+            let (full, _) = reveal_spec(&mut app, "P5.1");
+            let full_hover = full.hover.clone().expect("full reveal");
+
+            app.physical_show_skeleton = true;
+            let (skeleton, _) = reveal_spec(&mut app, "P5.1");
+            let skeleton_hover = skeleton.hover.clone().expect("skeleton reveal");
+
+            assert_eq!(
+                skeleton_hover.label, REVEAL_ELLIPSIZED_LABEL,
+                "the skeleton reveal still names the element ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.label, full_hover.label,
+                "the skeleton reveals the same label as the full view ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.state_text, full_hover.state_text,
+                "the skeleton reveals the same state as the full view ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.label_rect, full_hover.label_rect,
+                "the skeleton callout is placed identically ({mode:?})"
+            );
+            assert_eq!(
+                skeleton_hover.anchor, full_hover.anchor,
+                "the skeleton callout anchors identically ({mode:?})"
+            );
+        }
+    }
+
+    /// No element under the pointer: no callout, in every mode and in the
+    /// skeleton presentation.
+    #[test]
+    fn reveal_is_absent_with_no_hovered_component() {
+        for mode in reveal_modes() {
+            for skeleton in [false, true] {
+                let mut app = reveal_app(mode);
+                app.physical_show_skeleton = skeleton;
+                app.hovered_component = None;
+                let spec = physical_spec(&app, perf_pane()).expect("spec");
+                assert!(
+                    spec.hover.is_none(),
+                    "no callout without a hovered element ({mode:?}, skeleton={skeleton})"
+                );
+            }
+        }
+    }
+
+    /// The pane's status subject names the same element and state as the callout:
+    /// for every cell whose layout lost text, and in every label presentation.
+    #[test]
+    fn reveal_status_subject_names_the_full_label_and_state_in_every_mode() {
+        for mode in reveal_modes() {
+            let mut app = reveal_app(mode);
+            for (token, label) in REVEAL_SCENARIO {
+                let (spec, cell) = reveal_spec(&mut app, token);
+                let hover = spec
+                    .hover
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("a callout for {token} ({mode:?})"));
+                assert!(
+                    !cell.state_text.is_empty(),
+                    "the scenario's {token} cell carries a state ({mode:?})"
+                );
+                let subject = crate::gui::module_ui_status_subject(&app)
+                    .unwrap_or_else(|| panic!("a status subject for {token} ({mode:?})"));
+                assert_eq!(
+                    subject,
+                    format!("{label}: {}", cell.state_text),
+                    "the status subject names the full label and state ({token}, {mode:?})"
+                );
+                assert!(
+                    subject.starts_with(label),
+                    "the status subject names the element, not a cell fragment ({token}, {mode:?}): {subject:?}"
+                );
+                assert_eq!(
+                    subject,
+                    format!("{}: {}", hover.label, hover.state_text),
+                    "the status subject and the callout agree ({token}, {mode:?})"
+                );
+            }
+        }
+    }
 }
