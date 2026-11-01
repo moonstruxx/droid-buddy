@@ -124,7 +124,7 @@ cargo test --release --test perf_gate --locked
 
 | Job | Runner | Timeout | Runs |
 |---|---|---|---|
-| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, tests, release build, self-test, perf gate |
+| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, tests, release build, self-test, screenshot harness, perf gate |
 | `windows-latest` | `windows-latest` | 45 min | tests, release build, self-test |
 | `macos-latest` | `macos-latest` | 45 min | tests, release build, self-test |
 
@@ -142,13 +142,18 @@ explicit. The jobs then install `dtolnay/rust-toolchain@stable` with the
 between runs. The test and release-build steps are the same commands as
 the local gates.
 
-Formatting, clippy, rustdoc and the perf gate carry `if: runner.os ==
-'Linux'`, so only the Linux job runs them:
+Formatting, clippy, rustdoc, the screenshot harness build and the perf gate
+carry `if: runner.os == 'Linux'`, so only the Linux job runs them:
 
 - fmt, clippy and rustdoc are deterministic across targets. Running them three
   times triples the time to a verdict and adds no signal.
 - The perf gate's budgets are Linux release timings. A shared Windows or
   macOS runner has a different CPU, and a flaky gate is worse than none.
+- `tools/screenshots` is a separate crate whose build script stages
+  `src/gui/mod.rs` into `OUT_DIR` and rewrites the surface `mod`
+  declarations, so it stops compiling whenever a surface module is added
+  without being listed there. Building it on Linux keeps that harness from
+  rotting silently; it is a developer tool, not part of the shipped binary.
 
 Tests, the release build and the headless self-test do run on all three,
 which is what proves the crate compiles, its platform-neutral tests pass
