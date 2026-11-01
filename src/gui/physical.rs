@@ -41,11 +41,21 @@ const FADER_TRACK_WIDTH_FRACTION: f32 = 0.4;
 const FADER_TRACK_WIDTH_MAX: f32 = 10.0;
 const FADER_TRACK_GUTTER: f32 = 3.0;
 /// Compact state-glyph marker (D3): `h × 0.28` points, clamped to the 6–9 pt
-/// band, and skipped outright when the unclamped size falls below the 6 pt
-/// legibility floor — the marker never shrinks past it.
+/// band, so the marker never shrinks past the 6 pt legibility floor. A cell too
+/// small to hold even a 3 pt mark draws none; above that the mark is *clamped*
+/// rather than dropped, because a vanished glyph made an addressed rotary read
+/// as an empty position once the view zoomed out.
 const STATE_MARKER_SCALE: f32 = 0.28;
 const STATE_MARKER_MIN: f32 = 6.0;
 const STATE_MARKER_MAX: f32 = 9.0;
+/// Below this unclamped size the cell is too small for any legible mark.
+const STATE_MARKER_DRAW_FLOOR: f32 = 3.0;
+/// Unaddressed rotary position (an element the patch does not address): a ring
+/// plus a centre dot at a fixed fraction of the cell, so the position keeps
+/// reading as a knob/encoder at every zoom instead of collapsing into a speck.
+const UNADDRESSED_ROTARY_SCALE: f32 = 0.36;
+const UNADDRESSED_ROTARY_STROKE: f32 = 1.5;
+const UNADDRESSED_ROTARY_ALPHA: f32 = 0.75;
 
 /// What an element cell draws in skeleton mode: a plain cell dot or an
 /// in/out port marker (CV jacks on the master faceplate), mirroring
@@ -359,7 +369,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     }
 
     // Render all element cells from geometry (including unused ones)
-    for &(mi, ci, rect, mark) in &geom.cells {
+    for &(mi, ci, rect, mark, ref family) in &geom.cells {
         let module = &chain.modules[mi];
 
         // Global `patch.hw_components` index for a real element; `None` for an
@@ -498,30 +508,46 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 )
             }
         } else {
-            // Unused element - render dimmed and unlabelled
-            let family = match mark {
-                crate::gui::physical::PortMark::PortIn
-                | crate::gui::physical::PortMark::PortOut => "CV",
-                crate::gui::physical::PortMark::Cell => "B",
-            };
-            let (glyph, state_text, color) = match family {
-                "CV" => (
-                    "\u{25C0}".into(),
-                    String::new(),
-                    crate::theme::active().cv_in,
+            // Unused element - render dimmed and unlabelled. The family comes
+            // from the geometry cell (D2) rather than a guess: an unaddressed
+            // rotary reads as a dim knob/encoder position, an unaddressed CV
+            // jack keeps its direction glyph, and the remaining families keep
+            // the plain dot.
+            let (glyph, color, kind) = match family.as_str() {
+                "CV" => match mark {
+                    crate::gui::physical::PortMark::PortIn => (
+                        "\u{25C0}".into(),
+                        crate::theme::active().cv_in,
+                        crate::patch::ComponentKind::CvIn,
+                    ),
+                    _ => (
+                        "\u{25B6}".into(),
+                        crate::theme::active().cv_out,
+                        crate::patch::ComponentKind::CvOut,
+                    ),
+                },
+                "E" => (
+                    "\u{25C9}".into(),
+                    crate::theme::active().knob,
+                    crate::patch::ComponentKind::Encoder,
+                ),
+                "P" => (
+                    "\u{25C9}".into(),
+                    crate::theme::active().knob,
+                    crate::patch::ComponentKind::Knob,
                 ),
                 _ => (
                     "\u{00B7}".into(),
-                    String::new(),
                     crate::theme::active().muted,
+                    crate::patch::ComponentKind::Button,
                 ),
             };
             (
                 glyph,
-                state_text,
+                String::new(),
                 color,
                 String::new(),
-                crate::patch::ComponentKind::Button,
+                kind,
                 false,
                 0.0,
                 None,
@@ -1320,6 +1346,37 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         return;
     }
 
+    // Unaddressed rotary position (D2): a ring plus a centre dot reads the cell
+    // as a knob/encoder the patch does not address — no state, no label, no hit
+    // rect — while an addressed rotary keeps the compact glyph-plus-label path
+    // below. The key is `component_index`, not `dimmed` alone: the rule is about
+    // a position no component addresses, and a cell that merely lacks a label
+    // must still draw its own element.
+    if cell.component_index.is_none()
+        && cell.dimmed
+        && matches!(
+            cell.kind,
+            crate::patch::ComponentKind::Knob | crate::patch::ComponentKind::Encoder
+        )
+    {
+        let radius = rect.width().min(rect.height()) * UNADDRESSED_ROTARY_SCALE;
+        if radius > 1.5 {
+            // A fixed alpha floor on top of the paused dim: the position stays
+            // findable on a dark faceplate at every zoom preset.
+            let color = dim(
+                rgb(cell.color).gamma_multiply(UNADDRESSED_ROTARY_ALPHA),
+                paused,
+            );
+            painter.circle_stroke(
+                rect.center(),
+                radius,
+                egui::Stroke::new(UNADDRESSED_ROTARY_STROKE, color),
+            );
+            painter.circle_filled(rect.center(), (radius * 0.22).max(1.0), color);
+        }
+        return;
+    }
+
     // Standalone LED chrome for non-composed cells: outline ring plus inset
     // core (fader-led-contrast 2.1). The ring is field chrome and stays
     // full-bright (also while paused); the core carries the value with a
@@ -1352,17 +1409,28 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     }
 
     // Compact cell (module-ui-label-fit D3/D4): the state glyph is a small
-    // corner marker so it no longer shares a line with the label, then the
-    // fitted label lines, then the state row the layout kept.
+    // corner marker, then the fitted label lines, then the state row the
+    // layout kept. The label text is clipped short of the marker column: a
+    // fitted line spans the whole cell (at 103 % zoom "Encoder" fills its
+    // 27 pt cell), so an unclipped line painted straight through the marker
+    // and an addressed rotary read as an empty position. The marker is painted
+    // last, outside the clip, so it can never be overdrawn.
     let color = dim(rgb(cell.label_color), paused || cell.dimmed);
-    paint_state_marker(painter, cell, color);
     let Some(layout) = cell.label_layout.as_ref() else {
+        paint_state_marker(painter, cell, color);
         return;
+    };
+    let text_painter = match state_marker_reserve(cell) {
+        Some(reserve) => painter.with_clip_rect(Rect::from_min_max(
+            rect.min,
+            Pos2::new((rect.max.x - reserve).max(rect.min.x), rect.max.y),
+        )),
+        None => painter.clone(),
     };
     let line_h = crate::physical::label_line_height(layout.font);
     let font = egui::FontId::monospace(layout.font);
     for (i, line) in layout.lines.iter().enumerate() {
-        painter.text(
+        text_painter.text(
             rect.min + egui::vec2(LABEL_INSET_X, i as f32 * line_h),
             egui::Align2::LEFT_TOP,
             line,
@@ -1371,20 +1439,37 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         );
     }
     if layout.state_row {
-        paint_state_row(painter, cell, layout, line_h, paused);
+        paint_state_row(&text_painter, cell, layout, line_h, paused);
     }
+    paint_state_marker(painter, cell, color);
+}
+
+/// Width the compact cell's corner marker reserves on the right, when one
+/// paints at all (see [`paint_state_marker`]). The label text is clipped short
+/// of it so the two never overdraw each other.
+fn state_marker_reserve(cell: &CellSpec) -> Option<f32> {
+    if cell.glyph.is_empty() || cell.led_state.is_some() {
+        return None;
+    }
+    let raw = cell.rect.height() * STATE_MARKER_SCALE;
+    if raw < STATE_MARKER_DRAW_FLOOR {
+        return None;
+    }
+    let size = raw.clamp(STATE_MARKER_MIN, STATE_MARKER_MAX);
+    Some(size * MONO_ADVANCE + 2.0 * LABEL_INSET_X)
 }
 
 /// The compact cell's state glyph as a corner marker (module-ui-label-fit D3):
-/// `h × 0.28` points, never above 9 pt and never below the 6 pt legibility
-/// floor — a cell too small for 6 pt draws no marker at all. The marker yields
-/// to a cell's own LED indicator, which is then the state channel.
+/// `h × 0.28` points, clamped into the 6–9 pt band — so a small cell keeps a
+/// *legible* marker instead of losing it. Only a cell too small for any mark at
+/// all (below [`STATE_MARKER_DRAW_FLOOR`]) draws none. The marker yields to a
+/// cell's own LED indicator, which is then the state channel.
 fn paint_state_marker(painter: &Painter, cell: &CellSpec, color: egui::Color32) {
     if cell.glyph.is_empty() || cell.led_state.is_some() {
         return;
     }
     let raw = cell.rect.height() * STATE_MARKER_SCALE;
-    if raw < STATE_MARKER_MIN {
+    if raw < STATE_MARKER_DRAW_FLOOR {
         return;
     }
     painter.text(
@@ -1783,7 +1868,13 @@ pub(crate) fn rack_geometry(
                     w_mm: cell_mm.rect_mm.w_mm,
                     h_mm: cell_mm.rect_mm.h_mm,
                 });
-                cells.push((placed.module_index, cell_index, rect, mark));
+                cells.push((
+                    placed.module_index,
+                    cell_index,
+                    rect,
+                    mark,
+                    cell_mm.family.clone(),
+                ));
             }
             // Unaddressed cells (unreferenced-elements D1/D3): every
             // geometry-declared cell no component addresses, in deterministic
@@ -1814,6 +1905,7 @@ pub(crate) fn rack_geometry(
                         module.components.len() + ordinal,
                         rect,
                         mark,
+                        unaddr.family.clone(),
                     ));
                 }
             }
@@ -1872,8 +1964,11 @@ pub(crate) struct RackGeometry {
     pub mounts: Vec<Rect>,
     pub fold_bars: Vec<(Rect, String)>,
     pub module_rects: Vec<(usize, Rect)>,
-    /// `(module index, cell index, rect, port mark)` in chain order.
-    pub cells: Vec<(usize, usize, Rect, PortMark)>,
+    /// `(module index, cell index, rect, port mark, family)` in chain order;
+    /// the family is the geometry cell's family key (`E`, `B`, `P`, `S`, `L`,
+    /// `F`, `CV`, …) the unaddressed rendering derives its visuals from
+    /// (D2: the family, not a guess).
+    pub cells: Vec<(usize, usize, Rect, PortMark, String)>,
     /// `(module index, band rect)` for DB8E OLED display bands in chain order.
     pub db8e_bands: Vec<(usize, Rect)>,
 }
@@ -2336,7 +2431,7 @@ mod tests {
         let m = mapping_at(zoom);
         let geom = rack_geometry(rack, chain, &m);
         let mut cells = Vec::new();
-        for &(mi, ci, rect, mark) in &geom.cells {
+        for &(mi, ci, rect, mark, _) in &geom.cells {
             let comp = &chain.modules[mi].components[ci];
             // Test fixture has no geometry loaded; kind is unresolvable here.
             let (glyph, state_text, color) = cell_visuals(comp, false, false, None);
@@ -2447,11 +2542,11 @@ mod tests {
         let expected: Vec<(Option<usize>, egui::Rect)> = geom
             .cells
             .iter()
-            .filter(|(mi, ci, _, _)| {
+            .filter(|(mi, ci, _, _, _)| {
                 *ci >= chain.modules[*mi].components.len()
                     || !folded.contains(&chain.modules[*mi].components[*ci].id)
             })
-            .map(|(mi, ci, rect, _)| {
+            .map(|(mi, ci, rect, _, _)| {
                 let global = if *ci < chain.modules[*mi].components.len() {
                     let comp = &chain.modules[*mi].components[*ci];
                     patch
@@ -2599,7 +2694,7 @@ mod tests {
         );
         // The B1.1 cell: 20×10 mm at (10,5) mm → true size in points.
         assert_eq!(geom.cells.len(), 1);
-        let (_, _, rect, mark) = geom.cells[0];
+        let (_, _, rect, mark, _) = geom.cells[0];
         assert_eq!(mark, PortMark::Cell);
         assert!((rect.min.x - 10.0 * ppm).abs() < 1e-3);
         assert!((rect.min.y - 5.0 * ppm).abs() < 1e-3);
@@ -3658,6 +3753,195 @@ mod tests {
         shapes
     }
 
+    /// A synthetic fallback cell of the given kind, as the spec's unaddressed
+    /// branch builds it: no label, no hit rect, dimmed.
+    fn unaddressed_cell(kind: ComponentKind, color: Color) -> CellSpec {
+        CellSpec {
+            rect: Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(26.0, 26.0)),
+            glyph: String::new(),
+            label: String::new(),
+            state_text: String::new(),
+            color,
+            label_color: color,
+            is_fader: false,
+            fader_value: 0.0,
+            component_index: None,
+            mark: PortMark::Cell,
+            highlighted: false,
+            shift_color: None,
+            modifier_wash: None,
+            dimmed: true,
+            kind,
+            led_state: None,
+            led_rgb: None,
+            shape: None,
+            label_layout: None,
+        }
+    }
+
+    #[test]
+    fn unaddressed_rotary_paints_a_dim_circle_not_a_dot() {
+        // unaddressed-rotary: the E-family fallback cell paints a ring plus a
+        // centre dot so the unused position reads as a rotary — the old
+        // `·`-in-a-corner rendering was a speck the user could not tell
+        // apart from an unaddressed button.
+        let cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        let shapes = painted_shapes(&cell, false);
+        let circles: Vec<&egui::epaint::Shape> = shapes
+            .iter()
+            .filter(|s| matches!(s, egui::epaint::Shape::Circle(_)))
+            .collect();
+        assert_eq!(circles.len(), 2, "ring + centre dot, got {shapes:?}");
+        let mut ring = false;
+        let mut dot = false;
+        for s in &circles {
+            let egui::epaint::Shape::Circle(c) = s else {
+                continue;
+            };
+            if c.stroke.width > 0.0 && c.stroke.color.a() >= 120 {
+                ring = true;
+            }
+            if c.fill.a() >= 120 {
+                dot = true;
+            }
+        }
+        assert!(ring, "the outline keeps a visible alpha floor: {circles:?}");
+        assert!(dot, "the centre dot marks the shaft: {circles:?}");
+        assert!(
+            !shapes
+                .iter()
+                .any(|s| matches!(s, egui::epaint::Shape::Text(_))),
+            "no label or state glyph for an unaddressed cell"
+        );
+        // A knob (P family) shares the rotary presentation.
+        let knob = unaddressed_cell(ComponentKind::Knob, crate::theme::active().knob);
+        assert!(painted_shapes(&knob, false)
+            .iter()
+            .any(|s| matches!(s, egui::epaint::Shape::Circle(_))));
+        // An unaddressed button keeps the dot, not a knob outline.
+        let button = unaddressed_cell(ComponentKind::Button, crate::theme::active().muted);
+        assert!(
+            !painted_shapes(&button, false)
+                .iter()
+                .any(|s| matches!(s, egui::epaint::Shape::Circle(_))),
+            "buttons keep the plain dot"
+        );
+    }
+
+    #[test]
+    fn addressed_rotary_keeps_its_marker_at_the_zoom_floor() {
+        // Module-UI zoom floor (75 %): an E4 encoder cell is 26.36 × 0.75 ≈ 20 pt,
+        // whose raw marker would be 5.5 pt — under the old rule the glyph was
+        // dropped outright, so an addressed encoder read as an empty position
+        // while its neighbours kept theirs. The mark is clamped now, never lost.
+        let mut cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(19.8, 19.8));
+        cell.dimmed = false;
+        cell.component_index = Some(3);
+        cell.glyph = "\u{25C9}".into();
+        cell.label = String::from("Encoder E4.4");
+        cell.label_layout = cell_label_layout(&cell);
+        let texts = painted_cell(&cell);
+        assert!(
+            texts
+                .iter()
+                .any(|(t, font, _)| t == "\u{25C9}" && font.size >= STATE_MARKER_MIN),
+            "the rotary marker survives the smallest cell: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn label_text_is_clipped_short_of_the_state_marker() {
+        // The fitted label spans the whole cell at the smaller zoom presets
+        // (melody3's E4 at 103 %: a 27 pt cell with a 6 pt "Encoder" line
+        // reaching the right edge). Reserving the marker column is what keeps
+        // the rotary glyph visible instead of painting it under that line.
+        let mut cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(27.0, 27.0));
+        cell.dimmed = false;
+        cell.component_index = Some(0);
+        cell.glyph = "\u{25C9}".into();
+        cell.label = String::from("Encoder E4.4");
+        cell.label_layout = cell_label_layout(&cell);
+        let reserve = state_marker_reserve(&cell).expect("an addressed rotary reserves the column");
+        let glyph =
+            (cell.rect.height() * STATE_MARKER_SCALE).clamp(STATE_MARKER_MIN, STATE_MARKER_MAX);
+        let marker_x0 = cell.rect.max.x - LABEL_INSET_X - glyph * MONO_ADVANCE;
+        assert!(
+            cell.rect.max.x - reserve <= marker_x0,
+            "the text clip ({}) must stop at or before the marker box ({marker_x0})",
+            cell.rect.max.x - reserve
+        );
+        // A cell without a marker reserves nothing.
+        let mut no_marker = cell.clone();
+        no_marker.glyph = String::new();
+        assert_eq!(state_marker_reserve(&no_marker), None);
+    }
+
+    #[test]
+    fn state_marker_paints_over_its_own_label() {
+        // Draw order guard: the corner marker is chrome and must never be
+        // overdrawn by a long label line that reaches the cell's right edge.
+        let mut cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(26.0, 26.0));
+        cell.dimmed = false;
+        cell.component_index = Some(0);
+        cell.glyph = "\u{25C9}".into();
+        cell.label = String::from("Encoder E4.4");
+        cell.state_text = String::from("0%");
+        cell.label_layout = cell_label_layout(&cell);
+        let shapes = painted_shapes(&cell, false);
+        let first_line = cell
+            .label_layout
+            .as_ref()
+            .expect("a fitted layout")
+            .lines
+            .first()
+            .cloned()
+            .expect("the label has a line");
+        let text_at = |needle: &str| {
+            shapes.iter().position(|s| match s {
+                egui::epaint::Shape::Text(t) => t.galley.text() == needle,
+                _ => false,
+            })
+        };
+        let marker = text_at("\u{25C9}").expect("the marker paints");
+        let label = text_at(&first_line).expect("the first label line paints");
+        assert!(
+            marker > label,
+            "the marker must be emitted after the label lines (label {label}, marker {marker})"
+        );
+    }
+
+    #[test]
+    fn unaddressed_rotary_keeps_its_footprint_at_the_zoom_floor() {
+        // Module-UI zoom floor (75 %): a rotary cell is 26 × 0.75 ≈ 20 pt wide.
+        // The ring must keep a visible stroke and its centre dot — the pre-fix
+        // 1 pt ring at half gamma read as empty space, which is how a rotary
+        // position "disappeared" from a faceplate.
+        let mut cell = unaddressed_cell(ComponentKind::Knob, crate::theme::active().knob);
+        cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(19.8, 19.8));
+        let shapes = painted_shapes(&cell, false);
+        let circles: Vec<&egui::epaint::CircleShape> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles.len(), 2, "ring + dot at the floor: {shapes:?}");
+        let ring = circles.iter().find(|c| c.stroke.width > 0.0).expect("ring");
+        assert!(
+            ring.stroke.width >= UNADDRESSED_ROTARY_STROKE && ring.stroke.color.a() >= 120,
+            "the ring stays a visible stroke: {ring:?}"
+        );
+        assert!(
+            ring.radius >= 3.0,
+            "the ring keeps a knob-sized footprint: {}",
+            ring.radius
+        );
+    }
+
     #[test]
     fn composed_p2b8_button_face_is_state_outline_with_concentric_disc() {
         let app = app_with_patch("fixtures/own_buttons.ini");
@@ -3983,7 +4267,7 @@ mod tests {
     fn isotropic_mapping_maps_20x10mm_to_true_size() {
         let (rack, chain) = fixture();
         let geom = rack_geometry(&rack, &chain, &mapping());
-        let (_, _, rect, _) = geom.cells[0];
+        let (_, _, rect, _, _) = geom.cells[0];
         let ppm = crate::physical::PHYSICAL_POINTS_PER_MM as f32;
         assert!((rect.width() - 20.0 * ppm).abs() < 1e-3, "width: {rect:?}");
         assert!(

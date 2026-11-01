@@ -69,6 +69,11 @@ pub mod physical;
 pub mod platform;
 #[path = "../../../src/plugin.rs"]
 pub mod plugin;
+// The pure master-module resolver: `app.rs` and `validation.rs` both call
+// `crate::rack`, so the harness needs the shadow or the staged sources stop
+// resolving it.
+#[path = "../../../src/rack.rs"]
+pub mod rack;
 #[path = "../../../src/rendermetrics.rs"]
 pub mod rendermetrics;
 #[path = "../../../src/schema.rs"]
