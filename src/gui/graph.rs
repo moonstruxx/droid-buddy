@@ -2880,12 +2880,9 @@ mod scene_builder_tests {
             "sections mode builds no cluster rectangles: {:?}",
             s.clusters
         );
-        // A box that is not drawn must not be hit-testable either, so nothing
-        // is published for hit-testing/minimap/labels either.
-        assert!(
-            app.graph_cluster_rects.is_empty(),
-            "no cluster hit geometry in sections mode"
-        );
+        // A box that is not drawn is not drawn at all: the scene carries no
+        // cluster rectangles in sections mode, and the pane publishes no graph
+        // hit geometry either way (hit-testing is world space, ADR 40).
     }
 
     #[test]

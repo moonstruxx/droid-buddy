@@ -956,21 +956,13 @@ pub struct App {
     /// `graph.nodes` (index `i` ↔ `graph.nodes[i]`). Re-solved on open and on
     /// node move; never mutated by a continuous tick (design D1).
     pub graph_positions: Vec<(f32, f32)>,
-    /// Cluster-container rects published by the renderer each frame while the
-    /// graph is open, keyed by index into `graph.clusters` — the same
-    /// renderer-publishes/handler-consumes contract as `component_rects`.
-    /// Cleared per frame; populated by the renderer (task 5.1).
-    pub graph_cluster_rects: Vec<(usize, Rect)>,
-    /// Node rects published by the renderer each frame while the graph is open,
-    /// keyed by index into `graph.nodes` (parallel to `graph_positions`). Same
-    /// renderer-publishes/handler-consumes contract; used for drag hit-testing.
-    pub graph_node_rects: Vec<(usize, Rect)>,
-    /// In-progress graph drag (`g g`). `Some` from a left-button Down on a
-    /// `graph_node_rects` entry until the matching Up; drives node repositioning
-    /// + damped local re-settle (design D1).
+    /// In-progress graph drag (`g g`). `Some` from a left-button press on a
+    /// node's world extent until the matching release; drives node repositioning
+    /// and a damped local re-settle (design D1). Hit-testing is world space
+    /// through the shared camera, not a published rect list (ADR 40).
     pub graph_drag: Option<GraphDrag>,
-    /// Hovered graph node index while the graph surface is open, updated on
-    /// mouse Moved via `graph_node_rects` hit-testing. `None` when the pointer
+    /// Hovered graph node index while the graph surface is open, updated on each
+    /// window frame by the camera's world-space hit test. `None` when the pointer
     /// is not over a node or the graph is closed.
     pub hovered_graph_node: Option<usize>,
     /// Persistent world→pixel camera of the graph surface (task 2.3). Seeded by
@@ -1283,7 +1275,7 @@ pub struct App {
     /// True when the `?` help modal is shown.
     pub showing_help: bool,
     /// Renderer-published rect of the help modal, for click-outside hit-testing.
-    /// Cleared per frame like `graph_node_rects`.
+    /// Cleared per frame like `component_rects`.
     pub help_modal_rect: Option<Rect>,
     /// Select-state assumed values (change C 4.1). `None` when no assumed
     /// state is active; reset on `load_patch`.
@@ -1325,8 +1317,6 @@ impl App {
             graph: None,
             guessed_labels: HashMap::new(),
             graph_positions: Vec::new(),
-            graph_cluster_rects: Vec::new(),
-            graph_node_rects: Vec::new(),
             graph_drag: None,
             hovered_graph_node: None,
             graph_camera: None,
@@ -4155,8 +4145,6 @@ impl App {
         };
         self.graph = graph;
         self.graph_positions = positions;
-        self.graph_cluster_rects.clear();
-        self.graph_node_rects.clear();
         self.graph_drag = None;
         self.hovered_graph_node = None;
         // Task 2.3: a newly opened (or re-solved) graph re-fits its camera. The
@@ -4291,8 +4279,6 @@ impl App {
         };
         self.graph = graph;
         self.graph_positions = positions;
-        self.graph_cluster_rects.clear();
-        self.graph_node_rects.clear();
         self.graph_drag = None;
         // Rebuilds (tension/pin/select/processing) stay instant: no settle is
         // started and any running one is dropped.
@@ -4353,12 +4339,6 @@ impl App {
             }
         }
         self.refresh_guessed_labels();
-    }
-
-    /// Clear the renderer-published cluster rects each frame while the graph is
-    /// open, mirroring how `component_rects` is rebuilt per draw.
-    pub fn clear_graph_cluster_rects(&mut self) {
-        self.graph_cluster_rects.clear();
     }
 
     /// Step cable tension by `dir` (±1) on the graph surface: `[` lowers it,
@@ -4534,8 +4514,6 @@ impl App {
             positions[fi] = sub_pos[pi];
         }
         self.graph_positions = positions;
-        self.graph_cluster_rects.clear();
-        self.graph_node_rects.clear();
     }
 
     /// Display label of the frozen dependency root for the status line: the
@@ -4620,8 +4598,6 @@ impl App {
             positions[fi] = sub_pos[pi];
         }
         self.graph_positions = positions;
-        self.graph_cluster_rects.clear();
-        self.graph_node_rects.clear();
     }
 
     /// Display label of the frozen influence root for the status line: the
@@ -4655,8 +4631,6 @@ impl App {
         // The optimizer-preview diff baseline is per-patch (optimizer-click-focus).
         self.optimizer_diff_state = None;
         self.graph_positions.clear();
-        self.graph_cluster_rects.clear();
-        self.graph_node_rects.clear();
         self.graph_drag = None;
         self.hovered_graph_node = None;
         self.graph_camera = None;
@@ -4729,8 +4703,6 @@ impl App {
             let positions = self.solve_graph_positions(&graph, &pins);
             self.graph = Some(graph);
             self.graph_positions = positions;
-            self.graph_cluster_rects.clear();
-            self.graph_node_rects.clear();
             self.graph_drag = None;
             self.emit_graph_built();
         }
@@ -5341,7 +5313,6 @@ mod tests {
         assert!(!app.showing_graph);
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
-        assert!(app.graph_cluster_rects.is_empty());
         assert!(app.graph_settle.is_none());
         assert!(!app.graph_settle_pending);
     }
@@ -6043,15 +6014,6 @@ mod tests {
         assert!(!app.showing_graph);
         assert!(app.graph.is_none());
         assert!(app.graph_positions.is_empty());
-        assert!(app.graph_cluster_rects.is_empty());
-    }
-
-    #[test]
-    fn clear_graph_cluster_rects_empties_the_field() {
-        let mut app = App::new();
-        app.graph_cluster_rects = vec![(0, Rect::new(0, 0, 5, 5)), (1, Rect::new(1, 1, 5, 5))];
-        app.clear_graph_cluster_rects();
-        assert!(app.graph_cluster_rects.is_empty());
     }
 
     #[test]
