@@ -1270,6 +1270,15 @@ const STATE_FONT_SCALE: f32 = 0.8;
 /// State row (D4): the floor of the proportional state font, in points.
 const STATE_FONT_MIN: f32 = 9.0;
 
+/// State row (D4/D5): the narrowest text column that can carry a value, in
+/// character advances of the state font. One advance is not a value — a column
+/// that holds a single glyph makes the painter emit the glyph plus its ellipsis
+/// (`…`), which names no number — so a cell whose column holds fewer than two
+/// advances reports `state_row = false` and hands the room back to the label.
+/// Compact and composed cells never hit this gate; it exists for the fader,
+/// whose label column the track and gutter can narrow past a usable value.
+const STATE_ROW_MIN_CHARS: f32 = 2.0;
+
 /// Tolerance in points for the box comparisons: a line exactly as wide or tall
 /// as the box still fits, so float rounding never costs a cell its last
 /// character.
@@ -1355,7 +1364,8 @@ pub struct LabelLayout {
 ///
 /// Passes, in order of preference (D2/D4):
 ///
-/// 1. every ladder step with one state line reserved, when the cell has state;
+/// 1. every ladder step with one state line reserved, when the cell has state
+///    *and* its column can carry a value (see [`state_row_can_show_a_value`]);
 /// 2. every ladder step across the whole text box (the state row yields);
 /// 3. the floor, ellipsized on the last line — only here may text be dropped,
 ///    because only here does no step hold the whole label (D2).
@@ -1370,9 +1380,13 @@ pub fn label_layout(label: &str, area: &LabelBox) -> Option<LabelLayout> {
     }
     let (_, height) = label_text_box(area)?;
 
-    // D4: the state row is the first thing tried and the first thing given up.
+    // D4: the state row is the first thing tried and the first thing given up —
+    // and it is not tried at all when the column cannot carry a value (D5).
     if area.has_state {
         for &font in &LABEL_FONT_LADDER {
+            if !state_row_can_show_a_value(area, font) {
+                break;
+            }
             let reserved = label_line_height(state_font_size(font));
             if let Some((lines, stacked)) = fit_at(label, area, font, height - reserved) {
                 return Some(LabelLayout {
@@ -1411,6 +1425,25 @@ pub fn label_line_height(font: f32) -> f32 {
 /// `max(9, 0.8 × label font)`. Shared with the painter for the same reason.
 pub fn state_font_size(label_font: f32) -> f32 {
     (label_font * STATE_FONT_SCALE).max(STATE_FONT_MIN)
+}
+
+/// Whether this cell's text column can carry a state value at all (D4/D5),
+/// measured in advances of the state font for the candidate label step.
+///
+/// Compact and composed cells always qualify: their state row shares the label's
+/// own line width, which the ladder has already shown holds text. A fader's
+/// column is separately narrowed by the 40 % track and the gutter, so it can be
+/// narrower than one usable value while still stacking the label beside it —
+/// that cell reports no state row rather than painting `…`.
+pub fn state_row_can_show_a_value(area: &LabelBox, font: f32) -> bool {
+    match area.path {
+        CellTextPath::Compact | CellTextPath::Composed => true,
+        CellTextPath::Fader => {
+            let column = fader_column_width(area.w);
+            column + LABEL_FIT_TOLERANCE
+                >= STATE_ROW_MIN_CHARS * label_char_advance(state_font_size(font))
+        }
+    }
 }
 
 /// One written label's claim on the fit (D7): the cell's drawn size **at 100 %
@@ -3821,16 +3854,77 @@ mod tests {
         assert_eq!(long.font, 6.0, "ten glyphs only fit the floor");
         assert!(long.stacked, "still one glyph per line");
         assert_eq!(long.lines.len(), 10);
-        // Six glyphs plus the 9 pt state row still fit below the top step.
+        // The 6.5 pt column cannot carry a value (see
+        // `label_layout_fader_column_too_narrow_for_a_value`), so the label takes
+        // the full height: six glyphs at the top step, no state row.
         let with_state = label_layout("Volume", &label_box(w, h, 0, CellTextPath::Fader, true))
-            .expect("six glyphs beside a state row");
+            .expect("six glyphs, whole cell");
         assert_label_layout(
             &with_state,
-            9.0,
+            10.0,
             &["V", "o", "l", "u", "m", "e"],
             true,
+            false,
+            "fader stack, no room for a value",
+        );
+    }
+
+    /// D4/D5 (task 3.7): the state row is only reported where a value can exist.
+    /// At 1:1 the P8S8 is 4.2 mm × 22 mm (15.9 × 83.2 pt); its track narrows to
+    /// `min(0.4 × 15.9, 10) = 6.36 pt`, leaving a `15.9 − 6.36 − 3 = 6.5 pt`
+    /// column — short of the two advances of the 9 pt state font (10.8 pt) the
+    /// painter needs, so it would paint a bare `…`. The label still stacks.
+    #[test]
+    fn label_layout_fader_column_too_narrow_for_a_value_has_no_state_row() {
+        let p8s8 = label_box(label_pt(4.2), label_pt(22.0), 0, CellTextPath::Fader, true);
+        let layout = label_layout("Volume", &p8s8).expect("the label still stacks");
+        assert!(
+            layout.stacked,
+            "the narrow column still stacks one glyph per line: {layout:?}"
+        );
+        assert_eq!(
+            layout.lines,
+            ["V", "o", "l", "u", "m", "e"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "the whole label, one glyph per line: {layout:?}"
+        );
+        assert!(
+            !layout.state_row,
+            "no value fits 6.5 pt at 9 pt, so no state row: {layout:?}"
+        );
+        // The gate is width, not height: the same cell with the label's room
+        // reserved still has plenty of height to spare.
+        assert!(
+            layout.font >= LABEL_FONT_FLOOR,
+            "the label keeps a legal step: {layout:?}"
+        );
+    }
+
+    /// D4/D5 (task 3.7): a fader wide enough for a value keeps its state row —
+    /// the M4's 7 mm cell is 26.5 pt, so its track clamps to 10 pt and leaves
+    /// `26.5 − 10 − 3 = 13.5 pt`, which holds two advances of the 9 pt state font
+    /// (10.8 pt) with room to spare.
+    #[test]
+    fn label_layout_wide_fader_keeps_the_state_row() {
+        let m4 = label_box(label_pt(7.0), label_pt(62.0), 0, CellTextPath::Fader, true);
+        let layout = label_layout("Volume", &m4).expect("a horizontal fader label");
+        assert!(
+            !layout.stacked,
+            "a 13.5 pt column wraps horizontally: {layout:?}"
+        );
+        assert!(
+            layout.state_row,
+            "two 9 pt advances fit 13.5 pt, so the row stays: {layout:?}"
+        );
+        assert_label_layout(
+            &layout,
+            10.0,
+            &["Vo", "lu", "me"],
+            false,
             true,
-            "fader stack with state",
+            "M4 fader with state",
         );
     }
 

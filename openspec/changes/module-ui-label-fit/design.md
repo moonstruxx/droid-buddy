@@ -118,7 +118,16 @@ therefore narrows the track to `min(0.4 × w, 10)` and stacks the label one glyp
 per line in the remaining column at the largest step whose glyph width and total
 column height fit. At 100 % zoom that is a ~6.4 pt track, a 6.5 pt column and a
 6 pt stack holding ~10 characters in the cell's 83 pt height. The M4 fader
-(7 × 62 mm) is wide enough for a horizontal line and keeps one.
+(7 × 62 mm) is wide enough for a horizontal line and keeps one. The state row
+follows the same test: a fader column must hold at least two character advances of
+the state font (`STATE_ROW_MIN_CHARS`), because a one-character column paints a
+bare `…`, which names no value.
+
+This path was unreachable until this change: `CellSpec.is_fader` and `fader_value`
+were never set from a loaded patch, so every P8S8/M4 fader painted as a compact
+cell while `App`'s fit already classified those tokens as `CellTextPath::Fader`.
+Both now derive from the geometry cell's `F` family and the component state, and
+a paint test pins that the painter and the fit classifier agree.
 
 ### D6 — Composed button faces are never eaten
 
