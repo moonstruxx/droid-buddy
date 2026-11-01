@@ -1278,6 +1278,15 @@ const LABEL_FIT_TOLERANCE: f32 = 0.01;
 /// The mark appended to the last line when only the floor is left (D2).
 const LABEL_ELLIPSIS: char = '\u{2026}';
 
+/// The ellipsized form's legibility floor (D2/D10): the last line keeps at
+/// least this many visible characters ahead of its ellipsis. A one- or
+/// two-character fragment names nothing — `G…` is not `Gate`, it is noise on a
+/// faceplate — so a box too small to show three characters plus the mark gets no
+/// in-cell layout at all. The cell then draws its state alone and the whole
+/// label stays reachable through the annotation layer and the hover reveal (D9),
+/// which is the same fallback every other unserved cell uses.
+const LABEL_ELLIPSIS_MIN_VISIBLE: usize = 3;
+
 /// The fit's candidate grid (D7) in thousandths of the 1:1 baseline: the scan
 /// walks [`ZOOM_MIN`]..=[`ZOOM_MAX`] in 1 % steps, so at most 376 candidates
 /// bound it and the answer never lands on a division the user could not also
@@ -1674,16 +1683,23 @@ fn fit_at(label: &str, area: &LabelBox, font: f32, avail_h: f32) -> Option<(Vec<
 }
 
 /// A line truncated to `capacity` characters with the floor ellipsis closing it;
-/// `None` when not even the ellipsis fits.
+/// `None` when the line cannot hold [`LABEL_ELLIPSIS_MIN_VISIBLE`] visible
+/// characters plus the ellipsis itself — such a fragment identifies nothing, so
+/// the cell is better left to the annotation and hover reveal (D9).
 fn truncate_with_ellipsis(line: &str, capacity: usize) -> Option<String> {
-    if capacity == 0 {
+    // One character of the capacity belongs to the ellipsis itself.
+    let keep = capacity.checked_sub(1)?;
+    if keep < LABEL_ELLIPSIS_MIN_VISIBLE {
         return None;
     }
-    // One character of the capacity belongs to the ellipsis itself.
-    let keep = capacity.saturating_sub(1);
     let mut chars: Vec<char> = line.chars().take(keep).collect();
     while chars.last().is_some_and(|c| c.is_whitespace()) {
         chars.pop();
+    }
+    // A line that only has a word-break's worth of text left is not a name
+    // either, so the shortfall is the same answer as a short box.
+    if chars.len() < LABEL_ELLIPSIS_MIN_VISIBLE {
+        return None;
     }
     chars.push(LABEL_ELLIPSIS);
     Some(chars.iter().collect())
@@ -1693,6 +1709,12 @@ fn truncate_with_ellipsis(line: &str, capacity: usize) -> Option<String> {
 /// ellipsizing the final one. Reached only when no ladder step holds the whole
 /// label, so the ellipsis means "nothing fits" rather than "the first try was
 /// tight".
+///
+/// `None` closes the last resort too: when that final line cannot show
+/// [`LABEL_ELLIPSIS_MIN_VISIBLE`] visible characters plus the ellipsis (a 3 mm
+/// LED cell's two-character budget, or a one-glyph-wide stacked fader column),
+/// the cell gets no in-cell layout and waits for the annotation and hover
+/// reveal instead of painting a fragment.
 fn ellipsized_layout(label: &str, area: &LabelBox, height: f32) -> Option<LabelLayout> {
     let font = LABEL_FONT_FLOOR;
     let (width, _) = label_text_box(area)?;
@@ -3822,26 +3844,77 @@ mod tests {
     }
 
     /// D9/D10: a 3 mm LED cell cannot hold a label at any step, at 1:1 or at a
-    /// typical fit zoom — the glyph alone claims its whole first line — so the
-    /// cell reports no layout and the label stays annotation/hover territory.
+    /// typical fit zoom, so the cell reports no layout and the label stays
+    /// annotation/hover territory.
+    ///
+    /// Both wirings answer `None`: with the state glyph charged at the head of
+    /// line 1 (nothing reaches the label at all) and with `glyph_chars` 0 as the
+    /// module UI paints it today (the box's two-character budget is below the
+    /// ellipsized form's legibility floor, so `G…` is not emitted).
     #[test]
     fn label_layout_returns_none_for_a_3mm_led_cell() {
         for zoom in [1.0f32, 0.66] {
             let side = label_pt(3.0) * zoom;
-            let area = label_box(side, side, 1, CellTextPath::Compact, true);
-            assert_eq!(
-                label_layout("Kick", &area),
-                None,
-                "a 3 mm LED cell at zoom {zoom} has no room for a label"
-            );
-            // The mechanism: without the glyph prefix the same box still lays
-            // out text (ellipsized at the floor), so the glyph is what costs it.
-            let bare = label_box(side, side, 0, CellTextPath::Compact, false);
-            assert!(
-                label_layout("Kick", &bare).is_some(),
-                "the glyph prefix is what leaves no room at zoom {zoom}"
-            );
+            for glyph_chars in [0usize, 1] {
+                let area = label_box(side, side, glyph_chars, CellTextPath::Compact, true);
+                assert_eq!(
+                    label_layout("Gate", &area),
+                    None,
+                    "a 3 mm LED cell at zoom {zoom} (glyph {glyph_chars}) has no room for a label"
+                );
+            }
         }
+    }
+
+    /// D2/D10: the ellipsized form needs three visible characters — a two-character
+    /// budget names nothing, so it is no layout at all, while a four-character
+    /// budget draws exactly three and closes the line.
+    #[test]
+    fn label_layout_ellipsis_needs_three_visible_characters() {
+        // Text boxes of exactly two and four 6 pt characters, one line tall.
+        let two = label_box(9.2, 8.0, 0, CellTextPath::Compact, false);
+        assert_eq!(
+            label_layout("Gate", &two),
+            None,
+            "two characters plus the ellipsis would be a fragment"
+        );
+        let four = label_box(16.4, 8.0, 0, CellTextPath::Compact, false);
+        let layout = label_layout("Gatekeeper", &four).expect("three characters plus the ellipsis");
+        assert_label_layout(
+            &layout,
+            6.0,
+            &["Gat\u{2026}"],
+            false,
+            false,
+            "three visible",
+        );
+        let last = layout.lines.last().expect("a last line");
+        assert_eq!(
+            last.chars().filter(|c| *c != LABEL_ELLIPSIS).count(),
+            3,
+            "exactly three visible characters: {last:?}"
+        );
+    }
+
+    /// D2/D9: the acceptance case behind the rule — a 3 × 3 mm cell carrying
+    /// `Gate` used to paint `G…`; it now has no in-cell layout, so the paint path
+    /// draws the state alone and the label comes from the annotation and hover
+    /// reveal.
+    #[test]
+    fn label_layout_three_millimetre_gate_cell_has_no_layout() {
+        let side = label_pt(3.0);
+        assert_eq!(
+            label_layout(
+                "Gate",
+                &label_box(side, side, 0, CellTextPath::Compact, true)
+            ),
+            None
+        );
+        // The same box still serves a label of two characters, which needs no
+        // ellipsis at all: the rule is about fragments, not tiny cells.
+        let short = label_layout("Go", &label_box(side, side, 0, CellTextPath::Compact, true))
+            .expect("a two-character label fits a 3 mm cell");
+        assert_label_layout(&short, 7.0, &["Go"], false, false, "short label");
     }
 
     /// An empty or blank label has nothing to draw, in any path.
