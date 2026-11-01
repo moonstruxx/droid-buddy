@@ -1636,11 +1636,24 @@ pub fn handle_event(key: KeyEvent, app: &mut App) -> bool {
             false
         }
         KeyCode::Char('f') if physical_slot_focused(app) => {
-            // module-ui-labels D6: fit and centre the module UI and clear the
-            // manual-navigation latch. Free here because the graph's `f` is
-            // graph-scoped and returns in the arm above.
+            // module-ui-label-fit D8: `f` performs the *labels* fit and centres
+            // the module UI, clearing the manual-navigation latch. Free here
+            // because the graph's `f` is graph-scoped and returns in the arm
+            // above.
             if let Some((w, h)) = app.physical_pane_size() {
                 if app.fit_physical_view(w, h) {
+                    app.status_message = app.physical_status_hint().unwrap_or_default();
+                }
+            }
+            false
+        }
+        KeyCode::Char('F') if physical_slot_focused(app) => {
+            // module-ui-label-fit D8: `Shift+F` performs the *rack* fit — the
+            // whole-rack overview beside `f`'s readable-by-default label fit.
+            // Shifted glyphs arrive as their symbol, and the file picker owns
+            // `F` only inside its own overlay (which returns before this arm).
+            if let Some((w, h)) = app.physical_pane_size() {
+                if app.fit_physical_view_rack(w, h) {
                     app.status_message = app.physical_status_hint().unwrap_or_default();
                 }
             }
@@ -3515,6 +3528,47 @@ mod tests {
             app.status_message.contains("fit"),
             "status names the fitting zoom: {}",
             app.status_message
+        );
+    }
+
+    /// module-ui-label-fit 2.3 / D8: `f` and `Shift+F` each apply *their own*
+    /// fit. On a rack whose written label needs more than the whole-rack fit the
+    /// two keys land on different zooms, and the status names which one ran.
+    #[test]
+    fn f_fits_labels_and_shift_f_fits_the_rack() {
+        // A written preamble label on a 9 mm button: the labels fit lifts above
+        // the whole-rack fit on a pane this small.
+        let ini = "# B1.1: Trigger input\n\n[p4b2]\n    pot1 = P1.1\n    pot2 = P1.2\n    pot3 = P1.3\n    pot4 = P1.4\n    button1 = B1.1\n    led1 = L1.1\n    button2 = B1.2\n    led2 = L1.2\n";
+        let patch = Patch::from_ini_str(ini, String::from("label-fit-handler"))
+            .expect("the label-fit fixture parses");
+        let mut app = App::new();
+        assert!(app.load_patch(patch), "the label-fit fixture loads clean");
+        app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+        app.apply_physical_fit_triggers();
+
+        // `Shift+F` first, so the rack fit is not the one the trigger left.
+        handle_event(key(KeyCode::Char('F')), &mut app);
+        let rack_fit = app.physical_zoom;
+        assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Rack));
+        assert!(
+            app.status_message.contains("fit(rack)"),
+            "Shift+F reports the rack fit: {}",
+            app.status_message
+        );
+        assert!(!app.physical_nav_latched, "a fit clears the latch");
+
+        // `f` then applies the labels fit, which on this patch lifts.
+        handle_event(key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Labels));
+        assert!(
+            app.status_message.contains("fit(labels)"),
+            "f reports the labels fit: {}",
+            app.status_message
+        );
+        assert!(
+            app.physical_zoom > rack_fit,
+            "f lifts above the rack fit ({} vs {rack_fit})",
+            app.physical_zoom
         );
     }
 
