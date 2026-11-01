@@ -574,12 +574,14 @@ pub(crate) fn draw_pane_frame(
 
 /// The module-UI pane title (module-ui-labels D12): the view state rides the
 /// existing pane chrome instead of a new painted strip —
-/// `Module UI · 98% fit(labels) · labels auto · skeleton off`. The
+/// `Module UI · 98% fit(labels) · labels auto · skeleton off · MASTER`. The
 /// `fit(labels)` / `fit(rack)` segment appears only while the live zoom is still
 /// the last fitted value and names the fit that applied (module-ui-label-fit
 /// D8), `Pan x/y` only after a pan, and `labels` only when the presentation is
-/// not `off`. Ellipsized to the pane width so the title never paints past its
-/// own frame.
+/// not `off`. The resolved master's `label()` names the model the faceplate
+/// draws (master-module-resolution spec "Master faceplate"): of the two masters
+/// only one is drawn, and the face itself does not say which. Ellipsized to the
+/// pane width so the title never paints past its own frame.
 fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
     let mut title = format!(" Module UI \u{B7} {}%", (app.physical_zoom * 100.0) as u32);
     if app
@@ -605,6 +607,10 @@ fn module_ui_pane_title(app: &App, rect: egui::Rect) -> String {
     } else {
         " \u{B7} skeleton off"
     });
+    // master-module-resolution D1: the resolved model rides the title through the
+    // same accessor the pane's chain is built from, so the drawn faceplate and
+    // the name it is read under can never disagree.
+    let _ = write!(title, " \u{B7} {}", app.master_model().label());
     // D11: the element under the pointer (falling back to the selection) is the
     // title's last segment, so its full label and state stay readable even when
     // the cell could only ellipsize them.
@@ -1355,8 +1361,14 @@ mod tests {
     /// Run `paint_panes` once inside a headless egui context over an 800x600
     /// band and return the frame output for shape/label assertions.
     fn run_paint_panes(app: &mut App) -> egui::FullOutput {
+        run_paint_panes_in(app, egui::vec2(800.0, 600.0))
+    }
+
+    /// The same headless pass over a caller-chosen band, for assertions on a
+    /// title segment that the default band's ellipsis would cut off.
+    fn run_paint_panes_in(app: &mut App, size: egui::Vec2) -> egui::FullOutput {
         let ctx = egui::Context::default();
-        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
         let raw = egui::RawInput {
             screen_rect: Some(win),
             ..Default::default()
@@ -1867,6 +1879,65 @@ mod tests {
             !title.contains("fit("),
             "a manual zoom drops the fit segment: {title}"
         );
+    }
+
+    /// Stage a patch in the temp dir under a test-unique name, so the surface
+    /// test can load a declared variant without adding a fixture.
+    fn temp_patch(name: &str, contents: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("droid-tui-{name}-{}.ini", std::process::id()));
+        std::fs::write(&path, contents).expect("stage the temp patch");
+        path
+    }
+
+    /// The module-UI pane title as the frame painter emitted it (a single galley
+    /// per `draw_pane_frame` call).
+    fn painted_module_ui_title(out: &egui::FullOutput) -> String {
+        let labels = text_labels(out);
+        labels
+            .iter()
+            .find(|label| label.contains("Module UI"))
+            .unwrap_or_else(|| panic!("module UI title missing: {labels:?}"))
+            .clone()
+    }
+
+    /// master-module-resolution 3.1 / spec "Master faceplate": the pane title
+    /// names the resolved model, because the faceplate itself cannot say which of
+    /// the two masters it is. Asserted on the painted `Shape::Text`, over a band
+    /// wide enough that the last segment is never ellipsized away.
+    #[test]
+    fn module_ui_pane_title_names_the_resolved_master() {
+        let declaring = temp_patch(
+            "master18-title",
+            "# LABELS: master=18\n[copy]\n    input = I1\n    output = O1\n",
+        );
+        let patch = crate::patch::Patch::from_ini_file(&declaring).expect("parse declaring patch");
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        assert_eq!(app.master_model().label(), "MASTER18", "plan resolved");
+        let mut out = run_paint_panes_in(&mut app, egui::vec2(1600.0, 600.0));
+        let painted = painted_module_ui_title(&out);
+        assert!(
+            painted.contains("MASTER18"),
+            "a declaring patch names MASTER18: {painted}"
+        );
+        out.textures_delta.clear();
+        let _ = std::fs::remove_file(&declaring);
+
+        // A silent patch resolves to MASTER, and the title must not claim 18.
+        let silent = temp_patch("master-title", "[copy]\n    input = I1\n    output = O1\n");
+        let patch = crate::patch::Patch::from_ini_file(&silent).expect("parse silent patch");
+        let mut app = App::new();
+        assert!(app.load_patch(patch));
+        assert_eq!(app.master_model().label(), "MASTER", "plan resolved");
+        let mut out = run_paint_panes_in(&mut app, egui::vec2(1600.0, 600.0));
+        let painted = painted_module_ui_title(&out);
+        assert!(
+            painted.contains("MASTER") && !painted.contains("MASTER18"),
+            "a silent patch names MASTER only: {painted}"
+        );
+        out.textures_delta.clear();
+        let _ = std::fs::remove_file(&silent);
     }
 
     #[test]

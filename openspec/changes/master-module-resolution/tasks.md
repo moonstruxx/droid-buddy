@@ -17,7 +17,7 @@
 
 ## 3. Surfacing and documentation
 
-- [ ] 3.1 Name the resolved model in the module-UI pane title (`Module UI · … · MASTER18`) and assert the emitted label text in the surface test; verify with `cargo test gui::`. <!-- agent: frontend-engineer, depends_on: [1.5], touches: [src/gui/mod.rs, src/gui/physical.rs] -->
+- [x] 3.1 Name the resolved model in the module-UI pane title (`Module UI · … · MASTER18`) and assert the emitted label text in the surface test; verify with `cargo test gui::`. <!-- agent: frontend-engineer, depends_on: [1.5], touches: [src/gui/mod.rs, src/gui/physical.rs] -->
 - [ ] 3.2 Name the model and its source in the load status (`Loaded x — MASTER18 (declared)` / `MASTER (inferred)` / `MASTER (default)`) while keeping the existing `Loaded`/`Load failed` prefix assertions green; verify with `cargo test app::`. <!-- agent: rusty-engineer.build, depends_on: [1.5], touches: [src/app.rs] -->
 - [ ] 3.3 Document the master faceplate, the `# LABELS: master=NN` Forge convention, and both finding codes with their severities in `docs/views.md` and `docs/labels.md`; verify by reading the rendered pages. <!-- agent: devops-engineer.fast, depends_on: [3.1], touches: [docs/views.md, docs/labels.md] -->
 
