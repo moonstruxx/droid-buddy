@@ -293,9 +293,9 @@ mod windowed {
                     // (the final layout), so it does not chase the animation.
                     self.app.begin_graph_settle();
                     // The rect the graph scene will be painted into this frame:
-                    // the graph tile slot (or the quad FULL pane) when one is
-                    // open, else the whole window — the same mirror as the
-                    // render dispatch. The scene builder shifts the camera by
+                    // the class-layout pane holding the graph when one is open,
+                    // else the whole window — the same source the render
+                    // dispatch uses. The scene builder shifts the camera by
                     // its origin, so fit/center/zoom anchor to this same rect.
                     let pane = gui::graph_pane_rect(&self.app, win).unwrap_or(win);
                     if self.app.graph_camera.is_none() {
@@ -304,9 +304,9 @@ mod windowed {
                         // identity camera): seed `App.graph_camera` when
                         // unset, dependency-filter aware, and reuse it after
                         // so pan/zoom survive. The fit anchors to the exact
-                        // pane size the scene is painted into (a tile slot or
-                        // quad FULL pane, not the whole window) so c /
-                        // Shift+c and arrow-pan gating see the real pane.
+                        // pane size the scene is painted into (the graph pane,
+                        // not the whole window) so c / Shift+c and arrow-pan
+                        // gating see the real pane.
                         let fit: Vec<(f32, f32)> = if self.app.dependency_nodes.is_empty() {
                             self.app.graph_positions.clone()
                         } else {
@@ -327,8 +327,8 @@ mod windowed {
                     // The frame reports the window's input state; the loop
                     // owns `app`, so it maps the interactions here (D6: the
                     // loop acts on what it owns). `app` flows into the paint
-                    // so the quad dispatch builds real per-pane specs and
-                    // publishes `pane_rects`.
+                    // so the pane dispatch builds real per-pane specs and
+                    // publishes `pane_hit_rects`.
                     if let Some(frame) = self.window.fill_placeholder(&mut self.app) {
                         handler::handle_graph_window_frame(&frame, &mut self.app);
                     }

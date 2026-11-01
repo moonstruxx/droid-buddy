@@ -114,7 +114,7 @@ impl Default for PaneLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, FocusSlot, Rect};
+    use crate::app::{App, Rect};
     use crate::patch::Patch;
     use std::path::Path;
 
@@ -139,7 +139,6 @@ mod tests {
     fn big_arrangement_graph_right() -> App {
         let mut app = app_with_patch();
         app.layout.focus = PaneId::SmallTop;
-        app.tile_stack.focus = FocusSlot::Slot(0); // the viewer is slot 0
         app.close_focused_view(); // closes the startup viewer
         assert!(!app.layout.has_small_view());
         app.layout.focus = PaneId::BigRight;
@@ -204,7 +203,6 @@ mod tests {
         assert_eq!(app.layout.small_bottom.view, Some(ViewType::Optimizer));
         // Back to the left big pane, then Tab forward through all three.
         app.layout.focus = PaneId::BigLeft;
-        app.tile_stack.focus = FocusSlot::Panels;
         app.cycle_focus(true);
         assert_eq!(app.layout.focus, PaneId::SmallTop);
         app.cycle_focus(true);
@@ -224,7 +222,6 @@ mod tests {
         app.layout.small_top.view = None;
         app.layout.small_bottom.view = None;
         app.layout.big_right.view = Some(ViewType::Graph);
-        app.tile_stack.slots = vec![ViewType::Graph];
         app.cycle_focus(true); // BigLeft -> BigRight
         assert_eq!(app.layout.focus, PaneId::BigRight);
         app.cycle_focus(true); // -> BigLeft
@@ -240,7 +237,6 @@ mod tests {
         // panes are skipped").
         let mut app = App::new();
         app.layout.focus = PaneId::SmallTop;
-        app.tile_stack.focus = FocusSlot::Slot(0);
         app.cycle_focus(true);
         assert_eq!(app.layout.focus, PaneId::BigLeft);
         // Backward from BigLeft skips the empty pane as well.
@@ -409,7 +405,6 @@ mod tests {
             app.pane_holding(ViewType::SourceViewer).is_none(),
             "the source viewer is replaced"
         );
-        assert!(!app.showing_viewer);
     }
 
     // ── Physical and module UI are mutually exclusive ──
@@ -455,7 +450,6 @@ mod tests {
         let mut app = App::new(); // the viewer is the only small-class view
         assert!(app.layout.has_small_view());
         app.layout.focus = PaneId::SmallTop;
-        app.tile_stack.focus = FocusSlot::Slot(0);
         app.close_focused_view();
         assert!(!app.layout.has_small_view());
         assert_eq!(app.layout.small_top.view, None);
@@ -516,9 +510,7 @@ mod tests {
         app.layout.big_right.view = Some(ViewType::Graph);
         app.layout.small_top.view = None;
         app.layout.small_bottom.view = None;
-        app.tile_stack.slots = vec![ViewType::Graph];
         app.layout.focus = PaneId::BigRight;
-        app.tile_stack.focus = FocusSlot::Slot(0);
         app.swap_big();
         assert_eq!(app.layout.big_left.view, Some(ViewType::Graph));
         assert_eq!(app.layout.big_right.view, Some(ViewType::Physical));
@@ -562,7 +554,6 @@ mod tests {
         let mut app = App::new();
         app.layout.small_top.view = None;
         app.layout.small_bottom.view = None;
-        app.tile_stack.slots = Vec::new();
         let before = app.layout.clone();
         app.swap_small();
         assert_eq!(app.layout, before, "layout unchanged");
@@ -586,7 +577,6 @@ mod tests {
         // Big arrangement with only the module UI open.
         app.layout.small_top.view = None;
         app.layout.small_bottom.view = None;
-        app.tile_stack.slots = Vec::new();
         app.layout.focus = PaneId::BigLeft;
         app.cycle_focus(true);
         assert_eq!(app.layout.focus, PaneId::BigLeft);

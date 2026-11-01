@@ -679,8 +679,8 @@ fn band_has_views(app: &App, band: crate::app::Rect) -> bool {
 /// `App.layout.focus` and `pane_unfocused_border` otherwise; the viewer
 /// surface draws its own frame, the graph, physical, and optimizer
 /// panes get one here. An empty pane stays a bare background. Publishes
-/// `pane_hit_rects` (the drawn geometry, ADR 35) and the legacy `FocusSlot`
-/// mirror `pane_rects` for handler/main compat via `App::refresh_hit_geometry`.
+/// `pane_hit_rects` (the drawn geometry, ADR 35) via
+/// `App::refresh_hit_geometry`.
 fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, selected: &[usize]) {
     let t = crate::theme::active();
     let bg = t.egui_color(t.graph_canvas_bg);
@@ -868,9 +868,8 @@ fn paint_overlays(app: &mut App, ui: &mut egui::Ui) {
 /// `graph_canvas_px` for zoom anchoring and arrow-pan gating. Mirrors the
 /// window-size fallback in main.rs.
 fn publish_window_canvas(app: &mut App, canvas_px: (f32, f32)) {
-    // A pane-local graph (graph tile slot or quad FULL pane) publishes and
-    // seeds its own pane size from the paint path. Writing the full-window
-    // canvas here would clobber it every frame before c / Shift+c, wheel
+    // A pane-local graph publishes and seeds its own pane size from the paint
+    // path. Writing the full-window canvas here would clobber it every frame before c / Shift+c, wheel
     // zoom, and arrow-pan gating read the one source of truth, so the window
     // canvas is published and the fit seeded only when the scene fills the
     // whole window.
@@ -903,7 +902,7 @@ impl EguiSurface {
     /// (one spec pixel = one egui point), so they double as spec-pixel coords.
     /// `selected` is the window-local marquee selection driving the highlight.
     /// `app` flows through so the base paint builds real per-pane specs and
-    /// publishes `pane_rects` (renderer-owns-geometry contract).
+    /// publishes `pane_hit_rects` (renderer-owns-geometry contract).
     ///
     /// Surface dispatch: every pane of the layout arrangement paints its view
     /// (module UI, source viewer, physical, graph, optimizer); with no view open
@@ -1001,7 +1000,6 @@ impl EguiSurface {
             if band_has_views(app, band) {
                 paint_panes(app, ui, scene, selected);
             } else {
-                app.pane_rects.clear();
                 app.component_rects.clear();
                 graph::paint_scene(ui, window_rect.size(), scene, selected);
             }
@@ -1450,11 +1448,12 @@ mod tests {
             3,
             "three panes in the small arrangement"
         );
-        assert_eq!(
-            app.pane_rects.len(),
-            2,
-            "module UI + source viewer are hit-testable"
-        );
+        let hit_views = app
+            .pane_hit_rects
+            .iter()
+            .filter(|(id, _)| app.layout.pane(*id).view.is_some())
+            .count();
+        assert_eq!(hit_views, 2, "module UI + source viewer are hit-testable");
         // Geometry: left big pane 0..400, the right half split into two
         // quarter small panes top and bottom (main and small ratios at 0.5).
         let band = to_cell_rect(egui::Rect::from_min_size(
@@ -1910,15 +1909,16 @@ mod tests {
     }
 
     #[test]
-    fn graph_pane_rect_uses_the_class_layout_pane_not_the_tile_mirror() {
+    fn graph_pane_rect_uses_the_class_layout_pane_geometry() {
         // Bug droid_tui-up5: `graph_pane_rect` derived the drawn graph pane from
-        // the legacy `tile_stack` slot mirror (left_x = width * main_split_ratio,
-        // equal-height slots) instead of the class layout's `pane_geometry`, so
-        // the scene origin, the first-frame fit, and the mouse origin disagreed
-        // with the pane `paint_panes` actually draws the graph in. Here the
-        // startup arrangement (module UI big-left + SourceViewer small-top) gets the
-        // Graph view opened into the left big pane (0,0,400,600); the mirror
-        // formula would instead return the top-right small pane (400,0,400,300).
+        // a legacy slot mirror (left_x = width * main_split_ratio, equal-height
+        // slots) instead of the class layout's `pane_geometry`, so the scene
+        // origin, the first-frame fit, and the mouse origin disagreed with the
+        // pane `paint_panes` actually draws the graph in. Here the startup
+        // arrangement (module UI big-left + SourceViewer small-top) gets the
+        // Graph view opened into the left big pane (0,0,400,600); the retired
+        // mirror formula would instead return the top-right small pane
+        // (400,0,400,300).
         let mut app = App::new();
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
@@ -1947,14 +1947,13 @@ mod tests {
             Some(real),
             "the scene pane must be the class-layout graph pane"
         );
-        // Guard that the two formulas genuinely disagree (the old code returned
-        // the top-right small pane), so the assertion above is not vacuous.
+        // Bug droid_tui-up5 guard: the retired mirror formula returned the
+        // top-right small pane, so that geometry must never come back.
         let legacy = egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(400.0, 300.0));
-        assert_ne!(legacy, real, "mirror and class formulas disagree by design");
         assert_ne!(
             graph_pane_rect(&app, win),
             Some(legacy),
-            "still returns the legacy tile-mirror geometry"
+            "must not return the retired mirror geometry"
         );
     }
 
@@ -2112,11 +2111,12 @@ mod tests {
                 .any(|l| l.contains("P2B8") || l.contains("CV I/O")),
             "module UI faceplates rendered: {labels:?}"
         );
-        assert_eq!(
-            app.pane_rects.len(),
-            1,
-            "only the module UI pane is hit-testable"
-        );
+        let hit_views = app
+            .pane_hit_rects
+            .iter()
+            .filter(|(id, _)| app.layout.pane(*id).view.is_some())
+            .count();
+        assert_eq!(hit_views, 1, "only the module UI pane is hit-testable");
         assert!(app
             .pane_hit_rects
             .iter()

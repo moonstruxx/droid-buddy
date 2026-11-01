@@ -49,15 +49,26 @@ fn main() {
     let src = std::fs::read_to_string(root.join("src/gui/mod.rs")).expect("read gui/mod.rs");
     // The staged copy lives in OUT_DIR, so the surface `mod x;` declarations
     // must carry absolute paths back to the real sources.
-    let surfaces = ["graph", "overlays", "physical", "picker", "viewer"];
+    let surfaces = [
+        "graph",
+        "overlays",
+        "physical",
+        "picker",
+        "viewer",
+        // The self-test module lives in `gui/` too and is declared `pub mod`,
+        // so the staged copy needs its absolute path as well — without it the
+        // harness stops compiling the moment `gui/mod.rs` gains a surface.
+        "self_test",
+    ];
     let staged: Vec<String> = src
         .lines()
         .map(|line| {
             let trimmed = line.trim();
-            if let Some(name) = trimmed
-                .strip_prefix("mod ")
-                .and_then(|s| s.strip_suffix(';'))
-            {
+            let declaration = trimmed
+                .strip_prefix("pub mod ")
+                .or_else(|| trimmed.strip_prefix("mod "))
+                .and_then(|s| s.strip_suffix(';'));
+            if let Some(name) = declaration {
                 if surfaces.contains(&name) {
                     let path = root.join(format!("src/gui/{name}.rs"));
                     return format!("#[path = \"{}\"] mod {name};", path.display());
