@@ -843,6 +843,146 @@ fn regression_validation_fixture_matrix_all_present() {
     );
 }
 
+// ── master-module declaration stories (master-module-resolution 2.4) ─────────
+// App-level proof of the *load* outcome for the three real declaration
+// families: what declaring `# LABELS: master=18|16` does to the installed
+// patch, the modal and the model the module UI draws — not just the
+// validator's issue list (`validation::tests` pins the findings themselves).
+
+/// Load one of the declaration fixtures the way the app does and hand back the
+/// App, so a story can assert the load outcome rather than only the findings.
+fn master_declaration_app(fixture: &str) -> App {
+    let path = format!("fixtures/{fixture}.ini");
+    let patch =
+        Patch::from_ini_file(Path::new(&path)).unwrap_or_else(|e| panic!("{path} must parse: {e}"));
+    let mut app = App::new();
+    assert!(
+        app.load_patch(patch),
+        "{path} declares a master and only warns — it must load"
+    );
+    app
+}
+
+/// The value span of the entry binding `value` in the loaded patch, so a
+/// finding can be located the way the source view jumps to it.
+fn master_entry_span(app: &App, value: &str) -> crate::patch::Span {
+    app.patch
+        .as_ref()
+        .expect("a story helper only runs after a successful load")
+        .sections
+        .iter()
+        .flat_map(|section| section.detailed_entries.iter())
+        .find(|entry| entry.value.trim() == value)
+        .unwrap_or_else(|| panic!("no entry binds {value}"))
+        .value_span
+}
+
+/// A declared MASTER18 patch reading CV inputs on I3/I5/I7 is reported at each
+/// of the three entries and still loads — the declaration stays authoritative
+/// for what is drawn, and a conflict is a problem to inspect, not a refusal.
+#[test]
+fn regression_declared_master18_cv_inputs_warn_and_still_load() {
+    let app = master_declaration_app("master_declaration_cv_inputs");
+
+    assert!(app.patch.is_some(), "a declared MASTER18 patch loads");
+    assert!(
+        !app.showing_validation,
+        "warnings never auto-open the modal"
+    );
+    assert_eq!(
+        app.master_model(),
+        crate::patch::MasterModel::Master18,
+        "the declaration is authoritative for what is drawn"
+    );
+
+    let conflicts: Vec<_> = app
+        .validation_issues
+        .iter()
+        .filter(|issue| issue.code == "master_conflict")
+        .collect();
+    assert_eq!(conflicts.len(), 3, "issues: {:#?}", app.validation_issues);
+    assert!(
+        conflicts
+            .iter()
+            .all(|issue| issue.severity == crate::validation::Severity::Warning),
+        "a master conflict is a Warning: {conflicts:#?}"
+    );
+    assert!(
+        !app.validation_issues
+            .iter()
+            .any(|issue| issue.severity == crate::validation::Severity::Error),
+        "the conflicts must not gate the load: {:#?}",
+        app.validation_issues
+    );
+    for (issue, jack) in conflicts.iter().zip(["I3", "I5", "I7"]) {
+        assert_eq!(
+            issue.span,
+            master_entry_span(&app, jack),
+            "the conflict belongs on {jack}'s value"
+        );
+        assert!(
+            issue.message.contains(jack),
+            "message must name {jack}: {}",
+            issue.message
+        );
+    }
+}
+
+/// The motokit shape: `clock` on I1 and `reset` on I2 are trigger-typed, which
+/// MASTER18 reads as logic levels — no conflict, and the patch resolves to the
+/// declared MASTER18.
+#[test]
+fn regression_declared_master18_gate_inputs_load_clean() {
+    let app = master_declaration_app("master_declaration_gate_inputs");
+
+    assert!(app.patch.is_some());
+    assert!(!app.showing_validation);
+    assert_eq!(
+        app.master_model(),
+        crate::patch::MasterModel::Master18,
+        "the declaration is authoritative"
+    );
+    assert!(
+        !app.validation_issues
+            .iter()
+            .any(|issue| issue.code == "master_conflict" || issue.code == "no_master_fits"),
+        "gate/trigger inputs on I1/I2 are legitimate MASTER18 uses: {:#?}",
+        app.validation_issues
+    );
+    assert!(
+        app.validation_issues.is_empty(),
+        "the fixture is a clean patch: {:#?}",
+        app.validation_issues
+    );
+}
+
+/// A declared MASTER patch using I1..I8 as CV: MASTER hosts every one, so no
+/// master finding is reported and the model resolves to MASTER.
+#[test]
+fn regression_declared_master16_all_cv_inputs_load_clean() {
+    let app = master_declaration_app("master_declaration_master16");
+
+    assert!(app.patch.is_some());
+    assert!(!app.showing_validation);
+    assert_eq!(
+        app.master_model(),
+        crate::patch::MasterModel::Master,
+        "the declaration is authoritative"
+    );
+    assert!(
+        !app.validation_issues
+            .iter()
+            .any(|issue| issue.code == "master_conflict" || issue.code == "no_master_fits"),
+        "MASTER hosts I1..I8 as CV: {:#?}",
+        app.validation_issues
+    );
+    assert!(
+        app.validation_issues.is_empty(),
+        "the fixture is a clean patch: {:#?}",
+        app.validation_issues
+    );
+}
+
 #[test]
 fn visual_diff_changed_node_marker_snapshot() {
     // Param-level diff: same topology, one node's non-cable param differs ->
