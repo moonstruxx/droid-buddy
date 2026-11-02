@@ -163,6 +163,11 @@ diagnostics, warnings and error messages SHALL go to standard error, and standar
 SHALL be empty when the command exits `2`. The deny threshold SHALL default to error
 severity and SHALL be raisable to warnings.
 
+That threshold SHALL be an analysis concern: it gates `analyze`, whose report prints the
+findings it counts, so the exit code and the printed report cannot disagree. `optimize`
+prints no findings, so it SHALL reject the threshold option and SHALL exit `0` whenever it
+completed.
+
 #### Scenario: A clean patch exits zero
 
 - **WHEN** a patch with no errors is analyzed
@@ -187,6 +192,11 @@ severity and SHALL be raisable to warnings.
 
 - **WHEN** the command reads a file that is not a DROID patch
 - **THEN** the exit code is 2, standard output is empty, and the parse error is on standard error
+
+#### Scenario: Optimize is not gated by findings
+
+- **WHEN** `optimize p.ini` runs on a patch that `analyze` would fail
+- **THEN** the reorderings are reported and the exit code is 0, and passing the threshold option to `optimize` is rejected as a usage error
 
 ### Requirement: Agent skill documentation
 

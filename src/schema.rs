@@ -114,6 +114,12 @@ pub struct Schema {
     pub circuits: HashMap<String, CircuitDef>,
     pub controllers: HashMap<String, ControllerDef>,
     pub manual_references: HashMap<String, u32>,
+    /// Plugin files merged over the embedded schema at install time, in load
+    /// order; empty for an embedded-only install. Consumers: the headless CLI's
+    /// report provenance (`report::SchemaSummary`) and `--no-plugins`, which
+    /// reports exactly what this list says was applied.
+    #[serde(default)]
+    pub plugins: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +495,7 @@ fn parse_embedded() -> Schema {
         circuits,
         controllers,
         manual_references,
+        plugins: Vec::new(),
     }
 }
 
@@ -568,6 +575,7 @@ pub fn init(
 pub fn merge_plugins(mut base: Schema, files: &[PluginFile]) -> Schema {
     let embedded: HashSet<String> = base.circuits.keys().cloned().collect();
     for file in files {
+        base.plugins.push(file.path.display().to_string());
         let mut shadowed: Vec<&str> = Vec::new();
         for circuit in &file.circuits {
             if embedded.contains(&circuit.name) {

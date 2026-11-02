@@ -95,6 +95,11 @@ patch; the CLI must still report the findings that justify the gate — a gate t
 nothing is unusable. The two behaviours are documented side by side so a later
 "unification" cannot quietly delete the report.
 
+The threshold is therefore `analyze`-only. `optimize` reports no findings, and blocking a
+reordering on validation would refuse to reorder the draft patches the tool exists to
+iterate on — while an inert `--deny` would be a quiet lie. So `optimize` rejects the flag
+and exits `0` whenever it completed.
+
 *Alternative rejected:* a single non-zero code — loses the difference between "this patch
 has problems" and "I could not look at this patch", which is the distinction an agent loop
 branches on.

@@ -2,10 +2,13 @@
 //! (design D1, D3, D4, D8).
 //!
 //! [`parse`] turns a process argv tail into a [`Command`] without doing any
-//! IO: no file is opened, nothing is printed, and the process never exits. The
-//! executor that reads the patch, runs the analysis and picks an exit code
-//! lives elsewhere and consumes this module's output plus the `EXIT_*`
-//! constants.
+//! IO: no file is opened, nothing is printed, and the process never exits.
+//!
+//! [`execute`] consumes that command: it reads the patch (from a path or
+//! standard input), runs the analysis or the optimizer, and returns the text to
+//! print plus the exit code, still without writing. [`run`] is the single
+//! writer — it prints [`execute`]'s stdout, or a [`Failure`]'s message on
+//! standard error, so stdout carries nothing but the report.
 //!
 //! The renderers continue that rule: `analyze_text` and `optimize_text` turn a
 //! report into the short human summary, and `to_json` into the JSON contract
@@ -16,7 +19,7 @@
 //!
 //! ```text
 //! droid_tui analyze  <patch|-> [--json] [--no-plugins] [--deny <error|warning>]
-//! droid_tui optimize <patch|-> [--json] [--no-plugins] [--deny <error|warning>]
+//! droid_tui optimize <patch|-> [--json] [--no-plugins]
 //!                             [--strategy <banner|global|minmax>]
 //!                             [--weight <0.0..=1.0>] [--candidate <n>]
 //!                             [--write <path> | --stdout]
@@ -34,8 +37,18 @@
 //! called before the window machinery exists (design D1) and must stay total
 //! apart from the returned [`UsageError`].
 
-use crate::optimize::OptimizeScope;
-use crate::report::{AnalyzeReport, OptimizeReport, PatchSummary};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use crate::config;
+use crate::graph::{clusters_from_patch, Graph, GraphOptions};
+use crate::latency::CostModel;
+use crate::optimize::{generate_candidates, generate_candidates_weighted, OptimizeScope};
+use crate::patch::Patch;
+use crate::report::{
+    self, AnalyzeReport, OptimizeReport, PatchSummary, TopologyFinding, ValidationFinding,
+};
+use crate::schema;
 use crate::validation::Severity;
 
 /// The command completed and no finding reached the deny threshold (design D4).
@@ -104,8 +117,6 @@ pub struct OptimizeRequest {
     pub json: bool,
     /// Restrict the run to the embedded schema (design D5).
     pub no_plugins: bool,
-    /// Severity gate, as for [`AnalyzeRequest::deny`].
-    pub deny: Severity,
     /// Which candidate strategies to search.
     pub strategy: OptimizeScope,
     /// Objective weight in `0.0..=1.0` trading total latency against the
@@ -162,13 +173,13 @@ pub fn is_subcommand(arg: &str) -> bool {
 pub fn usage() -> &'static str {
     "Usage:\n\
      \x20 droid_tui analyze  <patch|-> [--json] [--no-plugins] [--deny <error|warning>]\n\
-     \x20 droid_tui optimize <patch|-> [--json] [--no-plugins] [--deny <error|warning>]\n\
+     \x20 droid_tui optimize <patch|-> [--json] [--no-plugins]\n\
      \x20                       [--strategy <banner|global|minmax>]\n\
      \x20                       [--weight <0.0..=1.0>] [--candidate <n>]\n\
      \x20                       [--write <path> | --stdout]\n\
      \n\
      <patch> is a patch path; `-` reads standard input. `--` ends option parsing.\n\
-     Exit codes: 0 clean, 1 findings at or above the deny threshold, 2 could not run."
+     Exit codes: 0 clean, 1 findings at or above the deny threshold (`analyze` only), 2 could not run."
 }
 
 /// Which subcommand is being parsed; only used to scope the option set.
@@ -231,6 +242,11 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 "--json" => json = true,
                 "--no-plugins" => no_plugins = true,
                 "--deny" => {
+                    if mode == Mode::Optimize {
+                        return Err(UsageError::new(
+                            "`--deny` applies to `analyze`: `optimize` reports no findings to gate on",
+                        ));
+                    }
                     let raw = value_of(args, &mut i, "--deny")?;
                     deny = match raw {
                         "error" => Severity::Error,
@@ -348,7 +364,6 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 patch,
                 json,
                 no_plugins,
-                deny,
                 strategy,
                 weight,
                 candidate,
@@ -557,12 +572,376 @@ pub fn to_json<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Err
     serde_json::to_string_pretty(value)
 }
 
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+/// What a finished command produced: the text for standard output and the
+/// process exit code that goes with it.
+///
+/// [`execute`] returns this without touching a stream, so the whole dispatch —
+/// including the exit-code gate — is testable in memory. [`run`] is the only
+/// function in this module that writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Execution {
+    /// The text standard output receives, already carrying its trailing newline.
+    pub stdout: String,
+    /// The process exit code: [`EXIT_OK`] or [`EXIT_FINDINGS`].
+    pub exit: i32,
+}
+
+/// A command that produced no report: standard output stays empty and
+/// `message` is the diagnostic standard error receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The diagnostic, naming what could not be done and why.
+    pub message: String,
+    /// The process exit code; [`EXIT_USAGE`] for everything [`execute`] raises.
+    pub exit: i32,
+}
+
+impl Failure {
+    /// A run that could not start: unreadable input, a parse error, or an
+    /// option combination that cannot produce the requested output.
+    fn usage(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            exit: EXIT_USAGE,
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Failure {}
+
+/// The parsed patch plus where it came from and how big it was.
+///
+/// `--write` needs the source path (it refuses to overwrite it), so the input
+/// keeps it; standard input has none.
+struct Input {
+    /// The parsed patch.
+    patch: Patch,
+    /// The report's patch label: the path exactly as given, or `<stdin>`.
+    label: String,
+    /// Size of the source in bytes, measured on the text that was parsed.
+    bytes: u64,
+    /// The source path for `--write`'s save-as refusal; `None` for stdin.
+    path: Option<PathBuf>,
+}
+
+impl Input {
+    /// Read and parse the patch from `source`.
+    ///
+    /// A file is read once and its length taken from that same text, so the
+    /// reported size cannot disagree with the parse; the name follows
+    /// `Patch::from_ini_file`'s rule (the file stem).
+    fn read(source: &PatchSource) -> Result<Self, Failure> {
+        match source {
+            PatchSource::File(given) => {
+                let content = std::fs::read_to_string(given)
+                    .map_err(|error| Failure::usage(format!("failed to read {given}: {error}")))?;
+                let bytes = content.len() as u64;
+                let patch = Patch::from_ini_str(&content, patch_name(Path::new(given)))
+                    .map_err(|error| Failure::usage(format!("failed to parse {given}: {error}")))?;
+                Ok(Self {
+                    patch,
+                    label: given.clone(),
+                    bytes,
+                    path: Some(PathBuf::from(given)),
+                })
+            }
+            PatchSource::Stdin => {
+                let mut content = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut content)
+                    .map_err(|error| {
+                        Failure::usage(format!("failed to read standard input: {error}"))
+                    })?;
+                let bytes = content.len() as u64;
+                let patch =
+                    Patch::from_ini_str(&content, String::from("stdin")).map_err(|error| {
+                        Failure::usage(format!("failed to parse standard input: {error}"))
+                    })?;
+                Ok(Self {
+                    patch,
+                    label: String::from("<stdin>"),
+                    bytes,
+                    path: None,
+                })
+            }
+        }
+    }
+}
+
+/// The name `Patch::from_ini_file` gives a file: its stem, or `patch`.
+fn patch_name(path: &Path) -> String {
+    path.file_stem().map_or_else(
+        || String::from("patch"),
+        |stem| stem.to_string_lossy().to_string(),
+    )
+}
+
+/// Plugin files the report names as applied over the embedded schema.
+///
+/// Read from the installed schema (`schema::init` records them in
+/// `Schema::plugins`), so the report cannot disagree with the circuits the
+/// analysis actually used. `--no-plugins` installs an embedded-only schema in
+/// `main`, and this returns empty for the flag as well so a caller that skipped
+/// that step still reports what it honoured.
+fn applied_plugins(no_plugins: bool) -> Vec<String> {
+    if no_plugins {
+        return Vec::new();
+    }
+    schema::load_schema().plugins.clone()
+}
+
+/// Return `text` with exactly one trailing line terminator.
+fn ensure_trailing_newline(mut text: String) -> String {
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// Serialize a report, turning a serializer failure into a usage failure.
+fn serialize<T: serde::Serialize>(value: &T) -> Result<String, Failure> {
+    to_json(value)
+        .map_err(|error| Failure::usage(format!("failed to serialize the report: {error}")))
+}
+
+/// Severity rank for the report's printed labels: lower is more severe.
+fn severity_rank(label: &str) -> u8 {
+    match label {
+        "error" => 0,
+        "warning" => 1,
+        "hint" => 2,
+        _ => u8::MAX,
+    }
+}
+
+/// The deny threshold's rank; [`Severity`] already orders `Error` first.
+fn deny_rank(deny: Severity) -> u8 {
+    match deny {
+        Severity::Error => 0,
+        Severity::Warning => 1,
+        Severity::Hint => 2,
+    }
+}
+
+/// Map the report's own findings to an exit code.
+///
+/// The gate reads the lists the report prints, never a second validation pass,
+/// so the exit code cannot disagree with the visible report: a finding reaches
+/// the threshold when its severity is at or above `deny` (rank order, `error`
+/// lowest).
+fn findings_exit(
+    validation: &[ValidationFinding],
+    topology: &[TopologyFinding],
+    deny: Severity,
+) -> i32 {
+    let threshold = deny_rank(deny);
+    let reached = validation
+        .iter()
+        .any(|finding| severity_rank(&finding.severity) <= threshold)
+        || topology
+            .iter()
+            .any(|finding| severity_rank(&finding.severity) <= threshold);
+    if reached {
+        EXIT_FINDINGS
+    } else {
+        EXIT_OK
+    }
+}
+
+/// Execute `command` against `settings` and return the text to print plus the
+/// exit code. No stream is written and the process never exits.
+///
+/// The only IO is reading the patch: a file named by the operand, or standard
+/// input for `-`. Everything after that is the app's own pure chain — schema
+/// load, graph build, report projection, candidate generation — so the whole
+/// run, including the exit-code gate, is testable in memory.
+///
+/// # Errors
+///
+/// [`Failure`] with exit [`EXIT_USAGE`] when the patch cannot be read or
+/// parsed, when the requested candidate does not exist, when the output option
+/// cannot be honoured, or when the report cannot be serialized.
+pub fn execute(command: &Command, settings: &config::Settings) -> Result<Execution, Failure> {
+    match command {
+        Command::Help => Ok(Execution {
+            stdout: ensure_trailing_newline(usage().to_owned()),
+            exit: EXIT_OK,
+        }),
+        Command::Analyze(request) => execute_analyze(request, settings),
+        Command::Optimize(request) => execute_optimize(request, settings),
+    }
+}
+
+/// `analyze`: read, build the graph once, project the report, gate on it.
+fn execute_analyze(
+    request: &AnalyzeRequest,
+    settings: &config::Settings,
+) -> Result<Execution, Failure> {
+    let input = Input::read(&request.patch)?;
+    let schema = schema::load_schema();
+    let plugins = applied_plugins(request.no_plugins);
+    let cost = CostModel::from_config(settings);
+    let graph = Graph::build_from_patch(
+        &input.patch,
+        &clusters_from_patch(&input.patch),
+        &cost,
+        &GraphOptions::default(),
+    );
+    let report = report::analyze_report(
+        &input.patch,
+        schema,
+        &graph,
+        &input.label,
+        input.bytes,
+        &plugins,
+    );
+    let body = if request.json {
+        serialize(&report)?
+    } else {
+        analyze_text(&report)
+    };
+    Ok(Execution {
+        stdout: ensure_trailing_newline(body),
+        exit: findings_exit(&report.validation, &report.topology, request.deny),
+    })
+}
+
+/// Rebuild `patch`'s section list in the candidate's order.
+///
+/// Only `sections` moves: `render_ini` addresses raw lines by each section's
+/// recorded header span, so every block travels with its section and the other
+/// fields stay an index-preserving view of the source.
+fn reordered(patch: &Patch, order: &[usize]) -> Result<Patch, Failure> {
+    if order.len() != patch.sections.len() {
+        return Err(Failure::usage(format!(
+            "candidate order has {} section(s) but the patch has {}",
+            order.len(),
+            patch.sections.len()
+        )));
+    }
+    let mut ordered = patch.clone();
+    ordered.sections = order
+        .iter()
+        .map(|&index| {
+            patch.sections.get(index).cloned().ok_or_else(|| {
+                Failure::usage(format!(
+                    "candidate order names section {index} but the patch has {}",
+                    patch.sections.len()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ordered)
+}
+
+/// `optimize`: generate candidates, select one, emit or write it, report.
+fn execute_optimize(
+    request: &OptimizeRequest,
+    settings: &config::Settings,
+) -> Result<Execution, Failure> {
+    // A JSON report on the same stream as the emitted patch would corrupt it.
+    if request.json && matches!(request.output, Some(OutputTarget::Stdout)) {
+        return Err(Failure::usage(
+            "options `--stdout` and `--json` are mutually exclusive: a JSON report on the same stream would corrupt the emitted patch",
+        ));
+    }
+    let input = Input::read(&request.patch)?;
+    let cost = CostModel::from_config(settings);
+    // Weight 0 is the GUI's default objective exactly; keep it on the original
+    // entry point so the CLI's replay of the default is byte-for-byte the GUI's.
+    let candidates = if request.weight == 0.0 {
+        generate_candidates(&input.patch, &cost, request.strategy)
+    } else {
+        generate_candidates_weighted(&input.patch, &cost, request.strategy, request.weight)
+    };
+    let selected = candidates.get(request.candidate).ok_or_else(|| {
+        Failure::usage(format!(
+            "candidate index {} is out of range: {} candidate(s) available",
+            request.candidate,
+            candidates.len()
+        ))
+    })?;
+    let ordered = reordered(&input.patch, &selected.order)?;
+
+    if matches!(request.output, Some(OutputTarget::Stdout)) {
+        let text = ordered.render_ini().map_err(Failure::usage)?;
+        return Ok(Execution {
+            stdout: ensure_trailing_newline(text),
+            exit: EXIT_OK,
+        });
+    }
+
+    let schema = schema::load_schema();
+    let mut report =
+        report::optimize_report(&input.patch, schema, &candidates, &input.label, input.bytes);
+    if let Some(OutputTarget::Write(destination)) = &request.output {
+        let source = input.path.as_deref().ok_or_else(|| {
+            Failure::usage(
+                "`--write` needs a patch path: standard input cannot be written back, use `--stdout`",
+            )
+        })?;
+        let written = ordered
+            .write_to_ini(source, Path::new(destination))
+            .map_err(Failure::usage)?;
+        // `write_to_ini` may have suffixed the destination; the report names
+        // the path it actually wrote, never the request.
+        report.candidates[request.candidate].wrote = Some(written.to_string_lossy().into_owned());
+    }
+    let body = if request.json {
+        serialize(&report)?
+    } else {
+        optimize_text(&report)
+    };
+    // The deny gate belongs to `analyze`, whose report prints the findings it
+    // counts. `optimize` reorders a patch and names no findings, so it exits 0
+    // on success and 2 on failure; `--deny` is rejected by the parser here.
+    Ok(Execution {
+        stdout: ensure_trailing_newline(body),
+        exit: EXIT_OK,
+    })
+}
+
+/// Run `command`, write its streams, and return the process exit code.
+///
+/// The only writer in this module: [`execute`] has already decided the text and
+/// the code, so stream discipline holds by construction — stdout carries only
+/// [`Execution::stdout`], diagnostics go to stderr, and stdout stays empty when
+/// the run fails with [`EXIT_USAGE`].
+pub fn run(command: &Command, settings: &config::Settings) -> i32 {
+    match execute(command, settings) {
+        Ok(execution) => {
+            // A closed pipe cannot be reported on the same stream; the code
+            // still describes the report the run produced.
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(execution.stdout.as_bytes());
+            let _ = stdout.flush();
+            execution.exit
+        }
+        Err(failure) => {
+            eprintln!("{}", failure.message);
+            failure.exit
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_text, is_subcommand, optimize_text, parse, to_json, usage, AnalyzeRequest, Command,
-        OptimizeRequest, OutputTarget, PatchSource,
+        analyze_text, execute, is_subcommand, optimize_text, parse, to_json, usage, AnalyzeRequest,
+        Command, Execution, Failure, OptimizeRequest, OutputTarget, PatchSource, EXIT_FINDINGS,
+        EXIT_OK, EXIT_USAGE,
     };
+    use crate::config::Settings;
     use crate::graph::{clusters_from_patch, Graph, GraphOptions};
     use crate::latency::CostModel;
     use crate::optimize::{generate_candidates, OptimizeScope};
@@ -694,17 +1073,16 @@ mod tests {
         assert!(a.no_plugins);
         assert_eq!(a.deny, Severity::Warning);
 
-        let o = optimize(&[
-            "optimize",
-            "p.ini",
-            "--json",
-            "--no-plugins",
-            "--deny",
-            "warning",
-        ]);
+        let o = optimize(&["optimize", "p.ini", "--json", "--no-plugins"]);
         assert!(o.json);
         assert!(o.no_plugins);
-        assert_eq!(o.deny, Severity::Warning);
+    }
+
+    #[test]
+    fn deny_is_analyze_only() {
+        let message = error(&["optimize", "p.ini", "--deny", "warning"]);
+        assert!(message.contains("--deny"), "message was {message}");
+        assert!(message.contains("analyze"), "message was {message}");
     }
 
     #[test]
@@ -742,7 +1120,6 @@ mod tests {
                 patch: PatchSource::File("p.ini".to_owned()),
                 json: false,
                 no_plugins: false,
-                deny: Severity::Error,
                 strategy: OptimizeScope::MinMax,
                 weight: 0.6,
                 candidate: 2,
@@ -1133,5 +1510,180 @@ mod tests {
             text.lines().any(|line| line.starts_with("baseline: ")),
             "text was {text}"
         );
+    }
+
+    // -- execution --------------------------------------------------------
+
+    /// A real fixture with controllers, cables and sections: the analysis
+    /// path's end-to-end input.
+    const ANALYZE_FIXTURE: &str = "fixtures/own_buttons.ini";
+
+    /// The optimizer's scrambled-chain fixture: five sections in an order the
+    /// banner strategy improves.
+    const OPTIMIZE_FIXTURE: &str = "fixtures/optimizer_latency.ini";
+
+    fn execute_args(request: &[&str]) -> Result<Execution, Failure> {
+        let command = parse(&args(request)).expect("the test argv parses");
+        execute(&command, &Settings::default())
+    }
+
+    fn failure_args(request: &[&str]) -> Failure {
+        execute_args(request).expect_err(&format!("expected a failure for {request:?}"))
+    }
+
+    #[test]
+    fn help_prints_the_usage_block_and_exits_ok() {
+        let execution = execute_args(&["--help"]).expect("help cannot fail");
+        assert_eq!(execution.exit, EXIT_OK);
+        let mut expected = usage().to_owned();
+        expected.push('\n');
+        assert_eq!(execution.stdout, expected);
+    }
+
+    #[test]
+    fn analyze_json_prints_one_document_and_exits_ok() {
+        let execution =
+            execute_args(&["analyze", ANALYZE_FIXTURE, "--json"]).expect("the fixture analyzes");
+        assert_eq!(execution.exit, EXIT_OK);
+        let stdout = execution.stdout;
+        // Exactly one document: it parses in full and is the report object.
+        assert!(stdout.starts_with('{'), "stdout was {stdout}");
+        assert!(stdout.ends_with('\n'), "stdout was {stdout}");
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("stdout is one JSON document");
+        assert!(value.get("report_version").is_some(), "json was {stdout}");
+        assert_eq!(value["patch"]["path"], ANALYZE_FIXTURE);
+    }
+
+    #[test]
+    fn analyze_text_prints_the_master_and_latency_lines() {
+        let execution = execute_args(&["analyze", ANALYZE_FIXTURE]).expect("the fixture analyzes");
+        assert_eq!(execution.exit, EXIT_OK);
+        let text = execution.stdout;
+        assert!(text.contains("master:"), "text was {text}");
+        assert!(text.contains("latency:"), "text was {text}");
+    }
+
+    #[test]
+    fn analyze_of_a_missing_path_is_a_usage_failure() {
+        let failure = failure_args(&["analyze", "fixtures/no-such-patch.ini"]);
+        assert_eq!(failure.exit, EXIT_USAGE);
+        let message = failure.message;
+        assert!(
+            message.contains("fixtures/no-such-patch.ini"),
+            "message was {message}"
+        );
+    }
+
+    #[test]
+    fn analyze_of_a_non_patch_carries_the_parse_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("not_a_patch.ini");
+        std::fs::write(&path, "not a patch").expect("write the fake patch");
+        let given = path.to_str().expect("utf-8 temp path");
+        let failure = failure_args(&["analyze", given]);
+        assert_eq!(failure.exit, EXIT_USAGE);
+        let message = failure.message;
+        assert!(message.contains(given), "message was {message}");
+        assert!(
+            message.contains("No circuit sections"),
+            "the actual parse error must survive: {message}"
+        );
+    }
+
+    #[test]
+    fn analyze_reports_an_error_finding_and_exits_findings() {
+        let execution =
+            execute_args(&["analyze", "fixtures/validation/unknown_param.ini", "--json"])
+                .expect("a patch with findings still reports");
+        assert_eq!(execution.exit, EXIT_FINDINGS);
+        let stdout = execution.stdout;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("stdout is one JSON document");
+        let findings = value["validation"]
+            .as_array()
+            .expect("the report carries a validation list");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding["severity"] == "error"
+                    && finding["code"] == "unknown_param"),
+            "json was {stdout}"
+        );
+    }
+
+    #[test]
+    fn optimize_text_prints_the_baseline_and_the_first_candidate() {
+        let execution =
+            execute_args(&["optimize", OPTIMIZE_FIXTURE]).expect("the fixture optimizes");
+        assert_eq!(execution.exit, EXIT_OK);
+        let text = execution.stdout;
+        assert!(text.contains("baseline:"), "text was {text}");
+        assert!(text.contains("[0]"), "text was {text}");
+    }
+
+    #[test]
+    fn optimize_with_an_out_of_range_candidate_is_a_usage_failure() {
+        let failure = failure_args(&["optimize", OPTIMIZE_FIXTURE, "--candidate", "99"]);
+        assert_eq!(failure.exit, EXIT_USAGE);
+        let message = failure.message;
+        assert!(message.contains("99"), "message was {message}");
+        assert!(
+            message.contains("candidate(s) available"),
+            "the count must be named: {message}"
+        );
+    }
+
+    #[test]
+    fn optimize_stdout_reparses_with_the_source_section_count() {
+        let source = Patch::from_ini_file(std::path::Path::new(OPTIMIZE_FIXTURE))
+            .expect("the fixture parses");
+        let execution = execute_args(&["optimize", OPTIMIZE_FIXTURE, "--stdout"])
+            .expect("the fixture optimizes");
+        assert_eq!(execution.exit, EXIT_OK);
+        let stdout = execution.stdout;
+        let emitted = Patch::from_ini_str(&stdout, String::from("emitted"))
+            .expect("the emitted text re-parses");
+        assert_eq!(emitted.sections.len(), source.sections.len());
+        assert!(
+            !stdout.contains("baseline:"),
+            "a report leaked onto the patch stream"
+        );
+    }
+
+    #[test]
+    fn optimize_write_saves_the_candidate_and_reports_the_path_written() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("out.ini");
+        let given = destination.to_str().expect("utf-8 temp path");
+        let execution = execute_args(&["optimize", OPTIMIZE_FIXTURE, "--json", "--write", given])
+            .expect("the fixture optimizes");
+        assert_eq!(execution.exit, EXIT_OK);
+        let stdout = execution.stdout;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("stdout is one JSON document");
+        let wrote = value["candidates"][0]["wrote"]
+            .as_str()
+            .expect("the report names the file it wrote");
+        let written = std::path::PathBuf::from(wrote);
+        assert!(
+            written.exists(),
+            "the report named {wrote}, which does not exist"
+        );
+        let text = std::fs::read_to_string(&written).expect("the written patch reads back");
+        let reparsed = Patch::from_ini_str(&text, String::from("written"))
+            .expect("the written patch re-parses");
+        let source = Patch::from_ini_file(std::path::Path::new(OPTIMIZE_FIXTURE))
+            .expect("the fixture parses");
+        assert_eq!(reparsed.sections.len(), source.sections.len());
+    }
+
+    #[test]
+    fn optimize_stdout_and_json_together_are_a_usage_failure() {
+        let failure = failure_args(&["optimize", OPTIMIZE_FIXTURE, "--stdout", "--json"]);
+        assert_eq!(failure.exit, EXIT_USAGE);
+        let message = failure.message;
+        assert!(message.contains("--stdout"), "message was {message}");
+        assert!(message.contains("--json"), "message was {message}");
     }
 }
