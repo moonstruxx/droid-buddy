@@ -1,10 +1,16 @@
-//! Pure argv grammar for the headless command surface (design D1, D3, D4, D8).
+//! Pure argv grammar and renderers for the headless command surface
+//! (design D1, D3, D4, D8).
 //!
 //! [`parse`] turns a process argv tail into a [`Command`] without doing any
 //! IO: no file is opened, nothing is printed, and the process never exits. The
 //! executor that reads the patch, runs the analysis and picks an exit code
 //! lives elsewhere and consumes this module's output plus the `EXIT_*`
 //! constants.
+//!
+//! The renderers continue that rule: `analyze_text` and `optimize_text` turn a
+//! report into the short human summary, and `to_json` into the JSON contract
+//! (design D3). Both return a `String` the executor writes; nothing here
+//! touches stdout, and neither form carries a trailing newline.
 //!
 //! # Grammar
 //!
@@ -29,6 +35,7 @@
 //! apart from the returned [`UsageError`].
 
 use crate::optimize::OptimizeScope;
+use crate::report::{AnalyzeReport, OptimizeReport, PatchSummary};
 use crate::validation::Severity;
 
 /// The command completed and no finding reached the deny threshold (design D4).
@@ -374,13 +381,194 @@ fn require_optimize(mode: Mode, option: &str) -> Result<(), UsageError> {
     }
 }
 
+/// How many of the reported worst edges the human summary prints.
+///
+/// The report keeps up to `report::WORST_EDGE_LIMIT`; the summary is prose for a
+/// terminal, so it shows only the slowest few.
+const WORST_EDGE_LINES: usize = 3;
+
+/// The one-line patch heading both summaries start with: name and counts.
+fn patch_heading(patch: &PatchSummary) -> String {
+    let name = &patch.name;
+    let (sections, circuits) = (patch.sections, patch.circuits);
+    let (cables, hw_tokens) = (patch.cables, patch.hw_tokens);
+    format!(
+        "{name} · {sections} sections · {circuits} circuits · {cables} cables · {hw_tokens} hw tokens"
+    )
+}
+
+/// Render the human summary of an `analyze` run.
+///
+/// Compact, deterministic, no ANSI and no trailing newline: the caller writes
+/// the string and owns the line ending. Every number is printed with `{:.4}`,
+/// matching the rounding the report already applied, so the text and the JSON
+/// document agree.
+#[must_use]
+pub fn analyze_text(report: &AnalyzeReport) -> String {
+    let mut lines = vec![patch_heading(&report.patch)];
+
+    let master = &report.master;
+    let mut master_line = format!(
+        "master: {model} ({source})",
+        model = master.model,
+        source = master.source
+    );
+    if !master.satisfiable {
+        master_line.push_str(" unsatisfiable");
+    }
+    lines.push(master_line);
+
+    let ram = &report.ram;
+    lines.push(format!(
+        "ram: {used}/{budget} bytes ({model})",
+        used = ram.used,
+        budget = ram.budget,
+        model = ram.model
+    ));
+
+    let latency = &report.latency;
+    if latency.worst.is_empty() {
+        lines.push(String::from("latency: none"));
+    } else {
+        lines.push(format!(
+            "latency: avg {avg:.4} · max {max:.4} · {back_edges} back edges",
+            avg = latency.avg,
+            max = latency.max,
+            back_edges = latency.back_edges
+        ));
+        for edge in latency.worst.iter().take(WORST_EDGE_LINES) {
+            lines.push(format!(
+                "  worst: {cable}  {source} → {sink}  {latency:.4}",
+                cable = edge.cable,
+                source = edge.source,
+                sink = edge.sink,
+                latency = edge.latency
+            ));
+        }
+    }
+
+    let schema = &report.schema;
+    let mut schema_line = format!(
+        "schema: {circuits} circuits ({source}",
+        circuits = schema.circuits,
+        source = schema.source
+    );
+    if !schema.plugins.is_empty() {
+        let plugins = schema.plugins.join(", ");
+        schema_line.push_str(", plugins: ");
+        schema_line.push_str(&plugins);
+    }
+    schema_line.push(')');
+    lines.push(schema_line);
+
+    let mut errors = 0_usize;
+    let mut warnings = 0_usize;
+    let mut hints = 0_usize;
+    for finding in &report.validation {
+        match finding.severity.as_str() {
+            "error" => errors += 1,
+            "warning" => warnings += 1,
+            "hint" => hints += 1,
+            _ => {}
+        }
+    }
+    lines.push(format!(
+        "validation: {errors} error(s), {warnings} warning(s), {hints} hint(s)"
+    ));
+    for finding in &report.validation {
+        lines.push(format!(
+            "  {line}:{col}  {severity}  {code}  {message}",
+            line = finding.line,
+            col = finding.col_start,
+            severity = finding.severity,
+            code = finding.code,
+            message = finding.message
+        ));
+    }
+
+    lines.push(format!("topology: {} finding(s)", report.topology.len()));
+    for finding in &report.topology {
+        lines.push(format!(
+            "  {cable}  {severity}  {message}",
+            cable = finding.cable,
+            severity = finding.severity,
+            message = finding.message
+        ));
+    }
+
+    lines.push(format!("groups: {}", report.groups.len()));
+    for group in &report.groups {
+        lines.push(format!(
+            "  {title}  [{start}..{end})",
+            title = group.title,
+            start = group.start,
+            end = group.end
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Render the human summary of an `optimize` run.
+///
+/// One line for the baseline the candidates share and one line per candidate,
+/// best first and indexed as `--candidate` indexes them. Signed deltas use
+/// `{:+.4}`, so a negative number is an improvement. No trailing newline.
+#[must_use]
+pub fn optimize_text(report: &OptimizeReport) -> String {
+    let mut lines = vec![patch_heading(&report.patch)];
+
+    let baseline = &report.baseline;
+    lines.push(format!(
+        "baseline: avg {avg:.4} · max {max:.4} · {back_edges} back edges",
+        avg = baseline.avg,
+        max = baseline.max,
+        back_edges = baseline.back_edges
+    ));
+
+    if report.candidates.is_empty() {
+        lines.push(String::from("candidates: none"));
+    }
+    for (index, candidate) in report.candidates.iter().enumerate() {
+        let label = &candidate.label;
+        let (before_avg, after_avg) = (candidate.before.avg, candidate.after.avg);
+        let (before_max, after_max) = (candidate.before.max, candidate.after.max);
+        let (delta_avg, delta_max) = (candidate.delta_avg, candidate.delta_max);
+        let mut line = format!(
+            "[{index}] {label}  avg {before_avg:.4} → {after_avg:.4} ({delta_avg:+.4})  \
+             max {before_max:.4} → {after_max:.4} ({delta_max:+.4})"
+        );
+        if let Some(path) = &candidate.wrote {
+            line.push_str("  wrote: ");
+            line.push_str(path);
+        }
+        lines.push(line);
+    }
+
+    lines.join("\n")
+}
+
+/// Serialize `value` as one pretty-printed JSON document.
+///
+/// The returned string starts with `{` and carries no trailing newline, so a
+/// caller that writes it plus `\n` emits exactly one document. Errors are only
+/// a serializer's own failures, which a report never produces.
+pub fn to_json<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        is_subcommand, parse, usage, AnalyzeRequest, Command, OptimizeRequest, OutputTarget,
-        PatchSource,
+        analyze_text, is_subcommand, optimize_text, parse, to_json, usage, AnalyzeRequest, Command,
+        OptimizeRequest, OutputTarget, PatchSource,
     };
-    use crate::optimize::OptimizeScope;
+    use crate::graph::{clusters_from_patch, Graph, GraphOptions};
+    use crate::latency::CostModel;
+    use crate::optimize::{generate_candidates, OptimizeScope};
+    use crate::patch::Patch;
+    use crate::report::{analyze_report, optimize_report, AnalyzeReport};
+    use crate::schema::load_schema;
     use crate::validation::Severity;
 
     fn args(list: &[&str]) -> Vec<String> {
@@ -722,5 +910,228 @@ mod tests {
         // Help is not an error, so it must not consume the usage trailer.
         assert!(usage().contains("optimize"));
         assert!(usage().contains("--deny"));
+    }
+
+    // -- analyze text renderer --------------------------------------------
+
+    /// The all-forward cable chain of `fixtures/graph_latency_chain.ini`,
+    /// inlined so the renderer tests need no filesystem.
+    fn analyze_fixture() -> AnalyzeReport {
+        let ini = concat!(
+            "[clocktool]\n    output = _CLK\n",
+            "[copy]\n    input = _CLK\n    output = _AUD\n",
+            "[mixer]\n    input = _AUD\n    output = _MIX\n",
+            "[contour]\n    gate = _MIX\n",
+            "[p2b8]\n",
+        );
+        report_for(ini, "graph_latency_chain.ini")
+    }
+
+    /// Analyze `ini` exactly as the executor would: parse, build the graph,
+    /// project the report.
+    fn report_for(ini: &str, name: &str) -> AnalyzeReport {
+        let patch = Patch::from_ini_str(ini, String::from(name)).expect("fixture parses");
+        let graph = Graph::build_from_patch(
+            &patch,
+            &clusters_from_patch(&patch),
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
+        analyze_report(&patch, load_schema(), &graph, name, ini.len() as u64, &[])
+    }
+
+    #[test]
+    fn analyze_text_prints_the_header_and_verdict_lines() {
+        let report = analyze_fixture();
+        let text = analyze_text(&report);
+        let lines: Vec<&str> = text.lines().collect();
+
+        // Header: patch name, then the four counts, in that order.
+        let header = lines[0];
+        assert_eq!(
+            header,
+            format!(
+                "{} · {} sections · {} circuits · {} cables · {} hw tokens",
+                report.patch.name,
+                report.patch.sections,
+                report.patch.circuits,
+                report.patch.cables,
+                report.patch.hw_tokens
+            )
+        );
+        assert_eq!(
+            (report.patch.sections, report.patch.cables),
+            (5, 3),
+            "header was {header}"
+        );
+
+        // Master verdict with its provenance, RAM against the budget, latency.
+        assert_eq!(
+            lines[1],
+            format!("master: {} ({})", report.master.model, report.master.source)
+        );
+        assert_eq!(
+            lines[2],
+            format!(
+                "ram: {}/{} bytes ({})",
+                report.ram.used, report.ram.budget, report.ram.model
+            )
+        );
+        let latency = &report.latency;
+        assert_eq!(
+            lines[3],
+            format!(
+                "latency: avg {:.4} · max {:.4} · {} back edges",
+                latency.avg, latency.max, latency.back_edges
+            )
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("  worst: ")),
+            "text was {text}"
+        );
+
+        // Schema provenance, severity tally and the remaining tallies.
+        assert!(text.contains(&format!(
+            "schema: {} circuits (embedded)",
+            report.schema.circuits
+        )));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("validation: ") && line.contains("error(s)")),
+            "text was {text}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("topology: ")),
+            "text was {text}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("groups: ")),
+            "text was {text}"
+        );
+        // No ANSI and no trailing newline: the caller owns the line ending.
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.ends_with('\n'));
+    }
+
+    #[test]
+    fn analyze_text_names_an_error_finding_with_line_and_column() {
+        let report = report_for("[copy]\ninput = I1\nnotaparam = 5\n", "bad.ini");
+        let finding = report
+            .validation
+            .iter()
+            .find(|finding| finding.code == "unknown_param")
+            .expect("the fixture must produce an unknown_param finding");
+        assert_eq!(finding.severity, "error");
+
+        let text = analyze_text(&report);
+        let expected = format!(
+            "  {}:{}  error  unknown_param  {}",
+            finding.line, finding.col_start, finding.message
+        );
+        assert!(text.contains(&expected), "text was {text}");
+        // The tally counts the severity, it does not just print a placeholder.
+        assert!(text.contains("1 error(s)"), "text was {text}");
+    }
+
+    #[test]
+    fn analyze_text_says_none_when_the_patch_has_no_cables() {
+        let report = report_for("[copy]\ninput = I1\n", "one.ini");
+        assert_eq!(report.patch.cables, 0);
+
+        let text = analyze_text(&report);
+        assert!(
+            text.lines().any(|line| line == "latency: none"),
+            "text was {text}"
+        );
+        assert!(!text.contains("  worst: "), "text was {text}");
+    }
+
+    // -- JSON serializer --------------------------------------------------
+
+    #[test]
+    fn to_json_round_trips_one_document() {
+        let report = analyze_fixture();
+        let json = to_json(&report).expect("a report serializes");
+
+        // One pretty-printed document and no trailing newline.
+        assert!(json.starts_with('{'), "json was {json}");
+        assert!(json.trim_end().ends_with('}'));
+        assert!(!json.ends_with('\n'));
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json round-trips");
+        let object = value.as_object().expect("the document is an object");
+        for key in ["report_version", "master", "latency", "validation"] {
+            assert!(object.contains_key(key), "missing `{key}` in {json}");
+        }
+    }
+
+    // -- optimize text renderer -------------------------------------------
+
+    /// A reorderable four-section chain (as in `report`'s tests): file order
+    /// d, b, a, c wired a→c→b→d.
+    fn optimize_fixture() -> Patch {
+        let ini = concat!(
+            "[d]\nbutton = B1.1\nin = _BD\n",
+            "[b]\noutput = _BD\nin = _CB\n",
+            "[a]\noutput = _AC\n",
+            "[c]\noutput = _CB\nin = _AC\n",
+        );
+        Patch::from_ini_str(ini, String::from("chain.ini")).expect("fixture parses")
+    }
+
+    #[test]
+    fn optimize_text_prints_the_baseline_and_every_candidate_index() {
+        let patch = optimize_fixture();
+        let candidates = generate_candidates(&patch, &CostModel::default(), OptimizeScope::Banner);
+        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 0);
+        assert!(
+            !report.candidates.is_empty(),
+            "the reorderable fixture must yield a candidate"
+        );
+
+        let text = optimize_text(&report);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            format!(
+                "chain.ini · {} sections · {} circuits · {} cables · {} hw tokens",
+                report.patch.sections,
+                report.patch.circuits,
+                report.patch.cables,
+                report.patch.hw_tokens
+            )
+        );
+        let baseline = &report.baseline;
+        assert_eq!(
+            lines[1],
+            format!(
+                "baseline: avg {:.4} · max {:.4} · {} back edges",
+                baseline.avg, baseline.max, baseline.back_edges
+            )
+        );
+        for (index, candidate) in report.candidates.iter().enumerate() {
+            assert!(
+                text.contains(&format!("[{index}] {}", candidate.label)),
+                "missing candidate {index} in {text}"
+            );
+        }
+        assert!(!text.contains("candidates: none"), "text was {text}");
+    }
+
+    #[test]
+    fn optimize_text_says_none_without_candidates() {
+        let patch = optimize_fixture();
+        let report = optimize_report(&patch, load_schema(), &[], "chain.ini", 0);
+
+        let text = optimize_text(&report);
+        assert!(
+            text.lines().any(|line| line == "candidates: none"),
+            "text was {text}"
+        );
+        assert!(
+            text.lines().any(|line| line.starts_with("baseline: ")),
+            "text was {text}"
+        );
     }
 }
