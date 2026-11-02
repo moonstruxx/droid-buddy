@@ -26,4 +26,4 @@
 ## 5. Documentation and gates
 
 - [x] 5.1 Document the inventory in `docs/config.md` (`modules` on `[[physical.rack.rows]]`, the module-key vocabulary, the master alias, unknown-entry warning, precedence against `assign`) and the rack-first view in `docs/views.md` (what an inventoried rack shows, what stays dim, the no-patch rack); verify by reading the rendered pages. <!-- agent: devops-engineer.fast, depends_on: [2.2], touches: [docs/config.md, docs/views.md] -->
-- [ ] 5.2 Run the gate at CI parity — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`, the release perf gate and the headless `--self-test` — and confirm every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [3.2, 4.3, 5.1], touches: [] -->
+- [x] 5.2 Run the gate at CI parity — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, `cargo build --release --locked`, the release perf gate and the headless `--self-test` — and confirm every command exits 0. <!-- agent: horst-engineer.fast, depends_on: [3.2, 4.3, 5.1], touches: [] -->
