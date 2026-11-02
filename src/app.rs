@@ -2487,7 +2487,9 @@ impl App {
         &self,
     ) -> Option<(crate::physical::PhysicalLayout, crate::physical::RackLayout)> {
         let patch = self.patch.as_ref()?;
-        let chain = crate::physical::PhysicalLayout::build(patch, self.master_model());
+        let inventory = self.physical_rack_spec.module_keys();
+        let chain =
+            crate::physical::PhysicalLayout::build(Some(patch), self.master_model(), &inventory);
         let spec = if self.physical_rack_spec.rows.is_empty() {
             crate::physical::RackSpec::default_case(&chain)
         } else {

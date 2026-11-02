@@ -290,7 +290,8 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     let patch = app.patch.as_ref()?;
     // The resolved master model, never a guess: `App::master_model` is the same
     // accessor `App::physical_chain_and_rack` reads (design D3/D7).
-    let chain = PhysicalLayout::build(patch, app.master_model());
+    let inventory = app.physical_rack_spec.module_keys();
+    let chain = PhysicalLayout::build(Some(patch), app.master_model(), &inventory);
     let rack_spec = if app.physical_rack_spec.rows.is_empty() {
         RackSpec::default_case(&chain)
     } else {
@@ -2236,6 +2237,7 @@ mod tests {
             he_mm: std::collections::HashMap::new(),
             fallback_width_mm: 0.0,
             fallback_height_mm: 0.0,
+            inventory_driven: false,
         };
         let rack = RackLayout {
             rows: vec![RackRowPlacement {
@@ -2352,6 +2354,7 @@ mod tests {
             he_mm: std::collections::HashMap::new(),
             fallback_width_mm: 0.0,
             fallback_height_mm: 0.0,
+            inventory_driven: false,
         };
         let rack = RackLayout {
             rows: vec![RackRowPlacement {
@@ -2507,7 +2510,8 @@ mod tests {
         // cells resolves to the first module's components.
         let app = app_with_patch("fixtures/multi_module_p2b8.ini");
         let patch = app.patch.as_ref().unwrap();
-        let chain = PhysicalLayout::build(patch, app.master_model());
+        let inventory = app.physical_rack_spec.module_keys();
+        let chain = PhysicalLayout::build(Some(patch), app.master_model(), &inventory);
         let rack_spec = if app.physical_rack_spec.rows.is_empty() {
             RackSpec::default_case(&chain)
         } else {
