@@ -767,10 +767,18 @@ impl Patch {
         Ok(target)
     }
 
-    /// Reconstruct the full `.ini` text from `raw_lines` in the current section
-    /// order: preamble first, then each section's block, joined with the
-    /// source's line ending and re-appended trailing terminator.
-    pub(crate) fn render_ini(&self) -> Result<String, String> {
+    /// Reconstruct the whole `.ini` text from `raw_lines` in the *current*
+    /// section order: the preamble first, then each section's block together
+    /// with its comment/banner run, joined with the source's line ending and
+    /// re-appended trailing terminator when the source had one.
+    ///
+    /// The rendering is lossless for an unmodified patch, so a binary crate can
+    /// round-trip a file it parsed without disturbing formatting.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when a section header line lies outside `raw_lines`.
+    pub fn render_ini(&self) -> Result<String, String> {
         // Defensive: a deserialized `Patch` could carry header spans outside
         // `raw_lines`; refuse instead of indexing out of bounds.
         if let Some(bad) = self

@@ -13,7 +13,8 @@
 use serde::Serialize;
 
 use crate::graph::{Graph, GraphEdge, NodeId, TopologySeverity};
-use crate::latency::EdgeLatency;
+use crate::latency::{EdgeLatency, LatencySummary};
+use crate::optimize::CandidateOrdering;
 use crate::patch::Patch;
 use crate::rack::{self, MasterSource};
 use crate::schema::Schema;
@@ -171,7 +172,7 @@ pub struct LatencyReport {
     pub max: f32,
     /// Number of edges that wrap the loop boundary.
     pub back_edges: usize,
-    /// Slowest edges, worst first, at most [`WORST_EDGE_LIMIT`] entries.
+    /// Slowest edges, worst first, at most `WORST_EDGE_LIMIT` entries.
     pub worst: Vec<WorstEdge>,
 }
 
@@ -204,6 +205,127 @@ pub struct GroupSummary {
     pub end: usize,
 }
 
+/// The complete `optimize` payload: the optimizer's candidates with their
+/// measured latency before and after, and the permutation each one applies.
+///
+/// Field order is the serializer's output order. Consumed by the `cli`
+/// serializer (`optimize --json`), the human text renderer and `tests/cli.rs`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OptimizeReport {
+    /// Report contract version; see [`REPORT_VERSION`].
+    pub report_version: u32,
+    /// Producer identity, so a stored report names the binary that wrote it.
+    pub tool: ToolInfo,
+    /// What was optimized and how big it is.
+    pub patch: PatchSummary,
+    /// Latency of the original file order; the `before` every candidate shares.
+    pub baseline: LatencySummaryReport,
+    /// Candidate orderings, best first (the optimizer's own order).
+    pub candidates: Vec<CandidateReport>,
+}
+
+/// One candidate ordering with its measured effect.
+///
+/// Consumed by the `cli` serializer and `tests/cli.rs`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CandidateReport {
+    /// Human-readable strategy label, e.g. `"banner (default)"`.
+    pub label: String,
+    /// Latency of the original file order.
+    pub before: LatencySummaryReport,
+    /// Latency of the reordered file.
+    pub after: LatencySummaryReport,
+    /// `after.avg − before.avg`, rounded to four decimals.
+    pub delta_avg: f32,
+    /// `after.max − before.max`, rounded to four decimals.
+    pub delta_max: f32,
+    /// Permutation of section indices: `order[i]` is the section at file
+    /// position `i` in the candidate.
+    pub order: Vec<usize>,
+    /// File the CLI saved this candidate to via `--write`, or `None` when it
+    /// was not written. Always `None` from [`optimize_report`].
+    pub wrote: Option<String>,
+}
+
+/// Compact latency summary for a candidate (no per-edge list).
+///
+/// Consumed by the `cli` serializer and `tests/cli.rs`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LatencySummaryReport {
+    /// Mean latency over all edges, rounded to four decimals.
+    pub avg: f32,
+    /// Largest edge latency, rounded to four decimals.
+    pub max: f32,
+    /// Number of edges that wrap the loop boundary.
+    pub back_edges: usize,
+}
+
+/// Build the optimization report for one patch and its already-generated
+/// candidates.
+///
+/// The caller owns candidate generation (and with it the strategy and search
+/// weight): this function neither runs the optimizer nor measures latency, it
+/// only projects the measured [`CandidateOrdering`]s into the report contract.
+/// `schema` is the same schema the caller fed the optimizer and the graph build,
+/// so the circuit count in [`PatchSummary`] cannot disagree with the analysis
+/// report of the same patch.
+///
+/// `path` is the label the CLI wants to show (`<stdin>` for standard input) and
+/// `bytes` the source size. Every reported float is rounded through `round4`,
+/// and the deltas are computed from the rounded `before`/`after` values, so the
+/// printed numbers satisfy `after − before == delta` consistently.
+///
+/// Pure and deterministic. Consumers: the `cli` module's `optimize` dispatch and
+/// the unit tests below.
+pub fn optimize_report(
+    patch: &Patch,
+    schema: &Schema,
+    candidates: &[CandidateOrdering],
+    path: &str,
+    bytes: u64,
+) -> OptimizeReport {
+    // Invariant: every candidate of one patch carries the same `before` (the
+    // original file order's summary), so the first candidate's value is the
+    // baseline. Documented rather than asserted: a caller that violates it gets
+    // a report labelled with the first candidate's baseline, never a panic.
+    let baseline = candidates.first().map_or(
+        LatencySummaryReport {
+            avg: 0.0,
+            max: 0.0,
+            back_edges: 0,
+        },
+        |candidate| latency_summary_report(&candidate.before),
+    );
+
+    OptimizeReport {
+        report_version: REPORT_VERSION,
+        tool: ToolInfo {
+            name: env!("CARGO_PKG_NAME").to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        patch: patch_summary(patch, schema, path, bytes),
+        baseline,
+        candidates: candidates
+            .iter()
+            .map(|candidate| {
+                let before = latency_summary_report(&candidate.before);
+                let after = latency_summary_report(&candidate.after);
+                CandidateReport {
+                    label: candidate.label.clone(),
+                    // Deltas come from the rounded values, not the raw
+                    // summaries, so `after − before` always reproduces them.
+                    delta_avg: round4(after.avg - before.avg),
+                    delta_max: round4(after.max - before.max),
+                    before,
+                    after,
+                    order: candidate.order.clone(),
+                    wrote: None,
+                }
+            })
+            .collect(),
+    }
+}
+
 /// Build the analysis report for one patch.
 ///
 /// `graph` is the caller's already-built signal-flow graph, so this function
@@ -230,19 +352,7 @@ pub fn analyze_report(
             name: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        patch: PatchSummary {
-            path: path.to_string(),
-            name: patch.name.clone(),
-            bytes,
-            sections: patch.sections.len(),
-            circuits: patch
-                .sections
-                .iter()
-                .filter(|section| schema.circuits.contains_key(&section.name.to_lowercase()))
-                .count(),
-            cables: patch.cable_index.len(),
-            hw_tokens: patch.hw_components.len(),
-        },
+        patch: patch_summary(patch, schema, path, bytes),
         schema: SchemaSummary {
             circuits: schema.circuits.len(),
             source: if plugins.is_empty() {
@@ -361,6 +471,33 @@ fn format_node(id: &NodeId) -> String {
     }
 }
 
+/// The shared patch projection used by every report: path, loader name, byte
+/// size and the counts both builders report.
+fn patch_summary(patch: &Patch, schema: &Schema, path: &str, bytes: u64) -> PatchSummary {
+    PatchSummary {
+        path: path.to_string(),
+        name: patch.name.clone(),
+        bytes,
+        sections: patch.sections.len(),
+        circuits: patch
+            .sections
+            .iter()
+            .filter(|section| schema.circuits.contains_key(&section.name.to_lowercase()))
+            .count(),
+        cables: patch.cable_index.len(),
+        hw_tokens: patch.hw_components.len(),
+    }
+}
+
+/// Project a measured [`LatencySummary`] onto the report's rounded shape.
+fn latency_summary_report(summary: &LatencySummary) -> LatencySummaryReport {
+    LatencySummaryReport {
+        avg: round4(summary.avg),
+        max: round4(summary.max),
+        back_edges: summary.back_edge_count,
+    }
+}
+
 /// RAM footprint: sum `ramsize` over sections that resolve to a circuit or a
 /// controller, mirroring the rule in [`validation::validate_patch`].
 fn ram_used(patch: &Patch, schema: &Schema) -> u32 {
@@ -410,8 +547,9 @@ fn round4(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{GraphNode, GraphOptions, NodeKind};
+    use crate::graph::{clusters_from_patch, GraphNode, GraphOptions, NodeKind};
     use crate::latency::{CostModel, LatencyData, LatencySummary};
+    use crate::optimize::{generate_candidates, OptimizeScope};
     use crate::schema::load_schema;
 
     /// A hand-built patch with no sections, cables or hardware tokens. `sample()`
@@ -733,5 +871,181 @@ mod tests {
         );
 
         assert_eq!(report.latency.worst.len(), 0);
+    }
+
+    /// A reorderable four-section chain: file order d, b, a, c wired
+    /// a→c→b→d. The optimizer's unique optimum is the chain order
+    /// `[2, 3, 0, 1]`; no banners, so the whole file is one search domain.
+    fn chain_patch() -> Patch {
+        Patch::from_ini_str(
+            "[d]\n\
+             button = B1.1\n\
+             in = _BD\n\
+             [b]\n\
+             output = _BD\n\
+             in = _CB\n\
+             [a]\n\
+             output = _AC\n\
+             [c]\n\
+             output = _CB\n\
+             in = _AC\n",
+            String::from("chain.ini"),
+        )
+        .expect("fixture parses")
+    }
+
+    fn identity_order(len: usize) -> Vec<usize> {
+        (0..len).collect()
+    }
+
+    /// Latency summary of `patch` exactly as the graph build measures it.
+    fn measured_summary(patch: &Patch) -> LatencySummary {
+        let graph = Graph::build_from_patch(
+            patch,
+            &clusters_from_patch(patch),
+            &CostModel::default(),
+            &GraphOptions::default(),
+        );
+        graph.latency.expect("fixture has cables").summary
+    }
+
+    #[test]
+    fn optimize_report_projects_candidates_and_permutations() {
+        let patch = chain_patch();
+        let cost = CostModel::default();
+        let candidates = generate_candidates(&patch, &cost, OptimizeScope::Banner);
+        assert!(
+            !candidates.is_empty(),
+            "the reorderable fixture must yield a candidate"
+        );
+
+        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 123);
+
+        assert_eq!(report.report_version, REPORT_VERSION);
+        assert_eq!(report.tool.name, env!("CARGO_PKG_NAME"));
+        assert_eq!(report.patch.path, "chain.ini");
+        assert_eq!(report.patch.name, "chain.ini");
+        assert_eq!(report.patch.bytes, 123);
+        assert_eq!(report.patch.sections, patch.sections.len());
+        assert_eq!(report.patch.cables, patch.cable_index.len());
+        assert_eq!(report.candidates.len(), candidates.len());
+
+        // The baseline is the first candidate's `before`, and that is the
+        // measured latency of the original file order.
+        let measured_before = measured_summary(&patch);
+        assert_eq!(report.baseline, report.candidates[0].before);
+        assert_eq!(report.baseline.avg, round4(measured_before.avg));
+        assert_eq!(report.baseline.max, round4(measured_before.max));
+        assert_eq!(report.baseline.back_edges, measured_before.back_edge_count);
+
+        for (candidate, raw) in report.candidates.iter().zip(&candidates) {
+            assert_eq!(candidate.label, raw.label);
+            assert_eq!(candidate.order, raw.order);
+            assert!(candidate.wrote.is_none());
+            // `order` is a permutation of every section index.
+            let mut sorted = candidate.order.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, identity_order(patch.sections.len()));
+            assert_eq!(candidate.before, report.baseline);
+        }
+
+        // At least one candidate actually reorders this fixture, and it is an
+        // improvement over the baseline.
+        let reordered = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.order != identity_order(patch.sections.len()))
+            .expect("a reorderable fixture yields a reordering candidate");
+        assert!(reordered.delta_avg < 0.0);
+    }
+
+    #[test]
+    fn optimize_report_after_matches_measured_latency_of_the_permutation() {
+        let patch = chain_patch();
+        // One implicit banner group over the whole file: reordering sections
+        // cannot invalidate a group range.
+        assert_eq!(patch.banner_groups.len(), 1);
+        assert_eq!(
+            patch.banner_groups[0].section_range,
+            0..patch.sections.len()
+        );
+        let cost = CostModel::default();
+        let candidates = generate_candidates(&patch, &cost, OptimizeScope::MinMax);
+        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 0);
+
+        for candidate in &report.candidates {
+            let mut reordered = patch.clone();
+            reordered.sections = candidate
+                .order
+                .iter()
+                .map(|&index| patch.sections[index].clone())
+                .collect();
+            let measured = measured_summary(&reordered);
+            assert_eq!(
+                candidate.after.avg,
+                round4(measured.avg),
+                "avg of {:?}",
+                candidate.label
+            );
+            assert_eq!(
+                candidate.after.max,
+                round4(measured.max),
+                "max of {:?}",
+                candidate.label
+            );
+            assert_eq!(
+                candidate.after.back_edges, measured.back_edge_count,
+                "back edges of {:?}",
+                candidate.label
+            );
+        }
+    }
+
+    #[test]
+    fn optimize_report_deltas_come_from_rounded_summaries() {
+        let patch = chain_patch();
+        let cost = CostModel::default();
+        let candidates = generate_candidates(&patch, &cost, OptimizeScope::Banner);
+        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 0);
+
+        for (candidate, raw) in report.candidates.iter().zip(&candidates) {
+            // The reported delta is exactly the difference of the reported
+            // (already rounded) before/after values.
+            assert_eq!(
+                candidate.delta_avg,
+                round4(candidate.after.avg - candidate.before.avg)
+            );
+            assert_eq!(
+                candidate.delta_max,
+                round4(candidate.after.max - candidate.before.max)
+            );
+            // ... and agrees with the raw measurements to four decimals.
+            assert_eq!(
+                (candidate.delta_avg * 10_000.0).round() as i64,
+                ((raw.after.avg - raw.before.avg) * 10_000.0).round() as i64
+            );
+            assert_eq!(
+                (candidate.delta_max * 10_000.0).round() as i64,
+                ((raw.after.max - raw.before.max) * 10_000.0).round() as i64
+            );
+        }
+    }
+
+    #[test]
+    fn optimize_report_without_candidates_zeroes_the_baseline() {
+        let patch = chain_patch();
+        let report = optimize_report(&patch, load_schema(), &[], "<stdin>", 0);
+
+        assert_eq!(
+            report.baseline,
+            LatencySummaryReport {
+                avg: 0.0,
+                max: 0.0,
+                back_edges: 0,
+            }
+        );
+        assert!(report.candidates.is_empty());
+        assert_eq!(report.patch.path, "<stdin>");
+        assert_eq!(report.patch.sections, patch.sections.len());
     }
 }
