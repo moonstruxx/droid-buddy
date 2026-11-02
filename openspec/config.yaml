@@ -11,7 +11,9 @@ context: |
   The main band is a class-based pane layout (src/panes.rs: PaneClass Big/Small, PaneLayout; App.layout is
   the source of truth). The module UI (ViewType::Physical) is the app's only hardware surface - the Panels
   view is retired.
-  The app is a patch viewer/simulator, NOT a hardware bridge (no MIDI, no network).
+  The app is a patch viewer/simulator with a one-way hardware bridge: after an explicit `U` confirmation it
+  uploads the in-memory patch to DROID hardware as MIDI SysEx over USB or DIN (via `amidi`/`sendmidi`) and
+  reads nothing back. There is no network access.
 
   Semantic anchors (repo-wide principles; every change must honor them):
   - YAGNI: every type, variant, derive, and trait has a current consumer or it gets deleted. No speculative

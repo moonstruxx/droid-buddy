@@ -89,6 +89,20 @@ pub struct Cluster {
     pub section_range: Range<usize>,
 }
 
+/// The one mapping from a patch's ordered banner groups onto clusters: the
+/// graph build's cluster input. The implicit group before the first banner has
+/// no banner of its own, so it gets the `(unnamed)` default title.
+pub fn clusters_from_patch(patch: &Patch) -> Vec<Cluster> {
+    patch
+        .banner_groups
+        .iter()
+        .map(|group| Cluster {
+            title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
+            section_range: group.section_range.clone(),
+        })
+        .collect()
+}
+
 /// Severity of a topology-validation finding (design D4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopologySeverity {

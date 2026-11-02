@@ -207,7 +207,9 @@ pub(crate) fn labels_file_path_from(
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::favorites::FavoritesStore;
-use crate::graph::{Cluster, Graph, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind};
+use crate::graph::{
+    clusters_from_patch, Graph, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind,
+};
 use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
 
@@ -4789,19 +4791,6 @@ impl Default for App {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Map a patch's ordered banner groups onto graph clusters, giving the
-/// implicit unnamed pre-first-banner group a default title.
-fn clusters_from_patch(patch: &Patch) -> Vec<Cluster> {
-    patch
-        .banner_groups
-        .iter()
-        .map(|group| Cluster {
-            title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
-            section_range: group.section_range.clone(),
-        })
-        .collect()
 }
 
 /// Union the selected hardware element's own register edge(s) into `subtree`

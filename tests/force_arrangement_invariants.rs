@@ -33,7 +33,7 @@
 use std::path::Path;
 
 use droid_tui::config::LayoutOrdering;
-use droid_tui::graph::{Cluster, Graph, GraphOptions};
+use droid_tui::graph::{clusters_from_patch, Graph, GraphOptions};
 use droid_tui::latency::CostModel;
 use droid_tui::layout::{self, SolveKnobs};
 use droid_tui::patch::Patch;
@@ -49,20 +49,13 @@ const FIXTURES: &[&str] = &[
 ];
 
 /// Build the signal-flow graph exactly as the app does: `banner_groups` become
-/// clusters (mirrors `app::clusters_from_patch`), default cost model and graph
+/// clusters through `graph::clusters_from_patch`, default cost model and graph
 /// options. Parsing is asserted, not unwrapped, so a corpus change reports the
 /// fixture that broke instead of a bare panic.
 fn graph_from_fixture(name: &str) -> Graph {
     let patch = Patch::from_ini_file(Path::new(name))
         .unwrap_or_else(|err| panic!("{name}: fixture must parse: {err}"));
-    let clusters: Vec<Cluster> = patch
-        .banner_groups
-        .iter()
-        .map(|group| Cluster {
-            title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
-            section_range: group.section_range.clone(),
-        })
-        .collect();
+    let clusters = clusters_from_patch(&patch);
     Graph::build_from_patch(
         &patch,
         &clusters,

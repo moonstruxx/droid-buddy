@@ -67,7 +67,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use droid_tui::app::App;
-use droid_tui::graph::{self, Cluster};
+use droid_tui::graph;
 use droid_tui::latency::CostModel;
 use droid_tui::layout;
 use droid_tui::optimize::{self, OptimizeScope};
@@ -192,15 +192,7 @@ fn phase_graph_solve() {
     let elapsed = budgeted("phase_graph_solve", GRAPH_SOLVE_BUDGET, || {
         let start = Instant::now();
         let patch = Patch::from_ini_file(Path::new(SCALE_ANCHOR)).unwrap();
-        // Mirrors app::clusters_from_patch, which is private to the crate.
-        let clusters: Vec<Cluster> = patch
-            .banner_groups
-            .iter()
-            .map(|group| Cluster {
-                title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
-                section_range: group.section_range.clone(),
-            })
-            .collect();
+        let clusters = graph::clusters_from_patch(&patch);
         let cost = CostModel::default();
         let options = graph::GraphOptions::default();
         let g = graph::Graph::build_from_patch(&patch, &clusters, &cost, &options);
@@ -237,15 +229,7 @@ fn phase_force_solve_and_separation() {
         FORCE_SOLVE_BUDGET,
         || {
             let patch = Patch::from_ini_file(Path::new(SCALE_ANCHOR)).unwrap();
-            // Mirrors app::clusters_from_patch, which is private to the crate.
-            let clusters: Vec<Cluster> = patch
-                .banner_groups
-                .iter()
-                .map(|group| Cluster {
-                    title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
-                    section_range: group.section_range.clone(),
-                })
-                .collect();
+            let clusters = graph::clusters_from_patch(&patch);
             let cost = CostModel::default();
             let options = graph::GraphOptions::default();
             let g = graph::Graph::build_from_patch(&patch, &clusters, &cost, &options);
@@ -270,15 +254,7 @@ fn phase_force_solve_and_separation() {
 fn phase_scene_widths() {
     let elapsed = budgeted("phase_scene_widths", SCENE_WIDTHS_BUDGET, || {
         let patch = Patch::from_ini_file(Path::new(SCALE_ANCHOR)).unwrap();
-        // Mirrors app::clusters_from_patch, which is private to the crate.
-        let clusters: Vec<Cluster> = patch
-            .banner_groups
-            .iter()
-            .map(|group| Cluster {
-                title: group.banner.as_deref().unwrap_or("(unnamed)").to_string(),
-                section_range: group.section_range.clone(),
-            })
-            .collect();
+        let clusters = graph::clusters_from_patch(&patch);
         let cost = CostModel::default();
         let options = graph::GraphOptions::default();
         let g = graph::Graph::build_from_patch(&patch, &clusters, &cost, &options);

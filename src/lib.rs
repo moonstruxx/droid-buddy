@@ -22,6 +22,7 @@ pub mod platform;
 pub mod plugin;
 pub mod rack;
 pub mod rendermetrics;
+pub mod report;
 pub mod schema;
 pub mod store;
 pub mod sysex;
