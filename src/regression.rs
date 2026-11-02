@@ -2277,6 +2277,181 @@ fn regression_faceplate_rotary_stack_all_six_declared_and_attributable() {
     );
 }
 
+// ── module-ui-rack-inventory 4.3: declared element identity in the chain ────
+// Task 4.2 pinned `cell_for` and the geometry-declared kind inside
+// `src/physical.rs`; these stories pin the cross-layer result on real
+// fixtures — the chain the app builds actually draws the MASTER18 gate
+// column for I/G tokens, and an R2C faceplate carries only its two serial
+// jacks, none of which a hardware token can reach.
+
+/// Assert a millimetre coordinate matches the geometry's declared value.
+fn assert_mm_near(actual: f64, expected: f64, what: &str) {
+    assert!(
+        (actual - expected).abs() < 1e-9,
+        "{what}: expected {expected} mm, got {actual} mm"
+    );
+}
+
+/// The MASTER18 shape (`fixtures/master_declaration_gate_inputs.ini`, reused:
+/// a declared MASTER18 patch clocked on I1 and reset from I2): the built chain
+/// resolves those tokens to the gate column, never to the CV-out jacks that
+/// occupy the same rows, and G tokens land on their own declared row.
+///
+/// The G half is layout-level only: the component scanner's token letters
+/// (`HW_TOKEN_LETTERS`) do not include `G`, so a `gate = G1` entry would not
+/// become a patch component — the cells still exist because MASTER18's
+/// geometry declares them, which is what `cell_for` resolves against.
+#[test]
+fn regression_master18_gate_tokens_land_on_the_gate_column() {
+    let path = "fixtures/master_declaration_gate_inputs.ini";
+    let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
+    let schema = crate::schema::load_schema();
+
+    // A wrong fixture must not pass silently: the declaration is what makes
+    // this patch MASTER18.
+    let plan = crate::rack::resolve(&patch, schema);
+    assert_eq!(
+        plan.model,
+        crate::patch::MasterModel::Master18,
+        "the fixture must resolve to MASTER18"
+    );
+    assert_eq!(
+        plan.source,
+        crate::rack::MasterSource::Declared,
+        "the fixture's `# LABELS: master=18` must be the reason"
+    );
+    assert!(
+        plan.conflicts.is_empty(),
+        "gate/trigger inputs on I1/I2 are legitimate MASTER18 uses: {:#?}",
+        plan.conflicts
+    );
+
+    let layout = crate::physical::PhysicalLayout::build(Some(&patch), plan.model, &[]);
+    assert_eq!(layout.modules.len(), 2, "master plus the P2B8");
+
+    let ix = layout
+        .modules
+        .iter()
+        .position(|m| m.geometry_key == "master18")
+        .expect("a MASTER18 patch draws the MASTER18 faceplate");
+    let master = &layout.modules[ix];
+    assert_eq!(master.controller, "CV I/O");
+    assert!(!master.is_fallback, "MASTER18 must use its geometry entry");
+
+    // Both sides of the patch are attributed to that one faceplate.
+    for token in ["I1", "I2", "O1", "O2"] {
+        assert!(
+            master.components.iter().any(|c| c.id == token),
+            "{token} must be attributed to the MASTER18 faceplate, got {:?}",
+            master
+                .components
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Gate column: I1/I2 are gate-ins at 18.5 mm — never the O1/O2 jacks.
+    let i1 = layout.cell_for(ix, "I1").expect("I1 gate-in cell");
+    assert_eq!(i1.label, "I1", "I1 must not resolve to O1");
+    assert_eq!(i1.kind.as_deref(), Some("gate_in"));
+    assert_mm_near(i1.rect_mm.x_mm, 18.5, "I1 column");
+    assert_mm_near(i1.rect_mm.y_mm, 30.0, "I1 row");
+
+    let i2 = layout.cell_for(ix, "I2").expect("I2 gate-in cell");
+    assert_eq!(i2.label, "I2", "I2 must not resolve to O2");
+    assert_eq!(i2.kind.as_deref(), Some("gate_in"));
+    assert_mm_near(i2.rect_mm.x_mm, 18.5, "I2 column");
+    assert_mm_near(i2.rect_mm.y_mm, 43.0, "I2 row");
+
+    let o1 = layout.cell_for(ix, "O1").expect("O1 cv-out cell");
+    assert_eq!(o1.label, "O1");
+    assert_eq!(o1.kind.as_deref(), Some("cv_out"));
+    assert_mm_near(o1.rect_mm.x_mm, 1.5, "O1 column");
+    assert!(
+        i1.rect_mm.x_mm > o1.rect_mm.x_mm,
+        "the gate column sits right of the CV-out column"
+    );
+
+    // Gate outs share the gate column and take their own declared rows.
+    let g1 = layout.cell_for(ix, "G1").expect("G1 gate-out cell");
+    assert_eq!(g1.label, "G1", "G1 must not resolve to O1");
+    assert_eq!(g1.kind.as_deref(), Some("gate_out"));
+    assert_mm_near(g1.rect_mm.x_mm, 18.5, "G1 column");
+    assert_mm_near(g1.rect_mm.y_mm, 56.0, "G1 row");
+
+    let g4 = layout.cell_for(ix, "G4").expect("G4 gate-out cell");
+    assert_eq!(g4.label, "G4");
+    assert_eq!(g4.kind.as_deref(), Some("gate_out"));
+    assert_mm_near(g4.rect_mm.x_mm, 18.5, "G4 column");
+    assert_mm_near(g4.rect_mm.y_mm, 95.0, "G4 row");
+}
+
+/// The R2C serial bridge reaches the chain through the rack inventory (its
+/// section name is not a patch controller, so no patch declares it). Its
+/// faceplate is exactly the two declared serial jacks, and neither is a token
+/// target: they render, but `cell_for` must return `None` for every shaped
+/// token, including the positional fallback.
+#[test]
+fn regression_r2c_faceplate_is_two_unaddressable_serial_cells() {
+    let key = crate::physical::ModuleKey::parse("r2c").expect("r2c is an inventory key");
+    let layout = crate::physical::PhysicalLayout::build(
+        None,
+        crate::patch::MasterModel::Master,
+        std::slice::from_ref(&key),
+    );
+    assert!(layout.inventory_driven, "the inventory built this chain");
+
+    let ix = layout
+        .modules
+        .iter()
+        .position(|m| m.geometry_key == "r2c")
+        .unwrap_or_else(|| {
+            panic!(
+                "no r2c faceplate; faceplates = {:?}",
+                layout
+                    .modules
+                    .iter()
+                    .map(|m| m.geometry_key.clone())
+                    .collect::<Vec<_>>()
+            )
+        });
+    let r2c = &layout.modules[ix];
+    assert_eq!(r2c.controller, "R2C");
+    assert_eq!(r2c.module_instance, Some(1));
+    assert!(!r2c.is_fallback, "r2c must use its geometry entry");
+
+    // Exactly two cells, both the serial pair, both without token identity.
+    let cells: Vec<&crate::physical::ElementCell> = r2c.cells.values().flatten().collect();
+    assert_eq!(
+        cells.len(),
+        2,
+        "the R2C faceplate is exactly its two serial jacks: {:?}",
+        cells.iter().map(|c| c.label.clone()).collect::<Vec<_>>()
+    );
+    let labels: Vec<&str> = cells.iter().map(|c| c.label.as_str()).collect();
+    assert!(
+        labels.contains(&"serial in") && labels.contains(&"serial out"),
+        "the two declared serial jacks, got {labels:?}"
+    );
+    for cell in &cells {
+        assert!(
+            cell.element.is_none() && cell.kind_letter.is_none(),
+            "{} must carry no token identity: {cell:?}",
+            cell.label
+        );
+    }
+
+    // No hardware token reaches either jack — identity matching needs a
+    // declared element, and the positional fallback rejects a cell without
+    // one.
+    for token in ["I1", "I2", "O1", "O2", "G1", "G4", "B1", "P1"] {
+        assert!(
+            layout.cell_for(ix, token).is_none(),
+            "{token} must not resolve to an R2C serial jack"
+        );
+    }
+}
 // ── button-led-composition (task 4.1): composed button faces + folded LEDs ─
 // One fixture (`fixtures/button_led_composition.ini`) declaring a P2B8, a B32
 // and an M4 with explicit button/LED pairs, plus one LED-less element (P2B8
