@@ -330,10 +330,18 @@ impl Graph {
             });
         }
 
+        // Cable-edge identity in latency order: `LatencyData.edges[i].edge_index`
+        // indexes this list, not the merged one below.
+        let cable_keys: Vec<(String, NodeId, NodeId)> = cable_edges
+            .iter()
+            .map(|e| (e.cable.clone(), e.source.clone(), e.sink.clone()))
+            .collect();
+
         // Merge cable + register edges, sorted deterministically.
         let mut edges = cable_edges;
         edges.extend(filtered_reg_edges);
         edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+        let latency = remap_latency_indices(latency, &cable_keys, &edges);
 
         // Compute slice_index for all nodes (circuit section_index, fixed outer slices for controllers/jacks)
         // and section-hole anchors from banner groups.
@@ -702,6 +710,35 @@ fn compute_latency(
         edges: lat_edges,
         summary,
     })
+}
+
+/// Rewrite every latency entry's `edge_index` from its position in the cable-edge
+/// list to its position in the merged, sorted edge list.
+///
+/// Latency is measured over the signal-path cables only, while the graph also
+/// carries `_REG:` register edges, and `_REG:` sorts among the virtual cables
+/// (`'R' < 'T'`). Without this remap every consumer that pairs an entry with
+/// `Graph.edges[edge_index]` — the renderer's latency ramp and the analysis
+/// report's worst-edge list — names a neighbouring edge.
+fn remap_latency_indices(
+    latency: Option<LatencyData>,
+    cable_keys: &[(String, NodeId, NodeId)],
+    edges: &[GraphEdge],
+) -> Option<LatencyData> {
+    let mut data = latency?;
+    let positions: HashMap<(&str, &NodeId, &NodeId), usize> = edges
+        .iter()
+        .enumerate()
+        .map(|(index, edge)| ((edge.cable.as_str(), &edge.source, &edge.sink), index))
+        .collect();
+    for entry in &mut data.edges {
+        if let Some((cable, source, sink)) = cable_keys.get(entry.edge_index) {
+            if let Some(&index) = positions.get(&(cable.as_str(), source, sink)) {
+                entry.edge_index = index;
+            }
+        }
+    }
+    Some(data)
 }
 
 /// Build one node per section, assigning distinct instance indices to
@@ -1487,6 +1524,55 @@ mod tests {
         assert_eq!(latency.summary.back_edge_count, 0);
         assert_eq!(latency.summary.max, 3.0);
         assert_eq!(latency.summary.avg, 2.0);
+    }
+
+    #[test]
+    fn latency_edge_indices_address_their_own_edge_after_the_merge() {
+        // `_REG:` register edges sort among the virtual cables ('R' < 'T'), so an
+        // index into the cable-edge list is not an index into `graph.edges`.
+        // Every latency entry must still address the cable edge it measured.
+        let graph = build(
+            "[p2b8]\n    button1 = B1.1\n\
+             [src]\n    output = _TRIG\n\
+             [sink]\n    input = _TRIG\n\
+             [led]\n    led = L1.1\n",
+            &[],
+        );
+        let latency = graph.latency.as_ref().expect("a graph with cables");
+        assert!(
+            graph.edges.iter().any(|e| e.cable.starts_with("_REG:")),
+            "fixture must produce register edges for this to be a regression"
+        );
+        assert!(
+            graph.edges.len() > latency.edges.len(),
+            "register edges must be interleaved with the cable edges"
+        );
+        for entry in &latency.edges {
+            let edge = graph
+                .edges
+                .get(entry.edge_index)
+                .expect("every latency entry addresses an edge");
+            assert!(
+                !edge.cable.starts_with("_REG:"),
+                "entry {} addresses a register edge ({})",
+                entry.edge_index,
+                edge.cable
+            );
+        }
+        let mut addressed: Vec<&str> = latency
+            .edges
+            .iter()
+            .map(|entry| graph.edges[entry.edge_index].cable.as_str())
+            .collect();
+        addressed.sort_unstable();
+        let mut signal: Vec<&str> = graph
+            .edges
+            .iter()
+            .filter(|edge| !edge.cable.starts_with("_REG:"))
+            .map(|edge| edge.cable.as_str())
+            .collect();
+        signal.sort_unstable();
+        assert_eq!(addressed, signal);
     }
 
     #[test]

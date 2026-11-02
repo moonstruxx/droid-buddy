@@ -17,7 +17,7 @@ context: |
 
   Semantic anchors (repo-wide principles; every change must honor them):
   - YAGNI: every type, variant, derive, and trait has a current consumer or it gets deleted. No speculative
-    persistence or abstraction. Persistence and hardware integration are deferred ideas, not code.
+    persistence or abstraction. State export/import and hardware read-back are deferred ideas, not code.
   - DRY: one source of truth per fact. Generated docs (ARCHITECTURE.md, DESIGN.md, guardrails) are derived
     artifacts - regenerate with /make-*, never hand-edit.
   - CodeAsDoc: names carry domain meaning (DROID vocabulary); doc comments explain non-obvious invariants and

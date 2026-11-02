@@ -45,8 +45,16 @@ agent that edits patches, a pre-upload gate — needs this surface first.
   top-level report key is undocumented, so the skill cannot drift from the contract.
 - **`docs/cli.md`** in the user manual, linked from the manual index.
 - **`openspec/config.yaml`** — the project context still claims the app is "NOT a
-  hardware bridge (no MIDI, no network)", false since `midi-upload`. Every future proposal
-  reads that line, so it is corrected here.
+  hardware bridge (no MIDI, no network)", false since `midi-upload`, and its YAGNI anchor
+  still calls hardware integration a deferred idea. Every future proposal reads that
+  block, so both are corrected here.
+- **A latency index defect is fixed, because this change depends on it** —
+  `LatencyData.edge_index` indexes the cable-edge list while `Graph.edges` also carries
+  `_REG:` register edges that sort among the virtual cables, so every consumer pairing an
+  entry with `graph.edges[index]` read a neighbouring edge: the renderer's latency ramp
+  and the optimizer's per-edge baseline were silently misattributed, and the report's
+  worst-edge list would have named the wrong cables. The mapping is remapped after the
+  merge and pinned by a regression test.
 
 New types and their consumers: `report::AnalyzeReport` / `report::OptimizeReport`
 (serialized by `cli`, asserted by `tests/cli.rs`), `cli::Command` / `cli::Invocation`
@@ -71,16 +79,17 @@ shape stays free to change.
   `.agents/skills/droid-patch-cli/` (`SKILL.md`, `references/report.md`,
   `references/recipes.md`), `docs/cli.md`.
 - Touched: `src/main.rs` (dispatch between `schema::init` and the window), `src/lib.rs`
-  (module wiring), `src/graph.rs` (public cluster helper), `src/patch.rs` (`render_ini`
-  visibility), `src/app.rs` (calls the moved helper), `tests/perf_gate.rs` and
-  `tests/force_arrangement_invariants.rs` (drop their mirrors), `docs/README.md`,
-  `openspec/config.yaml`.
+  (module wiring), `src/graph.rs` (public cluster helper plus the latency edge-index
+  remap), `src/patch.rs` (`render_ini` visibility), `src/app.rs` (calls the moved helper),
+  `tests/perf_gate.rs` and `tests/force_arrangement_invariants.rs` (drop their mirrors),
+  `docs/README.md`, `openspec/config.yaml`.
 - **BREAKING** (crate-internal only): `app::clusters_from_patch` disappears in favour of
   `graph::clusters_from_patch`; `Patch::render_ini` widens from `pub(crate)` to `pub`.
   Nothing user-facing breaks.
-- Unchanged: GUI behaviour and keybindings, patch parsing and output, the validation and
-  topology finding sets, the optimizer's strategies, the writer's save-as semantics, and
-  `--self-test`.
+- Unchanged: GUI keybindings and pane behaviour, patch parsing and output, the validation
+  and topology finding sets, the optimizer's strategies, the writer's save-as semantics,
+  and `--self-test`. The one rendering-visible change is the corrected latency ramp, which
+  now colours each edge by its own latency instead of a neighbour's.
 - `ARCHITECTURE.md` is updated at archive, not hand-edited.
 
 ## Non-goals

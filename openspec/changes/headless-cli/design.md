@@ -161,6 +161,26 @@ serialization so an f32's full expansion never enters the contract, and (c) boun
 worst-edge list deterministically (sort by latency descending, tie-break by cable then
 endpoints). Two runs on one patch then produce byte-identical output.
 
+### D11. Latency edge indices are remapped to the merged edge list
+
+Found while building the report, and fixed here because the report's worst-edge list
+depends on it: `LatencyData.edge_index` indexes the *cable-edge* list, while `Graph.edges`
+is that list merged with the `_REG:` register edges and re-sorted — and `_REG:` sorts among
+the virtual cables (`'R' < 'T'`). Every consumer that pairs an entry with
+`graph.edges[edge_index]` therefore read a neighbouring edge. That was already true of the
+renderer's latency ramp and of the optimizer's per-edge baseline capture; the report would
+have inherited it and named the wrong cables in its worst-edge list.
+
+`build_from_patch` now captures the cable-edge identities before the merge, builds a
+`(cable, source, sink)` → final-index map from the sorted merged list, and rewrites each
+entry's `edge_index`. The alternative — giving `LatencyData` its own edge identity — would
+change a pure module's public shape for the same result, and recomputing latency over the
+merged list would measure register edges as signal-path latency, which they are not.
+
+**Consequence accepted:** this fixes a user-visible rendering bug outside the change's
+stated scope (latency colours and the optimizer's worse/better verdicts become correct),
+so the proposal's Impact records it rather than claiming GUI behaviour is untouched.
+
 ## Risks / Trade-offs
 
 - **[The CLI diverges from the GUI's view of a patch]** → Both paths call the same pure
