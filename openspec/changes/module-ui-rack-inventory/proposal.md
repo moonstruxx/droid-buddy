@@ -35,7 +35,7 @@ Two element-identity defects surface with them:
 
 ## What Changes
 
-- **A rack inventory in configuration.** `[[physical.rack.row]] modules = ["master",
+- **A rack inventory in configuration.** `[[physical.rack.rows]] modules = ["master",
   "P2B8 1", "E4 2", "G8 1", "X7 1"]` names the modules a row physically holds, in
   left-to-right order. Entries use the module-key vocabulary `assign` already uses
   (`"{controller} {instance}"`); `master` and `CV I/O` resolve to the master model the

@@ -38,6 +38,37 @@ a patch no use constrains falls back to `MASTER`. An element the drawn
 master has no cell for draws no cell — the validation modal's
 `master_conflict` finding names it instead.
 
+**A configured rack inventory decides the rack.** When rows in
+`config.toml` list the modules they physically hold, the view draws that
+case rather than only the hardware the loaded patch happens to use. The
+listed modules appear in row order and, inside a row, in list order. A
+master faceplate is always present: at the position the inventory gives
+it, or at the head of the rack when no row names it. Patch modules the
+inventory leaves out are appended after the listed ones, in the order
+the patch declares them. A listed module the patch never uses still
+renders a faceplate with no components, so the hardware is visible
+before anything is patched into it.
+
+Every declared cell of an inventoried module is drawn, apart from the
+folded LEDs described above. A cell a component addresses carries its
+label where it has one, its state and a hit rect; every other cell is
+drawn dimmed and unlabelled, has no hit rect, and stays out of keyboard
+navigation, clicking, hovering, selection, the label editor and the
+modifier wash. The master is no exception: an inventoried rack draws its
+whole field, so a patch using two jacks still shows the other jacks, the
+LED matrix and the SD button around them, dimmed.
+
+An inventory is enough on its own. With no patch loaded the pane paints
+the whole inventory rack dimmed, every cell unaddressed and no hit rect
+published anywhere; the master is the default model and the pane title
+names it. The fits, zoom and pan, the skeleton presentation and the label
+presentations all still work, so the rack is a usable picture of the case
+before a patch is chosen.
+
+None of this changes for a user whose rack config names no modules: the
+rack still follows the patch, and the master still shows only the cells
+the patch uses.
+
 **Labels are fitted per cell.** A cell's label is drawn at the largest
 step of a 10, 9, 8, 7, 6 pt monospace ladder at which the whole label
 fits the cell's text box, wrapping at word boundaries, breaking a word

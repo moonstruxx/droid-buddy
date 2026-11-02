@@ -66,8 +66,8 @@ comes from theme tokens — no hardcoded RGB.
 ### `[physical]` / `[physical.rack]`
 
 Module-UI presentation defaults — the label presentation and a zoom/pan
-seed — plus the optional rack/case row definition. Omit `[physical.rack]`
-for the auto-packed default case.
+seed — plus the optional rack/case definition, including the modules each
+row holds. Omit `[physical.rack]` for the auto-packed default case.
 
 - `labels` (`auto` default, `off`, `on`): how labels reach you. `off`
   draws them inside their cells only. `on` also annotates every addressed
@@ -84,6 +84,58 @@ for the auto-packed default case.
   `+`/`-` step the presets and the wheel zooms at runtime.
 - `offset_x` / `offset_y` (points, default `0.0`): the pan seed, replaced
   on that same first frame by the fit's centring.
+
+`top_mount_te` and `side_mount_te` give the case's top and side mount
+sections in TE. Each `[[physical.rack.rows]]` entry is one row: `he` (row
+height, 1 or 3), `hp` (width in HP), an optional `label`, and the optional
+`modules` list of the modules that row physically holds.
+
+```toml
+[physical.rack]
+top_mount_te = 0.0
+side_mount_te = 0.0
+
+[[physical.rack.rows]]
+he = 3
+hp = 84.0
+label = "top"
+modules = ["master", "P2B8 1", "P2B8 2", "G8", "R2C"]  # left to right
+
+[[physical.rack.rows]]
+he = 1
+hp = 24.0
+modules = ["X7"]        # a bare controller means instance 1
+
+[physical.rack.assign]
+"B32 1" = 1             # 0-based row index, for unlisted modules only
+```
+
+An entry in `modules` is a module key: the controller name the patch uses
+plus the instance the patch numbers, counted from 1 (`P2B8 2`, `E4 1`). A
+single-instance module needs no number, so a bare controller (`B32`, `G8`,
+`X7`, `R2M`, `R2C`) means instance 1. `master`, `master18` and the patch
+vocabulary `CV I/O` all name the master slot, so one inventory works
+whichever master faceplate the patch resolves to. Controller names are
+case-insensitive.
+
+The list is rewritten on load and on save: entries are trimmed, empty and
+unreadable ones (an instance of 0, a third field) dropped, and every
+survivor re-emitted as `"{controller} {instance}"` with a lowercased
+controller. An alias such as `CV I/O` is therefore stored as `master 1`,
+and a saved file reads back unchanged. A controller the embedded geometry
+does not know is handled later, at paint time: the entry is skipped after
+one warning on stderr that names it, and the rest of the row still
+renders. The warning appears once per distinct unknown name, not once per
+frame.
+
+The list also decides placement. A module named in a row sits in that
+row, in list order, and `assign` cannot move it. `assign` still pins the
+modules no row names, and the rest auto-pack in chain order. A master the
+inventory never names is prepended, so the rack always holds exactly one.
+Patch modules missing from every list are appended after the inventory in
+the order the patch declares them, so a stale inventory never hides
+hardware. With no `modules` in any row, the chain follows the patch and
+the rows auto-pack, as before.
 
 The view opens at the **labels fit**: the greater of the whole-rack fit
 and the zoom every written label needs to be drawn whole, clamped to the
