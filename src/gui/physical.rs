@@ -277,7 +277,9 @@ fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
 /// patch (`PhysicalLayout::build`), pack it into the configured rack (or the
 /// default case when none is set), and resolve cells/geometry under the
 /// app's physical zoom/offset, anchored at `pane`'s top-left corner. `None`
-/// when no patch is loaded — the slot then paints nothing. Mirrors the
+/// only when there is neither a patch nor a configured rack inventory — an
+/// inventory alone is a drawable rack of real hardware, so the pane paints it
+/// with every cell unaddressed (module-ui-rack-inventory D6). Mirrors the
 /// test-only `build_spec`.
 ///
 /// `pane` is the on-screen rect the rack is drawn into: the module UI can
@@ -287,11 +289,15 @@ fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
 /// `component_rects` hit geometry stay at the window origin and stop matching
 /// the pane (and each other) as soon as the module UI is not in `BigLeft`.
 pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec> {
-    let patch = app.patch.as_ref()?;
+    let patch = app.patch.as_ref();
     // The resolved master model, never a guess: `App::master_model` is the same
     // accessor `App::physical_chain_and_rack` reads (design D3/D7).
     let inventory = app.physical_rack_spec.module_keys();
-    let chain = PhysicalLayout::build(Some(patch), app.master_model(), &inventory);
+    if patch.is_none() && inventory.is_empty() {
+        // Nothing to draw from either source: the pre-inventory empty slot.
+        return None;
+    }
+    let chain = PhysicalLayout::build(patch, app.master_model(), &inventory);
     let rack_spec = if app.physical_rack_spec.rows.is_empty() {
         RackSpec::default_case(&chain)
     } else {
@@ -325,12 +331,18 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // index is not the `patch.hw_components` index the handler's
     // `component_rects` hit-testing uses. Map by token id to recover the global
     // index for every real element.
+    // With no patch this map is empty, so no cell can claim a global index and
+    // the inventory rack publishes no hit rect (D4/D6).
     let index_of: std::collections::HashMap<&str, usize> = patch
-        .hw_components
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.id.as_str(), i))
-        .collect();
+        .map(|patch| {
+            patch
+                .hw_components
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id.as_str(), i))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Persistent selection emphasis (droid_tui-8ia): the shared element
     // selection (`selected_component`) keeps the clicked cell marked after the
@@ -406,6 +418,15 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         }
         // ci might be out of bounds for patch components if it's an unused element
         // In that case, we still render the cell but dimmed and unlabelled
+        //
+        // A chain built without a patch has no components at all, so every
+        // inventory cell lands in the unaddressed branch; binding `addressed`
+        // here keeps that branch the only reader of a patch.
+        let addressed: Option<&crate::patch::Patch> = if ci < module.components.len() {
+            patch
+        } else {
+            None
+        };
         let (
             glyph,
             state_text,
@@ -418,7 +439,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             led_rgb,
             shape,
             label_color,
-        ) = if ci < module.components.len() {
+        ) = if let Some(patch) = addressed {
             let comp = &module.components[ci];
             let shape = if comp.kind == crate::patch::ComponentKind::Button {
                 fold_shape_for_controller(&comp.controller)
@@ -631,8 +652,10 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             state: crate::physical::db8e_display_state_for_layout(&chain),
         })
         .collect();
+    // The overlay explodes the labels of patch elements; with no patch there is
+    // none to explode, but the compact rack itself still paints.
     let performance = if app.showing_performance {
-        Some(performance_overlay(patch, app, geom.case_rect, &cells))
+        patch.map(|patch| performance_overlay(patch, app, geom.case_rect, &cells))
     } else {
         None
     };
@@ -644,7 +667,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // consumes (rect + label + layout).
     let annotations = if app.showing_performance {
         Vec::new()
-    } else {
+    } else if let Some(patch) = patch {
         // `auto` only annotates labels the user actually wrote: a derived token
         // name ("Button B1.3") is mechanical, so annotating every derived name a
         // narrow cell ellipsizes would flood the field with noise. `on` draws
@@ -685,6 +708,10 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             .collect();
         let candidates: Vec<&CellSpec> = sources.iter().collect();
         budget_annotations(pane, geom.case_rect, &candidates).callouts
+    } else {
+        // No patch means no component and no written label: an inventory cell
+        // is unaddressed, so there is nothing to annotate (D6).
+        Vec::new()
     };
     // Hover reveal (D11): the full label plus state of the element under the
     // pointer, anchored to its cell and drawn in every presentation mode and in
@@ -694,14 +721,16 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     let hover = if app.showing_performance {
         None
     } else {
-        app.hovered_component
-            .and_then(|index| {
-                cells
-                    .iter()
-                    .find(|cell| cell.component_index == Some(index))
-            })
-            .map(|cell| with_resolved_state(cell, patch))
-            .and_then(|cell| hover_callout(pane, &cell))
+        patch.and_then(|patch| {
+            app.hovered_component
+                .and_then(|index| {
+                    cells
+                        .iter()
+                        .find(|cell| cell.component_index == Some(index))
+                })
+                .map(|cell| with_resolved_state(cell, patch))
+                .and_then(|cell| hover_callout(pane, &cell))
+        })
     };
     Some(PhysicalSpec {
         performance,
@@ -4994,6 +5023,138 @@ mod tests {
             Pos2::new(f32::from(cell.x), f32::from(cell.y)),
             Vec2::new(f32::from(cell.width), f32::from(cell.height)),
         )
+    }
+
+    // ---- module-ui-rack-inventory 2.4: an inventory with no patch ----
+
+    /// A one-row `[physical.rack]` inventory naming `modules` left to right —
+    /// the shape the config layer hands the app.
+    fn inventory_rack(modules: &[&str]) -> crate::physical::RackSpec {
+        crate::physical::RackSpec {
+            rows: vec![crate::physical::RackRow {
+                he: 3,
+                hp: 84.0,
+                label: None,
+                modules: modules.iter().map(|m| String::from(*m)).collect(),
+            }],
+            ..crate::physical::RackSpec::default()
+        }
+    }
+
+    /// The default-case rack with every chain module listed in its row: an
+    /// inventory that mirrors the modules the patch already declares, so the
+    /// only difference under test is the inventory switch itself.
+    fn mirror_inventory(app: &App) -> crate::physical::RackSpec {
+        let chain =
+            crate::physical::PhysicalLayout::build(app.patch.as_ref(), app.master_model(), &[]);
+        let mut spec = crate::physical::RackSpec::default_case(&chain);
+        if let Some(row) = spec.rows.first_mut() {
+            row.modules = chain
+                .modules
+                .iter()
+                .map(crate::physical::PhysicalModule::key)
+                .collect();
+        }
+        spec
+    }
+
+    /// D6: an inventory alone is drawable — every mounted faceplate paints —
+    /// but none of its elements is addressable, so the pane publishes no hit
+    /// rect at all.
+    #[test]
+    fn an_inventory_without_a_patch_paints_the_rack_and_publishes_no_rects() {
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        assert!(app.patch.is_none(), "the state under test");
+
+        run_paint_panes(&mut app);
+        assert!(
+            app.component_rects.is_empty(),
+            "no patch publishes no hit rect: {:?}",
+            app.component_rects
+        );
+
+        let spec = physical_spec(&app, published_physical_pane(&app))
+            .expect("an inventory alone is drawable");
+        let titles: Vec<&str> = spec.modules.iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["CV I/O 1", "P4B2 1", "S10 1"],
+            "every inventoried module renders, in row order"
+        );
+        assert!(
+            !spec.cells.is_empty(),
+            "the inventoried faceplates keep their cells"
+        );
+        let painted = painted_labels(&spec);
+        for title in &titles {
+            assert!(
+                painted.iter().any(|label| label == title),
+                "the pane paints the faceplate title {title}: {painted:?}"
+            );
+        }
+    }
+
+    /// The no-patch cells are inert: dimmed, unlabelled, stateless and without
+    /// a component index, so hover, selection and the modifier wash have no
+    /// element to act on.
+    #[test]
+    fn no_patch_cells_are_dimmed_and_carry_no_component_index() {
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        app.hovered_component = Some(0);
+        app.selected_component = Some(String::from("B1.1"));
+
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let spec = physical_spec(&app, pane).expect("an inventory alone is drawable");
+        assert!(!spec.cells.is_empty(), "the rack is not empty");
+        for cell in &spec.cells {
+            assert!(
+                cell.component_index.is_none(),
+                "no cell claims a component: {:?}",
+                cell.label
+            );
+            assert!(cell.dimmed, "an unaddressed cell is dimmed");
+            assert!(cell.label.is_empty(), "an unaddressed cell is unlabelled");
+            assert!(cell.label_layout.is_none(), "nothing to lay out");
+            assert!(
+                cell.state_text.is_empty(),
+                "an unaddressed cell has no state"
+            );
+            assert!(!cell.highlighted, "no selection can mark a cell");
+            assert!(
+                cell.modifier_wash.is_none(),
+                "no modifier wash without a component"
+            );
+        }
+        assert!(spec.hover.is_none(), "no hover reveal without a component");
+        assert!(spec.annotations.is_empty(), "no written labels to annotate");
+    }
+
+    /// A patch-loaded inventoried rack publishes exactly the hit rects the
+    /// patch-derived rack published: no element is added, dropped or moved by
+    /// the inventory naming the same modules.
+    #[test]
+    fn a_patch_loaded_inventory_publishes_the_same_hit_rects() {
+        let mut plain = app_with_patch("fixtures/own_buttons.ini");
+        run_paint_panes(&mut plain);
+        let baseline = plain.component_rects.clone();
+        assert!(
+            !baseline.is_empty(),
+            "the patch-derived rack publishes hit rects"
+        );
+
+        let mut inventoried = app_with_patch("fixtures/own_buttons.ini");
+        inventoried.physical_rack_spec = mirror_inventory(&inventoried);
+        assert!(
+            !inventoried.physical_rack_spec.module_keys().is_empty(),
+            "the inventory resolves to modules"
+        );
+        run_paint_panes(&mut inventoried);
+        assert_eq!(
+            inventoried.component_rects, baseline,
+            "an inventory naming the patch's own modules publishes the same rects"
+        );
     }
 
     /// module-ui-label-fit D9/`auto`: the presentation annotates exactly the
