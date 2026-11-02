@@ -15,7 +15,7 @@
 ## 3. Unaddressed emission
 
 - [x] 3.1 Switch the `CV I/O` suppression in `rack_geometry` to the chain flag: unaddressed cells are emitted for every module when the chain is inventory-driven and stay suppressed for the master on a patch-derived chain; verify with `cargo test gui::physical::`. <!-- agent: frontend-engineer, depends_on: [2.4], touches: [src/gui/physical.rs] -->
-- [ ] 3.2 Pin the counts with tests: without an inventory the master front is byte-identical to today; with one, MASTER exposes 33 cells and MASTER18 15, G8 16, X7 13, R2C 2; no patch with an inventory publishes zero hit rects; verify with `cargo test gui::physical::` and `cargo test regression::`. <!-- agent: horst-engineer.build, depends_on: [3.1], touches: [src/regression.rs, src/gui/physical.rs] -->
+- [x] 3.2 Pin the counts with tests: without an inventory the master front is byte-identical to today; with one, MASTER exposes 33 cells and MASTER18 15, G8 16, X7 13, R2C 2; no patch with an inventory publishes zero hit rects; verify with `cargo test gui::physical::` and `cargo test regression::`. <!-- agent: horst-engineer.build, depends_on: [3.1], touches: [src/regression.rs, src/gui/physical.rs] -->
 
 ## 4. Element identity in geometry
 
