@@ -1012,11 +1012,17 @@ pub struct RackSpec {
 impl RackSpec {
     /// The out-of-box case (D9): a single 3-HE row wide enough for the whole
     /// chain, no mounts, no overrides.
+    ///
+    /// The width is derived from the chain's own modules and the gaps packing
+    /// inserts between them, not from a patch, so an inventory-only chain (no
+    /// patch loaded) still gets a row that holds every faceplate and the HP
+    /// mounts between them.
     pub fn default_case(chain: &PhysicalLayout) -> Self {
         let he = chain.modules.iter().map(|m| m.he).max().unwrap_or(3).max(1);
-        let hp = (chain.total_width_mm / chain.hp_mm.max(0.001))
-            .ceil()
-            .max(1.0);
+        let gap = chain.chain_gaps_mm.inter_module.max(0.0);
+        let chain_width_mm = chain.modules.iter().map(|m| m.rect_mm.w_mm).sum::<f64>()
+            + gap * chain.modules.len().saturating_sub(1) as f64;
+        let hp = (chain_width_mm / chain.hp_mm.max(0.001)).ceil().max(1.0);
         Self {
             rows: vec![RackRow {
                 he,
@@ -1166,17 +1172,74 @@ pub struct RackLayout {
     pub fold_bar_height_mm: f64,
 }
 
+/// The chain faceplate an inventory entry names, if the chain carries one.
+///
+/// Entries use the vocabulary `RackSpec::assign` and `RackSpec::module_keys`
+/// already share: a controller name or usage alias plus a 1-based instance,
+/// with `master` and `CV I/O` naming the master faceplate whatever model it
+/// draws (`is_master_key`). Resolving through `controller_geometry_key` lets a
+/// row say `Faderbank 2` for the `p8s8` faceplate the chain holds.
+fn chain_index_for_entry(chain: &PhysicalLayout, entry: &str) -> Option<usize> {
+    let key = ModuleKey::parse(entry)?;
+    if is_master_key(&key) {
+        return chain.modules.iter().position(|m| m.controller == "CV I/O");
+    }
+    let controller = controller_geometry_key(&key.controller).unwrap_or(key.controller.as_str());
+    let instance = u32::try_from(key.instance).ok()?;
+    chain
+        .modules
+        .iter()
+        .position(|m| m.geometry_key == controller && m.module_instance == Some(instance))
+}
+
+/// Append one chain module at a row's current fill and advance that fill.
+///
+/// Listed and auto-packed modules share this x/gap rule so a row's declared
+/// order and its auto-pack tail cannot disagree about spacing.
+fn place_in_row(
+    chain: &PhysicalLayout,
+    gap: f64,
+    fills: &mut [f64],
+    placements: &mut [Vec<PlacedModule>],
+    row: usize,
+    module_index: usize,
+    overridden: bool,
+) {
+    let module = &chain.modules[module_index];
+    let x = if fills[row] > 0.0 {
+        fills[row] + gap
+    } else {
+        fills[row]
+    };
+    placements[row].push(PlacedModule {
+        key: module.key(),
+        module_index,
+        rect_mm: RectMm {
+            x_mm: x,
+            y_mm: 0.0,
+            w_mm: module.rect_mm.w_mm,
+            h_mm: module.rect_mm.h_mm,
+        },
+        overridden,
+    });
+    fills[row] = x + module.rect_mm.w_mm;
+}
+
 impl RackLayout {
     /// Pack the chain into the rack's rows (D10).
     ///
-    /// Modules auto-pack in chain order: the current row fills left-to-right
-    /// until the next module would exceed the row's HP (capacity = hp ×
-    /// `hp_mm`), then the next row starts; the last row accepts overflow. A
-    /// `spec.assign` override forces a module into a row regardless of fit;
-    /// an out-of-range override falls back to auto-pack. Overrides never
-    /// reorder modules within a row. An empty `spec.rows` materializes the
-    /// default single-row case. Deterministic — the assign map is consulted
-    /// by key only, never iterated.
+    /// A module named in a row's `modules` list belongs to that row, left to
+    /// right in list order; an explicit listing wins over `assign`, which only
+    /// decides the row of modules the inventory leaves unlisted
+    /// (module-ui-rack-inventory D1). Unlisted modules auto-pack in chain
+    /// order: the current row fills left-to-right until the next module would
+    /// exceed the row's HP (capacity = hp × `hp_mm`), then the next row
+    /// starts; the last row accepts overflow. An `assign` override forces a
+    /// module into a row regardless of fit; an out-of-range override falls
+    /// back to auto-pack. Overrides never reorder modules within a row. An
+    /// empty `spec.rows` materializes the default single-row case.
+    /// Deterministic — the assign map is consulted by key only, never
+    /// iterated.
     pub fn pack(chain: &PhysicalLayout, spec: &RackSpec) -> Self {
         let spec = if spec.rows.is_empty() {
             RackSpec::default_case(chain)
@@ -1186,16 +1249,52 @@ impl RackLayout {
         let hp_mm = chain.hp_mm.max(0.001);
         let gap = chain.chain_gaps_mm.inter_module.max(0.0);
 
-        // Row assignment: fills[i] = used mm width; placements[i] in chain order.
+        // Row-listed modules claim their row first, in list order. A key that
+        // repeats, names a module the chain lacks, or names a controller the
+        // geometry registry does not know is skipped: one faceplate lives in
+        // one row, and `build` already reported entries it could not resolve
+        // to a module.
+        let mut listed_row: Vec<Option<usize>> = vec![None; chain.modules.len()];
+        let mut listed: Vec<Vec<usize>> = vec![Vec::new(); spec.rows.len()];
+        for (row_index, row) in spec.rows.iter().enumerate() {
+            for entry in &row.modules {
+                let Some(module_index) = chain_index_for_entry(chain, entry) else {
+                    continue;
+                };
+                if listed_row[module_index].is_some() {
+                    continue;
+                }
+                listed_row[module_index] = Some(row_index);
+                listed[row_index].push(module_index);
+            }
+        }
+
+        // fills[i] = used mm width; placements[i] in placement order.
         let mut fills = vec![0.0; spec.rows.len()];
         let mut placements: Vec<Vec<PlacedModule>> = vec![Vec::new(); spec.rows.len()];
-        let mut cursor = 0usize;
 
+        for (row_index, indices) in listed.iter().enumerate() {
+            for &module_index in indices {
+                place_in_row(
+                    chain,
+                    gap,
+                    &mut fills,
+                    &mut placements,
+                    row_index,
+                    module_index,
+                    false,
+                );
+            }
+        }
+
+        let mut cursor = 0usize;
         for (module_index, module) in chain.modules.iter().enumerate() {
-            let key = module.key();
+            if listed_row[module_index].is_some() {
+                continue;
+            }
             let override_row = spec
                 .assign
-                .get(&key)
+                .get(&module.key())
                 .copied()
                 .filter(|&r| r < spec.rows.len());
             let row = if let Some(r) = override_row {
@@ -1219,23 +1318,15 @@ impl RackLayout {
                     r += 1;
                 }
             };
-            let x = if fills[row] > 0.0 {
-                fills[row] + gap
-            } else {
-                fills[row]
-            };
-            placements[row].push(PlacedModule {
-                key,
+            place_in_row(
+                chain,
+                gap,
+                &mut fills,
+                &mut placements,
+                row,
                 module_index,
-                rect_mm: RectMm {
-                    x_mm: x,
-                    y_mm: 0.0,
-                    w_mm: module.rect_mm.w_mm,
-                    h_mm: module.rect_mm.h_mm,
-                },
-                overridden: override_row.is_some(),
-            });
-            fills[row] = x + module.rect_mm.w_mm;
+                override_row.is_some(),
+            );
             if override_row.is_none() {
                 cursor = row;
             }
@@ -2984,6 +3075,24 @@ mod tests {
         }
     }
 
+    /// A rack spec whose rows may name the modules they physically hold.
+    fn spec_with_modules(rows: &[(u32, f64, &[&str])], assign: &[(&str, usize)]) -> RackSpec {
+        RackSpec {
+            rows: rows
+                .iter()
+                .map(|&(he, hp, modules)| RackRow {
+                    he,
+                    hp,
+                    label: None,
+                    modules: modules.iter().map(|m| String::from(*m)).collect(),
+                })
+                .collect(),
+            top_mount_te: 0.0,
+            side_mount_te: 0.0,
+            assign: assign.iter().map(|&(k, r)| (String::from(k), r)).collect(),
+        }
+    }
+
     #[test]
     fn module_key_format_is_controller_plus_instance() {
         let chain = three_module_chain();
@@ -3035,6 +3144,29 @@ mod tests {
     }
 
     #[test]
+    fn default_case_sizes_an_inventory_only_chain() {
+        // No patch: the chain is the inventory alone (master prepended), so the
+        // default row can only be sized from the modules `build` produced.
+        let chain = PhysicalLayout::build(
+            None,
+            MasterModel::Master,
+            &[module("p2b8", 1), module("b32", 1)],
+        );
+        let spec = RackSpec::default_case(&chain);
+        assert_eq!(spec.rows.len(), 1);
+        assert_eq!(spec.rows[0].he, 3);
+        // Master (40.64) + P2B8 (25.4) + B32 (50.8) + two 0.5 mm gaps
+        // = 117.84 mm; ceil(117.84 / 5.08) = 24 HP.
+        assert_close(spec.rows[0].hp, 24.0);
+        assert!(spec.rows[0].hp * chain.hp_mm >= chain.total_width_mm);
+
+        let rack = RackLayout::pack(&chain, &spec);
+        assert_close(rack.rows[0].fill_width_mm, 117.84);
+        assert_close(rack.total_width_mm, 121.92);
+        assert_eq!(rack.rows[0].modules.len(), 3, "every module fits the row");
+    }
+
+    #[test]
     fn override_places_module_into_row_regardless_of_fit() {
         let chain = three_module_chain();
         let rack = RackLayout::pack(&chain, &spec(&[(3, 10.0), (3, 10.0)], &[("P2B8 1", 1)]));
@@ -3062,6 +3194,90 @@ mod tests {
         assert!(!rack.rows[1].modules[0].overridden);
         assert_eq!(rack.rows[2].modules[0].key, "B32 2");
         assert!(!rack.rows[2].modules[0].overridden);
+    }
+
+    #[test]
+    fn listed_modules_hold_their_rows_in_list_order() {
+        let chain = three_module_chain();
+        // The lists reverse the chain order and split it across both rows, so
+        // both membership and left-to-right order can only come from the lists.
+        let rack = RackLayout::pack(
+            &chain,
+            &spec_with_modules(
+                &[(3, 20.0, &["B32 2", "CV I/O"]), (3, 10.0, &["P2B8 1"])],
+                &[],
+            ),
+        );
+        let row0: Vec<&str> = rack.rows[0]
+            .modules
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect();
+        let row1: Vec<&str> = rack.rows[1]
+            .modules
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect();
+        assert_eq!(row0, vec!["B32 2", "CV I/O"]);
+        assert_eq!(row1, vec!["P2B8 1"]);
+        // List order decides x: B32 (50.8) at 0, master after one 0.5 gap.
+        assert_close(rack.rows[0].modules[0].rect_mm.x_mm, 0.0);
+        assert_close(rack.rows[0].modules[1].rect_mm.x_mm, 51.3);
+        assert_close(rack.rows[0].fill_width_mm, 91.94);
+        assert!(rack.rows[0].modules.iter().all(|m| !m.overridden));
+        assert!(rack.fold_bars.iter().any(|f| f.after_row == 0));
+    }
+
+    #[test]
+    fn a_listed_module_ignores_a_conflicting_assign() {
+        let chain = three_module_chain();
+        let rack = RackLayout::pack(
+            &chain,
+            &spec_with_modules(&[(3, 10.0, &["P2B8 1"]), (3, 10.0, &[])], &[("P2B8 1", 1)]),
+        );
+        assert_eq!(rack.rows[0].modules[0].key, "P2B8 1");
+        assert!(
+            !rack.rows[0].modules[0].overridden,
+            "a listed module is placed by its row, not by assign"
+        );
+        assert!(rack.rows[1].modules.iter().all(|m| m.key != "P2B8 1"));
+    }
+
+    #[test]
+    fn an_unlisted_module_still_honours_assign() {
+        let chain = three_module_chain();
+        let rack = RackLayout::pack(
+            &chain,
+            &spec_with_modules(&[(3, 20.0, &["B32 2"]), (3, 10.0, &[])], &[("P2B8 1", 1)]),
+        );
+        let row0: Vec<&str> = rack.rows[0]
+            .modules
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect();
+        assert_eq!(row0, vec!["B32 2", "CV I/O"], "listed, then auto-packed");
+        let assigned = rack.rows[1]
+            .modules
+            .iter()
+            .find(|m| m.key == "P2B8 1")
+            .expect("the assigned module lands in row 1");
+        assert!(assigned.overridden);
+    }
+
+    #[test]
+    fn a_listed_module_wider_than_its_row_is_still_placed_there() {
+        let chain = three_module_chain();
+        // B32 is 10 HP while row 0 declares 5 HP: the listing still wins.
+        let rack = RackLayout::pack(
+            &chain,
+            &spec_with_modules(&[(3, 5.0, &["B32 2"]), (3, 5.0, &[])], &[]),
+        );
+        assert_eq!(rack.rows[0].modules[0].key, "B32 2");
+        assert_close(rack.rows[0].fill_width_mm, 50.8);
+        assert!(
+            rack.rows[0].fill_width_mm > rack.rows[0].hp * chain.hp_mm,
+            "the row overflows rather than dropping the module"
+        );
     }
 
     #[test]
