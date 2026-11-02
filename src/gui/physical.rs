@@ -19,7 +19,9 @@ use egui::{Painter, Pos2, Rect, Vec2};
 
 use crate::app::App;
 use crate::patch::{ComponentKind, ComponentState, NodeId, ShiftGroup};
-use crate::physical::{PhysicalLayout, RackLayout, RackSpec, ScreenMapping};
+use crate::physical::{
+    ElementCell, PhysicalLayout, PhysicalModule, RackLayout, RackSpec, ScreenMapping,
+};
 use crate::theme::Color;
 
 use super::graph::{MAX_ZOOM_STEP, ZOOM_SENSITIVITY};
@@ -408,7 +410,8 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         // token via the cell label and apply the same per-controller rule.
         if ci >= module.components.len() {
             let ordinal = ci - module.components.len();
-            if let Some(unaddr) = module.unaddressed_cells().get(ordinal) {
+            let unaddressed = unaddressed_cells(module, chain.inventory_driven);
+            if let Some(unaddr) = unaddressed.get(ordinal) {
                 if unaddr.kind_letter == Some('L')
                     && fold_shape_for_controller(&module.geometry_key).is_some()
                 {
@@ -1832,6 +1835,25 @@ pub(crate) fn cell_visuals(
     }
 }
 
+/// The unaddressed cells `rack_geometry` emits for `module`, in the order
+/// their `ci` ordinals follow `module.components.len()`.
+///
+/// One owner for the emission rule and for the `ci → cell` mapping the spec's
+/// fold suppression reads (module-ui-rack-inventory D4): an inventory-driven
+/// chain emits every declared cell, identity-less ones included, so the whole
+/// hardware front paints; a patch-derived chain keeps the pre-inventory set —
+/// the auto-added master faceplate (`CV I/O` is not a declared controller)
+/// emits nothing at all, which keeps bare full fronts byte-identical (D5).
+fn unaddressed_cells(module: &PhysicalModule, inventory_driven: bool) -> Vec<&ElementCell> {
+    if inventory_driven {
+        module.declared_unaddressed_cells()
+    } else if module.controller == "CV I/O" {
+        Vec::new()
+    } else {
+        module.unaddressed_cells()
+    }
+}
+
 /// The rack skeleton's screen geometry in egui points (port of
 /// `ui.rs::physical_skeleton_geometry`): the case outline, mounts, labeled
 /// fold bars, module outlines, and element-cell rects with their port
@@ -1911,33 +1933,33 @@ pub(crate) fn rack_geometry(
             // family/row/col order, with `ci = components.len() + ordinal` so
             // the spec's `ci`-based branch renders them dimmed via the
             // existing `None` path. Same `cell()` mapping as addressed cells.
-            // The auto-added master faceplate (`CV I/O`) is not a declared
-            // controller, so its unused jacks/matrix stay unrendered — this
-            // keeps bare full fronts byte-identical (D5).
-            if module.controller != "CV I/O" {
-                for (ordinal, unaddr) in module.unaddressed_cells().into_iter().enumerate() {
-                    if unaddr.element.is_none() {
-                        continue;
-                    }
-                    let mark = match unaddr.kind_letter {
-                        Some('I') => PortMark::PortIn,
-                        Some('O') => PortMark::PortOut,
-                        _ => PortMark::Cell,
-                    };
-                    let rect = cell(crate::physical::RectMm {
-                        x_mm: placed.rect_mm.x_mm + unaddr.rect_mm.x_mm,
-                        y_mm: abs_y_mm + unaddr.rect_mm.y_mm,
-                        w_mm: unaddr.rect_mm.w_mm,
-                        h_mm: unaddr.rect_mm.h_mm,
-                    });
-                    cells.push((
-                        placed.module_index,
-                        module.components.len() + ordinal,
-                        rect,
-                        mark,
-                        unaddr.family.clone(),
-                    ));
-                }
+            // The chain flag owns the rule (module-ui-rack-inventory D4): an
+            // inventory-driven chain draws every module's whole declared
+            // front, identity-less cells included; a patch-derived chain
+            // keeps the pre-inventory set and suppresses the auto-added
+            // master faceplate, so bare full fronts stay byte-identical (D5).
+            for (ordinal, unaddr) in unaddressed_cells(module, chain.inventory_driven)
+                .into_iter()
+                .enumerate()
+            {
+                let mark = match unaddr.kind_letter {
+                    Some('I') => PortMark::PortIn,
+                    Some('O') => PortMark::PortOut,
+                    _ => PortMark::Cell,
+                };
+                let rect = cell(crate::physical::RectMm {
+                    x_mm: placed.rect_mm.x_mm + unaddr.rect_mm.x_mm,
+                    y_mm: abs_y_mm + unaddr.rect_mm.y_mm,
+                    w_mm: unaddr.rect_mm.w_mm,
+                    h_mm: unaddr.rect_mm.h_mm,
+                });
+                cells.push((
+                    placed.module_index,
+                    module.components.len() + ordinal,
+                    rect,
+                    mark,
+                    unaddr.family.clone(),
+                ));
             }
 
             // DB8E OLED display placeholder (db8e-oled-display-placeholder):
@@ -5155,6 +5177,185 @@ mod tests {
             inventoried.component_rects, baseline,
             "an inventory naming the patch's own modules publishes the same rects"
         );
+    }
+
+    // ---- module-ui-rack-inventory 3.1: the chain flag owns the emission ----
+
+    /// The chain, packed rack and mapping `physical_spec` feeds `rack_geometry`
+    /// for `app` in `pane`, so a test can name the declared cell whose drawn
+    /// rect it asserts instead of re-deriving the painter's math differently.
+    fn painter_inputs(app: &App, pane: Rect) -> (PhysicalLayout, RackLayout, ScreenMapping) {
+        let inventory = app.physical_rack_spec.module_keys();
+        let chain = PhysicalLayout::build(app.patch.as_ref(), app.master_model(), &inventory);
+        let rack_spec = if app.physical_rack_spec.rows.is_empty() {
+            RackSpec::default_case(&chain)
+        } else {
+            app.physical_rack_spec.clone()
+        };
+        let rack = RackLayout::pack(&chain, &rack_spec);
+        let m = ScreenMapping::new(
+            crate::physical::PHYSICAL_POINTS_PER_MM,
+            f64::from(app.physical_zoom),
+            f64::from(app.physical_offset.0) - f64::from(pane.min.x),
+            f64::from(app.physical_offset.1) - f64::from(pane.min.y),
+        );
+        (chain, rack, m)
+    }
+
+    /// The rect `rack_geometry` draws a declared `cell` of the module placed at
+    /// `placed` in a row starting at `row_y_mm`.
+    fn declared_rect(
+        mapping: &ScreenMapping,
+        placed: &PlacedModule,
+        row_y_mm: f64,
+        cell: &ElementCell,
+    ) -> Rect {
+        let (left, top, width, height) = mapping.mm_to_screen(crate::physical::RectMm {
+            x_mm: placed.rect_mm.x_mm + cell.rect_mm.x_mm,
+            y_mm: row_y_mm + placed.rect_mm.y_mm + cell.rect_mm.y_mm,
+            w_mm: cell.rect_mm.w_mm,
+            h_mm: cell.rect_mm.h_mm,
+        });
+        Rect::from_min_size(
+            Pos2::new(left as f32, top as f32),
+            Vec2::new(width as f32, height as f32),
+        )
+    }
+
+    #[test]
+    fn an_inventory_driven_master_draws_its_whole_declared_front() {
+        // The chain flag, not the controller name, decides unaddressed
+        // emission: an inventoried MASTER with no patch draws every declared
+        // cell of its face — the CV jacks, the LED matrix and the identity-less
+        // `SD reload` button — as dim marks in their declared position, and
+        // none publishes a hit rect (3.2 pins the counts; this asserts the
+        // shape).
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["CV I/O"]);
+        run_paint_panes(&mut app);
+        assert!(
+            app.component_rects.is_empty(),
+            "an inventory without a patch publishes no hit rect"
+        );
+
+        let pane = published_physical_pane(&app);
+        let spec = physical_spec(&app, pane).expect("an inventory alone is drawable");
+        let (chain, rack, m) = painter_inputs(&app, pane);
+        assert!(chain.inventory_driven, "the inventory built this chain");
+        let master = &chain.modules[0];
+        assert_eq!(master.controller, "CV I/O");
+        let placed = &rack.rows[0].modules[0];
+        let row_y = rack.rows[0].y_mm;
+        let declared: Vec<&ElementCell> = master.cells.values().flatten().collect();
+        let drawn: Vec<Rect> = spec.cells.iter().map(|cell| cell.rect).collect();
+
+        // Every declared cell is drawn, at its declared position.
+        for cell in &declared {
+            let expected = declared_rect(&m, placed, row_y, cell);
+            assert!(
+                drawn.contains(&expected),
+                "declared cell {:?} ({}) is drawn at {expected:?}",
+                cell.family,
+                cell.label
+            );
+        }
+        assert_eq!(
+            drawn.len(),
+            declared.len(),
+            "the master front is exactly its declared cells"
+        );
+
+        // The identity-less hardware is part of that front: the SD button and
+        // the matrix pixels carry no patch token, so only the declared-cell
+        // emission can put them on the face.
+        let sd = declared
+            .iter()
+            .find(|cell| cell.label == "SD reload")
+            .expect("MASTER declares the SD reload button");
+        assert!(
+            sd.element.is_none(),
+            "the SD button carries no element number, so no token reaches it"
+        );
+        assert!(drawn.contains(&declared_rect(&m, placed, row_y, sd)));
+        let matrix: Vec<&ElementCell> = declared
+            .iter()
+            .copied()
+            .filter(|cell| cell.family == "L")
+            .collect();
+        assert!(!matrix.is_empty(), "MASTER declares its LED matrix");
+        for cell in &matrix {
+            assert!(
+                drawn.contains(&declared_rect(&m, placed, row_y, cell)),
+                "matrix cell {} is drawn",
+                cell.label
+            );
+        }
+
+        // Unused means dimmed, unlabelled and inert.
+        for cell in &spec.cells {
+            assert!(cell.component_index.is_none(), "no cell claims a component");
+            assert!(cell.dimmed, "a declared-but-unused cell is dimmed");
+            assert!(
+                cell.label.is_empty(),
+                "a declared-but-unused cell is unlabelled"
+            );
+        }
+    }
+
+    #[test]
+    fn a_patch_derived_master_front_stays_suppressed_without_an_inventory() {
+        // Compatibility path: without an inventory the chain is exactly today's,
+        // so the auto-added master faceplate still draws only the jacks the
+        // patch addresses — no declared-but-unused jack, matrix pixel or
+        // identity-less button.
+        let app = app_from_ini("[p2b8]\n[copy]\n    input = I3\n    output = O1\n");
+        assert!(
+            app.physical_rack_spec.rows.is_empty(),
+            "no inventory configured"
+        );
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let spec = physical_spec(&app, pane).expect("a loaded patch yields a spec");
+        let (chain, rack, m) = painter_inputs(&app, pane);
+        assert!(!chain.inventory_driven, "the chain came from the patch");
+        let master = &chain.modules[0];
+        assert_eq!(master.controller, "CV I/O");
+        assert_eq!(
+            master.components.len(),
+            2,
+            "the patch reads I3 and drives O1"
+        );
+
+        let placed = &rack.rows[0].modules[0];
+        let row_y = rack.rows[0].y_mm;
+        let master_rect = spec.modules[0].rect;
+        let master_cells: Vec<&CellSpec> = spec
+            .cells
+            .iter()
+            .filter(|cell| master_rect.contains(cell.rect.center()))
+            .collect();
+        assert_eq!(
+            master_cells.len(),
+            2,
+            "only the addressed jacks draw: {:?}",
+            master_cells.iter().map(|c| c.rect).collect::<Vec<_>>()
+        );
+        let drawn: Vec<Rect> = master_cells.iter().map(|cell| cell.rect).collect();
+        for comp in &master.components {
+            let cell = chain
+                .cell_for(0, &comp.id)
+                .unwrap_or_else(|| panic!("{} resolves to a declared jack", comp.id));
+            let expected = declared_rect(&m, placed, row_y, cell);
+            assert!(
+                drawn.contains(&expected),
+                "{} draws its own jack at {expected:?}",
+                comp.id
+            );
+        }
+        for cell in master_cells {
+            assert!(cell.component_index.is_some(), "addressed only");
+            assert!(!cell.dimmed, "an addressed cell is not dimmed");
+            assert!(!cell.label.is_empty(), "an addressed cell keeps its label");
+        }
     }
 
     /// module-ui-label-fit D9/`auto`: the presentation annotates exactly the

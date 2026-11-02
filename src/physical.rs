@@ -1069,6 +1069,23 @@ impl PhysicalModule {
     /// deterministic family-key/row/col order. Skips `element: None` cells;
     /// fallback modules (empty `cells`) yield empty.
     pub fn unaddressed_cells(&self) -> Vec<&ElementCell> {
+        self.unaddressed_matching(false)
+    }
+
+    /// Every declared cell no patch component addresses — the identity-less
+    /// ones included (`"SD reload"`, the r2m/r2c serial bridges, the X7
+    /// `"USB"` switch). A cell with no element identity can never be the
+    /// target of a patch token, so it is unaddressed by construction; an
+    /// inventory-driven chain draws it as a dim mark in its declared position
+    /// instead of dropping the hardware (module-ui-rack-inventory D4).
+    pub fn declared_unaddressed_cells(&self) -> Vec<&ElementCell> {
+        self.unaddressed_matching(true)
+    }
+
+    /// The one addressability predicate both enumerations share: a cell is
+    /// addressed only when it carries a full `(kind letter, element)` identity
+    /// that some component's token names.
+    fn unaddressed_matching(&self, include_identityless: bool) -> Vec<&ElementCell> {
         use std::collections::HashSet;
         let addressed: HashSet<(char, u32)> = self
             .components
@@ -1081,7 +1098,7 @@ impl PhysicalModule {
             .flatten()
             .filter(|c| match (c.kind_letter, c.element) {
                 (Some(k), Some(e)) => !addressed.contains(&(k, e)),
-                _ => false,
+                _ => include_identityless,
             })
             .collect();
         out.sort_by_key(|a| (a.family.clone(), a.row, a.col));
