@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::graph::{Graph, GraphEdge, NodeId, TopologySeverity};
 use crate::latency::{EdgeLatency, LatencySummary};
-use crate::optimize::CandidateOrdering;
+use crate::optimize::{CandidateOrdering, OptimizeScope};
 use crate::patch::Patch;
 use crate::rack::{self, MasterSource};
 use crate::schema::Schema;
@@ -218,6 +218,12 @@ pub struct OptimizeReport {
     pub tool: ToolInfo,
     /// What was optimized and how big it is.
     pub patch: PatchSummary,
+    /// Which candidate strategy searched (`banner`, `global` or `minmax`).
+    pub strategy: String,
+    /// The objective weight the search used: `0.0` is total latency only,
+    /// `1.0` is the single worst edge only. Recorded so two reports of one
+    /// patch are comparable without the command line that produced them.
+    pub weight: f32,
     /// Latency of the original file order; the `before` every candidate shares.
     pub baseline: LatencySummaryReport,
     /// Candidate orderings, best first (the optimizer's own order).
@@ -281,6 +287,8 @@ pub fn optimize_report(
     patch: &Patch,
     schema: &Schema,
     candidates: &[CandidateOrdering],
+    strategy: OptimizeScope,
+    weight: f32,
     path: &str,
     bytes: u64,
 ) -> OptimizeReport {
@@ -304,6 +312,8 @@ pub fn optimize_report(
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
         patch: patch_summary(patch, schema, path, bytes),
+        strategy: strategy_label(strategy).to_string(),
+        weight: round4(weight),
         baseline,
         candidates: candidates
             .iter()
@@ -511,6 +521,15 @@ fn ram_used(patch: &Patch, schema: &Schema) -> u32 {
         }
     }
     used
+}
+
+/// The strategy name reported for a search scope.
+fn strategy_label(scope: OptimizeScope) -> &'static str {
+    match scope {
+        OptimizeScope::Banner => "banner",
+        OptimizeScope::Global => "global",
+        OptimizeScope::MinMax => "minmax",
+    }
 }
 
 /// Serializer-facing severity name for a validation finding.
@@ -919,7 +938,15 @@ mod tests {
             "the reorderable fixture must yield a candidate"
         );
 
-        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 123);
+        let report = optimize_report(
+            &patch,
+            load_schema(),
+            &candidates,
+            OptimizeScope::Banner,
+            0.0,
+            "chain.ini",
+            123,
+        );
 
         assert_eq!(report.report_version, REPORT_VERSION);
         assert_eq!(report.tool.name, env!("CARGO_PKG_NAME"));
@@ -971,7 +998,15 @@ mod tests {
         );
         let cost = CostModel::default();
         let candidates = generate_candidates(&patch, &cost, OptimizeScope::MinMax);
-        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 0);
+        let report = optimize_report(
+            &patch,
+            load_schema(),
+            &candidates,
+            OptimizeScope::MinMax,
+            0.0,
+            "chain.ini",
+            0,
+        );
 
         for candidate in &report.candidates {
             let mut reordered = patch.clone();
@@ -1006,7 +1041,15 @@ mod tests {
         let patch = chain_patch();
         let cost = CostModel::default();
         let candidates = generate_candidates(&patch, &cost, OptimizeScope::Banner);
-        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 0);
+        let report = optimize_report(
+            &patch,
+            load_schema(),
+            &candidates,
+            OptimizeScope::Banner,
+            0.0,
+            "chain.ini",
+            0,
+        );
 
         for (candidate, raw) in report.candidates.iter().zip(&candidates) {
             // The reported delta is exactly the difference of the reported
@@ -1034,7 +1077,15 @@ mod tests {
     #[test]
     fn optimize_report_without_candidates_zeroes_the_baseline() {
         let patch = chain_patch();
-        let report = optimize_report(&patch, load_schema(), &[], "<stdin>", 0);
+        let report = optimize_report(
+            &patch,
+            load_schema(),
+            &[],
+            OptimizeScope::Banner,
+            0.0,
+            "<stdin>",
+            0,
+        );
 
         assert_eq!(
             report.baseline,

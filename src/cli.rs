@@ -555,6 +555,10 @@ pub fn optimize_text(report: &OptimizeReport) -> String {
         max = baseline.max,
         back_edges = baseline.back_edges
     ));
+    lines.push(format!(
+        "search: {} · objective weight {:.2}",
+        report.strategy, report.weight
+    ));
 
     if report.candidates.is_empty() {
         lines.push(String::from("candidates: none"));
@@ -897,8 +901,15 @@ fn execute_optimize(
     }
 
     let schema = schema::load_schema();
-    let mut report =
-        report::optimize_report(&input.patch, schema, &candidates, &input.label, input.bytes);
+    let mut report = report::optimize_report(
+        &input.patch,
+        schema,
+        &candidates,
+        request.strategy,
+        request.weight,
+        &input.label,
+        input.bytes,
+    );
     if let Some(OutputTarget::Write(destination)) = &request.output {
         let source = input.path.as_deref().ok_or_else(|| {
             Failure::usage(
@@ -1476,7 +1487,15 @@ mod tests {
     fn optimize_text_prints_the_baseline_and_every_candidate_index() {
         let patch = optimize_fixture();
         let candidates = generate_candidates(&patch, &CostModel::default(), OptimizeScope::Banner);
-        let report = optimize_report(&patch, load_schema(), &candidates, "chain.ini", 0);
+        let report = optimize_report(
+            &patch,
+            load_schema(),
+            &candidates,
+            OptimizeScope::Banner,
+            0.0,
+            "chain.ini",
+            0,
+        );
         assert!(
             !report.candidates.is_empty(),
             "the reorderable fixture must yield a candidate"
@@ -1514,7 +1533,15 @@ mod tests {
     #[test]
     fn optimize_text_says_none_without_candidates() {
         let patch = optimize_fixture();
-        let report = optimize_report(&patch, load_schema(), &[], "chain.ini", 0);
+        let report = optimize_report(
+            &patch,
+            load_schema(),
+            &[],
+            OptimizeScope::Banner,
+            0.0,
+            "chain.ini",
+            0,
+        );
 
         let text = optimize_text(&report);
         assert!(

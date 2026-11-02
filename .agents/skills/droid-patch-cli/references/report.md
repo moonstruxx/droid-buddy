@@ -114,6 +114,8 @@ order, in loop units. Empty graphs report zeros.
 | `report_version` | integer | contract version |
 | `tool` | object | `{ "name", "version" }` |
 | `patch` | object | as in [patch](#patch) |
+| `strategy` | string | the search that produced these candidates: `banner`, `global` or `minmax` |
+| `weight` | number | the objective weight the search used: `0.0` is total latency, `1.0` is the worst edge |
 | `baseline` | object | the current file order's latency — see [latency summary](#latency-summary) |
 | `candidates` | array | proposed reorderings, best first — see [candidates](#candidates) |
 

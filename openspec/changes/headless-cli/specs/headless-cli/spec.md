@@ -116,7 +116,9 @@ and SHALL report the current file-order latency and every candidate reordering w
 latency after reordering and the difference from the baseline. It SHALL accept a strategy
 selection (banner-preserving, global or all strategies including the min-max objective), an
 objective weight in `[0, 1]` that trades total latency against the worst edge, and a
-candidate index that selects which candidate an output option acts on.
+candidate index that selects which candidate an output option acts on. The report SHALL
+name the strategy and the objective weight the search actually used, so two reports of one
+patch are comparable without the command line that produced them.
 
 `--write <path>` SHALL save the selected candidate as a patch file without modifying the
 source, and SHALL report the path actually written. An existing destination SHALL NOT be

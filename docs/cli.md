@@ -87,6 +87,7 @@ Field notes:
 $ droid_tui optimize fixtures/optimizer_latency.ini
 optimizer_latency · 5 sections · 0 circuits · 4 cables · 2 hw tokens
 baseline: avg 4.0000 · max 4.0000 · 4 back edges
+search: banner · objective weight 0.00
 [0] banner (default)  avg 4.0000 → 1.0000 (-3.0000)  max 4.0000 → 1.0000 (-3.0000)
 ```
 
@@ -106,6 +107,10 @@ baseline: avg 4.0000 · max 4.0000 · 4 back edges
 
 `optimize` is not gated by validation: it reorders whatever it is given, and
 `--deny` is rejected for it. Run `analyze` when you want a verdict.
+
+The JSON form also records what searched: `strategy` (`banner`, `global` or
+`minmax`) and `weight`, so two reports of one patch are comparable without the
+command line that produced them.
 
 ## Exit codes
 
