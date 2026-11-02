@@ -2452,6 +2452,263 @@ fn regression_r2c_faceplate_is_two_unaddressable_serial_cells() {
         );
     }
 }
+
+// ── module-ui-rack-inventory 3.2: the drawn front, pinned by counts ─────────
+//
+// Task 3.1 made an inventory-driven chain draw every cell a faceplate declares
+// (addressed cells labelled and hit-tested, the rest dim and inert). The counts
+// are therefore whole declared fronts — the hardware on the panel, independent
+// of how much of it a patch uses:
+//
+//   `(inventory entry, patch fixture, geometry key, painted cells, breakdown)`
+//
+// A fixture is needed only to select the master *model*: the inventory key
+// `master18` names the master faceplate, and which geometry that faceplate uses
+// comes from the patch's resolved plan (no patch resolves to MASTER).
+const RACK_INVENTORY_FRONTS: &[(&str, Option<&str>, &str, usize, &str)] = &[
+    (
+        "master",
+        None,
+        "master",
+        33,
+        "16 CV jacks + 16 matrix cells + the identity-less `SD reload` button",
+    ),
+    (
+        "master18",
+        Some("fixtures/master_declaration_gate_inputs.ini"),
+        "master18",
+        15,
+        "14 CV/gate cells (I1, I2 and G1..G4 among them) + `SD reload`",
+    ),
+    (
+        "g8",
+        None,
+        "g8",
+        16,
+        "8 CV cells (G1.1..G1.8) + 8 matrix cells (R17..R24)",
+    ),
+    (
+        "x7",
+        None,
+        "x7",
+        13,
+        "12 token cells (4 CV jacks G9..G12, 8 matrix cells R49..R56) + `USB`",
+    ),
+    ("r2c", None, "r2c", 2, "the two identity-less serial jacks"),
+];
+
+/// A one-row `[physical.rack]` inventory naming `modules` left to right — the
+/// shape the config layer hands the app.
+fn rack_inventory(modules: &[&str]) -> crate::physical::RackSpec {
+    crate::physical::RackSpec {
+        rows: vec![crate::physical::RackRow {
+            he: 3,
+            hp: 84.0,
+            label: None,
+            modules: modules.iter().map(|entry| String::from(*entry)).collect(),
+        }],
+        ..crate::physical::RackSpec::default()
+    }
+}
+
+/// An app loaded from `fixture` (when given) with `modules` as its only rack
+/// inventory entry, so the chain is built through the same public path the
+/// config hands the app.
+fn inventory_app(fixture: Option<&str>, modules: &[&str]) -> App {
+    let mut app = App::new();
+    if let Some(fixture) = fixture {
+        let patch = Patch::from_ini_file(Path::new(fixture))
+            .unwrap_or_else(|e| panic!("{fixture} must parse: {e}"));
+        assert!(app.load_patch(patch), "{fixture} must load");
+    }
+    app.physical_rack_spec = rack_inventory(modules);
+    app
+}
+
+/// The cells the pane paints inside the spec module titled `title`, as
+/// `(rect, component index, dimmed)`.
+///
+/// Plain data, so the helper needs no name for the gui's private `CellSpec`.
+/// `crate::gui::physical_spec` is the production builder `paint_panes` feeds the
+/// painter, so the set counted here is exactly the set the pane draws — the
+/// stories below do not reimplement a cell-emission rule.
+fn painted_module_cells(app: &App, title: &str) -> Vec<(egui::Rect, Option<usize>, bool)> {
+    let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 800.0));
+    let spec = crate::gui::physical_spec(app, pane).expect("an inventory or a patch is drawable");
+    let module = spec
+        .modules
+        .iter()
+        .find(|module| module.title == title)
+        .unwrap_or_else(|| {
+            panic!(
+                "no {title} faceplate painted; painted = {:?}",
+                spec.modules
+                    .iter()
+                    .map(|module| module.title.clone())
+                    .collect::<Vec<_>>()
+            )
+        });
+    spec.cells
+        .iter()
+        .filter(|cell| module.rect.contains(cell.rect.center()))
+        .map(|cell| (cell.rect, cell.component_index, cell.dimmed))
+        .collect()
+}
+
+/// The painted cells of the chain module whose geometry key is `geometry_key`.
+///
+/// The chain is the one the painter builds (same `build` call and inventory),
+/// used only to name the faceplate's painted title — `physical_spec` titles a
+/// module `"{controller} 1"` — so a story names a geometry key, not a
+/// hand-constructed module.
+fn painted_faceplate_cells(
+    app: &App,
+    geometry_key: &str,
+) -> Vec<(egui::Rect, Option<usize>, bool)> {
+    let inventory = app.physical_rack_spec.module_keys();
+    let chain =
+        crate::physical::PhysicalLayout::build(app.patch.as_ref(), app.master_model(), &inventory);
+    assert!(
+        chain.inventory_driven,
+        "{geometry_key}: the chain must come from the rack inventory"
+    );
+    let module = chain
+        .modules
+        .iter()
+        .find(|module| module.geometry_key == geometry_key)
+        .unwrap_or_else(|| {
+            panic!(
+                "no {geometry_key} faceplate in the chain; faceplates = {:?}",
+                chain
+                    .modules
+                    .iter()
+                    .map(|module| module.geometry_key.clone())
+                    .collect::<Vec<_>>()
+            )
+        });
+    painted_module_cells(app, &format!("{} 1", module.controller))
+}
+
+/// The five declared fronts an inventory draws: MASTER 33, MASTER18 15, G8 16,
+/// X7 13 and R2C 2 cells. One story over `RACK_INVENTORY_FRONTS` keeps the
+/// numbers in one place; each rack is built by listing its module in a
+/// `RackSpec` row, never by constructing modules by hand.
+#[test]
+fn regression_inventory_fronts_draw_every_declared_cell() {
+    for &(entry, fixture, geometry_key, expected, breakdown) in RACK_INVENTORY_FRONTS {
+        let app = inventory_app(fixture, &[entry]);
+        let cells = painted_faceplate_cells(&app, geometry_key);
+        assert_eq!(
+            cells.len(),
+            expected,
+            "{entry} must paint {breakdown} ({expected} cells), painted {} instead",
+            cells.len()
+        );
+        if fixture.is_none() {
+            // No patch: the whole front is unaddressed, so every cell is dim
+            // and carries no component (task 2.4's inert-front rule).
+            assert!(app.patch.is_none(), "{entry}: the no-patch arm");
+            assert!(
+                cells
+                    .iter()
+                    .all(|(_, component, dimmed)| component.is_none() && *dimmed),
+                "{entry}: every cell of an unaddressed front is dim and inert: {cells:?}"
+            );
+        }
+    }
+}
+
+/// The compatibility arm: with no inventory the chain is the patch-derived one,
+/// so the master front stays suppressed exactly as before the inventory existed.
+/// `fixtures/own_two_ctrl.ini` addresses one CV I/O output (`O1`) on the master,
+/// so master cells are that one addressed jack — none of the 33 declared cells
+/// the patch leaves unused may appear.
+#[test]
+fn regression_no_inventory_keeps_the_master_front_suppressed() {
+    let fixture = "fixtures/own_two_ctrl.ini";
+    let patch = Patch::from_ini_file(Path::new(fixture))
+        .unwrap_or_else(|e| panic!("{fixture} must parse: {e}"));
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "{fixture} must load");
+    assert!(
+        app.physical_rack_spec.rows.is_empty(),
+        "{fixture}: no rack inventory configured"
+    );
+
+    let inventory = app.physical_rack_spec.module_keys();
+    assert!(inventory.is_empty(), "no inventory resolves to no keys");
+    let chain =
+        crate::physical::PhysicalLayout::build(app.patch.as_ref(), app.master_model(), &inventory);
+    assert!(!chain.inventory_driven, "the chain came from the patch");
+    let master = &chain.modules[0];
+    assert_eq!(master.controller, "CV I/O", "the master is the chain head");
+    assert!(
+        master
+            .components
+            .iter()
+            .all(|component| chain.cell_for(0, &component.id).is_some()),
+        "every addressed master component resolves to a declared jack"
+    );
+    let declared: usize = master.cells.values().map(Vec::len).sum();
+
+    let cells = painted_module_cells(&app, "CV I/O 1");
+    assert_eq!(
+        cells.len(),
+        master.components.len(),
+        "the master draws only the jacks the patch addresses"
+    );
+    assert!(
+        cells
+            .iter()
+            .all(|(_, component, dimmed)| component.is_some() && !*dimmed),
+        "every drawn master cell is an addressed element: {cells:?}"
+    );
+    assert!(
+        cells.len() < declared,
+        "declared cells the patch leaves unused stay suppressed: {} drawn of {declared}",
+        cells.len()
+    );
+}
+
+/// Task 2.4's rule: an inventory with no patch paints its modules but publishes
+/// no hit rect. `paint_panes` publishes `component_rects` as the cells'
+/// `component_index` projection, so the projection is asserted here through the
+/// production spec builder; the gui story
+/// `an_inventory_without_a_patch_paints_the_rack_and_publishes_no_rects` drives
+/// the real `paint_panes` path end to end.
+#[test]
+fn regression_no_patch_inventory_paints_modules_and_publishes_no_rects() {
+    let app = inventory_app(None, &["master", "g8"]);
+    assert!(app.patch.is_none(), "the state under test");
+
+    let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 800.0));
+    let spec = crate::gui::physical_spec(&app, pane).expect("an inventory alone is drawable");
+    let titles: Vec<&str> = spec
+        .modules
+        .iter()
+        .map(|module| module.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        ["CV I/O 1", "G8 1"],
+        "every inventoried faceplate still paints"
+    );
+    assert!(
+        !spec.cells.is_empty(),
+        "the inventoried fronts keep their cells"
+    );
+
+    let published: Vec<usize> = spec
+        .cells
+        .iter()
+        .filter_map(|cell| cell.component_index)
+        .collect();
+    assert!(
+        published.is_empty(),
+        "no patch publishes no hit rect: {published:?}"
+    );
+}
+
 // ── button-led-composition (task 4.1): composed button faces + folded LEDs ─
 // One fixture (`fixtures/button_led_composition.ini`) declaring a P2B8, a B32
 // and an M4 with explicit button/LED pairs, plus one LED-less element (P2B8
