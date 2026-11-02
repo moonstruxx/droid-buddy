@@ -17,6 +17,8 @@ feature overview, build & run), see the repo-root
 - [Views](views.md) — module UI, source viewer, signal-flow graph,
   optimizer, picker, and overlays.
 - [Keys](keys.md) — the full key reference, per view.
+- [Headless CLI](cli.md) — the no-window `analyze` and `optimize` subcommands,
+  the JSON report contract and the exit codes.
 - [Labels](labels.md) — per-patch labels, shift layers, preamble labels,
   guessed labels.
 - [Uploading](uploading.md) — sending the patch to DROID hardware over
