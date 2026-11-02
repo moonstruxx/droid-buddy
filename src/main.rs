@@ -2,20 +2,64 @@ use color_eyre::Result;
 
 use droid_tui::app::{App, GraphWindowRequest};
 use droid_tui::latency::CostModel;
-use droid_tui::{config, layout, schema, theme};
+use droid_tui::{cli, config, layout, schema, theme};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    // The process argv snapshot, taken once: the subcommand dispatch,
+    // `--self-test` and the window path all read it.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
     // Config load runs before the window opens so stderr warnings are visible.
     let settings = config::load(&theme::canonical_theme_name, theme::THEMES);
     theme::init(*theme::resolve(&settings.theme));
+    // The platform config roots, resolved once and handed to whichever schema
+    // install this process performs.
+    let xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let home = std::env::var_os("HOME");
+    let appdata = std::env::var_os("APPDATA");
+
+    // A first argument that exactly names a subcommand is the headless CLI
+    // (design D1). It runs before the panic hook and the window machinery so an
+    // analysis can never open a window by accident, and it installs its own
+    // schema because the executors read the installed one. `--help` needs no
+    // special case: `cli::run` prints the usage and exits `cli::EXIT_OK`.
+    if argv.first().is_some_and(|arg| cli::is_subcommand(arg)) {
+        let command = match cli::parse(&argv) {
+            Ok(command) => command,
+            Err(error) => {
+                eprintln!("{error}");
+                eprintln!("{}", cli::usage());
+                std::process::exit(cli::EXIT_USAGE);
+            }
+        };
+        // `--no-plugins` installs an embedded-only schema; every other run gets
+        // the same merged schema the window uses, so a report never disagrees
+        // with the GUI.
+        let installed = if cli::no_plugins(&command) {
+            let mut embedded_only = settings.clone();
+            embedded_only.plugins.enabled = false;
+            embedded_only
+        } else {
+            settings.clone()
+        };
+        schema::init(
+            &installed,
+            xdg.as_deref(),
+            home.as_deref(),
+            appdata.as_deref(),
+        );
+        // A subcommand is a one-shot command: its exit code is the process exit
+        // code, so there is no state left to unwind to after it returns.
+        std::process::exit(cli::run(&command, &settings));
+    }
+
     // Install the merged schema (embedded + plugin overlay) before the window
     // opens so plugin shadow/skip warnings print on a clean stderr (ADR 14).
     schema::init(
         &settings,
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-        std::env::var_os("APPDATA").as_deref(),
+        xdg.as_deref(),
+        home.as_deref(),
+        appdata.as_deref(),
     );
     // Destroy the graph window on panic so a panic leaves no orphaned desktop
     // window, then chain the default hook.
@@ -27,8 +71,9 @@ fn main() -> Result<()> {
 
     // `--self-test [patch.ini]` runs the headless smoke test before any window
     // exists: CI has no display, and the point is to prove the paint dispatch
-    // works without one. It is the only flag the binary parses.
-    let mut args = std::env::args().skip(1);
+    // works without one. It is the only flag the binary parses; the argv the
+    // subcommand dispatch above consumes is everything else.
+    let mut args = argv.into_iter();
     let first = args.next();
     if first.as_deref() == Some("--self-test") {
         let patch = args.next().map(std::path::PathBuf::from);

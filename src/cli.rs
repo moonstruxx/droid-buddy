@@ -167,6 +167,21 @@ pub fn is_subcommand(arg: &str) -> bool {
     matches!(arg, "analyze" | "optimize")
 }
 
+/// `true` when the command asked for an embedded-only schema.
+///
+/// `main` is the only consumer: it checks this before installing the
+/// process-wide schema, so a `--no-plugins` run never reads the plugin
+/// directory. [`Command::Help`] runs no analysis, so it installs nothing it
+/// could honour the flag with and reports `false`.
+#[must_use]
+pub fn no_plugins(command: &Command) -> bool {
+    match command {
+        Command::Analyze(request) => request.no_plugins,
+        Command::Optimize(request) => request.no_plugins,
+        Command::Help => false,
+    }
+}
+
 /// A short usage block for both commands, suitable as the `--help` body and
 /// as the trailer of a usage error.
 #[must_use]
