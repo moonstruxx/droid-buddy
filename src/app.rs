@@ -2481,15 +2481,30 @@ impl App {
     }
 
     /// The controller chain and the packed rack in one pass: what the painter
-    /// builds, resolved once for the caller that needs both. `None` without a
-    /// patch.
+    /// builds, resolved once for the caller that needs both.
+    ///
+    /// Without a patch an inventory alone is still a drawable rack: it names
+    /// real hardware, so the chain is the whole inventoried rack (master first
+    /// when the inventory omits it) with every component list empty — no patch
+    /// components, hence no written label and no non-rest state anywhere.
+    ///
+    /// `None` only when there is neither a patch nor an inventory. A
+    /// master-only layout there would make the fits and the overflow judge
+    /// measure a rack the painter does not draw yet (module-ui-rack-inventory
+    /// 2.4/3.1 adopt the inventory in the painter), so the pre-inventory
+    /// "nothing to draw" answer stays until then.
     fn physical_chain_and_rack(
         &self,
     ) -> Option<(crate::physical::PhysicalLayout, crate::physical::RackLayout)> {
-        let patch = self.patch.as_ref()?;
         let inventory = self.physical_rack_spec.module_keys();
-        let chain =
-            crate::physical::PhysicalLayout::build(Some(patch), self.master_model(), &inventory);
+        if self.patch.is_none() && inventory.is_empty() {
+            return None;
+        }
+        let chain = crate::physical::PhysicalLayout::build(
+            self.patch.as_ref(),
+            self.master_model(),
+            &inventory,
+        );
         let spec = if self.physical_rack_spec.rows.is_empty() {
             crate::physical::RackSpec::default_case(&chain)
         } else {
@@ -2587,6 +2602,10 @@ impl App {
     /// annotation rule: a derived token name is text nobody asked the surface to
     /// show, and letting it lift the fit would zoom the view for a label that
     /// only exists on hover.
+    ///
+    /// Without a patch there is no label source at all (`display_label` reads one),
+    /// so the request set is empty and the labels fit falls back to the rack fit
+    /// rather than inventing stand-in text for the inventoried faceplates.
     ///
     /// `glyph_chars` is `0` and `has_state` is `false`, as in the painter's own
     /// box: the module UI paints the state glyph as a corner marker rather than
@@ -8886,5 +8905,185 @@ mod tests {
                 .contains("fit("),
             "a manual pan drops the marker"
         );
+    }
+
+    // ---- module-ui-rack-inventory 2.3: an inventory with no patch ----
+
+    /// A one-row `[physical.rack]` inventory naming `modules` left to right —
+    /// the shape the config layer hands the app.
+    fn inventory_rack(modules: &[&str]) -> crate::physical::RackSpec {
+        crate::physical::RackSpec {
+            rows: vec![crate::physical::RackRow {
+                he: 3,
+                hp: 84.0,
+                label: None,
+                modules: modules.iter().map(|m| String::from(*m)).collect(),
+            }],
+            ..crate::physical::RackSpec::default()
+        }
+    }
+
+    #[test]
+    fn an_inventory_without_a_patch_builds_the_whole_rack_without_components() {
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        assert!(app.patch.is_none(), "the state under test");
+
+        let (chain, rack) = app
+            .physical_chain_and_rack()
+            .expect("an inventory alone is drawable");
+        let keys: Vec<String> = chain
+            .modules
+            .iter()
+            .map(crate::physical::PhysicalModule::key)
+            .collect();
+        assert_eq!(
+            keys,
+            ["CV I/O", "P4B2 1", "S10 1"],
+            "the inventory is the chain order"
+        );
+        assert!(chain.inventory_driven);
+        assert!(
+            chain.modules.iter().all(|m| m.components.is_empty()),
+            "no patch means no component is bound to any faceplate"
+        );
+        assert_eq!(rack.rows.len(), 1);
+        assert_eq!(rack.rows[0].modules.len(), 3, "every module is mounted");
+        assert!(rack.total_width_mm > 0.0 && rack.total_height_mm > 0.0);
+
+        // An inventory that omits the master still draws one at the head.
+        app.physical_rack_spec = inventory_rack(&["P4B2 1"]);
+        let (head, _) = app.physical_chain_and_rack().expect("inventory rack");
+        let keys: Vec<String> = head
+            .modules
+            .iter()
+            .map(crate::physical::PhysicalModule::key)
+            .collect();
+        assert_eq!(keys, ["CV I/O", "P4B2 1"]);
+    }
+
+    #[test]
+    fn the_labels_fit_equals_the_rack_fit_without_a_patch() {
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        let (chain, _) = app.physical_chain_and_rack().expect("inventory rack");
+        assert!(
+            app.physical_label_fit_requests(&chain).is_empty(),
+            "no patch, no written label to lift the fit"
+        );
+
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        let rack_fit = whole_rack_fit(&app, LABEL_FIT_PANE);
+        assert!(
+            app.fit_physical_view(w, h),
+            "the inventory rack is fittable"
+        );
+        assert!(
+            (f64::from(app.physical_zoom) - rack_fit).abs() <= FIT_EPS,
+            "the labels fit falls back to the rack fit ({} vs {rack_fit})",
+            app.physical_zoom
+        );
+        assert_eq!(
+            app.physical_fit_mode,
+            Some(FitMode::Labels),
+            "the mode still names the fit that ran"
+        );
+        assert_eq!(app.scale_factor, app.physical_zoom);
+        let (rack_w, rack_h) = rack_extent_mm(&app);
+        assert_eq!(
+            app.physical_offset,
+            crate::physical::fit_offset(rack_w, rack_h, w, h, f64::from(app.physical_zoom)),
+            "the fit centres the rack it measured"
+        );
+
+        // Nothing stands in for patch data the app does not have.
+        assert!(app.selected_component.is_none(), "no selected element");
+        assert!(app.hovered_component.is_none(), "no hovered element");
+        assert!(app.latched_component.is_none(), "no modifier wash");
+        assert!(app.modifier_influence.is_none());
+
+        // `Shift+F` answers the same zoom here: there is nothing to lift.
+        assert!(app.fit_physical_view_rack(w, h));
+        assert_eq!(app.physical_zoom, rack_fit as f32);
+        assert_eq!(app.physical_fit_zoom, Some(rack_fit as f32));
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Rack));
+    }
+
+    #[test]
+    fn both_fits_clear_the_navigation_latch_without_a_patch() {
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["S10 1"]);
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+
+        app.note_physical_navigation();
+        assert!(app.physical_nav_latched);
+        assert!(app.fit_physical_view(w, h));
+        assert!(!app.physical_nav_latched, "the labels fit clears the latch");
+        assert!(!app.physical_fit_pending, "the fit consumes the request");
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Labels));
+
+        app.note_physical_navigation();
+        app.physical_fit_pending = true;
+        assert!(app.physical_nav_latched);
+        assert!(app.fit_physical_view_rack(w, h));
+        assert!(!app.physical_nav_latched, "the rack fit clears the latch");
+        assert!(!app.physical_fit_pending, "the fit consumes the request");
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Rack));
+    }
+
+    #[test]
+    fn a_patch_loaded_inventory_keeps_todays_fits() {
+        // Loading a patch must not turn the inventory path into a second fit
+        // implementation: the same inventoried rack answers the same fits, and
+        // its derived (unwritten) label adds no lift.
+        let mut app = App::new();
+        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1"]);
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        let rack_fit = whole_rack_fit(&app, LABEL_FIT_PANE);
+        assert!(app.fit_physical_view(w, h));
+        let inventory_only = app.physical_zoom;
+
+        app.patch = Some(
+            Patch::from_ini_str("[p4b2]\n    button1 = B1.1\n", String::from("inventory"))
+                .expect("the fixture parses"),
+        );
+        assert_eq!(
+            whole_rack_fit(&app, LABEL_FIT_PANE),
+            rack_fit,
+            "binding components does not move the rack"
+        );
+        assert!(app.fit_physical_view(w, h));
+        assert_eq!(
+            app.physical_zoom, inventory_only,
+            "the labels fit is unchanged by the patch"
+        );
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Labels));
+        assert!(app.fit_physical_view_rack(w, h));
+        assert_eq!(
+            app.physical_zoom, rack_fit as f32,
+            "the rack fit is unchanged by the patch"
+        );
+    }
+
+    #[test]
+    fn neither_a_patch_nor_an_inventory_still_draws_nothing() {
+        let mut app = App::new();
+        assert!(app.patch.is_none());
+        assert!(app.physical_rack_spec.rows.is_empty());
+
+        assert!(app.physical_chain_and_rack().is_none());
+        assert!(app.physical_rack_for_fit().is_none());
+        assert_eq!(
+            app.physical_overflow(Rect::new(0, 0, 640, 520)),
+            (false, false)
+        );
+
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        assert!(!app.fit_physical_view(w, h), "nothing to fit");
+        assert!(!app.fit_physical_view_rack(w, h), "nothing to fit");
+        assert_eq!(app.physical_zoom, 1.0, "the view state is untouched");
+        assert_eq!(app.physical_fit_zoom, None);
+        assert_eq!(app.physical_fit_mode, None);
+        assert_eq!(app.physical_status_hint(), None);
     }
 }
