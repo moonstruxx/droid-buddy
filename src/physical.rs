@@ -136,7 +136,7 @@ pub struct ElementCellEntry {
 // ---------------------------------------------------------------------------
 
 /// Compiled in so a binary copied away from the repo still has its faceplates.
-const CONTROLLER_GEOMETRY_JSON: &str = include_str!("../controller_geometry.json");
+pub(crate) const CONTROLLER_GEOMETRY_JSON: &str = include_str!("../controller_geometry.json");
 
 /// Controller names that are themselves a geometry-data key.
 ///

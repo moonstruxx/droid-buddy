@@ -1125,6 +1125,163 @@ mod tests {
         }
     }
 
+    // ---- Cross-file / cross-declaration grid agreement (droid_tui-46x) ----
+
+    /// Mirror of the per-controller `grids` declarations in
+    /// `controller_geometry.json`. The production model ignores that field (it
+    /// is documentation no code reads), so the agreement sweep below reads it
+    /// through this mirror; unknown fields are skipped by serde.
+    #[derive(Deserialize)]
+    struct ControllerGridDeclarations {
+        controllers: HashMap<String, ControllerGridEntryMirror>,
+    }
+
+    #[derive(Deserialize)]
+    struct ControllerGridEntryMirror {
+        #[serde(default)]
+        grids: Vec<GridDeclarationMirror>,
+    }
+
+    #[derive(Deserialize)]
+    struct GridDeclarationMirror {
+        family: String,
+        cols: u32,
+        rows: u32,
+    }
+
+    fn controller_grid_declarations() -> ControllerGridDeclarations {
+        serde_json::from_str(crate::physical::CONTROLLER_GEOMETRY_JSON)
+            .expect("controller_geometry.json parses")
+    }
+
+    #[test]
+    fn every_declared_grid_agrees_with_element_cells() {
+        // Regression (droid_tui-46x): every grid a controller declares in
+        // controller_geometry.json must agree with the element cells the file
+        // emits for the same family — count, column/row cardinality, and slot
+        // distinctness — so a stack-vs-matrix drift like E4's four-cell row is
+        // caught for every controller in the suite, not only where a
+        // hand-written cross-file tie exists (b32, e4). Families that carry
+        // cells but declare no grid (the E4 and DB8E LED rings) are shape-free
+        // by design and are skipped. A family with several grids (s10/p10
+        // rotary banks, master18's CV jacks) partitions its cells in list
+        // order, one segment per grid extent, which is how the generator
+        // emits them; each segment must then fill its declared extent.
+        let ctrl =
+            crate::physical::ControllerGeometry::load().expect("controller_geometry.json loads");
+        let decls = controller_grid_declarations();
+        let mut controllers_checked = 0usize;
+        for (name, entry) in &decls.controllers {
+            let geo = ctrl
+                .controller(name)
+                .unwrap_or_else(|| panic!("controller_geometry.json carries no {name} entry"));
+            controllers_checked += 1;
+            let families: std::collections::BTreeSet<&str> =
+                entry.grids.iter().map(|g| g.family.as_str()).collect();
+            for family in families.iter().copied() {
+                let grids: Vec<&GridDeclarationMirror> =
+                    entry.grids.iter().filter(|g| g.family == family).collect();
+                let cells = geo.element_cells.get(family).unwrap_or_else(|| {
+                    panic!("{name}: grid declares family {family} but no cells exist")
+                });
+                let slots: usize = grids.iter().map(|g| (g.cols * g.rows) as usize).sum();
+                assert_eq!(
+                    cells.len(),
+                    slots,
+                    "{name}: family {family} has {} cells but its grids declare {slots} slots",
+                    cells.len()
+                );
+                // Partition the family's cells in list order, one segment per
+                // grid extent (the generator's emission order).
+                let mut idx = 0usize;
+                for grid in &grids {
+                    let seg = &cells[idx..idx + (grid.cols * grid.rows) as usize];
+                    idx += seg.len();
+                    let cols: std::collections::BTreeSet<u32> = seg.iter().map(|c| c.col).collect();
+                    let rows: std::collections::BTreeSet<u32> = seg.iter().map(|c| c.row).collect();
+                    assert_eq!(
+                        cols.len(),
+                        grid.cols as usize,
+                        "{name}: {family} grid {}x{} must use {} distinct columns, got {}",
+                        grid.cols,
+                        grid.rows,
+                        grid.cols,
+                        cols.len()
+                    );
+                    assert_eq!(
+                        rows.len(),
+                        grid.rows as usize,
+                        "{name}: {family} grid {}x{} must use {} distinct rows, got {}",
+                        grid.cols,
+                        grid.rows,
+                        grid.rows,
+                        rows.len()
+                    );
+                    let used: std::collections::BTreeSet<(u32, u32)> =
+                        seg.iter().map(|c| (c.col, c.row)).collect();
+                    assert_eq!(
+                        used.len(),
+                        seg.len(),
+                        "{name}: {family} grid {}x{} must not overlap its own slots",
+                        grid.cols,
+                        grid.rows
+                    );
+                }
+            }
+        }
+        assert!(
+            controllers_checked >= 15,
+            "sweep covered only {controllers_checked} controllers; controller_geometry.json carries 15"
+        );
+    }
+
+    #[test]
+    fn every_rack_grid_agrees_between_geometry_files() {
+        // Regression (droid_tui-46x): generalized from the hand-written b32
+        // and e4 ties — every grid rack_geometry.json describes for a
+        // controller must appear among the grid declarations
+        // controller_geometry.json makes for that controller, so a
+        // stack-vs-matrix drift like E4's four-cell row fails the suite for
+        // every controller the rack file describes, present or future.
+        // Singleton grids carry no shape and are skipped; a stack is one
+        // column, so it ties as 1 x count. The declared-grid side is itself
+        // tied to the emitted cells by
+        // every_declared_grid_agrees_with_element_cells above, so the two
+        // sweeps compose rack shape -> declaration -> cells.
+        let rack = RackGeometry::load().expect("rack_geometry.json loads");
+        let decls = controller_grid_declarations();
+        let mut described = 0usize;
+        for (name, grid) in &rack.grids {
+            let (cols, rows) = match grid {
+                Grid::Singleton => continue,
+                Grid::Matrix { cols, rows, .. } => (u32::from(*cols), u32::from(*rows)),
+                Grid::Stack { count, .. } => (1, u32::from(*count)),
+            };
+            described += 1;
+            let entry = decls
+                .controllers
+                .get(&name.to_lowercase())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "rack_geometry.json describes {name} but controller_geometry.json carries no {name} entry"
+                    )
+                });
+            assert!(
+                entry.grids.iter().any(|g| g.cols == cols && g.rows == rows),
+                "rack_geometry.json describes {name} as {cols}x{rows}, but controller_geometry.json declares only {:?}",
+                entry
+                    .grids
+                    .iter()
+                    .map(|g| (g.family.as_str(), g.cols, g.rows))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            described >= 2,
+            "rack_geometry.json must still describe the b32 and e4 grids (found {described})"
+        );
+    }
+
     // ---- BindingFeatures scenario tests (task 1.2) ----
 
     #[test]
