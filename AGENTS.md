@@ -1,7 +1,5 @@
 # AGENTS.md
 
-<!-- PC-NOT-INITIALIZED -->
-
 # Agent operating guide
 
 This guide defines the common operating contract for AI agents in this repository.
