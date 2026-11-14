@@ -36,15 +36,36 @@ const LOD_MIN_NODE_H: f32 = 12.0;
 /// zooming in (label-guess-and-screen-scale, design decision 4). Matches the
 /// cluster-title base size, so a zoomed-in graph keeps today's appearance.
 const NODE_LABEL_SIZE: f32 = 12.0;
-/// Cluster-title legibility floor: below the zoom-derived size the cluster
-/// title is omitted (graph-zoom-node-scaling, design decision 3).
-const MIN_LABEL_PX: f32 = 7.0;
 /// Monospace advance as a fraction of the font size (egui's monospace face is
 /// close to 0.6 em), used to budget the characters that fit a frame at the
 /// fixed [`NODE_LABEL_SIZE`] font.
 const MONO_ADVANCE: f32 = 0.6;
-/// Cluster title font at zoom 1.0; scales with the derived zoom.
+/// Fixed screen-space font size (points) for cluster titles, independent of the
+/// camera zoom — the cluster counterpart of [`NODE_LABEL_SIZE`], and equal to
+/// it so a zoomed-in graph keeps today's appearance.
 const CLUSTER_TITLE_PX: f32 = 12.0;
+/// Proportional-face advance as a fraction of the font size (about 0.55 em per
+/// character), used to size the smallest readable title fragment.
+const PROP_ADVANCE: f32 = 0.55;
+/// Characters a cluster title needs before it still names its group: a shorter,
+/// ellipsized fragment names nothing (the argument ADR 52 makes for cell
+/// labels).
+const CLUSTER_TITLE_MIN_CHARS: usize = 3;
+/// One text row's height as a multiple of the font size (egui's proportional
+/// face needs about 1.2 em per row).
+const LINE_HEIGHT_EM: f32 = 1.2;
+/// Left inset of a cluster title from its box's corner.
+const CLUSTER_TITLE_LEFT_INSET: f32 = 6.0;
+/// Top inset of a cluster title from its box's corner, which the box-room
+/// height gate must hold in addition to one title line.
+const CLUSTER_TITLE_TOP_INSET: f32 = 3.0;
+/// One cluster-title line at [`CLUSTER_TITLE_PX`].
+const CLUSTER_TITLE_LINE_H: f32 = CLUSTER_TITLE_PX * LINE_HEIGHT_EM;
+/// Shortest cluster box that can hold a title: the top inset plus one title
+/// line.
+const CLUSTER_TITLE_MIN_H: f32 = CLUSTER_TITLE_LINE_H + CLUSTER_TITLE_TOP_INSET;
+/// Narrowest cluster box that can hold a readable title fragment.
+const CLUSTER_TITLE_MIN_W: f32 = CLUSTER_TITLE_MIN_CHARS as f32 * PROP_ADVANCE * CLUSTER_TITLE_PX;
 /// Minimap node dot floor (raised from 1 px so dots stay visible when the
 /// scene is tiny).
 const MINIMAP_DOT_MIN: f32 = 2.0;
@@ -153,19 +174,21 @@ pub(crate) fn paint_scene_in(
             egui::Stroke::new(1.0, rgb(cluster.border)),
             egui::StrokeKind::Inside,
         );
-        // Cluster titles scale with the zoom and are omitted when so small
-        // they would not be legible (design decision 3). Gating on the raw
-        // zoom-derived size keeps the legibility floor from resurrecting a
-        // title that is below the threshold (the clamp would raise it to
-        // exactly MIN_LABEL_PX and defeat the gate).
-        let raw_title_px = CLUSTER_TITLE_PX * zoom;
-        if !cluster.title.is_empty() && raw_title_px >= MIN_LABEL_PX {
-            let title_px = raw_title_px.clamp(MIN_LABEL_PX, 40.0);
+        // Cluster titles are fixed screen-space text, like node labels
+        // (ADR 43): the font never scales with the camera. The box decides
+        // visibility, measured on its already-projected rect: it needs room
+        // for one title line below the top inset, and for a readable fragment
+        // of the title. A box without that room stays anonymous instead of
+        // drawing an ellipsized sliver that names nothing (ADR 52).
+        if !cluster.title.is_empty()
+            && rect.height() >= CLUSTER_TITLE_MIN_H
+            && rect.width() >= CLUSTER_TITLE_MIN_W
+        {
             painter.text(
-                rect.left_top() + egui::vec2(6.0, 3.0),
+                rect.left_top() + egui::vec2(CLUSTER_TITLE_LEFT_INSET, CLUSTER_TITLE_TOP_INSET),
                 egui::Align2::LEFT_TOP,
                 &cluster.title,
-                egui::FontId::proportional(title_px),
+                egui::FontId::proportional(CLUSTER_TITLE_PX),
                 rgb(cluster.title_color),
             );
         }

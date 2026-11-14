@@ -1476,8 +1476,11 @@ fn regression_graph_anchor_no_overlap_at_every_zoom() {
     }
 }
 
-/// Level of detail: node titles, port markers, and cluster titles are omitted
-/// below the legibility threshold and present at the fit zoom (task 4.1).
+/// Level of detail: node titles and port markers are omitted below the
+/// legibility threshold and present at the fit zoom (task 4.1). Cluster titles
+/// are not on that threshold: they are fixed screen-space text gated on box
+/// room, so a box large enough to hold one still keeps its title at any zoom
+/// (cluster-title-legibility, decision D1).
 #[test]
 fn regression_graph_anchor_lod_omits_text_below_threshold() {
     let anchor = anchor_graph();
@@ -1498,7 +1501,7 @@ fn regression_graph_anchor_lod_omits_text_below_threshold() {
         .filter(|c| !c.is_empty())
         .collect();
 
-    // 2a. Below the threshold: no node title, no port markers, no cluster title.
+    // 2a. Below the threshold: no node title, no port markers.
     let low_scene =
         crate::gui::build_scene_spec(&anchor_app(ZOOM_OUT), crate::theme::active(), pane)
             .expect("scene present at the zoom-out preset");
@@ -1518,14 +1521,6 @@ fn regression_graph_anchor_lod_omits_text_below_threshold() {
         assert!(
             !is_node_title,
             "node title painted below the legibility threshold: {painted:?}"
-        );
-        let is_cluster_title = low_scene
-            .clusters
-            .iter()
-            .any(|cl| !cl.title.is_empty() && cl.title == *painted);
-        assert!(
-            !is_cluster_title,
-            "cluster title painted below the legibility threshold: {painted:?}"
         );
     }
 
