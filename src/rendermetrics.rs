@@ -613,12 +613,18 @@ fn channel_luminance(channel: u8) -> f32 {
 }
 
 /// WCAG 2.x relative luminance of an sRGB color.
-fn rgb_luminance(r: u8, g: u8, b: u8) -> f32 {
+///
+/// Shared with the palette guards in `theme` (cluster-title contrast, theming
+/// spec) so the sRGB curve has one implementation, not a second copy.
+pub(crate) fn rgb_luminance(r: u8, g: u8, b: u8) -> f32 {
     0.2126 * channel_luminance(r) + 0.7152 * channel_luminance(g) + 0.0722 * channel_luminance(b)
 }
 
 /// WCAG 2.x contrast ratio between two relative luminances (1.0..=21.0).
-fn contrast_ratio(a: f32, b: f32) -> f32 {
+///
+/// Shared with the palette guards in `theme` (cluster-title contrast, theming
+/// spec). Callers resolve the two colors to RGB themselves.
+pub(crate) fn contrast_ratio(a: f32, b: f32) -> f32 {
     let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
     (hi + 0.05) / (lo + 0.05)
 }
