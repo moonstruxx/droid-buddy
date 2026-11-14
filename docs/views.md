@@ -137,8 +137,10 @@ pane, keeping selection and scroll.
 
 Circuits as nodes, virtual `_cable` connections as directed edges,
 banner groups as cluster containers — laid out by the deterministic
-column arrangement by default (`h` toggles the retained force
-solver, `a` applies the active arrangement and cycles the layout).
+column arrangement by default (titles are fixed screen-space text,
+and a box without room for one draws none; `h` toggles the retained
+force solver, `a` applies the active arrangement and cycles the
+layout).
 ![Signal-flow graph](assets/graph.png)
 
 - Drag a node to re-settle its neighborhood; `x` toggles processing
