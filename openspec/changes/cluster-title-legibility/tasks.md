@@ -14,3 +14,5 @@
 
 - [x] 3.1 Update `docs/views.md`'s cluster-container sentence to state that titles are screen-space constant and yield to boxes without room, then regenerate `ARCHITECTURE.md` (and its `§15` open bullet and ADR/footer record) with the project's architecture skill; verify `ARCHITECTURE.md` no longer lists the cluster-title contrast item as unfixed <!-- agent: devops-engineer.build, depends_on: [1.2, 2.2], touches: [docs/views.md, ARCHITECTURE.md] -->
 - [x] 3.2 Run the repository gates — `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`, and `cargo run --release -- --self-test` — and record the exit status of each; verify all four exit 0 <!-- agent: devops-engineer.fast, depends_on: [1.2, 2.2], touches: [] -->
+
+- [x] 3.3 Regenerate `DESIGN.md` (palette token table + cluster bullet) with the project's design skill; verify `grep -n "cluster-title" DESIGN.md` reports the LightBlue value and the diff touches only `DESIGN.md`
