@@ -3735,6 +3735,166 @@ mod window_paint_tests {
         );
         assert_eq!(sections_out.beziers, without_boxes.beziers);
     }
+
+    // ── cluster-title-legibility: fixed screen-space titles (task 2.2) ──────
+
+    /// Fonts of the painted texts whose content is one of `titles` — the
+    /// cluster titles, told apart from node labels by their own strings.
+    fn title_fonts(out: &PaintOutput, titles: &[&str]) -> Vec<egui::FontId> {
+        out.labels
+            .iter()
+            .zip(&out.label_fonts)
+            .filter(|(label, _)| titles.contains(&label.as_str()))
+            .map(|(_, font)| font.clone())
+            .collect()
+    }
+
+    /// Every cluster box in `scene` has room for a title, so a title missing
+    /// from a paint run was omitted by the painter, not by the gate.
+    fn assert_boxes_have_title_room(scene: &SceneSpec, zoom: f32) {
+        assert!(!scene.clusters.is_empty(), "scene has clusters to gate");
+        for cluster in &scene.clusters {
+            assert!(
+                cluster.h >= CLUSTER_TITLE_MIN_H && cluster.w >= CLUSTER_TITLE_MIN_W,
+                "zoom {zoom}: box {:?} must have title room (h {}, w {})",
+                cluster.title,
+                cluster.h,
+                cluster.w
+            );
+        }
+    }
+
+    /// Spec "Cluster title size independent of zoom" (design D4): the painted
+    /// cluster-title font is `CLUSTER_TITLE_PX` at camera zoom 0.5 and 1.5, and
+    /// identical between the two runs — the boxes scale with the camera, the
+    /// title font does not.
+    #[test]
+    fn cluster_title_font_size_is_identical_across_zoom() {
+        let canvas = egui::vec2(1280.0, 800.0);
+        let titles = ["Controls", "Audio"];
+        let mut runs = Vec::new();
+        for &zoom in &[0.5_f32, 1.5] {
+            let mut app = two_group_app();
+            app.graph_camera = Some(GraphCamera {
+                zoom,
+                pan: (0.0, 0.0),
+            });
+            let scene = scene_of(&app);
+            assert_boxes_have_title_room(&scene, zoom);
+            let out = paint(Some(&scene), canvas);
+            let fonts = title_fonts(&out, &titles);
+            assert_eq!(
+                fonts.len(),
+                titles.len(),
+                "zoom {zoom}: every box with room paints its title: {:?}",
+                out.labels
+            );
+            for font in &fonts {
+                assert_eq!(
+                    *font,
+                    egui::FontId::proportional(CLUSTER_TITLE_PX),
+                    "zoom {zoom}: a cluster title paints at the fixed screen-space font"
+                );
+            }
+            runs.push(fonts);
+        }
+        assert_eq!(runs[0], runs[1], "the title font is identical across zoom");
+    }
+
+    /// Spec "Cluster titles stay readable at fit zoom" (design D1/D4). At zoom
+    /// 0.2 the zoom-derived size is `CLUSTER_TITLE_PX × zoom = 2.4 px`, below
+    /// the pre-change painter's `raw >= 7 px` floor, while the projected box
+    /// still clears the box-room gate. That painter therefore omitted these
+    /// titles outright, so the assertion below is precisely the behaviour
+    /// change this change exists for, not a tautology.
+    #[test]
+    fn cluster_title_paints_below_the_old_zoom_floor() {
+        /// The deleted `MIN_LABEL_PX` cluster-title floor the old gate compared
+        /// the zoom-scaled size against.
+        const OLD_MIN_LABEL_PX: f32 = 7.0;
+        const ZOOM: f32 = 0.2;
+
+        // The pre-change rule hid every title at this zoom.
+        const { assert!(CLUSTER_TITLE_PX * ZOOM < OLD_MIN_LABEL_PX) };
+
+        let canvas = egui::vec2(1280.0, 800.0);
+        let titles = ["Controls", "Audio"];
+        let mut app = two_group_app();
+        // A negative pan keeps the zoomed-down scene inside the canvas.
+        app.graph_camera = Some(GraphCamera {
+            zoom: ZOOM,
+            pan: (-20.0, -20.0),
+        });
+        let scene = scene_of(&app);
+        assert_boxes_have_title_room(&scene, ZOOM);
+        let out = paint(Some(&scene), canvas);
+        let fonts = title_fonts(&out, &titles);
+        assert_eq!(
+            fonts.len(),
+            titles.len(),
+            "a box with room paints its title at zoom {ZOOM}: {:?}",
+            out.labels
+        );
+        for font in &fonts {
+            assert_eq!(
+                *font,
+                egui::FontId::proportional(CLUSTER_TITLE_PX),
+                "below the old floor the title still paints at the fixed font"
+            );
+        }
+    }
+
+    /// Spec "Cluster titles yield to boxes with no room" (design D1/D4): a box
+    /// shorter than one title line plus the top inset, and a box narrower than a
+    /// readable title fragment, both paint their rectangle but no title text.
+    #[test]
+    fn cluster_title_yields_to_a_box_without_room() {
+        let short = ClusterSpec {
+            x: 20.0,
+            y: 20.0,
+            w: 200.0,
+            h: CLUSTER_TITLE_MIN_H - 1.0,
+            title: "Squashed".into(),
+            border: (200, 200, 255),
+            title_color: (255, 255, 255),
+            member_indices: vec![],
+        };
+        let narrow = ClusterSpec {
+            x: 20.0,
+            y: 80.0,
+            w: CLUSTER_TITLE_MIN_W - 1.0,
+            h: 60.0,
+            title: "Clipped".into(),
+            border: (200, 200, 255),
+            title_color: (255, 255, 255),
+            member_indices: vec![],
+        };
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![],
+            edges: vec![],
+            clusters: vec![short.clone(), narrow.clone()],
+        };
+        let out = paint(Some(&scene), egui::vec2(400.0, 200.0));
+        assert!(
+            !out.labels.iter().any(|l| l == "Squashed" || l == "Clipped"),
+            "no title paints without room: {:?}",
+            out.labels
+        );
+        for cluster in [&short, &narrow] {
+            assert!(
+                out.rects.iter().any(|r| {
+                    (r.rect.left() - cluster.x).abs() < 0.5
+                        && (r.rect.top() - cluster.y).abs() < 0.5
+                        && (r.rect.width() - cluster.w).abs() < 0.5
+                        && (r.rect.height() - cluster.h).abs() < 0.5
+                        && r.fill == egui::Color32::TRANSPARENT
+                }),
+                "the box for {:?} still paints",
+                cluster.title
+            );
+        }
+    }
 }
 #[cfg(test)]
 // Small fit test: the camera frames a spread world and carries a finite

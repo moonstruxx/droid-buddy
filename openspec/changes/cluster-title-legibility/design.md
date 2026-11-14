@@ -43,7 +43,9 @@ The border stays ANSI Blue at 2.44:1: it is container chrome, not an operator, a
 
 ### D3 — Reuse the WCAG helpers instead of a second implementation
 
-`rendermetrics`'s three helpers become `pub(crate)` and the palette test calls them with `Theme::rgb` for the title and canvas background. Duplicating the sRGB→luminance curve in `theme.rs` would create a second source of truth for the formula the render-metrics artifact already depends on (the repo's DRY rule: one source per fact).
+`rendermetrics`'s `rgb_luminance` and `contrast_ratio` become `pub(crate)` and the palette test calls them on `Theme::rgb`'s output for the title and canvas background. Duplicating the sRGB→luminance curve in `theme.rs` would create a second source of truth for the formula the render-metrics artifact already depends on (the repo's DRY rule: one source per fact).
+
+The token→RGB hop deliberately comes from `Theme::rgb` (over `ansi16_rgb`), not from `rendermetrics::color_to_rgb`: the two ANSI tables disagree on the gray pair (`color_to_rgb` maps `Gray` to `0xc0c0c0`, `ansi16_rgb` to `0x808080`), and the rendered result is what `Theme::rgb` defines. The divergence is recorded as its own issue rather than folded into this change.
 
 The test enumerates `theme::THEMES`, skips a palette whose pair does not resolve (`Reset`), and fails below 4.5:1 — so a future palette entry that forgets the rule fails the suite rather than shipping dim text.
 

@@ -206,7 +206,8 @@ impl Theme {
             graph_node_border: Color::White,
             graph_node_title: Color::Yellow,
             graph_cluster_border: Color::Blue,
-            graph_cluster_title: Color::Blue,
+            // LightBlue clears the 4.5:1 text floor here: 6.45:1, ANSI Blue was 2.44:1.
+            graph_cluster_title: Color::LightBlue,
             graph_canvas_bg: Color::Black,
             graph_node_fill: Color::DarkGray,
             graph_edge_control: Color::Cyan,
