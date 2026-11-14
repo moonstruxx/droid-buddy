@@ -36,15 +36,36 @@ const LOD_MIN_NODE_H: f32 = 12.0;
 /// zooming in (label-guess-and-screen-scale, design decision 4). Matches the
 /// cluster-title base size, so a zoomed-in graph keeps today's appearance.
 const NODE_LABEL_SIZE: f32 = 12.0;
-/// Cluster-title legibility floor: below the zoom-derived size the cluster
-/// title is omitted (graph-zoom-node-scaling, design decision 3).
-const MIN_LABEL_PX: f32 = 7.0;
 /// Monospace advance as a fraction of the font size (egui's monospace face is
 /// close to 0.6 em), used to budget the characters that fit a frame at the
 /// fixed [`NODE_LABEL_SIZE`] font.
 const MONO_ADVANCE: f32 = 0.6;
-/// Cluster title font at zoom 1.0; scales with the derived zoom.
+/// Fixed screen-space font size (points) for cluster titles, independent of the
+/// camera zoom — the cluster counterpart of [`NODE_LABEL_SIZE`], and equal to
+/// it so a zoomed-in graph keeps today's appearance.
 const CLUSTER_TITLE_PX: f32 = 12.0;
+/// Proportional-face advance as a fraction of the font size (about 0.55 em per
+/// character), used to size the smallest readable title fragment.
+const PROP_ADVANCE: f32 = 0.55;
+/// Characters a cluster title needs before it still names its group: a shorter,
+/// ellipsized fragment names nothing (the argument ADR 52 makes for cell
+/// labels).
+const CLUSTER_TITLE_MIN_CHARS: usize = 3;
+/// One text row's height as a multiple of the font size (egui's proportional
+/// face needs about 1.2 em per row).
+const LINE_HEIGHT_EM: f32 = 1.2;
+/// Left inset of a cluster title from its box's corner.
+const CLUSTER_TITLE_LEFT_INSET: f32 = 6.0;
+/// Top inset of a cluster title from its box's corner, which the box-room
+/// height gate must hold in addition to one title line.
+const CLUSTER_TITLE_TOP_INSET: f32 = 3.0;
+/// One cluster-title line at [`CLUSTER_TITLE_PX`].
+const CLUSTER_TITLE_LINE_H: f32 = CLUSTER_TITLE_PX * LINE_HEIGHT_EM;
+/// Shortest cluster box that can hold a title: the top inset plus one title
+/// line.
+const CLUSTER_TITLE_MIN_H: f32 = CLUSTER_TITLE_LINE_H + CLUSTER_TITLE_TOP_INSET;
+/// Narrowest cluster box that can hold a readable title fragment.
+const CLUSTER_TITLE_MIN_W: f32 = CLUSTER_TITLE_MIN_CHARS as f32 * PROP_ADVANCE * CLUSTER_TITLE_PX;
 /// Minimap node dot floor (raised from 1 px so dots stay visible when the
 /// scene is tiny).
 const MINIMAP_DOT_MIN: f32 = 2.0;
@@ -153,19 +174,21 @@ pub(crate) fn paint_scene_in(
             egui::Stroke::new(1.0, rgb(cluster.border)),
             egui::StrokeKind::Inside,
         );
-        // Cluster titles scale with the zoom and are omitted when so small
-        // they would not be legible (design decision 3). Gating on the raw
-        // zoom-derived size keeps the legibility floor from resurrecting a
-        // title that is below the threshold (the clamp would raise it to
-        // exactly MIN_LABEL_PX and defeat the gate).
-        let raw_title_px = CLUSTER_TITLE_PX * zoom;
-        if !cluster.title.is_empty() && raw_title_px >= MIN_LABEL_PX {
-            let title_px = raw_title_px.clamp(MIN_LABEL_PX, 40.0);
+        // Cluster titles are fixed screen-space text, like node labels
+        // (ADR 43): the font never scales with the camera. The box decides
+        // visibility, measured on its already-projected rect: it needs room
+        // for one title line below the top inset, and for a readable fragment
+        // of the title. A box without that room stays anonymous instead of
+        // drawing an ellipsized sliver that names nothing (ADR 52).
+        if !cluster.title.is_empty()
+            && rect.height() >= CLUSTER_TITLE_MIN_H
+            && rect.width() >= CLUSTER_TITLE_MIN_W
+        {
             painter.text(
-                rect.left_top() + egui::vec2(6.0, 3.0),
+                rect.left_top() + egui::vec2(CLUSTER_TITLE_LEFT_INSET, CLUSTER_TITLE_TOP_INSET),
                 egui::Align2::LEFT_TOP,
                 &cluster.title,
-                egui::FontId::proportional(title_px),
+                egui::FontId::proportional(CLUSTER_TITLE_PX),
                 rgb(cluster.title_color),
             );
         }
@@ -3711,6 +3734,166 @@ mod window_paint_tests {
             "no cluster rectangle is painted in sections mode"
         );
         assert_eq!(sections_out.beziers, without_boxes.beziers);
+    }
+
+    // ── cluster-title-legibility: fixed screen-space titles (task 2.2) ──────
+
+    /// Fonts of the painted texts whose content is one of `titles` — the
+    /// cluster titles, told apart from node labels by their own strings.
+    fn title_fonts(out: &PaintOutput, titles: &[&str]) -> Vec<egui::FontId> {
+        out.labels
+            .iter()
+            .zip(&out.label_fonts)
+            .filter(|(label, _)| titles.contains(&label.as_str()))
+            .map(|(_, font)| font.clone())
+            .collect()
+    }
+
+    /// Every cluster box in `scene` has room for a title, so a title missing
+    /// from a paint run was omitted by the painter, not by the gate.
+    fn assert_boxes_have_title_room(scene: &SceneSpec, zoom: f32) {
+        assert!(!scene.clusters.is_empty(), "scene has clusters to gate");
+        for cluster in &scene.clusters {
+            assert!(
+                cluster.h >= CLUSTER_TITLE_MIN_H && cluster.w >= CLUSTER_TITLE_MIN_W,
+                "zoom {zoom}: box {:?} must have title room (h {}, w {})",
+                cluster.title,
+                cluster.h,
+                cluster.w
+            );
+        }
+    }
+
+    /// Spec "Cluster title size independent of zoom" (design D4): the painted
+    /// cluster-title font is `CLUSTER_TITLE_PX` at camera zoom 0.5 and 1.5, and
+    /// identical between the two runs — the boxes scale with the camera, the
+    /// title font does not.
+    #[test]
+    fn cluster_title_font_size_is_identical_across_zoom() {
+        let canvas = egui::vec2(1280.0, 800.0);
+        let titles = ["Controls", "Audio"];
+        let mut runs = Vec::new();
+        for &zoom in &[0.5_f32, 1.5] {
+            let mut app = two_group_app();
+            app.graph_camera = Some(GraphCamera {
+                zoom,
+                pan: (0.0, 0.0),
+            });
+            let scene = scene_of(&app);
+            assert_boxes_have_title_room(&scene, zoom);
+            let out = paint(Some(&scene), canvas);
+            let fonts = title_fonts(&out, &titles);
+            assert_eq!(
+                fonts.len(),
+                titles.len(),
+                "zoom {zoom}: every box with room paints its title: {:?}",
+                out.labels
+            );
+            for font in &fonts {
+                assert_eq!(
+                    *font,
+                    egui::FontId::proportional(CLUSTER_TITLE_PX),
+                    "zoom {zoom}: a cluster title paints at the fixed screen-space font"
+                );
+            }
+            runs.push(fonts);
+        }
+        assert_eq!(runs[0], runs[1], "the title font is identical across zoom");
+    }
+
+    /// Spec "Cluster titles stay readable at fit zoom" (design D1/D4). At zoom
+    /// 0.2 the zoom-derived size is `CLUSTER_TITLE_PX × zoom = 2.4 px`, below
+    /// the pre-change painter's `raw >= 7 px` floor, while the projected box
+    /// still clears the box-room gate. That painter therefore omitted these
+    /// titles outright, so the assertion below is precisely the behaviour
+    /// change this change exists for, not a tautology.
+    #[test]
+    fn cluster_title_paints_below_the_old_zoom_floor() {
+        /// The deleted `MIN_LABEL_PX` cluster-title floor the old gate compared
+        /// the zoom-scaled size against.
+        const OLD_MIN_LABEL_PX: f32 = 7.0;
+        const ZOOM: f32 = 0.2;
+
+        // The pre-change rule hid every title at this zoom.
+        const { assert!(CLUSTER_TITLE_PX * ZOOM < OLD_MIN_LABEL_PX) };
+
+        let canvas = egui::vec2(1280.0, 800.0);
+        let titles = ["Controls", "Audio"];
+        let mut app = two_group_app();
+        // A negative pan keeps the zoomed-down scene inside the canvas.
+        app.graph_camera = Some(GraphCamera {
+            zoom: ZOOM,
+            pan: (-20.0, -20.0),
+        });
+        let scene = scene_of(&app);
+        assert_boxes_have_title_room(&scene, ZOOM);
+        let out = paint(Some(&scene), canvas);
+        let fonts = title_fonts(&out, &titles);
+        assert_eq!(
+            fonts.len(),
+            titles.len(),
+            "a box with room paints its title at zoom {ZOOM}: {:?}",
+            out.labels
+        );
+        for font in &fonts {
+            assert_eq!(
+                *font,
+                egui::FontId::proportional(CLUSTER_TITLE_PX),
+                "below the old floor the title still paints at the fixed font"
+            );
+        }
+    }
+
+    /// Spec "Cluster titles yield to boxes with no room" (design D1/D4): a box
+    /// shorter than one title line plus the top inset, and a box narrower than a
+    /// readable title fragment, both paint their rectangle but no title text.
+    #[test]
+    fn cluster_title_yields_to_a_box_without_room() {
+        let short = ClusterSpec {
+            x: 20.0,
+            y: 20.0,
+            w: 200.0,
+            h: CLUSTER_TITLE_MIN_H - 1.0,
+            title: "Squashed".into(),
+            border: (200, 200, 255),
+            title_color: (255, 255, 255),
+            member_indices: vec![],
+        };
+        let narrow = ClusterSpec {
+            x: 20.0,
+            y: 80.0,
+            w: CLUSTER_TITLE_MIN_W - 1.0,
+            h: 60.0,
+            title: "Clipped".into(),
+            border: (200, 200, 255),
+            title_color: (255, 255, 255),
+            member_indices: vec![],
+        };
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![],
+            edges: vec![],
+            clusters: vec![short.clone(), narrow.clone()],
+        };
+        let out = paint(Some(&scene), egui::vec2(400.0, 200.0));
+        assert!(
+            !out.labels.iter().any(|l| l == "Squashed" || l == "Clipped"),
+            "no title paints without room: {:?}",
+            out.labels
+        );
+        for cluster in [&short, &narrow] {
+            assert!(
+                out.rects.iter().any(|r| {
+                    (r.rect.left() - cluster.x).abs() < 0.5
+                        && (r.rect.top() - cluster.y).abs() < 0.5
+                        && (r.rect.width() - cluster.w).abs() < 0.5
+                        && (r.rect.height() - cluster.h).abs() < 0.5
+                        && r.fill == egui::Color32::TRANSPARENT
+                }),
+                "the box for {:?} still paints",
+                cluster.title
+            );
+        }
     }
 }
 #[cfg(test)]

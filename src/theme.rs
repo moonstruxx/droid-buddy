@@ -206,7 +206,8 @@ impl Theme {
             graph_node_border: Color::White,
             graph_node_title: Color::Yellow,
             graph_cluster_border: Color::Blue,
-            graph_cluster_title: Color::Blue,
+            // LightBlue clears the 4.5:1 text floor here: 6.45:1, ANSI Blue was 2.44:1.
+            graph_cluster_title: Color::LightBlue,
             graph_canvas_bg: Color::Black,
             graph_node_fill: Color::DarkGray,
             graph_edge_control: Color::Cyan,
@@ -1297,5 +1298,53 @@ mod tests {
                 assert_ne!(a, b, "mono edge tokens must stay distinct in RGB");
             }
         }
+    }
+
+    #[test]
+    fn cluster_title_meets_text_contrast_in_every_palette() {
+        // Theming spec, cluster-title contrast floor: a banner-group name is
+        // the only text that names a group of circuits, so every shipped
+        // palette's `graph_cluster_title` must clear the WCAG AA text floor
+        // (4.5:1) against that palette's *own* `graph_canvas_bg` — the
+        // surface the title is painted on. Both tokens resolve through
+        // `Theme::rgb`, the palette's single Color → RGB hop, so the test
+        // measures the pixels the graph actually draws (this is why the
+        // resolution is not `rendermetrics::color_to_rgb`, whose ANSI table
+        // differs for the gray pair).
+        //
+        // A palette that defers both tokens to the terminal (`Reset`) has no
+        // RGB pair and defers to the host scheme instead of meeting the floor;
+        // `terminal` is the only such palette, asserted below so the exemption
+        // cannot silently widen to a palette that ships real colors.
+        use crate::rendermetrics::{contrast_ratio, rgb_luminance};
+
+        const TEXT_CONTRAST_FLOOR: f32 = 4.5;
+        let mut deferred: Vec<&'static str> = Vec::new();
+
+        for name in THEMES {
+            let theme = resolve(name);
+            let title = theme.graph_cluster_title;
+            let canvas = theme.graph_canvas_bg;
+            if title == Color::Reset || canvas == Color::Reset {
+                deferred.push(*name);
+                continue;
+            }
+
+            let (tr, tg, tb) = theme.rgb(title);
+            let (cr, cg, cb) = theme.rgb(canvas);
+            let ratio = contrast_ratio(rgb_luminance(tr, tg, tb), rgb_luminance(cr, cg, cb));
+            assert!(
+                ratio >= TEXT_CONTRAST_FLOOR,
+                "theme `{name}`: graph_cluster_title {title:?} ({tr},{tg},{tb}) on \
+                 graph_canvas_bg {canvas:?} ({cr},{cg},{cb}) measures {ratio:.2}:1, \
+                 below the {TEXT_CONTRAST_FLOOR:.1}:1 text floor"
+            );
+        }
+
+        assert_eq!(
+            deferred,
+            ["terminal"],
+            "only the terminal palette may defer its cluster-title pair to Reset"
+        );
     }
 }
