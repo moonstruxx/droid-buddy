@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "changeId": "cluster-title-legibility",
+  "required": true,
+  "status": "blocked",
+  "assets": [],
+  "reason": "The changed surface is user-visible (the signal-flow graph's banner-group titles) but this project is a native egui/winit binary, not a web stack: there is no `pnpm run dev` full-stack command, no route table, and no browser-reachable page, so the capturePlan contract (routes/viewports/login) has no meaning here. The repository also ships no Visual Evidence workflow (only ci.yml and release.yml), so nothing would execute a plan. The equivalent visual verification is already automated and ran green: three headless `Shape::Text` paint guards (font size identical at zoom 0.5 vs 1.5, title painted at zoom 0.2 where the pre-change 7 px floor omitted it, no title for a box under the room minimum), the palette contrast guard (classic 6.45:1, mono 5.32:1, terminal Reset exempt), and `cargo run --release -- --self-test` reporting 6/6 checks passed.",
+  "verification": {
+    "commands": [
+      "cargo fmt --check",
+      "cargo clippy --all-targets --all-features --locked -- -D warnings",
+      "RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps --locked",
+      "cargo test --locked",
+      "cargo build --release --locked",
+      "cargo test --release --test perf_gate --locked",
+      "cargo run --release -- --self-test"
+    ],
+    "result": "all exit 0; lib suite 1628 passed / 0 failed"
+  },
+  "prMarkdown": "## Evidence\n\nVisual evidence is **blocked**, not failed: the change is user-visible but the app is a native egui/winit binary with no dev server, route or browser surface, so no screenshot plan applies (and the repo ships no Visual Evidence workflow).\n\nAutomated visual checks that did run and pass:\n- `theme::tests::cluster_title_meets_text_contrast_in_every_palette` — classic 6.45:1, mono 5.32:1, terminal exempt (`Reset` pair)\n- `gui::graph`: cluster-title font size identical across zoom, title painted at zoom 0.2 (below the deleted 7 px floor), none for a box without room\n- `cargo run --release -- --self-test` — 6/6 checks passed\n- `cargo test --locked` — 1628 lib tests + integration targets, 0 failed; fmt, clippy `-D warnings`, rustdoc, release build and the release perf gate all clean"
+}
