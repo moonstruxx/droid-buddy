@@ -30,7 +30,7 @@
 
 ## 5b. Collapse-on-repeat reachability
 
-- [ ] 5.5 Make the second press reachable: an expanded group must be hoverable so `Enter`/click collapses it again, and `o` while isolated must restore without needing a fresh hover — `collapsed_group_boxes` enumerates only collapsed groups, so the repeat press has no target (found by task 5.3) <!-- agent: rusty-engineer.build, depends_on: [5.1, 5.3], touches: [src/handler.rs, src/app.rs] -->
+- [x] 5.5 Make the second press reachable: an expanded group must be hoverable so `Enter`/click collapses it again, and `o` while isolated must restore without needing a fresh hover — `collapsed_group_boxes` enumerates only collapsed groups, so the repeat press has no target (found by task 5.3) <!-- agent: rusty-engineer.build, depends_on: [5.1, 5.3], touches: [src/handler.rs, src/app.rs] -->
 
 ## 6. Group-level highlights
 

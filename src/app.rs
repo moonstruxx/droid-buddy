@@ -884,12 +884,20 @@ pub struct App {
     /// window frame by the camera's world-space hit test. `None` when the pointer
     /// is not over a node or the graph is closed.
     pub hovered_graph_node: Option<usize>,
-    /// Collapsed group whose box the pointer is over (graph-same-type-grouping
+    /// Group whose drawn extent the pointer is over (graph-same-type-grouping
     /// design D4), by index into [`crate::graph_group::GroupedView::groups`].
-    /// The painter reads it for the group hover highlight and the pane's
-    /// grouping keys act on it, so it is cleared wherever `hovered_graph_node`
-    /// is: the pointer leaving a group box or the graph. `None` otherwise, and
-    /// for an expanded group, which draws no box of its own.
+    /// A group draws either as one collapsed box or, once open, as its members
+    /// inside a group outline (design D5), and the graph pane's pointer path
+    /// publishes the index for both — the box it can be opened from and the
+    /// outline it can be closed by. `hovered_graph_node` stays independent of it
+    /// and may name a member under the pointer at the same time; a press then
+    /// gives the member priority for selection and the group for a collapse.
+    /// The painter reads it for the group hover peek and the pane's grouping
+    /// keys act on it, so it is cleared wherever `hovered_graph_node` is: the
+    /// pointer leaving the group's extent, the graph closing, and any grouping
+    /// answer invalidated (`invalidate_grouped_view`: the index names a group in
+    /// the answer that is going away). `None` otherwise, and while grouping is
+    /// off, when no group is drawn at all.
     pub hovered_group: Option<usize>,
     /// Persistent world→pixel camera of the graph surface (task 2.3). Seeded by
     /// both renderers (kitty image path and box-drawing fallback) to a
