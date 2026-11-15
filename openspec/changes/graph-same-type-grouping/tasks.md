@@ -13,12 +13,13 @@
 ## 3. Application state
 
 - [x] 3.1 Add grouping state to `App`: `graph_grouping` seeded from config, `expanded_groups`, `isolated_group`, and a cached `grouped_view` invalidated on `open_graph`, `rebuild_graph`, a settings change, an expand and an isolate; seed the settings in `seed_app` <!-- agent: rusty-engineer.build, depends_on: [1.1, 2.1], touches: [src/app.rs, src/main.rs] -->
-- [ ] 3.2 Tests: the cache invalidates on rebuild and on each state change; expand and isolate toggles flip; the settings are seeded from config <!-- agent: horst-engineer.build, depends_on: [3.1], touches: [src/app.rs] -->
+- [x] 3.2 Tests: the cache invalidates on rebuild and on each state change; expand and isolate toggles flip; the settings are seeded from config <!-- agent: horst-engineer.build, depends_on: [3.1], touches: [src/app.rs] -->
 
 ## 4. Rendering
 
-- [ ] 4.1 In `src/gui/graph.rs`, build the scene from the grouped view when grouping is enabled: one world-space box per collapsed group labelled `<circuit> ×<count>` in the circuit colour, member nodes plus a group outline for expanded groups, and aggregated edges, keeping the existing level-of-detail and ellipsis rules <!-- agent: frontend-engineer, depends_on: [1.1, 3.1], touches: [src/gui/graph.rs] -->
+- [x] 4.1 In `src/gui/graph.rs`, build the scene from the grouped view when grouping is enabled: one world-space box per collapsed group labelled `<circuit> ×<count>` in the circuit colour, member nodes plus a group outline for expanded groups, and aggregated edges, keeping the existing level-of-detail and ellipsis rules <!-- agent: frontend-engineer, depends_on: [1.1, 3.1], touches: [src/gui/graph.rs] -->
 - [ ] 4.2 Headless egui paint tests: a collapsed group paints one box and its label and no member nodes; an expanded group paints its members plus the outline; aggregated edges emit; an over-long label ellipsizes <!-- agent: frontend-engineer, depends_on: [4.1], touches: [src/gui/graph.rs] -->
+- [ ] 4.3 Pre-warm the grouped view in the paint entry point (`src/main.rs` passes it into `build_scene_spec_with_view`, re-exported from `src/gui/mod.rs`) so a scene build never recomputes clustering, and keep the four pre-grouping invariants honest now that grouping defaults on (`gui::self_test::tests::self_test_passes_on_the_demo_patch`, `gui::tests::center_graph_camera_centers_nodes_in_the_real_pane`, `regression::regression_graph_anchor_no_overlap_at_every_zoom`, `regression::regression_graph_anchor_lod_omits_text_below_threshold`) — disable grouping explicitly where a test pins ungrouped paint geometry, and say why in a comment <!-- agent: rusty-engineer.build, depends_on: [4.1], touches: [src/main.rs, src/gui/mod.rs, src/gui/self_test.rs, src/regression.rs] -->
 
 ## 5. Interaction
 
