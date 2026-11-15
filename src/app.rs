@@ -5061,6 +5061,7 @@ pub fn is_entry_selectable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_group::ViewNode;
     use crate::patch::Patch;
 
     #[test]
@@ -5192,6 +5193,161 @@ mod tests {
         assert!(app.graph_settle.is_none());
         assert!(!app.graph_settle_pending);
         assert!(app.graph_positions.is_empty());
+    }
+
+    /// A small real fixture whose repeated `copy` circuits form groups, with
+    /// the graph open and the grouping preference seeded from defaults.
+    fn app_with_grouped_graph() -> App {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/influence_outlier.ini")).unwrap();
+        app.load_patch(patch);
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        app.open_graph();
+        let view = app
+            .grouped_view()
+            .expect("a loaded graph has a grouped view");
+        assert!(
+            !view.groups.is_empty(),
+            "the fixture must produce at least one group"
+        );
+        app
+    }
+
+    #[test]
+    fn seed_graph_grouping_takes_settings_from_config() {
+        let mut app = App::new();
+        let config = crate::config::Graph {
+            group_enabled: false,
+            min_group_size: 3,
+        };
+        app.seed_graph_grouping(&config);
+        assert!(!app.graph_grouping.group_enabled);
+        assert_eq!(app.graph_grouping.min_group_size, 3);
+    }
+
+    #[test]
+    fn seed_graph_grouping_clears_group_view_state() {
+        // The expand/isolate indices address the previous clustering; changing
+        // the settings changes the clustering, so they cannot survive it.
+        let mut app = app_with_grouped_graph();
+        app.toggle_group_expanded(0);
+        app.toggle_group_isolated(0);
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        assert!(app.expanded_groups.is_empty());
+        assert!(app.isolated_group.is_none());
+        assert!(app.grouped_view.is_none(), "the cache goes with them");
+    }
+
+    #[test]
+    fn toggle_graph_grouping_flips_and_restores() {
+        let mut app = App::new();
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        let seeded = app.graph_grouping.group_enabled;
+        assert_eq!(
+            app.toggle_graph_grouping(),
+            !seeded,
+            "reports the new value"
+        );
+        assert_eq!(app.graph_grouping.group_enabled, !seeded);
+        assert_eq!(
+            app.toggle_graph_grouping(),
+            seeded,
+            "a second toggle restores"
+        );
+        assert_eq!(app.graph_grouping.group_enabled, seeded);
+    }
+
+    #[test]
+    fn toggle_group_expanded_flips_and_restores() {
+        let mut app = App::new();
+        assert!(app.toggle_group_expanded(0), "opens the group");
+        assert!(app.expanded_groups.contains(&0));
+        assert!(!app.toggle_group_expanded(0), "a second call closes it");
+        assert!(!app.expanded_groups.contains(&0));
+    }
+
+    #[test]
+    fn toggle_group_isolated_flips_and_restores() {
+        let mut app = App::new();
+        assert!(app.toggle_group_isolated(0), "isolating reports an isolate");
+        assert_eq!(app.isolated_group, Some(0));
+        assert!(
+            app.toggle_group_isolated(1),
+            "isolating another group switches the isolate instead of clearing it"
+        );
+        assert_eq!(app.isolated_group, Some(1));
+        assert!(!app.toggle_group_isolated(1), "a second call clears it");
+        assert!(app.isolated_group.is_none());
+    }
+
+    #[test]
+    fn grouped_view_is_none_without_a_graph() {
+        let mut app = App::new();
+        assert!(app.grouped_view().is_none());
+        assert!(
+            app.grouped_view.is_none(),
+            "with no graph there is nothing to cache"
+        );
+    }
+
+    #[test]
+    fn rebuild_graph_drops_the_cached_grouped_view() {
+        let mut app = app_with_grouped_graph();
+        let collapsed = app.grouped_view().cloned().expect("first read caches");
+        assert!(app.grouped_view.is_some(), "the first read leaves a cache");
+        let member = collapsed.groups[0].members[0];
+        assert_eq!(
+            collapsed.nodes[member],
+            ViewNode::Group(0),
+            "collapsed by default"
+        );
+
+        // Recorded behind the cache's back, exactly as a settings change would:
+        // only the invalidation itself can make the next read see it.
+        app.expanded_groups.insert(0);
+        app.rebuild_graph();
+        assert!(
+            app.grouped_view.is_none(),
+            "a rebuild drops the cached answer rather than keeping it stale"
+        );
+        let rebuilt = app
+            .grouped_view()
+            .cloned()
+            .expect("recomputed after rebuild");
+        assert_eq!(
+            rebuilt.nodes[member],
+            ViewNode::Individual(member),
+            "the next read reflects the expand that happened before the rebuild"
+        );
+    }
+
+    #[test]
+    fn grouping_state_changes_drop_the_cached_view() {
+        let mut app = app_with_grouped_graph();
+        assert!(app.grouped_view().is_some());
+        app.toggle_group_expanded(0);
+        assert!(app.grouped_view.is_none(), "an expand invalidates");
+        assert!(app.grouped_view().is_some());
+        app.toggle_group_isolated(0);
+        assert!(app.grouped_view.is_none(), "an isolate invalidates");
+        assert!(app.grouped_view().is_some());
+        app.toggle_graph_grouping();
+        assert!(app.grouped_view.is_none(), "a settings change invalidates");
+    }
+
+    #[test]
+    fn load_patch_clears_group_view_state() {
+        let mut app = app_with_grouped_graph();
+        app.toggle_group_expanded(0);
+        app.toggle_group_isolated(0);
+        assert!(!app.expanded_groups.is_empty());
+        assert_eq!(app.isolated_group, Some(0));
+
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        app.load_patch(patch);
+        assert!(app.expanded_groups.is_empty(), "indices name the old graph");
+        assert!(app.isolated_group.is_none());
+        assert!(app.grouped_view.is_none());
     }
 
     #[test]
