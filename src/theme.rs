@@ -161,308 +161,164 @@ pub struct Theme {
     pub graph_edge_diff_after: Color,
 }
 
+// The three built-in palettes cover the same token set in the same order, so
+// this table — not three hand-written struct literals — is their single source
+// of truth: one row per token, columns in `classic, terminal, mono` order.
+// Adding a token means adding one row, and a missing or extra token fails to
+// compile in all three constructors at once, so the palettes cannot drift.
+// Each value is an ANSI-16 tier name (`White` == `Color::White`): no built-in
+// palette uses the `Rgb`/`Indexed` passthroughs, so a plain ident is enough.
+macro_rules! palettes {
+    ( $( $token:ident : $classic:ident , $terminal:ident , $mono:ident , )* ) => {
+        impl Theme {
+            /// The palette shipped before theming existed; must stay byte-identical
+            /// to the colors previously hardcoded in `ui.rs`.
+            pub const fn classic() -> Self {
+                Self { $( $token: Color::$classic, )* }
+            }
+
+            /// Every token as `Color::Reset`, letting each user's terminal pick the
+            /// actual colors (works with custom schemes and low-color terminals).
+            pub const fn terminal() -> Self {
+                Self { $( $token: Color::$terminal, )* }
+            }
+
+            /// Grayscale palette; shift tokens are pairwise-distinct because shift
+            /// groups are distinguished by color alone during normal patching.
+            pub const fn mono() -> Self {
+                Self { $( $token: Color::$mono, )* }
+            }
+        }
+    };
+}
+
+palettes! {
+    // Byte-identical to the previous button-color rendering of Switch cells so
+    // the classic palette keeps existing snapshots unchanged.
+    button: White, Reset, White,
+    // Classic shares button's White; mono needs DarkGray so switches stay
+    // tellable apart from buttons (White) in the grayscale palette.
+    switch: White, Reset, DarkGray,
+    knob: Magenta, Reset, White,
+    cv_in: Cyan, Reset, Gray,
+    cv_out: Green, Reset, Gray,
+    led: Red, Reset, White,
+    // classic: ANSI-16 yellow reads as the fader strip's amber on most
+    // terminals. mono: mid-gray so the bar stays tellable from the White led
+    // and knob tokens.
+    fader_led_bar: Yellow, Reset, Gray,
+    // classic: mid gray, brighter than the muted track and distinct from the
+    // yellow strip. mono: White outline stays distinct from the gray strip and
+    // the dark-gray track.
+    fader_slot: Gray, Reset, White,
+    // classic: White ring reads against the red led core and dark cells. mono:
+    // the ring shares White with led/knob (shape distinguishes them, as it
+    // already does for led vs knob).
+    led_ring: White, Reset, White,
+    shift1: Yellow, Reset, Gray,
+    shift2: Cyan, Reset, White,
+    shift3: Magenta, Reset, DarkGray,
+    shift4: Green, Reset, Black,
+    accent: Blue, Reset, White,
+    muted: DarkGray, Reset, DarkGray,
+    text: Reset, Reset, White,
+    // Gold-star amber for file favourites, bright green for directory
+    // favourites: the bright variants stay distinct from the plain Yellow
+    // (shift1/focus) and Green (cv_out/shift4) tokens. mono: mid-gray for file
+    // favourites, black for directory favourites so the two kinds stay tellable
+    // from each other and from the White listing text.
+    picker_fav_file: LightYellow, Reset, Gray,
+    picker_fav_dir: LightGreen, Reset, Black,
+    viewer_key: Cyan, Reset, Gray,
+    status_bg: DarkGray, Reset, Black,
+    focus_border: Yellow, Reset, White,
+    occurrence_highlight: Yellow, Reset, White,
+    // Boolean vs exact modifiers share glyph and underline styling, and minimap
+    // occurrence vs combined rows share the same block glyph, so each pair needs
+    // distinct grays to stay tellable apart.
+    modifier_boolean: Cyan, Reset, Gray,
+    modifier_exact: Magenta, Reset, White,
+    minimap_occurrence: Yellow, Reset, White,
+    minimap_modifier_boolean: Cyan, Reset, Gray,
+    minimap_modifier_exact: Magenta, Reset, White,
+    minimap_combined: Magenta, Reset, Gray,
+    graph_node_border: White, Reset, White,
+    graph_node_title: Yellow, Reset, White,
+    graph_cluster_border: Blue, Reset, White,
+    // LightBlue clears the 4.5:1 text floor here: 6.45:1, ANSI Blue was 2.44:1.
+    graph_cluster_title: LightBlue, Reset, Gray,
+    // terminal: `Reset` would map to white via the rgb hop, wrong for a dark
+    // canvas; Black keeps the opaque image dark on any terminal. mono: canvas
+    // Black < node fill DarkGray < border White (grayscale contrast ladder for
+    // the image path).
+    graph_canvas_bg: Black, Black, Black,
+    graph_node_fill: DarkGray, DarkGray, DarkGray,
+    // mono: the four edge kinds plus error must stay pairwise distinct there —
+    // type/severity is carried by color alone. Only four gray shades exist, so
+    // `unknown` falls back to the terminal default (Reset) as neutral.
+    graph_edge_control: Cyan, Reset, White,
+    graph_edge_audio: Green, Reset, Gray,
+    graph_edge_midi: Magenta, Reset, DarkGray,
+    graph_edge_unknown: DarkGray, Reset, Reset,
+    graph_edge_error: Red, Reset, Black,
+    graph_node_highlight: Yellow, Reset, White,
+    graph_node_dim: Gray, Reset, Black,
+    graph_edge_highlight: White, Reset, Gray,
+    graph_edge_dim: DarkGray, Reset, DarkGray,
+    graph_edge_diff_added: Green, Gray, White,
+    graph_edge_diff_removed: Magenta, DarkGray, Gray,
+    // Per-kind node frames: classic controller green, jack input cyan, jack
+    // output green (same family as cv_out); mono controller white, jack input
+    // gray, jack output white (same family as graph_node_border); terminal
+    // keeps every graph token Reset.
+    graph_node_controller: Green, Reset, White,
+    graph_node_jack_input: Cyan, Reset, Gray,
+    graph_node_jack_output: Green, Reset, White,
+    // classic: muted dark-gray so register cables recede behind signal-path
+    // cables. mono: blue so they stand out as a distinct category (all existing
+    // edge tokens are grayscale or Reset).
+    graph_edge_register: DarkGray, Reset, Blue,
+    // classic: cold (blue) -> hot (red) latency ramp through the ANSI-16 hues.
+    // mono: four ANSI grays darkening toward the hot end, with `Reset` (bright
+    // terminal default) as the hottest stop so back-edges pop against the dim
+    // mid-ramp cables; Reset is the neutral fifth, mirroring
+    // `graph_edge_unknown`.
+    graph_edge_latency_0: Blue, Reset, White,
+    graph_edge_latency_1: Cyan, Reset, Gray,
+    graph_edge_latency_2: Green, Reset, DarkGray,
+    graph_edge_latency_3: Yellow, Reset, Black,
+    graph_edge_latency_4: Red, Reset, Reset,
+    graph_edge_latency_legend: Blue, Reset, Gray,
+    physical_skeleton_module_outline: White, Reset, White,
+    // Bright cyan leader distinct from the Cyan control cables and the White
+    // module outlines; mono: mid-gray callout chrome, tellable from the White
+    // headline text and the DarkGray dim chrome.
+    performance_leader: LightCyan, Reset, Gray,
+    validation_error: Red, Reset, White,
+    validation_warning: Yellow, Reset, Gray,
+    validation_hint: Cyan, Reset, DarkGray,
+    validation_modal_border: Red, Reset, White,
+    validation_selected_bg: DarkGray, Reset, Black,
+    // Focused pane pops (same family as focus_border); unfocused panes recede
+    // into the muted chrome. mono: brightest gray for the focused pane, muted
+    // gray for the rest so focus stays tellable in the grayscale palette.
+    pane_focus_border: Yellow, Reset, White,
+    pane_unfocused_border: DarkGray, Reset, DarkGray,
+    optimizer_selected_bg: DarkGray, Reset, Black,
+    // Same accent family as graph_node_title: the weight readout is an accent
+    // value, not a muted statistic. mono: brightest gray so the weight span
+    // stays tellable against the Black selected-row background.
+    optimizer_weight: Yellow, Reset, White,
+    // Optimizer-preview diff (optimizer-click-focus): latency got worse = red,
+    // better = blue, on both nodes and cables. mono: brighter = worse, dimmer =
+    // better, distinct from the plain node dim.
+    graph_node_diff_before: Red, Reset, White,
+    graph_node_diff_after: Blue, Reset, Gray,
+    graph_edge_diff_before: Red, Reset, LightYellow,
+    graph_edge_diff_after: Blue, Reset, Gray,
+}
+
 impl Theme {
-    /// The palette shipped before theming existed; must stay byte-identical
-    /// to the colors previously hardcoded in `ui.rs`.
-    pub const fn classic() -> Self {
-        Self {
-            button: Color::White,
-            // Byte-identical to the previous button-color rendering of Switch
-            // cells so the classic palette keeps existing snapshots unchanged.
-            switch: Color::White,
-            knob: Color::Magenta,
-            cv_in: Color::Cyan,
-            cv_out: Color::Green,
-            led: Color::Red,
-            // ANSI-16 yellow reads as the fader strip's amber on most terminals.
-            fader_led_bar: Color::Yellow,
-            // Mid gray: brighter than the muted track, distinct from the
-            // yellow strip.
-            fader_slot: Color::Gray,
-            // White ring reads against the red led core and dark cells.
-            led_ring: Color::White,
-            shift1: Color::Yellow,
-            shift2: Color::Cyan,
-            shift3: Color::Magenta,
-            shift4: Color::Green,
-            accent: Color::Blue,
-            muted: Color::DarkGray,
-            text: Color::Reset,
-            // Gold-star amber for file favourites, bright green for directory
-            // favourites: the bright variants stay distinct from the plain
-            // Yellow (shift1/focus) and Green (cv_out/shift4) tokens.
-            picker_fav_file: Color::LightYellow,
-            picker_fav_dir: Color::LightGreen,
-            viewer_key: Color::Cyan,
-            status_bg: Color::DarkGray,
-            focus_border: Color::Yellow,
-            occurrence_highlight: Color::Yellow,
-            modifier_boolean: Color::Cyan,
-            modifier_exact: Color::Magenta,
-            minimap_occurrence: Color::Yellow,
-            minimap_modifier_boolean: Color::Cyan,
-            minimap_modifier_exact: Color::Magenta,
-            minimap_combined: Color::Magenta,
-            graph_node_border: Color::White,
-            graph_node_title: Color::Yellow,
-            graph_cluster_border: Color::Blue,
-            // LightBlue clears the 4.5:1 text floor here: 6.45:1, ANSI Blue was 2.44:1.
-            graph_cluster_title: Color::LightBlue,
-            graph_canvas_bg: Color::Black,
-            graph_node_fill: Color::DarkGray,
-            graph_edge_control: Color::Cyan,
-            graph_edge_audio: Color::Green,
-            graph_edge_midi: Color::Magenta,
-            graph_edge_unknown: Color::DarkGray,
-            graph_edge_error: Color::Red,
-            graph_node_highlight: Color::Yellow,
-            graph_node_dim: Color::Gray,
-            graph_edge_highlight: Color::White,
-            graph_edge_dim: Color::DarkGray,
-            graph_edge_diff_added: Color::Green,
-            graph_edge_diff_removed: Color::Magenta,
-            // Per-kind node frames: controller green, jack input cyan, jack
-            // output green (same family as cv_out).
-            graph_node_controller: Color::Green,
-            graph_node_jack_input: Color::Cyan,
-            graph_node_jack_output: Color::Green,
-            // Register edges: muted dark-gray so they recede behind
-            // signal-path cables.
-            graph_edge_register: Color::DarkGray,
-            // Cold (blue) → hot (red) latency ramp through the ANSI-16 hues.
-            graph_edge_latency_0: Color::Blue,
-            graph_edge_latency_1: Color::Cyan,
-            graph_edge_latency_2: Color::Green,
-            graph_edge_latency_3: Color::Yellow,
-            graph_edge_latency_4: Color::Red,
-            graph_edge_latency_legend: Color::Blue,
-            physical_skeleton_module_outline: Color::White,
-            // Bright cyan leader distinct from the Cyan control cables and
-            // the White module outlines.
-            performance_leader: Color::LightCyan,
-            validation_error: Color::Red,
-            validation_warning: Color::Yellow,
-            validation_hint: Color::Cyan,
-            validation_modal_border: Color::Red,
-            validation_selected_bg: Color::DarkGray,
-            // Focused pane pops (same family as focus_border); unfocused
-            // panes recede into the muted chrome.
-            pane_focus_border: Color::Yellow,
-            pane_unfocused_border: Color::DarkGray,
-            optimizer_selected_bg: Color::DarkGray,
-            // Same accent family as graph_node_title: the weight readout is an
-            // accent value, not a muted statistic.
-            optimizer_weight: Color::Yellow,
-            // Optimizer-preview diff (optimizer-click-focus): latency got
-            // worse = red, better = blue, on both nodes and cables.
-            graph_node_diff_before: Color::Red,
-            graph_node_diff_after: Color::Blue,
-            graph_edge_diff_before: Color::Red,
-            graph_edge_diff_after: Color::Blue,
-        }
-    }
-
-    /// Every token as `Color::Reset`, letting each user's terminal pick the
-    /// actual colors (works with custom schemes and low-color terminals).
-    pub const fn terminal() -> Self {
-        Self {
-            button: Color::Reset,
-            switch: Color::Reset,
-            knob: Color::Reset,
-            cv_in: Color::Reset,
-            cv_out: Color::Reset,
-            led: Color::Reset,
-            fader_led_bar: Color::Reset,
-            fader_slot: Color::Reset,
-            led_ring: Color::Reset,
-            shift1: Color::Reset,
-            shift2: Color::Reset,
-            shift3: Color::Reset,
-            shift4: Color::Reset,
-            accent: Color::Reset,
-            muted: Color::Reset,
-            text: Color::Reset,
-            picker_fav_file: Color::Reset,
-            picker_fav_dir: Color::Reset,
-            viewer_key: Color::Reset,
-            status_bg: Color::Reset,
-            focus_border: Color::Reset,
-            occurrence_highlight: Color::Reset,
-            modifier_boolean: Color::Reset,
-            modifier_exact: Color::Reset,
-            minimap_occurrence: Color::Reset,
-            minimap_modifier_boolean: Color::Reset,
-            minimap_modifier_exact: Color::Reset,
-            minimap_combined: Color::Reset,
-            graph_node_border: Color::Reset,
-            graph_node_title: Color::Reset,
-            graph_cluster_border: Color::Reset,
-            graph_cluster_title: Color::Reset,
-            // `Reset` would map to white via the rgb hop, wrong for a dark
-            // canvas; Black keeps the opaque image dark on any terminal.
-            graph_canvas_bg: Color::Black,
-            graph_node_fill: Color::DarkGray,
-            graph_edge_control: Color::Reset,
-            graph_edge_audio: Color::Reset,
-            graph_edge_midi: Color::Reset,
-            graph_edge_unknown: Color::Reset,
-            graph_edge_error: Color::Reset,
-            graph_node_highlight: Color::Reset,
-            graph_node_dim: Color::Reset,
-            graph_edge_highlight: Color::Reset,
-            graph_edge_dim: Color::Reset,
-            graph_edge_diff_added: Color::Gray,
-            graph_edge_diff_removed: Color::DarkGray,
-            // Per-kind node frames: all Reset (matching existing graph tokens
-            // in the terminal palette).
-            graph_node_controller: Color::Reset,
-            graph_node_jack_input: Color::Reset,
-            graph_node_jack_output: Color::Reset,
-            // Register edges: Reset (matching the terminal palette's
-            // deferral to the user's terminal).
-            graph_edge_register: Color::Reset,
-            graph_edge_latency_0: Color::Reset,
-            graph_edge_latency_1: Color::Reset,
-            graph_edge_latency_2: Color::Reset,
-            graph_edge_latency_3: Color::Reset,
-            graph_edge_latency_4: Color::Reset,
-            graph_edge_latency_legend: Color::Reset,
-            physical_skeleton_module_outline: Color::Reset,
-            // Terminal defers every token to the user's terminal.
-            performance_leader: Color::Reset,
-            validation_error: Color::Reset,
-            validation_warning: Color::Reset,
-            validation_hint: Color::Reset,
-            validation_modal_border: Color::Reset,
-            validation_selected_bg: Color::Reset,
-            // Terminal defers every token to the user's terminal.
-            pane_focus_border: Color::Reset,
-            pane_unfocused_border: Color::Reset,
-            optimizer_selected_bg: Color::Reset,
-            optimizer_weight: Color::Reset,
-            graph_node_diff_before: Color::Reset,
-            graph_node_diff_after: Color::Reset,
-            graph_edge_diff_before: Color::Reset,
-            graph_edge_diff_after: Color::Reset,
-        }
-    }
-
-    /// Grayscale palette; shift tokens are pairwise-distinct because shift
-    /// groups are distinguished by color alone during normal patching.
-    pub const fn mono() -> Self {
-        Self {
-            button: Color::White,
-            // DarkGray so switches stay tellable apart from buttons (White)
-            // in the grayscale palette.
-            switch: Color::DarkGray,
-            knob: Color::White,
-            cv_in: Color::Gray,
-            cv_out: Color::Gray,
-            led: Color::White,
-            // Mid-gray so the fader bar stays tellable from the White led and
-            // knob tokens in the grayscale palette.
-            fader_led_bar: Color::Gray,
-            // White slot outline stays distinct from the gray strip and the
-            // dark-gray track; the ring shares White with led/knob (shape
-            // distinguishes them, as it already does for led vs knob).
-            fader_slot: Color::White,
-            led_ring: Color::White,
-            shift1: Color::Gray,
-            shift2: Color::White,
-            shift3: Color::DarkGray,
-            shift4: Color::Black,
-            accent: Color::White,
-            muted: Color::DarkGray,
-            text: Color::White,
-            // Mid-gray for file favourites, black for directory favourites so
-            // the two kinds stay tellable from each other and from the White
-            // listing text in the grayscale palette.
-            picker_fav_file: Color::Gray,
-            picker_fav_dir: Color::Black,
-            viewer_key: Color::Gray,
-            status_bg: Color::Black,
-            focus_border: Color::White,
-            occurrence_highlight: Color::White,
-            // Boolean vs exact modifiers share glyph and underline styling, and
-            // minimap occurrence vs combined rows share the same block glyph,
-            // so each pair needs distinct grays to stay tellable apart.
-            modifier_boolean: Color::Gray,
-            modifier_exact: Color::White,
-            minimap_occurrence: Color::White,
-            minimap_modifier_boolean: Color::Gray,
-            minimap_modifier_exact: Color::White,
-            minimap_combined: Color::Gray,
-            graph_node_border: Color::White,
-            graph_node_title: Color::White,
-            graph_cluster_border: Color::White,
-            graph_cluster_title: Color::Gray,
-            // Grayscale contrast ladder for the image path: canvas Black <
-            // node fill DarkGray < border White.
-            graph_canvas_bg: Color::Black,
-            graph_node_fill: Color::DarkGray,
-            // The four edge kinds plus error must stay pairwise distinct in mono:
-            // type/severity is carried by color alone. Only four gray shades exist,
-            // so `unknown` falls back to the terminal default (Reset) as neutral.
-            graph_edge_control: Color::White,
-            graph_edge_audio: Color::Gray,
-            graph_edge_midi: Color::DarkGray,
-            graph_edge_unknown: Color::Reset,
-            graph_edge_error: Color::Black,
-            graph_node_highlight: Color::White,
-            graph_node_dim: Color::Black,
-            graph_edge_highlight: Color::Gray,
-            graph_edge_dim: Color::DarkGray,
-            graph_edge_diff_added: Color::White,
-            graph_edge_diff_removed: Color::Gray,
-            // Per-kind node frames: controller white, jack input gray, jack
-            // output white (same family as graph_node_border).
-            graph_node_controller: Color::White,
-            graph_node_jack_input: Color::Gray,
-            graph_node_jack_output: Color::White,
-            // Register edges: blue so they stand out as a distinct category
-            // (all existing edge tokens are grayscale or Reset).
-            graph_edge_register: Color::Blue,
-            // Grayscale latency ramp: four ANSI grays darkening toward the hot
-            // end, with `Reset` (bright terminal default) as the hottest stop so
-            // back-edges pop against the dim mid-ramp cables. Only four gray
-            // shades exist, so Reset is the neutral fifth, mirroring
-            // `graph_edge_unknown`.
-            graph_edge_latency_0: Color::White,
-            graph_edge_latency_1: Color::Gray,
-            graph_edge_latency_2: Color::DarkGray,
-            graph_edge_latency_3: Color::Black,
-            graph_edge_latency_4: Color::Reset,
-            graph_edge_latency_legend: Color::Gray,
-            physical_skeleton_module_outline: Color::White,
-            // Mid-gray callout chrome, tellable from the White headline
-            // text and the DarkGray dim chrome in the grayscale palette.
-            performance_leader: Color::Gray,
-            validation_error: Color::White,
-            validation_warning: Color::Gray,
-            validation_hint: Color::DarkGray,
-            validation_modal_border: Color::White,
-            validation_selected_bg: Color::Black,
-            // Advisory render-outlier hint: brightest gray so the BOLD span
-            // stays tellable in the grayscale palette.
-            // Brightest gray for the focused pane, muted gray for the rest
-            // so focus stays tellable in the grayscale palette.
-            pane_focus_border: Color::White,
-            pane_unfocused_border: Color::DarkGray,
-            optimizer_selected_bg: Color::Black,
-            // Brightest gray so the weight span stays tellable against the
-            // Black selected-row background in the grayscale palette.
-            optimizer_weight: Color::White,
-            // Grayscale: brighter = worse, dimmer = better, distinct from the
-            // plain node dim.
-            graph_node_diff_before: Color::White,
-            graph_node_diff_after: Color::Gray,
-            graph_edge_diff_before: Color::LightYellow,
-            graph_edge_diff_after: Color::Gray,
-            // Brightest gray so the key column stays tellable against the
-            // Black selected-row background in the grayscale palette.
-        }
-    }
-
     /// The `Color → RGB` hop (design D9): the single source of pixel colors
     /// for the kitty rasterizer. ANSI-16 tokens map to fixed triples (pure
     /// primaries, half-intensity pastels for the `Light*` variants), `Rgb`
