@@ -40,4 +40,4 @@
 ## 7. Documentation and gates
 
 - [x] 7.1 Update `docs/views.md` with the grouping behaviour, then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's skills <!-- agent: devops-engineer.build, depends_on: [5.4, 6.1], touches: [docs/views.md, docs/config.md, ARCHITECTURE.md, DESIGN.md] -->
-- [ ] 7.2 Run `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked` and `cargo run --release -- --self-test`, recording each exit status <!-- agent: devops-engineer.fast, depends_on: [5.3, 6.2], touches: [] -->
+- [x] 7.2 Run `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked` and `cargo run --release -- --self-test`, recording each exit status — 2026-11-15: fmt 0, clippy 0, test 0 (1671 lib + 40 integration), self-test 0 (6/6 checks) <!-- agent: devops-engineer.fast, depends_on: [5.3, 6.2], touches: [] -->
