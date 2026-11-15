@@ -4365,6 +4365,822 @@ mod tests {
         );
     }
 
+    // -- faceplate-pot-jack-symbols 3.1: the painted faces ---------------------
+    //
+    // `paint_pot` / `paint_jack` are pure draw routines over a `CellSpec`, so the
+    // contract is pinned where it is observable: the shapes they emit, their
+    // geometry and their colours. The sizes are the ones the panel produces at
+    // 1:1 (a 12 mm pot is 45.35 pt, a 7 mm encoder or jack 26.46 pt), and the
+    // ladder is read off the *drawn ring*, not the cell or the zoom (D3).
+
+    /// An addressed face cell at a drawn size in points: the shape, the element
+    /// kind (which the wheel path reads), the 0..1 position the slot reads, and a
+    /// label and state fitted exactly as the spec build fits them, so the cell
+    /// paints the band it was measured against (D2/D4).
+    fn face_cell(
+        w: f32,
+        shape: CellShape,
+        kind: ComponentKind,
+        value: f32,
+        label: &str,
+        state: &str,
+    ) -> CellSpec {
+        let (glyph, color) = match kind {
+            ComponentKind::CvIn => ("\u{25C0}", crate::theme::active().cv_in),
+            ComponentKind::CvOut => ("\u{25B6}", crate::theme::active().cv_out),
+            _ => ("\u{25C9}", crate::theme::active().knob),
+        };
+        resolved_cell(CellSpec {
+            rect: Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(w, w)),
+            glyph: glyph.into(),
+            label: label.into(),
+            state_text: state.into(),
+            color,
+            label_color: color,
+            is_fader: false,
+            value_frac: value,
+            component_index: Some(0),
+            mark: PortMark::Cell,
+            highlighted: false,
+            shift_color: None,
+            modifier_wash: None,
+            dimmed: false,
+            kind,
+            led_state: None,
+            led_rgb: None,
+            shape: Some(shape),
+            label_layout: None,
+        })
+    }
+
+    /// A 45 pt-class pot face (the 12 mm cell) at a drawn size, with the label
+    /// and percentage a real pot carries.
+    fn pot_face(w: f32, value: f32) -> CellSpec {
+        face_cell(
+            w,
+            CellShape::Pot,
+            ComponentKind::Knob,
+            value,
+            "Cutoff",
+            "50%",
+        )
+    }
+
+    /// The same cell as an encoder: the endless rotary with no base line.
+    fn encoder_face(w: f32, value: f32) -> CellSpec {
+        face_cell(
+            w,
+            CellShape::Encoder,
+            ComponentKind::Encoder,
+            value,
+            "Cutoff",
+            "50%",
+        )
+    }
+
+    /// A CV input jack face at a drawn size.
+    fn jack_face(w: f32) -> CellSpec {
+        face_cell(
+            w,
+            CellShape::Jack,
+            ComponentKind::CvIn,
+            0.0,
+            "Gate",
+            "CV IN",
+        )
+    }
+
+    /// The stroked circles a cell paints: `(center, radius, stroke)`.
+    fn stroked_rings(shapes: &[egui::epaint::Shape]) -> Vec<(Pos2, f32, egui::Stroke)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => {
+                    Some((c.center, c.radius, c.stroke))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The filled discs a cell paints (the shaft, the socket mouth, the centre
+    /// dot): `(center, radius, fill)`.
+    fn filled_discs(shapes: &[egui::epaint::Shape]) -> Vec<(Pos2, f32, egui::Color32)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) if c.stroke.width == 0.0 => {
+                    Some((c.center, c.radius, c.fill))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The closed outlines a cell paints (the hex nut), each as its point list.
+    fn closed_outlines(shapes: &[egui::epaint::Shape]) -> Vec<Vec<Pos2>> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Path(p) if p.closed => Some(p.points.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The line segments a cell paints (the slot, the base line, the jack's
+    /// cross): `(from, to, stroke)`.
+    fn face_segments(shapes: &[egui::epaint::Shape]) -> Vec<(Pos2, Pos2, egui::Stroke)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::LineSegment { points, stroke } => {
+                    Some((points[0], points[1], *stroke))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The horizontal base line a pot seats its face on, when the cell draws one.
+    fn base_line_of(shapes: &[egui::epaint::Shape]) -> Option<(Pos2, Pos2, egui::Stroke)> {
+        face_segments(shapes)
+            .into_iter()
+            .find(|(a, b, _)| (a.y - b.y).abs() < 0.01)
+    }
+
+    /// The slot a rotary face paints: its `(inner, outer)` endpoints and the unit
+    /// direction between them. Every rotary slot is the one non-horizontal
+    /// segment; a pot's second segment is the base line.
+    fn painted_slot(cell: &CellSpec) -> (Pos2, Pos2, egui::Vec2) {
+        let shapes = painted_shapes(cell, false);
+        let (from, to, _) = face_segments(&shapes)
+            .into_iter()
+            .find(|(a, b, _)| (a.y - b.y).abs() > 0.01)
+            .unwrap_or_else(|| panic!("no slanted slot segment: {shapes:?}"));
+        (from, to, (to - from).normalized())
+    }
+
+    /// The contract's slot direction for a value (D4): a 270° sweep, 0 at 7:30
+    /// through 12:00 at 0.5 to 1 at 4:30, in screen coordinates where y grows
+    /// downward. Re-derived here from the spec's words, not from `pot_slot`.
+    fn expected_slot_dir(value: f32) -> egui::Vec2 {
+        let angle = (-135.0 + 270.0 * value).to_radians();
+        egui::Vec2::new(angle.sin(), -angle.cos())
+    }
+
+    /// Every text run a cell paints with the colour it painted it in.
+    fn painted_text_runs(cell: &CellSpec) -> Vec<(String, egui::Color32)> {
+        painted_shapes(cell, false)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Text(t) => {
+                    Some((t.galley.text().to_string(), t.fallback_color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn twelve_millimetre_pot_draws_ring_nut_shaft_slot_and_base_line() {
+        // A 12 mm pot (P2B8, P4B2, P10 big) is a 45.35 pt cell at 1:1, so its
+        // 0.60 w washer ring is 27.2 pt across: the Full step (D2/D3).
+        let w = pt(12.0);
+        let cell = pot_face(w, 0.5);
+        let rect = cell.rect;
+        let shapes = painted_shapes(&cell, false);
+
+        // The washer ring: 0.60 w across at the heavier 1.5 pt stroke, its top
+        // edge on the face box's top.
+        let rings = stroked_rings(&shapes);
+        assert_eq!(rings.len(), 1, "one washer ring: {shapes:?}");
+        let (center, radius, stroke) = rings[0];
+        assert!(
+            radius * 2.0 >= FACE_FULL_MIN,
+            "a 12 mm pot draws the full symbol: {} pt",
+            radius * 2.0
+        );
+        assert!(
+            (radius * 2.0 - FACE_RING_FRACTION * w).abs() < 0.05,
+            "the ring is 0.60 w across: {} vs {}",
+            radius * 2.0,
+            FACE_RING_FRACTION * w
+        );
+        assert_eq!(stroke.width, FACE_RING_STROKE);
+        assert!(
+            (center.x - rect.center().x).abs() < 0.01,
+            "centred: {center:?}"
+        );
+        assert!(
+            (center.y - (rect.min.y + 0.30 * w)).abs() < 0.05,
+            "the pot circle sits 0.30 w down, leaving the base line its strip: {center:?}"
+        );
+
+        // The hex nut: six corners at 0.80 r, flat top and bottom so the wrench
+        // flats still read.
+        let nuts = closed_outlines(&shapes);
+        assert_eq!(nuts.len(), 1, "one hex nut: {shapes:?}");
+        assert_eq!(nuts[0].len(), 6, "the nut is a hexagon: {:?}", nuts[0]);
+        let nut_r = radius * POT_NUT_FRACTION;
+        for corner in &nuts[0] {
+            assert!(
+                ((*corner - center).length() - nut_r).abs() < 0.05,
+                "every corner is on the 0.80 r circle: {corner:?}"
+            );
+        }
+        let flat = nut_r * 60.0_f32.to_radians().sin();
+        for edge in [flat, -flat] {
+            let on_edge = nuts[0]
+                .iter()
+                .filter(|p| ((p.y - center.y) - edge).abs() < 0.05)
+                .count();
+            assert_eq!(
+                on_edge, 2,
+                "two corners share each flat (y {edge}): {:?}",
+                nuts[0]
+            );
+        }
+
+        // The shaft: a filled disc at 0.38 r.
+        let shafts = filled_discs(&shapes);
+        assert_eq!(shafts.len(), 1, "one shaft disc: {shapes:?}");
+        assert!(
+            (shafts[0].0 - center).length() < 0.01,
+            "shaft on the ring centre"
+        );
+        assert!(
+            (shafts[0].1 - radius * POT_SHAFT_FRACTION).abs() < 0.05,
+            "the shaft is 0.38 r: {}",
+            shafts[0].1
+        );
+
+        // Two strokes: the slot and the finite control's base line.
+        let segments = face_segments(&shapes);
+        assert_eq!(segments.len(), 2, "slot + base line on a pot: {shapes:?}");
+        let (base_from, base_to, base_stroke) =
+            base_line_of(&shapes).expect("a pot seats its face on a base line");
+        assert_eq!(base_stroke.width, POT_BASE_LINE_THICKNESS);
+        assert!(
+            (base_from.y - (rect.min.y + 0.63 * w)).abs() < 0.05,
+            "the base line centres in the strip under the circle: {base_from:?}"
+        );
+        assert!(
+            ((base_to.x - base_from.x) - POT_BASE_LINE_FRACTION * w).abs() < 0.05,
+            "the base line spans 0.44 w: {base_from:?}..{base_to:?}"
+        );
+        let (inner, outer, dir) = painted_slot(&cell);
+        assert!(
+            (dir - expected_slot_dir(0.5)).length() < 0.01,
+            "at 0.5 the slot points straight up: {dir:?}"
+        );
+        assert!(
+            ((inner - center).length() - radius * POT_SLOT_INNER_FRACTION).abs() < 0.05,
+            "the slot starts 0.28 r out: {inner:?}"
+        );
+        assert!(
+            ((outer - center).length() - radius * POT_SLOT_OUTER_FRACTION).abs() < 0.05,
+            "the slot ends 0.82 r out: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn an_encoder_draws_the_same_face_without_the_base_line() {
+        // D2/D5: the base line is the *only* silhouette difference between the
+        // finite pot and the endless encoder — the one stroke that still
+        // resolves at a 10 pt face.
+        let w = pt(12.0);
+        let pot = pot_face(w, 0.5);
+        let encoder = encoder_face(w, 0.5);
+        let pot_shapes = painted_shapes(&pot, false);
+        let enc_shapes = painted_shapes(&encoder, false);
+
+        // The same face, shape for shape and size for size.
+        for (name, shapes) in [("pot", &pot_shapes), ("encoder", &enc_shapes)] {
+            assert_eq!(
+                stroked_rings(shapes).len(),
+                1,
+                "{name} draws one washer ring"
+            );
+            assert_eq!(closed_outlines(shapes).len(), 1, "{name} draws the hex nut");
+            assert_eq!(filled_discs(shapes).len(), 1, "{name} draws the shaft");
+        }
+        let (pot_ring, enc_ring) = (stroked_rings(&pot_shapes)[0], stroked_rings(&enc_shapes)[0]);
+        assert_eq!(pot_ring.1, enc_ring.1, "the same ring size: {}", pot_ring.1);
+        assert_eq!(pot_ring.2, enc_ring.2, "the same ring stroke");
+        assert_eq!(
+            filled_discs(&pot_shapes)[0].1,
+            filled_discs(&enc_shapes)[0].1,
+            "the same shaft"
+        );
+        assert_eq!(closed_outlines(&pot_shapes)[0].len(), 6);
+        assert_eq!(closed_outlines(&enc_shapes)[0].len(), 6);
+        // The geometry the base-line strip costs (D2): the pot's circle sits in
+        // the top `0.60 w + 0.06 w` of the box, the encoder centres the same
+        // circle in the whole `0.66 w` — so the encoder's face is 0.03 w lower.
+        assert!(
+            (enc_ring.0.y - pot_ring.0.y - 0.03 * w).abs() < 0.05,
+            "the encoder centres 0.03 w lower: {} vs {}",
+            enc_ring.0.y,
+            pot_ring.0.y
+        );
+
+        // ... and exactly one stroke fewer: the slot, with no base line under it.
+        assert_eq!(
+            face_segments(&pot_shapes).len(),
+            2,
+            "the pot keeps the base line"
+        );
+        assert_eq!(
+            face_segments(&enc_shapes).len(),
+            1,
+            "the encoder keeps the slot and loses the base line: {enc_shapes:?}"
+        );
+        let base = base_line_of(&pot_shapes).expect("the pot's base line").0;
+        assert!(
+            base_line_of(&enc_shapes).is_none(),
+            "no horizontal stroke at any y on an encoder"
+        );
+        assert!(
+            face_segments(&enc_shapes)
+                .iter()
+                .all(|(a, b, _)| (a.y - base.y).abs() > 0.5 && (b.y - base.y).abs() > 0.5),
+            "nothing on the encoder sits on the pot's base-line row ({base:?})"
+        );
+    }
+
+    #[test]
+    fn rotary_faces_converge_to_ring_and_slot_at_the_rack_fit() {
+        // At the 37 % rack fit a 12 mm pot is a 16.8 pt cell, so its ring is
+        // 10.1 pt: the Reduced step, where pot and encoder must draw the same
+        // ring and slot and nothing else (D3/D5).
+        let fit = 0.37;
+        let w = pt(12.0) * fit;
+        let pot = pot_face(w, 0.5);
+        let encoder = encoder_face(w, 0.5);
+        for (name, cell) in [("pot", &pot), ("encoder", &encoder)] {
+            let shapes = painted_shapes(cell, false);
+            let rings = stroked_rings(&shapes);
+            assert_eq!(rings.len(), 1, "{name} keeps its ring at the fit");
+            let diameter = rings[0].1 * 2.0;
+            assert!(
+                (FACE_REDUCED_MIN..FACE_FULL_MIN).contains(&diameter),
+                "{name} ring is {diameter} pt: the reduced step"
+            );
+            assert!(
+                (diameter - FACE_RING_FRACTION * w).abs() < 0.05,
+                "{name} keeps the 0.60 w footprint"
+            );
+            assert!(
+                closed_outlines(&shapes).is_empty(),
+                "{name} drops the nut below 18 pt: {shapes:?}"
+            );
+            assert!(
+                filled_discs(&shapes).is_empty(),
+                "{name} drops the shaft below 18 pt: {shapes:?}"
+            );
+            assert_eq!(
+                face_segments(&shapes).len(),
+                1,
+                "{name} keeps only the slot: {shapes:?}"
+            );
+            assert!(
+                base_line_of(&shapes).is_none(),
+                "{name} drops the base line below 18 pt"
+            );
+        }
+        // Converged: the same drawn face, so the label and state row are all that
+        // tell the kinds apart at this size.
+        let (pot_ring, enc_ring) = (
+            stroked_rings(&painted_shapes(&pot, false))[0],
+            stroked_rings(&painted_shapes(&encoder, false))[0],
+        );
+        assert_eq!(pot_ring.1, enc_ring.1, "the same ring at the fit");
+        assert_eq!(pot_ring.2, enc_ring.2);
+        assert_eq!(painted_slot(&pot).2, painted_slot(&encoder).2);
+
+        // The real panel agrees: the P10's P2.1 pot is that size at this fit.
+        let mut app = app_with_labels("fixtures/module_ui_label_fit.ini", &[]);
+        app.physical_zoom = fit as f32;
+        let spec = physical_spec(&app, perf_pane()).expect("spec at the rack fit");
+        let cell = cell_for_token(&app, &spec, "P2.1").clone();
+        assert!(
+            (cell.rect.width() - w).abs() < 0.5,
+            "a 12 mm pot at the {fit} fit is {w} pt wide, got {}",
+            cell.rect.width()
+        );
+        let shapes = painted_shapes(&cell, false);
+        assert_eq!(
+            stroked_rings(&shapes).len(),
+            1,
+            "the real pot keeps its ring"
+        );
+        assert!(
+            closed_outlines(&shapes).is_empty(),
+            "and draws no nut at the fit"
+        );
+        assert_eq!(face_segments(&shapes).len(), 1, "only the slot survives");
+    }
+
+    #[test]
+    fn sub_ten_point_faces_reduce_to_ring_and_dot_and_keep_their_footprint() {
+        // Below a 10 pt ring the ladder is a ring plus a centre dot — for both
+        // rotary kinds and for a jack, so the smallest cells keep exactly the
+        // footprint they had before the faces existed (D3).
+        let w = 16.0; // ring 9.6 pt
+        for (name, cell) in [
+            ("pot", pot_face(w, 0.5)),
+            ("encoder", encoder_face(w, 0.5)),
+            ("jack", jack_face(w)),
+        ] {
+            let shapes = painted_shapes(&cell, false);
+            let rings = stroked_rings(&shapes);
+            assert_eq!(rings.len(), 1, "{name}: one ring: {shapes:?}");
+            let diameter = rings[0].1 * 2.0;
+            assert!(diameter < FACE_REDUCED_MIN, "{name} ring is {diameter} pt");
+            assert!(
+                (diameter - FACE_RING_FRACTION * w).abs() < 0.05,
+                "{name} keeps the 0.60 w footprint at the smallest step"
+            );
+            let dots = filled_discs(&shapes);
+            assert_eq!(dots.len(), 1, "{name}: ring plus one dot: {shapes:?}");
+            assert!(
+                (dots[0].1 - (rings[0].1 * FACE_DOT_FRACTION).max(1.0)).abs() < 0.05,
+                "{name} dot is 0.22 r, never below 1 pt: {}",
+                dots[0].1
+            );
+            assert_eq!(dots[0].0, rings[0].0, "{name} dot on the ring centre");
+            assert!(
+                closed_outlines(&shapes).is_empty() && face_segments(&shapes).is_empty(),
+                "{name} draws no nut, slot, mouth or base line below 10 pt: {shapes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forty_five_point_jack_draws_bezel_mouth_and_cross() {
+        // D6: the CV jack is the frontal socket — bezel ring, filled mouth, and
+        // the cross the contacts cut into it.
+        let w = pt(12.0);
+        let cell = jack_face(w);
+        let shapes = painted_shapes(&cell, false);
+        let rings = stroked_rings(&shapes);
+        assert_eq!(rings.len(), 1, "one bezel ring: {shapes:?}");
+        assert_eq!(rings[0].2.width, FACE_RING_STROKE);
+        assert!((rings[0].1 * 2.0 - FACE_RING_FRACTION * w).abs() < 0.05);
+        let mouths = filled_discs(&shapes);
+        assert_eq!(mouths.len(), 1, "one socket mouth: {shapes:?}");
+        assert!(
+            (mouths[0].1 * 2.0 - JACK_MOUTH_FRACTION * w).abs() < 0.05,
+            "the mouth is 0.40 w across: {}",
+            mouths[0].1 * 2.0
+        );
+        assert_eq!(mouths[0].0, rings[0].0, "mouth centred in the bezel");
+
+        // The cross: two axis-aligned strokes in the faceplate background (cut
+        // out of the mouth), each 0.85 of the mouth's radius long.
+        let cuts = face_segments(&shapes);
+        assert_eq!(cuts.len(), 2, "two cross arms: {shapes:?}");
+        let bg = rgb(crate::theme::active().graph_canvas_bg);
+        for (a, b, stroke) in &cuts {
+            assert_eq!(stroke.color, bg, "the cross is cut out of the mouth");
+            assert!((stroke.width - FACE_EDGE_STROKE).abs() < 0.01);
+            let horizontal = (a.y - b.y).abs() < 0.01;
+            let vertical = (a.x - b.x).abs() < 0.01;
+            assert!(
+                horizontal ^ vertical,
+                "the arms are axis-aligned: {a:?}..{b:?}"
+            );
+            assert!(
+                (((*b - *a).length() / 2.0) - mouths[0].1 * JACK_CROSS_FRACTION).abs() < 0.05,
+                "each arm reaches 0.85 of the mouth: {a:?}..{b:?}"
+            );
+        }
+        assert_eq!(
+            mouths[0].0,
+            cuts[0].0.lerp(cuts[0].1, 0.5),
+            "arms cross the centre"
+        );
+
+        // A master's 7 mm jack is a 26.5 pt cell at 1:1, so its ring is 15.9 pt:
+        // the Reduced step — bezel and mouth, **no** cross. The cross returns
+        // only from a 30 pt cell up (ring 18 pt), i.e. above ~113 % zoom on those
+        // jacks. That is the designed ladder, not a missing symbol.
+        let small = jack_face(pt(7.0));
+        let shapes = painted_shapes(&small, false);
+        assert_eq!(stroked_rings(&shapes).len(), 1, "the bezel survives");
+        assert_eq!(
+            filled_discs(&shapes).len(),
+            1,
+            "the mouth survives the reduced step: {shapes:?}"
+        );
+        assert!(
+            face_segments(&shapes).is_empty(),
+            "no cross below an 18 pt ring (26.5 pt cell): {shapes:?}"
+        );
+
+        // An unaddressed jack keeps the whole face, dimmed to the alpha floor
+        // (D5) — the symbol never changes, only its brightness.
+        let mut unused = small.clone();
+        unused.component_index = None;
+        unused.dimmed = true;
+        let shapes = painted_shapes(&unused, false);
+        assert_eq!(
+            stroked_rings(&shapes).len(),
+            1,
+            "an unused jack keeps its face"
+        );
+        assert_eq!(filled_discs(&shapes).len(), 1);
+        let alpha = stroked_rings(&shapes)[0].2.color.a();
+        assert!(alpha >= 120 && alpha < 255, "dimmed but legible: {alpha}");
+    }
+
+    #[test]
+    fn the_slot_points_lower_left_up_and_lower_right_across_the_value_range() {
+        // D4: the value rides the slot on a 270° sweep. 0 is 7:30 (down-left),
+        // 0.5 is 12:00 (straight up) and 1 is 4:30 (down-right).
+        let w = pt(12.0);
+        let cell = pot_face(w, 0.0);
+        let (center, radius, _) = stroked_rings(&painted_shapes(&cell, false))[0];
+        let mut dirs = Vec::new();
+        for value in [0.0_f32, 0.5, 1.0] {
+            let mut probe = cell.clone();
+            probe.value_frac = value;
+            let (inner, outer, dir) = painted_slot(&probe);
+            let expected = expected_slot_dir(value);
+            assert!(
+                (dir - expected).length() < 0.01,
+                "value {value}: the slot points {dir:?}, expected {expected:?}"
+            );
+            assert!(
+                ((inner - center).length() - radius * POT_SLOT_INNER_FRACTION).abs() < 0.05,
+                "value {value}: the slot starts 0.28 r out"
+            );
+            assert!(
+                ((outer - center).length() - radius * POT_SLOT_OUTER_FRACTION).abs() < 0.05,
+                "value {value}: the slot ends 0.82 r out"
+            );
+            dirs.push(dir);
+        }
+        // The named readings, in screen coordinates (y grows downward).
+        assert!(
+            dirs[0].x < -0.5 && dirs[0].y > 0.5,
+            "0 points down-left (7:30): {:?}",
+            dirs[0]
+        );
+        assert!(
+            dirs[1].x.abs() < 0.01 && dirs[1].y < -0.99,
+            "0.5 points straight up (12:00): {:?}",
+            dirs[1]
+        );
+        assert!(
+            dirs[2].x > 0.5 && dirs[2].y > 0.5,
+            "1 points down-right (4:30): {:?}",
+            dirs[2]
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_a_pot_moves_the_painted_slot_by_one_step() {
+        // The slot *is* the value channel, so the wheel path must be observable
+        // in the drawing: one notch turns the painted slot by exactly one
+        // `WHEEL_VALUE_STEP` of the 270° sweep, not just the stored value.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut app = app_with_labels("fixtures/module_ui_label_fit.ini", &[]);
+        let hw = hw_index(&app, "P2.1");
+        app.patch.as_mut().unwrap().hw_components[hw].state = ComponentState::Value(0.5);
+        let spec = physical_spec(&app, pane).expect("spec");
+        let before = cell_for_token(&app, &spec, "P2.1").clone();
+        assert!(
+            (before.value_frac - 0.5).abs() < 1e-6,
+            "the slot reads the element's own position: {}",
+            before.value_frac
+        );
+        let dir_before = painted_slot(&before).2;
+
+        let frame = frame_after(
+            before.rect.center(),
+            vec![wheel(true, egui::Modifiers::default())],
+            pane,
+            Some(&spec),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            frame.value_adjust,
+            Some((hw, WHEEL_VALUE_STEP)),
+            "a wheel over the pot adjusts its value"
+        );
+        assert_eq!(frame.zoom, None, "a value wheel must not zoom");
+        crate::handler::handle_physical_frame(&frame, &mut app);
+
+        let spec = physical_spec(&app, pane).expect("spec after the wheel");
+        let after = cell_for_token(&app, &spec, "P2.1").clone();
+        assert!(
+            (after.value_frac - (0.5 + WHEEL_VALUE_STEP)).abs() < 1e-6,
+            "one notch is one step: {}",
+            after.value_frac
+        );
+        let dir_after = painted_slot(&after).2;
+        assert!(
+            (dir_after - expected_slot_dir(0.5 + WHEEL_VALUE_STEP)).length() < 0.01,
+            "the painted slot follows the new value: {dir_after:?}"
+        );
+        let turned = dir_before
+            .dot(dir_after)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        let step_deg = POT_SLOT_SWEEP_DEGREES * WHEEL_VALUE_STEP;
+        assert!(
+            (turned - step_deg).abs() < 0.05,
+            "the slot turned {turned}°, one wheel step is {step_deg}°"
+        );
+    }
+
+    #[test]
+    fn a_face_replaces_the_corner_marker_but_a_jack_keeps_its_direction_glyph() {
+        // D6: `mono` maps `cv_in` and `cv_out` to the same value, so direction
+        // must be carried by the glyph. A pot or encoder has a face instead of
+        // the `◉` corner marker; a jack keeps its `◀`/`▶`.
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let w = pt(12.0);
+        for (name, cell) in [("pot", pot_face(w, 0.5)), ("encoder", encoder_face(w, 0.5))] {
+            let texts = painted_text_runs(&cell);
+            assert!(
+                !texts.iter().any(|(t, _)| t.contains('\u{25C9}')),
+                "{name}: the face replaces the corner marker: {texts:?}"
+            );
+        }
+
+        // The two CV kinds paint the *same* colour in `mono`...
+        assert_eq!(
+            rgb(crate::theme::active().cv_in),
+            rgb(crate::theme::active().cv_out),
+            "mono forbids colour as the direction channel"
+        );
+        // ... so the marker glyph is what tells a CV in from a CV out.
+        let input = jack_face(w);
+        let mut output = input.clone();
+        output.kind = ComponentKind::CvOut;
+        output.glyph = "\u{25B6}".into();
+        output.color = crate::theme::active().cv_out;
+        output.label_color = output.color;
+        let in_texts = painted_text_runs(&input);
+        let out_texts = painted_text_runs(&output);
+        let in_mark = in_texts
+            .iter()
+            .find(|(t, _)| t == "\u{25C0}")
+            .expect("a CV input keeps its ◀ marker");
+        let out_mark = out_texts
+            .iter()
+            .find(|(t, _)| t == "\u{25B6}")
+            .expect("a CV output keeps its ▶ marker");
+        assert_eq!(
+            in_mark.1, out_mark.1,
+            "the two directions paint the same colour here, so the glyph is the channel"
+        );
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_state_row_appears_only_where_the_face_band_holds_it() {
+        // D4: the percentage row is not special-cased — it survives only when the
+        // `h − 0.66 w` band still holds it after the label.
+        let narrow = face_cell(
+            pt(12.0),
+            CellShape::Pot,
+            ComponentKind::Knob,
+            0.5,
+            "Filter cutoff",
+            "50%",
+        );
+        let layout = narrow
+            .label_layout
+            .as_ref()
+            .expect("the 12 mm band fits the long label");
+        assert!(
+            !layout.state_row,
+            "a 12 mm pot's band holds the label, not the row: {layout:?}"
+        );
+        assert!(
+            state_lines(&narrow).is_empty(),
+            "no percentage run paints: {:?}",
+            painted_runs(&narrow)
+        );
+        // The label still takes the band, never the face.
+        let face_bottom =
+            narrow.rect.min.y + crate::physical::FACE_HEIGHT_FRACTION * narrow.rect.width();
+        let lines = label_lines(&narrow);
+        assert!(!lines.is_empty(), "the label still paints: {layout:?}");
+        for (text, _, pos) in lines {
+            assert!(
+                pos.y >= face_bottom - 0.01,
+                "`{text}` paints in the band beneath the face ({pos:?} vs {face_bottom})"
+            );
+        }
+
+        // Zoomed in, the same band is 61 pt and holds the label *and* the row.
+        let wide = face_cell(
+            180.0,
+            CellShape::Pot,
+            ComponentKind::Knob,
+            0.5,
+            "Filter cutoff",
+            "50%",
+        );
+        let layout = wide
+            .label_layout
+            .as_ref()
+            .expect("the wide band fits the label");
+        assert!(
+            layout.state_row,
+            "a 180 pt band holds label and row: {layout:?}"
+        );
+        assert_eq!(state_lines(&wide), vec!["50%".to_string()]);
+        // The row sits below the label lines and bottom-aligns in the band.
+        let label_bottom = label_lines(&wide)
+            .last()
+            .map(|(_, _, pos)| pos.y)
+            .expect("label lines");
+        let row = painted_runs(&wide)
+            .into_iter()
+            .find(|run| run.font.family == egui::FontFamily::Proportional)
+            .expect("the percentage row paints");
+        assert!(
+            row.pos.y > label_bottom,
+            "the row follows the label lines ({} vs {label_bottom})",
+            row.pos.y
+        );
+        assert!(
+            row.pos.y + crate::physical::label_line_height(row.font.size) <= wide.rect.max.y + 0.01,
+            "the row is bottom-aligned in the cell"
+        );
+    }
+
+    #[test]
+    fn an_unused_rotary_drops_the_ring_only_at_the_full_step() {
+        // D5 as built, which deviates from "always drop the ring" on purpose:
+        // only the Full step can carry the difference. At Reduced and Dot the
+        // unaddressed rotary keeps the addressed drawing at the alpha floor,
+        // because a bare slot at the rack fit would read as nothing.
+        let color = crate::theme::active().knob;
+        let mut full = unaddressed_cell(ComponentKind::Knob, color);
+        full.rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(pt(12.0), pt(12.0)));
+        let shapes = painted_shapes(&full, false);
+        assert!(
+            stroked_rings(&shapes).is_empty(),
+            "the ring is what addressing adds at the Full step: {shapes:?}"
+        );
+        assert_eq!(closed_outlines(&shapes).len(), 1, "the nut stays");
+        assert_eq!(filled_discs(&shapes).len(), 1, "the shaft stays");
+        assert_eq!(face_segments(&shapes).len(), 2, "slot + base line stay");
+        let mut encoder = unaddressed_cell(ComponentKind::Encoder, color);
+        encoder.rect = full.rect;
+        let shapes = painted_shapes(&encoder, false);
+        assert!(
+            stroked_rings(&shapes).is_empty(),
+            "the encoder drops it too"
+        );
+        assert_eq!(face_segments(&shapes).len(), 1, "and keeps no base line");
+
+        // The rack fit (ring 10.1 pt) keeps the ring and the slot.
+        let fitted = Rect::from_min_size(
+            Pos2::new(100.0, 100.0),
+            Vec2::new(pt(12.0) * 0.37, pt(12.0) * 0.37),
+        );
+        for (name, kind) in [
+            ("pot", ComponentKind::Knob),
+            ("encoder", ComponentKind::Encoder),
+        ] {
+            let mut cell = unaddressed_cell(kind, color);
+            cell.rect = fitted;
+            let shapes = painted_shapes(&cell, false);
+            let rings = stroked_rings(&shapes);
+            assert_eq!(
+                rings.len(),
+                1,
+                "{name} keeps its ring at the fit: {shapes:?}"
+            );
+            assert!(
+                rings[0].2.color.a() >= 120,
+                "{name} ring stays legible: {rings:?}"
+            );
+            assert_eq!(face_segments(&shapes).len(), 1, "{name} keeps its slot");
+        }
+
+        // Below a 10 pt ring the same ring plus a dot, at the alpha floor.
+        let mut dot = unaddressed_cell(ComponentKind::Knob, color);
+        dot.rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(16.0, 16.0));
+        let shapes = painted_shapes(&dot, false);
+        assert_eq!(
+            stroked_rings(&shapes).len(),
+            1,
+            "the ring holds the position"
+        );
+        assert_eq!(filled_discs(&shapes).len(), 1, "plus the centre dot");
+        assert!(face_segments(&shapes).is_empty());
+    }
+
     #[test]
     fn composed_p2b8_button_face_is_state_outline_with_concentric_disc() {
         let app = app_with_patch("fixtures/own_buttons.ini");
