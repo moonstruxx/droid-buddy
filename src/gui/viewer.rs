@@ -1279,30 +1279,12 @@ mod tests {
     }
 
     fn painted_labels(spec: &ViewerSpec) -> Vec<String> {
-        let ctx = egui::Context::default();
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(600.0, 300.0),
-            )),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_viewer(ui.painter(), ui.max_rect(), ui.ctx(), Some(spec));
-        });
-        let labels: Vec<String> = full_output
-            .shapes
-            .iter()
-            .filter_map(|cs| {
-                if let egui::epaint::Shape::Text(t) = &cs.shape {
-                    Some(t.galley.text().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        full_output.textures_delta.clear();
-        labels
+        crate::gui::overlays::painted_labels(Vec2::new(600.0, 300.0), |p, size, ctx| {
+            // The headless pass renders into a canvas anchored at the origin, so
+            // rebuilding the rect from the reported size yields the same
+            // `ui.max_rect()` the routine was handed before this harness moved.
+            paint_viewer(p, Rect::from_min_size(Pos2::ZERO, size), ctx, Some(spec));
+        })
     }
 
     #[test]

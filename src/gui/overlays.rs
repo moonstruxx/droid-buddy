@@ -133,13 +133,7 @@ pub(crate) fn paint_validation_modal(
     let inner_top = rect.min.y + 24.0;
     let inner_bottom = rect.max.y - 18.0;
     if let Some(msg) = &spec.empty_message {
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            msg,
-            egui::FontId::proportional(12.0),
-            rgb(theme.text),
-        );
+        paint_empty_message(painter, rect, msg, rgb(theme.text));
         return ValidationFrame::default();
     }
     let row_h = 16.0;
@@ -245,13 +239,7 @@ pub(super) fn paint_select_menu(
         rgb(t.text),
     );
     if let Some(msg) = &spec.empty_message {
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            msg,
-            egui::FontId::proportional(12.0),
-            rgb(t.text),
-        );
+        paint_empty_message(painter, rect, msg, rgb(t.text));
         return;
     }
     let mut y = rect.min.y + 24.0;
@@ -517,13 +505,7 @@ pub(super) fn paint_optimizer(painter: &Painter, pane: Rect, spec: Option<&Optim
         rgb(t.text),
     );
     if let Some(msg) = &spec.empty_message {
-        painter.text(
-            pane.center(),
-            egui::Align2::CENTER_CENTER,
-            msg,
-            egui::FontId::proportional(12.0),
-            rgb(t.text),
-        );
+        paint_empty_message(painter, pane, msg, rgb(t.text));
         return;
     }
     let mut y = pane.min.y + 24.0;
@@ -568,6 +550,19 @@ pub(super) fn paint_optimizer(painter: &Painter, pane: Rect, spec: Option<&Optim
 
 fn rgb(color: Color) -> egui::Color32 {
     crate::theme::active().egui_color(color)
+}
+
+/// Empty-state message: the surface's body text centered in the region it owns.
+/// Shared by every overlay whose row list collapses to a single hint line, so the
+/// empty states cannot drift apart.
+fn paint_empty_message(painter: &Painter, area: Rect, msg: &str, color: egui::Color32) {
+    painter.text(
+        area.center(),
+        egui::Align2::CENTER_CENTER,
+        msg,
+        egui::FontId::proportional(12.0),
+        color,
+    );
 }
 
 // ── MIDI upload (confirm modal + waiting bar) ───────────────────────────────
@@ -967,37 +962,42 @@ pub(crate) fn diff_spec_for(app: &crate::app::App) -> Option<DiffSpec> {
     Some(diff_spec_from_report(app.filtered_report().as_ref()))
 }
 
+/// Run one paint routine in a headless egui context of `size` and collect the
+/// text labels it emitted, in paint order. Both this module's paint tests and the
+/// source viewer's assert on what the routine actually drew, so the harness lives
+/// at module scope where the viewer can reach it.
+#[cfg(test)]
+pub(crate) fn painted_labels<F: FnMut(&Painter, Vec2, &Context)>(
+    size: Vec2,
+    mut f: F,
+) -> Vec<String> {
+    let ctx = egui::Context::default();
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+        ..Default::default()
+    };
+    let mut full_output = ctx.run_ui(raw_input, |ui| {
+        f(ui.painter(), ui.max_rect().size(), ui.ctx());
+    });
+    let labels: Vec<String> = full_output
+        .shapes
+        .iter()
+        .filter_map(|cs| {
+            if let egui::epaint::Shape::Text(t) = &cs.shape {
+                Some(t.galley.text().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    full_output.textures_delta.clear();
+    labels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui::{Pos2, Vec2};
-
-    fn painted_labels<F: FnMut(&egui::Painter, Vec2, &egui::Context)>(
-        size: Vec2,
-        mut f: F,
-    ) -> Vec<String> {
-        let ctx = egui::Context::default();
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
-            ..Default::default()
-        };
-        let mut full_output = ctx.run_ui(raw_input, |ui| {
-            f(ui.painter(), ui.max_rect().size(), ui.ctx());
-        });
-        let labels: Vec<String> = full_output
-            .shapes
-            .iter()
-            .filter_map(|cs| {
-                if let egui::epaint::Shape::Text(t) = &cs.shape {
-                    Some(t.galley.text().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        full_output.textures_delta.clear();
-        labels
-    }
 
     /// Rect fills (geometry + color) the paint routine emitted, so a test can
     /// assert a dialog paints an opaque backdrop and no translucent wash.
