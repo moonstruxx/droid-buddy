@@ -41,3 +41,10 @@
 
 - [x] 7.1 Update `docs/views.md` with the grouping behaviour, then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's skills <!-- agent: devops-engineer.build, depends_on: [5.4, 6.1], touches: [docs/views.md, docs/config.md, ARCHITECTURE.md, DESIGN.md] -->
 - [x] 7.2 Run `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked` and `cargo run --release -- --self-test`, recording each exit status — 2026-11-15: fmt 0, clippy 0, test 0 (1671 lib + 40 integration), self-test 0 (6/6 checks) <!-- agent: devops-engineer.fast, depends_on: [5.3, 6.2], touches: [] -->
+
+## 8. Type policy (added after measuring the real patches)
+
+- [ ] 8.1 Add `GroupPolicy { Type, Run }` (default `Type`) to `GroupSettings`, union every circuit of a type under `Type`, keep the spatial-or-hop rule under `Run`, and give `Group` one extent rule (enclose a compact stack, one nominal box at the centroid when the type is spread); wire `[graph] group_by` through config and `App::group_settings` <!-- agent: rusty-engineer.build, depends_on: [1.1, 2.1, 3.1], touches: [src/graph_group.rs, src/config.rs, src/app.rs, docs/config.md] -->
+- [ ] 8.2 Tests: the type policy collapses a whole type into one box on a real patch, the run policy keeps its behaviour, the minimum-size gate still applies, the extent rule encloses a stack and compacts a spread type, and `group_by` parses with a warn-once fallback <!-- agent: horst-engineer.build, depends_on: [8.1], touches: [src/graph_group.rs, src/config.rs] -->
+- [x] 8.3 Correct the measured-effect claims in the proposal, design, spec deltas and `ARCHITECTURE.md` to the measured numbers (type policy: melody3 686→148 bodies, 2230→353 cables; drum 634→231, 2340→396) <!-- agent: lead, depends_on: [], touches: [openspec/**, ARCHITECTURE.md] -->
+- [ ] 8.4 Re-measure on the big patches and re-run the gates <!-- agent: lead, depends_on: [8.2], touches: [] -->
