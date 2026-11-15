@@ -393,16 +393,15 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // index for every real element.
     // With no patch this map is empty, so no cell can claim a global index and
     // the inventory rack publishes no hit rect (D4/D6).
-    let index_of: std::collections::HashMap<&str, usize> = patch
-        .map(|patch| {
+    let index_of: std::collections::HashMap<&str, usize> =
+        patch.map_or_else(Default::default, |patch| {
             patch
                 .hw_components
                 .iter()
                 .enumerate()
                 .map(|(i, c)| (c.id.as_str(), i))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
 
     // Persistent selection emphasis (droid_tui-8ia): the shared element
     // selection (`selected_component`) keeps the clicked cell marked after the

@@ -3358,8 +3358,7 @@ impl App {
             let name = self
                 .patch
                 .as_ref()
-                .map(|p| p.name.trim().to_string())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |p| p.name.trim().to_string());
             let master = master_segment;
             if name.is_empty() {
                 "Ready".to_string()
@@ -3424,8 +3423,7 @@ impl App {
         self.current_patch_path
             .as_ref()
             .and_then(|p| self.label_store.patch_labels(p))
-            .map(|b| b.hw.clone())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |b| b.hw.clone())
     }
 
     /// Circuit bucket for the currently loaded patch as `NodeId -> label`,
@@ -7208,12 +7206,10 @@ mod tests {
             Patch::from_ini_str("[button]\nbutton = B1.1\n", "t".to_string()).unwrap();
         let hw_a = reloaded
             .patch_labels(&a_path)
-            .map(|b| b.hw.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |b| b.hw.clone());
         let hw_b = reloaded
             .patch_labels(&b_path)
-            .map(|b| b.hw.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |b| b.hw.clone());
         assert_eq!(
             empty_patch.display_label("B1.1", 1, true, 4, &hw_a),
             "A-label"

@@ -4091,7 +4091,7 @@ mod window_paint_tests {
                     // `LayoutJob`, so the section format carries the FontId and
                     // the colour the galley was laid out with.
                     let format = t.galley.job.sections.first().map(|s| &s.format);
-                    label_fonts.push(format.map(|f| f.font_id.clone()).unwrap_or_default());
+                    label_fonts.push(format.map_or_else(Default::default, |f| f.font_id.clone()));
                     label_colors.push(format.map_or(egui::Color32::TRANSPARENT, |f| f.color));
                 }
                 egui::epaint::Shape::Rect(r) => rects.push(r.clone()),
