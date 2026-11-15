@@ -25,15 +25,19 @@
 
 - [x] 5.1 In `src/handler.rs`, bind `o` (isolate), `Enter` (expand or collapse) and `Shift+O` (toggle grouping) in the graph-pane handler, route world-space group hover and click through the existing pointer path, and publish the hovered group for the painter <!-- agent: rusty-engineer.build, depends_on: [3.1, 4.1], touches: [src/handler.rs] -->
 - [x] 5.2 Render the hover content peek in `src/gui/graph.rs`: the members' shared label prefix when one exists, otherwise the first eight labels plus `…+N` <!-- agent: frontend-engineer, depends_on: [5.1], touches: [src/gui/graph.rs] -->
-- [ ] 5.3 Tests: each key dispatches; `o` filters the scene and refits the camera; `o` and `Enter` without a hover are silent no-ops; the popover text follows the peek rule <!-- agent: horst-engineer.build, depends_on: [5.1, 5.2], touches: [src/handler.rs, src/gui/graph.rs] -->
+- [x] 5.3 Tests: each key dispatches; `o` filters the scene and refits the camera; `o` and `Enter` without a hover are silent no-ops; the popover text follows the peek rule <!-- agent: horst-engineer.build, depends_on: [5.1, 5.2], touches: [src/handler.rs, src/gui/graph.rs] -->
 - [x] 5.4 Add the three rows to the graph help table in `src/help.rs` and to `docs/keys.md` <!-- agent: rusty-engineer.fast, depends_on: [5.1], touches: [src/help.rs, docs/keys.md] -->
+
+## 5b. Collapse-on-repeat reachability
+
+- [ ] 5.5 Make the second press reachable: an expanded group must be hoverable so `Enter`/click collapses it again, and `o` while isolated must restore without needing a fresh hover — `collapsed_group_boxes` enumerates only collapsed groups, so the repeat press has no target (found by task 5.3) <!-- agent: rusty-engineer.build, depends_on: [5.1, 5.3], touches: [src/handler.rs, src/app.rs] -->
 
 ## 6. Group-level highlights
 
 - [x] 6.1 Map the existing highlight sources onto groups in the grouped view: selection, diff classification, topology errors, the influence wash and the dependency filter light a group when any member matches, under the topology-error > diff > influence > cable-kind precedence <!-- agent: frontend-engineer, depends_on: [4.1, 5.1], touches: [src/gui/graph.rs, src/app.rs] -->
-- [ ] 6.2 Tests: a group lights when a member is selected, diffed, or carries a topology error; the precedence order holds <!-- agent: horst-engineer.build, depends_on: [6.1], touches: [src/gui/graph.rs] -->
+- [x] 6.2 Tests: a group lights when a member is selected, diffed, or carries a topology error; the precedence order holds <!-- agent: horst-engineer.build, depends_on: [6.1], touches: [src/gui/graph.rs] -->
 
 ## 7. Documentation and gates
 
-- [ ] 7.1 Update `docs/views.md` with the grouping behaviour, then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's skills <!-- agent: devops-engineer.build, depends_on: [5.4, 6.1], touches: [docs/views.md, docs/config.md, ARCHITECTURE.md, DESIGN.md] -->
+- [x] 7.1 Update `docs/views.md` with the grouping behaviour, then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's skills <!-- agent: devops-engineer.build, depends_on: [5.4, 6.1], touches: [docs/views.md, docs/config.md, ARCHITECTURE.md, DESIGN.md] -->
 - [ ] 7.2 Run `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked` and `cargo run --release -- --self-test`, recording each exit status <!-- agent: devops-engineer.fast, depends_on: [5.3, 6.2], touches: [] -->
