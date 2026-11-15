@@ -797,12 +797,17 @@ fn master_status_segment(plan: &crate::rack::MasterPlan) -> String {
 /// D7): the paint path the painter will use for that cell, mirrored here so the
 /// fit measures the same text box the paint does.
 ///
-/// This mirrors `gui::physical`'s private fold rule (`fold_shape_for_controller`
-/// plus the button-kind test that sets `CellSpec::shape`) because `app` must not
-/// depend on `gui`. The two must not drift: a controller that folds its LED into
-/// a button face paints through the composed path (the label takes the band
-/// beneath the shape), and the fit has to measure that band rather than the
-/// whole cell.
+/// This mirrors `gui::physical`'s two private rules — `fold_shape_for_controller`
+/// with the button-kind test that sets `CellSpec::shape`, and the shape-to-path
+/// match in `cell_label_box` — because `app` must not depend on `gui`. The two
+/// must not drift: a controller that folds its LED into a button face paints
+/// through the composed path (the label takes the band beneath the shape), a pot,
+/// encoder or CV jack paints a hardware face and its label takes the band
+/// `h − FACE_HEIGHT_FRACTION · w` beneath it (faceplate-pot-jack-symbols D2), and
+/// the fit has to measure that band rather than the whole cell.
+///
+/// `label_fit_path_agrees_with_the_painters_label_box_per_kind` pins the
+/// agreement against `gui::physical::cell_label_box` for one cell of each kind.
 fn label_fit_path(
     comp: &crate::patch::HwComponent,
     cell: &crate::physical::ElementCell,
@@ -810,14 +815,26 @@ fn label_fit_path(
     use crate::physical::CellTextPath;
     if cell.family == "F" {
         // Faders (P8S8, M4): the label column beside the narrowed track, stacked
-        // when it is too narrow for a line (D5).
+        // when it is too narrow for a line (D5). A fader carries no face, so this
+        // stays ahead of the kind match.
         return CellTextPath::Fader;
     }
-    if comp.kind != crate::patch::ComponentKind::Button {
-        return CellTextPath::Compact;
-    }
-    match comp.controller.to_ascii_lowercase().as_str() {
-        "p2b8" | "b32" | "notebuttons" | "m4" | "motorfader" => CellTextPath::Composed,
+    match comp.kind {
+        // A rotary outside the fader family paints `CellShape::Pot`/`Encoder`,
+        // and a CV in/out paints `CellShape::Jack`; `cell_label_box` routes all
+        // three to `Face` (D2).
+        ComponentKind::Knob
+        | ComponentKind::Encoder
+        | ComponentKind::CvIn
+        | ComponentKind::CvOut => CellTextPath::Face,
+        // A button keeps the per-controller fold rule: on a folding controller
+        // its LED composes into a face and the label takes the band beneath the
+        // shape, everywhere else the cell stays compact.
+        ComponentKind::Button => match comp.controller.to_ascii_lowercase().as_str() {
+            "p2b8" | "p4b2" | "b32" | "notebuttons" | "m4" | "motorfader" => CellTextPath::Composed,
+            _ => CellTextPath::Compact,
+        },
+        // Everything else (switch, LED) has no face: the whole cell is the box.
         _ => CellTextPath::Compact,
     }
 }
@@ -3341,8 +3358,7 @@ impl App {
             let name = self
                 .patch
                 .as_ref()
-                .map(|p| p.name.trim().to_string())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |p| p.name.trim().to_string());
             let master = master_segment;
             if name.is_empty() {
                 "Ready".to_string()
@@ -3407,8 +3423,7 @@ impl App {
         self.current_patch_path
             .as_ref()
             .and_then(|p| self.label_store.patch_labels(p))
-            .map(|b| b.hw.clone())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |b| b.hw.clone())
     }
 
     /// Circuit bucket for the currently loaded patch as `NodeId -> label`,
@@ -7191,12 +7206,10 @@ mod tests {
             Patch::from_ini_str("[button]\nbutton = B1.1\n", "t".to_string()).unwrap();
         let hw_a = reloaded
             .patch_labels(&a_path)
-            .map(|b| b.hw.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |b| b.hw.clone());
         let hw_b = reloaded
             .patch_labels(&b_path)
-            .map(|b| b.hw.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |b| b.hw.clone());
         assert_eq!(
             empty_patch.display_label("B1.1", 1, true, 4, &hw_a),
             "A-label"
@@ -8912,7 +8925,9 @@ mod tests {
 
     /// The fit pane these tests measure in: small enough that the fixture
     /// rack's whole-rack fit lands near the supported floor (0.41), well below
-    /// what a written two-word label needs on a 9 mm button cell (~0.6).
+    /// what a written two-word label needs on the 9 mm P4B2 button cell (0.88 —
+    /// the composed band beneath the folded `Round` face, `h − 0.5 w` rather
+    /// than the whole cell).
     const LABEL_FIT_PANE: Rect = Rect::new(0, 0, 260, 200);
 
     /// The clamp fixture: the always-present 8 HP master plus one P4B2
@@ -8989,6 +9004,28 @@ mod tests {
         assert!(
             lifted >= rack_fit * 1.25,
             "the lift is a legibility step, not rounding noise ({lifted} vs rack {rack_fit})"
+        );
+        // faceplate-pot-jack-symbols 1.5: `B1.1` sits on the P4B2, whose LED folds
+        // into a `Round` face, so the fit measures the composed band beneath that
+        // face instead of the whole 9 mm cell. Against the compact box the same
+        // label needed 0.66; the narrower band needs 0.88 — pinned here so a fold
+        // rule one side of the pair forgets is a failure, not a quiet relock.
+        let (chain, _) = app
+            .physical_chain_and_rack()
+            .expect("the fixture has a rack");
+        let button_request = app
+            .physical_label_fit_requests(&chain)
+            .into_iter()
+            .find(|request| request.label == "Trigger input")
+            .expect("the written label on B1.1 is a fit request");
+        assert_eq!(
+            button_request.path,
+            crate::physical::CellTextPath::Composed,
+            "a P4B2 button folds its LED into a face, so the fit sizes the composed band"
+        );
+        assert_eq!(
+            app.physical_zoom, 0.88,
+            "the composed band needs 0.88 for this label (0.66 was the compact cell)"
         );
         assert!(
             lifted <= crate::physical::ZOOM_MAX,
@@ -9374,6 +9411,126 @@ mod tests {
             app.physical_zoom, rack_fit as f32,
             "the rack fit is unchanged by the patch"
         );
+    }
+
+    #[test]
+    fn label_fit_path_agrees_with_the_painters_label_box_per_kind() {
+        // faceplate-pot-jack-symbols 1.4/1.5: the labels fit has to measure the
+        // text box the painter labels, so `App::label_fit_path` must answer what
+        // `gui::physical::cell_label_box` answers for the *same* cell. One token
+        // per kind: a pot outside the fader family, a fader, a button on each of
+        // the two fold-rule sizes (P2B8 and P4B2 both fold to a `Round` face), a
+        // CV in, a CV out and a plain switch.
+        //
+        // `cell_label_box` is private to the `gui::physical` module, so the
+        // painter's side is read off the spec's own `CellSpec` here — the same
+        // three facts it decides on (`is_fader`, `shape`, and, for the band, the
+        // rect) — and named against the function it mirrors rather than replaced.
+        use crate::gui::CellShape;
+        use crate::physical::CellTextPath;
+
+        let mut app = App::new();
+        let patch = Patch::from_ini_str(
+            // One faceplate per kind, and the instance numbers keep the token
+            // sets apart: bare `[p8s8]` declares its front first (faders `P1.x`
+            // and switches `S1.x`), then the P10 pot (`P2.1`), the P2B8's
+            // buttons (`B3.x`) and the P4B2's front (`P4.x`, `B4.x`, `L4.x` —
+            // P4B2 is not bare-synthesized).
+            "[p8s8]\n\
+             [p10]\n    pot = P2.1\n\
+             [p2b8]\n\
+             [p4b2]\n    pot1 = P4.1\n    pot2 = P4.2\n    pot3 = P4.3\n    pot4 = P4.4\n    \
+             button1 = B4.1\n    led1 = L4.1\n    button2 = B4.2\n    led2 = L4.2\n\
+             [copy]\n    input = I1\n    output = O1\n",
+            String::from("fit-path-agreement"),
+        )
+        .expect("the agreement fixture parses");
+        assert!(app.load_patch(patch), "the agreement fixture loads clean");
+
+        let (chain, _) = app
+            .physical_chain_and_rack()
+            .expect("the fixture has a rack");
+        let spec =
+            crate::gui::physical_spec(&app, egui::Rect::ZERO).expect("the pane draws a spec");
+        let patch = app.patch.as_ref().expect("patch loaded");
+
+        // The faceplate cell the *fit* sizes for `token`: the chain resolves it
+        // exactly as the painter's chain does, so both sides measure one cell.
+        let element_cell = |token: &str| {
+            chain
+                .modules
+                .iter()
+                .enumerate()
+                .find_map(|(module_index, module)| {
+                    module
+                        .components
+                        .iter()
+                        .any(|c| c.id == token)
+                        .then(|| chain.cell_for(module_index, token))
+                        .flatten()
+                })
+                .unwrap_or_else(|| panic!("{token} sits on a faceplate"))
+        };
+
+        for (token, expected, what) in [
+            ("P2.1", CellTextPath::Face, "a pot outside the fader family"),
+            ("P1.1", CellTextPath::Fader, "a fader"),
+            (
+                "B3.1",
+                CellTextPath::Composed,
+                "a button on a P2B8 faceplate",
+            ),
+            (
+                "B4.1",
+                CellTextPath::Composed,
+                "a button on a P4B2 faceplate",
+            ),
+            ("I1", CellTextPath::Face, "a CV in"),
+            ("O1", CellTextPath::Face, "a CV out"),
+            ("S1.1", CellTextPath::Compact, "a plain switch"),
+        ] {
+            let index = patch
+                .hw_components
+                .iter()
+                .position(|c| c.id == token)
+                .unwrap_or_else(|| panic!("{token} is a patch component"));
+            let comp = &patch.hw_components[index];
+            let element = element_cell(token);
+            let cell = spec
+                .cells
+                .iter()
+                .find(|cell| cell.component_index == Some(index))
+                .unwrap_or_else(|| panic!("{what} ({token}) paints a cell"));
+
+            // The `gui::physical::cell_label_box` rule: the fader flag wins, then
+            // the shape — `Pot | Encoder | Jack` take the `h − 0.66 w` band, a
+            // composed button face its own band, no shape the compact box.
+            let painted = match (cell.is_fader, cell.shape) {
+                (true, _) => CellTextPath::Fader,
+                (false, None) => CellTextPath::Compact,
+                (false, Some(CellShape::Round | CellShape::Rect)) => CellTextPath::Composed,
+                (false, Some(CellShape::Pot | CellShape::Encoder | CellShape::Jack)) => {
+                    CellTextPath::Face
+                }
+            };
+
+            assert_eq!(
+                painted, expected,
+                "{what} ({token}): the painter must draw the face this pin expects"
+            );
+            assert_eq!(
+                label_fit_path(comp, element),
+                painted,
+                "{what} ({token}): the fit must measure the box the painter labels"
+            );
+            // Both sides really are the same cell, so the agreement is not
+            // between a faceplate cell and some other one.
+            let scale = crate::physical::PHYSICAL_POINTS_PER_MM * f64::from(app.physical_zoom);
+            assert!(
+                (f64::from(cell.rect.width()) - element.rect_mm.w_mm * scale).abs() < 0.1,
+                "{what} ({token}): the fit sizes the cell the spec draws"
+            );
+        }
     }
 
     #[test]

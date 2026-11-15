@@ -1159,8 +1159,7 @@ impl Patch {
     pub fn modifier_affected_spans(&self, token: &str) -> Vec<Span> {
         self.modifier_index
             .get(token)
-            .map(|v| v.iter().map(|e| e.span).collect())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |v| v.iter().map(|e| e.span).collect())
     }
 
     /// Full modifier entries for `token` (span + source + selectat).
@@ -3151,12 +3150,10 @@ fn unique_dest(dest: &Path) -> PathBuf {
     }
     let stem = dest
         .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .map_or_else(Default::default, |s| s.to_string_lossy().to_string());
     let ext = dest
         .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
+        .map_or_else(Default::default, |e| format!(".{}", e.to_string_lossy()));
     let mut n = 1usize;
     loop {
         let candidate = dest.with_file_name(format!("{stem}-{n}{ext}"));
@@ -3223,8 +3220,7 @@ mod tests {
             .sections
             .iter()
             .find(|s| s.name == "m4")
-            .map(|s| s.entries.clone())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |s| s.entries.clone())
     }
 
     #[test]

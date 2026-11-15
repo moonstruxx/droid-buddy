@@ -1721,6 +1721,14 @@ const LABEL_INSET_X: f32 = 2.0;
 /// edge. The shape itself is never shrunk for the label.
 const COMPOSED_FACE_HEIGHT_FRACTION: f32 = 0.5;
 
+/// Hardware face (D2): a pot, encoder and jack share one face depth — the symbol
+/// claims the cell's top `0.66 × w` and the label takes the band beneath it,
+/// `h − 0.66 × w` tall, ending at the cell's bottom edge. One constant for all
+/// three keeps the three symbols at one visual size, and the face is never
+/// shrunk or displaced for the label. Public because the painters draw the face
+/// at exactly this depth: the drawn shape and the fitted band must agree.
+pub const FACE_HEIGHT_FRACTION: f32 = 0.66;
+
 /// Fader (D5): the track may claim at most this fraction of the cell width, so a
 /// tall-narrow fader leaves the label a real column beside it.
 const FADER_TRACK_WIDTH_FRACTION: f32 = 0.4;
@@ -1748,8 +1756,9 @@ const STATE_FONT_MIN: f32 = 9.0;
 /// that holds a single glyph makes the painter emit the glyph plus its ellipsis
 /// (`…`), which names no number — so a cell whose column holds fewer than two
 /// advances reports `state_row = false` and hands the room back to the label.
-/// Compact and composed cells never hit this gate; it exists for the fader,
-/// whose label column the track and gutter can narrow past a usable value.
+/// Compact, composed and face cells never hit this gate; it exists for the
+/// fader, whose label column the track and gutter can narrow past a usable
+/// value.
 const STATE_ROW_MIN_CHARS: f32 = 2.0;
 
 /// Tolerance in points for the box comparisons: a line exactly as wide or tall
@@ -1788,6 +1797,10 @@ pub enum CellTextPath {
     /// Composed button face: the shape keeps the cell, the label takes the band
     /// beneath it.
     Composed,
+    /// Hardware face (pot, encoder, jack): the symbol keeps the cell and the
+    /// label takes the band `h − 0.66 × w` beneath it — the same shape of rule as
+    /// a composed face, at the depth a rotary or jack needs to stay a silhouette.
+    Face,
     /// Fader: the label column right of the narrowed track, stacked one glyph
     /// per line when the column is too narrow for a line of text.
     Fader,
@@ -1903,14 +1916,16 @@ pub fn state_font_size(label_font: f32) -> f32 {
 /// Whether this cell's text column can carry a state value at all (D4/D5),
 /// measured in advances of the state font for the candidate label step.
 ///
-/// Compact and composed cells always qualify: their state row shares the label's
-/// own line width, which the ladder has already shown holds text. A fader's
+/// Compact, composed and face cells always qualify: their state row shares the
+/// label's own line width, which the ladder has already shown holds text. A
+/// face cell still loses the row whenever its band cannot hold the row and a
+/// line together — that is [`label_layout`]'s height test, not this gate. A fader's
 /// column is separately narrowed by the 40 % track and the gutter, so it can be
 /// narrower than one usable value while still stacking the label beside it —
 /// that cell reports no state row rather than painting `…`.
 pub fn state_row_can_show_a_value(area: &LabelBox, font: f32) -> bool {
     match area.path {
-        CellTextPath::Compact | CellTextPath::Composed => true,
+        CellTextPath::Compact | CellTextPath::Composed | CellTextPath::Face => true,
         CellTextPath::Fader => {
             let column = fader_column_width(area.w);
             column + LABEL_FIT_TOLERANCE
@@ -2057,12 +2072,15 @@ fn fader_column_width(w: f32) -> f32 {
 /// The text box a path leaves for the label, in points (D1/D5/D6).
 fn label_text_box(area: &LabelBox) -> Option<(f32, f32)> {
     let width = match area.path {
-        CellTextPath::Compact | CellTextPath::Composed => area.w - LABEL_INSET_X,
+        CellTextPath::Compact | CellTextPath::Composed | CellTextPath::Face => {
+            area.w - LABEL_INSET_X
+        }
         CellTextPath::Fader => fader_column_width(area.w),
     };
     let height = match area.path {
         CellTextPath::Compact | CellTextPath::Fader => area.h,
         CellTextPath::Composed => area.h - COMPOSED_FACE_HEIGHT_FRACTION * area.w,
+        CellTextPath::Face => area.h - FACE_HEIGHT_FRACTION * area.w,
     };
     if width <= 0.0 || height <= 0.0 {
         None
@@ -4635,6 +4653,120 @@ mod tests {
     fn label_layout_composed_without_a_band_has_no_layout() {
         let area = label_box(30.0, 15.0, 0, CellTextPath::Composed, false);
         assert_eq!(label_layout("Reverb", &area), None);
+    }
+
+    /// D2 (1.1): a hardware face keeps the cell and hands the label the band
+    /// beneath it, so its text box is `h − 0.66 × w` tall at the same 2 pt inset a
+    /// composed face uses — the composed rule at the depth a rotary or jack needs.
+    #[test]
+    fn face_band_is_the_height_below_the_shape() {
+        // 12 / 9 / 7 / 4.5 mm cells, all square, so the band is 34 % of the cell.
+        for (size, width, height) in [
+            (45.0, 43.0, 15.3),
+            (34.0, 32.0, 11.56),
+            (26.0, 24.0, 8.84),
+            (17.0, 15.0, 5.78),
+        ] {
+            let area = label_box(size, size, 0, CellTextPath::Face, false);
+            let (w, h) = label_text_box(&area).expect("a band under a positive face");
+            assert!(
+                (w - width).abs() < 0.001 && (h - height).abs() < 0.001,
+                "{size} pt face: text box {w} × {h}, want {width} × {height}"
+            );
+        }
+    }
+
+    /// D2 (1.1): the band at each true-size face cell holds the largest ladder step
+    /// that fits the written label — 8 pt on a 12 mm pot's 15.3 pt band, 7 pt on a
+    /// 9 mm pot's 11.6 pt, 6 pt on a 7 mm jack's 8.8 pt, and nothing at all at the
+    /// 37 % rack fit, where the band is 5.8 pt. The label's own length picks the
+    /// step (the ladder wraps before it steps down), so each size is pinned with
+    /// the label whose width lands on it.
+    #[test]
+    fn label_layout_face_band_takes_the_step_the_cell_allows() {
+        let wide = label_layout(
+            "Waveform",
+            &label_box(45.0, 45.0, 0, CellTextPath::Face, false),
+        )
+        .expect("one 8 pt line in 15.3 pt");
+        assert_label_layout(&wide, 8.0, &["Waveform"], false, false, "45 pt face");
+        // 10 pt wraps to two 12.5 pt lines, which the band cannot hold.
+        assert!(
+            label_line_height(10.0) * 2.0 > 15.3,
+            "two top lines overflow"
+        );
+
+        let mid = label_layout(
+            "Release",
+            &label_box(34.0, 34.0, 0, CellTextPath::Face, false),
+        )
+        .expect("one 7 pt line in 11.56 pt");
+        assert_label_layout(&mid, 7.0, &["Release"], false, false, "34 pt face");
+
+        let small = label_layout(
+            "Detune",
+            &label_box(26.0, 26.0, 0, CellTextPath::Face, false),
+        )
+        .expect("one 6 pt line in 8.84 pt");
+        assert_label_layout(&small, 6.0, &["Detune"], false, false, "26 pt face");
+
+        assert_eq!(
+            label_layout(
+                "Detune",
+                &label_box(17.0, 17.0, 0, CellTextPath::Face, false)
+            ),
+            None,
+            "5.8 pt of band holds neither a ladder line nor an ellipsized fragment"
+        );
+    }
+
+    /// D4 (1.1): the state row is not special-cased — at a 12 mm pot's 15.3 pt band
+    /// the reserved row would leave 4 pt, so the row yields and the label keeps its
+    /// line (at one step down for a long label, at the top step for a short one).
+    #[test]
+    fn label_layout_face_band_yields_the_state_row_at_true_size() {
+        let area = label_box(45.0, 45.0, 0, CellTextPath::Face, true);
+        let long = label_layout("Waveform", &area).expect("the band still holds a line");
+        assert_label_layout(&long, 8.0, &["Waveform"], false, false, "45 pt face row");
+        // One 10 pt line fits 15.3 pt, but a line plus the 11.25 pt row does not.
+        let short = label_layout("Cut", &area).expect("the top step holds it");
+        assert_label_layout(&short, 10.0, &["Cut"], false, false, "45 pt short label");
+    }
+
+    /// D4 (1.1): the row returns wherever the band still holds it after the label —
+    /// the same pot at 400 % has a 61.2 pt band, so the top step keeps its value.
+    #[test]
+    fn label_layout_face_band_keeps_the_state_row_when_it_fits() {
+        let area = label_box(180.0, 180.0, 0, CellTextPath::Face, true);
+        let layout = label_layout("Waveform", &area).expect("label and row both fit");
+        assert_label_layout(&layout, 10.0, &["Waveform"], false, true, "400 % face row");
+    }
+
+    /// D1 (1.1): no egui type enters the band decision — the rule takes the box's
+    /// plain scalars and answers plain scalars, so the painter, the fit, the
+    /// annotation layer and the hover reveal all reach it without a paint context.
+    #[test]
+    fn face_band_decision_takes_and_returns_no_egui_type() {
+        let decision: fn(&str, &LabelBox) -> Option<LabelLayout> = label_layout;
+        let LabelBox {
+            w,
+            h,
+            glyph_chars,
+            path,
+            has_state,
+        } = label_box(45.0, 45.0, 0, CellTextPath::Face, true);
+        let _: (f32, f32, usize, CellTextPath, bool) = (w, h, glyph_chars, path, has_state);
+        let area = label_box(w, h, glyph_chars, path, has_state);
+        let layout = decision("Waveform", &area).expect("a line in the band");
+        let LabelLayout {
+            font,
+            lines,
+            stacked,
+            state_row,
+        } = layout.clone();
+        let _: (f32, Vec<String>, bool, bool) = (font, lines, stacked, state_row);
+        // The box alone decides: nothing outside it can change the step.
+        assert_eq!(decision("Waveform", &area), Some(layout));
     }
 
     /// D5 (spec "A fader label stacks"): the P8S8's 6.5 pt column holds one

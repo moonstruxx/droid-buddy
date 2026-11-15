@@ -1902,8 +1902,7 @@ fn painted_graph_label_sizes(scene: &crate::graph_render::SceneSpec) -> Vec<f32>
                 .job
                 .sections
                 .first()
-                .map(|s| s.format.font_id.clone())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |s| s.format.font_id.clone());
             if font.family == egui::FontFamily::Monospace {
                 sizes.push(font.size);
             }
@@ -1989,8 +1988,7 @@ fn painted_physical_label_sizes(zoom: f32) -> (Vec<CellLabelStep>, Vec<CellLabel
             .job
             .sections
             .first()
-            .map(|s| s.format.font_id.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |s| s.format.font_id.clone());
         if font.family != egui::FontFamily::Monospace {
             continue;
         }
@@ -3171,9 +3169,9 @@ fn regression_shift_colour_module_ui_tint_and_noop() {
     let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
 
     let token_of = |app: &App, index: Option<usize>| -> String {
-        index
-            .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.clone())
-            .unwrap_or_default()
+        index.map_or_else(Default::default, |i| {
+            app.patch.as_ref().unwrap().hw_components[i].id.clone()
+        })
     };
 
     // No-shift baseline.
@@ -4262,8 +4260,10 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
 //   B3.1 (9 mm button, DB8E)  wraps to two or three lines at a step below the
 //                             top — the "a long label wraps instead of
 //                             disappearing" branch, drawn whole, no ellipsis.
-//   P2.1 (12 mm pot, P10)     draws whole on one line at the 10 pt top step — a
-//                             cell with room never shrinks.
+//   P2.1 (12 mm pot, P10)     draws whole on one 8 pt line and keeps its state
+//                             row in the band `h − 0.66 w` beneath its face —
+//                             one step below the top, because the band, not the
+//                             cell, is the label's budget now.
 //   I1   (7 mm jack, master)  takes a step below the top — the "a small cell
 //                             takes a smaller step" branch, never below the floor.
 //   P1.1 (P8S8 fader cell)    stacks one glyph per line in the column beside the
@@ -4274,11 +4274,18 @@ fn regression_module_ui_labels_modes_leave_hit_and_skeleton_rects_identical() {
 // The story also pins the change's three cross-layer promises: no painted run
 // is below the 6 pt floor, every fitted line is painted inside its own cell
 // while the cell the ladder cannot serve paints no text at all, and the
-// labels-first fit lands at the rack fit with the pot's and button's labels
-// drawn whole — the LED's impossible label must not climb towards the zoom cap.
+// labels-first fit is the greater of the rack fit and the band's lift with the
+// pot's, jack's and button's labels drawn whole — the LED's impossible label
+// must not climb towards the zoom cap.
+//
+// faceplate-pot-jack-symbols (task 3.2) moved the fit's answer here: the pot and
+// the master jack now fit their labels into the `h − 0.66 w` band beneath their
+// faces (D2), so the fit lifts to 1.44 instead of the rack fit 1.25 — the jack's
+// 10-character label needs the deeper band. The lift is pinned below with the
+// face band named, so the number cannot drift silently.
 //
 // NOTE (closed by task 3.6): `gui::physical::physical_spec` now derives
-// `CellSpec::is_fader` from the geometry cell's `F` family and `fader_value`
+// `CellSpec::is_fader` from the geometry cell's `F` family and `value_frac`
 // from the element's state, so a loaded patch's fader cell paints through the D5
 // face — the narrowed track, the amber value bar and the stacked label column —
 // and its own `label_layout` is the fader column below. The fader assertions pin
@@ -4412,10 +4419,12 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     ));
     app.apply_physical_fit_triggers();
 
-    // The fit is the labels fit, and it is the rack fit: every written label a
-    // zoom can serve is already whole there, and the LED's label — which no
-    // zoom can serve — is ignored rather than allowed to drag the view towards
-    // the cap (D7).
+    // The fit is the labels fit, and it is the greater of the rack fit and the
+    // band's lift: the pot and the master jack fit their labels into the
+    // `h − 0.66 w` band beneath their faces (faceplate-pot-jack-symbols D2), so
+    // the jack's 10-character label lifts the view to 1.44 where the rack fit is
+    // 1.25. The LED's label — which no zoom can serve — is still ignored rather
+    // than allowed to drag the view towards the cap (D7).
     assert_eq!(
         app.physical_fit_mode,
         Some(crate::app::FitMode::Labels),
@@ -4430,14 +4439,32 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
         pane.width(),
         pane.height(),
     );
+    // The band's answer on this fixture, measured: a face cell's text box is
+    // `h − FACE_HEIGHT_FRACTION · w` with `FACE_HEIGHT_FRACTION = 0.66`, and the
+    // 7 mm jack's band holds "Gate input" whole at 1.44.
+    let face_band_lift = 1.44_f64;
     assert!(
-        (f64::from(fitted) - rack_fit).abs() < 1e-3,
-        "the fit must be the rack fit {rack_fit}, not a label lift: {fitted}"
+        (f64::from(fitted) - rack_fit.max(face_band_lift)).abs() < 1e-6,
+        "the fit must be the greater of the rack fit {rack_fit} and the face band's \
+         lift {face_band_lift}: {fitted}"
+    );
+    assert!(
+        f64::from(fitted) > rack_fit,
+        "the face band lifts the fit above the rack fit: {fitted} vs {rack_fit}"
     );
     assert!(
         (app.physical_zoom - fitted).abs() < 1e-6,
         "the applied zoom must be the fitted one: {} vs {fitted}",
         app.physical_zoom
+    );
+
+    // Deterministic: the label fit scan is a fixed 1 % grid, so a refit lands on
+    // the same zoom.
+    assert!(app.fit_physical_view(pane.width(), pane.height()));
+    assert_eq!(
+        app.physical_fit_zoom,
+        Some(fitted),
+        "a refit must land on the same zoom"
     );
 
     let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
@@ -4480,7 +4507,11 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
     let top_step = MODULE_UI_LABEL_LADDER[0];
     let floor = MODULE_UI_LABEL_LADDER[4];
 
-    // Pot: the ladder's head. A cell with room wraps nothing.
+    // Pot: the face band's branch. The face keeps the cell and leaves
+    // `h − 0.66 w` = 22.2 pt for the label at the fitted 1.44, so the ladder
+    // takes one 8 pt line and the band still holds the `NN%` state row — the
+    // row is not special-cased (D4), it is dropped only when the band cannot
+    // hold it. One step below the top, never the floor.
     let pot_layout = pot
         .label_layout
         .as_ref()
@@ -4491,8 +4522,16 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
         "a 12 mm cell holds the short label on one line: {pot_layout:?}"
     );
     assert_eq!(
-        pot_layout.font, top_step,
-        "and at the ladder's top step: {pot_layout:?}"
+        pot_layout.font, 8.0,
+        "the face band's 22.2 pt holds one 8 pt line: {pot_layout:?}"
+    );
+    assert!(
+        pot_layout.font < top_step && pot_layout.font >= floor,
+        "the band costs a step below the top and never the floor: {pot_layout:?}"
+    );
+    assert!(
+        pot_layout.state_row,
+        "the band still holds the pot's state row after its label (D4): {pot_layout:?}"
     );
     assert!(!pot_layout.stacked, "a pot does not stack: {pot_layout:?}");
     assert!(
@@ -4500,8 +4539,9 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
         "the whole label, no ellipsis: {pot_layout:?}"
     );
 
-    // Button: the wrap branch. A long label wraps before it steps down, and the
-    // step it does take stays above the floor.
+    // Button: the wrap branch. A long label wraps before it steps down, and at
+    // the fitted 1.44 the 9 mm composed cell's band holds the three lines at the
+    // top step — the wrap, not a step, is what the branch demonstrates now.
     let button_layout = button
         .label_layout
         .as_ref()
@@ -4510,9 +4550,17 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
         (2..=3).contains(&button_layout.lines.len()),
         "a 9 mm cell folds the long label into two or three lines: {button_layout:?}"
     );
+    assert_eq!(
+        button_layout.font, top_step,
+        "the fitted zoom holds the wrapped lines at the top step: {button_layout:?}"
+    );
     assert!(
-        button_layout.font < top_step && button_layout.font >= floor,
-        "the wrap costs a step below the top and never the floor: {button_layout:?}"
+        button_layout.font >= floor,
+        "a wrapped label never falls to the floor: {button_layout:?}"
+    );
+    assert!(
+        button_layout.state_row,
+        "the composed band still holds the button's state row (D4): {button_layout:?}"
     );
     assert!(
         !button_layout.stacked,
@@ -4719,5 +4767,702 @@ fn regression_module_ui_label_fit_covers_every_ladder_branch() {
                 .any(|(text, font, _)| text == label && *font == callout_font),
             "{label:?} drawn in its cell must not be duplicated as a callout: {runs:?}"
         );
+    }
+}
+
+// ── faceplate-pot-jack-symbols (task 3.2): the face moves the band, not the rect ─
+// A pot, encoder or CV jack now draws a face and fits its label into the band
+// `h − FACE_HEIGHT_FRACTION · w` beneath it (`src/physical.rs`, D2), and
+// `App::label_fit_path` measures that same band for the labels fit (D2/1.4).
+// These stories pin the cross-layer consequences on real fixtures through the
+// production load, fit trigger, spec builder and paint path:
+//
+//   * the dense rack's labels fit (`physical_multirow_rack.ini` at its 37 %
+//     rack fit) lifts above the rack fit, where the pre-change whole-cell box
+//     left it at the rack fit;
+//   * the `auto` annotation set at that rack fit is the labels the smaller band
+//     cannot hold — the pots newly, the button as before, and the master jack's
+//     callout dropped by the unchanged family-0 budget;
+//   * both fit clamps (25 % floor, 400 % cap) still answer at the extremes;
+//   * an inventoried master's one written jack label now lifts the fit to the
+//     band, and its spare jacks draw dimmed socket faces without a hit rect;
+//   * every published element hit rect is still exactly the geometry cell rect
+//     `physical::layout` produced — a face changes no geometry.
+
+/// The dense rack the change's risk section names: sixteen bare P2B8 fronts and
+/// the CV I/O master in one 457.2 × 128.5 mm row. The module UI's `BigLeft` pane
+/// in a 1280 × 800 window is 640 × 800, which lands this rack's fit at 37 %.
+const FACE_MULTIROW_FIXTURE: &str = "fixtures/physical_multirow_rack.ini";
+
+/// The written labels the dense-rack stories add to that fixture. It is a
+/// geometry fixture and carries none of its own, so the story writes the label
+/// set a rack this dense would carry — two pots on the first front, a pot and a
+/// button on the second, and the master's first CV input. The set spans the
+/// three families the change touches plus the button whose band did not move.
+const FACE_MULTIROW_LABELS: &[(&str, &str)] = &[
+    ("P1.1", "Cutoff"),
+    ("P1.2", "Resonance"),
+    ("P2.1", "Cutoff"),
+    ("B1.1", "Trigger input"),
+    ("I1", "Gate input"),
+];
+
+/// The fit lift the face band now earns on [`FACE_MULTIROW_FIXTURE`] with
+/// [`FACE_MULTIROW_LABELS`]: the master's 7 mm jack needs a 1.44 zoom for its
+/// 10-character label to fit one 6 pt line in the `h − 0.66 w` band. The
+/// whole-cell box the fit measured before this change answered 0.88, below the
+/// rack fit, so the same view used to open at the rack fit.
+const FACE_MULTIROW_LABEL_LIFT: f64 = 1.44;
+
+/// The rack the multirow fixture packs into, from the same chain + default-case
+/// source `App::apply_physical_fit` and `physical_spec` consume.
+fn face_multirow_chain_and_rack(
+    patch: &Patch,
+) -> (crate::physical::PhysicalLayout, crate::physical::RackLayout) {
+    let chain =
+        crate::physical::PhysicalLayout::build(Some(patch), crate::patch::MasterModel::Master, &[]);
+    let spec = crate::physical::RackSpec::default_case(&chain);
+    let rack = crate::physical::RackLayout::pack(&chain, &spec);
+    (chain, rack)
+}
+
+/// The module UI's `BigLeft` pane in a 1280 × 800 window.
+fn face_multirow_pane() -> egui::Rect {
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(640.0, 800.0))
+}
+
+/// The fixture's patch with `labels` written into its preamble, the way the
+/// label store hands them to `Patch::explicit_hw_label`.
+fn face_labelled_multirow_patch(labels: &[(&str, &str)]) -> Patch {
+    let mut patch = Patch::from_ini_file(Path::new(FACE_MULTIROW_FIXTURE))
+        .unwrap_or_else(|e| panic!("{FACE_MULTIROW_FIXTURE} must parse: {e}"));
+    for (token, label) in labels {
+        patch
+            .preamble_labels
+            .insert((*token).to_string(), (*label).to_string());
+    }
+    patch
+}
+
+/// An app opened on `patch` through the production load + fit triggers, with the
+/// module UI pane published at `pane` (the same trigger the pane dispatch runs).
+fn face_fitted_app(patch: Patch, pane: egui::Rect) -> App {
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "the fixture must load");
+    app.note_physical_pane_rect(Rect::new(
+        0,
+        0,
+        pane.width().round() as u16,
+        pane.height().round() as u16,
+    ));
+    app.apply_physical_fit_triggers();
+    app
+}
+
+/// The `(label, layout)` of `token`'s cell in `spec`, resolved by the component
+/// index the spec maps back through `hw_components` — the same mapping the hit
+/// publication uses. A closure rather than a helper because the spec's cell type
+/// is private to `gui::physical` and cannot be named in a signature here.
+macro_rules! face_cell_of {
+    ($app:expr, $spec:expr, $token:expr) => {{
+        let index = idx_for($app, $token);
+        $spec
+            .cells
+            .iter()
+            .find(|cell| cell.component_index == Some(index))
+            .unwrap_or_else(|| panic!("{} must render a cell", $token))
+    }};
+}
+
+#[test]
+fn regression_faceplate_faces_lift_the_labels_fit_to_the_band() {
+    let patch = face_labelled_multirow_patch(&[]);
+    let (_, rack) = face_multirow_chain_and_rack(&patch);
+    let pane = face_multirow_pane();
+    let rack_fit = crate::physical::fit_zoom(
+        rack.total_width_mm,
+        rack.total_height_mm,
+        pane.width(),
+        pane.height(),
+    );
+    assert!(
+        (rack_fit - 0.370_370_370_370_370_4).abs() < 1e-9,
+        "640 pt of pane over 457.2 mm is the 37 % rack fit: {rack_fit}"
+    );
+
+    // (a) The fixture's own state: it writes no label, so the labels fit has no
+    // request to serve and the rack fit answers alone — the face moves nothing.
+    let plain = face_fitted_app(patch.clone(), pane);
+    assert_eq!(
+        plain.physical_fit_mode,
+        Some(crate::app::FitMode::Labels),
+        "the view opens at the labels fit (D8)"
+    );
+    let plain_fit = plain
+        .physical_fit_zoom
+        .expect("the fit trigger must report the zoom it applied");
+    assert!(
+        (f64::from(plain_fit) - rack_fit).abs() < 1e-6,
+        "no written label means the rack fit answers: {plain_fit} vs {rack_fit}"
+    );
+
+    // (b) With labels written, the band beneath the faces lifts the fit: every
+    // pot and the master jack now measure `h − 0.66 w`, so the fit is the
+    // greater of the rack fit and the band's label lift.
+    let labelled = face_fitted_app(face_labelled_multirow_patch(FACE_MULTIROW_LABELS), pane);
+    let fitted = labelled
+        .physical_fit_zoom
+        .expect("the fit trigger must report the zoom it applied");
+    assert!(
+        (f64::from(fitted) - rack_fit.max(FACE_MULTIROW_LABEL_LIFT)).abs() < 1e-6,
+        "the fit must be the greater of the rack fit {rack_fit} and the face band's lift {FACE_MULTIROW_LABEL_LIFT}: {fitted}"
+    );
+    assert!(
+        f64::from(fitted) > rack_fit,
+        "the band lifts the fit above the rack fit: {fitted} vs {rack_fit}"
+    );
+    assert!(
+        (labelled.physical_zoom - fitted).abs() < 1e-6,
+        "the applied zoom must be the fitted one: {} vs {fitted}",
+        labelled.physical_zoom
+    );
+
+    // The whole-cell box this fit measured before the change answered 0.88 —
+    // above the rack fit but well below the band's 1.44, so the same view used
+    // to open at 88 % with the pots' labels wrapped into a clipped two-line
+    // layout. The face band is what lifts it to 1.44.
+    let pre_change_lift = 0.88_f64;
+    assert!(
+        rack_fit < pre_change_lift && pre_change_lift < f64::from(fitted),
+        "the pre-change whole-cell answer sat between the rack fit and the band's lift: \
+         {rack_fit} < {pre_change_lift} < {fitted}"
+    );
+
+    // (c) The fit's promise at the zoom it chose: every written label has an
+    // in-cell layout and is drawn whole, so `auto` has nothing to annotate.
+    let spec = crate::gui::physical_spec(&labelled, pane).expect("a loaded patch yields a spec");
+    for &(token, label) in FACE_MULTIROW_LABELS {
+        let cell = face_cell_of!(&labelled, &spec, token);
+        assert_eq!(cell.label, label, "{token} keeps its written label");
+        let layout = cell.label_layout.as_ref().unwrap_or_else(|| {
+            panic!("{token} must have an in-cell layout at the fitted zoom: {cell:?}")
+        });
+        assert!(
+            module_ui_label_fit_draws_whole(label, layout),
+            "{token} must draw {label:?} whole at the fitted zoom: {layout:?}"
+        );
+    }
+    assert!(
+        spec.annotations.is_empty(),
+        "a label the fitted zoom serves must not be annotated: {:?}",
+        spec.annotations
+            .iter()
+            .map(|c| c.label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // (d) Deterministic: the same rack and pane answer the same zoom twice.
+    let mut refit = face_fitted_app(face_labelled_multirow_patch(FACE_MULTIROW_LABELS), pane);
+    assert!(refit.fit_physical_view(pane.width(), pane.height()));
+    assert_eq!(
+        refit.physical_fit_zoom,
+        Some(fitted),
+        "the label fit scan is a fixed grid, so a refit lands on the same zoom"
+    );
+}
+
+#[test]
+fn regression_faceplate_faces_annotate_the_labels_the_band_cannot_hold() {
+    let patch = face_labelled_multirow_patch(FACE_MULTIROW_LABELS);
+    let (_, rack) = face_multirow_chain_and_rack(&patch);
+    let pane = face_multirow_pane();
+    let rack_fit = crate::physical::fit_zoom(
+        rack.total_width_mm,
+        rack.total_height_mm,
+        pane.width(),
+        pane.height(),
+    );
+
+    // The `auto` set is what the *rack fit* leaves unlaid — the labels-first fit
+    // would lift until every one of them has a layout, so this story reads the
+    // zoom the overview opens at, not the fitted one.
+    let mut app = face_fitted_app(patch, pane);
+    app.physical_zoom = rack_fit as f32;
+    app.physical_offset = (0.0, 0.0);
+    let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+
+    // Every written label loses its in-cell layout at 37 %: the face band is
+    // 5.7 pt under a 12 mm pot (16.8 pt cell − 0.66 × 16.8) and 3.3 pt under a
+    // 7 mm jack, both below the 6 pt floor.
+    for &(token, _) in FACE_MULTIROW_LABELS {
+        let cell = face_cell_of!(&app, &spec, token);
+        assert!(
+            cell.label_layout.is_none(),
+            "{token} must have no in-cell layout at the rack fit: {:?}",
+            cell.label_layout
+        );
+    }
+
+    // `auto` annotates four of the five: the three pot labels — which the
+    // whole-cell box used to wrap whole, so they were never annotated before —
+    // the button's label as before, and not the master jack's, whose callout the
+    // unchanged 30 % band budget drops first (family 0: LEDs and jacks).
+    let mut annotated: Vec<String> = spec
+        .annotations
+        .iter()
+        .map(|callout| callout.label.clone())
+        .collect();
+    annotated.sort();
+    assert_eq!(
+        annotated,
+        vec![
+            String::from("Cutoff"),
+            String::from("Cutoff"),
+            String::from("Resonance"),
+            String::from("Trigger input"),
+        ],
+        "the rack fit annotates the three pots and the button, and the budget drops the jack"
+    );
+    assert!(
+        !annotated.iter().any(|label| label == "Gate input"),
+        "the master jack's callout is the family-0 drop, not a laid-out label"
+    );
+
+    // The pots are the new callouts: measured against the pre-change whole-cell
+    // box they had a layout at this zoom, so the `auto` rule (a label with *no*
+    // layout) did not annotate them. "Cutoff" was even drawn whole there; the
+    // band has no room for it at all.
+    for &(token, label) in &FACE_MULTIROW_LABELS[..3] {
+        let cell = face_cell_of!(&app, &spec, token);
+        let old_box = crate::physical::LabelBox {
+            w: cell.rect.width(),
+            h: cell.rect.height(),
+            glyph_chars: 0,
+            path: crate::physical::CellTextPath::Compact,
+            has_state: false,
+        };
+        let old_layout = crate::physical::label_layout(label, &old_box).unwrap_or_else(|| {
+            panic!("{token}: the whole-cell box used to hold {label:?} at the rack fit")
+        });
+        assert!(
+            !old_layout.lines.is_empty(),
+            "{token}: the whole-cell box laid {label:?} out, so it was not annotated: {old_layout:?}"
+        );
+    }
+
+    // ... and the jack's callout is genuinely placeable: on its own it is
+    // annotated, so the count above is the budget's, not the band's.
+    let only_jack = face_labelled_multirow_patch(&[("I1", "Gate input")]);
+    let mut jack_app = face_fitted_app(only_jack, pane);
+    jack_app.physical_zoom = rack_fit as f32;
+    jack_app.physical_offset = (0.0, 0.0);
+    let jack_spec =
+        crate::gui::physical_spec(&jack_app, pane).expect("a loaded patch yields a spec");
+    let jack_labels: Vec<&str> = jack_spec
+        .annotations
+        .iter()
+        .map(|callout| callout.label.as_str())
+        .collect();
+    assert_eq!(
+        jack_labels,
+        vec!["Gate input"],
+        "the band leaves the jack's label unlaid, so `auto` annotates it when it is alone"
+    );
+}
+
+#[test]
+fn regression_faceplate_faces_clamp_the_fit_to_the_zoom_range() {
+    let patch = face_labelled_multirow_patch(&[]);
+
+    // An extreme pane on either side: the fit stops at the 400 % cap and at the
+    // 25 % floor, never outside them.
+    for (w, h, expected, why) in [
+        (
+            8000u16,
+            8000u16,
+            crate::physical::ZOOM_MAX,
+            "a pane wider than the 400 % cap",
+        ),
+        (
+            60,
+            40,
+            crate::physical::ZOOM_MIN,
+            "a pane below the 25 % floor",
+        ),
+    ] {
+        let pane = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(f32::from(w), f32::from(h)),
+        );
+        let app = face_fitted_app(patch.clone(), pane);
+        assert_eq!(
+            app.physical_fit_mode,
+            Some(crate::app::FitMode::Labels),
+            "{why}: the labels fit is still the mode"
+        );
+        let fitted = app
+            .physical_fit_zoom
+            .expect("the fit trigger must report the zoom it applied");
+        assert!(
+            (f64::from(fitted) - expected).abs() < 1e-6,
+            "{why} must clamp the fit to {expected}: {fitted}"
+        );
+        assert!(
+            (crate::physical::ZOOM_MIN..=crate::physical::ZOOM_MAX).contains(&f64::from(fitted)),
+            "{why}: {fitted} must stay inside the supported range"
+        );
+    }
+
+    // A labelled rack answers the same range at both extremes: the label lift is
+    // inside it, so the clamp — not the lift — decides.
+    for (w, h) in [(8000u16, 8000u16), (60, 40)] {
+        let pane = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(f32::from(w), f32::from(h)),
+        );
+        let app = face_fitted_app(face_labelled_multirow_patch(FACE_MULTIROW_LABELS), pane);
+        let fitted = app
+            .physical_fit_zoom
+            .expect("the fit trigger must report the zoom it applied");
+        assert!(
+            (crate::physical::ZOOM_MIN..=crate::physical::ZOOM_MAX).contains(&f64::from(fitted)),
+            "a labelled rack at {w}×{h} must stay inside the range: {fitted}"
+        );
+    }
+}
+
+#[test]
+fn regression_faceplate_faces_relock_the_inventoried_master_to_the_band() {
+    // The inventory draws the whole master front; the patch addresses one CV
+    // input and one CV output, and writes a label on the input.
+    let mut patch = Patch::from_ini_str(
+        "[copy]\n    input = I1\n    output = O1\n",
+        String::from("face_inventoried_master"),
+    )
+    .expect("the master fixture must parse");
+    patch
+        .preamble_labels
+        .insert(String::from("I1"), String::from("Gate input"));
+
+    let mut app = App::new();
+    assert!(
+        app.load_patch(patch.clone()),
+        "the master fixture must load"
+    );
+    app.physical_rack_spec = rack_inventory(&["master"]);
+    let inventory = app.physical_rack_spec.module_keys();
+    let chain =
+        crate::physical::PhysicalLayout::build(app.patch.as_ref(), app.master_model(), &inventory);
+    assert!(
+        chain.inventory_driven,
+        "the inventory built this chain, so the whole front draws"
+    );
+    let rack_spec = app.physical_rack_spec.clone();
+    let rack = crate::physical::RackLayout::pack(&chain, &rack_spec);
+    assert_eq!(
+        (rack.total_width_mm, rack.total_height_mm),
+        (426.72, 128.5),
+        "the inventory packs one full 84 HP row (426.72 mm) with the master at its head"
+    );
+
+    let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1600.0, 1000.0));
+    app.note_physical_pane_rect(Rect::new(0, 0, 1600, 1000));
+    app.apply_physical_fit_triggers();
+    let rack_fit = crate::physical::fit_zoom(
+        rack.total_width_mm,
+        rack.total_height_mm,
+        pane.width(),
+        pane.height(),
+    );
+    let fitted = app
+        .physical_fit_zoom
+        .expect("the fit trigger must report the zoom it applied");
+    assert!(
+        (f64::from(fitted) - rack_fit.max(FACE_MULTIROW_LABEL_LIFT)).abs() < 1e-6,
+        "the master's jack label must lift the fit to the face band: {fitted} vs rack {rack_fit}"
+    );
+    assert!(
+        f64::from(fitted) > rack_fit,
+        "the band lifts the inventoried master's fit above the rack fit: {fitted} vs {rack_fit}"
+    );
+    // Before the change the whole-cell box answered 0.76 for the same jack,
+    // below the rack fit, so the fit used to open at the rack fit.
+    let pre_change_lift = 0.76_f64;
+    assert!(
+        pre_change_lift < rack_fit,
+        "the pre-change whole-cell answer sat below the rack fit: {pre_change_lift} vs {rack_fit}"
+    );
+
+    let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+    assert_eq!(
+        spec.cells.len(),
+        33,
+        "the inventory draws every declared master cell"
+    );
+    let jacks: Vec<_> = spec
+        .cells
+        .iter()
+        .filter(|cell| cell.shape == Some(crate::gui::CellShape::Jack))
+        .collect();
+    assert_eq!(
+        jacks.len(),
+        16,
+        "the master declares sixteen CV jack faces (8 in, 8 out)"
+    );
+    let published: Vec<usize> = spec
+        .cells
+        .iter()
+        .filter_map(|cell| cell.component_index)
+        .collect();
+    assert_eq!(
+        published.len(),
+        2,
+        "only the patch's two addressed jacks publish a hit rect"
+    );
+    for cell in &jacks {
+        if cell.component_index.is_some() {
+            assert!(!cell.dimmed, "an addressed jack is not dimmed");
+        } else {
+            assert!(
+                cell.dimmed,
+                "a spare jack draws its socket face dimmed, not hit-testable"
+            );
+        }
+    }
+    let spare_jacks = jacks
+        .iter()
+        .filter(|cell| cell.component_index.is_none())
+        .count();
+    assert_eq!(
+        spare_jacks, 14,
+        "fourteen spare CV jacks draw dimmed faces and publish no rect"
+    );
+    assert_eq!(
+        spec.cells
+            .iter()
+            .filter(|cell| cell.component_index.is_none() && !cell.dimmed)
+            .count(),
+        0,
+        "no unaddressed cell of the front is bright"
+    );
+
+    // The label is what lifted the fit: at the chosen zoom the band holds it on
+    // one 6 pt line, drawn whole.
+    let input = face_cell_of!(&app, &spec, "I1");
+    let layout = input
+        .label_layout
+        .as_ref()
+        .expect("the fitted zoom must lay out the jack's written label");
+    assert_eq!(layout.font, MODULE_UI_LABEL_LADDER[4]);
+    assert_eq!(layout.lines, vec![String::from("Gate input")]);
+    assert!(
+        module_ui_label_fit_draws_whole("Gate input", layout),
+        "the band draws the jack's label whole: {layout:?}"
+    );
+
+    // At the rack fit the band is 8.9 pt deep, so the label is only laid out
+    // ellipsized — clipped, which is what the labels fit exists to avoid.
+    let mut at_rack_fit = App::new();
+    assert!(at_rack_fit.load_patch(patch));
+    at_rack_fit.physical_rack_spec = rack_inventory(&["master"]);
+    at_rack_fit.physical_zoom = rack_fit as f32;
+    at_rack_fit.physical_offset = (0.0, 0.0);
+    let rack_spec =
+        crate::gui::physical_spec(&at_rack_fit, pane).expect("a loaded patch yields a spec");
+    let input_at_rack_fit = face_cell_of!(&at_rack_fit, &rack_spec, "I1");
+    let clipped = input_at_rack_fit
+        .label_layout
+        .as_ref()
+        .expect("the rack fit still lays the label out, at the 6 pt floor");
+    assert!(
+        !module_ui_label_fit_draws_whole("Gate input", clipped),
+        "the rack fit's band clips the jack's label: {clipped:?}"
+    );
+}
+
+/// The geometry cell rect of `token` in points: `element.rect_mm` placed at its
+/// module's packed position and mapped by the painter's own `ScreenMapping`
+/// (`mm × points-per-mm × zoom − offset`). This is the rect the pre-change
+/// painter published; a face must reproduce it exactly.
+fn face_geometry_cell_rect(
+    chain: &crate::physical::PhysicalLayout,
+    rack: &crate::physical::RackLayout,
+    mapping: &crate::physical::ScreenMapping,
+    token: &str,
+) -> Option<egui::Rect> {
+    for row in &rack.rows {
+        for placed in &row.modules {
+            let module = &chain.modules[placed.module_index];
+            if !module.components.iter().any(|comp| comp.id == token) {
+                continue;
+            }
+            let cell = chain.cell_for(placed.module_index, token)?;
+            let (x, y, w, h) = mapping.mm_to_screen(crate::physical::RectMm {
+                x_mm: placed.rect_mm.x_mm + cell.rect_mm.x_mm,
+                y_mm: row.y_mm + placed.rect_mm.y_mm + cell.rect_mm.y_mm,
+                w_mm: cell.rect_mm.w_mm,
+                h_mm: cell.rect_mm.h_mm,
+            });
+            return Some(egui::Rect::from_min_size(
+                egui::Pos2::new(x as f32, y as f32),
+                egui::Vec2::new(w as f32, h as f32),
+            ));
+        }
+    }
+    None
+}
+
+/// The renderer→handler handoff the module UI publishes with (`gui::to_cell_rect`):
+/// min and size rounded to whole cells, negative edges clamped to 0. The published
+/// hit rect is this rounding of the geometry rect — the only clamp on this path
+/// (the terminal skeleton's `mm_rect_to_screen` keeps adjoined cells apart on its
+/// own integer grid and is not involved here).
+fn face_cell_grid(rect: egui::Rect) -> Rect {
+    Rect::new(
+        rect.min.x.round().max(0.0) as u16,
+        rect.min.y.round().max(0.0) as u16,
+        rect.width().round().max(0.0) as u16,
+        rect.height().round().max(0.0) as u16,
+    )
+}
+
+/// **Invariant: a face changes no geometry.** On `fixtures/render_outlier_matrix.ini`
+/// — pots (P1.1, P1.2), an encoder (E2.1) and both CV jack directions (I2.1,
+/// O2.1) — every published element hit rect is exactly the geometry cell rect
+/// `physical::layout` produced for that element: `element.rect_mm` ×
+/// points-per-mm × zoom, at the module's packed position. The face changes the
+/// text box the label is fitted to and the strokes drawn inside the cell, never
+/// the cell, so the published rects are the pre-change rects.
+#[test]
+fn regression_faceplate_faces_publish_the_geometry_hit_rects() {
+    let patch = Patch::from_ini_file(Path::new("fixtures/render_outlier_matrix.ini"))
+        .expect("the mixed-kind fixture must parse");
+
+    for zoom in [1.0_f32, 0.37] {
+        let mut app = App::new();
+        assert!(app.load_patch(patch.clone()), "the fixture must load");
+        // Keep the manual zoom: the pane paint runs the fit trigger, and this
+        // story asserts the rects at a chosen zoom.
+        app.physical_nav_latched = true;
+        app.physical_fit_pending = false;
+        app.physical_zoom = zoom;
+        app.physical_offset = (0.0, 0.0);
+
+        // Publish through the production path, not a spec shortcut.
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 800.0));
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(window),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            crate::gui::paint_band(&mut app, ui, None, &[]);
+        });
+        out.textures_delta.clear();
+
+        assert_eq!(
+            app.component_rects.len(),
+            13,
+            "eight buttons, two pots, one encoder and two CV jacks publish: {:?}",
+            app.component_rects
+        );
+
+        let (_, pane_cells) = app
+            .pane_hit_rects
+            .iter()
+            .find(|(id, _)| *id == crate::panes::PaneId::BigLeft)
+            .expect("the module UI pane is published");
+        let pane = egui::Rect::from_min_size(
+            egui::Pos2::new(f32::from(pane_cells.x), f32::from(pane_cells.y)),
+            egui::Vec2::new(f32::from(pane_cells.width), f32::from(pane_cells.height)),
+        );
+
+        let chain = crate::physical::PhysicalLayout::build(
+            Some(&patch),
+            crate::patch::MasterModel::Master,
+            &[],
+        );
+        let rack_spec = crate::physical::RackSpec::default_case(&chain);
+        let rack = crate::physical::RackLayout::pack(&chain, &rack_spec);
+        let mapping = crate::physical::ScreenMapping::new(
+            crate::physical::PHYSICAL_POINTS_PER_MM,
+            f64::from(app.physical_zoom),
+            f64::from(app.physical_offset.0) - f64::from(pane.min.x),
+            f64::from(app.physical_offset.1) - f64::from(pane.min.y),
+        );
+        let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch yields a spec");
+
+        let mut geometry_rects = Vec::new();
+        for (index, published) in &app.component_rects {
+            let token = patch.hw_components[*index].id.as_str();
+            let expected = face_geometry_cell_rect(&chain, &rack, &mapping, token)
+                .unwrap_or_else(|| panic!("{token} must resolve to a geometry cell"));
+            assert_eq!(
+                *published,
+                face_cell_grid(expected),
+                "at {zoom}× {token}'s published hit rect must be its geometry cell rect \
+                 {expected:?} rounded into the cell grid"
+            );
+            let cell = spec
+                .cells
+                .iter()
+                .find(|cell| cell.component_index == Some(*index))
+                .unwrap_or_else(|| panic!("{token} must publish a drawn cell"));
+            assert!(
+                (cell.rect.min.x - expected.min.x).abs() < 1e-3
+                    && (cell.rect.min.y - expected.min.y).abs() < 1e-3
+                    && (cell.rect.width() - expected.width()).abs() < 1e-3
+                    && (cell.rect.height() - expected.height()).abs() < 1e-3,
+                "at {zoom}× {token}'s drawn cell must be the geometry rect: {:?} vs {expected:?}",
+                cell.rect
+            );
+            geometry_rects.push((token.to_string(), expected));
+        }
+
+        // The fixture reaches all three face families, so the invariant covers
+        // them rather than a button-only subset.
+        let faces: Vec<crate::gui::CellShape> = spec
+            .cells
+            .iter()
+            .filter(|cell| cell.component_index.is_some())
+            .filter_map(|cell| cell.shape)
+            .collect();
+        for shape in [
+            crate::gui::CellShape::Pot,
+            crate::gui::CellShape::Encoder,
+            crate::gui::CellShape::Jack,
+        ] {
+            assert!(
+                faces.contains(&shape),
+                "the fixture must publish a {shape:?} cell: {faces:?}"
+            );
+        }
+
+        // Adjacency: the geometry cells do not overlap, so neither do the
+        // published rects (edge-touching counts as disjoint).
+        for (i, (a_token, a)) in geometry_rects.iter().enumerate() {
+            for (b_token, b) in &geometry_rects[i + 1..] {
+                assert!(
+                    a.max.x <= b.min.x
+                        || b.max.x <= a.min.x
+                        || a.max.y <= b.min.y
+                        || b.max.y <= a.min.y,
+                    "at {zoom}× {a_token} {a:?} and {b_token} {b:?} overlap"
+                );
+            }
+        }
+        for (i, (a_index, a)) in app.component_rects.iter().enumerate() {
+            for (b_index, b) in &app.component_rects[i + 1..] {
+                assert!(
+                    a.x + a.width <= b.x
+                        || b.x + b.width <= a.x
+                        || a.y + a.height <= b.y
+                        || b.y + b.height <= a.y,
+                    "at {zoom}× the published rects of {} and {} overlap: {a:?} {b:?}",
+                    patch.hw_components[*a_index].id,
+                    patch.hw_components[*b_index].id
+                );
+            }
+        }
     }
 }

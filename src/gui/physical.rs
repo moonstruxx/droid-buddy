@@ -52,12 +52,54 @@ const STATE_MARKER_MIN: f32 = 6.0;
 const STATE_MARKER_MAX: f32 = 9.0;
 /// Below this unclamped size the cell is too small for any legible mark.
 const STATE_MARKER_DRAW_FLOOR: f32 = 3.0;
-/// Unaddressed rotary position (an element the patch does not address): a ring
-/// plus a centre dot at a fixed fraction of the cell, so the position keeps
-/// reading as a knob/encoder at every zoom instead of collapsing into a speck.
-const UNADDRESSED_ROTARY_SCALE: f32 = 0.36;
-const UNADDRESSED_ROTARY_STROKE: f32 = 1.5;
-const UNADDRESSED_ROTARY_ALPHA: f32 = 0.75;
+/// Unaddressed face (faceplate-pot-jack-symbols D5): an element the patch does
+/// not address keeps a fixed alpha floor on top of the paused dim, so the
+/// position stays findable on a dark faceplate at every zoom preset instead of
+/// collapsing into a speck.
+const UNADDRESSED_FACE_ALPHA: f32 = 0.75;
+
+/// Hardware face (faceplate-pot-jack-symbols D2): the washer ring's diameter as
+/// a fraction of the cell width. The face box's own depth is
+/// [`crate::physical::FACE_HEIGHT_FRACTION`] — the same constant the label band
+/// is measured against, so the drawn symbol and the fitted label can never
+/// disagree about where the face ends.
+const FACE_RING_FRACTION: f32 = 0.60;
+/// The symbol ladder's thresholds, on the *drawn* face diameter (D3): the full
+/// drawing at 18 pt, a ring plus one stroke from 10 pt, a ring plus a centre dot
+/// below.
+const FACE_FULL_MIN: f32 = 18.0;
+const FACE_REDUCED_MIN: f32 = 10.0;
+/// The washer ring is a washer: its stroke reads heavier than the edge of the
+/// nut, the shaft and the jack's mouth.
+const FACE_RING_STROKE: f32 = 1.5;
+const FACE_EDGE_STROKE: f32 = 1.0;
+/// The slot's stroke as a fraction of the ring radius, never thinner than an
+/// edge and never a slab.
+const FACE_SLOT_STROKE_FRACTION: f32 = 0.10;
+/// The smallest step's centre dot, as a fraction of the ring radius (the ring
+/// plus dot an unaddressed position has always drawn).
+const FACE_DOT_FRACTION: f32 = 0.22;
+/// Pot nut (D2): the hexagon's circumradius and the shaft's radius, as fractions
+/// of the ring radius. The hexagon keeps a flat top and bottom, so its wrench
+/// flats still read at an 18 pt face.
+const POT_NUT_FRACTION: f32 = 0.80;
+const POT_SHAFT_FRACTION: f32 = 0.38;
+/// Pot base line (D2): the finite control's end-stop mark, `0.44 w` wide and
+/// 1.2 pt thick, centred under the face. An encoder has no base line, which is
+/// how an endless rotary is told apart by silhouette.
+const POT_BASE_LINE_FRACTION: f32 = 0.44;
+const POT_BASE_LINE_THICKNESS: f32 = 1.2;
+/// Pot slot (D4): the value on a 270° sweep, 0 at 7:30 (lower left) through
+/// 12:00 at 0.5 to 1 at 4:30 (lower right), drawn from just inside the shaft out
+/// toward the ring.
+const POT_SLOT_SWEEP_DEGREES: f32 = 270.0;
+const POT_SLOT_START_DEGREES: f32 = -135.0;
+const POT_SLOT_INNER_FRACTION: f32 = 0.28;
+const POT_SLOT_OUTER_FRACTION: f32 = 0.82;
+/// Jack (D6): the filled socket mouth's diameter as a fraction of the cell width,
+/// and how far the contacts' cross reaches into the mouth.
+const JACK_MOUTH_FRACTION: f32 = 0.40;
+const JACK_CROSS_FRACTION: f32 = 0.85;
 
 /// What an element cell draws in skeleton mode: a plain cell dot or an
 /// in/out port marker (CV jacks on the master faceplate), mirroring
@@ -85,17 +127,28 @@ pub(crate) struct ModuleSpec {
 /// component's index into `patch.hw_components` (`None` for unused geometry
 /// cells), so the window can hit-test the module UI against `component_rects`.
 ///
-/// A button-kind cell on a controller whose LED lights the button face
-/// (button-led-composition D2) carries a `shape` instead of a glyph: the
-/// outline carries the button state and the folded LED is the inner fill.
-/// `None` keeps today's glyph path for every other element kind and
-/// controller.
+/// A cell whose element paints a face instead of a glyph: a composed button
+/// face (button-led-composition D2) or a hardware symbol (faceplate-pot-jack-
+/// symbols D1). The variant *is* the element kind, so a painter reads
+/// finiteness and direction off the shape instead of a second flag.
+///
+/// A composed face carries the button's state on its outline with the folded LED
+/// as the inner fill; a rotary or jack face carries identity only (the value
+/// rides the pot slot). `None` keeps the glyph path for every other element kind
+/// and every fader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CellShape {
     /// Round face (P2B8, B32): circle outline + concentric disc fill.
     Round,
     /// Rectangular face (M4 touch plate): rect outline + inner rect fill.
     Rect,
+    /// Finite rotary (P-type pot): washer ring, hex nut, shaft and slot on a base
+    /// line that marks the end stops (D2).
+    Pot,
+    /// Endless rotary (E-type encoder): the same face without the base line.
+    Encoder,
+    /// CV socket (I/O jack): bezel ring around a filled mouth cut by a cross.
+    Jack,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CellSpec {
@@ -110,7 +163,9 @@ pub(crate) struct CellSpec {
     /// read as dark grey on every off button.
     pub label_color: Color,
     pub is_fader: bool,
-    pub fader_value: f32,
+    /// The element's 0..1 position: the fader track draws it as its fill and
+    /// the pot slot reads it for the indicator (faceplate-pot-jack-symbols).
+    pub value_frac: f32,
     pub component_index: Option<usize>,
     pub mark: PortMark,
     pub highlighted: bool,
@@ -130,9 +185,11 @@ pub(crate) struct CellSpec {
     pub led_state: Option<f32>,
     /// LED RGB colour folded into this element (if any)
     pub led_rgb: Option<[u8; 3]>,
-    /// Composed-face discriminant (button-led-composition D2): `Some` on
-    /// button-kind cells of P2B8/P4B2/B32 (round) and M4 (rect), `None`
-    /// elsewhere.
+    /// Face discriminant: which symbol the cell draws instead of a glyph, and
+    /// with it which text box the label is fitted to (`cell_label_box`). `Some`
+    /// on a composed button face of P2B8/P4B2/B32 (round) and M4 (rect), on a
+    /// pot/encoder cell, and on a CV jack; `None` on every other kind and on
+    /// every fader.
     pub shape: Option<CellShape>,
     /// The fitted label of this cell (module-ui-label-fit D1), computed once by
     /// [`cell_label_layout`] when the spec is built: `None` when the label is
@@ -261,12 +318,13 @@ fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
     }
 }
 
-/// The knob position a fader face draws (module-ui-label-fit D5): the element's
-/// own state, read the way the terminal path reads it — a `Value` is the patch's
-/// 0..1 position, an `On` button-like state is fully raised, and every state
-/// without a position (off, an LED's brightness, a CV ring) leaves the track
-/// empty rather than inventing a mid-scale value.
-fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
+/// The element's 0..1 position, shared by the fader track and the pot slot
+/// (module-ui-label-fit D5): the element's own state, read the way the terminal
+/// path reads it — a `Value` is the patch's 0..1 position, an `On` button-like
+/// state is fully raised, and every state without a position (off, an LED's
+/// brightness, a CV ring) leaves the track empty rather than inventing a
+/// mid-scale value.
+fn value_frac_for(state: &crate::patch::ComponentState) -> f32 {
     use crate::patch::ComponentState;
     match state {
         ComponentState::Value(v) => v.clamp(0.0, 1.0),
@@ -335,16 +393,15 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
     // index for every real element.
     // With no patch this map is empty, so no cell can claim a global index and
     // the inventory rack publishes no hit rect (D4/D6).
-    let index_of: std::collections::HashMap<&str, usize> = patch
-        .map(|patch| {
+    let index_of: std::collections::HashMap<&str, usize> =
+        patch.map_or_else(Default::default, |patch| {
             patch
                 .hw_components
                 .iter()
                 .enumerate()
                 .map(|(i, c)| (c.id.as_str(), i))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
 
     // Persistent selection emphasis (droid_tui-8ia): the shared element
     // selection (`selected_component`) keeps the clicked cell marked after the
@@ -437,18 +494,13 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             label,
             kind,
             is_fader,
-            fader_value,
+            value_frac,
             led_state,
             led_rgb,
             shape,
             label_color,
         ) = if let Some(patch) = addressed {
             let comp = &module.components[ci];
-            let shape = if comp.kind == crate::patch::ComponentKind::Button {
-                fold_shape_for_controller(&comp.controller)
-            } else {
-                None
-            };
             let is_shift_active = app
                 .active_shift
                 .is_some_and(|g| comp.shift_group == Some(g));
@@ -463,11 +515,32 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             let element_cell = chain.cell_for(mi, &comp.id);
             let switch_kind = element_cell.and_then(|c| c.kind.as_deref());
             let is_fader = element_cell.is_some_and(|c| c.family == "F");
-            let fader_value = fader_value_for(&comp.state);
+            let value_frac = value_frac_for(&comp.state);
+            // The element's face (faceplate-pot-jack-symbols D1): the shape is the
+            // kind, so a pot, encoder and CV jack paint their own symbol and the
+            // label is fitted to the band beneath it. A fader is a knob/encoder
+            // cell that draws the fader track instead, so it never carries a face;
+            // a button keeps the per-controller composed rule; nothing else has
+            // one.
+            let button_shape = if comp.kind == crate::patch::ComponentKind::Button {
+                fold_shape_for_controller(&comp.controller)
+            } else {
+                None
+            };
+            let shape = match comp.kind {
+                crate::patch::ComponentKind::Button => button_shape,
+                crate::patch::ComponentKind::Knob if !is_fader => Some(CellShape::Pot),
+                crate::patch::ComponentKind::Encoder if !is_fader => Some(CellShape::Encoder),
+                crate::patch::ComponentKind::CvIn | crate::patch::ComponentKind::CvOut => {
+                    Some(CellShape::Jack)
+                }
+                _ => None,
+            };
             let (glyph, state_text, color) =
                 cell_visuals(comp, is_shift_active, is_fader, switch_kind);
-            // The folded LED (if any) drives the inner fill.
-            let folded = shape
+            // The folded LED (if any) drives the inner fill of a composed button
+            // face only — a pot keeps its own symbol and no folded fill.
+            let folded = button_shape
                 .is_some()
                 .then(|| crate::patch::folded_led_for_element(comp))
                 .flatten();
@@ -494,7 +567,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             // A composed face carries the state on its outline (D6), so
             // the glyph and the state-text row go away; the outline color
             // is the state channel (off `muted`, on the button token).
-            if shape.is_some() {
+            if button_shape.is_some() {
                 let on = matches!(comp.state, crate::patch::ComponentState::On);
                 let outline = if on {
                     color
@@ -519,25 +592,18 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 )
             } else {
                 (
-                    glyph,
-                    state_text,
-                    color,
-                    label,
-                    comp.kind,
-                    is_fader,
-                    fader_value,
-                    led_state,
-                    led_rgb,
-                    shape,
-                    color,
+                    glyph, state_text, color, label, comp.kind, is_fader, value_frac, led_state,
+                    led_rgb, shape, color,
                 )
             }
         } else {
             // Unused element - render dimmed and unlabelled. The family comes
             // from the geometry cell (D2) rather than a guess: an unaddressed
-            // rotary reads as a dim knob/encoder position, an unaddressed CV
-            // jack keeps its direction glyph, and the remaining families keep
-            // the plain dot.
+            // rotary reads as a dim pot/encoder face, an unaddressed CV jack as
+            // a dim socket face, and the remaining families keep the plain dot.
+            // The face is what makes an unused position read as hardware, so the
+            // symbol family — not brightness — carries it (faceplate-pot-jack-
+            // symbols D5).
             let (glyph, color, kind) = match family.as_str() {
                 "CV" => match mark {
                     crate::gui::physical::PortMark::PortIn => (
@@ -577,7 +643,12 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 0.0,
                 None,
                 None,
-                None,
+                match family.as_str() {
+                    "P" => Some(CellShape::Pot),
+                    "E" => Some(CellShape::Encoder),
+                    "CV" => Some(CellShape::Jack),
+                    _ => None,
+                },
                 color,
             )
         };
@@ -616,7 +687,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             color,
             label_color,
             is_fader,
-            fader_value,
+            value_frac,
             component_index,
             mark,
             highlighted: component_index.is_some_and(|i| {
@@ -796,10 +867,17 @@ pub(crate) fn cell_label_box(cell: &CellSpec) -> crate::physical::LabelBox {
         glyph_chars: 0,
         path: if cell.is_fader {
             crate::physical::CellTextPath::Fader
-        } else if cell.shape.is_some() {
-            crate::physical::CellTextPath::Composed
         } else {
-            crate::physical::CellTextPath::Compact
+            match cell.shape {
+                None => crate::physical::CellTextPath::Compact,
+                Some(CellShape::Round | CellShape::Rect) => crate::physical::CellTextPath::Composed,
+                // A rotary or jack face keeps the cell and the label takes the
+                // `h − 0.66 w` band beneath it (D2), at the one face depth all
+                // three symbols share.
+                Some(CellShape::Pot | CellShape::Encoder | CellShape::Jack) => {
+                    crate::physical::CellTextPath::Face
+                }
+            }
         },
         has_state: !cell.state_text.is_empty(),
     }
@@ -1369,46 +1447,28 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         return;
     }
 
-    // Composed button face (button-led-composition D5/D6/D7): the outline
-    // carries the button state, the folded LED is the inner fill, the label
-    // renders under the shape when the cell has room, and the state-text row
-    // is dropped. The fill stays bright while paused (fader-led-contrast);
-    // only the outline and the label dim.
+    // A cell with a face keeps the cell and labels the band beneath it: a
+    // composed button face carries its state on the outline (button-led-
+    // composition D5/D6/D7), a rotary or jack face is a hardware symbol
+    // (faceplate-pot-jack-symbols D1). Either way the face replaces the compact
+    // `◉` corner marker and the compact label lines, so nothing below this point
+    // paints on such a cell.
     if let Some(shape) = cell.shape {
-        paint_composed(painter, cell, shape, base, paused);
-        return;
-    }
-
-    // Unaddressed rotary position (D2): a ring plus a centre dot reads the cell
-    // as a knob/encoder the patch does not address — no state, no label, no hit
-    // rect — while an addressed rotary keeps the compact glyph-plus-label path
-    // below. The key is `component_index`, not `dimmed` alone: the rule is about
-    // a position no component addresses, and a cell that merely lacks a label
-    // must still draw its own element.
-    if cell.component_index.is_none()
-        && cell.dimmed
-        && matches!(
-            cell.kind,
-            crate::patch::ComponentKind::Knob | crate::patch::ComponentKind::Encoder
-        )
-    {
-        let radius = rect.width().min(rect.height()) * UNADDRESSED_ROTARY_SCALE;
-        if radius > 1.5 {
-            // A fixed alpha floor on top of the paused dim: the position stays
-            // findable on a dark faceplate at every zoom preset.
-            let color = dim(
-                rgb(cell.color).gamma_multiply(UNADDRESSED_ROTARY_ALPHA),
-                paused,
-            );
-            painter.circle_stroke(
-                rect.center(),
-                radius,
-                egui::Stroke::new(UNADDRESSED_ROTARY_STROKE, color),
-            );
-            painter.circle_filled(rect.center(), (radius * 0.22).max(1.0), color);
+        match shape {
+            CellShape::Pot | CellShape::Encoder => paint_pot(painter, cell, shape, base, paused),
+            CellShape::Jack => paint_jack(painter, cell, base, paused),
+            CellShape::Round | CellShape::Rect => {
+                paint_composed(painter, cell, shape, base, paused);
+            }
         }
         return;
     }
+
+    // Unaddressed elements never reach this point in a rotary position: the face
+    // dispatch above gives an unaddressed knob/encoder its own dimmed symbol
+    // without the washer ring, and an unaddressed CV jack its full socket face
+    // (faceplate-pot-jack-symbols D5). Every other unreferenced kind keeps the
+    // plain dimmed marker below.
 
     // Standalone LED chrome for non-composed cells: outline ring plus inset
     // core (fader-led-contrast 2.1). The ring is field chrome and stays
@@ -1472,7 +1532,13 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
         );
     }
     if layout.state_row {
-        paint_state_row(&text_painter, cell, layout, line_h, paused);
+        paint_state_row(
+            &text_painter,
+            cell,
+            layout,
+            rect.min + egui::vec2(LABEL_INSET_X, layout.lines.len() as f32 * line_h),
+            paused,
+        );
     }
     paint_state_marker(painter, cell, color);
 }
@@ -1515,19 +1581,20 @@ fn paint_state_marker(painter: &Painter, cell: &CellSpec, color: egui::Color32) 
 }
 
 /// The in-cell state row (module-ui-label-fit D4): proportional
-/// [`crate::physical::state_font_size`], one line height below the last label
-/// line, and only when the layout kept room for it.
+/// [`crate::physical::state_font_size`], painted at `top` — the line below the
+/// last label line, wherever that line landed — and only when the layout kept
+/// room for it.
 fn paint_state_row(
     painter: &Painter,
     cell: &CellSpec,
     layout: &crate::physical::LabelLayout,
-    line_h: f32,
+    top: Pos2,
     paused: bool,
 ) {
     let font = egui::FontId::proportional(crate::physical::state_font_size(layout.font));
     let budget = (cell.rect.width() / (font.size * MONO_ADVANCE)).floor() as usize;
     painter.text(
-        cell.rect.min + egui::vec2(LABEL_INSET_X, layout.lines.len() as f32 * line_h),
+        top,
         egui::Align2::LEFT_TOP,
         clip_label(&cell.state_text, budget.max(1)),
         font,
@@ -1551,6 +1618,10 @@ fn paint_state_row(
 /// are omitted entirely — leaving the cell an annotation candidate — when the
 /// layout found no step that fits the band. No state-text row: the shape carries
 /// the state.
+///
+/// Only the button faces (round, rect) reach this painter: a pot, encoder or
+/// jack face is a hardware symbol and paints through [`paint_pot`] /
+/// [`paint_jack`], which take the same band for their label.
 fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Color, paused: bool) {
     let rect = cell.rect;
     // The face spans the cell: the outline and fill stay concentric with the
@@ -1577,6 +1648,9 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
         .led_state
         .map_or(0.0, |v| 0.25 + 0.75 * v.clamp(0.0, 1.0));
     match shape {
+        // Hardware symbols belong to `paint_pot` / `paint_jack`; this composer
+        // owns the button faces only.
+        CellShape::Pot | CellShape::Encoder | CellShape::Jack => {}
         CellShape::Round => {
             let radius = (diameter / 2.0 - 1.0).max(1.0);
             painter.circle_stroke(center, radius, egui::Stroke::new(stroke_w, ring));
@@ -1630,6 +1704,237 @@ fn paint_composed(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Co
         }
     }
 }
+/// Which detail the drawn face diameter can carry (faceplate-pot-jack-symbols
+/// D3): the full symbol, the one-stroke reduction, or a ring plus a centre dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaceDetail {
+    Full,
+    Reduced,
+    Dot,
+}
+
+/// The ladder step for a drawn face diameter — the ring's diameter, not the cell
+/// and not the zoom, so the reduction is automatically right at 25 %, at both
+/// fits and at 400 %.
+fn face_detail(diameter: f32) -> FaceDetail {
+    if diameter >= FACE_FULL_MIN {
+        FaceDetail::Full
+    } else if diameter >= FACE_REDUCED_MIN {
+        FaceDetail::Reduced
+    } else {
+        FaceDetail::Dot
+    }
+}
+
+/// The face box a symbol claims: the cell's top `0.66 w`, the band the label is
+/// fitted to by [`cell_label_box`] and [`crate::physical::FACE_HEIGHT_FRACTION`].
+fn face_box(rect: Rect) -> Rect {
+    let h = (crate::physical::FACE_HEIGHT_FRACTION * rect.width()).min(rect.height());
+    Rect::from_min_size(rect.min, Vec2::new(rect.width(), h.max(0.0)))
+}
+
+/// The nut's six corners (D2): a regular hexagon with a flat top and bottom, so
+/// the wrench flats still read at the smallest face the full symbol draws.
+fn hexagon(center: Pos2, radius: f32) -> Vec<Pos2> {
+    (0..6)
+        .map(|i| {
+            let angle = std::f32::consts::TAU * (i as f32) / 6.0;
+            center + Vec2::new(angle.cos(), angle.sin()) * radius
+        })
+        .collect()
+}
+
+/// The slot's two endpoints for a value (D4): a 270° sweep, 0 at 7:30 through
+/// 12:00 at 0.5 to 1 at 4:30, drawn from [`POT_SLOT_INNER_FRACTION`] of the ring
+/// radius out to [`POT_SLOT_OUTER_FRACTION`]. Screen y grows downward, so the
+/// up reference is `-cos`.
+fn pot_slot(center: Pos2, radius: f32, value: f32) -> [Pos2; 2] {
+    let angle =
+        (POT_SLOT_START_DEGREES + POT_SLOT_SWEEP_DEGREES * value.clamp(0.0, 1.0)).to_radians();
+    let dir = Vec2::new(angle.sin(), -angle.cos());
+    [
+        center + dir * (radius * POT_SLOT_INNER_FRACTION),
+        center + dir * (radius * POT_SLOT_OUTER_FRACTION),
+    ]
+}
+
+/// The band under a face (D2/D4): the fitted label lines and, when the layout
+/// kept room for it, the state row, bottom-aligned in the cell's last
+/// `h − 0.66 w` — the box [`cell_label_box`] measured them against, so a symbol
+/// can never steal a line from its own label.
+fn paint_face_band(painter: &Painter, cell: &CellSpec, paused: bool) {
+    let Some(layout) = cell.label_layout.as_ref() else {
+        return;
+    };
+    let rect = cell.rect;
+    let line_h = crate::physical::label_line_height(layout.font);
+    let state_h = if layout.state_row {
+        crate::physical::label_line_height(crate::physical::state_font_size(layout.font))
+    } else {
+        0.0
+    };
+    let top = rect.max.y - (layout.lines.len() as f32 * line_h + state_h);
+    let font = egui::FontId::monospace(layout.font);
+    let color = dim(rgb(cell.label_color), paused || cell.dimmed);
+    for (i, line) in layout.lines.iter().enumerate() {
+        painter.text(
+            Pos2::new(rect.min.x + LABEL_INSET_X, top + i as f32 * line_h),
+            egui::Align2::LEFT_TOP,
+            line,
+            font.clone(),
+            color,
+        );
+    }
+    if layout.state_row {
+        paint_state_row(
+            painter,
+            cell,
+            layout,
+            Pos2::new(
+                rect.min.x + LABEL_INSET_X,
+                top + layout.lines.len() as f32 * line_h,
+            ),
+            paused,
+        );
+    }
+}
+
+/// A pot (`CellShape::Pot`) or encoder (`CellShape::Encoder`) face
+/// (faceplate-pot-jack-symbols D2–D5): the washer ring, the hex nut, the shaft and
+/// the slot that carries the value, seated on a base line for a finite pot and
+/// without one for an endless encoder — the one stroke that still resolves at a
+/// 10 pt face, where the reference icon's legs would be mush.
+///
+/// The symbol claims the cell's top `0.66 w` and the label paints in the band
+/// beneath it, so a face never shrinks for a label. Detail follows the *drawn*
+/// face diameter (D3): the full symbol at 18 pt, a ring plus the slot from 10 pt,
+/// a ring plus a centre dot below.
+///
+/// An unaddressed rotary drops the washer ring, because the ring is what
+/// addressing adds (D5), and keeps the nut, the slot and the pot's base line,
+/// dimmed through the same paused-dim path as every other face. Below the full
+/// symbol there is no nut left to read the difference from, so the reduced steps
+/// fall back to the addressed drawing: the ring is what keeps the position
+/// findable at the rack fit and the zoom floor.
+fn paint_pot(painter: &Painter, cell: &CellSpec, shape: CellShape, base: Color, paused: bool) {
+    let rect = cell.rect;
+    let face = face_box(rect);
+    let diameter = (rect.width() * FACE_RING_FRACTION).max(1.0);
+    let radius = diameter / 2.0;
+    // A pot pushes its circle to the top of the box and spends the rest of the box
+    // on the base line; an encoder centres the same circle in the whole box.
+    let center = if shape == CellShape::Pot {
+        Pos2::new(face.center().x, face.min.y + radius)
+    } else {
+        face.center()
+    };
+    let addressed = cell.component_index.is_some();
+    let detail = face_detail(diameter);
+    let ring = addressed || detail != FaceDetail::Full;
+    let raw = if addressed {
+        rgb(base)
+    } else {
+        rgb(base).gamma_multiply(UNADDRESSED_FACE_ALPHA)
+    };
+    let color = dim(raw, paused);
+    let slot_stroke = (radius * FACE_SLOT_STROKE_FRACTION).clamp(FACE_EDGE_STROKE, 2.0);
+    if ring {
+        painter.circle_stroke(center, radius, egui::Stroke::new(FACE_RING_STROKE, color));
+    }
+    match detail {
+        FaceDetail::Full => {
+            painter.add(egui::Shape::closed_line(
+                hexagon(center, radius * POT_NUT_FRACTION),
+                egui::Stroke::new(FACE_EDGE_STROKE, color),
+            ));
+            painter.circle_filled(center, radius * POT_SHAFT_FRACTION, color);
+            painter.line_segment(
+                pot_slot(center, radius, cell.value_frac),
+                egui::Stroke::new(slot_stroke, color),
+            );
+            if shape == CellShape::Pot {
+                // The base line marks a finite control: end stops at both ends,
+                // centred in the strip the circle leaves under itself.
+                let half = rect.width() * POT_BASE_LINE_FRACTION * 0.5;
+                let y = face.min.y + (radius * 2.0).midpoint(face.height());
+                painter.line_segment(
+                    [Pos2::new(center.x - half, y), Pos2::new(center.x + half, y)],
+                    egui::Stroke::new(POT_BASE_LINE_THICKNESS, color),
+                );
+            }
+        }
+        FaceDetail::Reduced => {
+            painter.line_segment(
+                pot_slot(center, radius, cell.value_frac),
+                egui::Stroke::new(slot_stroke, color),
+            );
+        }
+        FaceDetail::Dot => {
+            painter.circle_filled(center, (radius * FACE_DOT_FRACTION).max(1.0), color);
+        }
+    }
+    paint_face_band(painter, cell, paused);
+}
+
+/// A CV jack face (faceplate-pot-jack-symbols D6): the bezel ring, the filled
+/// socket mouth and the cross its contacts cut into it. Detail follows the same
+/// ladder as a rotary (D3) — below 18 pt the cross goes, below 10 pt the mouth
+/// goes — so the smallest cells keep the ring-plus-dot footprint.
+///
+/// A jack never drops anything but the cross, and it keeps the `◀`/`▶` corner
+/// marker and the `CV IN`/`CV OUT` state row on top of the face: the `mono`
+/// palette maps `cv_in` and `cv_out` to the same value, so direction can never
+/// ride the face's colour (D6).
+fn paint_jack(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) {
+    let rect = cell.rect;
+    let face = face_box(rect);
+    let diameter = (rect.width() * FACE_RING_FRACTION).max(1.0);
+    let radius = diameter / 2.0;
+    let center = face.center();
+    let addressed = cell.component_index.is_some();
+    let detail = face_detail(diameter);
+    // An unaddressed jack keeps its whole face (D5): the symbol is the same, and
+    // only the brightness floor says the patch never names it.
+    let raw = if addressed {
+        rgb(base)
+    } else {
+        rgb(base).gamma_multiply(UNADDRESSED_FACE_ALPHA)
+    };
+    let color = dim(raw, paused);
+    painter.circle_stroke(center, radius, egui::Stroke::new(FACE_RING_STROKE, color));
+    match detail {
+        FaceDetail::Full | FaceDetail::Reduced => {
+            let mouth = (rect.width() * JACK_MOUTH_FRACTION * 0.5).max(1.0);
+            painter.circle_filled(center, mouth, color);
+            if detail == FaceDetail::Full {
+                // The contacts' cross is cut *out* of the mouth: two strokes in
+                // the faceplate background, so the socket reads as an opening
+                // rather than a painted disc.
+                let cut = egui::Stroke::new(
+                    FACE_EDGE_STROKE.max(mouth * FACE_SLOT_STROKE_FRACTION),
+                    rgb(crate::theme::active().graph_canvas_bg),
+                );
+                let arm = mouth * JACK_CROSS_FRACTION;
+                painter.line_segment(
+                    [center - Vec2::new(arm, 0.0), center + Vec2::new(arm, 0.0)],
+                    cut,
+                );
+                painter.line_segment(
+                    [center - Vec2::new(0.0, arm), center + Vec2::new(0.0, arm)],
+                    cut,
+                );
+            }
+        }
+        FaceDetail::Dot => {
+            painter.circle_filled(center, (radius * FACE_DOT_FRACTION).max(1.0), color);
+        }
+    }
+    paint_face_band(painter, cell, paused);
+    // Direction is the marker's job, and it paints last so the face can never
+    // overdraw it.
+    paint_state_marker(painter, cell, color);
+}
+
 fn paint_performance(painter: &Painter, overlay: &PerformanceOverlay, paused: bool) {
     paint_callouts(painter, &overlay.callouts, paused);
 }
@@ -1696,7 +2001,7 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, paused: bool) {
     let track_w = (rect.width() * FADER_TRACK_WIDTH_FRACTION)
         .min(FADER_TRACK_WIDTH_MAX)
         .min(rect.width());
-    let value = cell.fader_value.clamp(0.0, 1.0);
+    let value = cell.value_frac.clamp(0.0, 1.0);
     let fill_h = (rect.height() * value).round().clamp(0.0, rect.height());
     let track = Rect::from_min_size(rect.min, egui::vec2(track_w, rect.height()));
     if fill_h > 0.0 {
@@ -2498,7 +2803,7 @@ mod tests {
                 color,
                 label_color: color,
                 is_fader: false,
-                fader_value: 0.0,
+                value_frac: 0.0,
                 component_index: Some(ci),
                 mark,
                 highlighted: false,
@@ -2970,7 +3275,7 @@ mod tests {
             color: crate::theme::active().knob,
             label_color: crate::theme::active().knob,
             is_fader: true,
-            fader_value: value,
+            value_frac: value,
             component_index: Some(0),
             mark: PortMark::Cell,
             highlighted: false,
@@ -3062,7 +3367,7 @@ mod tests {
             color: crate::theme::active().button,
             label_color: crate::theme::active().button,
             is_fader: false,
-            fader_value: 0.0,
+            value_frac: 0.0,
             component_index: Some(0),
             mark: PortMark::Cell,
             highlighted: false,
@@ -3810,7 +4115,9 @@ mod tests {
     }
 
     /// A synthetic fallback cell of the given kind, as the spec's unaddressed
-    /// branch builds it: no label, no hit rect, dimmed.
+    /// branch builds it: no label, no hit rect, dimmed — and carrying the face
+    /// the cell's geometry family resolves to, so an unused rotary or jack paints
+    /// its symbol rather than a bare dot (faceplate-pot-jack-symbols D5).
     fn unaddressed_cell(kind: ComponentKind, color: Color) -> CellSpec {
         CellSpec {
             rect: Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(26.0, 26.0)),
@@ -3820,7 +4127,7 @@ mod tests {
             color,
             label_color: color,
             is_fader: false,
-            fader_value: 0.0,
+            value_frac: 0.0,
             component_index: None,
             mark: PortMark::Cell,
             highlighted: false,
@@ -3830,66 +4137,96 @@ mod tests {
             kind,
             led_state: None,
             led_rgb: None,
-            shape: None,
+            shape: match kind {
+                ComponentKind::Knob => Some(CellShape::Pot),
+                ComponentKind::Encoder => Some(CellShape::Encoder),
+                ComponentKind::CvIn | ComponentKind::CvOut => Some(CellShape::Jack),
+                _ => None,
+            },
             label_layout: None,
         }
     }
 
     #[test]
-    fn unaddressed_rotary_paints_a_dim_circle_not_a_dot() {
-        // unaddressed-rotary: the E-family fallback cell paints a ring plus a
-        // centre dot so the unused position reads as a rotary — the old
-        // `·`-in-a-corner rendering was a speck the user could not tell
-        // apart from an unaddressed button.
-        let cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
-        let shapes = painted_shapes(&cell, false);
-        let circles: Vec<&egui::epaint::Shape> = shapes
+    fn unaddressed_rotary_drops_the_washer_ring_and_keeps_its_symbol() {
+        // faceplate-pot-jack-symbols D5: the ring is what *addressing* adds, so an
+        // unused rotary draws the nut, shaft, slot and (on a pot) the base line
+        // without it — the silhouette says "unused", not only the brightness.
+        let mut pot = unaddressed_cell(ComponentKind::Knob, crate::theme::active().knob);
+        pot.rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(45.0, 45.0));
+        let shapes = painted_shapes(&pot, false);
+        assert!(
+            !shapes
+                .iter()
+                .any(|s| matches!(s, egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0)),
+            "an unaddressed rotary drops the washer ring: {shapes:?}"
+        );
+        assert!(
+            shapes.iter().any(
+                |s| matches!(s, egui::epaint::Shape::Path(p) if p.closed && p.points.len() == 6)
+            ),
+            "the hex nut is the silhouette: {shapes:?}"
+        );
+        assert!(
+            shapes
+                .iter()
+                .any(|s| matches!(s, egui::epaint::Shape::Circle(c) if c.stroke.width == 0.0 && c.fill.a() >= 120)),
+            "the shaft is a filled disc: {shapes:?}"
+        );
+        let strokes: Vec<&egui::Stroke> = shapes
             .iter()
-            .filter(|s| matches!(s, egui::epaint::Shape::Circle(_)))
+            .filter_map(|s| match s {
+                egui::epaint::Shape::LineSegment { stroke, .. } => Some(stroke),
+                _ => None,
+            })
             .collect();
-        assert_eq!(circles.len(), 2, "ring + centre dot, got {shapes:?}");
-        let mut ring = false;
-        let mut dot = false;
-        for s in &circles {
-            let egui::epaint::Shape::Circle(c) = s else {
-                continue;
-            };
-            if c.stroke.width > 0.0 && c.stroke.color.a() >= 120 {
-                ring = true;
-            }
-            if c.fill.a() >= 120 {
-                dot = true;
-            }
+        assert_eq!(strokes.len(), 2, "slot + base line on a pot: {shapes:?}");
+        for stroke in &strokes {
+            assert!(
+                stroke.color.a() >= 120,
+                "the dimmed face keeps its alpha floor: {stroke:?}"
+            );
         }
-        assert!(ring, "the outline keeps a visible alpha floor: {circles:?}");
-        assert!(dot, "the centre dot marks the shaft: {circles:?}");
         assert!(
             !shapes
                 .iter()
                 .any(|s| matches!(s, egui::epaint::Shape::Text(_))),
             "no label or state glyph for an unaddressed cell"
         );
-        // A knob (P family) shares the rotary presentation.
-        let knob = unaddressed_cell(ComponentKind::Knob, crate::theme::active().knob);
-        assert!(painted_shapes(&knob, false)
-            .iter()
-            .any(|s| matches!(s, egui::epaint::Shape::Circle(_))));
-        // An unaddressed button keeps the dot, not a knob outline.
-        let button = unaddressed_cell(ComponentKind::Button, crate::theme::active().muted);
-        assert!(
-            !painted_shapes(&button, false)
+        // The encoder draws the same face without the finite control's base line.
+        let mut encoder = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        encoder.rect = pot.rect;
+        assert_eq!(
+            painted_shapes(&encoder, false)
                 .iter()
-                .any(|s| matches!(s, egui::epaint::Shape::Circle(_))),
-            "buttons keep the plain dot"
+                .filter(|s| matches!(s, egui::epaint::Shape::LineSegment { .. }))
+                .count(),
+            1,
+            "an unaddressed encoder keeps the slot and loses the base line"
         );
+        // Every other unaddressed kind keeps the plain dimmed marker: no face.
+        for kind in [
+            ComponentKind::Button,
+            ComponentKind::Switch,
+            ComponentKind::Led,
+        ] {
+            let cell = unaddressed_cell(kind, crate::theme::active().muted);
+            assert!(
+                !painted_shapes(&cell, false).iter().any(|s| matches!(
+                    s,
+                    egui::epaint::Shape::Circle(_) | egui::epaint::Shape::Path(_)
+                )),
+                "{kind:?} keeps the plain dim dot"
+            );
+        }
     }
 
     #[test]
-    fn addressed_rotary_keeps_its_marker_at_the_zoom_floor() {
+    fn addressed_rotary_keeps_its_face_at_the_zoom_floor() {
         // Module-UI zoom floor (75 %): an E4 encoder cell is 26.36 × 0.75 ≈ 20 pt,
-        // whose raw marker would be 5.5 pt — under the old rule the glyph was
-        // dropped outright, so an addressed encoder read as an empty position
-        // while its neighbours kept theirs. The mark is clamped now, never lost.
+        // so its face is 11.9 pt — the reduced step. The cell draws the ring plus
+        // its slot there, bright, and no `◉` marker (a face replaces it), so an
+        // addressed rotary can never read as an empty position.
         let mut cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
         cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(19.8, 19.8));
         cell.dimmed = false;
@@ -3897,22 +4234,45 @@ mod tests {
         cell.glyph = "\u{25C9}".into();
         cell.label = String::from("Encoder E4.4");
         cell.label_layout = cell_label_layout(&cell);
-        let texts = painted_cell(&cell);
+        let shapes = painted_shapes(&cell, false);
+        let ring = shapes
+            .iter()
+            .find_map(|s| match s {
+                egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => Some(c),
+                _ => None,
+            })
+            .expect("the face keeps its ring at the zoom floor");
         assert!(
-            texts
+            ring.radius >= 3.0,
+            "the face keeps a knob-sized footprint: {}",
+            ring.radius
+        );
+        assert_eq!(
+            ring.stroke.color.a(),
+            255,
+            "an addressed face is not dimmed: {ring:?}"
+        );
+        assert!(
+            shapes
                 .iter()
-                .any(|(t, font, _)| t == "\u{25C9}" && font.size >= STATE_MARKER_MIN),
-            "the rotary marker survives the smallest cell: {texts:?}"
+                .any(|s| matches!(s, egui::epaint::Shape::LineSegment { .. })),
+            "the slot survives the smallest face: {shapes:?}"
+        );
+        assert!(
+            !painted_cell(&cell).iter().any(|(t, _, _)| t == "\u{25C9}"),
+            "a face replaces the compact corner marker: {:?}",
+            painted_cell(&cell)
         );
     }
 
     #[test]
     fn label_text_is_clipped_short_of_the_state_marker() {
-        // The fitted label spans the whole cell at the smaller zoom presets
-        // (melody3's E4 at 103 %: a 27 pt cell with a 6 pt "Encoder" line
-        // reaching the right edge). Reserving the marker column is what keeps
-        // the rotary glyph visible instead of painting it under that line.
-        let mut cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        // The fitted label spans the whole cell at the smaller zoom presets (a
+        // 27 pt cell with a 6 pt line reaching the right edge). Reserving the
+        // marker column is what keeps a compact kind's glyph visible instead of
+        // painting it under that line. A switch still draws that marker; a pot,
+        // encoder or jack has a face instead and never reaches this path.
+        let mut cell = unaddressed_cell(ComponentKind::Switch, crate::theme::active().knob);
         cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(27.0, 27.0));
         cell.dimmed = false;
         cell.component_index = Some(0);
@@ -3937,8 +4297,9 @@ mod tests {
     #[test]
     fn state_marker_paints_over_its_own_label() {
         // Draw order guard: the corner marker is chrome and must never be
-        // overdrawn by a long label line that reaches the cell's right edge.
-        let mut cell = unaddressed_cell(ComponentKind::Encoder, crate::theme::active().knob);
+        // overdrawn by a long label line that reaches the cell's right edge. A
+        // switch still draws that marker; a pot, encoder or jack has a face.
+        let mut cell = unaddressed_cell(ComponentKind::Switch, crate::theme::active().knob);
         cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(26.0, 26.0));
         cell.dimmed = false;
         cell.component_index = Some(0);
@@ -3971,24 +4332,23 @@ mod tests {
 
     #[test]
     fn unaddressed_rotary_keeps_its_footprint_at_the_zoom_floor() {
-        // Module-UI zoom floor (75 %): a rotary cell is 26 × 0.75 ≈ 20 pt wide.
-        // The ring must keep a visible stroke and its centre dot — the pre-fix
-        // 1 pt ring at half gamma read as empty space, which is how a rotary
-        // position "disappeared" from a faceplate.
+        // Module-UI zoom floor (75 %): a rotary cell is 26 × 0.75 ≈ 20 pt wide, so
+        // its face is 11.9 pt — the reduced step, where no nut is left to carry
+        // the addressed/unaddressed difference. The ring therefore stays (it is
+        // what keeps the position findable at this size) with the slot beside it,
+        // and the fixed alpha floor keeps both legible on a dark faceplate.
         let mut cell = unaddressed_cell(ComponentKind::Knob, crate::theme::active().knob);
         cell.rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(19.8, 19.8));
         let shapes = painted_shapes(&cell, false);
-        let circles: Vec<&egui::epaint::CircleShape> = shapes
+        let ring = shapes
             .iter()
-            .filter_map(|s| match s {
-                egui::epaint::Shape::Circle(c) => Some(c),
+            .find_map(|s| match s {
+                egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => Some(c),
                 _ => None,
             })
-            .collect();
-        assert_eq!(circles.len(), 2, "ring + dot at the floor: {shapes:?}");
-        let ring = circles.iter().find(|c| c.stroke.width > 0.0).expect("ring");
+            .expect("the reduced step keeps a ring at the floor");
         assert!(
-            ring.stroke.width >= UNADDRESSED_ROTARY_STROKE && ring.stroke.color.a() >= 120,
+            ring.stroke.width >= FACE_EDGE_STROKE && ring.stroke.color.a() >= 120,
             "the ring stays a visible stroke: {ring:?}"
         );
         assert!(
@@ -3996,6 +4356,828 @@ mod tests {
             "the ring keeps a knob-sized footprint: {}",
             ring.radius
         );
+        assert!(
+            shapes
+                .iter()
+                .any(|s| matches!(s, egui::epaint::Shape::LineSegment { .. })),
+            "the slot still carries the position: {shapes:?}"
+        );
+    }
+
+    // -- faceplate-pot-jack-symbols 3.1: the painted faces ---------------------
+    //
+    // `paint_pot` / `paint_jack` are pure draw routines over a `CellSpec`, so the
+    // contract is pinned where it is observable: the shapes they emit, their
+    // geometry and their colours. The sizes are the ones the panel produces at
+    // 1:1 (a 12 mm pot is 45.35 pt, a 7 mm encoder or jack 26.46 pt), and the
+    // ladder is read off the *drawn ring*, not the cell or the zoom (D3).
+
+    /// An addressed face cell at a drawn size in points: the shape, the element
+    /// kind (which the wheel path reads), the 0..1 position the slot reads, and a
+    /// label and state fitted exactly as the spec build fits them, so the cell
+    /// paints the band it was measured against (D2/D4).
+    fn face_cell(
+        w: f32,
+        shape: CellShape,
+        kind: ComponentKind,
+        value: f32,
+        label: &str,
+        state: &str,
+    ) -> CellSpec {
+        let (glyph, color) = match kind {
+            ComponentKind::CvIn => ("\u{25C0}", crate::theme::active().cv_in),
+            ComponentKind::CvOut => ("\u{25B6}", crate::theme::active().cv_out),
+            _ => ("\u{25C9}", crate::theme::active().knob),
+        };
+        resolved_cell(CellSpec {
+            rect: Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(w, w)),
+            glyph: glyph.into(),
+            label: label.into(),
+            state_text: state.into(),
+            color,
+            label_color: color,
+            is_fader: false,
+            value_frac: value,
+            component_index: Some(0),
+            mark: PortMark::Cell,
+            highlighted: false,
+            shift_color: None,
+            modifier_wash: None,
+            dimmed: false,
+            kind,
+            led_state: None,
+            led_rgb: None,
+            shape: Some(shape),
+            label_layout: None,
+        })
+    }
+
+    /// A 45 pt-class pot face (the 12 mm cell) at a drawn size, with the label
+    /// and percentage a real pot carries.
+    fn pot_face(w: f32, value: f32) -> CellSpec {
+        face_cell(
+            w,
+            CellShape::Pot,
+            ComponentKind::Knob,
+            value,
+            "Cutoff",
+            "50%",
+        )
+    }
+
+    /// The same cell as an encoder: the endless rotary with no base line.
+    fn encoder_face(w: f32, value: f32) -> CellSpec {
+        face_cell(
+            w,
+            CellShape::Encoder,
+            ComponentKind::Encoder,
+            value,
+            "Cutoff",
+            "50%",
+        )
+    }
+
+    /// A CV input jack face at a drawn size.
+    fn jack_face(w: f32) -> CellSpec {
+        face_cell(
+            w,
+            CellShape::Jack,
+            ComponentKind::CvIn,
+            0.0,
+            "Gate",
+            "CV IN",
+        )
+    }
+
+    /// The stroked circles a cell paints: `(center, radius, stroke)`.
+    fn stroked_rings(shapes: &[egui::epaint::Shape]) -> Vec<(Pos2, f32, egui::Stroke)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) if c.stroke.width > 0.0 => {
+                    Some((c.center, c.radius, c.stroke))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The filled discs a cell paints (the shaft, the socket mouth, the centre
+    /// dot): `(center, radius, fill)`.
+    fn filled_discs(shapes: &[egui::epaint::Shape]) -> Vec<(Pos2, f32, egui::Color32)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Circle(c) if c.stroke.width == 0.0 => {
+                    Some((c.center, c.radius, c.fill))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The closed outlines a cell paints (the hex nut), each as its point list.
+    fn closed_outlines(shapes: &[egui::epaint::Shape]) -> Vec<Vec<Pos2>> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Path(p) if p.closed => Some(p.points.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The line segments a cell paints (the slot, the base line, the jack's
+    /// cross): `(from, to, stroke)`.
+    fn face_segments(shapes: &[egui::epaint::Shape]) -> Vec<(Pos2, Pos2, egui::Stroke)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::LineSegment { points, stroke } => {
+                    Some((points[0], points[1], *stroke))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The horizontal base line a pot seats its face on, when the cell draws one.
+    fn base_line_of(shapes: &[egui::epaint::Shape]) -> Option<(Pos2, Pos2, egui::Stroke)> {
+        face_segments(shapes)
+            .into_iter()
+            .find(|(a, b, _)| (a.y - b.y).abs() < 0.01)
+    }
+
+    /// The slot a rotary face paints: its `(inner, outer)` endpoints and the unit
+    /// direction between them. Every rotary slot is the one non-horizontal
+    /// segment; a pot's second segment is the base line.
+    fn painted_slot(cell: &CellSpec) -> (Pos2, Pos2, egui::Vec2) {
+        let shapes = painted_shapes(cell, false);
+        let (from, to, _) = face_segments(&shapes)
+            .into_iter()
+            .find(|(a, b, _)| (a.y - b.y).abs() > 0.01)
+            .unwrap_or_else(|| panic!("no slanted slot segment: {shapes:?}"));
+        (from, to, (to - from).normalized())
+    }
+
+    /// The contract's slot direction for a value (D4): a 270° sweep, 0 at 7:30
+    /// through 12:00 at 0.5 to 1 at 4:30, in screen coordinates where y grows
+    /// downward. Re-derived here from the spec's words, not from `pot_slot`.
+    fn expected_slot_dir(value: f32) -> egui::Vec2 {
+        let angle = (-135.0 + 270.0 * value).to_radians();
+        egui::Vec2::new(angle.sin(), -angle.cos())
+    }
+
+    /// Every text run a cell paints with the colour it painted it in.
+    fn painted_text_runs(cell: &CellSpec) -> Vec<(String, egui::Color32)> {
+        painted_shapes(cell, false)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::epaint::Shape::Text(t) => {
+                    Some((t.galley.text().to_string(), t.fallback_color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn twelve_millimetre_pot_draws_ring_nut_shaft_slot_and_base_line() {
+        // A 12 mm pot (P2B8, P4B2, P10 big) is a 45.35 pt cell at 1:1, so its
+        // 0.60 w washer ring is 27.2 pt across: the Full step (D2/D3).
+        let w = pt(12.0);
+        let cell = pot_face(w, 0.5);
+        let rect = cell.rect;
+        let shapes = painted_shapes(&cell, false);
+
+        // The washer ring: 0.60 w across at the heavier 1.5 pt stroke, its top
+        // edge on the face box's top.
+        let rings = stroked_rings(&shapes);
+        assert_eq!(rings.len(), 1, "one washer ring: {shapes:?}");
+        let (center, radius, stroke) = rings[0];
+        assert!(
+            radius * 2.0 >= FACE_FULL_MIN,
+            "a 12 mm pot draws the full symbol: {} pt",
+            radius * 2.0
+        );
+        assert!(
+            (radius * 2.0 - FACE_RING_FRACTION * w).abs() < 0.05,
+            "the ring is 0.60 w across: {} vs {}",
+            radius * 2.0,
+            FACE_RING_FRACTION * w
+        );
+        assert_eq!(stroke.width, FACE_RING_STROKE);
+        assert!(
+            (center.x - rect.center().x).abs() < 0.01,
+            "centred: {center:?}"
+        );
+        assert!(
+            (center.y - (rect.min.y + 0.30 * w)).abs() < 0.05,
+            "the pot circle sits 0.30 w down, leaving the base line its strip: {center:?}"
+        );
+
+        // The hex nut: six corners at 0.80 r, flat top and bottom so the wrench
+        // flats still read.
+        let nuts = closed_outlines(&shapes);
+        assert_eq!(nuts.len(), 1, "one hex nut: {shapes:?}");
+        assert_eq!(nuts[0].len(), 6, "the nut is a hexagon: {:?}", nuts[0]);
+        let nut_r = radius * POT_NUT_FRACTION;
+        for corner in &nuts[0] {
+            assert!(
+                ((*corner - center).length() - nut_r).abs() < 0.05,
+                "every corner is on the 0.80 r circle: {corner:?}"
+            );
+        }
+        let flat = nut_r * 60.0_f32.to_radians().sin();
+        for edge in [flat, -flat] {
+            let on_edge = nuts[0]
+                .iter()
+                .filter(|p| ((p.y - center.y) - edge).abs() < 0.05)
+                .count();
+            assert_eq!(
+                on_edge, 2,
+                "two corners share each flat (y {edge}): {:?}",
+                nuts[0]
+            );
+        }
+
+        // The shaft: a filled disc at 0.38 r.
+        let shafts = filled_discs(&shapes);
+        assert_eq!(shafts.len(), 1, "one shaft disc: {shapes:?}");
+        assert!(
+            (shafts[0].0 - center).length() < 0.01,
+            "shaft on the ring centre"
+        );
+        assert!(
+            (shafts[0].1 - radius * POT_SHAFT_FRACTION).abs() < 0.05,
+            "the shaft is 0.38 r: {}",
+            shafts[0].1
+        );
+
+        // Two strokes: the slot and the finite control's base line.
+        let segments = face_segments(&shapes);
+        assert_eq!(segments.len(), 2, "slot + base line on a pot: {shapes:?}");
+        let (base_from, base_to, base_stroke) =
+            base_line_of(&shapes).expect("a pot seats its face on a base line");
+        assert_eq!(base_stroke.width, POT_BASE_LINE_THICKNESS);
+        assert!(
+            (base_from.y - (rect.min.y + 0.63 * w)).abs() < 0.05,
+            "the base line centres in the strip under the circle: {base_from:?}"
+        );
+        assert!(
+            ((base_to.x - base_from.x) - POT_BASE_LINE_FRACTION * w).abs() < 0.05,
+            "the base line spans 0.44 w: {base_from:?}..{base_to:?}"
+        );
+        let (inner, outer, dir) = painted_slot(&cell);
+        assert!(
+            (dir - expected_slot_dir(0.5)).length() < 0.01,
+            "at 0.5 the slot points straight up: {dir:?}"
+        );
+        assert!(
+            ((inner - center).length() - radius * POT_SLOT_INNER_FRACTION).abs() < 0.05,
+            "the slot starts 0.28 r out: {inner:?}"
+        );
+        assert!(
+            ((outer - center).length() - radius * POT_SLOT_OUTER_FRACTION).abs() < 0.05,
+            "the slot ends 0.82 r out: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn an_encoder_draws_the_same_face_without_the_base_line() {
+        // D2/D5: the base line is the *only* silhouette difference between the
+        // finite pot and the endless encoder — the one stroke that still
+        // resolves at a 10 pt face.
+        let w = pt(12.0);
+        let pot = pot_face(w, 0.5);
+        let encoder = encoder_face(w, 0.5);
+        let pot_shapes = painted_shapes(&pot, false);
+        let enc_shapes = painted_shapes(&encoder, false);
+
+        // The same face, shape for shape and size for size.
+        for (name, shapes) in [("pot", &pot_shapes), ("encoder", &enc_shapes)] {
+            assert_eq!(
+                stroked_rings(shapes).len(),
+                1,
+                "{name} draws one washer ring"
+            );
+            assert_eq!(closed_outlines(shapes).len(), 1, "{name} draws the hex nut");
+            assert_eq!(filled_discs(shapes).len(), 1, "{name} draws the shaft");
+        }
+        let (pot_ring, enc_ring) = (stroked_rings(&pot_shapes)[0], stroked_rings(&enc_shapes)[0]);
+        assert_eq!(pot_ring.1, enc_ring.1, "the same ring size: {}", pot_ring.1);
+        assert_eq!(pot_ring.2, enc_ring.2, "the same ring stroke");
+        assert_eq!(
+            filled_discs(&pot_shapes)[0].1,
+            filled_discs(&enc_shapes)[0].1,
+            "the same shaft"
+        );
+        assert_eq!(closed_outlines(&pot_shapes)[0].len(), 6);
+        assert_eq!(closed_outlines(&enc_shapes)[0].len(), 6);
+        // The geometry the base-line strip costs (D2): the pot's circle sits in
+        // the top `0.60 w + 0.06 w` of the box, the encoder centres the same
+        // circle in the whole `0.66 w` — so the encoder's face is 0.03 w lower.
+        assert!(
+            (enc_ring.0.y - pot_ring.0.y - 0.03 * w).abs() < 0.05,
+            "the encoder centres 0.03 w lower: {} vs {}",
+            enc_ring.0.y,
+            pot_ring.0.y
+        );
+
+        // ... and exactly one stroke fewer: the slot, with no base line under it.
+        assert_eq!(
+            face_segments(&pot_shapes).len(),
+            2,
+            "the pot keeps the base line"
+        );
+        assert_eq!(
+            face_segments(&enc_shapes).len(),
+            1,
+            "the encoder keeps the slot and loses the base line: {enc_shapes:?}"
+        );
+        let base = base_line_of(&pot_shapes).expect("the pot's base line").0;
+        assert!(
+            base_line_of(&enc_shapes).is_none(),
+            "no horizontal stroke at any y on an encoder"
+        );
+        assert!(
+            face_segments(&enc_shapes)
+                .iter()
+                .all(|(a, b, _)| (a.y - base.y).abs() > 0.5 && (b.y - base.y).abs() > 0.5),
+            "nothing on the encoder sits on the pot's base-line row ({base:?})"
+        );
+    }
+
+    #[test]
+    fn rotary_faces_converge_to_ring_and_slot_at_the_rack_fit() {
+        // At the 37 % rack fit a 12 mm pot is a 16.8 pt cell, so its ring is
+        // 10.1 pt: the Reduced step, where pot and encoder must draw the same
+        // ring and slot and nothing else (D3/D5).
+        let fit = 0.37;
+        let w = pt(12.0) * fit;
+        let pot = pot_face(w, 0.5);
+        let encoder = encoder_face(w, 0.5);
+        for (name, cell) in [("pot", &pot), ("encoder", &encoder)] {
+            let shapes = painted_shapes(cell, false);
+            let rings = stroked_rings(&shapes);
+            assert_eq!(rings.len(), 1, "{name} keeps its ring at the fit");
+            let diameter = rings[0].1 * 2.0;
+            assert!(
+                (FACE_REDUCED_MIN..FACE_FULL_MIN).contains(&diameter),
+                "{name} ring is {diameter} pt: the reduced step"
+            );
+            assert!(
+                (diameter - FACE_RING_FRACTION * w).abs() < 0.05,
+                "{name} keeps the 0.60 w footprint"
+            );
+            assert!(
+                closed_outlines(&shapes).is_empty(),
+                "{name} drops the nut below 18 pt: {shapes:?}"
+            );
+            assert!(
+                filled_discs(&shapes).is_empty(),
+                "{name} drops the shaft below 18 pt: {shapes:?}"
+            );
+            assert_eq!(
+                face_segments(&shapes).len(),
+                1,
+                "{name} keeps only the slot: {shapes:?}"
+            );
+            assert!(
+                base_line_of(&shapes).is_none(),
+                "{name} drops the base line below 18 pt"
+            );
+        }
+        // Converged: the same drawn face, so the label and state row are all that
+        // tell the kinds apart at this size.
+        let (pot_ring, enc_ring) = (
+            stroked_rings(&painted_shapes(&pot, false))[0],
+            stroked_rings(&painted_shapes(&encoder, false))[0],
+        );
+        assert_eq!(pot_ring.1, enc_ring.1, "the same ring at the fit");
+        assert_eq!(pot_ring.2, enc_ring.2);
+        assert_eq!(painted_slot(&pot).2, painted_slot(&encoder).2);
+
+        // The real panel agrees: the P10's P2.1 pot is that size at this fit.
+        let mut app = app_with_labels("fixtures/module_ui_label_fit.ini", &[]);
+        app.physical_zoom = fit;
+        let spec = physical_spec(&app, perf_pane()).expect("spec at the rack fit");
+        let cell = cell_for_token(&app, &spec, "P2.1").clone();
+        assert!(
+            (cell.rect.width() - w).abs() < 0.5,
+            "a 12 mm pot at the {fit} fit is {w} pt wide, got {}",
+            cell.rect.width()
+        );
+        let shapes = painted_shapes(&cell, false);
+        assert_eq!(
+            stroked_rings(&shapes).len(),
+            1,
+            "the real pot keeps its ring"
+        );
+        assert!(
+            closed_outlines(&shapes).is_empty(),
+            "and draws no nut at the fit"
+        );
+        assert_eq!(face_segments(&shapes).len(), 1, "only the slot survives");
+    }
+
+    #[test]
+    fn sub_ten_point_faces_reduce_to_ring_and_dot_and_keep_their_footprint() {
+        // Below a 10 pt ring the ladder is a ring plus a centre dot — for both
+        // rotary kinds and for a jack, so the smallest cells keep exactly the
+        // footprint they had before the faces existed (D3).
+        let w = 16.0; // ring 9.6 pt
+        for (name, cell) in [
+            ("pot", pot_face(w, 0.5)),
+            ("encoder", encoder_face(w, 0.5)),
+            ("jack", jack_face(w)),
+        ] {
+            let shapes = painted_shapes(&cell, false);
+            let rings = stroked_rings(&shapes);
+            assert_eq!(rings.len(), 1, "{name}: one ring: {shapes:?}");
+            let diameter = rings[0].1 * 2.0;
+            assert!(diameter < FACE_REDUCED_MIN, "{name} ring is {diameter} pt");
+            assert!(
+                (diameter - FACE_RING_FRACTION * w).abs() < 0.05,
+                "{name} keeps the 0.60 w footprint at the smallest step"
+            );
+            let dots = filled_discs(&shapes);
+            assert_eq!(dots.len(), 1, "{name}: ring plus one dot: {shapes:?}");
+            assert!(
+                (dots[0].1 - (rings[0].1 * FACE_DOT_FRACTION).max(1.0)).abs() < 0.05,
+                "{name} dot is 0.22 r, never below 1 pt: {}",
+                dots[0].1
+            );
+            assert_eq!(dots[0].0, rings[0].0, "{name} dot on the ring centre");
+            assert!(
+                closed_outlines(&shapes).is_empty() && face_segments(&shapes).is_empty(),
+                "{name} draws no nut, slot, mouth or base line below 10 pt: {shapes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forty_five_point_jack_draws_bezel_mouth_and_cross() {
+        // D6: the CV jack is the frontal socket — bezel ring, filled mouth, and
+        // the cross the contacts cut into it.
+        let w = pt(12.0);
+        let cell = jack_face(w);
+        let shapes = painted_shapes(&cell, false);
+        let rings = stroked_rings(&shapes);
+        assert_eq!(rings.len(), 1, "one bezel ring: {shapes:?}");
+        assert_eq!(rings[0].2.width, FACE_RING_STROKE);
+        assert!((rings[0].1 * 2.0 - FACE_RING_FRACTION * w).abs() < 0.05);
+        let mouths = filled_discs(&shapes);
+        assert_eq!(mouths.len(), 1, "one socket mouth: {shapes:?}");
+        assert!(
+            (mouths[0].1 * 2.0 - JACK_MOUTH_FRACTION * w).abs() < 0.05,
+            "the mouth is 0.40 w across: {}",
+            mouths[0].1 * 2.0
+        );
+        assert_eq!(mouths[0].0, rings[0].0, "mouth centred in the bezel");
+
+        // The cross: two axis-aligned strokes in the faceplate background (cut
+        // out of the mouth), each 0.85 of the mouth's radius long.
+        let cuts = face_segments(&shapes);
+        assert_eq!(cuts.len(), 2, "two cross arms: {shapes:?}");
+        let bg = rgb(crate::theme::active().graph_canvas_bg);
+        for (a, b, stroke) in &cuts {
+            assert_eq!(stroke.color, bg, "the cross is cut out of the mouth");
+            assert!((stroke.width - FACE_EDGE_STROKE).abs() < 0.01);
+            let horizontal = (a.y - b.y).abs() < 0.01;
+            let vertical = (a.x - b.x).abs() < 0.01;
+            assert!(
+                horizontal ^ vertical,
+                "the arms are axis-aligned: {a:?}..{b:?}"
+            );
+            assert!(
+                (((*b - *a).length() / 2.0) - mouths[0].1 * JACK_CROSS_FRACTION).abs() < 0.05,
+                "each arm reaches 0.85 of the mouth: {a:?}..{b:?}"
+            );
+        }
+        assert_eq!(
+            mouths[0].0,
+            cuts[0].0.lerp(cuts[0].1, 0.5),
+            "arms cross the centre"
+        );
+
+        // A master's 7 mm jack is a 26.5 pt cell at 1:1, so its ring is 15.9 pt:
+        // the Reduced step — bezel and mouth, **no** cross. The cross returns
+        // only from a 30 pt cell up (ring 18 pt), i.e. above ~113 % zoom on those
+        // jacks. That is the designed ladder, not a missing symbol.
+        let small = jack_face(pt(7.0));
+        let shapes = painted_shapes(&small, false);
+        assert_eq!(stroked_rings(&shapes).len(), 1, "the bezel survives");
+        assert_eq!(
+            filled_discs(&shapes).len(),
+            1,
+            "the mouth survives the reduced step: {shapes:?}"
+        );
+        assert!(
+            face_segments(&shapes).is_empty(),
+            "no cross below an 18 pt ring (26.5 pt cell): {shapes:?}"
+        );
+
+        // An unaddressed jack keeps the whole face, dimmed to the alpha floor
+        // (D5) — the symbol never changes, only its brightness.
+        let mut unused = small.clone();
+        unused.component_index = None;
+        unused.dimmed = true;
+        let shapes = painted_shapes(&unused, false);
+        assert_eq!(
+            stroked_rings(&shapes).len(),
+            1,
+            "an unused jack keeps its face"
+        );
+        assert_eq!(filled_discs(&shapes).len(), 1);
+        let alpha = stroked_rings(&shapes)[0].2.color.a();
+        assert!((120..255).contains(&alpha), "dimmed but legible: {alpha}");
+    }
+
+    #[test]
+    fn the_slot_points_lower_left_up_and_lower_right_across_the_value_range() {
+        // D4: the value rides the slot on a 270° sweep. 0 is 7:30 (down-left),
+        // 0.5 is 12:00 (straight up) and 1 is 4:30 (down-right).
+        let w = pt(12.0);
+        let cell = pot_face(w, 0.0);
+        let (center, radius, _) = stroked_rings(&painted_shapes(&cell, false))[0];
+        let mut dirs = Vec::new();
+        for value in [0.0_f32, 0.5, 1.0] {
+            let mut probe = cell.clone();
+            probe.value_frac = value;
+            let (inner, outer, dir) = painted_slot(&probe);
+            let expected = expected_slot_dir(value);
+            assert!(
+                (dir - expected).length() < 0.01,
+                "value {value}: the slot points {dir:?}, expected {expected:?}"
+            );
+            assert!(
+                ((inner - center).length() - radius * POT_SLOT_INNER_FRACTION).abs() < 0.05,
+                "value {value}: the slot starts 0.28 r out"
+            );
+            assert!(
+                ((outer - center).length() - radius * POT_SLOT_OUTER_FRACTION).abs() < 0.05,
+                "value {value}: the slot ends 0.82 r out"
+            );
+            dirs.push(dir);
+        }
+        // The named readings, in screen coordinates (y grows downward).
+        assert!(
+            dirs[0].x < -0.5 && dirs[0].y > 0.5,
+            "0 points down-left (7:30): {:?}",
+            dirs[0]
+        );
+        assert!(
+            dirs[1].x.abs() < 0.01 && dirs[1].y < -0.99,
+            "0.5 points straight up (12:00): {:?}",
+            dirs[1]
+        );
+        assert!(
+            dirs[2].x > 0.5 && dirs[2].y > 0.5,
+            "1 points down-right (4:30): {:?}",
+            dirs[2]
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_a_pot_moves_the_painted_slot_by_one_step() {
+        // The slot *is* the value channel, so the wheel path must be observable
+        // in the drawing: one notch turns the painted slot by exactly one
+        // `WHEEL_VALUE_STEP` of the 270° sweep, not just the stored value.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut app = app_with_labels("fixtures/module_ui_label_fit.ini", &[]);
+        let hw = hw_index(&app, "P2.1");
+        app.patch.as_mut().unwrap().hw_components[hw].state = ComponentState::Value(0.5);
+        let spec = physical_spec(&app, pane).expect("spec");
+        let before = cell_for_token(&app, &spec, "P2.1").clone();
+        assert!(
+            (before.value_frac - 0.5).abs() < 1e-6,
+            "the slot reads the element's own position: {}",
+            before.value_frac
+        );
+        let dir_before = painted_slot(&before).2;
+
+        let frame = frame_after(
+            before.rect.center(),
+            vec![wheel(true, egui::Modifiers::default())],
+            pane,
+            Some(&spec),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            frame.value_adjust,
+            Some((hw, WHEEL_VALUE_STEP)),
+            "a wheel over the pot adjusts its value"
+        );
+        assert_eq!(frame.zoom, None, "a value wheel must not zoom");
+        crate::handler::handle_physical_frame(&frame, &mut app);
+
+        let spec = physical_spec(&app, pane).expect("spec after the wheel");
+        let after = cell_for_token(&app, &spec, "P2.1").clone();
+        assert!(
+            (after.value_frac - (0.5 + WHEEL_VALUE_STEP)).abs() < 1e-6,
+            "one notch is one step: {}",
+            after.value_frac
+        );
+        let dir_after = painted_slot(&after).2;
+        assert!(
+            (dir_after - expected_slot_dir(0.5 + WHEEL_VALUE_STEP)).length() < 0.01,
+            "the painted slot follows the new value: {dir_after:?}"
+        );
+        let turned = dir_before
+            .dot(dir_after)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        let step_deg = POT_SLOT_SWEEP_DEGREES * WHEEL_VALUE_STEP;
+        assert!(
+            (turned - step_deg).abs() < 0.05,
+            "the slot turned {turned}°, one wheel step is {step_deg}°"
+        );
+    }
+
+    #[test]
+    fn a_face_replaces_the_corner_marker_but_a_jack_keeps_its_direction_glyph() {
+        // D6: `mono` maps `cv_in` and `cv_out` to the same value, so direction
+        // must be carried by the glyph. A pot or encoder has a face instead of
+        // the `◉` corner marker; a jack keeps its `◀`/`▶`.
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let w = pt(12.0);
+        for (name, cell) in [("pot", pot_face(w, 0.5)), ("encoder", encoder_face(w, 0.5))] {
+            let texts = painted_text_runs(&cell);
+            assert!(
+                !texts.iter().any(|(t, _)| t.contains('\u{25C9}')),
+                "{name}: the face replaces the corner marker: {texts:?}"
+            );
+        }
+
+        // The two CV kinds paint the *same* colour in `mono`...
+        assert_eq!(
+            rgb(crate::theme::active().cv_in),
+            rgb(crate::theme::active().cv_out),
+            "mono forbids colour as the direction channel"
+        );
+        // ... so the marker glyph is what tells a CV in from a CV out.
+        let input = jack_face(w);
+        let mut output = input.clone();
+        output.kind = ComponentKind::CvOut;
+        output.glyph = "\u{25B6}".into();
+        output.color = crate::theme::active().cv_out;
+        output.label_color = output.color;
+        let in_texts = painted_text_runs(&input);
+        let out_texts = painted_text_runs(&output);
+        let in_mark = in_texts
+            .iter()
+            .find(|(t, _)| t == "\u{25C0}")
+            .expect("a CV input keeps its ◀ marker");
+        let out_mark = out_texts
+            .iter()
+            .find(|(t, _)| t == "\u{25B6}")
+            .expect("a CV output keeps its ▶ marker");
+        assert_eq!(
+            in_mark.1, out_mark.1,
+            "the two directions paint the same colour here, so the glyph is the channel"
+        );
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_state_row_appears_only_where_the_face_band_holds_it() {
+        // D4: the percentage row is not special-cased — it survives only when the
+        // `h − 0.66 w` band still holds it after the label.
+        let narrow = face_cell(
+            pt(12.0),
+            CellShape::Pot,
+            ComponentKind::Knob,
+            0.5,
+            "Filter cutoff",
+            "50%",
+        );
+        let layout = narrow
+            .label_layout
+            .as_ref()
+            .expect("the 12 mm band fits the long label");
+        assert!(
+            !layout.state_row,
+            "a 12 mm pot's band holds the label, not the row: {layout:?}"
+        );
+        assert!(
+            state_lines(&narrow).is_empty(),
+            "no percentage run paints: {:?}",
+            painted_runs(&narrow)
+        );
+        // The label still takes the band, never the face.
+        let face_bottom =
+            narrow.rect.min.y + crate::physical::FACE_HEIGHT_FRACTION * narrow.rect.width();
+        let lines = label_lines(&narrow);
+        assert!(!lines.is_empty(), "the label still paints: {layout:?}");
+        for (text, _, pos) in lines {
+            assert!(
+                pos.y >= face_bottom - 0.01,
+                "`{text}` paints in the band beneath the face ({pos:?} vs {face_bottom})"
+            );
+        }
+
+        // Zoomed in, the same band is 61 pt and holds the label *and* the row.
+        let wide = face_cell(
+            180.0,
+            CellShape::Pot,
+            ComponentKind::Knob,
+            0.5,
+            "Filter cutoff",
+            "50%",
+        );
+        let layout = wide
+            .label_layout
+            .as_ref()
+            .expect("the wide band fits the label");
+        assert!(
+            layout.state_row,
+            "a 180 pt band holds label and row: {layout:?}"
+        );
+        assert_eq!(state_lines(&wide), vec!["50%".to_string()]);
+        // The row sits below the label lines and bottom-aligns in the band.
+        let label_bottom = label_lines(&wide)
+            .last()
+            .map(|(_, _, pos)| pos.y)
+            .expect("label lines");
+        let row = painted_runs(&wide)
+            .into_iter()
+            .find(|run| run.font.family == egui::FontFamily::Proportional)
+            .expect("the percentage row paints");
+        assert!(
+            row.pos.y > label_bottom,
+            "the row follows the label lines ({} vs {label_bottom})",
+            row.pos.y
+        );
+        assert!(
+            row.pos.y + crate::physical::label_line_height(row.font.size) <= wide.rect.max.y + 0.01,
+            "the row is bottom-aligned in the cell"
+        );
+    }
+
+    #[test]
+    fn an_unused_rotary_drops_the_ring_only_at_the_full_step() {
+        // D5 as built, which deviates from "always drop the ring" on purpose:
+        // only the Full step can carry the difference. At Reduced and Dot the
+        // unaddressed rotary keeps the addressed drawing at the alpha floor,
+        // because a bare slot at the rack fit would read as nothing.
+        let color = crate::theme::active().knob;
+        let mut full = unaddressed_cell(ComponentKind::Knob, color);
+        full.rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(pt(12.0), pt(12.0)));
+        let shapes = painted_shapes(&full, false);
+        assert!(
+            stroked_rings(&shapes).is_empty(),
+            "the ring is what addressing adds at the Full step: {shapes:?}"
+        );
+        assert_eq!(closed_outlines(&shapes).len(), 1, "the nut stays");
+        assert_eq!(filled_discs(&shapes).len(), 1, "the shaft stays");
+        assert_eq!(face_segments(&shapes).len(), 2, "slot + base line stay");
+        let mut encoder = unaddressed_cell(ComponentKind::Encoder, color);
+        encoder.rect = full.rect;
+        let shapes = painted_shapes(&encoder, false);
+        assert!(
+            stroked_rings(&shapes).is_empty(),
+            "the encoder drops it too"
+        );
+        assert_eq!(face_segments(&shapes).len(), 1, "and keeps no base line");
+
+        // The rack fit (ring 10.1 pt) keeps the ring and the slot.
+        let fitted = Rect::from_min_size(
+            Pos2::new(100.0, 100.0),
+            Vec2::new(pt(12.0) * 0.37, pt(12.0) * 0.37),
+        );
+        for (name, kind) in [
+            ("pot", ComponentKind::Knob),
+            ("encoder", ComponentKind::Encoder),
+        ] {
+            let mut cell = unaddressed_cell(kind, color);
+            cell.rect = fitted;
+            let shapes = painted_shapes(&cell, false);
+            let rings = stroked_rings(&shapes);
+            assert_eq!(
+                rings.len(),
+                1,
+                "{name} keeps its ring at the fit: {shapes:?}"
+            );
+            assert!(
+                rings[0].2.color.a() >= 120,
+                "{name} ring stays legible: {rings:?}"
+            );
+            assert_eq!(face_segments(&shapes).len(), 1, "{name} keeps its slot");
+        }
+
+        // Below a 10 pt ring the same ring plus a dot, at the alpha floor.
+        let mut dot = unaddressed_cell(ComponentKind::Knob, color);
+        dot.rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(16.0, 16.0));
+        let shapes = painted_shapes(&dot, false);
+        assert_eq!(
+            stroked_rings(&shapes).len(),
+            1,
+            "the ring holds the position"
+        );
+        assert_eq!(filled_discs(&shapes).len(), 1, "plus the centre dot");
+        assert!(face_segments(&shapes).is_empty());
     }
 
     #[test]
@@ -4059,7 +5241,12 @@ mod tests {
         let cell = spec
             .cells
             .iter()
-            .find(|c| c.shape.is_some() && c.component_index.is_some())
+            .find(|c| {
+                // The composed faces only: a pot, encoder or jack carries a shape
+                // of its own now and its outline is its element token.
+                matches!(c.shape, Some(CellShape::Round | CellShape::Rect))
+                    && c.component_index.is_some()
+            })
             .expect("a composed element cell");
         assert_eq!(
             cell.color, t.muted,
@@ -4875,6 +6062,92 @@ mod tests {
         );
     }
 
+    /// Faceplate-pot-jack-symbols D1 through the real spec: the shape is the
+    /// element kind. A knob is a pot face, an encoder an encoder face, a CV jack
+    /// a jack face; a fader keeps the fader track, a button the composed rule,
+    /// and the label box of every face is the band beneath it.
+    #[test]
+    fn physical_spec_resolves_a_face_shape_per_family() {
+        // One patch addressing a 12 mm P10 pot (`P2.1`), a second pot (`P2.2`), a
+        // P8S8 fader (`P1.1`), a master CV input (`I1`) and a CV output (`O1`).
+        let app = app_with_labels(
+            "fixtures/module_ui_label_fit.ini",
+            &[("P2.1", "Cutoff"), ("I1", "Gate input")],
+        );
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        for token in ["P2.1", "P2.2"] {
+            let cell = cell_for_token(&app, &spec, token);
+            assert_eq!(cell.shape, Some(CellShape::Pot), "{token} is a pot face");
+            assert_eq!(
+                cell_label_box(cell).path,
+                crate::physical::CellTextPath::Face,
+                "{token} fits its label to the band beneath the face"
+            );
+        }
+        // A 12 mm pot is 45.4 pt at 1:1, so its band is 15.4 pt: the 10 pt step
+        // holds the label and the state row no longer fits under it (D4) — which
+        // is what tells the face band apart from the whole-cell box that would
+        // have kept a row here.
+        let pot = cell_for_token(&app, &spec, "P2.1");
+        let layout = pot
+            .label_layout
+            .as_ref()
+            .expect("the pot band fits its label");
+        assert_eq!(layout.lines, vec!["Cutoff".to_string()]);
+        assert_eq!(layout.font, 10.0, "the roomiest step still holds it");
+        assert!(
+            !layout.state_row,
+            "a 45 pt pot's band holds the label, not the percentage row: {layout:?}"
+        );
+        for token in ["I1", "O1"] {
+            let cell = cell_for_token(&app, &spec, token);
+            assert_eq!(cell.shape, Some(CellShape::Jack), "{token} is a jack face");
+            assert_eq!(
+                cell_label_box(cell).path,
+                crate::physical::CellTextPath::Face,
+                "{token} fits its label to the band beneath the face"
+            );
+        }
+        // A `P` register in the geometry's `F` family is a fader: it draws the
+        // track, never a rotary face.
+        let fader = cell_for_token(&app, &spec, "P1.1");
+        assert!(fader.is_fader);
+        assert_eq!(fader.shape, None, "a fader keeps the fader face");
+        // An encoder face needs a bare `[e4]` section (`faceplate_rotary_stack`).
+        let app = app_with_labels("fixtures/faceplate_rotary_stack.ini", &[]);
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let encoder = cell_for_token(&app, &spec, "E4.1");
+        assert_eq!(
+            encoder.kind,
+            ComponentKind::Encoder,
+            "E4.1 is an encoder token"
+        );
+        assert_eq!(
+            encoder.shape,
+            Some(CellShape::Encoder),
+            "an encoder is the endless rotary face"
+        );
+        assert_eq!(
+            cell_label_box(encoder).path,
+            crate::physical::CellTextPath::Face
+        );
+        // A P2B8 button keeps the per-controller composed face, not a hardware
+        // symbol: its LED is the inner fill.
+        let app = app_with_labels("fixtures/own_buttons.ini", &[]);
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let button = cell_for_token(&app, &spec, "B1.1");
+        assert_eq!(button.kind, ComponentKind::Button);
+        assert_eq!(
+            button.shape,
+            Some(CellShape::Round),
+            "a P2B8 button keeps its composed face"
+        );
+        assert_eq!(
+            cell_label_box(button).path,
+            crate::physical::CellTextPath::Composed
+        );
+    }
+
     /// module-ui-label-fit D5 (task 3.6), through a loaded patch: the P8S8
     /// `P1.1` cell reaches the fader face. `is_fader` comes from the geometry
     /// cell's `F` family — the same fact `App`'s label fit classifies as
@@ -4905,9 +6178,9 @@ mod tests {
             "a P8S8 fader cell carries the geometry `F` family flag: {cell:?}"
         );
         assert!(
-            (cell.fader_value - 0.6).abs() < 1e-6,
+            (cell.value_frac - 0.6).abs() < 1e-6,
             "the bar follows the element state, not a guess: {}",
-            cell.fader_value
+            cell.value_frac
         );
         // Fit and painter agree on the path: `App`'s label fit maps a geometry
         // `F` cell to `CellTextPath::Fader`, and the painter's own box — built
@@ -5931,7 +7204,7 @@ mod tests {
     fn p8s8_fader_cell(label: &str) -> CellSpec {
         let mut cell = sized_cell(4.2, 22.0, "", label, "50%");
         cell.is_fader = true;
-        cell.fader_value = 0.5;
+        cell.value_frac = 0.5;
         cell.kind = ComponentKind::Knob;
         cell.color = crate::theme::active().fader_led_bar;
         cell.label_color = crate::theme::active().fader_led_bar;

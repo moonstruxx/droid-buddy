@@ -2534,10 +2534,9 @@ fn sync_window_camera(
 /// cap), so the test rect matches the drawn frame instead of reaching past a
 /// capped node (graph-zoom-node-scaling, design decision 5).
 fn graph_world_sizes(app: &App) -> Vec<(f32, f32)> {
-    app.graph
-        .as_ref()
-        .map(|graph| crate::gui::drawn_world_sizes(app.layout_mode, graph))
-        .unwrap_or_default()
+    app.graph.as_ref().map_or_else(Default::default, |graph| {
+        crate::gui::drawn_world_sizes(app.layout_mode, graph)
+    })
 }
 
 /// The group under the window pointer, as the pane draws it: a collapsed group's
@@ -8419,8 +8418,7 @@ mod tests {
     fn node_world_sizes_of(app: &App) -> Vec<(f32, f32)> {
         app.graph
             .as_ref()
-            .map(crate::layout::node_world_sizes)
-            .unwrap_or_default()
+            .map_or_else(Default::default, crate::layout::node_world_sizes)
     }
 
     #[test]
