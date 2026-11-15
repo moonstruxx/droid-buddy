@@ -4760,7 +4760,7 @@ mod tests {
 
         // The real panel agrees: the P10's P2.1 pot is that size at this fit.
         let mut app = app_with_labels("fixtures/module_ui_label_fit.ini", &[]);
-        app.physical_zoom = fit as f32;
+        app.physical_zoom = fit;
         let spec = physical_spec(&app, perf_pane()).expect("spec at the rack fit");
         let cell = cell_for_token(&app, &spec, "P2.1").clone();
         assert!(
@@ -4891,7 +4891,7 @@ mod tests {
         );
         assert_eq!(filled_discs(&shapes).len(), 1);
         let alpha = stroked_rings(&shapes)[0].2.color.a();
-        assert!(alpha >= 120 && alpha < 255, "dimmed but legible: {alpha}");
+        assert!((120..255).contains(&alpha), "dimmed but legible: {alpha}");
     }
 
     #[test]

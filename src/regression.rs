@@ -1902,8 +1902,7 @@ fn painted_graph_label_sizes(scene: &crate::graph_render::SceneSpec) -> Vec<f32>
                 .job
                 .sections
                 .first()
-                .map(|s| s.format.font_id.clone())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |s| s.format.font_id.clone());
             if font.family == egui::FontFamily::Monospace {
                 sizes.push(font.size);
             }
@@ -1989,8 +1988,7 @@ fn painted_physical_label_sizes(zoom: f32) -> (Vec<CellLabelStep>, Vec<CellLabel
             .job
             .sections
             .first()
-            .map(|s| s.format.font_id.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |s| s.format.font_id.clone());
         if font.family != egui::FontFamily::Monospace {
             continue;
         }
@@ -3171,9 +3169,9 @@ fn regression_shift_colour_module_ui_tint_and_noop() {
     let patch = Patch::from_ini_file(Path::new(path)).expect("fixture must parse");
 
     let token_of = |app: &App, index: Option<usize>| -> String {
-        index
-            .map(|i| app.patch.as_ref().unwrap().hw_components[i].id.clone())
-            .unwrap_or_default()
+        index.map_or_else(Default::default, |i| {
+            app.patch.as_ref().unwrap().hw_components[i].id.clone()
+        })
     };
 
     // No-shift baseline.
@@ -4917,8 +4915,7 @@ fn regression_faceplate_faces_lift_the_labels_fit_to_the_band() {
         .expect("the fit trigger must report the zoom it applied");
     assert!(
         (f64::from(fitted) - rack_fit.max(FACE_MULTIROW_LABEL_LIFT)).abs() < 1e-6,
-        "the fit must be the greater of the rack fit {rack_fit} and the face band's lift {}: {fitted}",
-        FACE_MULTIROW_LABEL_LIFT
+        "the fit must be the greater of the rack fit {rack_fit} and the face band's lift {FACE_MULTIROW_LABEL_LIFT}: {fitted}"
     );
     assert!(
         f64::from(fitted) > rack_fit,
@@ -5181,11 +5178,11 @@ fn regression_faceplate_faces_relock_the_inventoried_master_to_the_band() {
         .physical_fit_zoom
         .expect("the fit trigger must report the zoom it applied");
     assert!(
-        (fitted as f64 - rack_fit.max(FACE_MULTIROW_LABEL_LIFT)).abs() < 1e-6,
+        (f64::from(fitted) - rack_fit.max(FACE_MULTIROW_LABEL_LIFT)).abs() < 1e-6,
         "the master's jack label must lift the fit to the face band: {fitted} vs rack {rack_fit}"
     );
     assert!(
-        fitted as f64 > rack_fit,
+        f64::from(fitted) > rack_fit,
         "the band lifts the inventoried master's fit above the rack fit: {fitted} vs {rack_fit}"
     );
     // Before the change the whole-cell box answered 0.76 for the same jack,

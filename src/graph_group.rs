@@ -1393,9 +1393,9 @@ mod tests {
             );
             assert_eq!(view.groups[0].members, (0..5).collect::<Vec<_>>());
             assert_eq!(view.groups[0].circuit, "copy");
-            for node in 5..9 {
+            for (node, drawn) in view.nodes.iter().enumerate().skip(5) {
                 assert_eq!(
-                    view.nodes[node],
+                    *drawn,
                     ViewNode::Individual(node),
                     "{policy:?}: a four-member component stays individual"
                 );
