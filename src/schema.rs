@@ -415,6 +415,25 @@ pub fn load_schema() -> &'static Schema {
     installed
 }
 
+/// Map the embedded JSON's `RawParam` onto `CircuitParam`. A circuit's `inputs`
+/// and `outputs` carry the same field set, so both key spaces go through this
+/// one mapping rather than a copied block per side.
+fn embedded_param(p: RawParam) -> CircuitParam {
+    CircuitParam {
+        name: p.name,
+        short: p.short,
+        param_type: p.param_type,
+        default: p.default,
+        description: p.description,
+        essential: p.essential,
+        ramhint: p.ramhint,
+        autotitle: p.autotitle,
+        prefix: p.prefix,
+        count: p.count,
+        start_at: p.start_at,
+    }
+}
+
 /// Parse the embedded `circuits.json` into the schema shape. Pure; the
 /// fallback path of `load_schema` calls this at most once per process.
 fn parse_embedded() -> Schema {
@@ -431,40 +450,8 @@ fn parse_embedded() -> Schema {
                 title: def.title,
                 description: def.description,
                 ramsize: def.ramsize.unwrap_or(0),
-                inputs: def
-                    .inputs
-                    .into_iter()
-                    .map(|p| CircuitParam {
-                        name: p.name,
-                        short: p.short,
-                        param_type: p.param_type,
-                        default: p.default,
-                        description: p.description,
-                        essential: p.essential,
-                        ramhint: p.ramhint,
-                        autotitle: p.autotitle,
-                        prefix: p.prefix,
-                        count: p.count,
-                        start_at: p.start_at,
-                    })
-                    .collect(),
-                outputs: def
-                    .outputs
-                    .into_iter()
-                    .map(|p| CircuitParam {
-                        name: p.name,
-                        short: p.short,
-                        param_type: p.param_type,
-                        default: p.default,
-                        description: p.description,
-                        essential: p.essential,
-                        ramhint: p.ramhint,
-                        autotitle: p.autotitle,
-                        prefix: p.prefix,
-                        count: p.count,
-                        start_at: p.start_at,
-                    })
-                    .collect(),
+                inputs: def.inputs.into_iter().map(embedded_param).collect(),
+                outputs: def.outputs.into_iter().map(embedded_param).collect(),
                 presets: def.presets,
                 manual: def.manual,
                 cable_kind: None,

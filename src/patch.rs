@@ -736,7 +736,7 @@ impl Patch {
     /// than overwritten, and the write is atomic (temp file + rename, same
     /// pattern as `LabelStore`). Returns the path actually written.
     pub fn write_to_ini(&self, source: &Path, dest: &Path) -> Result<PathBuf, String> {
-        if canonical_str(source) == canonical_str(dest) {
+        if crate::store::canonical_key(source) == crate::store::canonical_key(dest) {
             return Err(format!(
                 "refusing to overwrite the source patch {} (save-as only)",
                 source.display()
@@ -3141,24 +3141,6 @@ fn block_slice_by_headers(
 /// Whole-line `#` comment or `# ---- Name ----` banner (trimmed start).
 fn is_comment_line(line: &str) -> bool {
     line.trim_start().starts_with('#')
-}
-
-/// Canonicalized absolute path string for identity comparison: real canonical
-/// path when the file exists, otherwise an absolute join against `current_dir`.
-/// Mirrors `LabelStore::canonical_key`, which `patch` cannot import (layered
-/// dependency direction).
-fn canonical_str(path: &Path) -> String {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical.to_string_lossy().to_string();
-    }
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    absolute.to_string_lossy().to_string()
 }
 
 /// First free auto-suffix of `dest` (`foo.ini` → `foo-1.ini` → `foo-2.ini` …)

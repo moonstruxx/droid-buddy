@@ -1411,36 +1411,8 @@ mod tests {
 
         // Independent brute force: enumerate all 4! permutations of the four
         // sections (names distinct → all valid), score, keep the best.
-        let mut best: Option<(Vec<usize>, LatencySummary)> = None;
-        let mut perm = vec![0usize, 1, 2, 3];
-        let mut stack = [0usize; 4];
-        let mut i = 0usize;
-        loop {
-            let summary = evaluate_order(&perm, &eval);
-            let take = match &best {
-                None => true,
-                Some((_, bs)) => better(&summary, bs, Objective::MinSum),
-            };
-            if take {
-                best = Some((perm.clone(), summary));
-            }
-            if i >= 4 {
-                break;
-            }
-            if stack[i] < i {
-                if i.is_multiple_of(2) {
-                    perm.swap(0, i);
-                } else {
-                    perm.swap(stack[i], i);
-                }
-                stack[i] += 1;
-                i = 0;
-            } else {
-                stack[i] = 0;
-                i += 1;
-            }
-        }
-        let (brute_order, brute_summary) = best.expect("brute force found a best");
+        let (brute_order, brute_summary) =
+            brute_force_best(patch.sections.len(), &eval, Objective::MinSum);
         assert_eq!(candidates[0].order, brute_order);
         assert_eq!(candidates[0].after, brute_summary);
         assert_eq!(candidates[0].after.avg, 1.0);
@@ -1640,6 +1612,47 @@ mod tests {
              in2 = _DA\n\
              output = _AB\n",
         )
+    }
+
+    /// Reference search for the tests that guard the ordering engine: Heap's
+    /// algorithm over all `n!` permutations of `0..n`, each scored by
+    /// `evaluate_order` and kept when `better` prefers it. Deliberately brute
+    /// force with no pruning, so it shares nothing with the engine it checks.
+    fn brute_force_best(
+        n: usize,
+        eval: &EvalCtx<'_>,
+        objective: Objective,
+    ) -> (Vec<usize>, LatencySummary) {
+        let mut perm: Vec<usize> = (0..n).collect();
+        let mut stack = vec![0usize; n];
+        let mut best: Option<(Vec<usize>, LatencySummary)> = None;
+        let mut i = 0usize;
+        loop {
+            let summary = evaluate_order(&perm, eval);
+            let take = match &best {
+                None => true,
+                Some((_, bs)) => better(&summary, bs, objective),
+            };
+            if take {
+                best = Some((perm.clone(), summary));
+            }
+            if i >= n {
+                break;
+            }
+            if stack[i] < i {
+                if i.is_multiple_of(2) {
+                    perm.swap(0, i);
+                } else {
+                    perm.swap(stack[i], i);
+                }
+                stack[i] += 1;
+                i = 0;
+            } else {
+                stack[i] = 0;
+                i += 1;
+            }
+        }
+        best.expect("brute force found a best")
     }
 
     fn assert_full_permutation(order: &[usize], section_count: usize) {
@@ -2352,36 +2365,8 @@ mod tests {
         for w in [0.0, 0.4, 1.0] {
             let objective = Objective::weighted(w);
             // Independent brute force: Heap's algorithm over all 8! permutations.
-            let mut perm: Vec<usize> = (0..patch.sections.len()).collect();
-            let mut stack = [0usize; 8];
-            let mut best: Option<(Vec<usize>, LatencySummary)> = None;
-            let mut i = 0usize;
-            loop {
-                let summary = evaluate_order(&perm, &eval);
-                let take = match &best {
-                    None => true,
-                    Some((_, bs)) => better(&summary, bs, objective),
-                };
-                if take {
-                    best = Some((perm.clone(), summary));
-                }
-                if i >= 8 {
-                    break;
-                }
-                if stack[i] < i {
-                    if i.is_multiple_of(2) {
-                        perm.swap(0, i);
-                    } else {
-                        perm.swap(stack[i], i);
-                    }
-                    stack[i] += 1;
-                    i = 0;
-                } else {
-                    stack[i] = 0;
-                    i += 1;
-                }
-            }
-            let (brute_order, brute_summary) = best.expect("brute force found a best");
+            let (brute_order, brute_summary) =
+                brute_force_best(patch.sections.len(), &eval, objective);
             assert_eq!(
                 brute_summary.back_edge_count, 0,
                 "the all-forward chain order is the unique optimum for w={w}"
