@@ -1045,251 +1045,349 @@ fn begin_hw_label_edit(app: &mut App, index: usize) -> bool {
     true
 }
 
+/// The graph surface's key table (`g g`), routed only while the graph pane holds
+/// focus (spec "Keys route to the focused view"). Global keys (`q`, Ctrl+C, `l`)
+/// fall through to the shared dispatch by answering `None`.
+///
+/// The steps below are the table's own sections, one per responsibility. Their
+/// codes are disjoint, so the order between them is arbitrary, and a code no
+/// section claims falls straight through to the shared table — the same answer
+/// the single `match` gave. Grouping runs first because its rows own `o`,
+/// `Enter` and `Shift+O` and answer `false` again when nothing is hovered: `Enter`
+/// must still reach the shared element chord, and `g o` never arrives here at all
+/// (the armed prefix step sits earlier in the chain, so the chord still opens the
+/// optimizer).
 fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
-    // Graph surface handling (`g g`), routed only while the graph pane holds
-    // focus (spec "Keys route to the focused view"). Global keys (`q`,
-    // Ctrl+C, `l`) fall through to the shared dispatch below.
     if app.view_focused(ViewType::Graph) {
-        match key.code {
-            KeyCode::Char('p') => {
-                // Task 3.1 (design D7): `p` toggles pin/unpin on the hovered
-                // graph node, mirroring the `x` processing toggle. Silent
-                // no-op without hover; the rebuild + re-solve re-anchors the
-                // layout. Processing pause stays on `p` on every other
-                // surface.
-                if let Some(idx) = app.hovered_graph_node {
-                    graph_node_pin_toggle(app, idx);
-                }
-                return Some(false);
-            }
-            KeyCode::Char('c') => {
-                // Bare `c` centers the graph in the visible pane (design D3);
-                // Ctrl+C (quit) is matched above with its modifier guard.
-                app.center_graph_camera();
-                return Some(false);
-            }
-            KeyCode::Char('C') => {
-                // Shift+c (winit reports Shift+c as `Char('C')`): refit the
-                // camera to the published pane size and reset the preset to
-                // the fitted zoom (design D3/D4).
-                let viewport = app.graph_canvas_px.unwrap_or((1280.0, 800.0));
-                app.fit_graph_camera(viewport);
-                app.status_message = format!(
-                    "Graph zoom {:.0}%",
-                    App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] * 100.0
-                );
-                return Some(false);
-            }
-            KeyCode::Char('x') => {
-                if let Some(idx) = app.hovered_graph_node {
-                    graph_node_processing_toggle(app, idx);
-                }
-                return Some(false);
-            }
-            KeyCode::Char('f') => {
-                // Change D task 2.1: `f` toggles the upstream dependency
-                // filter rooted at the hovered node (fallback: the shared
-                // circuit selection); a second `f` restores the full graph.
-                app.toggle_dependency_filter();
-                return Some(false);
-            }
-            KeyCode::Char('i') => {
-                // Change D task 2.1: `i` toggles the influence-filtered induced
-                // subgraph rooted at the hovered node (fallback: the shared
-                // circuit selection); a second `i` restores the full graph.
-                app.toggle_influence_filter();
-                return Some(false);
-            }
-            KeyCode::Char('o') => {
-                // graph-same-type-grouping D4/D7: `o` isolates the hovered
-                // group as its own subset — the induced-subgraph shape the
-                // `f`/`i` filters already use — falling back to the group
-                // holding the shared circuit selection. With neither there is
-                // no group to isolate, so the press is silent and inert (spec
-                // "Isolate without a group is inert"). The `g o` chord still
-                // opens the optimizer: the prefix step runs before this table.
-                //
-                // An isolate restores from its own state first, and
-                // unconditionally: isolating draws the group through its
-                // members, which drops the hover that opened it (the index
-                // belonged to the grouping answer that just changed), so
-                // resolving the target from the pointer alone would leave the
-                // second press inert until the user hovered a group again.
-                let target = app
-                    .isolated_group
-                    .or(app.hovered_group)
-                    .or_else(|| app.selected_group());
-                if let Some(group) = target {
-                    app.toggle_group_isolated(group);
-                }
-                return Some(false);
-            }
-            KeyCode::Enter => {
-                // graph-same-type-grouping D7: `Enter` opens or closes the
-                // group under the pointer as the pane draws it — a collapsed
-                // box or an expanded group's outline, both of which publish
-                // `hovered_group` (`toggle_group_in_place`). Without one it
-                // falls through untouched, so the shared element chord keeps
-                // its own hovered-component rule and an inert press reports
-                // nothing (spec "Expansion without a group is inert").
-                if let Some(group) = app.hovered_group {
-                    toggle_group_in_place(app, group);
-                    return Some(false);
-                }
-            }
-            KeyCode::Char('O') => {
-                // Shift+O (winit reports it as `Char('O')`) turns the grouping
-                // pass on or off for the whole graph — the runtime reversal
-                // design D1 relies on. Group-view preference, not patch state.
-                app.toggle_graph_grouping();
-                return Some(false);
-            }
-            KeyCode::Char('h') if app.view_focused(ViewType::Graph) => {
-                // graph-column-layout D5: `h` cycles through column, force, and
-                // sections modes on the focused graph pane. Flipping the mode
-                // then rebuilding re-solves under the new arrangement
-                // (`solve_graph_positions` dispatches by mode) and emits
-                // GraphRebuilt; the status mirrors the tension hint. The mode
-                // order matches the `a` arrangement cycle's mode order
-                // (column → force → sections), so the two user-facing
-                // arrangement controls agree (sections-black-hole-solver 5.2).
-                app.layout_mode = match app.layout_mode {
-                    crate::config::LayoutMode::Column => crate::config::LayoutMode::Force,
-                    crate::config::LayoutMode::Force => crate::config::LayoutMode::Sections,
-                    crate::config::LayoutMode::Sections => crate::config::LayoutMode::Column,
-                };
-                app.status_message = match app.layout_mode {
-                    crate::config::LayoutMode::Column => String::from("Layout: column"),
-                    crate::config::LayoutMode::Force => String::from("Layout: force"),
-                    crate::config::LayoutMode::Sections => String::from("Layout: sections"),
-                };
-                if app.graph.is_some() {
-                    app.rebuild_graph();
-                }
-                return Some(false);
-            }
-            KeyCode::Char('a') => {
-                // graph-arrange-cycle 2.2: `a` applies the active arrangement
-                // (rebuild + refit) and cycles layouts on repeat presses.
-                // Graph-pane-only, like `h`/`c` above.
-                app.apply_arrangement();
-                return Some(false);
-            }
-            KeyCode::Char('A') => {
-                // sections-black-hole-solver 3.2 (design D5) +
-                // force-arrangement-nonoverlap-and-sliders D7: `A` applies the
-                // active arrangement's Arrange action without cycling it —
-                // sections re-anneals from the current positions, force
-                // re-solves from its seed under the current knobs. No conflict
-                // with lowercase `a` (arrangement cycle): winit reports Shift+a
-                // as `Char('A')`, a distinct code. Column has no forces, so it
-                // falls through to the shared dispatch below.
-                match app.layout_mode {
-                    crate::config::LayoutMode::Sections => {
-                        app.arrange_sections();
-                        return Some(false);
-                    }
-                    crate::config::LayoutMode::Force => {
-                        app.arrange_force();
-                        return Some(false);
-                    }
-                    crate::config::LayoutMode::Column => {}
-                }
-            }
-            // `S` toggles the sliders panel of the active arrangement
-            // (sections-black-hole-solver 5.2 + force-arrangement-nonoverlap-
-            // and-sliders D7). Force and sections own the panel (three knobs
-            // each); the status names the arrangement it belongs to.
-            KeyCode::Char('S') => {
-                let arrangement = match app.layout_mode {
-                    crate::config::LayoutMode::Force => Some("force"),
-                    crate::config::LayoutMode::Sections => Some("sections"),
-                    crate::config::LayoutMode::Column => None,
-                };
-                let Some(name) = arrangement else {
-                    // Column lays out no panel: there is nothing to tune, so
-                    // report that rather than opening one (design D7).
-                    app.status_message = String::from("Column arrangement has no forces to tune");
-                    return Some(false);
-                };
-                app.showing_sliders = !app.showing_sliders;
-                let state = if app.showing_sliders { "on" } else { "off" };
-                app.status_message = format!("Sliders panel: {state} ({name})");
-                return Some(false);
-            }
-            // Lowercase `s` is the sections panel's historical toggle and stays
-            // sections-only, so in the other arrangements it keeps falling
-            // through to the shared dispatch below (open/focus the module-UI
-            // pane, and toggle the skeleton inside it).
-            KeyCode::Char('s') => {
-                if app.layout_mode == crate::config::LayoutMode::Sections {
-                    app.showing_sliders = !app.showing_sliders;
-                    app.status_message = if app.showing_sliders {
-                        String::from("Sliders panel: on (sections)")
-                    } else {
-                        String::from("Sliders panel: off (sections)")
-                    };
-                    return Some(false);
-                }
-            }
-            KeyCode::Char('+' | '-') => {
-                // Zoom family (change `tiled-window-manager`, 4.2): plain
-                // scales the focused pane (graph camera zoom when the graph
-                // slot is focused), `Shift` scales the other pane. The
-                // camera re-seeds a fit on open; pan/zoom both re-emit the
-                // image on the next draw (drag/hover/x/e are unchanged).
-                let plus = matches!(key.code, KeyCode::Char('+'));
-                let step = if plus { 1 } else { -1 };
-                if key.modifiers.shift == app.view_focused(ViewType::Graph) {
-                    cycle_panel_scale(app, plus);
-                } else {
-                    app.graph_zoom_preset_step(step);
-                }
-                return Some(false);
-            }
-            KeyCode::Char('[' | ']') => {
-                // `Alt` adjusts cable tension on the focused graph pane (design
-                // D9: determinism holds per tension value); plain brackets move
-                // the left/right big-pane boundary (spec "Adaptive pane
-                // layout"). The optimizer pane's weight slider returns before
-                // this branch.
-                if key.modifiers.alt {
-                    let dir = if matches!(key.code, KeyCode::Char(']')) {
-                        1
-                    } else {
-                        -1
-                    };
-                    app.adjust_tension(dir);
-                    return Some(false);
-                }
-                let delta = if matches!(key.code, KeyCode::Char('[')) {
-                    -0.1
-                } else {
-                    0.1
-                };
-                app.status_message = adjust_big_boundary(app, delta);
-                return Some(false);
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
-                // Task 2.3: arrows pan the graph camera on the graph surface
-                // (mirrors the physical pan-on-overflow model, but gated to the
-                // graph's own camera). When the camera has not been seeded yet
-                // (the box-drawing path), this is a no-op so navigation is
-                // unchanged.
-                let (dx, dy) = match key.code {
-                    KeyCode::Left => (-1, 0),
-                    KeyCode::Right => (1, 0),
-                    KeyCode::Up => (0, -1),
-                    KeyCode::Down => (0, 1),
-                    _ => (0, 0),
-                };
-                app.graph_pan_if_overflow(dx, dy);
-                return Some(false);
-            }
-            _ => {}
+        if handle_grouping_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_node_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_camera_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_filter_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_layout_mode_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_arrangement_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_sliders_key(app, &key.code) {
+            return Some(false);
+        }
+        if handle_graph_scale_key(key, app) {
+            return Some(false);
         }
     }
     None
+}
+
+/// The graph pane's group-view rows: `o` isolates a group, `Enter` opens or
+/// closes it in place, `Shift+O` turns the grouping pass on or off. `true` means
+/// this table answered the key.
+///
+/// `Enter` answers `false` when no group is hovered, so the shared element chord
+/// keeps it and an inert press reports nothing (spec "Expansion without a group
+/// is inert").
+fn handle_grouping_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('o') => {
+            // graph-same-type-grouping D4/D7: `o` isolates the hovered group as
+            // its own subset — the induced-subgraph shape the `f`/`i` filters
+            // already use — falling back to the group holding the shared circuit
+            // selection. With neither there is no group to isolate, so the press
+            // is silent and inert (spec "Isolate without a group is inert").
+            //
+            // An isolate restores from its own state first, and unconditionally:
+            // isolating draws the group through its members, which drops the
+            // hover that opened it (the index belonged to the grouping answer
+            // that just changed), so resolving the target from the pointer alone
+            // would leave the second press inert until the user hovered a group
+            // again.
+            let target = app
+                .isolated_group
+                .or(app.hovered_group)
+                .or_else(|| app.selected_group());
+            if let Some(group) = target {
+                app.toggle_group_isolated(group);
+            }
+            true
+        }
+        KeyCode::Enter => {
+            // graph-same-type-grouping D7: `Enter` acts on the group under the
+            // pointer as the pane draws it — a collapsed box or an expanded
+            // group's outline, both of which publish `hovered_group`
+            // (`toggle_group_in_place`).
+            let Some(group) = app.hovered_group else {
+                return false;
+            };
+            toggle_group_in_place(app, group);
+            true
+        }
+        KeyCode::Char('O') => {
+            // Shift+O (winit reports it as `Char('O')`) turns the grouping pass on
+            // or off for the whole graph — the runtime reversal design D1 relies
+            // on. Group-view preference, not patch state.
+            app.toggle_graph_grouping();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's hovered-node rows: `p` pins and `x` pauses processing on the
+/// node under the pointer. Both are silent no-ops with no hover, and both answer
+/// `true` so the key never reaches another surface (pause stays on `p` there).
+fn handle_graph_node_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('p') => {
+            // Task 3.1 (design D7): `p` toggles pin/unpin on the hovered
+            // graph node, mirroring the `x` processing toggle. Silent
+            // no-op without hover; the rebuild + re-solve re-anchors the
+            // layout.
+            if let Some(idx) = app.hovered_graph_node {
+                graph_node_pin_toggle(app, idx);
+            }
+            true
+        }
+        KeyCode::Char('x') => {
+            if let Some(idx) = app.hovered_graph_node {
+                graph_node_processing_toggle(app, idx);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's camera rows: `c` centers, `Shift+c` refits, the arrows pan.
+/// `true` means the key belonged here.
+fn handle_graph_camera_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('c') => {
+            // Bare `c` centers the graph in the visible pane (design D3);
+            // Ctrl+C (quit) is matched above with its modifier guard.
+            app.center_graph_camera();
+            true
+        }
+        KeyCode::Char('C') => {
+            // Shift+c (winit reports Shift+c as `Char('C')`): refit the
+            // camera to the published pane size and reset the preset to
+            // the fitted zoom (design D3/D4).
+            let viewport = app.graph_canvas_px.unwrap_or((1280.0, 800.0));
+            app.fit_graph_camera(viewport);
+            app.status_message = format!(
+                "Graph zoom {:.0}%",
+                App::GRAPH_ZOOM_PRESETS[App::GRAPH_ZOOM_FIT_INDEX] * 100.0
+            );
+            true
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
+            // Task 2.3: arrows pan the graph camera on the graph surface
+            // (mirrors the physical pan-on-overflow model, but gated to the
+            // graph's own camera). When the camera has not been seeded yet
+            // (the box-drawing path), this is a no-op so navigation is
+            // unchanged.
+            let (dx, dy) = match code {
+                KeyCode::Left => (-1, 0),
+                KeyCode::Right => (1, 0),
+                KeyCode::Up => (0, -1),
+                KeyCode::Down => (0, 1),
+                _ => (0, 0),
+            };
+            app.graph_pan_if_overflow(dx, dy);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's filter rows: `f` for the dependency filter, `i` for the
+/// influence filter. Both root at the hovered node and fall back to the shared
+/// circuit selection; a second press of either restores the full graph.
+fn handle_graph_filter_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('f') => {
+            // Change D task 2.1: `f` toggles the upstream dependency
+            // filter rooted at the hovered node (fallback: the shared
+            // circuit selection); a second `f` restores the full graph.
+            app.toggle_dependency_filter();
+            true
+        }
+        KeyCode::Char('i') => {
+            // Change D task 2.1: `i` toggles the influence-filtered induced
+            // subgraph rooted at the hovered node (fallback: the shared
+            // circuit selection); a second `i` restores the full graph.
+            app.toggle_influence_filter();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's layout-mode row: `h` cycles column → force → sections on the
+/// focused pane.
+///
+/// graph-column-layout D5: flipping the mode then rebuilding re-solves under the
+/// new arrangement (`solve_graph_positions` dispatches by mode) and emits
+/// `GraphRebuilt`; the status mirrors the tension hint. The mode order matches the
+/// `a` arrangement cycle's order, so the two user-facing arrangement controls
+/// agree (sections-black-hole-solver 5.2).
+fn handle_graph_layout_mode_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('h') if app.view_focused(ViewType::Graph) => {
+            app.layout_mode = match app.layout_mode {
+                crate::config::LayoutMode::Column => crate::config::LayoutMode::Force,
+                crate::config::LayoutMode::Force => crate::config::LayoutMode::Sections,
+                crate::config::LayoutMode::Sections => crate::config::LayoutMode::Column,
+            };
+            app.status_message = match app.layout_mode {
+                crate::config::LayoutMode::Column => String::from("Layout: column"),
+                crate::config::LayoutMode::Force => String::from("Layout: force"),
+                crate::config::LayoutMode::Sections => String::from("Layout: sections"),
+            };
+            if app.graph.is_some() {
+                app.rebuild_graph();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's arrangement rows: `a` applies the active arrangement and
+/// cycles on repeat, `Shift+A` applies it without cycling.
+///
+/// `Shift+A` answers `false` in column mode, which lays out no forces: the press
+/// then falls through to the shared dispatch, as it always did.
+fn handle_graph_arrangement_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('a') => {
+            // graph-arrange-cycle 2.2: `a` applies the active arrangement
+            // (rebuild + refit) and cycles layouts on repeat presses.
+            // Graph-pane-only, like `h`/`c`.
+            app.apply_arrangement();
+            true
+        }
+        KeyCode::Char('A') => {
+            // sections-black-hole-solver 3.2 (design D5) +
+            // force-arrangement-nonoverlap-and-sliders D7: `A` applies the
+            // active arrangement's Arrange action without cycling it —
+            // sections re-anneals from the current positions, force
+            // re-solves from its seed under the current knobs. No conflict
+            // with lowercase `a` (arrangement cycle): winit reports Shift+a
+            // as `Char('A')`, a distinct code.
+            match app.layout_mode {
+                crate::config::LayoutMode::Sections => {
+                    app.arrange_sections();
+                    true
+                }
+                crate::config::LayoutMode::Force => {
+                    app.arrange_force();
+                    true
+                }
+                crate::config::LayoutMode::Column => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's sliders rows: `Shift+S` toggles the active arrangement's
+/// panel, lowercase `s` toggles the sections panel only.
+///
+/// Lowercase `s` is the sections panel's historical toggle, so in the other
+/// arrangements it answers `false` and keeps falling through to the shared
+/// dispatch (open/focus the module-UI pane, and toggle the skeleton inside it).
+fn handle_graph_sliders_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        // `S` toggles the sliders panel of the active arrangement
+        // (sections-black-hole-solver 5.2 + force-arrangement-nonoverlap-
+        // and-sliders D7). Force and sections own the panel (three knobs
+        // each); the status names the arrangement it belongs to.
+        KeyCode::Char('S') => {
+            let arrangement = match app.layout_mode {
+                crate::config::LayoutMode::Force => Some("force"),
+                crate::config::LayoutMode::Sections => Some("sections"),
+                crate::config::LayoutMode::Column => None,
+            };
+            let Some(name) = arrangement else {
+                // Column lays out no panel: there is nothing to tune, so
+                // report that rather than opening one (design D7).
+                app.status_message = String::from("Column arrangement has no forces to tune");
+                return true;
+            };
+            app.showing_sliders = !app.showing_sliders;
+            let state = if app.showing_sliders { "on" } else { "off" };
+            app.status_message = format!("Sliders panel: {state} ({name})");
+            true
+        }
+        KeyCode::Char('s') => {
+            if app.layout_mode != crate::config::LayoutMode::Sections {
+                return false;
+            }
+            app.showing_sliders = !app.showing_sliders;
+            app.status_message = if app.showing_sliders {
+                String::from("Sliders panel: on (sections)")
+            } else {
+                String::from("Sliders panel: off (sections)")
+            };
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The graph pane's scale rows: `+`/`-` scale a pane or step the zoom preset,
+/// `[`/`]` set cable tension (`Alt`) or move the big-pane boundary. The modifiers
+/// pick the meaning, so this one reads the whole event.
+///
+/// The zoom family is change `tiled-window-manager` 4.2: plain scales the focused
+/// pane (graph camera zoom when the graph slot is focused), `Shift` scales the
+/// other one. The camera re-seeds a fit on open; pan/zoom both re-emit the image
+/// on the next draw (drag/hover/x/e are unchanged).
+fn handle_graph_scale_key(key: &KeyEvent, app: &mut App) -> bool {
+    match key.code {
+        KeyCode::Char('+' | '-') => {
+            let plus = matches!(key.code, KeyCode::Char('+'));
+            let step = if plus { 1 } else { -1 };
+            if key.modifiers.shift == app.view_focused(ViewType::Graph) {
+                cycle_panel_scale(app, plus);
+            } else {
+                app.graph_zoom_preset_step(step);
+            }
+            true
+        }
+        KeyCode::Char('[' | ']') => {
+            // `Alt` adjusts cable tension on the focused graph pane (design
+            // D9: determinism holds per tension value); plain brackets move
+            // the left/right big-pane boundary (spec "Adaptive pane
+            // layout"). The optimizer pane's weight slider returns before
+            // this branch.
+            if key.modifiers.alt {
+                let dir = if matches!(key.code, KeyCode::Char(']')) {
+                    1
+                } else {
+                    -1
+                };
+                app.adjust_tension(dir);
+                return true;
+            }
+            let delta = if matches!(key.code, KeyCode::Char('[')) {
+                -0.1
+            } else {
+                0.1
+            };
+            app.status_message = adjust_big_boundary(app, delta);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn handle_viewer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
@@ -2248,6 +2346,10 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
 /// yet (graph not fitted) means nothing is interactive. The windowed loop in
 /// `main.rs` owns both the window and the `App`, so it calls this once per
 /// painted frame (D6: the loop acts on what it owns).
+///
+/// Read as resolve pointer → resolve targets → dispatch. The steps are the
+/// frame's stages in their original order; the ones that used to end the frame
+/// with an early `return` say so through a `bool` instead.
 pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App) {
     // Reap a finished background upload (same non-blocking poll as the key
     // path, so mouse-only frames still land the verdict).
@@ -2259,179 +2361,245 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     if app.showing_picker {
         return;
     }
-    // Module UI (Physical pane) pointer routing. The window frame is the only
-    // live pointer path, and the module UI has no graph: handle hover/click on
-    // the rack before the graph-camera gate so it works with no graph open.
-    if let Some((px, py)) = frame.pointer {
-        let col = px.round().max(0.0) as u16;
-        let row = py.round().max(0.0) as u16;
-        let in_physical_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
-            app.layout.pane(*id).view == Some(ViewType::Physical) && rect_contains(*rect, col, row)
-        });
-        if in_physical_pane {
-            let hit = app
-                .component_rects
-                .iter()
-                .find(|(_, rect)| rect_contains(*rect, col, row))
-                .map(|(idx, _)| *idx);
-            app.hovered_component = hit;
-            if frame.primary_pressed {
-                focus_pane_at(app, col, row);
-                if let Some(idx) = hit {
-                    let token_id = app
-                        .patch
-                        .as_ref()
-                        .and_then(|p| p.hw_components.get(idx))
-                        .map(|c| c.id.clone());
-                    if let Some(token) = token_id {
-                        // Click semantics (droid_tui-8ia, decided): a left-click
-                        // on a module-UI element FOCUSES it across surfaces and
-                        // never toggles state — the element stays selected, the
-                        // source pane jumps to its occurrence, and the graph
-                        // highlights its register entity + influence subtree.
-                        // State toggle stays on Enter/Space over the hovered
-                        // cell (`handle_event`).
-                        app.select_component(token.clone());
-                        // Focus the graph on the element's own node(s) when the
-                        // graph pane is open (its camera + canvas are then
-                        // published). `select_component` already filled the
-                        // influence set with the register endpoints.
-                        if app.pane_holding(ViewType::Graph).is_some() {
-                            let focus = app.influence.as_ref().map(|s| s.influenced_nodes.clone());
-                            if let Some(focus) = focus {
-                                app.center_graph_camera_on_nodes(&focus);
-                            }
-                        }
-                        app.status_message = format!("Focused: {token}");
-                    }
-                }
-            }
-            return;
-        }
-        // Pointer is over a different pane: drop a stale module-UI hover, then
-        // fall through to the graph logic unchanged.
-        app.hovered_component = None;
+    // The panes that take the pointer without a graph own the frame first; a
+    // pointer over one of them never reaches the graph beneath.
+    if route_physical_pane_pointer(frame, app) || route_optimizer_pane_pointer(frame, app) {
+        return;
     }
-    // Optimizer pane pointer routing (optimizer-click-focus): a click on a
-    // candidate row previews it (the Enter-equivalent) — the preview recolors
-    // the graph by latency change and focuses the affected node across views.
-    // Handled before the graph-camera gate so it works even with no graph open.
-    if let Some((px, py)) = frame.pointer {
-        let col = px.round().max(0.0) as u16;
-        let row = py.round().max(0.0) as u16;
-        let in_optimizer = app.pane_hit_rects.iter().find(|(id, rect)| {
-            app.layout.pane(*id).view == Some(ViewType::Optimizer) && rect_contains(*rect, col, row)
-        });
-        if let Some((_, rect)) = in_optimizer {
-            let row_count = app.optimizer.as_ref().map_or(0, |s| s.candidates.len());
-            if let Some(ri) = optimizer_row_at(*rect, col, row, row_count) {
-                if let Some(state) = app.optimizer.as_mut() {
-                    state.cursor = ri;
-                }
-                if frame.primary_pressed {
-                    app.optimizer_preview(ri);
-                }
-            }
-            return;
-        }
-    }
-    let Some(mut camera) = app.graph_camera else {
+    // Resolve the camera before anything is hit-tested, so hover and drag agree
+    // with the pan/zoom just applied.
+    let Some((camera, origin)) = sync_window_camera(frame, app) else {
         app.hovered_graph_node = None;
         app.hovered_group = None;
         return;
     };
-    // Hover hit-tests must match what is drawn: while a settle animation runs
-    // the drawn nodes are the interpolated positions, not the solved ones.
-    // Equal to `graph_positions` when no settle is active.
-    let display = app.graph_display_positions();
-    // The scene is painted as absolute window coordinates from the graph pane's
-    // origin (the egui painter has no translate; the scene builder shifts the
-    // camera by the pane origin), but this shared camera is pane-relative. The
-    // pointer and wheel-zoom anchor arrive in window coordinates, so map them
-    // into the pane before the world mapping, or click/drag/wheel land one
-    // pane origin away from the drawn node.
-    let (ox, oy) = graph_pane_origin(app);
-    // Window pan/zoom reaches the shared camera (design D5): both surfaces
-    // consume the same camera, so a middle-drag or wheel zoom in the window
-    // moves the terminal tile identically. Applied before hit-testing so the
-    // hover/drag hit rects stay aligned with the freshly painted view.
+    let world = graph_world_sizes(app);
+    let world_point = frame
+        .pointer
+        .map(|(px, py)| camera.pixel_to_world(px - origin.0, py - origin.1));
+    // Both targets are resolved before dispatch: the group answers a press on its
+    // own drawn body, the node answers a press on a member inside an open group.
+    let group_hit = group_hover_target(app, &world, world_point);
+    let node_hit = node_hover_target(app, &world, world_point, camera.zoom);
+    publish_graph_hover(app, group_hit, node_hit);
+    commit_window_marquee(frame, app);
+
+    if frame.primary_pressed && handle_window_press(frame, app, node_hit, &camera, origin) {
+        return;
+    }
+    if apply_window_drag(frame, app, &camera, origin) {
+        return;
+    }
+    release_window_drag(frame, app);
+    apply_window_graph_keys(frame, app);
+}
+
+/// Module UI (Physical pane) pointer routing for the window frame. The module UI
+/// has no graph, so this runs before the graph-camera gate: hover/click on the
+/// rack works with no graph open. `true` = the pointer was over a Physical pane
+/// and the frame is done; a pointer elsewhere drops a stale module-UI hover and
+/// lets the frame continue.
+fn route_physical_pane_pointer(frame: &crate::gui::WindowFrame, app: &mut App) -> bool {
+    let Some((px, py)) = frame.pointer else {
+        return false;
+    };
+    let col = px.round().max(0.0) as u16;
+    let row = py.round().max(0.0) as u16;
+    let in_physical_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
+        app.layout.pane(*id).view == Some(ViewType::Physical) && rect_contains(*rect, col, row)
+    });
+    if !in_physical_pane {
+        // Pointer is over a different pane: drop a stale module-UI hover, then
+        // fall through to the graph logic unchanged.
+        app.hovered_component = None;
+        return false;
+    }
+    let hit = app
+        .component_rects
+        .iter()
+        .find(|(_, rect)| rect_contains(*rect, col, row))
+        .map(|(idx, _)| *idx);
+    app.hovered_component = hit;
+    if frame.primary_pressed {
+        focus_pane_at(app, col, row);
+        if let Some(idx) = hit {
+            let token_id = app
+                .patch
+                .as_ref()
+                .and_then(|p| p.hw_components.get(idx))
+                .map(|c| c.id.clone());
+            if let Some(token) = token_id {
+                // Click semantics (droid_tui-8ia, decided): a left-click
+                // on a module-UI element FOCUSES it across surfaces and
+                // never toggles state — the element stays selected, the
+                // source pane jumps to its occurrence, and the graph
+                // highlights its register entity + influence subtree.
+                // State toggle stays on Enter/Space over the hovered
+                // cell (`handle_event`).
+                app.select_component(token.clone());
+                // Focus the graph on the element's own node(s) when the
+                // graph pane is open (its camera + canvas are then
+                // published). `select_component` already filled the
+                // influence set with the register endpoints.
+                if app.pane_holding(ViewType::Graph).is_some() {
+                    let focus = app.influence.as_ref().map(|s| s.influenced_nodes.clone());
+                    if let Some(focus) = focus {
+                        app.center_graph_camera_on_nodes(&focus);
+                    }
+                }
+                app.status_message = format!("Focused: {token}");
+            }
+        }
+    }
+    true
+}
+
+/// Optimizer pane pointer routing (optimizer-click-focus): a click on a candidate
+/// row previews it (the Enter-equivalent) — the preview recolors the graph by
+/// latency change and focuses the affected node across views. Handled before the
+/// graph-camera gate so it works even with no graph open. `true` = the pointer was
+/// over the optimizer pane and the frame is done, whether or not it landed on a
+/// row (the pane keeps its own scroll state either way).
+fn route_optimizer_pane_pointer(frame: &crate::gui::WindowFrame, app: &mut App) -> bool {
+    let Some((px, py)) = frame.pointer else {
+        return false;
+    };
+    let col = px.round().max(0.0) as u16;
+    let row = py.round().max(0.0) as u16;
+    let in_optimizer = app.pane_hit_rects.iter().find(|(id, rect)| {
+        app.layout.pane(*id).view == Some(ViewType::Optimizer) && rect_contains(*rect, col, row)
+    });
+    let Some((_, rect)) = in_optimizer else {
+        return false;
+    };
+    let row_count = app.optimizer.as_ref().map_or(0, |s| s.candidates.len());
+    if let Some(ri) = optimizer_row_at(*rect, col, row, row_count) {
+        if let Some(state) = app.optimizer.as_mut() {
+            state.cursor = ri;
+        }
+        if frame.primary_pressed {
+            app.optimizer_preview(ri);
+        }
+    }
+    true
+}
+
+/// Resolve this frame's camera and pane origin, applying the pan/zoom the window
+/// reported before any hit test, so hover and drag rects stay aligned with the
+/// freshly painted view. `None` = no camera yet (the graph has not been fitted),
+/// which is what makes the graph non-interactive.
+///
+/// The scene is painted as absolute window coordinates from the graph pane's
+/// origin (the egui painter has no translate; the scene builder shifts the camera
+/// by the pane origin), but this shared camera is pane-relative. The pointer and
+/// wheel-zoom anchor arrive in window coordinates, so they are mapped into the
+/// pane before the world mapping, or click/drag/wheel land one pane origin away
+/// from the drawn node.
+///
+/// Window pan/zoom reaches the shared camera (design D5): both surfaces consume
+/// the same camera, so a middle-drag or wheel zoom in the window moves the
+/// terminal tile identically.
+fn sync_window_camera(
+    frame: &crate::gui::WindowFrame,
+    app: &mut App,
+) -> Option<(crate::graph_render::GraphCamera, (f32, f32))> {
+    let mut camera = app.graph_camera?;
+    let origin = graph_pane_origin(app);
     if frame.pan_delta != (0.0, 0.0) {
         camera = crate::gui::camera_pan(&camera, frame.pan_delta.0, frame.pan_delta.1);
     }
     if let Some((factor, (ax, ay))) = frame.zoom {
-        camera = crate::gui::camera_zoom_about(&camera, factor, (ax - ox, ay - oy));
+        camera = crate::gui::camera_zoom_about(&camera, factor, (ax - origin.0, ay - origin.1));
     }
     app.graph_camera = Some(camera);
-    // Hit-test against each node's world-space extent (graph-zoom-node-scaling,
-    // design decision 5): the drawn frame *is* the node's world rect projected
-    // through the camera, so testing in world units is exact at every zoom and
-    // needs no `/ zoom` conversion. `drawn_world_sizes` gives each node its own
-    // world `(width, height)` (node positions are the box's top-left corner) and
-    // is mode-aware: in sections mode it applies the lane width cap, so the test
-    // rect matches the drawn frame instead of reaching past a capped node.
-    // A minimum hit size keeps a node selectable when its drawn frame is only a
-    // few pixels, expanding the world test rect symmetrically. First match wins.
-    let world = app
-        .graph
+    Some((camera, origin))
+}
+
+/// Every node's world-space `(width, height)`, the extents the painter draws and
+/// therefore the extents the hit tests measure against. Empty with no graph open.
+///
+/// `drawn_world_sizes` is mode-aware (in sections mode it applies the lane width
+/// cap), so the test rect matches the drawn frame instead of reaching past a
+/// capped node (graph-zoom-node-scaling, design decision 5).
+fn graph_world_sizes(app: &App) -> Vec<(f32, f32)> {
+    app.graph
         .as_ref()
         .map(|graph| crate::gui::drawn_world_sizes(app.layout_mode, graph))
-        .unwrap_or_default();
-    let min_w = App::GRAPH_MIN_HIT_PX / camera.zoom;
-    let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;
-    // Group extents are world-space bodies exactly like a node (design D4), so
-    // hover and click travel this same pointer path instead of a second rect
-    // list: the extents are projected through the one camera the painter draws
-    // with, and the group's index is what the hover publishes. A group draws
-    // either as one collapsed box or, once open, as its members inside an
-    // outline (design D5), so both are targets — the outline is what lets a
-    // second press reach the group it just opened. Collapsed boxes are tested
-    // first: that path keeps the priority it has always had.
-    let (collapsed_boxes, outline_boxes) = if frame.pointer.is_some() {
-        let isolated = app.isolated_group;
-        match app.grouped_view() {
-            Some(view) => (
-                collapsed_group_boxes(view, &world, isolated),
-                expanded_group_boxes(view, &world),
-            ),
-            None => (Vec::new(), Vec::new()),
-        }
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let world_point = frame
-        .pointer
-        .map(|(px, py)| camera.pixel_to_world(px - ox, py - oy));
-    let group_hit = world_point.and_then(|(wx, wy)| {
-        collapsed_boxes
-            .iter()
-            .chain(outline_boxes.iter())
-            .find(|(_, (x0, y0, x1, y1))| wx >= *x0 && wx < *x1 && wy >= *y0 && wy < *y1)
-            .map(|(group, _)| *group)
-    });
+        .unwrap_or_default()
+}
+
+/// The group under the window pointer, as the pane draws it: a collapsed group's
+/// box first, then an expanded group's outline.
+///
+/// Group extents are world-space bodies exactly like a node (design D4), so hover
+/// and click travel this same pointer path instead of a second rect list: the
+/// extents are projected through the one camera the painter draws with, and the
+/// group's index is what the hover publishes. A group draws either as one
+/// collapsed box or, once open, as its members inside an outline (design D5), so
+/// both are targets — the outline is what lets a second press reach the group it
+/// just opened. Collapsed boxes are tested first: that path keeps the priority it
+/// has always had.
+fn group_hover_target(
+    app: &mut App,
+    world: &[(f32, f32)],
+    world_point: Option<(f32, f32)>,
+) -> Option<usize> {
+    let (wx, wy) = world_point?;
+    let isolated = app.isolated_group;
+    let view = app.grouped_view()?;
+    let collapsed = collapsed_group_boxes(view, world, isolated);
+    let outlines = expanded_group_boxes(view, world);
+    collapsed
+        .iter()
+        .chain(outlines.iter())
+        .find(|(_, (x0, y0, x1, y1))| wx >= *x0 && wx < *x1 && wy >= *y0 && wy < *y1)
+        .map(|(group, _)| *group)
+}
+
+/// The node under the window pointer, tested against the positions that are drawn
+/// — the settle interpolation while an animation runs, not the solved ones.
+///
+/// Hit-testing is in world units against each node's own world extent
+/// (graph-zoom-node-scaling, design decision 5): the drawn frame *is* that rect
+/// projected through the camera, so the test is exact at every zoom and needs no
+/// `/ zoom` conversion. A minimum hit size, converted into world units, keeps a
+/// node selectable when its drawn frame is only a few pixels, expanding the test
+/// rect symmetrically. First match wins.
+fn node_hover_target(
+    app: &App,
+    world: &[(f32, f32)],
+    world_point: Option<(f32, f32)>,
+    zoom: f32,
+) -> Option<usize> {
+    let (wx, wy) = world_point?;
+    let display = app.graph_display_positions();
+    let min_w = App::GRAPH_MIN_HIT_PX / zoom;
+    let min_h = App::GRAPH_MIN_HIT_PX / zoom;
+    display.iter().enumerate().find_map(|(i, &(x, y))| {
+        let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
+        let hw = (w.max(min_w) - w) / 2.0;
+        let hh = (h.max(min_h) - h) / 2.0;
+        (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
+    })
+}
+
+/// Publish this frame's hover: the group under the pointer and then the node
+/// under it. Both are `None` without a pointer, which is what clears them.
+///
+/// The node hit test sees every model node even inside an open group: the
+/// grouping view is a drawing answer, so a member's frame keeps answering hover
+/// (the `p`/`x` keys stay meaningful on it) while a press over a collapsed box
+/// opens the group instead of selecting.
+///
+/// Back-edge sink hover (design D2): surface "reads _X 1 loop behind" in the
+/// status bar when the hover enters a node that has one; a node without a back
+/// edge leaves the previous status untouched. This lived only in the terminal
+/// mouse path until droid_tui-7e1 retired it, so porting it here is what keeps the
+/// behaviour on the surface users actually use.
+fn publish_graph_hover(app: &mut App, group_hit: Option<usize>, node_hit: Option<usize>) {
     let previous_hover = app.hovered_graph_node;
-    app.hovered_group = if frame.pointer.is_some() {
-        group_hit
-    } else {
-        None
-    };
-    // The node hit test still sees every model node: the grouping view is a
-    // drawing answer, so a member's frame keeps answering hover (the `p`/`x`
-    // keys stay meaningful on it) while a press over a group's box opens the
-    // group instead of selecting, below (design D4).
-    let hit = world_point.and_then(|(wx, wy)| {
-        display.iter().enumerate().find_map(|(i, &(x, y))| {
-            let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
-            let hw = (w.max(min_w) - w) / 2.0;
-            let hh = (h.max(min_h) - h) / 2.0;
-            (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
-        })
-    });
-    app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
-    // Back-edge sink hover (design D2): surface "reads _X 1 loop behind" in the
-    // status bar when the hover enters a node that has one; a node without a
-    // back edge leaves the previous status untouched. This lived only in the
-    // terminal mouse path until droid_tui-7e1 retired it, so porting it here is
-    // what keeps the behaviour on the surface users actually use.
+    app.hovered_group = group_hit;
+    app.hovered_graph_node = node_hit;
     if app.hovered_graph_node != previous_hover {
         if let Some(text) = app
             .hovered_graph_node
@@ -2440,171 +2608,230 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             app.status_message = text;
         }
     }
+}
 
-    // Marquee commit (ibu-marquee-selection): the window already highlighted
-    // `marquee.nodes` in scene order, so the first enclosed index is the
-    // primary. It arrives in the same window-space mapping the click path
-    // uses (pane origin + pixel_to_world), matching the drawn highlight.
-    // Empty marquee is a no-op. The guard keeps a held drag from churning
-    // scroll/cursor via repeated `select_circuit` calls.
-    if let Some(marquee) = frame.marquee.as_ref() {
-        if let Some(&first) = marquee.nodes.first() {
-            // `marquee.nodes` are scene-body indices, and a collapsed group is
-            // one body standing in for all its members, so the index no longer
-            // names the same `graph.nodes` entry once anything is grouped. The
-            // grouping view restores the mapping (design D4).
-            let primary = {
-                let isolated = app.isolated_group;
-                app.grouped_view()
-                    .and_then(|view| scene_body_node(view, isolated, first))
-            };
-            if let Some(node_id) = primary
-                .and_then(|node| app.graph.as_ref().and_then(|g| g.nodes.get(node)))
-                .map(|n| n.id.clone())
-            {
-                if app.selected_circuit() != Some(&node_id) {
-                    app.select_circuit(node_id);
-                }
+/// Commit the marquee selection the window reported (ibu-marquee-selection): the
+/// window already highlighted `marquee.nodes` in scene order, so the first
+/// enclosed index is the primary. It arrives in the same window-space mapping the
+/// click path uses, matching the drawn highlight.
+///
+/// `marquee.nodes` are scene-body indices, and a collapsed group is one body
+/// standing in for all its members, so the index no longer names the same
+/// `graph.nodes` entry once anything is grouped; the grouping view restores the
+/// mapping (design D4). An empty marquee is a no-op, and the selection guard keeps
+/// a held drag from churning scroll/cursor through repeated `select_circuit`
+/// calls.
+fn commit_window_marquee(frame: &crate::gui::WindowFrame, app: &mut App) {
+    let Some(first) = frame
+        .marquee
+        .as_ref()
+        .and_then(|m| m.nodes.first().copied())
+    else {
+        return;
+    };
+    let isolated = app.isolated_group;
+    let primary = app
+        .grouped_view()
+        .and_then(|view| scene_body_node(view, isolated, first));
+    if let Some(node_id) = primary
+        .and_then(|node| app.graph.as_ref().and_then(|g| g.nodes.get(node)))
+        .map(|n| n.id.clone())
+    {
+        if app.selected_circuit() != Some(&node_id) {
+            app.select_circuit(node_id);
+        }
+    }
+}
+
+/// Dispatch this frame's press. `true` ends the frame, which is what the early
+/// returns in this path always did: the minimap, a group's own drawn body, and a
+/// press on empty canvas all act alone, and none of them reaches the drag,
+/// release, or key steps below.
+///
+/// Precedence is the whole point of this helper. The minimap is painted over the
+/// scene, so it answers first. A press on a group's drawn body then belongs to the
+/// group (`apply_group_press`) — except over an open group's member, which is a
+/// node again and selects like any other. Only then does a node take the press.
+fn handle_window_press(
+    frame: &crate::gui::WindowFrame,
+    app: &mut App,
+    node_hit: Option<usize>,
+    camera: &crate::graph_render::GraphCamera,
+    origin: (f32, f32),
+) -> bool {
+    if apply_minimap_press(frame, app, origin) {
+        return true;
+    }
+    if let Some(group) = app.hovered_group {
+        if apply_group_press(app, group, node_hit) {
+            return true;
+        }
+    }
+    let Some(node_index) = node_hit else {
+        app.hovered_graph_node = None;
+        return true;
+    };
+    app.hovered_graph_node = Some(node_index);
+    // Clicking a node selects its circuit (design D4) — shared selection
+    // propagates to the source viewer, panels, and terminal tile.
+    if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(node_index)) {
+        app.select_circuit(node.id.clone());
+    }
+    let Some((px, py)) = frame.pointer else {
+        return true;
+    };
+    // A grab ends the animation: the drag must start from the final solved
+    // layout, not the animated position under the cursor.
+    app.cancel_graph_settle();
+    let (wx, wy) = camera.pixel_to_world(px - origin.0, py - origin.1);
+    if let Some((nx, ny)) = app.graph_positions.get(node_index).copied() {
+        // Grab offset in world units so the node follows the pointer
+        // without jumping on the first drag delta (mirrors GraphDrag).
+        app.graph_drag = Some(GraphDrag {
+            node_index,
+            offset_x: nx - wx,
+            offset_y: ny - wy,
+        });
+    }
+    false
+}
+
+/// A press inside the minimap panel pans the camera to the clicked world point;
+/// `true` = the press was the minimap's, so the scene beneath it stays untouched.
+///
+/// `panel_egui` is canvas-relative while the pointer is window-space, so the pane
+/// origin shifts it into window space here. `(ix, iy)` in the published transform
+/// is the inner-panel origin in canvas space (the outer panel inset by
+/// `MINIMAP_INSET`); inverting `minimap_layout`'s `map` gives
+/// `world = bx + (rel - ix) / sx`. The scale guard keeps a zero extent from
+/// dividing by zero.
+fn apply_minimap_press(frame: &crate::gui::WindowFrame, app: &mut App, origin: (f32, f32)) -> bool {
+    let (Some(pointer), Some(panel_egui)) = (frame.pointer, app.graph_minimap_panel_egui) else {
+        return false;
+    };
+    let (ox, oy) = origin;
+    let panel_window = egui::Rect::from_min_size(
+        egui::pos2(panel_egui.min.x + ox, panel_egui.min.y + oy),
+        panel_egui.size(),
+    );
+    if !panel_window.contains(egui::pos2(pointer.0, pointer.1)) {
+        return false;
+    }
+    // Minimap click: pan camera to clicked world position.
+    if let Some(transform) = app.graph_minimap_transform {
+        let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
+        if sx > 0.0 && sy > 0.0 {
+            let rel_x = pointer.0 - (ix + ox);
+            let rel_y = pointer.1 - (iy + oy);
+            let world_x = bx + rel_x / sx;
+            let world_y = by + rel_y / sy;
+            if let Some(mut camera) = app.graph_camera {
+                let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
+                camera.pan = (
+                    world_x * camera.zoom - vw / 2.0,
+                    world_y * camera.zoom - vh / 2.0,
+                );
+                app.graph_camera = Some(camera);
+                app.status_message = format!("Minimap click: pan to ({world_x:.0}, {world_y:.0})");
             }
         }
     }
+    true
+}
 
-    if frame.primary_pressed {
-        // Check for minimap click first
-        if let (Some(pointer), Some(panel_egui)) = (frame.pointer, app.graph_minimap_panel_egui) {
-            // panel_egui is canvas-relative; graph pane origin is (ox, oy)
-            let panel_window = egui::Rect::from_min_size(
-                egui::pos2(panel_egui.min.x + ox, panel_egui.min.y + oy),
-                panel_egui.size(),
-            );
-            if panel_window.contains(egui::pos2(pointer.0, pointer.1)) {
-                // Minimap click: pan camera to clicked world position
-                if let Some(transform) = app.graph_minimap_transform {
-                    let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
-                    // `(ix, iy)` is the inner-panel origin in canvas space (the
-                    // outer panel inset by MINIMAP_INSET). Shift it by the pane
-                    // origin to match the window-space pointer, then invert
-                    // `minimap_layout`'s `map`: world = bx + (rel - ix) / sx.
-                    // Guard the scale factors: a zero extent would divide by 0.
-                    if sx > 0.0 && sy > 0.0 {
-                        let rel_x = pointer.0 - (ix + ox);
-                        let rel_y = pointer.1 - (iy + oy);
-                        let world_x = bx + rel_x / sx;
-                        let world_y = by + rel_y / sy;
-                        // Pan camera to center on world position
-                        if let Some(mut camera) = app.graph_camera {
-                            let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
-                            camera.pan = (
-                                world_x * camera.zoom - vw / 2.0,
-                                world_y * camera.zoom - vh / 2.0,
-                            );
-                            app.graph_camera = Some(camera);
-                            app.status_message =
-                                format!("Minimap click: pan to ({world_x:.0}, {world_y:.0})");
-                        }
-                    }
-                }
-                return;
-            }
-        }
-        // A click on a collapsed group's box opens the group instead of
-        // selecting (design D4): the members are reachable through expand or
-        // isolate, and the box is not a node, so it must not fall through to
-        // selecting whichever member's frame happens to sit under the point.
-        // An open group takes the opposite order, because its members are drawn
-        // bodies again: a press on one selects it (node hit first, as on any
-        // other node), and only the outline around them closes the group.
-        if let Some(group) = app.hovered_group {
-            if !(group_drawn_expanded(app, group) && hit.is_some()) {
-                toggle_group_in_place(app, group);
-                return;
-            }
-        }
-        let Some(node_index) = hit else {
-            app.hovered_graph_node = None;
-            return;
-        };
-        app.hovered_graph_node = Some(node_index);
-        // Clicking a node selects its circuit (design D4) — shared selection
-        // propagates to the source viewer, panels, and terminal tile.
-        if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(node_index)) {
-            app.select_circuit(node.id.clone());
-        }
-        let Some((px, py)) = frame.pointer else {
-            return;
-        };
-        // A grab ends the animation: the drag must start from the final solved
-        // layout, not the animated position under the cursor.
-        app.cancel_graph_settle();
-        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
-        if let Some((nx, ny)) = app.graph_positions.get(node_index).copied() {
-            // Grab offset in world units so the node follows the pointer
-            // without jumping on the first drag delta (mirrors GraphDrag).
-            app.graph_drag = Some(GraphDrag {
-                node_index,
-                offset_x: nx - wx,
-                offset_y: ny - wy,
-            });
-        }
+/// Apply a press that landed on group `group`; `true` = the group consumed it.
+///
+/// A collapsed box opens the group instead of selecting: the box is not a node, so
+/// it must not fall through to selecting whichever member's frame happens to sit
+/// under the point, and the members stay reachable through expand or isolate
+/// (design D4). An open group takes the opposite order, because its members are
+/// drawn bodies again: a press on one selects it (node hit first, as on any other
+/// node), and only the outline around them closes the group.
+fn apply_group_press(app: &mut App, group: usize, node_hit: Option<usize>) -> bool {
+    if group_drawn_expanded(app, group) && node_hit.is_some() {
+        return false;
     }
+    toggle_group_in_place(app, group);
+    true
+}
 
-    // A drag frame moves the node only when the button was already down at
-    // the start of this frame: egui reports `primary_pressed` and
-    // `primary_down` together on the press frame, and the press frame only
-    // grabs the node (mirrors the terminal Down/Drag event split).
-    if frame.primary_down && !frame.primary_pressed {
-        let Some(drag) = app.graph_drag.as_ref() else {
-            return;
-        };
-        let Some(graph) = app.graph.as_ref() else {
-            return;
-        };
-        let Some(node_id) = graph.nodes.get(drag.node_index).map(|n| n.id.clone()) else {
-            return;
-        };
-        let Some((px, py)) = frame.pointer else {
-            return;
-        };
-        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
-        if let Some(pos) = app.graph_positions.get_mut(drag.node_index) {
-            *pos = (
-                clamp_drag(wx + drag.offset_x),
-                clamp_drag(wy + drag.offset_y),
-            );
-        }
-        let pins = app.pinned_indices(graph);
-        // Same knob source as the terminal drag path: the re-settle honors the
-        // panel's repulsion/cohesion, not just the cable tension.
-        let knobs = app.force_solve_knobs();
-        layout::local_resettle(
-            graph,
-            &mut app.graph_positions,
-            &node_id,
-            layout::LOCAL_RADIUS,
-            layout::LOCAL_ITERATIONS,
-            &pins,
-            knobs,
+/// Move the dragged node for one drag frame. `true` = the frame ended, matching the
+/// early returns this path always had when there was nothing to move.
+///
+/// The node moves only when the button was already down at the start of the frame:
+/// egui reports `primary_pressed` and `primary_down` together on the press frame,
+/// and the press frame only grabs the node (mirrors the terminal Down/Drag event
+/// split).
+fn apply_window_drag(
+    frame: &crate::gui::WindowFrame,
+    app: &mut App,
+    camera: &crate::graph_render::GraphCamera,
+    origin: (f32, f32),
+) -> bool {
+    if !frame.primary_down || frame.primary_pressed {
+        return false;
+    }
+    let Some(drag) = app.graph_drag.as_ref() else {
+        return true;
+    };
+    let Some(graph) = app.graph.as_ref() else {
+        return true;
+    };
+    let Some(node_id) = graph.nodes.get(drag.node_index).map(|n| n.id.clone()) else {
+        return true;
+    };
+    let Some((px, py)) = frame.pointer else {
+        return true;
+    };
+    let (wx, wy) = camera.pixel_to_world(px - origin.0, py - origin.1);
+    if let Some(pos) = app.graph_positions.get_mut(drag.node_index) {
+        *pos = (
+            clamp_drag(wx + drag.offset_x),
+            clamp_drag(wy + drag.offset_y),
         );
-        app.notify_node_moved(&node_id);
     }
+    let pins = app.pinned_indices(graph);
+    // Same knob source as the terminal drag path: the re-settle honors the
+    // panel's repulsion/cohesion, not just the cable tension.
+    let knobs = app.force_solve_knobs();
+    layout::local_resettle(
+        graph,
+        &mut app.graph_positions,
+        &node_id,
+        layout::LOCAL_RADIUS,
+        layout::LOCAL_ITERATIONS,
+        &pins,
+        knobs,
+    );
+    app.notify_node_moved(&node_id);
+    false
+}
 
-    if frame.primary_released {
-        // Design D7: the dropped node becomes a fixed anchor so it stays where
-        // placed instead of snapping back on a rebuild (mirrors the terminal).
-        if let Some(drag) = app.graph_drag.take() {
-            if let Some(node) = app
-                .graph
-                .as_ref()
-                .and_then(|g| g.nodes.get(drag.node_index))
-            {
-                app.pinned.insert(node.id.clone());
-            }
+/// Drop a finished drag (design D7): the node becomes a fixed anchor so it stays
+/// where it was placed instead of snapping back on a rebuild (mirrors the
+/// terminal).
+fn release_window_drag(frame: &crate::gui::WindowFrame, app: &mut App) {
+    if !frame.primary_released {
+        return;
+    }
+    if let Some(drag) = app.graph_drag.take() {
+        if let Some(node) = app
+            .graph
+            .as_ref()
+            .and_then(|g| g.nodes.get(drag.node_index))
+        {
+            app.pinned.insert(node.id.clone());
         }
     }
+}
 
-    // Design D3: the camera keys act on the pane without a hovered node,
-    // mirroring the terminal graph's `c`/`Shift+c`. The fit status text
-    // matches the terminal path exactly.
+/// Apply the window's keyboard report, which mirrors the terminal graph keys.
+///
+/// The camera keys act on the pane without a hovered node (`c`/`Shift+c`, design
+/// D3; the fit status text matches the terminal path exactly), so they run in their
+/// own pass; the node keys need the hovered node and act on it like the terminal
+/// `x`/`p`/`e`.
+fn apply_window_graph_keys(frame: &crate::gui::WindowFrame, app: &mut App) {
     for key in &frame.keys {
         match key {
             crate::gui::WindowGraphKey::CenterGraph => {
