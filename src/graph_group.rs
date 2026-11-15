@@ -111,8 +111,8 @@ pub struct Group {
     pub center: (f32, f32),
     /// `(min_x, min_y, max_x, max_y)` of the box drawn in a *collapsed* group's
     /// place — the members' union when they are collinear, one nominal body at
-    /// their centroid when the type is spread over both axes. [`footprint`] owns
-    /// the rule (design D5b).
+    /// their centroid when the type is spread over both axes. The private
+    /// `footprint` helper owns the rule (design D5b).
     ///
     /// This is the collapsed box only, not the members' extent. Anything that must
     /// reach a group's members — the expanded outline, an open member's hit area —
@@ -205,7 +205,7 @@ impl GroupedView {
 /// `positions` are the drawn node centres and `sizes` their world extents, both
 /// parallel to `graph.nodes`; short or empty slices are tolerated (a node without
 /// a position simply never merges spatially, a node without a size falls back to
-/// [`NOMINAL_WIDTH`] × [`NODE_WORLD_H`]) so a caller mid-build can never panic
+/// `NOMINAL_WIDTH` × [`NODE_WORLD_H`]) so a caller mid-build can never panic
 /// this pass. `expanded` holds the indices of groups the user opened: an expanded
 /// group keeps its entry in [`GroupedView::groups`] but its members are drawn
 /// individually, which is what lets the outline stay visible while the contents
