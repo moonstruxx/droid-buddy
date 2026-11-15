@@ -3808,8 +3808,9 @@ mod scene_builder_tests {
 mod window_paint_tests {
     use super::*;
     use crate::config::LayoutMode;
+    use crate::diff::ChangedNode;
     use crate::graph::{Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
-    use crate::patch::NodeId;
+    use crate::patch::{InfluenceSubtree, NodeId};
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
         GraphNode {
@@ -3850,6 +3851,9 @@ mod window_paint_tests {
         labels: Vec<String>,
         /// The `FontId` each label was painted with, parallel to `labels`.
         label_fonts: Vec<egui::FontId>,
+        /// The `Color32` each label was painted with, parallel to `labels`: the
+        /// emitted `Shape::Text` colour, which is what a reader actually sees.
+        label_colors: Vec<egui::Color32>,
         rects: Vec<egui::epaint::RectShape>,
         circles: usize,
         beziers: usize,
@@ -3901,6 +3905,7 @@ mod window_paint_tests {
         let mut full_output = ctx.run_ui(raw_input, body);
         let mut labels = Vec::new();
         let mut label_fonts = Vec::new();
+        let mut label_colors = Vec::new();
         let mut rects = Vec::new();
         let mut circles = 0usize;
         let mut beziers = 0usize;
@@ -3910,15 +3915,11 @@ mod window_paint_tests {
                 egui::epaint::Shape::Text(t) => {
                     labels.push(t.galley.text().to_string());
                     // The painter lays every label out as a single-section
-                    // `LayoutJob`, so the section format carries the FontId.
-                    label_fonts.push(
-                        t.galley
-                            .job
-                            .sections
-                            .first()
-                            .map(|s| s.format.font_id.clone())
-                            .unwrap_or_default(),
-                    );
+                    // `LayoutJob`, so the section format carries the FontId and
+                    // the colour the galley was laid out with.
+                    let format = t.galley.job.sections.first().map(|s| &s.format);
+                    label_fonts.push(format.map(|f| f.font_id.clone()).unwrap_or_default());
+                    label_colors.push(format.map_or(egui::Color32::TRANSPARENT, |f| f.color));
                 }
                 egui::epaint::Shape::Rect(r) => rects.push(r.clone()),
                 egui::epaint::Shape::Circle(_) => circles += 1,
@@ -3931,6 +3932,7 @@ mod window_paint_tests {
         PaintOutput {
             labels,
             label_fonts,
+            label_colors,
             rects,
             circles,
             beziers,
@@ -5110,11 +5112,17 @@ mod window_paint_tests {
         );
 
         app.selected_circuit = Some(NodeId::circuit("copy", 2));
-        let selected = group_body(&scene_of(&app)).border;
+        let selected_scene = scene_of(&app);
+        let selected = group_body(&selected_scene);
         assert_eq!(
-            selected,
+            selected.border,
             theme().rgb(theme().graph_node_highlight),
             "a selected member lights the whole box"
+        );
+        assert_eq!(
+            selected.label_color,
+            theme().rgb(theme().graph_node_highlight),
+            "the label travels with the selection class"
         );
 
         app.selected_circuit = None;
@@ -5153,6 +5161,163 @@ mod window_paint_tests {
             "a topology error outranks the diff classification"
         );
         assert_eq!(errored.label_color, theme().rgb(theme().graph_edge_error));
+    }
+
+    /// Every diff class the report can carry, and their ranking (task 6.2): a
+    /// changed member wears the added token exactly as a changed cable does, and
+    /// added outranks removed outranks changed, so a group holding several
+    /// classes answers with the strongest one. The removed-only case is pinned
+    /// by `collapsed_group_wears_the_strongest_member_class` above.
+    #[test]
+    fn collapsed_group_diff_classes_rank_added_over_removed_over_changed() {
+        let mut app = stacked_copies_app();
+        app.diff_showing = true;
+
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 3)],
+            ..Default::default()
+        });
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_edge_diff_added),
+            "an added member puts the group in the added class"
+        );
+
+        app.diff_report = Some(DiffReport {
+            changed_nodes: vec![ChangedNode {
+                id: NodeId::circuit("copy", 1),
+                changed_params: vec!["input".into()],
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_edge_diff_added),
+            "a changed member wears the added token, like a changed cable"
+        );
+
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 4)],
+            removed_nodes: vec![NodeId::circuit("copy", 0)],
+            changed_nodes: vec![ChangedNode {
+                id: NodeId::circuit("copy", 1),
+                changed_params: vec!["input".into()],
+            }],
+            ..Default::default()
+        });
+        let ranked = scene_of(&app);
+        assert_eq!(
+            group_body(&ranked).border,
+            theme().rgb(theme().graph_edge_diff_added),
+            "added outranks removed and changed when the group holds several"
+        );
+    }
+
+    /// The influence wash lights a collapsed group through any member, and a
+    /// topology error on a member's cable outranks every other source at once —
+    /// selection, diff and influence (task 6.2).
+    #[test]
+    fn collapsed_group_topology_error_outranks_selection_diff_and_influence() {
+        let mut app = stacked_copies_app();
+        app.influence = Some(InfluenceSubtree {
+            influenced_nodes: std::iter::once(NodeId::circuit("copy", 1)).collect(),
+            ..Default::default()
+        });
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_node_highlight),
+            "an influenced member lights the group like a selected one"
+        );
+
+        app.selected_circuit = Some(NodeId::circuit("copy", 2));
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 3)],
+            ..Default::default()
+        });
+        app.graph
+            .as_mut()
+            .expect("graph")
+            .validation
+            .push(TopologyIssue {
+                cable: "_FAN_B".into(),
+                severity: TopologySeverity::Error,
+                message: "two producers".into(),
+            });
+        let scene = scene_of(&app);
+        let body = group_body(&scene);
+        assert_eq!(
+            body.border,
+            theme().rgb(theme().graph_edge_error),
+            "a topology error outranks selection, diff and influence together"
+        );
+        assert_eq!(
+            body.label_color,
+            theme().rgb(theme().graph_edge_error),
+            "the label travels with the error class"
+        );
+    }
+
+    /// The emitted `Shape::Text` colour, not only the `NodeSpec`: the painter
+    /// hands `label_color` straight to the galley, so the class colour a reader
+    /// sees is asserted on the painted frame (task 6.2's "label colour travels
+    /// with the strongest class").
+    #[test]
+    fn group_label_paints_in_the_strongest_class_colour() {
+        fn painted(app: &App) -> egui::Color32 {
+            let scene = scene_of(app);
+            let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+            let mut colours = out
+                .labels
+                .iter()
+                .zip(&out.label_colors)
+                .filter(|(label, _)| label.contains('\u{d7}'))
+                .map(|(_, colour)| *colour);
+            let colour = colours.next().expect("the group label paints");
+            assert!(colours.next().is_none(), "one group label, one text shape");
+            colour
+        }
+
+        let mut app = stacked_copies_app();
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_node_title)),
+            "nothing lights the group: the kind title token paints"
+        );
+
+        app.selected_circuit = Some(NodeId::circuit("copy", 2));
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_node_highlight)),
+            "selection paints the title in the highlight token"
+        );
+
+        app.selected_circuit = None;
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 4)],
+            ..Default::default()
+        });
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_edge_diff_added)),
+            "a diff class paints the title in its own token"
+        );
+
+        app.graph
+            .as_mut()
+            .expect("graph")
+            .validation
+            .push(TopologyIssue {
+                cable: "_FAN_B".into(),
+                severity: TopologySeverity::Error,
+                message: "two producers".into(),
+            });
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_edge_error)),
+            "the topology error paints the title in the error token"
+        );
     }
 }
 #[cfg(test)]
