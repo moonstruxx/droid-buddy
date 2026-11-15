@@ -110,7 +110,9 @@ pub(crate) struct CellSpec {
     /// read as dark grey on every off button.
     pub label_color: Color,
     pub is_fader: bool,
-    pub fader_value: f32,
+    /// The element's 0..1 position: the fader track draws it as its fill and
+    /// the pot slot reads it for the indicator (faceplate-pot-jack-symbols).
+    pub value_frac: f32,
     pub component_index: Option<usize>,
     pub mark: PortMark,
     pub highlighted: bool,
@@ -261,12 +263,13 @@ fn fold_shape_for_controller(controller: &str) -> Option<CellShape> {
     }
 }
 
-/// The knob position a fader face draws (module-ui-label-fit D5): the element's
-/// own state, read the way the terminal path reads it — a `Value` is the patch's
-/// 0..1 position, an `On` button-like state is fully raised, and every state
-/// without a position (off, an LED's brightness, a CV ring) leaves the track
-/// empty rather than inventing a mid-scale value.
-fn fader_value_for(state: &crate::patch::ComponentState) -> f32 {
+/// The element's 0..1 position, shared by the fader track and the pot slot
+/// (module-ui-label-fit D5): the element's own state, read the way the terminal
+/// path reads it — a `Value` is the patch's 0..1 position, an `On` button-like
+/// state is fully raised, and every state without a position (off, an LED's
+/// brightness, a CV ring) leaves the track empty rather than inventing a
+/// mid-scale value.
+fn value_frac_for(state: &crate::patch::ComponentState) -> f32 {
     use crate::patch::ComponentState;
     match state {
         ComponentState::Value(v) => v.clamp(0.0, 1.0),
@@ -437,7 +440,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             label,
             kind,
             is_fader,
-            fader_value,
+            value_frac,
             led_state,
             led_rgb,
             shape,
@@ -463,7 +466,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             let element_cell = chain.cell_for(mi, &comp.id);
             let switch_kind = element_cell.and_then(|c| c.kind.as_deref());
             let is_fader = element_cell.is_some_and(|c| c.family == "F");
-            let fader_value = fader_value_for(&comp.state);
+            let value_frac = value_frac_for(&comp.state);
             let (glyph, state_text, color) =
                 cell_visuals(comp, is_shift_active, is_fader, switch_kind);
             // The folded LED (if any) drives the inner fill.
@@ -519,17 +522,8 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 )
             } else {
                 (
-                    glyph,
-                    state_text,
-                    color,
-                    label,
-                    comp.kind,
-                    is_fader,
-                    fader_value,
-                    led_state,
-                    led_rgb,
-                    shape,
-                    color,
+                    glyph, state_text, color, label, comp.kind, is_fader, value_frac, led_state,
+                    led_rgb, shape, color,
                 )
             }
         } else {
@@ -616,7 +610,7 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
             color,
             label_color,
             is_fader,
-            fader_value,
+            value_frac,
             component_index,
             mark,
             highlighted: component_index.is_some_and(|i| {
@@ -1696,7 +1690,7 @@ fn paint_fader(painter: &Painter, cell: &CellSpec, paused: bool) {
     let track_w = (rect.width() * FADER_TRACK_WIDTH_FRACTION)
         .min(FADER_TRACK_WIDTH_MAX)
         .min(rect.width());
-    let value = cell.fader_value.clamp(0.0, 1.0);
+    let value = cell.value_frac.clamp(0.0, 1.0);
     let fill_h = (rect.height() * value).round().clamp(0.0, rect.height());
     let track = Rect::from_min_size(rect.min, egui::vec2(track_w, rect.height()));
     if fill_h > 0.0 {
@@ -2498,7 +2492,7 @@ mod tests {
                 color,
                 label_color: color,
                 is_fader: false,
-                fader_value: 0.0,
+                value_frac: 0.0,
                 component_index: Some(ci),
                 mark,
                 highlighted: false,
@@ -2970,7 +2964,7 @@ mod tests {
             color: crate::theme::active().knob,
             label_color: crate::theme::active().knob,
             is_fader: true,
-            fader_value: value,
+            value_frac: value,
             component_index: Some(0),
             mark: PortMark::Cell,
             highlighted: false,
@@ -3062,7 +3056,7 @@ mod tests {
             color: crate::theme::active().button,
             label_color: crate::theme::active().button,
             is_fader: false,
-            fader_value: 0.0,
+            value_frac: 0.0,
             component_index: Some(0),
             mark: PortMark::Cell,
             highlighted: false,
@@ -3820,7 +3814,7 @@ mod tests {
             color,
             label_color: color,
             is_fader: false,
-            fader_value: 0.0,
+            value_frac: 0.0,
             component_index: None,
             mark: PortMark::Cell,
             highlighted: false,
@@ -4905,9 +4899,9 @@ mod tests {
             "a P8S8 fader cell carries the geometry `F` family flag: {cell:?}"
         );
         assert!(
-            (cell.fader_value - 0.6).abs() < 1e-6,
+            (cell.value_frac - 0.6).abs() < 1e-6,
             "the bar follows the element state, not a guess: {}",
-            cell.fader_value
+            cell.value_frac
         );
         // Fit and painter agree on the path: `App`'s label fit maps a geometry
         // `F` cell to `CellTextPath::Fader`, and the painter's own box — built
@@ -5931,7 +5925,7 @@ mod tests {
     fn p8s8_fader_cell(label: &str) -> CellSpec {
         let mut cell = sized_cell(4.2, 22.0, "", label, "50%");
         cell.is_fader = true;
-        cell.fader_value = 0.5;
+        cell.value_frac = 0.5;
         cell.kind = ComponentKind::Knob;
         cell.color = crate::theme::active().fader_led_bar;
         cell.label_color = crate::theme::active().fader_led_bar;
