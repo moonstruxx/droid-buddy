@@ -93,7 +93,7 @@ CV direction SHALL be carried by the `◀`/`▶` corner marker and the `CV IN`/`
 
 The module UI SHALL render every hardware element of a declared controller, including elements the patch does not reference. Unreferenced elements SHALL render dimmed and without a label. Unreferenced elements SHALL NOT publish hit rects and SHALL NOT be reachable by keyboard navigation, selection, the label editor, or modifier latching. An unreferenced LED on a fold-rule controller (P2B8, B32, M4) SHALL NOT render as a standalone cell (the fold rule covers its face); all other unreferenced LEDs SHALL render dimmed standalone.
 
-An unreferenced rotary or CV jack SHALL render the same symbol as an addressed one, with the washer ring omitted on a rotary and the base line kept on a pot, and dimmed; every other unreferenced element kind SHALL keep the plain dimmed marker. An addressed rotary that merely lacks a label SHALL still draw its full face, because the rule keys on the element having no component rather than on the absence of a label.
+An unreferenced rotary or CV jack SHALL render the same symbol as an addressed one and dimmed. At the full-detail step an unreferenced rotary SHALL omit the washer ring and keep the nut, the slot and, on a pot, the base line, so it reads as unused rather than merely unlit; at the reduced and centre-dot steps it SHALL keep the addressed drawing at the dimmed floor, because a bare slot at that size no longer reads as hardware. Every other unreferenced element kind SHALL keep the plain dimmed marker. An addressed rotary that merely lacks a label SHALL still draw its full face, because the rule keys on the element having no component rather than on the absence of a label.
 
 The master faceplate SHALL follow the same rule only when the chain comes from a configured rack module inventory: then its complete declared field renders — sixteen jacks, the `R1..R16` LED matrix and the SD button on MASTER, `O1..O8` with the `I1`/`I2` logic inputs, `G1..G4` gate outputs and the SD button on MASTER18. On a chain derived from the patch alone, the master's unreferenced cells SHALL remain suppressed, so an existing setup renders exactly as before.
 
@@ -136,8 +136,13 @@ When a rack module inventory is configured and no patch is loaded, the pane SHAL
 
 #### Scenario: An unaddressed rotary is tellable by silhouette
 
-- **WHEN** a P2B8 carries one addressed pot and one pot the patch never names
+- **WHEN** a P2B8 carries one addressed pot and one pot the patch never names, drawn at true size
 - **THEN** the unaddressed pot draws the nut, slot and base line without the washer ring, dimmed, so it reads as unused rather than merely unlit
+
+#### Scenario: The unaddressed ring survives where the detail does not
+
+- **WHEN** an unaddressed rotary is drawn at the reduced or centre-dot step, as at the whole-rack fit
+- **THEN** it keeps the addressed drawing at the dimmed floor rather than a ringless slot, and stays dimmed so it still reads as unused
 
 #### Scenario: An inventoried master's spare jacks draw socket faces
 

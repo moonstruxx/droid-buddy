@@ -50,7 +50,7 @@ The slot sweeps 270°, 0 at 7:30 and 1 at 4:30, mirroring a real pot's travel. N
 
 ### D5 — Silhouette separates addressed from unaddressed, not brightness
 
-An unaddressed rotary drops the washer ring (the ring is what *addressed* adds) and keeps the nut, the slot and, on a pot, the base line; an unaddressed jack keeps its full face. Both are dimmed by the existing `dim` path. This retires the ring-plus-dot rule (`DESIGN.md:224`) for rotaries only — every other kind keeps the plain dim dot.
+An unaddressed rotary drops the washer ring (the ring is what *addressed* adds) and keeps the nut, the slot and, on a pot, the base line; an unaddressed jack keeps its full face. Both are dimmed by the existing `dim` path. The ring is dropped **only at the full-detail step**: at the reduced and dot steps a ringless slot is a bare stroke at the rack fit, where unaddressed cells are the majority, so those steps keep the addressed drawing at the dimmed floor and rely on the alpha, exactly as D3 notes the reduced ladder cannot carry the difference. This retires the ring-plus-dot rule (`DESIGN.md:224`) for rotaries only — every other kind keeps the plain dim dot.
 
 Below an 18 pt face the reduced ladder cannot carry the difference, so pot and encoder converge, as they already do today where both render `◉`; the label still names them.
 
