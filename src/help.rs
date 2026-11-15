@@ -147,6 +147,13 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("S", "toggle forces panel (force/sections)"),
             ("f", "dependency filter"),
             ("i", "influence filter"),
+            // graph-same-type-grouping D7: the grouping controls sit next to the
+            // filters they compose with — `o` isolates the hovered/selected
+            // group like the `f`/`i` induced subgraphs, `Enter` folds a group
+            // open or shut, `Shift+O` reverses grouping for the whole graph.
+            ("o", "isolate group"),
+            ("Enter", "expand/collapse group"),
+            ("Shift+O", "toggle grouping"),
             ("g s", "open select-state menu"),
             ("+/-", "camera zoom"),
             ("arrows", "pan camera"),
@@ -561,6 +568,9 @@ mod tests {
         ("a", "apply arrangement / cycle layouts"),
         ("f", "dependency filter"),
         ("i", "influence filter"),
+        ("o", "isolate group"),
+        ("Enter", "expand/collapse group"),
+        ("Shift+O", "toggle grouping"),
         ("+/-", "camera zoom"),
         ("arrows", "pan camera"),
         ("click minimap", "pan camera to clicked position"),
