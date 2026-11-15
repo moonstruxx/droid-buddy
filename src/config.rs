@@ -1,5 +1,5 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
-//! and `[physical.rack]`, `[plugins]`, `[layout]`) stored in
+//! and `[physical.rack]`, `[plugins]`, `[layout]`, `[graph]`) stored in
 //! `config.toml` under the platform data directory (`platform::config_dir`).
 //! Loaded once at startup, before the terminal UI initializes (design decision 5).
 //!
@@ -64,6 +64,17 @@ pub const DEFAULT_SLICE_FORCE: f32 = crate::layout::DEFAULT_SLICE_K;
 /// truth, so the app's sections solve matches the solver's tuned strength.
 pub const DEFAULT_SECTION_FORCE: f32 = crate::layout::DEFAULT_SECTION_HOLE_K;
 
+/// Same-type node grouping defaults under `[graph]` (graph-same-type-grouping):
+/// nodes whose circuit type occurs at least `min_group_size` times collapse into
+/// one type group out of the box; an absent table keeps that behaviour.
+pub const DEFAULT_GRAPH_GROUP_ENABLED: bool = true;
+/// Instance count at which one circuit type groups by default.
+pub const DEFAULT_MIN_GROUP_SIZE: usize = 5;
+/// Smallest accepted `min_group_size`: a group of one is just the node itself.
+pub const MIN_GROUP_SIZE: usize = 2;
+/// Largest accepted `min_group_size`, so a stray digit cannot group everything.
+pub const MAX_GROUP_SIZE: usize = 64;
+
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 fn default_theme() -> String {
@@ -108,6 +119,14 @@ fn default_slice_force() -> f32 {
 
 fn default_section_force() -> f32 {
     DEFAULT_SECTION_FORCE
+}
+
+fn default_graph_enabled() -> bool {
+    DEFAULT_GRAPH_GROUP_ENABLED
+}
+
+fn default_min_group_size() -> usize {
+    DEFAULT_MIN_GROUP_SIZE
 }
 
 /// Per-label configuration under `[labels]`.
@@ -379,6 +398,30 @@ impl Default for Layout {
     }
 }
 
+/// Same-type node grouping preferences under `[graph]`
+/// (graph-same-type-grouping).
+///
+/// `group_enabled` turns grouping on or off as a whole; `min_group_size` is the
+/// instance count at which one circuit type collapses into a single group node.
+/// The range is enforced by clamp on load and on save, so an out-of-range value
+/// in the file becomes the nearest bound and a save writes the clamped value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Graph {
+    #[serde(default = "default_graph_enabled")]
+    pub group_enabled: bool,
+    #[serde(default = "default_min_group_size")]
+    pub min_group_size: usize,
+}
+
+impl Default for Graph {
+    fn default() -> Self {
+        Self {
+            group_enabled: default_graph_enabled(),
+            min_group_size: default_min_group_size(),
+        }
+    }
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions). `Eq` is intentionally not
 /// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
@@ -396,6 +439,8 @@ pub struct Settings {
     pub plugins: Plugins,
     #[serde(default)]
     pub layout: Layout,
+    #[serde(default)]
+    pub graph: Graph,
 }
 
 impl Default for Settings {
@@ -407,6 +452,7 @@ impl Default for Settings {
             physical: Physical::default(),
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         }
     }
 }
@@ -483,6 +529,10 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    settings.graph.min_group_size = settings
+        .graph
+        .min_group_size
+        .clamp(MIN_GROUP_SIZE, MAX_GROUP_SIZE);
     sanitize_physical(&mut settings.physical);
     settings
 }
@@ -547,6 +597,10 @@ pub fn save_to_dir(dir: &Path, settings: &Settings) -> io::Result<()> {
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    normalized.graph.min_group_size = normalized
+        .graph
+        .min_group_size
+        .clamp(MIN_GROUP_SIZE, MAX_GROUP_SIZE);
     sanitize_physical(&mut normalized.physical);
     // D13: stamp the baseline on every save, so a legacy config is migrated
     // exactly once and later runs honour the stored zoom.
@@ -797,6 +851,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -830,6 +885,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -904,6 +960,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -932,6 +989,7 @@ mod tests {
                     physical: Physical::default(),
                     plugins: Plugins::default(),
                     layout: Layout::default(),
+                    graph: Graph::default(),
                 },
             )
             .unwrap();
@@ -959,6 +1017,7 @@ mod tests {
             physical: Physical::default(),
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1030,6 +1089,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -1280,6 +1340,7 @@ mod tests {
             },
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1324,6 +1385,7 @@ mod tests {
                 },
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -1446,6 +1508,7 @@ mod tests {
                 enabled: false,
             },
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1591,6 +1654,7 @@ mod tests {
                 slice_force: DEFAULT_SLICE_FORCE,
                 section_force: DEFAULT_SECTION_FORCE,
             },
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1768,6 +1832,7 @@ mod tests {
             },
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(&cfg_dir, &settings).unwrap();
         let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();

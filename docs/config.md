@@ -23,6 +23,10 @@ max_shift_layer = 4
 mode = "column"      # or "force"
 ordering = "strict"  # or "barycenter"
 
+[graph]
+group_enabled = true  # collapse repeated circuit types into one group node
+min_group_size = 5    # instances needed before a type groups (clamped 2-64)
+
 [physical]
 labels = "auto"      # off / auto / on
 zoom = 1.0
@@ -62,6 +66,18 @@ comes from theme tokens — no hardcoded RGB.
   the graph pane toggles at runtime.
 - `ordering` (`strict` default / `barycenter`): within-column node
   order for the column arrangement.
+
+### `[graph]`
+
+Same-type node grouping. An absent table leaves grouping on at the
+default minimum size.
+
+- `group_enabled` (bool, default `true`): collapse every circuit type
+  that repeats into a single group node instead of drawing each
+  instance. Off draws every node individually.
+- `min_group_size` (2–64, default `5`): how many instances of one
+  circuit type a patch needs before that type groups. Clamped on load
+  and on save.
 
 ### `[physical]` / `[physical.rack]`
 

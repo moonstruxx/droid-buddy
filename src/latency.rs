@@ -384,6 +384,7 @@ mod tests {
             physical: crate::config::Physical::default(),
             plugins: crate::config::Plugins::default(),
             layout: crate::config::Layout::default(),
+            graph: crate::config::Graph::default(),
         };
         let model = CostModel::from_config(&settings);
         assert_eq!(
