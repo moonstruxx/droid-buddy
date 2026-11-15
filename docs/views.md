@@ -155,6 +155,17 @@ layout).
 - `Alt+[` / `Alt+]` adjust cable tension (force solver only).
 - `Esc` closes the graph pane.
 
+### Same-type grouping
+
+Circuits of one type that stack in the drawing, or sit within two cable
+hops of each other, collapse into a single labelled box — `encoder
+×24` — and their cables aggregate onto it; a component with fewer than
+five members stays individual. Hovering a box peeks at its contents, a
+click or `Enter` expands it in place, `o` isolates the group (its
+immediate neighbours dimmed), and `Shift+O` turns grouping off for the
+whole graph. The `[graph]` table in `config.toml` carries
+`group_enabled` and `min_group_size`.
+
 ## Latency optimizer (`g o`)
 
 A small pane proposing section reorderings that reduce forward-loop
