@@ -23,6 +23,47 @@ element of a declared controller renders at its faceplate position;
 unused elements are drawn dimmed and unlabelled. LEDs fold into their
 element and render the patch's LED color/brightness.
 
+**Every element draws its hardware face.** A knob draws a pot face: a
+washer ring 0.60 of the cell wide, a hex nut inside it whose circumradius
+is 0.80 of the ring's with a flat top and bottom, a shaft at 0.38 of the
+ring radius, and a slot running from 0.28 to 0.82 of that radius. The
+slot carries the value on a 270° sweep — 0 at 7:30, straight up at half,
+1 at 4:30 — and the face sits on a horizontal base line 0.44 of the cell
+wide and 1.2 pt thick. An encoder draws the same face with no base line:
+the base line is what says the control is finite and has end stops. A CV
+jack draws a bezel ring around a filled socket mouth 0.40 of the cell
+wide, with the cross its contacts cut into the mouth. Direction on a jack
+is the `◀`/`▶` corner marker and the `CV IN`/`CV OUT` state row, never
+the face colour, because the `mono` palette gives both CV tokens the same
+grey.
+
+**Detail follows the drawn face.** The symbol ladder is measured on the
+ring's own diameter — not on the cell, not on the zoom — so the reduction
+is right at 25 % and at 400 % alike. At 18 pt and above the face is drawn
+whole. From 10 pt to 18 pt a rotary keeps the ring and the slot, and the
+nut, the shaft and the base line drop; a jack keeps its ring and mouth and
+loses the cross. Below 10 pt both reduce to the ring and a centre dot. A
+12 mm pot (a 45 pt cell) and a 9 mm pot (34 pt) are full at 100 %; a 7 mm
+encoder or master jack (26 pt) is reduced there and draws the full symbol
+above about 113 %. Below 18 pt a pot and an encoder are the same drawing,
+and the label and the hover reveal are what tell them apart.
+
+**A face keeps its cell.** The symbol claims the cell's top `0.66 w` and
+never shrinks or moves to make room for text: the label is fitted to the
+band beneath it, `h − 0.66 w`, and the percentage row appears only when
+that band still holds it after the labelled lines. The published rect,
+the wheel step and the keyboard reach stay the cell's, exactly as they
+were before the symbol existed.
+
+**An unaddressed element keeps its symbol.** An unaddressed rotary is the
+addressed drawing at the 0.75 alpha floor, with the washer ring dropped
+at the full-detail step — the ring is what addressing adds — so the nut,
+the slot and a pot's base line are what carry it; at the reduced and
+centre-dot steps it keeps the addressed drawing, because a ringless slot
+at that size reads as a stray stroke rather than as hardware. An
+unaddressed jack keeps its whole face. Every other unaddressed kind keeps
+the plain dim marker.
+
 **The rack always starts with exactly one master faceplate**, and the
 pane title names which one is drawn:
 
