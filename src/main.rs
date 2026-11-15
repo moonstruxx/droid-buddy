@@ -128,6 +128,11 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // painters and the label overlay read it from state (ADR 13) instead of
     // re-reading the config file per frame/event.
     app.labels = settings.labels.clone();
+
+    // [graph]: the same-type grouping preference (graph-same-type-grouping D6).
+    // An absent table seeds App::new's defaults, so out-of-box behavior is
+    // unchanged.
+    app.seed_graph_grouping(&settings.graph);
 }
 
 /// Bundled demo patch shown when no `argv[1]` path is given — the same fixture
@@ -447,8 +452,8 @@ mod windowed {
     }
 }
 
-/// `seed_app` wires the `[physical]`, `[layout]` and `[labels]` sections into
-/// `App` (design D6).
+/// `seed_app` wires the `[physical]`, `[layout]`, `[labels]` and `[graph]`
+/// sections into `App` (design D6).
 #[cfg(test)]
 mod tests {
     use super::*;
