@@ -45,6 +45,10 @@ pub mod geometry;
 pub mod graph;
 #[path = "../../../src/graph_anim.rs"]
 pub mod graph_anim;
+// Same-type node grouping: `app.rs`, `handler.rs` and the gui read
+// `crate::graph_group`, so the shadow has to exist for the staged sources.
+#[path = "../../../src/graph_group.rs"]
+pub mod graph_group;
 #[path = "../../../src/graph_render.rs"]
 pub mod graph_render;
 #[path = "../../../src/handler.rs"]
