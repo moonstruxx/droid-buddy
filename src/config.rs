@@ -1839,4 +1839,118 @@ mod tests {
         assert!(body.contains("labels = \"on\""), "body: {body}");
         assert_eq!(load_at(&dir).physical.labels, LabelPresentation::On);
     }
+
+    // ── graph-same-type-grouping 2.2: [graph] defaults / clamp / warn ──
+
+    #[test]
+    fn graph_defaults_when_table_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph, Graph::default());
+        assert!(loaded.graph.group_enabled);
+        assert_eq!(loaded.graph.min_group_size, 5);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn min_group_size_clamped_on_load() {
+        for (raw, expected) in [(0, 2), (1, 2), (2, 2), (5, 5), (64, 64), (200, 64)] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[graph]\nmin_group_size = {raw}\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.graph.min_group_size, expected,
+                "raw {raw} should clamp to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_group_enabled_false_disables_grouping() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\ngroup_enabled = false\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert!(!loaded.graph.group_enabled);
+        assert_eq!(
+            loaded.graph.min_group_size, 5,
+            "the other key keeps its default"
+        );
+    }
+
+    #[test]
+    fn malformed_min_group_size_falls_back_to_default() {
+        // A wrong-type value fails the whole file (the `[layout] mode` and
+        // `[physical.rack]` malformed-value precedent): the loader warns once
+        // on stderr and returns `Settings::default()`, whose `[graph]` size is
+        // the default 5. This module captures no stderr, so only the fallback
+        // is asserted, as in the sibling malformed-value tests.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\nmin_group_size = \"five\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded, Settings::default());
+        assert_eq!(loaded.graph.min_group_size, 5);
+    }
+
+    #[test]
+    fn graph_save_round_trips_clamped_value() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\ngroup_enabled = false\nmin_group_size = 200\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph.min_group_size, 64);
+        save_to_dir(&cfg_dir, &loaded).unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[graph]"), "body: {body}");
+        assert!(body.contains("group_enabled = false"), "body: {body}");
+        assert!(body.contains("min_group_size = 64"), "body: {body}");
+        assert_eq!(load_at(&dir).graph, loaded.graph);
+
+        // The save path clamps too: an in-memory value below the floor is
+        // written as the floor rather than as given.
+        save_to_dir(
+            &cfg_dir,
+            &Settings {
+                theme: "classic".to_string(),
+                labels: Labels::default(),
+                latency: Latency::default(),
+                physical: Physical::default(),
+                plugins: Plugins::default(),
+                layout: Layout::default(),
+                graph: Graph {
+                    group_enabled: true,
+                    min_group_size: 1,
+                },
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("min_group_size = 2"), "body: {body}");
+        assert_eq!(load_at(&dir).graph.min_group_size, 2);
+    }
 }
