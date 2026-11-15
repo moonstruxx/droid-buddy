@@ -831,7 +831,7 @@ fn label_fit_path(
         // its LED composes into a face and the label takes the band beneath the
         // shape, everywhere else the cell stays compact.
         ComponentKind::Button => match comp.controller.to_ascii_lowercase().as_str() {
-            "p2b8" | "b32" | "notebuttons" | "m4" | "motorfader" => CellTextPath::Composed,
+            "p2b8" | "p4b2" | "b32" | "notebuttons" | "m4" | "motorfader" => CellTextPath::Composed,
             _ => CellTextPath::Compact,
         },
         // Everything else (switch, LED) has no face: the whole cell is the box.
@@ -8929,7 +8929,9 @@ mod tests {
 
     /// The fit pane these tests measure in: small enough that the fixture
     /// rack's whole-rack fit lands near the supported floor (0.41), well below
-    /// what a written two-word label needs on a 9 mm button cell (~0.6).
+    /// what a written two-word label needs on the 9 mm P4B2 button cell (0.88 —
+    /// the composed band beneath the folded `Round` face, `h − 0.5 w` rather
+    /// than the whole cell).
     const LABEL_FIT_PANE: Rect = Rect::new(0, 0, 260, 200);
 
     /// The clamp fixture: the always-present 8 HP master plus one P4B2
@@ -9006,6 +9008,28 @@ mod tests {
         assert!(
             lifted >= rack_fit * 1.25,
             "the lift is a legibility step, not rounding noise ({lifted} vs rack {rack_fit})"
+        );
+        // faceplate-pot-jack-symbols 1.5: `B1.1` sits on the P4B2, whose LED folds
+        // into a `Round` face, so the fit measures the composed band beneath that
+        // face instead of the whole 9 mm cell. Against the compact box the same
+        // label needed 0.66; the narrower band needs 0.88 — pinned here so a fold
+        // rule one side of the pair forgets is a failure, not a quiet relock.
+        let (chain, _) = app
+            .physical_chain_and_rack()
+            .expect("the fixture has a rack");
+        let button_request = app
+            .physical_label_fit_requests(&chain)
+            .into_iter()
+            .find(|request| request.label == "Trigger input")
+            .expect("the written label on B1.1 is a fit request");
+        assert_eq!(
+            button_request.path,
+            crate::physical::CellTextPath::Composed,
+            "a P4B2 button folds its LED into a face, so the fit sizes the composed band"
+        );
+        assert_eq!(
+            app.physical_zoom, 0.88,
+            "the composed band needs 0.88 for this label (0.66 was the compact cell)"
         );
         assert!(
             lifted <= crate::physical::ZOOM_MAX,
@@ -9395,11 +9419,12 @@ mod tests {
 
     #[test]
     fn label_fit_path_agrees_with_the_painters_label_box_per_kind() {
-        // faceplate-pot-jack-symbols 1.4: the labels fit has to measure the text
-        // box the painter labels, so `App::label_fit_path` must answer what
+        // faceplate-pot-jack-symbols 1.4/1.5: the labels fit has to measure the
+        // text box the painter labels, so `App::label_fit_path` must answer what
         // `gui::physical::cell_label_box` answers for the *same* cell. One token
-        // per kind: a pot outside the fader family, a fader, a button on a
-        // fold-rule controller, a CV in, a CV out and a plain switch.
+        // per kind: a pot outside the fader family, a fader, a button on each of
+        // the two fold-rule sizes (P2B8 and P4B2 both fold to a `Round` face), a
+        // CV in, a CV out and a plain switch.
         //
         // `cell_label_box` is private to the `gui::physical` module, so the
         // painter's side is read off the spec's own `CellSpec` here — the same
@@ -9412,11 +9437,14 @@ mod tests {
         let patch = Patch::from_ini_str(
             // One faceplate per kind, and the instance numbers keep the token
             // sets apart: bare `[p8s8]` declares its front first (faders `P1.x`
-            // and switches `S1.x`), then the P10 pot (`P2.1`) and the P2B8's
-            // buttons (`B3.x`).
+            // and switches `S1.x`), then the P10 pot (`P2.1`), the P2B8's
+            // buttons (`B3.x`) and the P4B2's front (`P4.x`, `B4.x`, `L4.x` —
+            // P4B2 is not bare-synthesized).
             "[p8s8]\n\
              [p10]\n    pot = P2.1\n\
              [p2b8]\n\
+             [p4b2]\n    pot1 = P4.1\n    pot2 = P4.2\n    pot3 = P4.3\n    pot4 = P4.4\n    \
+             button1 = B4.1\n    led1 = L4.1\n    button2 = B4.2\n    led2 = L4.2\n\
              [copy]\n    input = I1\n    output = O1\n",
             String::from("fit-path-agreement"),
         )
@@ -9454,7 +9482,12 @@ mod tests {
             (
                 "B3.1",
                 CellTextPath::Composed,
-                "a button on a fold-rule controller",
+                "a button on a P2B8 faceplate",
+            ),
+            (
+                "B4.1",
+                CellTextPath::Composed,
+                "a button on a P4B2 faceplate",
             ),
             ("I1", CellTextPath::Face, "a CV in"),
             ("O1", CellTextPath::Face, "a CV out"),
