@@ -1997,4 +1997,93 @@ mod tests {
         assert!(body.contains("min_group_size = 2"), "body: {body}");
         assert_eq!(load_at(&dir).graph.min_group_size, 2);
     }
+
+    // ── graph-same-type-grouping 2.2: [graph] group_by ──
+
+    #[test]
+    fn graph_group_by_parses_both_policies() {
+        for (raw, expected) in [("run", GroupBy::Run), ("type", GroupBy::Type)] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[graph]\ngroup_by = \"{raw}\"\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(loaded.graph.group_by, expected, "group_by = \"{raw}\"");
+        }
+    }
+
+    #[test]
+    fn graph_group_by_absent_key_is_type() {
+        // The absent-key default must hold even when the table itself is present:
+        // a `[graph]` table carrying only another key leaves the policy at `Type`.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\nmin_group_size = 7\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph.group_by, GroupBy::Type);
+        assert_eq!(
+            loaded.graph.min_group_size, 7,
+            "the present key still applies"
+        );
+    }
+
+    #[test]
+    fn graph_group_by_unknown_value_falls_back_to_type() {
+        // An unknown policy string is a warn-once value error, not a parse error:
+        // the manual `Deserialize` keeps the rest of the table and file loadable,
+        // unlike the wrong-type `min_group_size = "many"` case.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\ngroup_by = \"cluster\"\ngroup_enabled = false\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph.group_by, GroupBy::Type);
+        assert_eq!(loaded.graph.min_group_size, 5);
+        assert!(
+            !loaded.graph.group_enabled,
+            "the rest of the table still loads"
+        );
+        assert_eq!(loaded.theme, "classic", "the rest of the file still loads");
+    }
+
+    #[test]
+    fn graph_group_by_round_trips_through_save() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let settings = Settings {
+            graph: Graph {
+                group_by: GroupBy::Run,
+                ..Graph::default()
+            },
+            ..Settings::default()
+        };
+        save_to_dir(&cfg_dir, &settings).unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[graph]"), "body: {body}");
+        assert!(body.contains("group_by = \"run\""), "body: {body}");
+        assert_eq!(load_at(&dir).graph, settings.graph);
+
+        // The default policy writes its own spelling rather than omitting the key,
+        // so a saved file reads back as the policy that produced it.
+        let typed_dir = TempDir::new().unwrap();
+        let typed_cfg = typed_dir.path().join(APP_DIR_NAME);
+        save_to_dir(&typed_cfg, &Settings::default()).unwrap();
+        let body = std::fs::read_to_string(typed_cfg.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("group_by = \"type\""), "body: {body}");
+        assert_eq!(load_at(&typed_dir).graph.group_by, GroupBy::Type);
+    }
 }

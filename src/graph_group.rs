@@ -1149,4 +1149,279 @@ mod tests {
             "the compacted box is not the member union"
         );
     }
+
+    /// Design D5b's other thin axis: a single row is collinear too, so its box
+    /// encloses it exactly as a column's does — the rule tests shape, not length.
+    #[test]
+    fn a_wide_row_is_enclosed_like_a_column() {
+        let nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("encoder", i)).collect();
+        let positions: Vec<(f32, f32)> =
+            (0..5).map(|i| (100.0 + i as f32 * 400.0, 120.0)).collect();
+        let graph = hand_built(nodes, Vec::new());
+        let view = group_nodes(
+            &graph,
+            &positions,
+            &bodies(graph.nodes.len()),
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(view.groups.len(), 1);
+        let group = &view.groups[0];
+        assert!(
+            positions[4].0 - positions[0].0 > GROUP_THIN_RATIO * NOMINAL_WIDTH,
+            "the row must span more than the thin-axis bound, or it proves nothing"
+        );
+        assert_eq!(group.members_bbox, (100.0, 120.0, 1700.0, 120.0));
+        assert_eq!(
+            group.bbox, group.members_bbox,
+            "a collinear row is enclosed, however wide"
+        );
+        assert_eq!(group.center, (900.0, 120.0));
+    }
+
+    /// Spec scenario "A type collapses into one box": at the default type policy
+    /// the whole population of one type is one group, wherever the solver drew it.
+    #[test]
+    fn type_policy_collapses_a_whole_type_on_a_real_fixture() {
+        // influence_outlier.ini carries twenty-five `copy` nodes plus one `p2b8`
+        // and one `button` — a repeated type at a real patch's order of magnitude,
+        // so the group is not an artefact of a hand-built stack.
+        let graph = fixture_graph("influence_outlier.ini");
+        let drawn = solved(&graph);
+        let settings = GroupSettings::default();
+        assert_eq!(
+            settings.policy,
+            GroupPolicy::Type,
+            "the default policy is the one under test"
+        );
+
+        let copies: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.kind == NodeKind::Circuit && node.circuit == "copy")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(copies.len(), 25, "the fixture must draw the repeated type");
+        assert!(
+            copies.windows(2).all(|pair| pair[0] < pair[1]),
+            "indices must ascend: {copies:?}"
+        );
+
+        let view = group_nodes(
+            &graph,
+            &drawn.positions,
+            &drawn.sizes,
+            &settings,
+            &HashSet::new(),
+        );
+
+        let ViewNode::Group(group) = view.nodes[copies[0]] else {
+            panic!(
+                "all 25 `copy` circuits must collapse, got {:?}",
+                view.nodes[copies[0]]
+            );
+        };
+        assert_eq!(
+            view.groups[group].members, copies,
+            "the group holds exactly that type's nodes, ascending"
+        );
+        assert_eq!(view.groups[group].circuit, "copy");
+        assert_eq!(view.groups.len(), 1, "no other type reaches the minimum");
+        for &member in &copies {
+            assert_eq!(
+                view.nodes[member],
+                ViewNode::Group(group),
+                "node {member} must draw as the type's one group box"
+            );
+        }
+
+        // One stand-in replaces the whole population, and the singleton types keep
+        // their own body each, so the drawn count falls by the population minus one.
+        let stand_ins: HashSet<ViewNode> = copies.iter().map(|&node| view.nodes[node]).collect();
+        assert_eq!(stand_ins.len(), 1);
+        let singles: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.kind == NodeKind::Circuit && node.circuit != "copy")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(singles.len(), 2, "the fixture's two other circuit types");
+        for &node in &singles {
+            assert_eq!(view.nodes[node], ViewNode::Individual(node));
+        }
+        // The controllers the fixture's register cables introduce never group, so
+        // the whole reduction is the one copy group's population minus one.
+        let collapsed: usize = view
+            .groups
+            .iter()
+            .map(|group| group.members.len() - 1)
+            .sum();
+        assert_eq!(collapsed, copies.len() - 1);
+        let drawn_bodies = view
+            .nodes
+            .iter()
+            .copied()
+            .collect::<HashSet<ViewNode>>()
+            .len();
+        assert_eq!(
+            view.nodes.len() - drawn_bodies,
+            collapsed,
+            "one stand-in per group replaces its members"
+        );
+    }
+
+    /// The run policy is strictly stricter than the type policy on one graph: the
+    /// same six copies that `Type` merges into one box stay apart under `Run`,
+    /// because the only drawn run is three members short of the minimum.
+    #[test]
+    fn run_policy_is_stricter_than_type_policy_on_the_same_graph() {
+        let nodes: Vec<GraphNode> = (0..6).map(|i| circuit_node("copy", i)).collect();
+        // Three copies stacked in one column, three far from everything — and no
+        // cables at all, so only the spatial half of the run union can act.
+        let positions = vec![
+            (0.0, 0.0),
+            (0.0, NODE_WORLD_H),
+            (0.0, 2.0 * NODE_WORLD_H),
+            (4000.0, 4000.0),
+            (8000.0, 8000.0),
+            (12000.0, 12000.0),
+        ];
+        let sizes = bodies(nodes.len());
+        let graph = hand_built(nodes, Vec::new());
+
+        let typed = group_nodes(
+            &graph,
+            &positions,
+            &sizes,
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+        let run = group_nodes(
+            &graph,
+            &positions,
+            &sizes,
+            &GroupSettings {
+                enabled: true,
+                min_size: 5,
+                policy: GroupPolicy::Run,
+            },
+            &HashSet::new(),
+        );
+
+        assert_eq!(typed.groups.len(), 1);
+        assert_eq!(typed.groups[0].members, (0..6).collect::<Vec<_>>());
+        assert!(
+            run.groups.is_empty(),
+            "the only drawn run has three members, below the minimum: {:?}",
+            run.groups
+        );
+
+        let typed_bodies: HashSet<ViewNode> = typed.nodes.iter().copied().collect();
+        let run_bodies: HashSet<ViewNode> = run.nodes.iter().copied().collect();
+        assert_eq!(
+            typed_bodies.len(),
+            1,
+            "one box stands in for all six copies under the type policy"
+        );
+        assert_eq!(
+            run_bodies.len(),
+            6,
+            "every copy draws individually under the run policy"
+        );
+        assert!(
+            run_bodies.len() > typed_bodies.len(),
+            "the run policy draws more bodies than the type policy"
+        );
+    }
+
+    /// The policy difference in isolation: two same-type circuits drawn far apart
+    /// and uncabled are one group under `Type` and two individual bodies under
+    /// `Run`, at the same minimum size.
+    #[test]
+    fn far_apart_same_type_pair_groups_only_under_type_policy() {
+        let nodes = vec![circuit_node("copy", 0), circuit_node("copy", 1)];
+        let positions = vec![(0.0, 0.0), (6000.0, 6000.0)];
+        let sizes = bodies(nodes.len());
+        let graph = hand_built(nodes, Vec::new());
+        let permissive = |policy| GroupSettings {
+            enabled: true,
+            min_size: 2,
+            policy,
+        };
+
+        let typed = group_nodes(
+            &graph,
+            &positions,
+            &sizes,
+            &permissive(GroupPolicy::Type),
+            &HashSet::new(),
+        );
+        assert_eq!(typed.groups.len(), 1);
+        assert_eq!(typed.groups[0].members, vec![0, 1]);
+        assert_eq!(typed.nodes[0], ViewNode::Group(0));
+        assert_eq!(typed.nodes[1], ViewNode::Group(0));
+
+        let run = group_nodes(
+            &graph,
+            &positions,
+            &sizes,
+            &permissive(GroupPolicy::Run),
+            &HashSet::new(),
+        );
+        assert!(
+            run.groups.is_empty(),
+            "no cable and no proximity is not a run: {:?}",
+            run.groups
+        );
+        for (index, drawn) in run.nodes.iter().enumerate() {
+            assert_eq!(*drawn, ViewNode::Individual(index));
+        }
+    }
+
+    /// The minimum-size gate is the same under both policies, and it cuts both
+    /// ways: a five-member stack groups while a four-member stack of another type
+    /// stays individual, so neither policy is deciding by reach alone.
+    #[test]
+    fn minimum_size_gate_holds_under_both_policies() {
+        // Five `copy` stacked in one column (a group at the default minimum) and
+        // four `vca` stacked in another (one below it).
+        let mut nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("copy", i)).collect();
+        nodes.extend((0..4).map(|i| circuit_node("vca", i)));
+        let mut positions: Vec<(f32, f32)> =
+            (0..5).map(|i| (0.0, i as f32 * NODE_WORLD_H)).collect();
+        positions.extend((0..4).map(|i| (900.0, i as f32 * NODE_WORLD_H)));
+        let sizes = bodies(nodes.len());
+        let graph = hand_built(nodes, Vec::new());
+
+        for policy in [GroupPolicy::Type, GroupPolicy::Run] {
+            let view = group_nodes(
+                &graph,
+                &positions,
+                &sizes,
+                &GroupSettings {
+                    enabled: true,
+                    min_size: 5,
+                    policy,
+                },
+                &HashSet::new(),
+            );
+            assert_eq!(
+                view.groups.len(),
+                1,
+                "{policy:?}: only the copy stack reaches the minimum"
+            );
+            assert_eq!(view.groups[0].members, (0..5).collect::<Vec<_>>());
+            assert_eq!(view.groups[0].circuit, "copy");
+            for node in 5..9 {
+                assert_eq!(
+                    view.nodes[node],
+                    ViewNode::Individual(node),
+                    "{policy:?}: a four-member component stays individual"
+                );
+            }
+        }
+    }
 }
