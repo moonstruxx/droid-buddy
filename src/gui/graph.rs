@@ -14,10 +14,13 @@ use std::fmt::Write as _;
 
 use super::{MarqueeSelection, WindowFrame};
 use crate::app::App;
-use crate::graph::{Graph, NodeKind};
+use crate::diff::DiffReport;
+use crate::graph::{Graph, GraphNode, NodeKind};
 use crate::graph_render::{
     CableKind, ClusterSpec, EdgeDiffState, EdgeSpec, GraphCamera, NodeSpec, SceneSpec, WorldBounds,
 };
+use crate::latency::LatencyData;
+use crate::patch::NodeId;
 use crate::theme::Theme;
 
 /// Clamps a normalized ramp axis position into 0..1.
@@ -1248,6 +1251,66 @@ struct SceneInput<'a> {
     render_clusters: bool,
 }
 
+/// Which way an optimizer preview moved an element's forward-loop latency.
+/// Worse wins when an edge and its sibling disagree, so a regression mark never
+/// disappears under an improvement mark.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptDir {
+    Worse,
+    Better,
+}
+
+/// Fixed render context shared by the scene passes: the state the styling
+/// reads, the theme it resolves through, and the zoom the scene is built at.
+#[derive(Clone, Copy)]
+struct SceneStyle<'a> {
+    app: &'a App,
+    theme: &'a Theme,
+    zoom: f32,
+}
+
+/// Per-node geometry, indexed by full-graph index.
+#[derive(Clone, Copy)]
+struct SceneGeometry<'a> {
+    positions: &'a [(f32, f32)],
+    world: &'a [(f32, f32)],
+    camera: GraphCamera,
+}
+
+/// The label inputs a node title resolves through.
+#[derive(Clone, Copy)]
+struct LabelInputs<'a> {
+    circuit_store: &'a HashMap<NodeId, String>,
+    circuit_counts: &'a HashMap<String, usize>,
+}
+
+/// Node pass output: the drawn nodes plus the full-index to drawn-index map
+/// the edge and cluster passes need.
+struct BuiltNodes {
+    nodes: Vec<NodeSpec>,
+    kept: HashMap<usize, usize>,
+}
+
+/// Edge pass output: the drawn edges plus the per-node optimizer direction the
+/// border pass applies after the loop.
+struct BuiltEdges {
+    edges: Vec<EdgeSpec>,
+    node_dirs: Vec<Option<OptDir>>,
+}
+
+/// Everything the edge colour precedence chain reads, bundled so the chain
+/// stays one readable function instead of seven positional arguments.
+#[derive(Clone, Copy)]
+struct EdgeFlags {
+    error: bool,
+    dimmed: bool,
+    influenced: bool,
+    diff: Option<EdgeDiffState>,
+    ramp: Option<usize>,
+    register: bool,
+    kind: CableKind,
+}
+
 /// Shared scene core: maps `graph` through `camera`, keeps only visible
 /// nodes/edges, and styles each element from `App`'s influence and diff state.
 fn build_scene(
@@ -1266,134 +1329,93 @@ fn build_scene(
     if positions.len() != graph.nodes.len() {
         return None;
     }
+    let style = SceneStyle {
+        app,
+        theme,
+        zoom: camera.zoom,
+    };
     // World-unit node bodies from the layout's per-node estimate, projected
     // through the camera (graph-zoom-node-scaling decision 1): a node's pixel
     // size is its reserved world size times the zoom, so the column
     // arrangement stays overlap-free at any zoom. Indexed by full-graph index.
     // In sections mode the width is clamped to the lane cap there (task 3.10)
     // via `drawn_world_sizes`; every other mode is unchanged.
-    let zoom = camera.zoom;
     let world = drawn_world_sizes(app.layout_mode, graph);
-    let circuit_store = app.current_circuit_store();
-
+    let geometry = SceneGeometry {
+        positions,
+        world: &world,
+        camera,
+    };
     let diff = if app.diff_showing {
         app.filtered_report()
     } else {
         None
     };
+    let circuit_store = app.current_circuit_store();
+    let circuit_counts = instance_counts(graph);
+    let labels = LabelInputs {
+        circuit_store: &circuit_store,
+        circuit_counts: &circuit_counts,
+    };
 
-    // Optimizer-preview diff active (optimizer-click-focus): the optimizer is
-    // open, a candidate is previewed, and the file-order latency baseline was
-    // captured. Reordering keeps the same node set, so the meaningful diff is
-    // the *latency* change — edges/nodes are colored by whether their
-    // forward-loop latency went up (worse) or down (better).
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum OptDir {
-        Worse,
-        Better,
-    }
-    let opt_diff_active = app
-        .optimizer
-        .as_ref()
-        .is_some_and(|s| s.previewing.is_some())
-        && app.optimizer_diff_state.is_some();
-    // Repeated circuit instances get the numbered title suffix; non-circuit
-    // nodes always render their plain name.
-    let mut circuit_counts: HashMap<String, usize> = HashMap::new();
+    let mut built = build_nodes(style, graph, geometry, diff.as_ref(), labels, node_visible);
+    let edges = build_edges(style, graph, &mut built, diff.as_ref(), edge_visible);
+    apply_optimizer_node_diff(style, &mut built.nodes, &edges.node_dirs);
+    let clusters = if render_clusters {
+        build_clusters(style, graph, &built.nodes, &built.kept)
+    } else {
+        Vec::new()
+    };
+
+    Some(SceneSpec {
+        background: theme.rgb(theme.graph_canvas_bg),
+        nodes: built.nodes,
+        edges: edges.edges,
+        clusters,
+    })
+}
+
+/// Per-circuit-name instance counts, so repeated instances get the numbered
+/// title suffix while non-circuit nodes always render their plain name.
+fn instance_counts(graph: &Graph) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
     for node in &graph.nodes {
         if node.kind == NodeKind::Circuit {
-            *circuit_counts.entry(node.circuit.clone()).or_default() += 1;
+            *counts.entry(node.circuit.clone()).or_default() += 1;
         }
     }
+    counts
+}
 
+/// Build the visible node specs and the full-index to drawn-index map.
+fn build_nodes(
+    style: SceneStyle<'_>,
+    graph: &Graph,
+    geometry: SceneGeometry<'_>,
+    diff: Option<&DiffReport>,
+    labels: LabelInputs<'_>,
+    node_visible: impl Fn(usize) -> bool,
+) -> BuiltNodes {
+    let SceneStyle { app, theme, zoom } = style;
     let mut nodes = Vec::with_capacity(graph.nodes.len());
     let mut kept: HashMap<usize, usize> = HashMap::new();
     for (i, node) in graph.nodes.iter().enumerate() {
         if !node_visible(i) {
             continue;
         }
-        let (px, py) = camera.world_to_pixel(positions[i].0, positions[i].1);
-        let disabled = app.disabled_circuits.contains(&node.id);
-        let highlighted = app.hovered_graph_node == Some(i);
-        let selected = app.selected_circuit == Some(node.id.clone());
-        let diff_marked = diff.as_ref().map(|report| {
-            report.added_nodes.contains(&node.id)
-                || report.removed_nodes.contains(&node.id)
-                || report.changed_nodes.iter().any(|c| c.id == node.id)
-        });
-
-        // Label chain (label-guess-and-screen-scale 1.3): stored label →
-        // tree-derived guess (the `guessed_labels` cache — never a per-frame
-        // walk) → raw circuit name / numbered instance title.
-        let title = circuit_store
-            .get(&node.id)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| app.guessed_labels.get(&node.id).cloned())
-            .unwrap_or_else(|| {
-                if node.kind == NodeKind::Circuit {
-                    instance_title(
-                        &node.circuit,
-                        node.instance_index,
-                        circuit_counts.get(&node.circuit).copied(),
-                    )
-                } else {
-                    node.circuit.clone()
-                }
-            });
-        let title = if diff_marked == Some(true) {
-            format!("{title} *")
-        } else {
-            title
-        };
-
-        // Border/title token chain: dim beats highlight beats kind frames.
-        // With an active influence the influenced border/title token marks the
-        // influenced set and the rest dims; hover/selection interaction feedback
-        // stays highest. While a modifier is active (latched or held) the
-        // influence hue is the per-token `modifier_hue`, matching the panels
-        // wash (design D).
-        let dim = theme.rgb(theme.graph_node_dim);
-        let hl = if let Some(tok) = app.active_modifier() {
-            theme.rgb(crate::theme::modifier_hue(tok))
-        } else {
-            theme.rgb(theme.graph_node_highlight)
-        };
-        let influenced = app
-            .modifier_influence
-            .as_ref()
-            .or(app.influence.as_ref())
-            .is_some_and(|s| s.influenced_nodes.contains(&node.id));
-        // Border widths keep the 1-vs-3 distinction but scale with the camera
-        // zoom, each with a minimum so the outline never vanishes at the zoom
-        // floor (graph-zoom-node-scaling decision 2).
-        let normal_border = (1.0 * zoom).max(0.5);
-        let highlight_border = (3.0 * zoom).max(1.0);
-        let (border, label_color, border_width) = if disabled {
-            (dim, dim, normal_border)
-        } else if highlighted || selected || influenced {
-            (hl, hl, highlight_border)
-        } else if app.modifier_influence.is_some() || app.influence.is_some() {
-            (dim, dim, normal_border)
-        } else {
-            let (b, t) = match node.kind {
-                NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
-                NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
-                NodeKind::OutputJack => {
-                    (theme.graph_node_jack_output, theme.graph_node_jack_output)
-                }
-                NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
-            };
-            (theme.rgb(b), theme.rgb(t), normal_border)
-        };
+        let (px, py) = geometry
+            .camera
+            .world_to_pixel(geometry.positions[i].0, geometry.positions[i].1);
+        let title = node_title(app, node, labels, node_diff_marked(diff, node));
+        let (border, label_color, border_width) = node_styling(style, node, i);
 
         let idx = nodes.len();
         kept.insert(i, idx);
         nodes.push(NodeSpec {
             x: px,
             y: py,
-            w: world[i].0 * zoom,
-            h: world[i].1 * zoom,
+            w: geometry.world[i].0 * zoom,
+            h: geometry.world[i].1 * zoom,
             radius: NODE_RADIUS * zoom,
             fill: theme.rgb(theme.graph_node_fill),
             border,
@@ -1406,18 +1428,114 @@ fn build_scene(
             output_port: false,
         });
     }
+    BuiltNodes { nodes, kept }
+}
 
+/// Label chain (label-guess-and-screen-scale 1.3): stored label → tree-derived
+/// guess (the `guessed_labels` cache — never a per-frame walk) → raw circuit
+/// name / numbered instance title. A node the active diff touched carries a
+/// trailing marker.
+fn node_title(app: &App, node: &GraphNode, labels: LabelInputs<'_>, diff_marked: bool) -> String {
+    let title = labels
+        .circuit_store
+        .get(&node.id)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| app.guessed_labels.get(&node.id).cloned())
+        .unwrap_or_else(|| {
+            if node.kind == NodeKind::Circuit {
+                instance_title(
+                    &node.circuit,
+                    node.instance_index,
+                    labels.circuit_counts.get(&node.circuit).copied(),
+                )
+            } else {
+                node.circuit.clone()
+            }
+        });
+    if diff_marked {
+        format!("{title} *")
+    } else {
+        title
+    }
+}
+
+/// Whether the active diff touched this node, so its title carries the marker.
+fn node_diff_marked(diff: Option<&DiffReport>, node: &GraphNode) -> bool {
+    diff.is_some_and(|report| {
+        report.added_nodes.contains(&node.id)
+            || report.removed_nodes.contains(&node.id)
+            || report.changed_nodes.iter().any(|c| c.id == node.id)
+    })
+}
+
+/// Border/title token chain: dim beats highlight beats kind frames. With an
+/// active influence the influenced border/title token marks the influenced set
+/// and the rest dims; hover/selection interaction feedback stays highest. While
+/// a modifier is active (latched or held) the influence hue is the per-token
+/// `modifier_hue`, matching the panels wash (design D).
+fn node_styling(
+    style: SceneStyle<'_>,
+    node: &GraphNode,
+    index: usize,
+) -> ((u8, u8, u8), (u8, u8, u8), f32) {
+    let SceneStyle { app, theme, zoom } = style;
+    let dim = theme.rgb(theme.graph_node_dim);
+    let highlight = if let Some(tok) = app.active_modifier() {
+        theme.rgb(crate::theme::modifier_hue(tok))
+    } else {
+        theme.rgb(theme.graph_node_highlight)
+    };
+    let influenced = app
+        .modifier_influence
+        .as_ref()
+        .or(app.influence.as_ref())
+        .is_some_and(|s| s.influenced_nodes.contains(&node.id));
+    // Border widths keep the 1-vs-3 distinction but scale with the camera zoom,
+    // each with a minimum so the outline never vanishes at the zoom floor
+    // (graph-zoom-node-scaling decision 2).
+    let normal_border = (1.0 * zoom).max(0.5);
+    let highlight_border = (3.0 * zoom).max(1.0);
+    if app.disabled_circuits.contains(&node.id) {
+        (dim, dim, normal_border)
+    } else if app.hovered_graph_node == Some(index)
+        || app.selected_circuit == Some(node.id.clone())
+        || influenced
+    {
+        (highlight, highlight, highlight_border)
+    } else if app.modifier_influence.is_some() || app.influence.is_some() {
+        (dim, dim, normal_border)
+    } else {
+        let (border_token, title_token) = match node.kind {
+            NodeKind::Controller => (theme.graph_node_controller, theme.graph_node_controller),
+            NodeKind::InputJack => (theme.graph_node_jack_input, theme.graph_node_jack_input),
+            NodeKind::OutputJack => (theme.graph_node_jack_output, theme.graph_node_jack_output),
+            NodeKind::Circuit => (theme.graph_node_border, theme.graph_node_title),
+        };
+        (
+            theme.rgb(border_token),
+            theme.rgb(title_token),
+            normal_border,
+        )
+    }
+}
+
+/// Build the visible edge specs, set the port markers on the nodes they touch,
+/// and accumulate each node's optimizer direction.
+fn build_edges(
+    style: SceneStyle<'_>,
+    graph: &Graph,
+    built: &mut BuiltNodes,
+    diff: Option<&DiffReport>,
+    edge_visible: impl Fn(usize) -> bool,
+) -> BuiltEdges {
+    let SceneStyle { app, theme, zoom } = style;
     let latency = if app.latency_coloring {
         graph.latency.as_ref()
     } else {
         None
     };
-
-    // Per-scene-node optimizer-diff direction, accumulated over incident
-    // edges in the loop below (worse beats better); applied to node borders
-    // after the loop. Sized to the built node vector.
-    let mut node_opt_dir: Vec<Option<OptDir>> = vec![None; nodes.len()];
-
+    let mut node_dirs: Vec<Option<OptDir>> = vec![None; built.nodes.len()];
     let mut edges = Vec::with_capacity(graph.edges.len());
     for (i, edge) in graph.edges.iter().enumerate() {
         if !edge_visible(i) {
@@ -1429,16 +1547,17 @@ fn build_scene(
         let Some(t) = edge.sink_index(&graph.nodes) else {
             continue;
         };
-        let (Some(&si), Some(&ti)) = (kept.get(&s), kept.get(&t)) else {
+        let (Some(&si), Some(&ti)) = (built.kept.get(&s), built.kept.get(&t)) else {
             continue;
         };
-        let start_node = &nodes[si];
-        let end_node = &nodes[ti];
         let start = (
-            start_node.x + start_node.w,
-            start_node.y + start_node.h / 2.0,
+            built.nodes[si].x + built.nodes[si].w,
+            built.nodes[si].y + built.nodes[si].h / 2.0,
         );
-        let end = (end_node.x, end_node.y + end_node.h / 2.0);
+        let end = (
+            built.nodes[ti].x,
+            built.nodes[ti].y + built.nodes[ti].h / 2.0,
+        );
         let Some(ctrl) = edge_ctrl(start, end) else {
             continue;
         };
@@ -1450,115 +1569,37 @@ fn build_scene(
             .validation
             .iter()
             .any(|issue| issue.cable == edge.cable);
-
         let kind = crate::graph_render::cable_kind(graph, &edge.cable);
-        // Optimizer-preview diff direction for this edge (optimizer-click-focus):
-        // compare the current forward-loop latency against the captured file-order
-        // baseline by cable name. `None` when the diff is inactive or this edge
-        // is unchanged.
-        let opt_dir = if opt_diff_active {
-            let state = app.optimizer_diff_state.as_ref().unwrap();
-            if i < state.before_latency.len()
-                && state.before_cable.get(i).is_some_and(|c| c == &edge.cable)
-            {
-                let current = graph
-                    .latency
-                    .as_ref()
-                    .and_then(|lat| lat.edges.iter().find(|l| l.edge_index == i))
-                    .map_or(0.0, |l| l.latency);
-                let delta = current - state.before_latency[i];
-                if delta > 1e-6 {
-                    Some(OptDir::Worse)
-                } else if delta < -1e-6 {
-                    Some(OptDir::Better)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let opt_dir = edge_opt_dir(app, graph, i, &edge.cable);
         if let Some(dir) = opt_dir {
-            for &j in [&si, &ti] {
-                match (node_opt_dir[j], dir) {
+            for &j in &[si, ti] {
+                match (node_dirs[j], dir) {
                     (Some(OptDir::Worse), _) | (Some(OptDir::Better), OptDir::Better) => {}
-                    (None, d) => node_opt_dir[j] = Some(d),
-                    (Some(OptDir::Better), OptDir::Worse) => node_opt_dir[j] = Some(OptDir::Worse),
+                    (None, d) => node_dirs[j] = Some(d),
+                    (Some(OptDir::Better), OptDir::Worse) => node_dirs[j] = Some(OptDir::Worse),
                 }
             }
         }
-        let mut diff_state = None;
-        if let Some(report) = &diff {
-            if report.added_cables.contains(&edge.cable) {
-                diff_state = Some(EdgeDiffState::Added);
-            } else if report.removed_cables.contains(&edge.cable) {
-                diff_state = Some(EdgeDiffState::Removed);
-            } else if report.changed_cables.iter().any(|c| c.cable == edge.cable) {
-                diff_state = Some(EdgeDiffState::Changed);
-            }
-        }
-
-        let mut ramp = None;
-        let mut back_edge = false;
-        if let Some(data) = latency {
-            if let Some(entry) = data.edges.iter().find(|l| l.edge_index == i) {
-                back_edge = entry.is_back_edge;
-                let stop = if entry.is_back_edge {
-                    LATENCY_STOPS - 1
-                } else {
-                    let den = data.summary.max.max(f32::EPSILON);
-                    (clamp01(entry.latency / den) * (LATENCY_STOPS - 1) as f32).round() as usize
-                };
-                ramp = Some(stop);
-            }
-        }
+        let diff_state = edge_diff_state(diff, &edge.cable);
+        let (ramp, back_edge) = edge_ramp(latency, i);
 
         let influenced = app
             .modifier_influence
             .as_ref()
             .or(app.influence.as_ref())
             .is_some_and(|s| s.influenced_edges.contains(&edge.cable));
-        let mut color = if has_error {
-            // Error red outranks influence (guardrails).
-            theme.rgb(theme.graph_edge_error)
-        } else if incident_disabled || incident_unselected {
-            theme.rgb(theme.graph_edge_dim)
-        } else if influenced {
-            if let Some(tok) = app.active_modifier() {
-                theme.rgb(crate::theme::modifier_hue(tok))
-            } else {
-                theme.rgb(theme.graph_edge_highlight)
-            }
-        } else if app.modifier_influence.is_some() || app.influence.is_some() {
-            theme.rgb(theme.graph_edge_dim)
-        } else if let Some(state) = diff_state {
-            match state {
-                EdgeDiffState::Added | EdgeDiffState::Changed => {
-                    theme.rgb(theme.graph_edge_diff_added)
-                }
-                EdgeDiffState::Removed => theme.rgb(theme.graph_edge_diff_removed),
-            }
-        } else if let Some(stop) = ramp {
-            let stops = [
-                theme.graph_edge_latency_0,
-                theme.graph_edge_latency_1,
-                theme.graph_edge_latency_2,
-                theme.graph_edge_latency_3,
-                theme.graph_edge_latency_4,
-            ];
-            theme.rgb(stops[stop.min(LATENCY_STOPS - 1)])
-        } else if edge.cable.starts_with("_REG:") {
-            theme.rgb(theme.graph_edge_register)
-        } else {
-            match kind {
-                CableKind::Control => theme.rgb(theme.graph_edge_control),
-                CableKind::Audio => theme.rgb(theme.graph_edge_audio),
-                CableKind::Midi => theme.rgb(theme.graph_edge_midi),
-                CableKind::Unknown => theme.rgb(theme.graph_edge_unknown),
-            }
-        };
+        let mut color = edge_color(
+            style,
+            EdgeFlags {
+                error: has_error,
+                dimmed: incident_disabled || incident_unselected,
+                influenced,
+                diff: diff_state,
+                ramp,
+                register: edge.cable.starts_with("_REG:"),
+                kind,
+            },
+        );
         // Optimizer-preview diff overrides the kind/latency color (but sits
         // below error/influence/disabled above): latency got worse = red,
         // better = blue (optimizer-click-focus).
@@ -1569,8 +1610,8 @@ fn build_scene(
             };
         }
 
-        nodes[si].output_port = true;
-        nodes[ti].input_port = true;
+        built.nodes[si].output_port = true;
+        built.nodes[ti].input_port = true;
         edges.push(EdgeSpec {
             start,
             end,
@@ -1593,12 +1634,141 @@ fn build_scene(
             }),
         });
     }
+    BuiltEdges { edges, node_dirs }
+}
 
-    // Optimizer-preview diff: color each node's border by its aggregated
-    // direction (worse beats better). Unchanged nodes keep their resolved
-    // border (optimizer-click-focus).
+/// Optimizer-preview diff direction for one edge (optimizer-click-focus):
+/// compare the current forward-loop latency against the captured file-order
+/// baseline by cable name. `None` when the diff is inactive or this edge is
+/// unchanged.
+fn edge_opt_dir(app: &App, graph: &Graph, edge_index: usize, cable: &str) -> Option<OptDir> {
+    let active = app
+        .optimizer
+        .as_ref()
+        .is_some_and(|s| s.previewing.is_some())
+        && app.optimizer_diff_state.is_some();
+    if !active {
+        return None;
+    }
+    let state = app.optimizer_diff_state.as_ref()?;
+    if edge_index >= state.before_latency.len()
+        || state
+            .before_cable
+            .get(edge_index)
+            .is_none_or(|c| c.as_str() != cable)
+    {
+        return None;
+    }
+    let current = graph
+        .latency
+        .as_ref()
+        .and_then(|lat| lat.edges.iter().find(|l| l.edge_index == edge_index))
+        .map_or(0.0, |l| l.latency);
+    let delta = current - state.before_latency[edge_index];
+    if delta > 1e-6 {
+        Some(OptDir::Worse)
+    } else if delta < -1e-6 {
+        Some(OptDir::Better)
+    } else {
+        None
+    }
+}
+
+/// Structural diff classification of one cable, if a diff is showing.
+fn edge_diff_state(diff: Option<&DiffReport>, cable: &str) -> Option<EdgeDiffState> {
+    let report = diff?;
+    if report.added_cables.iter().any(|c| c.as_str() == cable) {
+        Some(EdgeDiffState::Added)
+    } else if report.removed_cables.iter().any(|c| c.as_str() == cable) {
+        Some(EdgeDiffState::Removed)
+    } else if report.changed_cables.iter().any(|c| c.cable == cable) {
+        Some(EdgeDiffState::Changed)
+    } else {
+        None
+    }
+}
+
+/// Latency-ramp stop for one edge and whether it is a back edge (which always
+/// sits at the hot end of the ramp).
+fn edge_ramp(latency: Option<&LatencyData>, edge_index: usize) -> (Option<usize>, bool) {
+    let Some(data) = latency else {
+        return (None, false);
+    };
+    let Some(entry) = data.edges.iter().find(|l| l.edge_index == edge_index) else {
+        return (None, false);
+    };
+    let stop = if entry.is_back_edge {
+        LATENCY_STOPS - 1
+    } else {
+        let den = data.summary.max.max(f32::EPSILON);
+        (clamp01(entry.latency / den) * (LATENCY_STOPS - 1) as f32).round() as usize
+    };
+    (Some(stop), entry.is_back_edge)
+}
+
+/// Stroke colour precedence: topology error, then disabled/deselected, then the
+/// influenced set, then a dimmed rest of an influence, then the structural diff,
+/// then the latency ramp or register edge, then the cable kind.
+fn edge_color(style: SceneStyle<'_>, flags: EdgeFlags) -> (u8, u8, u8) {
+    let SceneStyle { app, theme, .. } = style;
+    if flags.error {
+        // Error red outranks influence (guardrails).
+        theme.rgb(theme.graph_edge_error)
+    } else if flags.dimmed {
+        theme.rgb(theme.graph_edge_dim)
+    } else if flags.influenced {
+        if let Some(tok) = app.active_modifier() {
+            theme.rgb(crate::theme::modifier_hue(tok))
+        } else {
+            theme.rgb(theme.graph_edge_highlight)
+        }
+    } else if app.modifier_influence.is_some() || app.influence.is_some() {
+        theme.rgb(theme.graph_edge_dim)
+    } else if let Some(state) = flags.diff {
+        match state {
+            EdgeDiffState::Added | EdgeDiffState::Changed => theme.rgb(theme.graph_edge_diff_added),
+            EdgeDiffState::Removed => theme.rgb(theme.graph_edge_diff_removed),
+        }
+    } else {
+        base_edge_color(theme, flags)
+    }
+}
+
+/// The undecorated stroke colour: register edges and the latency ramp override
+/// the cable-kind colour.
+fn base_edge_color(theme: &Theme, flags: EdgeFlags) -> (u8, u8, u8) {
+    if let Some(stop) = flags.ramp {
+        let stops = [
+            theme.graph_edge_latency_0,
+            theme.graph_edge_latency_1,
+            theme.graph_edge_latency_2,
+            theme.graph_edge_latency_3,
+            theme.graph_edge_latency_4,
+        ];
+        return theme.rgb(stops[stop.min(LATENCY_STOPS - 1)]);
+    }
+    if flags.register {
+        return theme.rgb(theme.graph_edge_register);
+    }
+    match flags.kind {
+        CableKind::Control => theme.rgb(theme.graph_edge_control),
+        CableKind::Audio => theme.rgb(theme.graph_edge_audio),
+        CableKind::Midi => theme.rgb(theme.graph_edge_midi),
+        CableKind::Unknown => theme.rgb(theme.graph_edge_unknown),
+    }
+}
+
+/// Optimizer-preview diff: color each node's border by its aggregated direction
+/// (worse beats better). Unchanged nodes keep their resolved border
+/// (optimizer-click-focus).
+fn apply_optimizer_node_diff(
+    style: SceneStyle<'_>,
+    nodes: &mut [NodeSpec],
+    dirs: &[Option<OptDir>],
+) {
+    let SceneStyle { theme, zoom, .. } = style;
     for (j, node) in nodes.iter_mut().enumerate() {
-        if let Some(dir) = node_opt_dir[j] {
+        if let Some(dir) = dirs[j] {
             node.border = match dir {
                 OptDir::Worse => theme.rgb(theme.graph_node_diff_before),
                 OptDir::Better => theme.rgb(theme.graph_node_diff_after),
@@ -1606,56 +1776,52 @@ fn build_scene(
             node.border_width = (3.0 * zoom).max(1.0);
         }
     }
+}
 
-    // Cluster containers are padded unions of the kept member node rects in
-    // the un-filtered graph; a filtered render (dependency or influence subset)
-    // skips them because the member index mapping does not match the
-    // full-graph range.
+/// Cluster containers are padded unions of the kept member node rects in the
+/// un-filtered graph; a filtered render (dependency or influence subset) skips
+/// them because the member index mapping does not match the full-graph range.
+fn build_clusters(
+    style: SceneStyle<'_>,
+    graph: &Graph,
+    nodes: &[NodeSpec],
+    kept: &HashMap<usize, usize>,
+) -> Vec<ClusterSpec> {
+    let SceneStyle { theme, zoom, .. } = style;
     let cluster_pad = (CLUSTER_PAD * zoom).max(2.0);
-    let clusters = if render_clusters {
-        graph
-            .clusters
-            .iter()
-            .filter_map(|cluster| {
-                let members: Vec<usize> = (cluster.section_range.start..cluster.section_range.end)
-                    .filter_map(|i| kept.get(&i).copied())
-                    .collect();
-                if members.is_empty() {
-                    return None;
-                }
-                let mut x0 = f32::INFINITY;
-                let mut y0 = f32::INFINITY;
-                let mut x1 = f32::NEG_INFINITY;
-                let mut y1 = f32::NEG_INFINITY;
-                for &m in &members {
-                    let n = &nodes[m];
-                    x0 = x0.min(n.x);
-                    y0 = y0.min(n.y);
-                    x1 = x1.max(n.x + n.w);
-                    y1 = y1.max(n.y + n.h);
-                }
-                Some(ClusterSpec {
-                    x: x0 - cluster_pad,
-                    y: y0 - cluster_pad,
-                    w: (x1 + cluster_pad) - (x0 - cluster_pad),
-                    h: (y1 + cluster_pad) - (y0 - cluster_pad),
-                    title: cluster.title.clone(),
-                    border: theme.rgb(theme.graph_cluster_border),
-                    title_color: theme.rgb(theme.graph_cluster_title),
-                    member_indices: members,
-                })
+    graph
+        .clusters
+        .iter()
+        .filter_map(|cluster| {
+            let members: Vec<usize> = (cluster.section_range.start..cluster.section_range.end)
+                .filter_map(|i| kept.get(&i).copied())
+                .collect();
+            if members.is_empty() {
+                return None;
+            }
+            let mut x0 = f32::INFINITY;
+            let mut y0 = f32::INFINITY;
+            let mut x1 = f32::NEG_INFINITY;
+            let mut y1 = f32::NEG_INFINITY;
+            for &m in &members {
+                let n = &nodes[m];
+                x0 = x0.min(n.x);
+                y0 = y0.min(n.y);
+                x1 = x1.max(n.x + n.w);
+                y1 = y1.max(n.y + n.h);
+            }
+            Some(ClusterSpec {
+                x: x0 - cluster_pad,
+                y: y0 - cluster_pad,
+                w: (x1 + cluster_pad) - (x0 - cluster_pad),
+                h: (y1 + cluster_pad) - (y0 - cluster_pad),
+                title: cluster.title.clone(),
+                border: theme.rgb(theme.graph_cluster_border),
+                title_color: theme.rgb(theme.graph_cluster_title),
+                member_indices: members,
             })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Some(SceneSpec {
-        background: theme.rgb(theme.graph_canvas_bg),
-        nodes,
-        edges,
-        clusters,
-    })
+        })
+        .collect()
 }
 
 #[cfg(test)]
