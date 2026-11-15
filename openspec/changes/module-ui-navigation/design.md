@@ -32,7 +32,7 @@ The world is the rack's case rect at the current zoom, taken from `physical::rac
 
 `physical::rack_minimap(case, modules, pane, offset, zoom) -> MiniMap { panel, modules: Vec<Rect>, viewport: Rect, transform }`, with the same transform tuple shape the graph publishes `(bx, by, bw, bh, ix, iy, sx, sy)`, plus an inverse (`minimap_rack_point`) so the handler can turn a pointer position into a rack point. Painter and pointer read one answer; neither re-derives a scale. This is the specific lesson `minimap-region-zoom` recorded after shipping an inline inverse in the handler.
 
-The panel is 160 pt wide, its height `160 × rack_h / rack_w + 8` clamped to 56–120 pt, inset 8 pt from the pane's bottom-right: the multirow rack is about 2.5:1, so a fixed square panel would waste half its area and make 17 modules 5 pt wide instead of 9.
+The panel is 160 pt wide, its height `160 × rack_h / rack_w + 8` clamped to 56–120 pt, inset 8 pt from the pane's bottom-right: the multirow fixture's rack is one row of 457.2 × 128.5 mm — 3.56:1 — so its panel height lands on the 56 pt floor and its 17 modules get about 8.9 pt each; a 2.5:1 rack would take 72 pt. A fixed square panel would waste half its area and halve that module width.
 
 ### D3 — The panel claims the pointer before element hits
 
