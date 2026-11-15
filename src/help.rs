@@ -158,6 +158,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("+/-", "camera zoom"),
             ("arrows", "pan camera"),
             ("click minimap", "pan camera to clicked position"),
+            ("drag minimap", "zoom to dragged region"),
             ("Alt+[/Alt+]", "cable tension"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
@@ -574,6 +575,7 @@ mod tests {
         ("+/-", "camera zoom"),
         ("arrows", "pan camera"),
         ("click minimap", "pan camera to clicked position"),
+        ("drag minimap", "zoom to dragged region"),
         ("Alt+[/Alt+]", "cable tension"),
         ("Esc", "close graph"),
         // Source viewer.

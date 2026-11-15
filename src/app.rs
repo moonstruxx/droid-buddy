@@ -1005,6 +1005,15 @@ pub struct App {
     /// Graph minimap transform for click-to-world conversion: (bx, by, bw, bh, ix, iy, sx, sy)
     /// Published by renderer each frame alongside `graph_minimap_rect`.
     pub graph_minimap_transform: Option<GraphMinimapTransform>,
+    /// Live minimap region-zoom marquee as `(anchor_x, anchor_y, current_x,
+    /// current_y)` in window points — the space window pointers arrive in. `Some`
+    /// only between a press inside the minimap panel and the matching release: a
+    /// click (a zero-extent marquee) still pans to the anchor's world point, a
+    /// drag fits the camera to the world rect under the marquee, and the painter
+    /// draws the marquee from these same corners. Cleared on Esc, on graph close,
+    /// and wherever the graph camera is reset, so a stale marquee can never
+    /// outlive the view it was drawn over.
+    pub minimap_drag: Option<(f32, f32, f32, f32)>,
     /// Full geometry of the embedded source pane published by the renderer
     /// each frame while the viewer is open. Used to route bare source-pane
     /// clicks to `ViewerFocus::Source` without side effects.
@@ -1291,6 +1300,7 @@ impl App {
             graph_minimap_rect: None,
             graph_minimap_panel_egui: None,
             graph_minimap_transform: None,
+            minimap_drag: None,
             source_pane_rect: None,
             scale_factor: 1.0,
             events: EventBus::default(),
@@ -2254,6 +2264,7 @@ impl App {
             ViewType::Graph => {
                 self.hovered_graph_node = None;
                 self.hovered_group = None;
+                self.minimap_drag = None;
             }
             ViewType::Optimizer => self.drop_optimizer_state(),
             ViewType::Physical | ViewType::SourceViewer => {}
@@ -3972,6 +3983,7 @@ impl App {
         // a solve invalidates it (this covers `open_graph` and `place_view`).
         self.invalidate_grouped_view();
         self.graph_drag = None;
+        self.minimap_drag = None;
         self.hovered_graph_node = None;
         self.hovered_group = None;
         // Task 2.3: a newly opened (or re-solved) graph re-fits its camera. The
@@ -4074,6 +4086,7 @@ impl App {
         }
         self.hovered_graph_node = None;
         self.hovered_group = None;
+        self.minimap_drag = None;
     }
 
     /// Rebuild the graph from the current patch without closing the graph
@@ -4108,6 +4121,8 @@ impl App {
         // nodes that no longer line up.
         self.invalidate_grouped_view();
         self.graph_drag = None;
+        // A marquee in flight names corners of the graph that is going away.
+        self.minimap_drag = None;
         // Rebuilds (tension/pin/select/processing) stay instant: no settle is
         // started and any running one is dropped.
         self.graph_settle = None;
@@ -4450,6 +4465,7 @@ impl App {
         self.optimizer_diff_state = None;
         self.graph_positions.clear();
         self.graph_drag = None;
+        self.minimap_drag = None;
         self.hovered_graph_node = None;
         self.hovered_group = None;
         self.graph_camera = None;

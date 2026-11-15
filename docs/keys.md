@@ -53,6 +53,7 @@ coloring).
 | `Shift+O` | toggle grouping |
 | `+`/`-`, `arrows` | camera zoom / pan |
 | `click minimap` | pan camera to clicked position |
+| `drag minimap` | zoom to the dragged region |
 | `Alt+[`/`Alt+]` | cable tension (force solver) |
 | `e` / `d` | edit label / diff overlay |
 | `Esc` | close graph |

@@ -353,6 +353,15 @@ pub(crate) const MAX_ZOOM_STEP: f32 = 1.5;
 const MINIMAP_SIZE: (f32, f32) = (180.0, 120.0);
 /// Margin between the minimap panel and the canvas edge.
 const MINIMAP_PAD: f32 = 10.0;
+/// Inset between the minimap panel's outer edge and its map area: the panel
+/// edge's padding and, on the interaction side, the drag clamp's bound, so the
+/// marquee can only name the map area the dots occupy.
+pub(crate) const MINIMAP_INSET: f32 = 4.0;
+/// Shortest world span a minimap region zoom frames on either axis. A marquee
+/// that maps to a zero-span rect (one pixel wide, or a map whose scale guard
+/// collapsed) is widened to this, so the fit divides by a real number instead
+/// of the graph's degenerate-span floor.
+const MINIMAP_MIN_WORLD_SPAN: f32 = 1.0;
 /// Pixel margin around a node frame when attributing an edge endpoint to it.
 const EDGE_ATTRIB_MARGIN: f32 = 8.0;
 /// Minimum drag extent before a marquee is reported; a click on empty canvas
@@ -527,12 +536,15 @@ pub(crate) fn minimap_layout(scene: &SceneSpec, canvas: egui::Rect) -> Option<Mi
     if bw <= 0.0 || bh <= 0.0 {
         return None;
     }
-    // A layout that fits the canvas needs no map; only show the minimap when
-    // the world overflows the viewport in at least one axis.
-    if bw <= canvas.width() && bh <= canvas.height() {
-        return None;
-    }
-    let inner = (px + 4.0, py + 4.0, mw - 8.0, mh - 8.0);
+    // The map is drawn whenever the graph has a scene, whatever the zoom: it is
+    // the pane's persistent navigation aid (click to pan, drag a region to
+    // zoom), so a scene that currently fits the canvas still gets one.
+    let inner = (
+        px + MINIMAP_INSET,
+        py + MINIMAP_INSET,
+        mw - 2.0 * MINIMAP_INSET,
+        mh - 2.0 * MINIMAP_INSET,
+    );
     let (ix, iy, iw, ih) = inner;
     let sx = iw / bw;
     let sy = ih / bh;
@@ -549,16 +561,16 @@ pub(crate) fn minimap_layout(scene: &SceneSpec, canvas: egui::Rect) -> Option<Mi
     // The visible canvas occupies `canvas` in scene-pixel space.
     let (v0, v0y) = map(canvas.min.x, canvas.min.y);
     let (v1, v1y) = map(canvas.max.x, canvas.max.y);
-    // Clamp the viewport box to the panel: when the canvas is larger than the
+    // Clamp the viewport box to the map area: when the canvas is larger than the
     // scene (zoomed out so the whole scene fits), the full-canvas box would
     // overrun the panel; clamping makes it read as "the whole scene is
-    // visible". When zoomed in, the box is already a sub-rect and is
-    // unchanged.
-    let (px2, py2, pw2, ph2) = panel;
-    let cx = v0.clamp(px2, px2 + pw2);
-    let cy = v0y.clamp(py2, py2 + ph2);
-    let cx2 = (v1).clamp(px2, px2 + pw2);
-    let cy2 = (v1y).clamp(py2, py2 + ph2);
+    // visible" — a box filling the map, never a degenerate line. When zoomed
+    // in, the box is already a sub-rect and is unchanged. Clamping to the inner
+    // rect rather than the panel edge keeps the box off the panel's own border.
+    let cx = v0.clamp(ix, ix + iw);
+    let cy = v0y.clamp(iy, iy + ih);
+    let cx2 = (v1).clamp(ix, ix + iw);
+    let cy2 = (v1y).clamp(iy, iy + ih);
     let viewport = (cx, cy, cx2 - cx, cy2 - cy);
     Some(Minimap {
         panel,
@@ -566,6 +578,54 @@ pub(crate) fn minimap_layout(scene: &SceneSpec, canvas: egui::Rect) -> Option<Mi
         nodes,
         transform: (bx, by, bw, bh, ix, iy, sx, sy),
     })
+}
+
+/// The world point under a minimap position: the inverse of
+/// [`minimap_layout`]'s `map`.
+///
+/// `px` is in the space the published transform lives in — canvas points, i.e.
+/// window points minus the pane origin — and the result is world (solver)
+/// units, so a pointer over the panel names the scene point it covers. A
+/// non-positive scale divides by zero, which a degenerate scene can still
+/// publish, so such an axis maps to the world bounds' origin instead; callers
+/// that must not navigate from a degenerate map gate on the scale themselves.
+pub(crate) fn minimap_world_point(
+    transform: (f32, f32, f32, f32, f32, f32, f32, f32),
+    px: (f32, f32),
+) -> (f32, f32) {
+    let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
+    let wx = if sx > 0.0 { bx + (px.0 - ix) / sx } else { bx };
+    let wy = if sy > 0.0 { by + (px.1 - iy) / sy } else { by };
+    (wx, wy)
+}
+
+/// The world rectangle a marquee between two minimap positions names, as
+/// `(min_x, min_y, max_x, max_y)` — the shape the camera fit consumes.
+///
+/// `a` and `b` are the drag's corners in canvas points (the [`Minimap`]
+/// transform's space), in either order: the result is normalised, because a
+/// drag runs in any direction. A zero-span axis is widened to
+/// [`MINIMAP_MIN_WORLD_SPAN`] about its midpoint, so a one-pixel marquee still
+/// produces a rect the fit can frame instead of collapsing onto the degenerate
+/// span guard.
+pub(crate) fn minimap_world_bounds(
+    transform: (f32, f32, f32, f32, f32, f32, f32, f32),
+    a: (f32, f32),
+    b: (f32, f32),
+) -> (f32, f32, f32, f32) {
+    let (ax, ay) = minimap_world_point(transform, a);
+    let (bx, by) = minimap_world_point(transform, b);
+    let (min_x, max_x) = (ax.min(bx), ax.max(bx));
+    let (min_y, max_y) = (ay.min(by), ay.max(by));
+    let span_x = (max_x - min_x).max(MINIMAP_MIN_WORLD_SPAN);
+    let span_y = (max_y - min_y).max(MINIMAP_MIN_WORLD_SPAN);
+    let (cx, cy) = (f32::midpoint(min_x, max_x), f32::midpoint(min_y, max_y));
+    (
+        cx - span_x / 2.0,
+        cy - span_y / 2.0,
+        cx + span_x / 2.0,
+        cy + span_y / 2.0,
+    )
 }
 
 /// The node whose frame is nearest to a scene point, within a margin: used to
@@ -662,7 +722,13 @@ fn paint_polish(
         .or_else(|| spec.clusters.first().map(|c| c.border))
         .unwrap_or(spec.background);
     if let Some(minimap) = minimap_layout(spec, canvas) {
-        paint_minimap(painter, spec, &minimap, accent);
+        paint_minimap(
+            painter,
+            spec,
+            &minimap,
+            accent,
+            app.and_then(|app| app.minimap_drag),
+        );
     }
     // The committed marquee selection: an accent overlay border on each picked
     // node frame, drawn above the scene but below the in-progress marquee rect
@@ -908,13 +974,19 @@ fn starts_a_name(remainder: &str) -> bool {
 }
 
 /// The minimap panel: opaque scene-background backdrop, accent-bordered,
-/// node frames as accent rects, and a viewport indicator showing what the
-/// canvas currently displays.
+/// node frames as accent rects, an optional region-zoom marquee, and a
+/// viewport indicator showing what the canvas currently displays.
+///
+/// `drag` is the live minimap marquee as `(anchor_x, anchor_y, current_x,
+/// current_y)` in window points — the space the pointer arrives in and the
+/// space the painter itself draws in, so no origin shift applies — or `None`
+/// while no marquee is down.
 fn paint_minimap(
     painter: &egui::Painter,
     spec: &SceneSpec,
     minimap: &Minimap,
     accent: (u8, u8, u8),
+    drag: Option<(f32, f32, f32, f32)>,
 ) {
     let (px, py, pw, ph) = minimap.panel;
     let panel = egui::Rect::from_min_size(egui::pos2(px, py), egui::vec2(pw, ph));
@@ -938,6 +1010,22 @@ fn paint_minimap(
             ),
             egui::CornerRadius::same(1),
             rgb(accent),
+        );
+    }
+    // The region-zoom marquee sits above the dots (it names a part of the map)
+    // and below the viewport box (which stays readable through the translucent
+    // fill). Clipped to the panel so a drag that ran past the map cannot smear
+    // over the scene around it.
+    if let Some((ax, ay, bx, by)) = drag {
+        let rect =
+            egui::Rect::from_two_pos(egui::pos2(ax, ay), egui::pos2(bx, by)).intersect(panel);
+        painter.rect_filled(rect, 0.0, rgba(accent, 40));
+        painter.rect(
+            rect,
+            0.0,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, rgb(accent)),
+            egui::StrokeKind::Inside,
         );
     }
     let (vx, vy, vw, vh) = minimap.viewport;
@@ -2675,14 +2763,25 @@ mod tests {
     }
 
     #[test]
-    fn minimap_hidden_when_layout_fits_canvas() {
+    fn minimap_shown_even_when_the_layout_fits() {
         let s = scene();
-        // Scene bounds (700×380) fit the 1000×800 canvas: no map needed.
-        assert!(minimap_layout(
+        // Scene bounds (700×380) fit the 1000×800 canvas: the map is drawn all
+        // the same — it is the pane's persistent navigation aid, and a
+        // click/drag region zoom must work at any zoom level.
+        let m = minimap_layout(
             &s,
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0))
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0)),
         )
-        .is_none());
+        .expect("the minimap is always laid out for a scene");
+        let (px, py, pw, ph) = m.panel;
+        assert_eq!((px, py, pw, ph), (10.0, 670.0, 180.0, 120.0));
+        // The whole scene is visible, so the viewport box fills the map area
+        // (inset by MINIMAP_INSET) rather than collapsing to a line.
+        let (vx, vy, vw, vh) = m.viewport;
+        assert!((vx - (px + MINIMAP_INSET)).abs() < 0.5, "vx: {vx}");
+        assert!((vy - (py + MINIMAP_INSET)).abs() < 0.5, "vy: {vy}");
+        assert!((vw - (pw - 2.0 * MINIMAP_INSET)).abs() < 0.5, "vw: {vw}");
+        assert!((vh - (ph - 2.0 * MINIMAP_INSET)).abs() < 0.5, "vh: {vh}");
     }
 
     #[test]
@@ -2712,6 +2811,76 @@ mod tests {
             ..WindowFrame::default()
         };
         assert!(next_selection(&pressed, &prev).is_empty());
+    }
+
+    #[test]
+    fn minimap_world_point_inverts_the_map() {
+        // The published transform is the layout's own `map` inverted: the inner
+        // panel's origin is the world bounds' origin, and a panel pixel is
+        // `1/scale` world units.
+        let s = scene();
+        let m = minimap_layout(
+            &s,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0)),
+        )
+        .unwrap();
+        let (bx, by, _bw, _bh, ix, iy, sx, sy) = m.transform;
+        assert_eq!(minimap_world_point(m.transform, (ix, iy)), (bx, by));
+        let (wx, wy) = minimap_world_point(m.transform, (ix + 7.0, iy + 3.0));
+        assert!((wx - (bx + 7.0 / sx)).abs() < 1e-3, "wx: {wx}");
+        assert!((wy - (by + 3.0 / sy)).abs() < 1e-3, "wy: {wy}");
+        // Round trip through the forward map: the inverse returns the world
+        // point the panel position was built from.
+        let (world, px) = ((123.0_f32, 45.0_f32), (ix + 123.0 * sx, iy + 45.0 * sy));
+        let got = minimap_world_point(m.transform, px);
+        assert!((got.0 - world.0).abs() < 1e-3 && (got.1 - world.1).abs() < 1e-3);
+    }
+
+    #[test]
+    fn minimap_world_point_guards_a_zero_scale() {
+        // A degenerate map cannot be inverted: dividing by the zero scale would
+        // yield an infinity, so the guard answers the world bounds origin
+        // instead of poisoning a camera fit with NaN.
+        let transform = (10.0, 20.0, 0.0, 0.0, 4.0, 5.0, 0.0, 0.0);
+        let (wx, wy) = minimap_world_point(transform, (100.0, 100.0));
+        assert_eq!((wx, wy), (10.0, 20.0));
+        let (min_x, min_y, max_x, max_y) =
+            minimap_world_bounds(transform, (0.0, 0.0), (180.0, 120.0));
+        assert!(min_x.is_finite() && max_x.is_finite());
+        assert!(max_x > min_x && max_y > min_y, "a positive span survives");
+    }
+
+    #[test]
+    fn minimap_world_bounds_normalises_reversed_corners() {
+        let transform = (0.0, 0.0, 1000.0, 500.0, 14.0, 104.0, 0.172, 0.224);
+        // Two corners of the map: (200, 100) and (600, 400) in world units.
+        let a = (14.0 + 200.0 * 0.172, 104.0 + 100.0 * 0.224);
+        let b = (14.0 + 600.0 * 0.172, 104.0 + 400.0 * 0.224);
+        let (min_x, min_y, max_x, max_y) = minimap_world_bounds(transform, a, b);
+        assert!((min_x - 200.0).abs() < 1e-2, "min_x: {min_x}");
+        assert!((min_y - 100.0).abs() < 1e-2, "min_y: {min_y}");
+        assert!((max_x - 600.0).abs() < 1e-2, "max_x: {max_x}");
+        assert!((max_y - 400.0).abs() < 1e-2, "max_y: {max_y}");
+        // The drag direction does not matter: the swapped corners give the same
+        // normalised rect.
+        let swapped = minimap_world_bounds(transform, b, a);
+        assert!((swapped.0 - min_x).abs() < 1e-3 && (swapped.3 - max_y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn minimap_world_bounds_widens_a_zero_span() {
+        // A click (or a one-pixel marquee) names a zero-span rect; the fit would
+        // then divide by the graph's degenerate-span floor and jump to the zoom
+        // ceiling, so the bounds keep a small positive span around the point.
+        let transform = (0.0, 0.0, 1000.0, 500.0, 14.0, 104.0, 0.172, 0.224);
+        let at = (40.0, 60.0);
+        let (min_x, min_y, max_x, max_y) = minimap_world_bounds(transform, at, at);
+        assert!(max_x > min_x && max_y > min_y, "span: {min_x}..{max_x}");
+        let (px, py) = minimap_world_point(transform, at);
+        assert!(
+            min_x <= px && px <= max_x && min_y <= py && py <= max_y,
+            "the point stays inside the kept span"
+        );
     }
 
     #[test]
@@ -3804,7 +3973,7 @@ mod scene_builder_tests {
 /// [`paint_scene`] through an egui `Context` exactly as `EguiSurface::paint`
 /// does, and pins the emitted shapes across the four view states the window
 /// reaches — ready (fitted camera + scene), waiting (no scene yet), mid-window
-/// (canvas smaller than the fitted scene, so the minimap appears), and zoomed
+/// (canvas smaller than the fitted scene, so the scene overflows it), and zoomed
 /// (camera zoom scales node spacing). A camera/scene regression that silently
 /// repaints the window black or pushes content off-canvas now fails the suite
 /// instead of surfacing only on a live screen (bead droid_tui-69r).
@@ -4219,11 +4388,16 @@ mod window_paint_tests {
             out.labels
         );
         // The tooltip card is a dialog backdrop: no rect in this frame may be
-        // partially transparent (the card was a 235-alpha wash before).
+        // partially transparent (the card was a 235-alpha wash before). The
+        // minimap's viewport indicator is the one deliberate wash — chrome over
+        // the map, drawn on every scene since the map is always on — so it is
+        // excluded by geometry.
+        let panel = map_panel_rect(&scene, canvas);
         let translucent: Vec<_> = out
             .rects
             .iter()
             .filter(|r| r.fill.a() != 255 && r.fill.a() != 0)
+            .filter(|r| panel.is_none_or(|p| !p.contains_rect(r.rect)))
             .map(|r| (r.rect, r.fill))
             .collect();
         assert!(
@@ -4248,7 +4422,7 @@ mod window_paint_tests {
     fn window_paint_mid_window_shows_minimap() {
         // A mid-sized canvas smaller than the fitted scene overflows: seed
         // the design-viewport fit and paint into a smaller canvas, modelling
-        // the zoomed-in state that shows the minimap bottom-left.
+        // the zoomed-in state, whose minimap sits bottom-left.
         let mut app = chain_app();
         app.graph_camera = Some(graph_window_fit_camera(
             &app.graph_positions,
@@ -4434,6 +4608,82 @@ mod window_paint_tests {
         }
     }
 
+    /// The minimap region-zoom marquee paints exactly while `App::minimap_drag`
+    /// is set, at the drag's window-space corners: a translucent accent fill plus
+    /// a 1 px accent stroke.
+    #[test]
+    fn window_paint_draws_the_minimap_marquee_only_while_dragging() {
+        let node = |x: f32| NodeSpec {
+            x,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+            radius: 0.0,
+            fill: (20, 20, 20),
+            border: (200, 200, 200),
+            border_width: 1.0,
+            label: String::new(),
+            label_color: (255, 255, 255),
+            circuit: String::new(),
+            instance_index: 0,
+            input_port: false,
+            output_port: false,
+        };
+        let scene = SceneSpec {
+            background: (10, 10, 10),
+            nodes: vec![node(0.0), node(500.0), node(1000.0)],
+            edges: vec![],
+            clusters: vec![],
+        };
+        let canvas = egui::vec2(200.0, 150.0);
+        let raw_input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            ..Default::default()
+        };
+        // The marquee spans (30, 40) → (120, 90) in window points, inside the
+        // panel the canvas places at (10, 20, 180, 120).
+        let drag = (30.0, 40.0, 120.0, 90.0);
+        let marquee_painted = |out: &PaintOutput| {
+            out.rects.iter().any(|r| {
+                (r.rect.min.x - drag.0).abs() < 0.5
+                    && (r.rect.min.y - drag.1).abs() < 0.5
+                    && (r.rect.width() - (drag.2 - drag.0)).abs() < 0.5
+                    && (r.rect.height() - (drag.3 - drag.1)).abs() < 0.5
+                    // The fill and the 1 px stroke are two shapes at the same
+                    // rect; either one proves the marquee is drawn.
+                    && (r.fill.a() > 0 || r.stroke.width > 0.0)
+            })
+        };
+
+        let mut app = App::new();
+        app.minimap_drag = Some(drag);
+        let dragging = paint_ui(raw_input(), |ui| {
+            paint_scene_in(
+                ui,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
+                Some(&scene),
+                &[],
+                Some(&app),
+            );
+        });
+        assert!(
+            marquee_painted(&dragging),
+            "the marquee is drawn while the drag is live"
+        );
+
+        let idle = App::new();
+        let released = paint_ui(raw_input(), |ui| {
+            paint_scene_in(
+                ui,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
+                Some(&scene),
+                &[],
+                Some(&idle),
+            );
+        });
+        assert!(!marquee_painted(&released), "no marquee without a drag");
+    }
+
     /// Arrow dimensions shrink with zoom, floored so the direction stays
     /// visible (graph-zoom-node-scaling design decision 2).
     #[test]
@@ -4549,6 +4799,31 @@ mod window_paint_tests {
             .collect()
     }
 
+    /// The minimap panel's rect for a canvas, when the scene lays one out.
+    fn map_panel_rect(scene: &SceneSpec, canvas: egui::Vec2) -> Option<egui::Rect> {
+        minimap_layout(scene, egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)).map(|m| {
+            egui::Rect::from_min_size(
+                egui::pos2(m.panel.0, m.panel.1),
+                egui::vec2(m.panel.2, m.panel.3),
+            )
+        })
+    }
+
+    /// Painted rects outside the minimap panel, as `(rect, fill, stroke)`: the
+    /// map is chrome that now draws on every scene (a fitting layout included),
+    /// so scene-shape comparisons measure what the scene itself paints.
+    fn scene_rect_geometry(
+        scene: &SceneSpec,
+        canvas: egui::Vec2,
+        rects: &[egui::epaint::RectShape],
+    ) -> Vec<(egui::Rect, egui::Color32, egui::Color32)> {
+        let panel = map_panel_rect(scene, canvas);
+        rect_geometry(rects)
+            .into_iter()
+            .filter(|(rect, _, _)| panel.is_none_or(|p| !p.contains_rect(*rect)))
+            .collect()
+    }
+
     #[test]
     fn paint_omits_cluster_boxes_in_sections_mode() {
         let canvas = egui::vec2(1280.0, 800.0);
@@ -4576,7 +4851,9 @@ mod window_paint_tests {
 
         // Sections mode paints exactly the stripped column frame: same nodes,
         // same cables, and neither a banner-group rectangle nor a cluster
-        // title (spec "No cluster boxes drawn in sections mode").
+        // title (spec "No cluster boxes drawn in sections mode"). The minimap
+        // is compared apart: it draws on every scene, and its dots follow the
+        // two arrangements' own positions.
         let mut sections = two_group_app();
         sections.layout_mode = LayoutMode::Sections;
         let sections_scene = scene_of(&sections);
@@ -4587,8 +4864,8 @@ mod window_paint_tests {
             "no cluster title is painted in sections mode"
         );
         assert_eq!(
-            rect_geometry(&sections_out.rects),
-            rect_geometry(&without_boxes.rects),
+            scene_rect_geometry(&sections_scene, canvas, &sections_out.rects),
+            scene_rect_geometry(&stripped, canvas, &without_boxes.rects),
             "no cluster rectangle is painted in sections mode"
         );
         assert_eq!(sections_out.beziers, without_boxes.beziers);

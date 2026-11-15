@@ -824,6 +824,15 @@ fn handle_focus_routing_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // tree order (skipping empty panes), and `Esc` closes the focused pane's
     // view. The maximize-restore, overlay, filter, and armed-prefix Esc paths
     // all returned above.
+    //
+    // A minimap region zoom in flight is the graph pane's own transient state,
+    // so Esc drops that first and keeps the view open — the next Esc closes the
+    // pane as before. Checked here because this is where the pane's Esc lives;
+    // the graph key table below never sees an Esc that reached this far.
+    if key.code == KeyCode::Esc && app.minimap_drag.take().is_some() {
+        app.status_message = String::from("Minimap zoom cancelled");
+        return Some(false);
+    }
     let shift = key.modifiers.shift;
     if key.code == KeyCode::Tab && !shift {
         app.cycle_focus(true);
@@ -2390,6 +2399,9 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     if apply_window_drag(frame, app, &camera, origin) {
         return;
     }
+    if release_minimap_drag(frame, app, origin) {
+        return;
+    }
     release_window_drag(frame, app);
     apply_window_graph_keys(frame, app);
 }
@@ -2622,6 +2634,12 @@ fn publish_graph_hover(app: &mut App, group_hit: Option<usize>, node_hit: Option
 /// a held drag from churning scroll/cursor through repeated `select_circuit`
 /// calls.
 fn commit_window_marquee(frame: &crate::gui::WindowFrame, app: &mut App) {
+    // A minimap gesture names a region of the map, not nodes: the press that
+    // anchored it returned before any node was taken, and the canvas marquee the
+    // same drag produces over the panel must not also select what it covers.
+    if app.minimap_drag.is_some() {
+        return;
+    }
     let Some(first) = frame
         .marquee
         .as_ref()
@@ -2696,15 +2714,71 @@ fn handle_window_press(
     false
 }
 
-/// A press inside the minimap panel pans the camera to the clicked world point;
-/// `true` = the press was the minimap's, so the scene beneath it stays untouched.
+/// Minimum marquee extent (window points) on either axis before a minimap drag
+/// is a region zoom: below it the gesture is a click, which keeps panning to the
+/// anchor's world point.
+const MINIMAP_DRAG_MIN_PX: f32 = 3.0;
+
+/// The minimap panel's map area in window points: the published panel (published
+/// canvas-relative, so the pane origin shifts it into window space) inset by
+/// [`crate::gui::MINIMAP_INSET`]. `None` without a published panel, or with a
+/// panel too small to hold its own inset. The drag clamp and the marquee's own
+/// bounds both come from here, so they cannot disagree.
+fn minimap_inner_window(app: &App, origin: (f32, f32)) -> Option<(f32, f32, f32, f32)> {
+    let panel = app.graph_minimap_panel_egui?;
+    let inset = crate::gui::MINIMAP_INSET;
+    let (w, h) = (panel.width() - 2.0 * inset, panel.height() - 2.0 * inset);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some((
+        panel.min.x + origin.0 + inset,
+        panel.min.y + origin.1 + inset,
+        w,
+        h,
+    ))
+}
+
+/// Clamp a window-space point into the minimap's map area; a point outside the
+/// panel (a drag that left the map) lands on the nearest edge, so the marquee
+/// never names world beyond what the panel shows.
+fn clamp_to_minimap(app: &App, point: (f32, f32), origin: (f32, f32)) -> (f32, f32) {
+    let Some((x, y, w, h)) = minimap_inner_window(app, origin) else {
+        return point;
+    };
+    (point.0.clamp(x, x + w), point.1.clamp(y, y + h))
+}
+
+/// Pan the camera so `world` is the canvas centre — the minimap's click action,
+/// shared by the press path's click release. Silent without a seeded camera
+/// (nothing has been fitted yet, so there is nothing to pan).
+fn pan_minimap_to_world(app: &mut App, world: (f32, f32)) {
+    let Some(mut camera) = app.graph_camera else {
+        return;
+    };
+    let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
+    camera.pan = (
+        world.0 * camera.zoom - vw / 2.0,
+        world.1 * camera.zoom - vh / 2.0,
+    );
+    app.graph_camera = Some(camera);
+    app.status_message = format!("Minimap click: pan to ({:.0}, {:.0})", world.0, world.1);
+}
+
+/// A press inside the minimap panel starts a region-zoom marquee; `true` = the
+/// press was the minimap's, so the scene beneath it stays untouched.
+///
+/// A click is a zero-extent drag: nothing moves here, and the release
+/// ([`release_minimap_drag`]) pans to the anchor's world point exactly as the
+/// click always did. A drag becomes a zoom instead, so the camera cannot jump on
+/// the press frame.
 ///
 /// `panel_egui` is canvas-relative while the pointer is window-space, so the pane
-/// origin shifts it into window space here. `(ix, iy)` in the published transform
-/// is the inner-panel origin in canvas space (the outer panel inset by
-/// `MINIMAP_INSET`); inverting `minimap_layout`'s `map` gives
-/// `world = bx + (rel - ix) / sx`. The scale guard keeps a zero extent from
-/// dividing by zero.
+/// origin shifts it into window space here. The anchor is clamped into the
+/// panel's map area, so a press on the panel's inset border starts at the nearest
+/// map edge. The transform's scale gate keeps a degenerate map (a zero extent
+/// divides by zero) from anchoring a marquee at all — the same map
+/// [`crate::gui::minimap_world_point`] refuses to invert.
 fn apply_minimap_press(frame: &crate::gui::WindowFrame, app: &mut App, origin: (f32, f32)) -> bool {
     let (Some(pointer), Some(panel_egui)) = (frame.pointer, app.graph_minimap_panel_egui) else {
         return false;
@@ -2717,25 +2791,76 @@ fn apply_minimap_press(frame: &crate::gui::WindowFrame, app: &mut App, origin: (
     if !panel_window.contains(egui::pos2(pointer.0, pointer.1)) {
         return false;
     }
-    // Minimap click: pan camera to clicked world position.
-    if let Some(transform) = app.graph_minimap_transform {
-        let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
+    if let Some((_bx, _by, _bw, _bh, _ix, _iy, sx, sy)) = app.graph_minimap_transform {
         if sx > 0.0 && sy > 0.0 {
-            let rel_x = pointer.0 - (ix + ox);
-            let rel_y = pointer.1 - (iy + oy);
-            let world_x = bx + rel_x / sx;
-            let world_y = by + rel_y / sy;
-            if let Some(mut camera) = app.graph_camera {
-                let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
-                camera.pan = (
-                    world_x * camera.zoom - vw / 2.0,
-                    world_y * camera.zoom - vh / 2.0,
-                );
-                app.graph_camera = Some(camera);
-                app.status_message = format!("Minimap click: pan to ({world_x:.0}, {world_y:.0})");
-            }
+            // Both corners live inside the map area from the start: a press on
+            // the panel's inset border anchors at the nearest map edge instead
+            // of naming world the panel does not show.
+            let anchor = clamp_to_minimap(app, (pointer.0, pointer.1), origin);
+            app.minimap_drag = Some((anchor.0, anchor.1, anchor.0, anchor.1));
         }
     }
+    true
+}
+
+/// Extend the live minimap marquee to `pointer` for one drag frame, clamped into
+/// the map area. A no-op without a marquee in flight.
+fn update_minimap_drag(app: &mut App, pointer: (f32, f32), origin: (f32, f32)) {
+    let Some((ax, ay, _cx, _cy)) = app.minimap_drag else {
+        return;
+    };
+    let (cx, cy) = clamp_to_minimap(app, pointer, origin);
+    app.minimap_drag = Some((ax, ay, cx, cy));
+}
+
+/// Finish a minimap gesture on release. A click — a marquee shorter than
+/// [`MINIMAP_DRAG_MIN_PX`] on either axis — pans to the anchor's world point,
+/// exactly as the click always did; a real drag fits the camera to the world rect
+/// under the marquee. The marquee is always cleared and `true` = consumed, so the
+/// release never falls through to node handling: a gesture that began on the
+/// minimap owns the pointer wherever it ended.
+fn release_minimap_drag(
+    frame: &crate::gui::WindowFrame,
+    app: &mut App,
+    origin: (f32, f32),
+) -> bool {
+    if !frame.primary_released {
+        return false;
+    }
+    let Some((ax, ay, cx, cy)) = app.minimap_drag.take() else {
+        return false;
+    };
+    // The map can vanish mid-gesture (a grouping change drops the minimap); the
+    // marquee goes with it rather than naming world nothing can be fitted to.
+    let Some(transform) = app.graph_minimap_transform else {
+        return true;
+    };
+    let (ox, oy) = origin;
+    if (cx - ax).abs() < MINIMAP_DRAG_MIN_PX || (cy - ay).abs() < MINIMAP_DRAG_MIN_PX {
+        let world = crate::gui::minimap_world_point(transform, (ax - ox, ay - oy));
+        pan_minimap_to_world(app, world);
+        return true;
+    }
+    let (min_x, min_y, max_x, max_y) =
+        crate::gui::minimap_world_bounds(transform, (ax - ox, ay - oy), (cx - ox, cy - oy));
+    let (vw, vh) = app.graph_canvas_px.unwrap_or((800.0, 600.0));
+    app.graph_camera = Some(crate::graph_render::GraphCamera::fit_to_world_with_nodes(
+        crate::graph_render::WorldBounds {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        },
+        app.graph_fit_node_world(),
+        (vw, vh),
+        0.0,
+    ));
+    // The bookkeeping `fit_graph_camera` does for a fit: the zoom preset latches
+    // back onto the fitted-zoom entry, so `+`/`-` step from the region's frame
+    // instead of from the zoom the user left behind.
+    app.graph_zoom_preset = App::GRAPH_ZOOM_FIT_INDEX as u8;
+    app.status_message =
+        format!("Minimap zoom: world ({min_x:.0}, {min_y:.0})-({max_x:.0}, {max_y:.0})");
     true
 }
 
@@ -2770,6 +2895,14 @@ fn apply_window_drag(
 ) -> bool {
     if !frame.primary_down || frame.primary_pressed {
         return false;
+    }
+    // A minimap marquee owns the drag: it extends the region instead of moving a
+    // node, and the press that anchored it returned before any node was grabbed.
+    if app.minimap_drag.is_some() {
+        if let Some(pointer) = frame.pointer {
+            update_minimap_drag(app, pointer, origin);
+        }
+        return true;
     }
     let Some(drag) = app.graph_drag.as_ref() else {
         return true;
@@ -6854,6 +6987,26 @@ mod tests {
             },
             &mut app,
         );
+        // The press only anchors the marquee; a click is a zero-extent drag, so
+        // the pan lands on the release.
+        assert!(app.minimap_drag.is_some(), "the press anchors the marquee");
+        assert_eq!(
+            app.graph_camera.map(|c| (c.zoom, c.pan)),
+            Some((
+                crate::graph_render::GraphCamera::new().zoom,
+                crate::graph_render::GraphCamera::new().pan
+            )),
+            "nothing pans before the release"
+        );
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((click_x, click_y)),
+                primary_released: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(app.minimap_drag.is_none(), "the release ends the gesture");
 
         // The camera centers that world point in the published canvas:
         // pan = world * zoom - canvas/2 (zoom 1 here).
@@ -6909,6 +7062,256 @@ mod tests {
             app.graph_drag.is_some(),
             "outside the minimap a node drag starts"
         );
+    }
+
+    /// Publish the minimap geometry and world mapping `minimap_layout` would,
+    /// for a canvas whose panel sits at `(10, 100, 180, 120)`: the click and
+    /// region-zoom paths read nothing else.
+    fn publish_test_minimap(app: &mut App) {
+        let (px, py, mw, mh) = (10.0f32, 100.0f32, 180.0f32, 120.0f32);
+        let (bx, by, bw, bh) = (0.0f32, 0.0f32, 1000.0f32, 500.0f32);
+        let (ix, iy) = (px + 4.0, py + 4.0);
+        let (sx, sy) = ((mw - 8.0) / bw, (mh - 8.0) / bh);
+        app.graph_minimap_panel_egui = Some(egui::Rect::from_min_size(
+            egui::pos2(px, py),
+            egui::vec2(mw, mh),
+        ));
+        app.graph_minimap_transform = Some((bx, by, bw, bh, ix, iy, sx, sy));
+        app.graph_canvas_px = Some((190.0, 400.0));
+        app.graph_camera = Some(crate::graph_render::GraphCamera::new());
+    }
+
+    #[test]
+    fn graph_window_minimap_drag_zooms_to_the_region() {
+        use crate::gui::WindowFrame;
+        // Press inside the minimap and drag: nothing moves on the press frame,
+        // the marquee tracks the pointer, and the release fits the camera to the
+        // world rect under it.
+        let mut app = app_with_graph_window();
+        publish_test_minimap(&mut app);
+        let (_, _, _, _, ix, iy, sx, sy) = app.graph_minimap_transform.unwrap();
+        let (ox, oy) = graph_pane_origin(&app);
+        let start_world = (200.0f32, 100.0f32);
+        let end_world = (600.0f32, 400.0f32);
+        let press = (ix + start_world.0 * sx + ox, iy + start_world.1 * sy + oy);
+        let end = (ix + end_world.0 * sx + ox, iy + end_world.1 * sy + oy);
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(press),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(
+            app.minimap_drag.is_some(),
+            "the press anchors a marquee instead of panning"
+        );
+        assert_eq!(
+            app.graph_camera.map(|c| (c.zoom, c.pan)),
+            Some((
+                crate::graph_render::GraphCamera::new().zoom,
+                crate::graph_render::GraphCamera::new().pan
+            )),
+            "the camera cannot jump on the press frame"
+        );
+        assert!(
+            app.graph_drag.is_none() && app.selected_circuit().is_none(),
+            "a minimap press grabs no node"
+        );
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(end),
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let marquee = app.minimap_drag.expect("the marquee stays live while held");
+        assert!((marquee.2 - end.0).abs() < 0.5 && (marquee.3 - end.1).abs() < 0.5);
+        assert_eq!(marquee.0, press.0, "the anchor stays put");
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(end),
+                primary_released: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(app.minimap_drag.is_none(), "the release clears the marquee");
+
+        let expected = crate::graph_render::GraphCamera::fit_to_world_with_nodes(
+            crate::graph_render::WorldBounds {
+                min_x: start_world.0,
+                min_y: start_world.1,
+                max_x: end_world.0,
+                max_y: end_world.1,
+            },
+            app.graph_fit_node_world(),
+            (190.0, 400.0),
+            0.0,
+        );
+        let camera = app.graph_camera.expect("the release fits the camera");
+        assert!(
+            (camera.zoom - expected.zoom).abs() < 1e-2,
+            "zoom {} vs {}",
+            camera.zoom,
+            expected.zoom
+        );
+        assert!(
+            (camera.pan.0 - expected.pan.0).abs() < 0.5
+                && (camera.pan.1 - expected.pan.1).abs() < 0.5,
+            "pan {:?} vs {:?}",
+            camera.pan,
+            expected.pan
+        );
+        assert_eq!(
+            app.graph_zoom_preset,
+            App::GRAPH_ZOOM_FIT_INDEX as u8,
+            "a region fit latches the zoom preset like a refit"
+        );
+        assert!(
+            app.status_message.starts_with("Minimap zoom: world"),
+            "status: {}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn graph_window_minimap_sub_threshold_drag_still_pans() {
+        use crate::gui::WindowFrame;
+        // A marquee shorter than the region-zoom threshold on either axis is a
+        // click, not a zoom: the camera pans to the anchor's world point, the
+        // behaviour the gesture had before dragging existed.
+        let mut app = app_with_graph_window();
+        publish_test_minimap(&mut app);
+        let (ox, oy) = graph_pane_origin(&app);
+        let at = (100.0f32, 150.0f32); // canvas point inside the panel
+        let press = (at.0 + ox, at.1 + oy);
+
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(press),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        // A 2 px drag stays under MINIMAP_DRAG_MIN_PX on both axes.
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((press.0 + 2.0, press.1 + 2.0)),
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((press.0 + 2.0, press.1 + 2.0)),
+                primary_released: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+
+        let transform = app.graph_minimap_transform.unwrap();
+        let world = crate::gui::minimap_world_point(transform, (at.0, at.1));
+        let camera = app.graph_camera.expect("camera stays seeded");
+        assert!(
+            (camera.pan.0 - (world.0 - 190.0 / 2.0)).abs() < 0.5
+                && (camera.pan.1 - (world.1 - 400.0 / 2.0)).abs() < 0.5,
+            "pan {:?} centers {:?}",
+            camera.pan,
+            world
+        );
+        assert!(
+            app.status_message.starts_with("Minimap click: pan to"),
+            "status: {}",
+            app.status_message
+        );
+        assert!(app.minimap_drag.is_none());
+    }
+
+    #[test]
+    fn graph_window_minimap_drag_clamps_to_the_panel() {
+        use crate::gui::WindowFrame;
+        // A drag that leaves the map clamps to the map area, so the marquee never
+        // names world the panel does not show.
+        let mut app = app_with_graph_window();
+        publish_test_minimap(&mut app);
+        let (ox, oy) = graph_pane_origin(&app);
+        let press = (40.0 + ox, 150.0 + oy);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some(press),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((5000.0, 5000.0)),
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        let (_, _, cx, cy) = app.minimap_drag.expect("marquee live");
+        // Inner rect in window space: panel (10, 100, 180, 120) shifted by the
+        // pane origin and inset by 4 → max corner (186, 216) canvas + origin.
+        assert!((cx - (186.0 + ox)).abs() < 0.5, "cx: {cx}");
+        assert!((cy - (216.0 + oy)).abs() < 0.5, "cy: {cy}");
+    }
+
+    #[test]
+    fn graph_window_release_without_a_minimap_drag_is_a_no_op() {
+        use crate::gui::WindowFrame;
+        // The release path runs on every frame; without a marquee it must leave
+        // the camera alone and fall through to the node release.
+        let mut app = app_with_graph_window();
+        publish_test_minimap(&mut app);
+        let before = app.graph_camera.map(|c| (c.zoom, c.pan));
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((100.0, 150.0)),
+                primary_released: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(app.graph_camera.map(|c| (c.zoom, c.pan)), before);
+        assert!(app.minimap_drag.is_none());
+        assert!(!app.status_message.starts_with("Minimap"));
+    }
+
+    #[test]
+    fn graph_esc_and_close_clear_the_minimap_drag() {
+        // Esc drops the marquee and keeps the graph open; the next Esc closes it
+        // as before. Closing the graph drops any marquee too.
+        let mut app = app_with_graph();
+        assert_eq!(app.focused_view(), Some(ViewType::Graph));
+        app.minimap_drag = Some((10.0, 10.0, 40.0, 40.0));
+        handle_event(&key(KeyCode::Esc), &mut app);
+        assert!(app.minimap_drag.is_none(), "Esc cancels the marquee");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "the pane stays open"
+        );
+        assert_eq!(app.status_message, "Minimap zoom cancelled");
+        handle_event(&key(KeyCode::Esc), &mut app);
+        assert!(app.pane_holding(ViewType::Graph).is_none());
+
+        app.minimap_drag = Some((10.0, 10.0, 40.0, 40.0));
+        app.close_graph();
+        assert!(app.minimap_drag.is_none(), "closing the graph drops it");
     }
 
     #[test]

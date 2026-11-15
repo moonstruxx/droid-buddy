@@ -146,7 +146,9 @@ layout).
 - Drag a node to re-settle its neighborhood; `x` toggles processing
   for the hovered circuit; `p` pins/unpins the hovered node.
 - `c` centers the graph, `Shift+c` refits and centers; `+`/`-` zoom,
-  arrows pan, clicking the minimap pans to the clicked point.
+  arrows pan, clicking the minimap pans to the clicked point, and dragging
+  a rectangle across the minimap zooms the camera to that region. The
+  minimap is drawn at every zoom, so both gestures stay available.
 - `f` filters to the hovered node's upstream-dependency subgraph
   (`Esc` clears the filter first); `i` toggles the influence filter.
 - `g s` opens the select-state menu (assume `select` values; sections

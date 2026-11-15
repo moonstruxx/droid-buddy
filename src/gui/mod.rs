@@ -46,6 +46,10 @@ pub use graph::graph_window_fit_camera;
 pub(crate) use graph::paint_scene;
 pub(crate) use graph::MAX_ZOOM_STEP;
 pub(crate) use graph::{camera_pan, camera_zoom_about, drawn_world_sizes};
+// The minimap mapping the window pointer path shares with the painter: one home
+// for the inverse of `minimap_layout`'s map, so the click pan and the
+// region-zoom fit cannot drift apart.
+pub(crate) use graph::{minimap_world_bounds, minimap_world_point, MINIMAP_INSET};
 // Headless cross-layer regression (`src/regression.rs`, same precedent as
 // `paint_scene`): the viewer spec and the physical-module-UI spec + painter.
 #[allow(unused_imports)]
