@@ -73,6 +73,14 @@ const CLUSTER_TITLE_MIN_W: f32 = CLUSTER_TITLE_MIN_CHARS as f32 * PROP_ADVANCE *
 /// Minimap node dot floor (raised from 1 px so dots stay visible when the
 /// scene is tiny).
 const MINIMAP_DOT_MIN: f32 = 2.0;
+/// Labels a group's content peek lists before it summarizes the rest as `…+N`
+/// (task 5.2): enough to recognize the run, few enough to stay one card row on
+/// a normal pane.
+const PEEK_LABEL_LIMIT: usize = 8;
+/// Characters that end the shared prefix a group's peek abbreviates with: the
+/// prefix is cut back to the last of these, so `encoder E1.1` / `encoder E1.24`
+/// peek as `encoder · E1.1–E1.24` rather than `encoder E1. · 1–24`.
+const PEEK_LABEL_SEPARATORS: [char; 6] = [' ', '\u{b7}', '-', '\u{2013}', ':', '_'];
 
 /// The camera zoom the scene was built with, derived back from the projected
 /// node height (`h = layout::NODE_WORLD_H × zoom`). The scene spec carries no
@@ -153,6 +161,7 @@ pub(crate) fn paint_scene(
         egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
         scene,
         selected,
+        None,
     );
 }
 
@@ -160,11 +169,17 @@ pub(crate) fn paint_scene(
 /// Each graph pane paints its pane's scene here; the scene builder must have
 /// produced coordinates inside the pane, because egui has no painter
 /// translate primitive.
+///
+/// `app` is the state the scene cannot carry: the painter reads it for the
+/// hovered collapsed group's content peek (task 5.2), whose labels only the
+/// `App` label chain resolves. A caller without one (the compat wrapper, the
+/// screenshot tool, the headless shape tests) paints the scene alone.
 pub(crate) fn paint_scene_in(
     ui: &mut egui::Ui,
     canvas: egui::Rect,
     scene: Option<&SceneSpec>,
     selected: &[usize],
+    app: Option<&App>,
 ) {
     let Some(spec) = scene else {
         return; // No scene: the swapchain clear color shows through.
@@ -285,7 +300,7 @@ pub(crate) fn paint_scene_in(
 
     // Task 3.2/3.3: selection, navigation and inspection overlays.
     let ctx = ui.ctx();
-    paint_polish(painter, canvas, scene, ctx, selected);
+    paint_polish(painter, canvas, scene, ctx, selected, app);
 }
 
 /// Fill the direction arrow at an edge's `end`, following the scene spec's
@@ -624,12 +639,18 @@ fn node_tooltip(scene: &SceneSpec, node_index: usize) -> String {
 /// hovered node's latency tooltip. Every color derives from the resolved scene
 /// spec RGB (never hardcoded). The tooltip is drawn last so it stays readable
 /// above marquee, selection, and minimap.
+///
+/// A hovered collapsed group's content peek takes the tooltip's slot (task 5.2):
+/// the pointer then rests on the group's box, so the node card would only name
+/// the circuit the box is already labelled with, while the peek names what the
+/// box hides. The node card keeps the slot whenever no group is hovered.
 fn paint_polish(
     painter: &egui::Painter,
     canvas: egui::Rect,
     scene: Option<&SceneSpec>,
     ctx: &egui::Context,
     selected: &[usize],
+    app: Option<&App>,
 ) {
     let Some(spec) = scene else {
         return;
@@ -663,13 +684,11 @@ fn paint_polish(
     // Read the input state under the context lock, then paint both overlays
     // after it: text layout takes the context write lock again, so it must not
     // run inside the ctx.input closure (same-thread reentrant write deadlock).
-    let (marquee, hover) = ctx.input(|i| {
+    let (marquee, hover, pointer) = ctx.input(|i| {
         let marquee = frame_marquee(Some(spec), i, None);
-        let hover = i
-            .pointer
-            .latest_pos()
-            .and_then(|pos| node_at(spec, pos.x, pos.y).map(|idx| (pos, idx)));
-        (marquee, hover)
+        let pointer = i.pointer.latest_pos();
+        let hover = pointer.and_then(|pos| node_at(spec, pos.x, pos.y).map(|idx| (pos, idx)));
+        (marquee, hover, pointer)
     });
     if let Some(marquee) = marquee {
         let (x, y, w, h) = marquee.rect;
@@ -683,7 +702,19 @@ fn paint_polish(
             egui::StrokeKind::Inside,
         );
     }
-    if let Some((pos, idx)) = hover {
+    // Both cards are laid out after the input read: text layout takes the
+    // context write lock again (see the note above).
+    if let Some(peek) = pointer.and_then(|pos| group_peek(app, spec, pos)) {
+        paint_tooltip_card(
+            painter,
+            spec,
+            canvas,
+            peek.anchor,
+            &peek.text,
+            peek.accent,
+            peek.color,
+        );
+    } else if let Some((pos, idx)) = hover {
         paint_tooltip(painter, spec, canvas, pos, idx);
     }
 }
@@ -698,9 +729,32 @@ fn paint_tooltip(
     node_index: usize,
 ) {
     let node = &spec.nodes[node_index];
+    paint_tooltip_card(
+        painter,
+        spec,
+        canvas,
+        pos,
+        &node_tooltip(spec, node_index),
+        node.border,
+        node.label_color,
+    );
+}
+
+/// One tooltip card (node readout or group content peek): an opaque backdrop
+/// with the accent border, placed above-right of the cursor and clamped to the
+/// canvas. Both cards share this so the peek lands where the node tooltip
+/// already does — the mechanism spec "Hover peeks at contents" reuses.
+fn paint_tooltip_card(
+    painter: &egui::Painter,
+    spec: &SceneSpec,
+    canvas: egui::Rect,
+    pos: egui::Pos2,
+    text: &str,
+    accent: (u8, u8, u8),
+    color: (u8, u8, u8),
+) {
     let font = egui::FontId::proportional(13.0);
-    let galley =
-        painter.layout_no_wrap(node_tooltip(spec, node_index), font, rgb(node.label_color));
+    let galley = painter.layout_no_wrap(text.to_string(), font, rgb(color));
     let pad = 6.0;
     let size = galley.size() + egui::vec2(pad * 2.0, pad * 2.0);
     let min_x = (pos.x + 12.0).clamp(canvas.min.x, (canvas.max.x - size.x).max(canvas.min.x));
@@ -712,14 +766,145 @@ fn paint_tooltip(
         rect,
         egui::CornerRadius::same(4),
         rgba(spec.background, 255),
-        egui::Stroke::new(1.0, rgb(node.border)),
+        egui::Stroke::new(1.0, rgb(accent)),
         egui::StrokeKind::Inside,
     );
-    painter.galley(
-        rect.min + egui::vec2(pad, pad),
-        galley,
-        rgb(node.label_color),
-    );
+    painter.galley(rect.min + egui::vec2(pad, pad), galley, rgb(color));
+}
+
+/// A collapsed group's content peek (task 5.2): the line the card shows, the
+/// pointer position it is anchored to, and the colour pair it wears — the group
+/// box's own resolved border and label tokens, so the peek reads as belonging to
+/// the box under the pointer.
+struct GroupPeek {
+    anchor: egui::Pos2,
+    text: String,
+    accent: (u8, u8, u8),
+    color: (u8, u8, u8),
+}
+
+/// The content peek for the collapsed group the pointer rests on.
+///
+/// `App::hovered_group` already means "the pointer is inside this group's drawn
+/// box" — the graph pane's pointer path publishes it from the same world-space
+/// extent `group_node_spec` paints (design D4) — so this only has to confirm the
+/// box is part of the scene being painted and read the members' labels. An
+/// expanded or isolated group draws its members instead of a box, and then
+/// there is nothing to peek at. The member labels resolve through the same
+/// chain the member titles would have used, so the peek names the nodes exactly
+/// as expanding the group would reveal them.
+fn group_peek(app: Option<&App>, scene: &SceneSpec, pos: egui::Pos2) -> Option<GroupPeek> {
+    let app = app?;
+    let group_index = app.hovered_group?;
+    let graph = app.graph.as_ref()?;
+    let view = scene_groups(app)?;
+    let group = view.groups.get(group_index)?;
+    // A collapsed group's body is labelled `<circuit> ×<count>` and is the only
+    // scene node carrying its circuit, so this finds the box the pointer is on.
+    let label = format!("{} \u{d7}{}", group.circuit, group.members.len());
+    let body = scene
+        .nodes
+        .iter()
+        .find(|node| node.circuit == group.circuit && node.label == label)?;
+    let rect = egui::Rect::from_min_size(egui::pos2(body.x, body.y), egui::vec2(body.w, body.h));
+    if !rect.contains(pos) {
+        return None;
+    }
+    let store = app.current_circuit_store();
+    let counts = instance_counts(graph);
+    let labels = LabelInputs {
+        circuit_store: &store,
+        circuit_counts: &counts,
+    };
+    let member_labels: Vec<String> = group
+        .members
+        .iter()
+        .filter_map(|&member| graph.nodes.get(member))
+        .map(|node| node_title(app, node, labels, false))
+        .collect();
+    Some(GroupPeek {
+        anchor: pos,
+        text: group_peek_line(&member_labels),
+        accent: body.border,
+        color: body.label_color,
+    })
+}
+
+/// The peek line for a collapsed group's member labels, in member order.
+///
+/// Two shapes, per spec "Hover peeks at contents":
+///
+/// - Members whose labels share a prefix show that prefix and the range their
+///   remainders span, `encoder · E1.1–E1.24`. The prefix is the shared run cut
+///   back to its last separator, so `encoder E1.1` / `encoder E1.24` peek as
+///   `encoder` + `E1.1–E1.24` rather than the unreadable `encoder E1.` + `1–24`.
+///   The range carries the member count: a span names how many instances it
+///   covers, and it is the shortest form that still says which ones.
+/// - Otherwise the first [`PEEK_LABEL_LIMIT`] labels, written in the tooltip's
+///   ` · `-separated style, followed by `…+N` for the ones that did not fit.
+///
+/// Shared-prefix form needs something to name in every label and a range that
+/// actually spans: identical labels, or a member whose label is the prefix
+/// itself (`copy`, `copy (1)`, … — the numbered-instance case), fall back to the
+/// list, which reads correctly there.
+pub(crate) fn group_peek_line(labels: &[String]) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let mut shared: Vec<char> = labels[0].chars().collect();
+    for label in &labels[1..] {
+        let run = label
+            .chars()
+            .zip(shared.iter())
+            .take_while(|(c, s)| c == *s)
+            .count();
+        shared.truncate(run);
+        if shared.is_empty() {
+            break;
+        }
+    }
+    let cut = shared
+        .iter()
+        .rposition(|c| PEEK_LABEL_SEPARATORS.contains(c))
+        .map_or(0, |i| i + 1);
+    if cut > 0 {
+        let prefix = shared[..cut].iter().collect::<String>();
+        let remainders: Vec<String> = labels
+            .iter()
+            .map(|label| label.chars().skip(cut).collect())
+            .collect();
+        let spans = remainders.len() > 1
+            && remainders.iter().all(|r| starts_a_name(r))
+            && remainders[0] != *remainders.last().expect("non-empty");
+        if spans {
+            return format!(
+                "{} \u{b7} {}\u{2013}{}",
+                prefix.trim_end(),
+                remainders[0],
+                remainders.last().expect("non-empty")
+            );
+        }
+    }
+    let shown: Vec<&str> = labels
+        .iter()
+        .take(PEEK_LABEL_LIMIT)
+        .map(String::as_str)
+        .collect();
+    let mut line = shown.join(" \u{b7} ");
+    let hidden = labels.len().saturating_sub(PEEK_LABEL_LIMIT);
+    if hidden > 0 {
+        let _ = write!(line, " \u{b7} \u{2026}+{hidden}");
+    }
+    line
+}
+
+/// Whether a label's remainder past the shared prefix still names something: it
+/// must start an alphanumeric run. A remainder opening a bracket or punctuation
+/// (`(1)`, the numbered-instance suffix) is a list entry, not a ranged instance
+/// reference, so those groups keep the list form where a span would read as
+/// `copy · (1)–(10)`.
+fn starts_a_name(remainder: &str) -> bool {
+    remainder.chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// The minimap panel: opaque scene-background backdrop, accent-bordered,
@@ -1645,11 +1830,11 @@ fn collapsed_group(view: Option<&GroupedView>, node: usize) -> Option<(usize, &G
 /// reach one body down-right of `bbox`: the box is centred on the frame union —
 /// the group's `center` shifted by half a body — which is both what makes it
 /// contain every member frame and the same footprint the expanded group's
-/// outline encloses. It is labelled `<circuit> ×<count>` and framed in the
-/// tokens that circuit's own nodes wear; being an ordinary [`NodeSpec`] it gets
-/// the painter's zoom scaling, level-of-detail chrome and label-ellipsis rule
-/// unchanged. Group-level highlight precedence is task 6.1's answer and hooks in
-/// here.
+/// outline encloses. It is labelled `<circuit> ×<count>`, framed in the tokens
+/// that circuit's own nodes wear, and carrying the strongest highlight class any
+/// member would wear ([`group_styling`], task 6.1). Being an ordinary
+/// [`NodeSpec`] it gets the painter's zoom scaling, level-of-detail chrome and
+/// label-ellipsis rule unchanged.
 fn group_node_spec(style: SceneStyle<'_>, group: &Group, pass: &NodePass<'_>) -> NodeSpec {
     let SceneStyle { theme, zoom, .. } = style;
     let (min_x, min_y, max_x, max_y) = group.bbox;
@@ -1670,6 +1855,7 @@ fn group_node_spec(style: SceneStyle<'_>, group: &Group, pass: &NodePass<'_>) ->
     );
     let (px, py) = pass.geometry.camera.world_to_pixel(centre.0, centre.1);
     let (w, h) = (world_w * zoom, world_h * zoom);
+    let (border, label_color, border_width) = group_styling(style, group, pass);
     NodeSpec {
         x: px - w / 2.0,
         y: py - h / 2.0,
@@ -1677,15 +1863,151 @@ fn group_node_spec(style: SceneStyle<'_>, group: &Group, pass: &NodePass<'_>) ->
         h,
         radius: NODE_RADIUS * zoom,
         fill: theme.rgb(theme.graph_node_fill),
-        border: theme.rgb(theme.graph_node_border),
-        border_width: (1.0 * zoom).max(0.5),
+        border,
+        border_width,
         label: format!("{} \u{d7}{}", group.circuit, group.members.len()),
-        label_color: theme.rgb(theme.graph_node_title),
+        label_color,
         circuit: group.circuit.clone(),
         instance_index: 0,
         input_port: false,
         output_port: false,
     }
+}
+
+/// The structural diff class a collapsed group stands in for: a group wears the
+/// diff state of its members the way an edge wears its own (task 6.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupDiffClass {
+    Added,
+    Removed,
+}
+
+/// The strongest highlight class among a collapsed group's members (design D5,
+/// task 6.1), as `(border, label colour, border width)`.
+///
+/// Precedence, highest first — the chain nodes and edges already resolve, so a
+/// group answers with the class a member would have shown on its own:
+///
+/// 1. **Topology error**: any validation finding on a cable incident to a
+///    member. Error red outranks every overlay (guardrails), and it is the one
+///    class a reader must not miss under a collapsed box.
+/// 2. **Diff classification**: any member added/removed/changed in the report
+///    the scene shows. Ordered like the edge chain — added, then removed, then
+///    changed, which wears the added token exactly as a changed cable does.
+/// 3. **Selection or influence wash**: any member selected, or inside the active
+///    influence set. One class rather than two because that is how the node path
+///    ranks them — [`node_styling`] puts hover, selection and influence on the
+///    same highlight token and width — and a live modifier gives it the modifier
+///    hue, matching the panels wash.
+/// 4. The circuit-kind frame the box wore before: `graph_node_border` over
+///    `graph_node_title`.
+///
+/// The label colour always travels with the class, the rule the node path
+/// applies: the class colour is both frame and title, so `<circuit> ×<count>`
+/// stays legible under an error, diff or highlight frame instead of keeping a
+/// kind title token that no longer belongs to it.
+fn group_styling(
+    style: SceneStyle<'_>,
+    group: &Group,
+    pass: &NodePass<'_>,
+) -> ((u8, u8, u8), (u8, u8, u8), f32) {
+    let SceneStyle { app, theme, zoom } = style;
+    let members: Vec<&GraphNode> = group
+        .members
+        .iter()
+        .filter_map(|&member| pass.graph.nodes.get(member))
+        .collect();
+    // Border widths keep the node path's 1-vs-3 distinction, each scaled by the
+    // camera zoom with a floor so the frame never vanishes at the zoom floor.
+    let normal_border = (1.0 * zoom).max(0.5);
+    let highlight_border = (3.0 * zoom).max(1.0);
+    if group_has_topology_error(pass.graph, &members) {
+        let error = theme.rgb(theme.graph_edge_error);
+        return (error, error, highlight_border);
+    }
+    if let Some(class) = group_diff_class(pass.diff, &members) {
+        let color = match class {
+            GroupDiffClass::Added => theme.rgb(theme.graph_edge_diff_added),
+            GroupDiffClass::Removed => theme.rgb(theme.graph_edge_diff_removed),
+        };
+        return (color, color, highlight_border);
+    }
+    let selected = app
+        .selected_circuit
+        .as_ref()
+        .is_some_and(|id| members.iter().any(|node| &node.id == id));
+    let influenced = app
+        .modifier_influence
+        .as_ref()
+        .or(app.influence.as_ref())
+        .is_some_and(|state| {
+            members
+                .iter()
+                .any(|node| state.influenced_nodes.contains(&node.id))
+        });
+    if selected || influenced {
+        let highlight = if let Some(token) = app.active_modifier() {
+            theme.rgb(crate::theme::modifier_hue(token))
+        } else {
+            theme.rgb(theme.graph_node_highlight)
+        };
+        return (highlight, highlight, highlight_border);
+    }
+    (
+        theme.rgb(theme.graph_node_border),
+        theme.rgb(theme.graph_node_title),
+        normal_border,
+    )
+}
+
+/// Which structural diff class a collapsed group carries, if any: the strongest
+/// class among its members in the report the scene is showing, ordered like the
+/// edge chain (added, then removed, then changed — a changed member wears the
+/// added token, as a changed cable does). `None` without a diff, which is also
+/// why the group keeps its kind frame then.
+fn group_diff_class(diff: Option<&DiffReport>, members: &[&GraphNode]) -> Option<GroupDiffClass> {
+    let report = diff?;
+    if members
+        .iter()
+        .any(|node| report.added_nodes.contains(&node.id))
+    {
+        Some(GroupDiffClass::Added)
+    } else if members
+        .iter()
+        .any(|node| report.removed_nodes.contains(&node.id))
+    {
+        Some(GroupDiffClass::Removed)
+    } else if members.iter().any(|node| {
+        report
+            .changed_nodes
+            .iter()
+            .any(|changed| changed.id == node.id)
+    }) {
+        Some(GroupDiffClass::Added)
+    } else {
+        None
+    }
+}
+
+/// Whether any cable incident to a member carries a topology-validation finding
+/// (design D5: a group carrying an error is visually distinct, and expanding
+/// reveals the exact member). `Graph::validation` names cables, so a member is
+/// implicated through the cables that touch it.
+fn group_has_topology_error(graph: &Graph, members: &[&GraphNode]) -> bool {
+    if graph.validation.is_empty() {
+        return false;
+    }
+    let fallible: HashSet<&str> = graph
+        .validation
+        .iter()
+        .map(|issue| issue.cable.as_str())
+        .collect();
+    graph.edges.iter().any(|edge| {
+        fallible.contains(edge.cable.as_str())
+            && members
+                .iter()
+                .any(|node| node.id == edge.source || node.id == edge.sink)
+    })
 }
 
 /// Label chain (label-guess-and-screen-scale 1.3): stored label → tree-derived
@@ -3486,7 +3808,7 @@ mod scene_builder_tests {
 mod window_paint_tests {
     use super::*;
     use crate::config::LayoutMode;
-    use crate::graph::{Graph, GraphEdge, GraphNode};
+    use crate::graph::{Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
     use crate::patch::NodeId;
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
@@ -3568,10 +3890,15 @@ mod window_paint_tests {
         canvas: egui::Vec2,
         raw_input: egui::RawInput,
     ) -> PaintOutput {
+        paint_ui(raw_input, |ui| paint_scene(ui, canvas, scene, &[]))
+    }
+
+    /// One painted frame's shapes, for any paint entry point: `body` receives the
+    /// `Ui` the scene is painted into (the group peek needs `paint_scene_in` with
+    /// an `App`, which the compat wrapper above deliberately does not take).
+    fn paint_ui(raw_input: egui::RawInput, body: impl FnMut(&mut egui::Ui)) -> PaintOutput {
         let ctx = egui::Context::default();
-        let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_scene(ui, canvas, scene, &[]);
-        });
+        let mut full_output = ctx.run_ui(raw_input, body);
         let mut labels = Vec::new();
         let mut label_fonts = Vec::new();
         let mut rects = Vec::new();
@@ -4672,6 +4999,160 @@ mod window_paint_tests {
             "the painted label fits its frame: {text:?} in {} px",
             body.w
         );
+    }
+
+    // ── graph-same-type-grouping: hover content peek (task 5.2) ──────────────
+
+    /// Task 5.2's line rule: a shared label prefix collapses into the range its
+    /// instances span; without one the first eight labels stand, and the rest is
+    /// summarized as `…+N`.
+    #[test]
+    fn group_peek_line_ranges_a_shared_prefix_and_lists_the_rest() {
+        assert_eq!(
+            group_peek_line(&["encoder E1.1".to_string(), "encoder E1.24".to_string()]),
+            "encoder \u{b7} E1.1\u{2013}E1.24",
+            "the prefix names the run, the range carries its extent"
+        );
+
+        let numbered: Vec<String> = (1..=10).map(|i| format!("copy ({i})")).collect();
+        assert_eq!(
+            group_peek_line(&numbered),
+            "copy (1) \u{b7} copy (2) \u{b7} copy (3) \u{b7} copy (4) \u{b7} copy (5) \u{b7} \
+             copy (6) \u{b7} copy (7) \u{b7} copy (8) \u{b7} \u{2026}+2",
+            "eight labels and a remainder count"
+        );
+
+        // One member's label *is* the shared prefix (the numbered-instance case),
+        // so there is nothing to range and the list form reads it.
+        assert_eq!(
+            group_peek_line(&["copy".to_string(), "copy (1)".to_string()]),
+            "copy \u{b7} copy (1)"
+        );
+    }
+
+    /// Spec "Hover peeks at contents" (task 5.2): the pointer resting on a
+    /// collapsed group's box paints the members' peek in the tooltip card, and
+    /// paints no such card when no group is hovered.
+    #[test]
+    fn hovered_group_peeks_at_its_member_labels() {
+        let mut app = stacked_copies_app();
+        let scene = scene_of(&app);
+        let canvas = egui::vec2(1280.0, 800.0);
+        let body = group_body(&scene);
+        let centre = egui::pos2(body.x + body.w / 2.0, body.y + body.h / 2.0);
+        let peek = "copy \u{b7} copy (1) \u{b7} copy (2) \u{b7} copy (3) \u{b7} copy (4)";
+        let pointer = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            events: vec![egui::Event::PointerMoved(centre)],
+            ..Default::default()
+        };
+        let frame = |app: Option<&App>| {
+            paint_ui(pointer(), |ui| {
+                paint_scene_in(
+                    ui,
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
+                    Some(&scene),
+                    &[],
+                    app,
+                );
+            })
+        };
+
+        let quiet = frame(None);
+        assert!(
+            !quiet.labels.iter().any(|label| label == peek),
+            "no hovered group, no peek: {:?}",
+            quiet.labels
+        );
+
+        app.hovered_group = Some(0);
+        let peeked = frame(Some(&app));
+        assert!(
+            peeked.labels.iter().any(|label| label == peek),
+            "the hovered group names its members: {:?}",
+            peeked.labels
+        );
+        assert_eq!(
+            peeked.labels.iter().filter(|label| *label == peek).count(),
+            1,
+            "one card, not one per painted member"
+        );
+        // The peek takes the card's slot rather than stacking on it, so the
+        // painted rect count is unchanged (the layout is untouched) and the last
+        // rect — the card, painted above everything — got wider.
+        assert_eq!(
+            peeked.rects.len(),
+            quiet.rects.len(),
+            "the peek replaces the node readout instead of drawing beside it"
+        );
+        let card_width = |out: &PaintOutput| out.rects.last().expect("a card rect").rect.width();
+        assert!(
+            card_width(&peeked) > card_width(&quiet),
+            "the peek card is wider than the readout it replaced: {} vs {}",
+            card_width(&peeked),
+            card_width(&quiet)
+        );
+    }
+
+    // ── graph-same-type-grouping: group-level highlights (task 6.1) ─────────
+
+    /// A collapsed group wears the strongest class any member would wear:
+    /// selection and the diff classification light it, and a topology error on a
+    /// member's cable outranks them both. Insertion order is checked too — the
+    /// class does not depend on which member carries it.
+    #[test]
+    fn collapsed_group_wears_the_strongest_member_class() {
+        let mut app = stacked_copies_app();
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_node_border),
+            "no member class: the circuit-kind frame"
+        );
+
+        app.selected_circuit = Some(NodeId::circuit("copy", 2));
+        let selected = group_body(&scene_of(&app)).border;
+        assert_eq!(
+            selected,
+            theme().rgb(theme().graph_node_highlight),
+            "a selected member lights the whole box"
+        );
+
+        app.selected_circuit = None;
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            removed_nodes: vec![NodeId::circuit("copy", 4)],
+            ..Default::default()
+        });
+        let diffed_scene = scene_of(&app);
+        let diffed = group_body(&diffed_scene);
+        assert_eq!(
+            diffed.border,
+            theme().rgb(theme().graph_edge_diff_removed),
+            "a removed member puts the group in the removed class"
+        );
+        assert_eq!(
+            diffed.label_color,
+            theme().rgb(theme().graph_edge_diff_removed),
+            "the label travels with the class and stays legible"
+        );
+
+        app.graph
+            .as_mut()
+            .expect("graph")
+            .validation
+            .push(TopologyIssue {
+                cable: "_FAN_B".into(),
+                severity: TopologySeverity::Error,
+                message: "two producers".into(),
+            });
+        let errored_scene = scene_of(&app);
+        let errored = group_body(&errored_scene);
+        assert_eq!(
+            errored.border,
+            theme().rgb(theme().graph_edge_error),
+            "a topology error outranks the diff classification"
+        );
+        assert_eq!(errored.label_color, theme().rgb(theme().graph_edge_error));
     }
 }
 #[cfg(test)]

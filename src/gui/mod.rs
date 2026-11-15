@@ -810,7 +810,10 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 if app.graph_camera.is_none() {
                     app.fit_graph_camera((rect.width(), rect.height()));
                 }
-                graph::paint_scene_in(ui, rect, scene, selected);
+                // `app` rides along for the hovered group's content peek: the
+                // painter cannot resolve the members' labels from the scene alone
+                // (graph-same-type-grouping task 5.2).
+                graph::paint_scene_in(ui, rect, scene, selected, Some(&*app));
                 // sections-black-hole-solver 4.1/4.3: the sections sliders
                 // panel paints over the scene and owns the pointer inside its
                 // rect (see `graph::paint_sliders_panel`).
