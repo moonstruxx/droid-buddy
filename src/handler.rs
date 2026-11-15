@@ -294,6 +294,7 @@ use crate::app::{
     is_entry_selectable, is_picker_parent_entry, App, GraphDrag, PrefixState, SourceViewMode,
     ViewType,
 };
+use crate::graph_group::{Group, GroupedView, ViewNode};
 use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, NodeId, Patch, ShiftGroup};
 
@@ -1097,6 +1098,37 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 // subgraph rooted at the hovered node (fallback: the shared
                 // circuit selection); a second `i` restores the full graph.
                 app.toggle_influence_filter();
+                return Some(false);
+            }
+            KeyCode::Char('o') => {
+                // graph-same-type-grouping D4/D7: `o` isolates the hovered
+                // group as its own subset — the induced-subgraph shape the
+                // `f`/`i` filters already use — falling back to the group
+                // holding the shared circuit selection. With neither there is
+                // no group to isolate, so the press is silent and inert (spec
+                // "Isolate without a group is inert"). The `g o` chord still
+                // opens the optimizer: the prefix step runs before this table.
+                if let Some(group) = app.hovered_group.or_else(|| app.selected_group()) {
+                    app.toggle_group_isolated(group);
+                }
+                return Some(false);
+            }
+            KeyCode::Enter => {
+                // graph-same-type-grouping D7: `Enter` opens or closes the
+                // hovered group. Without one it falls through untouched, so the
+                // shared element chord keeps its own hovered-component rule and
+                // an inert press reports nothing (spec "Expansion without a
+                // group is inert").
+                if let Some(group) = app.hovered_group {
+                    app.toggle_group_expanded(group);
+                    return Some(false);
+                }
+            }
+            KeyCode::Char('O') => {
+                // Shift+O (winit reports it as `Char('O')`) turns the grouping
+                // pass on or off for the whole graph — the runtime reversal
+                // design D1 relies on. Group-view preference, not patch state.
+                app.toggle_graph_grouping();
                 return Some(false);
             }
             KeyCode::Char('h') if app.view_focused(ViewType::Graph) => {
@@ -1952,6 +1984,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
         return;
     }
     app.hovered_graph_node = None;
+    app.hovered_group = None;
     // Minimap click-to-scroll: uses renderer-published minimap geometry with
     // the same proportional mapping as the viewport indicator in ui.rs
     // (indicator: scroll * inner_h / total_lines). Click must work whenever
@@ -2291,6 +2324,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     }
     let Some(mut camera) = app.graph_camera else {
         app.hovered_graph_node = None;
+        app.hovered_group = None;
         return;
     };
     // Hover hit-tests must match what is drawn: while a settle animation runs
@@ -2331,8 +2365,39 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         .unwrap_or_default();
     let min_w = App::GRAPH_MIN_HIT_PX / camera.zoom;
     let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;
-    let hit = frame.pointer.and_then(|(px, py)| {
-        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
+    // Collapsed group boxes are world-space bodies exactly like a node (design
+    // D4), so hover and click travel this same pointer path instead of a second
+    // rect list: the extents are projected through the one camera the painter
+    // draws with, and the group's index is what the hover publishes.
+    let group_boxes = if frame.pointer.is_some() {
+        let isolated = app.isolated_group;
+        match app.grouped_view() {
+            Some(view) => collapsed_group_boxes(view, &world, isolated),
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let world_point = frame
+        .pointer
+        .map(|(px, py)| camera.pixel_to_world(px - ox, py - oy));
+    let group_hit = world_point.and_then(|(wx, wy)| {
+        group_boxes
+            .iter()
+            .find(|(_, (x0, y0, x1, y1))| wx >= *x0 && wx < *x1 && wy >= *y0 && wy < *y1)
+            .map(|(group, _)| *group)
+    });
+    let previous_hover = app.hovered_graph_node;
+    app.hovered_group = if frame.pointer.is_some() {
+        group_hit
+    } else {
+        None
+    };
+    // The node hit test still sees every model node: the grouping view is a
+    // drawing answer, so a member's frame keeps answering hover (the `p`/`x`
+    // keys stay meaningful on it) while a press over a group's box opens the
+    // group instead of selecting, below (design D4).
+    let hit = world_point.and_then(|(wx, wy)| {
         display.iter().enumerate().find_map(|(i, &(x, y))| {
             let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
             let hw = (w.max(min_w) - w) / 2.0;
@@ -2340,7 +2405,6 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
         })
     });
-    let previous_hover = app.hovered_graph_node;
     app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
     // Back-edge sink hover (design D2): surface "reads _X 1 loop behind" in the
     // status bar when the hover enters a node that has one; a node without a
@@ -2364,10 +2428,17 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     // scroll/cursor via repeated `select_circuit` calls.
     if let Some(marquee) = frame.marquee.as_ref() {
         if let Some(&first) = marquee.nodes.first() {
-            if let Some(node_id) = app
-                .graph
-                .as_ref()
-                .and_then(|g| g.nodes.get(first))
+            // `marquee.nodes` are scene-body indices, and a collapsed group is
+            // one body standing in for all its members, so the index no longer
+            // names the same `graph.nodes` entry once anything is grouped. The
+            // grouping view restores the mapping (design D4).
+            let primary = {
+                let isolated = app.isolated_group;
+                app.grouped_view()
+                    .and_then(|view| scene_body_node(view, isolated, first))
+            };
+            if let Some(node_id) = primary
+                .and_then(|node| app.graph.as_ref().and_then(|g| g.nodes.get(node)))
                 .map(|n| n.id.clone())
             {
                 if app.selected_circuit() != Some(&node_id) {
@@ -2414,6 +2485,14 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
                 }
                 return;
             }
+        }
+        // A click on a collapsed group's box opens the group instead of
+        // selecting (design D4): the members are reachable through expand or
+        // isolate, and the box is not a node, so it must not fall through to
+        // selecting whichever member's frame happens to sit under the point.
+        if let Some(group) = app.hovered_group {
+            app.toggle_group_expanded(group);
+            return;
         }
         let Some(node_index) = hit else {
             app.hovered_graph_node = None;
@@ -2547,6 +2626,108 @@ fn graph_pane_origin(app: &App) -> (f32, f32) {
         .map_or((0.0, 0.0), |(_, rect)| {
             (f32::from(rect.x), f32::from(rect.y))
         })
+}
+
+/// Slack the painter puts around a collapsed group's member footprint, mirroring
+/// `GROUP_PAD` in `src/gui/graph.rs`.
+///
+/// The hit box must be the drawn box (ADR 40), and that pad is private to the
+/// painter, so the interaction layer carries the value too: change one and the
+/// other must follow.
+const GROUP_BOX_PAD: f32 = 6.0;
+
+/// Every collapsed group's drawn box paired with its group index, ready to be
+/// projected through the camera on the graph window's pointer path.
+///
+/// Only a collapsed group draws a body: an expanded group draws its members
+/// individually, and an isolate draws its own group expanded (design D4), so
+/// neither has a box under the pointer. Order follows the group indices, so the
+/// first match on a hit is deterministic.
+fn collapsed_group_boxes(
+    view: &GroupedView,
+    world: &[(f32, f32)],
+    isolated: Option<usize>,
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    let mut boxes = Vec::new();
+    for (group_index, group) in view.groups.iter().enumerate() {
+        if isolated == Some(group_index) {
+            continue;
+        }
+        let Some(&first) = group.members.first() else {
+            continue;
+        };
+        if !matches!(view.nodes.get(first), Some(ViewNode::Group(g)) if *g == group_index) {
+            continue;
+        }
+        boxes.push((group_index, group_world_box(group, world)));
+    }
+    boxes
+}
+
+/// World-space extent `(min_x, min_y, max_x, max_y)` of collapsed group
+/// `group`'s drawn box.
+///
+/// The members' frame union grown by one member body and [`GROUP_BOX_PAD`] on
+/// every side — node positions are top-left corners, so the union reaches one
+/// body down-right of the group's `bbox` and the box is centred on it. This is
+/// the same extent `gui::graph::group_node_spec` paints, computed from the same
+/// `world` slice the node hit test reads, so both surfaces answer one source
+/// (ADR 40).
+fn group_world_box(group: &Group, world: &[(f32, f32)]) -> (f32, f32, f32, f32) {
+    let (min_x, min_y, max_x, max_y) = group.bbox;
+    let mut member = (0.0_f32, 0.0_f32);
+    for &member_index in &group.members {
+        let (w, h) = world.get(member_index).copied().unwrap_or_default();
+        member = (member.0.max(w), member.1.max(h));
+    }
+    let width = (max_x - min_x) + member.0 + 2.0 * GROUP_BOX_PAD;
+    let height = (max_y - min_y) + member.1 + 2.0 * GROUP_BOX_PAD;
+    let centre = (
+        group.center.0 + member.0 / 2.0,
+        group.center.1 + member.1 / 2.0,
+    );
+    (
+        centre.0 - width / 2.0,
+        centre.1 - height / 2.0,
+        centre.0 + width / 2.0,
+        centre.1 + height / 2.0,
+    )
+}
+
+/// The model node a drawn scene body stands for.
+///
+/// `SceneSpec::nodes` holds drawn bodies, not model nodes: grouping emits one box
+/// at its first member's slot and skips the other members, so a scene index and
+/// a `graph.nodes` index part company as soon as anything collapses. Rebuilding
+/// the drawn order from the view restores the mapping — an individual body is
+/// its own node, and a group body resolves to the group's first member, the
+/// first of the identical circuits it stands in for. `isolated` names the group
+/// the painter draws expanded (design D4); `None` is the plain case.
+fn scene_body_node(
+    view: &GroupedView,
+    isolated: Option<usize>,
+    scene_index: usize,
+) -> Option<usize> {
+    let mut drawn: Vec<Option<usize>> = Vec::with_capacity(view.nodes.len());
+    let mut emitted = vec![false; view.groups.len()];
+    for (node, entry) in view.nodes.iter().enumerate() {
+        let ViewNode::Group(group) = *entry else {
+            drawn.push(Some(node));
+            continue;
+        };
+        if isolated == Some(group) {
+            drawn.push(Some(node));
+            continue;
+        }
+        let Some(group_view) = view.groups.get(group) else {
+            continue;
+        };
+        if std::mem::replace(&mut emitted[group], true) {
+            continue;
+        }
+        drawn.push(group_view.members.first().copied());
+    }
+    drawn.get(scene_index).copied().flatten()
 }
 
 fn adjust_value(comp: &mut HwComponent, delta: f32) {

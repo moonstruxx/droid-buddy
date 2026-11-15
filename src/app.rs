@@ -884,6 +884,13 @@ pub struct App {
     /// window frame by the camera's world-space hit test. `None` when the pointer
     /// is not over a node or the graph is closed.
     pub hovered_graph_node: Option<usize>,
+    /// Collapsed group whose box the pointer is over (graph-same-type-grouping
+    /// design D4), by index into [`crate::graph_group::GroupedView::groups`].
+    /// The painter reads it for the group hover highlight and the pane's
+    /// grouping keys act on it, so it is cleared wherever `hovered_graph_node`
+    /// is: the pointer leaving a group box or the graph. `None` otherwise, and
+    /// for an expanded group, which draws no box of its own.
+    pub hovered_group: Option<usize>,
     /// Persistent world→pixel camera of the graph surface (task 2.3). Seeded by
     /// both renderers (kitty image path and box-drawing fallback) to a
     /// frame-the-graph `fit_to_world` on the first frame after open, then
@@ -1252,6 +1259,7 @@ impl App {
             graph_positions: Vec::new(),
             graph_drag: None,
             hovered_graph_node: None,
+            hovered_group: None,
             graph_camera: None,
             graph_zoom_preset: Self::GRAPH_ZOOM_FIT_INDEX as u8,
             graph_canvas_px: None,
@@ -2237,6 +2245,7 @@ impl App {
         match view {
             ViewType::Graph => {
                 self.hovered_graph_node = None;
+                self.hovered_group = None;
             }
             ViewType::Optimizer => self.drop_optimizer_state(),
             ViewType::Physical | ViewType::SourceViewer => {}
@@ -3826,12 +3835,20 @@ impl App {
         let graph = self.graph.as_ref()?;
         let positions = self.graph_display_positions();
         let sizes = crate::layout::node_world_sizes(graph);
+        // An isolated group always draws through its members (design D4), so the
+        // isolate folds into the expanded set here instead of each consumer
+        // compensating for it — the painter, the pointer hit test and the
+        // marquee mapping then read one answer.
+        let mut expanded = self.expanded_groups.clone();
+        if let Some(group) = self.isolated_group {
+            expanded.insert(group);
+        }
         Some(crate::graph_group::group_nodes(
             graph,
             &positions,
             &sizes,
             &self.group_settings(),
-            &self.expanded_groups,
+            &expanded,
         ))
     }
 
@@ -3845,9 +3862,11 @@ impl App {
 
     /// Mark the cached grouping answer stale. One helper rather than field
     /// writes at each site, so every mutation path reads as "this changed the
-    /// grouping inputs".
+    /// grouping inputs". The hovered group index belongs to the answer that is
+    /// going away, so it goes with it.
     fn invalidate_grouped_view(&mut self) {
         self.grouped_view = None;
+        self.hovered_group = None;
     }
 
     /// Seed the grouping preference from `[graph]` at startup (ADR 13: the
@@ -3885,6 +3904,19 @@ impl App {
             Some(group)
         };
         self.isolated_group.is_some()
+    }
+
+    /// The group holding the shared circuit selection, if any — the fallback
+    /// the graph pane's isolate key reads when nothing is hovered (design D4).
+    /// `None` without a graph or a selection, and for a selected node no group
+    /// owns (a controller, a jack, or a circuit drawn on its own).
+    pub fn selected_group(&mut self) -> Option<usize> {
+        let index = {
+            let graph = self.graph.as_ref()?;
+            let id = self.selected_circuit()?;
+            graph.nodes.iter().position(|node| node.id == *id)?
+        };
+        self.grouped_view()?.group_of(index)
     }
 
     /// Turn the grouping pass on or off (`Shift+O`, design D7); returns the new
@@ -3928,6 +3960,7 @@ impl App {
         self.invalidate_grouped_view();
         self.graph_drag = None;
         self.hovered_graph_node = None;
+        self.hovered_group = None;
         // Task 2.3: a newly opened (or re-solved) graph re-fits its camera. The
         // renderer seeds a legible `fit_to_world` on the next kitty frame; a
         // previously-zoomed/panned camera must not linger across a new solve.
@@ -4027,6 +4060,7 @@ impl App {
             self.layout.pane_mut(id).view = None;
         }
         self.hovered_graph_node = None;
+        self.hovered_group = None;
     }
 
     /// Rebuild the graph from the current patch without closing the graph
@@ -4404,6 +4438,7 @@ impl App {
         self.graph_positions.clear();
         self.graph_drag = None;
         self.hovered_graph_node = None;
+        self.hovered_group = None;
         self.graph_camera = None;
         self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = None;
