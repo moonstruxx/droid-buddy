@@ -34,6 +34,14 @@ pub const GROUP_HOP_LIMIT: usize = 2;
 /// diagonal neighbours across a gap and parallel but distant columns do not.
 pub const GROUP_PROXIMITY_RATIO: f32 = 1.5;
 
+/// Slack added to the proximity bound on each axis.
+///
+/// The column arrangement separates stacked nodes by exactly the body height, so
+/// an un-padded bound would sit on the comparison boundary and any future change
+/// to that spacing would silently stop a stack from grouping. The pad is small
+/// enough that it cannot reach a second neighbour slot.
+const PROXIMITY_EPSILON: f32 = 4.0;
+
 /// Width assumed for a node whose entry is missing from the caller's `sizes`.
 ///
 /// The height fallback is [`NODE_WORLD_H`] (the real body height), so only the
@@ -278,8 +286,8 @@ fn spatially_close(a: usize, b: usize, positions: &[(f32, f32)], sizes: &[(f32, 
         return false;
     };
     let ((aw, ah), (bw, bh)) = (size_of(a, sizes), size_of(b, sizes));
-    (ax - bx).abs() <= GROUP_PROXIMITY_RATIO * 0.5 * (aw + bw)
-        && (ay - by).abs() <= GROUP_PROXIMITY_RATIO * 0.5 * (ah + bh)
+    (ax - bx).abs() <= GROUP_PROXIMITY_RATIO * 0.5 * (aw + bw) + PROXIMITY_EPSILON
+        && (ay - by).abs() <= GROUP_PROXIMITY_RATIO * 0.5 * (ah + bh) + PROXIMITY_EPSILON
 }
 
 /// The drawn extent of node `node`, with the nominal body as the fallback.
@@ -430,5 +438,509 @@ impl UnionFind {
             (root_b, root_a)
         };
         self.parent[absorbed] = keep;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    use crate::config::LayoutOrdering;
+    use crate::graph::GraphOptions;
+    use crate::graph::{Cluster, GraphEdge, GraphNode};
+    use crate::latency::CostModel;
+    use crate::layout::{estimated_widths, node_world_sizes, solve_columns};
+    use crate::patch::{NodeId, Patch};
+
+    /// A `fixtures/` patch's graph, built the way `App::build_graph_state` builds
+    /// it (banner groups → clusters, shared default cost model).
+    fn fixture_graph(name: &str) -> Graph {
+        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{name}"))).unwrap();
+        let clusters: Vec<Cluster> = patch
+            .banner_groups
+            .iter()
+            .map(|g| Cluster {
+                title: g.banner.clone().unwrap_or_default(),
+                section_range: g.section_range.clone(),
+            })
+            .collect();
+        Graph::build_from_patch(
+            &patch,
+            &clusters,
+            &CostModel::default(),
+            &GraphOptions::default(),
+        )
+    }
+
+    /// The two inputs grouping consumes, taken from the real arrangement: the
+    /// drawn centres the column solver publishes and the world extents the
+    /// renderer draws (ADR 40).
+    struct Drawn {
+        positions: Vec<(f32, f32)>,
+        sizes: Vec<(f32, f32)>,
+    }
+
+    fn solved(graph: &Graph) -> Drawn {
+        Drawn {
+            positions: solve_columns(graph, &estimated_widths(graph), LayoutOrdering::Strict),
+            sizes: node_world_sizes(graph),
+        }
+    }
+
+    /// A circuit node whose id, name and indices all derive from `index`.
+    fn circuit_node(circuit: &str, index: usize) -> GraphNode {
+        GraphNode {
+            id: NodeId::circuit(circuit, index),
+            kind: NodeKind::Circuit,
+            circuit: circuit.to_string(),
+            instance_index: index,
+            section_index: index,
+        }
+    }
+
+    /// A cable between two already-built nodes.
+    fn cable(from: &GraphNode, to: &GraphNode, name: &str) -> GraphEdge {
+        GraphEdge {
+            cable: name.to_string(),
+            source: from.id.clone(),
+            sink: to.id.clone(),
+        }
+    }
+
+    fn hand_built(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> Graph {
+        Graph {
+            nodes,
+            edges,
+            ..Graph::default()
+        }
+    }
+
+    /// Drawn centres no pair can read as one stack: every node thousands of
+    /// units from its neighbours on both axes.
+    fn far_apart(count: usize) -> Vec<(f32, f32)> {
+        (0..count)
+            .map(|i| (i as f32 * 4000.0, i as f32 * 3000.0))
+            .collect()
+    }
+
+    /// Real-sized bodies for `count` nodes.
+    fn bodies(count: usize) -> Vec<(f32, f32)> {
+        vec![(NOMINAL_WIDTH, NODE_WORLD_H); count]
+    }
+
+    /// The longest run of one circuit type drawn contiguously in a single
+    /// column, read from the published centres alone.
+    ///
+    /// The spec scenario names this shape, so the test derives it from the solve
+    /// result instead of trusting the implementation under test to report it.
+    /// Only circuit nodes are considered: grouping never touches controllers or
+    /// jacks, so a run spanning one of those is not the shape under test.
+    fn longest_column_run(graph: &Graph, positions: &[(f32, f32)]) -> Vec<usize> {
+        let mut columns: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for (index, node) in graph.nodes.iter().enumerate() {
+            let Some(&(x, _)) = positions.get(index) else {
+                continue;
+            };
+            if node.kind == NodeKind::Circuit {
+                columns.entry((x * 100.0) as i64).or_default().push(index);
+            }
+        }
+
+        let mut best: Vec<usize> = Vec::new();
+        for mut column in columns.into_values() {
+            column.sort_by(|&a, &b| positions[a].1.total_cmp(&positions[b].1));
+            let mut start = 0;
+            while start < column.len() {
+                let circuit = graph.nodes[column[start]].circuit.as_str();
+                let mut end = start + 1;
+                while end < column.len() && graph.nodes[column[end]].circuit == circuit {
+                    end += 1;
+                }
+                if end - start > best.len() {
+                    best = column[start..end].to_vec();
+                }
+                start = end;
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn stacked_run_on_scale_fixture_collapses_into_one_group() {
+        // The scale fixture draws a long contiguous run of `copy` nodes in one
+        // column. Its cables are attributed by name, so copy→copy cables collapse
+        // onto the first instance and the run is joined by drawn proximity alone —
+        // the spatial half of the union, on real solver output.
+        let graph = fixture_graph("own_scale.ini");
+        let drawn = solved(&graph);
+        let settings = GroupSettings::default();
+        let view = group_nodes(
+            &graph,
+            &drawn.positions,
+            &drawn.sizes,
+            &settings,
+            &HashSet::new(),
+        );
+
+        let run = longest_column_run(&graph, &drawn.positions);
+        assert!(
+            run.len() >= settings.min_size,
+            "the fixture must draw a stack of at least {} nodes, found {}",
+            settings.min_size,
+            run.len()
+        );
+        let circuit = graph.nodes[run[0]].circuit.as_str();
+
+        let ViewNode::Group(group) = view.nodes[run[0]] else {
+            panic!(
+                "a contiguous stack of {} `{circuit}` nodes must collapse, got {:?}",
+                run.len(),
+                view.nodes[run[0]]
+            );
+        };
+        for &member in &run {
+            assert_eq!(
+                view.nodes[member],
+                ViewNode::Group(group),
+                "every node of the stack must draw as the one group box"
+            );
+            assert!(
+                view.groups[group].members.contains(&member),
+                "node {member} must be owned by the group it draws as"
+            );
+        }
+        assert_eq!(view.groups[group].circuit, circuit);
+        assert!(
+            view.groups[group]
+                .members
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "members must be ascending: {:?}",
+            view.groups[group].members
+        );
+
+        // Spec: the drawn node count falls by the member count minus one.
+        let collapsed: usize = view
+            .groups
+            .iter()
+            .map(|group| group.members.len() - 1)
+            .sum();
+        let stand_ins: HashSet<ViewNode> = view.nodes.iter().copied().collect();
+        assert_eq!(view.nodes.len() - stand_ins.len(), collapsed);
+    }
+
+    #[test]
+    fn two_cable_hops_group_far_apart_same_type_nodes() {
+        // `copy` — `mixer` — `copy`: the two copies are two cable hops apart and
+        // drawn thousands of units from each other, so only the hop rule can
+        // join them.
+        let nodes = vec![
+            circuit_node("copy", 0),
+            circuit_node("mixer", 0),
+            circuit_node("copy", 1),
+        ];
+        let edges = vec![
+            cable(&nodes[0], &nodes[1], "_A"),
+            cable(&nodes[1], &nodes[2], "_B"),
+        ];
+        let graph = hand_built(nodes, edges);
+        let settings = GroupSettings {
+            enabled: true,
+            min_size: 2,
+        };
+
+        let view = group_nodes(
+            &graph,
+            &far_apart(graph.nodes.len()),
+            &bodies(graph.nodes.len()),
+            &settings,
+            &HashSet::new(),
+        );
+
+        assert_eq!(view.groups.len(), 1, "the two-hop pair must form one group");
+        assert_eq!(view.groups[0].circuit, "copy");
+        assert_eq!(view.groups[0].members, vec![0, 2]);
+        assert_eq!(view.nodes[0], ViewNode::Group(0));
+        assert_eq!(view.nodes[2], ViewNode::Group(0));
+        assert_eq!(
+            view.nodes[1],
+            ViewNode::Individual(1),
+            "the bridge circuit is not a member"
+        );
+
+        // One hop is inside the same budget.
+        let pair = vec![circuit_node("copy", 0), circuit_node("copy", 1)];
+        let direct = hand_built(pair.clone(), vec![cable(&pair[0], &pair[1], "_C")]);
+        let direct_view = group_nodes(
+            &direct,
+            &far_apart(direct.nodes.len()),
+            &bodies(direct.nodes.len()),
+            &settings,
+            &HashSet::new(),
+        );
+        assert_eq!(direct_view.groups.len(), 1);
+        assert_eq!(direct_view.groups[0].members, vec![0, 1]);
+    }
+
+    #[test]
+    fn three_cable_hops_leave_same_type_nodes_individual() {
+        // `copy` — `mixer` — `vca` — `copy` is three hops: one past the limit.
+        let nodes = vec![
+            circuit_node("copy", 0),
+            circuit_node("mixer", 0),
+            circuit_node("vca", 0),
+            circuit_node("copy", 1),
+        ];
+        let edges = vec![
+            cable(&nodes[0], &nodes[1], "_A"),
+            cable(&nodes[1], &nodes[2], "_B"),
+            cable(&nodes[2], &nodes[3], "_C"),
+        ];
+        let graph = hand_built(nodes, edges);
+        let settings = GroupSettings {
+            enabled: true,
+            min_size: 2,
+        };
+
+        let view = group_nodes(
+            &graph,
+            &far_apart(graph.nodes.len()),
+            &bodies(graph.nodes.len()),
+            &settings,
+            &HashSet::new(),
+        );
+
+        assert!(
+            view.groups.is_empty(),
+            "three hops must not group, got {:?}",
+            view.groups
+        );
+        for (index, drawn) in view.nodes.iter().enumerate() {
+            assert_eq!(*drawn, ViewNode::Individual(index));
+        }
+    }
+
+    #[test]
+    fn component_below_the_minimum_stays_individual() {
+        // own_two_ctrl.ini draws two `p2b8` nodes in one column and two `copy`
+        // nodes — every same-type component has two members, below the default
+        // minimum of five.
+        let graph = fixture_graph("own_two_ctrl.ini");
+        let drawn = solved(&graph);
+        let stack_pair: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.kind == NodeKind::Circuit && node.circuit == "p2b8")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(stack_pair.len(), 2, "the fixture must hold the small stack");
+
+        let view = group_nodes(
+            &graph,
+            &drawn.positions,
+            &drawn.sizes,
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            view.groups.is_empty(),
+            "a two-member component must not become a group, got {:?}",
+            view.groups
+        );
+        for (index, drawn) in view.nodes.iter().enumerate() {
+            assert_eq!(*drawn, ViewNode::Individual(index));
+        }
+
+        // The member count is what held it back: at a minimum of two the same
+        // stack collapses.
+        let permissive = GroupSettings {
+            enabled: true,
+            min_size: 2,
+        };
+        let grouped = group_nodes(
+            &graph,
+            &drawn.positions,
+            &drawn.sizes,
+            &permissive,
+            &HashSet::new(),
+        );
+        assert_eq!(grouped.groups.len(), 1);
+        assert_eq!(grouped.groups[0].members, stack_pair);
+        assert_eq!(grouped.groups[0].circuit, "p2b8");
+    }
+
+    #[test]
+    fn identical_inputs_yield_identical_views() {
+        let first = fixture_graph("own_scale.ini");
+        let second = fixture_graph("own_scale.ini");
+        let drawn = solved(&first);
+        let rebuilt = solved(&second);
+        assert_eq!(drawn.positions, rebuilt.positions);
+        let settings = GroupSettings::default();
+
+        let once = group_nodes(
+            &first,
+            &drawn.positions,
+            &drawn.sizes,
+            &settings,
+            &HashSet::new(),
+        );
+        let twice = group_nodes(
+            &first,
+            &drawn.positions,
+            &drawn.sizes,
+            &settings,
+            &HashSet::new(),
+        );
+        assert_eq!(once.groups, twice.groups);
+        assert_eq!(once.nodes, twice.nodes);
+        assert_eq!(once.edges, twice.edges);
+
+        assert!(!once.groups.is_empty(), "the fixture must actually group");
+        assert!(!once.edges.is_empty());
+        assert_eq!(
+            once,
+            group_nodes(
+                &second,
+                &rebuilt.positions,
+                &rebuilt.sizes,
+                &settings,
+                &HashSet::new()
+            ),
+            "a freshly built graph from the same file must group identically"
+        );
+    }
+
+    #[test]
+    fn expanded_group_keeps_its_members_individual() {
+        let nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("encoder", i)).collect();
+        let positions: Vec<(f32, f32)> = (0..5).map(|i| (0.0, i as f32 * NODE_WORLD_H)).collect();
+        let sizes = bodies(nodes.len());
+        let graph = hand_built(nodes, Vec::new());
+        let settings = GroupSettings::default();
+
+        let collapsed = group_nodes(&graph, &positions, &sizes, &settings, &HashSet::new());
+        assert_eq!(
+            collapsed.groups.len(),
+            1,
+            "five stacked encoders must form one group"
+        );
+        assert_eq!(collapsed.groups[0].members, vec![0, 1, 2, 3, 4]);
+
+        let expanded: HashSet<usize> = HashSet::from([0]);
+        let view = group_nodes(&graph, &positions, &sizes, &settings, &expanded);
+        assert_eq!(
+            view.groups, collapsed.groups,
+            "expanding keeps the group entry"
+        );
+        for (index, drawn) in view.nodes.iter().enumerate() {
+            assert_eq!(
+                *drawn,
+                ViewNode::Individual(index),
+                "an expanded member draws on its own"
+            );
+        }
+        assert_eq!(
+            view.group_of(3),
+            Some(0),
+            "an expanded member is still owned by its group"
+        );
+    }
+
+    #[test]
+    fn disabled_grouping_returns_the_identity_view() {
+        let graph = fixture_graph("own_scale.ini");
+        let drawn = solved(&graph);
+        let off = GroupSettings {
+            enabled: false,
+            ..GroupSettings::default()
+        };
+
+        let view = group_nodes(
+            &graph,
+            &drawn.positions,
+            &drawn.sizes,
+            &off,
+            &HashSet::new(),
+        );
+        assert_eq!(view, GroupedView::identity(&graph));
+        assert!(view.groups.is_empty());
+        for (index, drawn) in view.nodes.iter().enumerate() {
+            assert_eq!(*drawn, ViewNode::Individual(index));
+        }
+
+        let on = group_nodes(
+            &graph,
+            &drawn.positions,
+            &drawn.sizes,
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+        assert!(!on.groups.is_empty());
+        assert_ne!(on, view, "the toggle must change the drawn view");
+    }
+
+    #[test]
+    fn cables_deduplicate_and_intra_group_cables_drop() {
+        // Five stacked encoders collapse; three of them fan out onto one `vca`,
+        // `vca` feeds a `mixer` that feeds back into the group, and one cable is
+        // internal to the group.
+        let mut nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("encoder", i)).collect();
+        nodes.push(circuit_node("vca", 0));
+        nodes.push(circuit_node("mixer", 0));
+        let edges = vec![
+            cable(&nodes[0], &nodes[5], "_A"),
+            cable(&nodes[1], &nodes[5], "_B"),
+            cable(&nodes[2], &nodes[5], "_C"),
+            cable(&nodes[3], &nodes[4], "_D"),
+            cable(&nodes[5], &nodes[6], "_E"),
+            cable(&nodes[6], &nodes[0], "_F"),
+        ];
+        let graph = hand_built(nodes, edges);
+
+        let positions = vec![
+            (0.0, 0.0),
+            (0.0, NODE_WORLD_H),
+            (0.0, 2.0 * NODE_WORLD_H),
+            (0.0, 3.0 * NODE_WORLD_H),
+            (0.0, 4.0 * NODE_WORLD_H),
+            (900.0, 900.0),
+            (1800.0, 1800.0),
+        ];
+        let sizes = bodies(graph.nodes.len());
+        let view = group_nodes(
+            &graph,
+            &positions,
+            &sizes,
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(view.groups[0].members, vec![0, 1, 2, 3, 4]);
+        let group = ViewNode::Group(0);
+        assert_eq!(view.nodes[5], ViewNode::Individual(5));
+        assert_eq!(view.nodes[6], ViewNode::Individual(6));
+
+        assert_eq!(
+            view.edges,
+            vec![
+                ViewEdge {
+                    source: group,
+                    sink: ViewNode::Individual(5),
+                },
+                ViewEdge {
+                    source: ViewNode::Individual(5),
+                    sink: ViewNode::Individual(6),
+                },
+                ViewEdge {
+                    source: ViewNode::Individual(6),
+                    sink: group,
+                },
+            ],
+            "three fan-out cables must collapse into one and the internal cable must vanish"
+        );
     }
 }
