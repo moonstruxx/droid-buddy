@@ -716,11 +716,11 @@ pub(crate) fn paint_band(
     scene: Option<&SceneSpec>,
     selected: &[usize],
 ) {
-    // module-ui-navigation D3: the map's panel is per-frame geometry like the
-    // hit rects below, so it is cleared here and republished only by a pane that
-    // actually draws a map. A stale panel could otherwise claim a press over a
-    // surface that is no longer on screen.
-    app.physical_minimap_panel_egui = None;
+    // module-ui-navigation D2: the map is per-frame geometry like the hit rects
+    // below, so it is cleared here and republished only by a pane that actually
+    // draws one. A stale map could otherwise claim a press over a surface that is
+    // no longer on screen.
+    app.physical_minimap = None;
     let band = to_cell_rect(ui.max_rect());
     if band_has_views(app, band) {
         paint_panes(app, ui, scene, selected);
@@ -778,7 +778,7 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                 // sees the pane actually on screen.
                 app.note_physical_pane_rect(to_cell_rect(rect));
                 app.apply_physical_fit_triggers();
-                let spec = physical::physical_spec(app, rect);
+                let mut spec = physical::physical_spec(app, rect);
                 let frame = physical::paint_physical(ui, rect, spec.as_ref());
                 // module-ui-labels D8: apply the pane's own input report —
                 // middle-drag pan, cursor-anchored wheel zoom, and the D7
@@ -808,20 +808,16 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                         .filter_map(|c| c.component_index.map(|i| (i, to_cell_rect(c.rect))))
                         .collect();
                 }
-                // module-ui-navigation D3: publish the map's panel rect, which
-                // the pointer path claims before element hit-testing. `None`
-                // whenever this frame drew no map (performance view, no rack, a
-                // degenerate one), so the pointer path can never claim a panel
-                // that is not painted.
-                app.physical_minimap_panel_egui = spec
-                    .as_ref()
-                    .and_then(|spec| spec.minimap.as_ref())
-                    .map(|minimap| {
-                        egui::Rect::from_min_size(
-                            egui::pos2(minimap.panel.x, minimap.panel.y),
-                            egui::vec2(minimap.panel.w, minimap.panel.h),
-                        )
-                    });
+                // module-ui-navigation D2/D3: publish the map the pane just drew —
+                // panel, modules, viewport and transform — which the pointer path
+                // reads to claim the panel and to invert the click and the
+                // marquee. One published answer, so the pointer cannot derive a
+                // different scale from the painter. `None` whenever this frame
+                // drew no map (performance view, no rack, a degenerate one), so
+                // the pointer path can never claim a map that is not painted.
+                // The map is the last thing this frame reads out of the spec, so
+                // it is handed over rather than copied.
+                app.physical_minimap = spec.as_mut().and_then(|spec| spec.minimap.take());
                 let painter = ui.painter().with_clip_rect(rect);
                 let title = module_ui_pane_title(app, rect);
                 draw_pane_frame(&painter, rect, focused, &title, t);

@@ -1101,15 +1101,17 @@ pub struct App {
     /// tests that never render. Not reset on patch load — pane geometry is a
     /// property of the window arrangement, not the patch.
     pub physical_pane_rect: Option<Rect>,
-    /// The module UI's minimap panel as last painted, in the point space the
-    /// cells are drawn in (window points, like `component_rects`), for the
-    /// pointer path's precedence check (module-ui-navigation D3). Republished
-    /// every frame by `paint_physical` and left `None` whenever no map is
-    /// drawn — before the first frame, in the performance view, and with no
-    /// rack — so a stale panel can never claim a press over a surface that is
-    /// not there. Mirrors `graph_minimap_panel_egui`; window geometry, so it is
-    /// not reset on patch load, like `physical_pane_rect`.
-    pub physical_minimap_panel_egui: Option<egui::Rect>,
+    /// The module UI's minimap as last painted (module-ui-navigation D2): the
+    /// panel it occupies, one rect per module, the viewport box, the focused
+    /// module, and — the part the pointer path reads — the transform from rack
+    /// points into the panel. Published whole so the handler inverts the
+    /// painter's own answer instead of re-deriving a scale (D2: painter and
+    /// pointer read one answer). Republished every frame from the pane dispatch
+    /// (`gui::paint_panes`) and left `None` whenever no map is drawn — before the
+    /// first frame, in the performance view, and with no rack — so a stale map
+    /// can never claim a press over a surface that is not there. Window
+    /// geometry, so it is not reset on patch load, like `physical_pane_rect`.
+    pub physical_minimap: Option<crate::physical::MiniMap>,
     /// The live minimap marquee, `(anchor_x, anchor_y, current_x, current_y)` in
     /// window points, or `None` while no drag on the map is down
     /// (module-ui-navigation D2/D5). The handler owns it — a press inside the
@@ -1349,7 +1351,7 @@ impl App {
             physical_nav_latched: false,
             physical_fit_pending: true,
             physical_pane_rect: None,
-            physical_minimap_panel_egui: None,
+            physical_minimap: None,
             physical_minimap_drag: None,
             physical_rack_spec: crate::physical::RackSpec::default(),
             graph_window_request: GraphWindowRequest::default(),
@@ -2939,6 +2941,48 @@ impl App {
             return false;
         }
         self.physical_center_on_rect(crate::physical::RectPt::new(0.0, 0.0, w, h))
+    }
+
+    /// Fit the module UI to a rack region — the minimap marquee's region zoom
+    /// (module-ui-navigation D2/D5), `(min_x, min_y, max_x, max_y)` in rack
+    /// points at the current zoom.
+    ///
+    /// The region is named in the same space [`Self::physical_center_on_rect`]
+    /// consumes (`mm × PHYSICAL_POINTS_PER_MM × zoom`), so framing it is the
+    /// point-space form of `physical::fit_zoom`: the current zoom scaled by the
+    /// pane/region ratio on the tighter axis, clamped to
+    /// `ZOOM_MIN..=ZOOM_MAX` so a tiny marquee cannot leave the supported range.
+    /// The region's centre then lands on the pane's centre exactly as a click
+    /// does — `offset = centre − pane_centre`, with the centre scaled by the
+    /// effective ratio. A region zoom is manual navigation, so the view latches
+    /// through [`Self::note_physical_navigation`] and the fit marker drops.
+    ///
+    /// Returns whether it moved — `false` before the pane size is known or for
+    /// a degenerate region.
+    pub fn physical_fit_region(&mut self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> bool {
+        let Some((pane_w, pane_h)) = self.physical_pane_size() else {
+            return false;
+        };
+        let (w, h) = (max_x - min_x, max_y - min_y);
+        let current = self.physical_zoom;
+        if pane_w <= 0.0 || pane_h <= 0.0 || current <= 0.0 || w <= 0.0 || h <= 0.0 {
+            return false;
+        }
+        let target = (current * (pane_w / w).min(pane_h / h)).clamp(
+            crate::physical::ZOOM_MIN as f32,
+            crate::physical::ZOOM_MAX as f32,
+        );
+        // The effective ratio (after the clamp) drives the offset, so a region
+        // that would need a zoom outside the range still lands centred.
+        let ratio = target / current;
+        self.physical_offset = (
+            (min_x + w / 2.0) * ratio - pane_w / 2.0,
+            (min_y + h / 2.0) * ratio - pane_h / 2.0,
+        );
+        self.physical_zoom = target;
+        self.scale_factor = target;
+        self.note_physical_navigation();
+        true
     }
 
     /// One step of physical-view panning in screen cells (4.3): arrow keys
