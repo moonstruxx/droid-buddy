@@ -59,6 +59,29 @@ pub(crate) use viewer::viewer_spec;
 #[allow(unused_imports)]
 pub(crate) use viewer::ViewerFrame;
 
+/// [`build_scene_spec`] with the grouping answer supplied by the caller instead
+/// of recomputed inside the build.
+///
+/// A caller that owns `&mut App` pre-warms [`App::grouped_view`] — the cache a
+/// running settle drops every frame — and passes the borrowed answer here, so
+/// the quadratic grouping pass runs once per invalidation rather than once per
+/// frame (design D1). `None` draws the ungrouped view, exactly as
+/// [`build_scene_spec`] does with grouping off or no graph loaded.
+///
+/// A forwarder rather than a re-export for one reason: `graph`'s seam is
+/// `pub(crate)` (this file does not own that module's visibility) and a
+/// `pub(crate)` item cannot be re-exported at full visibility, while the
+/// windowed loop lives in the `droid_tui` bin — a separate crate root that only
+/// sees `droid_tui::gui`.
+pub fn build_scene_spec_with_view(
+    app: &App,
+    theme: &crate::theme::Theme,
+    pane: egui::Rect,
+    groups: Option<&crate::graph_group::GroupedView>,
+) -> Option<SceneSpec> {
+    graph::build_scene_spec_with_view(app, theme, pane, groups)
+}
+
 use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
@@ -2095,7 +2118,12 @@ mod tests {
         // center — the position-bounds center plus half the node world extent,
         // since node positions are top-left corners — so the drawn node BOXES,
         // not just their top-left corners, sit on the pane center.
+        //
+        // Pins the UNGROUPED renderer: the expectation is the model graph's own
+        // position bounds and node extent, which grouping (on by default) would
+        // replace with the drawn group nodes.
         let mut app = App::new();
+        app.graph_grouping.group_enabled = false;
         let patch = crate::patch::Patch::from_ini_file(Path::new("fixtures/source_navigation.ini"))
             .unwrap();
         assert!(app.load_patch(patch));
