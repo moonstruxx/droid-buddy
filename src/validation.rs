@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::patch::{IniEntry, MasterModel, Patch, Span};
+use crate::patch::{IniEntry, IniSection, MasterModel, Patch, Span};
 use crate::rack::MasterConflict;
 use crate::schema::{is_valid_jack, suggest_circuit_with_schema, validate_jack, Schema};
 
@@ -488,14 +488,19 @@ fn ram_budgets(schema: &Schema, model: MasterModel) -> Vec<(String, u32)> {
 }
 
 // ---------------------------------------------------------------------------
-// Main validator
+// Cable facts
 // ---------------------------------------------------------------------------
 
-/// Validate `patch` against `schema`, returning all issues sorted by `(line, col)`.
-pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
-    let mut issues: Vec<ValidationIssue> = Vec::new();
+/// Everything the cable checks need, precomputed once per run: the cables the
+/// patch defines (with the `(section, entry)` locations that define them), their
+/// names alone, and the cables something references as a sink.
+struct CableFacts {
+    defined: HashMap<String, Vec<(usize, usize)>>,
+    defined_names: HashSet<String>,
+    sink_cables: HashSet<String>,
+}
 
-    // --- Precompute cable definitions and sink set ---
+fn collect_cable_facts(patch: &Patch, schema: &Schema) -> CableFacts {
     // defined: cable -> list of (section_idx, entry_idx)
     let mut defined: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut sink_cables: HashSet<String> = HashSet::new();
@@ -525,195 +530,245 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
         }
     }
 
-    // --- Per-section checks ---
-    for section in &patch.sections {
-        let lower = section.name.to_lowercase();
-        let is_known_circuit = schema.circuits.contains_key(&lower);
-        let is_known_controller = schema.controllers.contains_key(&lower);
+    CableFacts {
+        defined,
+        defined_names,
+        sink_cables,
+    }
+}
 
-        // 1. unknown circuit
-        if !is_known_circuit && !is_known_controller {
-            let suggestion = suggest_circuit_with_schema(&section.name, schema);
-            let message = if let Some(s) = suggestion {
-                format!("Unknown circuit \"{}\". Did you mean: {s}?", section.name)
-            } else {
-                format!("Unknown circuit \"{}\"", section.name)
-            };
+// ---------------------------------------------------------------------------
+// Per-section checks
+// ---------------------------------------------------------------------------
+
+fn check_section(
+    schema: &Schema,
+    section: &IniSection,
+    facts: &CableFacts,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let lower = section.name.to_lowercase();
+    let is_known_circuit = schema.circuits.contains_key(&lower);
+    let is_known_controller = schema.controllers.contains_key(&lower);
+
+    // 1. unknown circuit
+    if !is_known_circuit && !is_known_controller {
+        let suggestion = suggest_circuit_with_schema(&section.name, schema);
+        let message = if let Some(s) = suggestion {
+            format!("Unknown circuit \"{}\". Did you mean: {s}?", section.name)
+        } else {
+            format!("Unknown circuit \"{}\"", section.name)
+        };
+        issues.push(ValidationIssue {
+            span: section.header_span,
+            severity: Severity::Error,
+            code: "unknown_circuit".to_string(),
+            message,
+        });
+    }
+
+    let seen = check_entries(schema, section, facts, is_known_circuit, issues);
+
+    // 5. missing required (essential == 2)
+    check_missing_required(schema, section, &seen, issues);
+}
+
+/// Per-entry checks for one section; returns the params it saw mapped to the
+/// line they first appeared on, so the required-parameter scan can run after the
+/// whole section is known.
+fn check_entries(
+    schema: &Schema,
+    section: &IniSection,
+    facts: &CableFacts,
+    is_known_circuit: bool,
+    issues: &mut Vec<ValidationIssue>,
+) -> HashMap<String, usize> {
+    // Track seen params for this section
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let valid_param_set: Option<HashSet<String>> = if is_known_circuit {
+        schema
+            .get_param_names(&section.name)
+            .map(|v| v.into_iter().collect())
+    } else {
+        None
+    };
+
+    // Missing-required check needs seen after full scan, but we collect now.
+    // We do per-entry checks inline.
+    for entry in &section.detailed_entries {
+        // 2. duplicate param (second occurrence)
+        if let Some(_first) = seen.get(&entry.key) {
             issues.push(ValidationIssue {
-                span: section.header_span,
-                severity: Severity::Error,
-                code: "unknown_circuit".to_string(),
-                message,
+                span: entry.value_span,
+                severity: Severity::Warning,
+                code: "duplicate_param".to_string(),
+                message: format!(
+                    "Duplicate parameter \"{}\" in [{}]",
+                    entry.key, section.name
+                ),
             });
+        } else {
+            seen.insert(entry.key.clone(), entry.line);
         }
 
-        // Track seen params for this section
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        let valid_param_set: Option<HashSet<String>> = if is_known_circuit {
-            schema
-                .get_param_names(&section.name)
-                .map(|v| v.into_iter().collect())
-        } else {
-            None
-        };
-
-        // Missing-required check needs seen after full scan, but we collect now.
-        // We do per-entry checks inline.
-        for entry in &section.detailed_entries {
-            // 2. duplicate param (second occurrence)
-            if let Some(_first) = seen.get(&entry.key) {
-                issues.push(ValidationIssue {
-                    span: entry.value_span,
-                    severity: Severity::Warning,
-                    code: "duplicate_param".to_string(),
-                    message: format!(
-                        "Duplicate parameter \"{}\" in [{}]",
-                        entry.key, section.name
-                    ),
-                });
-            } else {
-                seen.insert(entry.key.clone(), entry.line);
-            }
-
-            // 3. unknown param (only for known circuits)
-            if let Some(ref valid) = valid_param_set {
-                if !valid.contains(&entry.key) {
-                    issues.push(ValidationIssue {
-                        span: entry.value_span,
-                        severity: Severity::Error,
-                        code: "unknown_param".to_string(),
-                        message: format!(
-                            "Unknown parameter \"{}\" for circuit \"{}\"",
-                            entry.key, section.name
-                        ),
-                    });
-                }
-            }
-
-            // 3b. expression grammar: DROID evaluates `A * B + C` only, so a
-            // bracketed or chained calculation is an invalid parameter value
-            // and the firmware refuses the whole patch.
-            if let Some(problem) = expression_problem(&entry.value) {
+        // 3. unknown param (only for known circuits)
+        if let Some(ref valid) = valid_param_set {
+            if !valid.contains(&entry.key) {
                 issues.push(ValidationIssue {
                     span: entry.value_span,
                     severity: Severity::Error,
-                    code: "invalid_expression".to_string(),
+                    code: "unknown_param".to_string(),
                     message: format!(
-                        "Invalid value \"{}\" for \"{}\" in [{}]: {problem}",
-                        entry.value.trim(),
-                        entry.key,
-                        section.name
+                        "Unknown parameter \"{}\" for circuit \"{}\"",
+                        entry.key, section.name
                     ),
                 });
             }
+        }
 
-            // 4. invalid jack: scan value for jack tokens, validate each
-            // Skip numeric and cable values: if value is pure numeric or starts with '_' skip jack check
-            let trimmed = entry.value.trim();
-            let is_numeric = trimmed.parse::<f64>().is_ok();
-            let is_cable = trimmed.starts_with('_');
-            if !is_numeric && !is_cable {
-                let jack_tokens = extract_jack_tokens(&entry.value);
-                let mut invalid_msg: Option<String> = None;
-                for tok in &jack_tokens {
-                    if !is_valid_jack(tok) {
-                        // produce detailed message via validate_jack
-                        if let Some((prefix, mod_num, ch)) = parse_jack_for_validate(tok) {
-                            if let Some(msg) = validate_jack(&prefix, mod_num, ch) {
-                                invalid_msg = Some(msg);
-                                break;
-                            }
+        // 3b. expression grammar: DROID evaluates `A * B + C` only, so a
+        // bracketed or chained calculation is an invalid parameter value
+        // and the firmware refuses the whole patch.
+        if let Some(problem) = expression_problem(&entry.value) {
+            issues.push(ValidationIssue {
+                span: entry.value_span,
+                severity: Severity::Error,
+                code: "invalid_expression".to_string(),
+                message: format!(
+                    "Invalid value \"{}\" for \"{}\" in [{}]: {problem}",
+                    entry.value.trim(),
+                    entry.key,
+                    section.name
+                ),
+            });
+        }
+
+        // 4. invalid jack: scan value for jack tokens, validate each
+        // Skip numeric and cable values: if value is pure numeric or starts with '_' skip jack check
+        let trimmed = entry.value.trim();
+        let is_numeric = trimmed.parse::<f64>().is_ok();
+        let is_cable = trimmed.starts_with('_');
+        if !is_numeric && !is_cable {
+            let jack_tokens = extract_jack_tokens(&entry.value);
+            let mut invalid_msg: Option<String> = None;
+            for tok in &jack_tokens {
+                if !is_valid_jack(tok) {
+                    // produce detailed message via validate_jack
+                    if let Some((prefix, mod_num, ch)) = parse_jack_for_validate(tok) {
+                        if let Some(msg) = validate_jack(&prefix, mod_num, ch) {
+                            invalid_msg = Some(msg);
+                            break;
                         }
                     }
                 }
-                if let Some(msg) = invalid_msg {
-                    issues.push(ValidationIssue {
-                        span: entry.value_span,
-                        severity: Severity::Warning,
-                        code: "invalid_jack".to_string(),
-                        message: msg,
-                    });
-                }
             }
-
-            // 6. undefined cable (sink references never defined)
-            // For each cable in this entry's value (excluding pure output defs already considered)
-            let is_def = is_cable_definition(schema, &section.name, &entry.key, &entry.value);
-            if !is_def {
-                let cables = crate::patch::scan_internal_tokens(&entry.value);
-                // dedup per entry to avoid duplicate warnings for same cable repeated in same value expression
-                let mut seen_cable: HashSet<String> = HashSet::new();
-                for cable in cables {
-                    if !seen_cable.insert(cable.clone()) {
-                        continue;
-                    }
-                    if !defined_names.contains(&cable) {
-                        issues.push(ValidationIssue {
-                            span: entry.value_span,
-                            severity: Severity::Warning,
-                            code: "undefined_cable".to_string(),
-                            message: format!(
-                                "Virtual cable \"{cable}\" is used but never defined as an output"
-                            ),
-                        });
-                    }
-                }
+            if let Some(msg) = invalid_msg {
+                issues.push(ValidationIssue {
+                    span: entry.value_span,
+                    severity: Severity::Warning,
+                    code: "invalid_jack".to_string(),
+                    message: msg,
+                });
             }
         }
 
-        // 5. missing required (essential == 2)
-        if is_known_circuit {
-            if let Some(def) = schema.circuits.get(&lower) {
-                for input in &def.inputs {
-                    // Ranged params (button1 ... button32, mixer input1 ...
-                    // input8, sequencer pitch1 ... pitch8) are skipped: leaving
-                    // unused members unpatched is normal practice, and the
-                    // firmware does not require them. droid-lsp's diagnostics.ts
-                    // skips them for the same reason; expanding them here turned
-                    // one optional group into six or eight warnings per section.
-                    let is_ranged = input.prefix.is_some() && input.count.is_some();
-                    if input.essential == 2 && !is_ranged {
-                        let expanded = expand_param_names(
-                            input.prefix.as_ref(),
-                            input.count,
-                            input.start_at,
-                            &input.name,
-                        );
-                        for name in expanded {
-                            if !seen.contains_key(&name) {
-                                // A documented alternative present in this same
-                                // section satisfies the param (see
-                                // ALTERNATIVE_INPUTS). A different required
-                                // param of the circuit is not excused: the table
-                                // is keyed by the exact param name.
-                                if satisfied_by_alternative(
-                                    &lower,
-                                    &name,
-                                    &section.detailed_entries,
-                                ) {
-                                    continue;
-                                }
-                                issues.push(ValidationIssue {
-                                    span: section.header_span,
-                                    severity: Severity::Warning,
-                                    code: "missing_required".to_string(),
-                                    message: format!(
-                                        "Missing required parameter \"{name}\" for [{}]",
-                                        section.name
-                                    ),
-                                });
-                            }
-                        }
-                    }
+        // 6. undefined cable (sink references never defined)
+        // For each cable in this entry's value (excluding pure output defs already considered)
+        let is_def = is_cable_definition(schema, &section.name, &entry.key, &entry.value);
+        if !is_def {
+            let cables = crate::patch::scan_internal_tokens(&entry.value);
+            // dedup per entry to avoid duplicate warnings for same cable repeated in same value expression
+            let mut seen_cable: HashSet<String> = HashSet::new();
+            for cable in cables {
+                if !seen_cable.insert(cable.clone()) {
+                    continue;
+                }
+                if !facts.defined_names.contains(&cable) {
+                    issues.push(ValidationIssue {
+                        span: entry.value_span,
+                        severity: Severity::Warning,
+                        code: "undefined_cable".to_string(),
+                        message: format!(
+                            "Virtual cable \"{cable}\" is used but never defined as an output"
+                        ),
+                    });
                 }
             }
         }
     }
 
+    seen
+}
+
+fn check_missing_required(
+    schema: &Schema,
+    section: &IniSection,
+    seen: &HashMap<String, usize>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let lower = section.name.to_lowercase();
+    let Some(def) = schema.circuits.get(&lower) else {
+        return;
+    };
+    for input in &def.inputs {
+        // Ranged params (button1 ... button32, mixer input1 ...
+        // input8, sequencer pitch1 ... pitch8) are skipped: leaving
+        // unused members unpatched is normal practice, and the
+        // firmware does not require them. droid-lsp's diagnostics.ts
+        // skips them for the same reason; expanding them here turned
+        // one optional group into six or eight warnings per section.
+        let is_ranged = input.prefix.is_some() && input.count.is_some();
+        if input.essential == 2 && !is_ranged {
+            let expanded = expand_param_names(
+                input.prefix.as_ref(),
+                input.count,
+                input.start_at,
+                &input.name,
+            );
+            for name in expanded {
+                if !seen.contains_key(&name) {
+                    // A documented alternative present in this same
+                    // section satisfies the param (see
+                    // ALTERNATIVE_INPUTS). A different required
+                    // param of the circuit is not excused: the table
+                    // is keyed by the exact param name.
+                    if satisfied_by_alternative(&lower, &name, &section.detailed_entries) {
+                        continue;
+                    }
+                    issues.push(ValidationIssue {
+                        span: section.header_span,
+                        severity: Severity::Warning,
+                        code: "missing_required".to_string(),
+                        message: format!(
+                            "Missing required parameter \"{name}\" for [{}]",
+                            section.name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whole-patch checks
+// ---------------------------------------------------------------------------
+
+/// The patch's cable definitions in cable-name order, the order both cable
+/// checks walk so their findings do not depend on map iteration order.
+fn sorted_definitions(facts: &CableFacts) -> Vec<(&String, &Vec<(usize, usize)>)> {
+    let mut definitions: Vec<_> = facts.defined.iter().collect();
+    definitions.sort_by(|a, b| a.0.cmp(b.0));
+    definitions
+}
+
+fn check_duplicate_cables(
+    patch: &Patch,
+    definitions: &[(&String, &Vec<(usize, usize)>)],
+    issues: &mut Vec<ValidationIssue>,
+) {
     // 7. duplicate cable def
-    let mut defined_sorted: Vec<(String, Vec<(usize, usize)>)> = defined.into_iter().collect();
-    defined_sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    for (cable, defs) in &defined_sorted {
+    for &(cable, defs) in definitions {
         if defs.len() >= 2 {
             let first_section = &patch.sections[defs[0].0].name;
             for dup in defs.iter().skip(1) {
@@ -731,9 +786,16 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
             }
         }
     }
+}
 
+fn check_unused_cables(
+    patch: &Patch,
+    definitions: &[(&String, &Vec<(usize, usize)>)],
+    sink_cables: &HashSet<String>,
+    issues: &mut Vec<ValidationIssue>,
+) {
     // 8. unused cable (defined once but never referenced)
-    for (cable, defs) in &defined_sorted {
+    for &(cable, defs) in definitions {
         if defs.len() == 1 && !sink_cables.contains(cable) {
             let (si, ei) = defs[0];
             let entry = &patch.sections[si].detailed_entries[ei];
@@ -748,7 +810,15 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
             });
         }
     }
+}
 
+/// Report the master-fit verdict and return the model the patch resolves to, so
+/// the RAM check judges the same resolution instead of resolving a second time.
+fn check_master_fit(
+    patch: &Patch,
+    schema: &Schema,
+    issues: &mut Vec<ValidationIssue>,
+) -> MasterModel {
     // 9. master fit: one resolution per run decides which model hosts the
     // patch, and every use that model cannot host is reported at its own span.
     // A conflict warns (the declaration is authoritative for what is drawn); a
@@ -780,41 +850,71 @@ pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
             message: no_master_fits_message(&plan.conflicts),
         });
     }
+    plan.model
+}
 
+fn check_ram_overflow(
+    patch: &Patch,
+    schema: &Schema,
+    model: MasterModel,
+    issues: &mut Vec<ValidationIssue>,
+) {
     // 10. RAM overflow, judged against the master model the patch resolved to
     // so the verdict names the model the patch actually runs on.
-    {
-        let mut ram_used: u32 = 0;
-        let mut unknown = false;
-        for section in &patch.sections {
-            let lower = section.name.to_lowercase();
-            if let Some(c) = schema.circuits.get(&lower) {
-                ram_used = ram_used.saturating_add(c.ramsize);
-            } else if let Some(ctrl) = schema.controllers.get(&lower) {
-                ram_used = ram_used.saturating_add(ctrl.ramsize);
-            } else {
-                unknown = true;
-            }
+    let mut ram_used: u32 = 0;
+    let mut unknown = false;
+    for section in &patch.sections {
+        let lower = section.name.to_lowercase();
+        if let Some(c) = schema.circuits.get(&lower) {
+            ram_used = ram_used.saturating_add(c.ramsize);
+        } else if let Some(ctrl) = schema.controllers.get(&lower) {
+            ram_used = ram_used.saturating_add(ctrl.ramsize);
+        } else {
+            unknown = true;
         }
-        if !unknown && ram_used > 0 && !schema.available_memory.is_empty() {
-            for (master, avail) in ram_budgets(schema, plan.model) {
-                if ram_used > avail {
-                    issues.push(ValidationIssue {
-                        span: Span {
-                            line: 0,
-                            col_start: 0,
-                            col_end: 0,
-                        },
-                        severity: Severity::Error,
-                        code: "ram_overflow".to_string(),
-                        message: format!(
-                            "Patch needs {ram_used} bytes of RAM but {master} only provides {avail} bytes — the patch will not load"
-                        ),
-                    });
-                }
+    }
+    if !unknown && ram_used > 0 && !schema.available_memory.is_empty() {
+        for (master, avail) in ram_budgets(schema, model) {
+            if ram_used > avail {
+                issues.push(ValidationIssue {
+                    span: Span {
+                        line: 0,
+                        col_start: 0,
+                        col_end: 0,
+                    },
+                    severity: Severity::Error,
+                    code: "ram_overflow".to_string(),
+                    message: format!(
+                        "Patch needs {ram_used} bytes of RAM but {master} only provides {avail} bytes — the patch will not load"
+                    ),
+                });
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Main validator
+// ---------------------------------------------------------------------------
+
+/// Validate `patch` against `schema`, returning all issues sorted by `(line, col)`.
+pub fn validate_patch(patch: &Patch, schema: &Schema) -> Vec<ValidationIssue> {
+    let mut issues: Vec<ValidationIssue> = Vec::new();
+
+    let facts = collect_cable_facts(patch, schema);
+
+    // --- Per-section checks ---
+    for section in &patch.sections {
+        check_section(schema, section, &facts, &mut issues);
+    }
+
+    // Both cable checks walk the definitions in cable-name order; one sorted
+    // view keeps that order identical across them.
+    let definitions = sorted_definitions(&facts);
+    check_duplicate_cables(patch, &definitions, &mut issues);
+    check_unused_cables(patch, &definitions, &facts.sink_cables, &mut issues);
+    let model = check_master_fit(patch, schema, &mut issues);
+    check_ram_overflow(patch, schema, model, &mut issues);
 
     // Deterministic sort
     issues.sort();
