@@ -2707,6 +2707,10 @@ fn collapsed_group_boxes(
 /// the same extent `gui::graph::group_node_spec` paints, computed from the same
 /// `world` slice the node hit test reads, so both surfaces answer one source
 /// (ADR 40).
+///
+/// Reads [`Group::bbox`], the compacted drawn box, because a collapsed group paints
+/// exactly that body; the members' own union ([`Group::members_bbox`]) belongs to
+/// the expanded outline, not to this box.
 fn group_world_box(group: &Group, world: &[(f32, f32)]) -> (f32, f32, f32, f32) {
     let (min_x, min_y, max_x, max_y) = group.bbox;
     let mut member = (0.0_f32, 0.0_f32);
@@ -2765,10 +2769,13 @@ fn expanded_group_boxes(
 /// The members' union grown by [`GROUP_OUTLINE_PAD`] on every side — the same
 /// extent `gui::graph::build_group_outlines` encloses, from the same `world`
 /// slice the node hit test reads, so the outline under the pointer is the one
-/// painted (ADR 40). Unlike the collapsed box it is not re-centred: an open group
-/// keeps its members where they are drawn and only wraps them.
+/// painted (ADR 40). It reads [`Group::members_bbox`], never [`Group::bbox`]: the
+/// drawn box may have compacted to a nominal body for a spread type, which would
+/// leave the outline floating between the members instead of around them. Unlike
+/// the collapsed box it is not re-centred: an open group keeps its members where
+/// they are drawn and only wraps them.
 fn group_outline_box(group: &Group, world: &[(f32, f32)]) -> (f32, f32, f32, f32) {
-    let (min_x, min_y, max_x, max_y) = group.bbox;
+    let (min_x, min_y, max_x, max_y) = group.members_bbox;
     let mut member = (0.0_f32, 0.0_f32);
     for &member_index in &group.members {
         let (w, h) = world.get(member_index).copied().unwrap_or_default();
@@ -7312,7 +7319,7 @@ mod tests {
         use crate::gui::WindowFrame;
         let mut app = app_with_grouped_graph_window();
         app.toggle_group_expanded(0);
-        let bbox = app.grouped_view().expect("a grouped view").groups[0].bbox;
+        let bbox = app.grouped_view().expect("a grouped view").groups[0].members_bbox;
         // Just inside the outline's left edge, at the members' top row: every
         // member body starts at or right of `bbox.0`, so the point is outline
         // band and cannot be a body.
@@ -7347,7 +7354,7 @@ mod tests {
         use crate::gui::WindowFrame;
         let mut app = app_with_grouped_graph_window();
         app.toggle_group_expanded(0);
-        let bbox = app.grouped_view().expect("a grouped view").groups[0].bbox;
+        let bbox = app.grouped_view().expect("a grouped view").groups[0].members_bbox;
         let (wx, wy) = (bbox.0 - GROUP_OUTLINE_PAD / 2.0, bbox.1 + 2.0);
         let (px, py) = app
             .graph_camera

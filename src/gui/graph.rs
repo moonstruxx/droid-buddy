@@ -1456,10 +1456,7 @@ fn scene_groups(app: &App) -> Option<GroupedView> {
     let graph = app.graph.as_ref()?;
     let positions = app.graph_display_positions();
     let sizes = crate::layout::node_world_sizes(graph);
-    let settings = crate::graph_group::GroupSettings {
-        enabled: app.graph_grouping.group_enabled,
-        min_size: app.graph_grouping.min_group_size,
-    };
+    let settings = app.group_settings();
     // Isolating a group draws its members individually — the isolate reads as
     // "these nodes, plus their neighbours" (design D4) — so it is expanded for
     // the pass; its outline comes along because the group stays in the view.
@@ -2429,6 +2426,13 @@ fn build_clusters(
 /// it reads as a container, in the tokens the group's circuit nodes wear, and
 /// titled with the same `<circuit> ×<count>` label the collapsed box carries.
 /// A collapsed group is already one drawn body and gets no outline.
+///
+/// The outline wraps the members' own drawn rects — [`Group::members_bbox`]
+/// projected through the camera — and never [`Group::bbox`]: that one is the
+/// collapsed body and compacts to a nominal box for a spread type, which would
+/// leave the outline floating between the member bodies instead of around them
+/// (ADR 40: the extent the pointer hit-tests in
+/// `handler::group_outline_box` is the same one).
 fn build_group_outlines(
     style: SceneStyle<'_>,
     view: &GroupedView,

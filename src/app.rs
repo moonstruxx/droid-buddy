@@ -3860,11 +3860,16 @@ impl App {
         ))
     }
 
-    /// The `[graph]` preference in the shape the grouping pass takes it.
-    fn group_settings(&self) -> crate::graph_group::GroupSettings {
+    /// The `[graph]` preference in the shape the grouping pass takes it: the one
+    /// place the config file's names are translated into the pass's own types.
+    pub(crate) fn group_settings(&self) -> crate::graph_group::GroupSettings {
         crate::graph_group::GroupSettings {
             enabled: self.graph_grouping.group_enabled,
             min_size: self.graph_grouping.min_group_size,
+            policy: match self.graph_grouping.group_by {
+                crate::config::GroupBy::Type => crate::graph_group::GroupPolicy::Type,
+                crate::config::GroupBy::Run => crate::graph_group::GroupPolicy::Run,
+            },
         }
     }
 
@@ -5262,6 +5267,7 @@ mod tests {
         let config = crate::config::Graph {
             group_enabled: false,
             min_group_size: 3,
+            group_by: crate::config::GroupBy::Run,
         };
         app.seed_graph_grouping(&config);
         assert!(!app.graph_grouping.group_enabled);

@@ -49,6 +49,31 @@ const PROXIMITY_EPSILON: f32 = 4.0;
 /// drawn width of a short circuit title with one port on each side.
 const NOMINAL_WIDTH: f32 = 120.0;
 
+/// How narrow one axis must be for a group to read as collinear (design D5b).
+///
+/// The extent rule asks about *shape*, not *length*: a stack is collinear — its
+/// members share one column or one row, however many of them there are — while a
+/// type scattered over the canvas is wide on both axes. So a group encloses its
+/// members when either axis is within this multiple of the nominal body on that
+/// axis: [`NOMINAL_WIDTH`] across, or [`NODE_WORLD_H`] down. A fixed span would
+/// decide it by length instead and get both cases backwards — a five-member column
+/// already spans four body heights, so a span large enough to hold the stack it was
+/// meant to enclose would also swallow genuine spreads.
+const GROUP_THIN_RATIO: f32 = 1.5;
+
+/// Which same-type circuits the pass is allowed to put in one group (design D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupPolicy {
+    /// Every circuit of one type joins the same group, wherever it is drawn — the
+    /// default, because a run is broken by any interleaved circuit type and the
+    /// ask is "all the encoders", not "this column of them".
+    #[default]
+    Type,
+    /// Only circuits drawn next to each other or at most [`GROUP_HOP_LIMIT`]
+    /// cables apart join, so a group keeps a positional meaning.
+    Run,
+}
+
 /// Grouping knobs, mirrored from the `[graph]` config table (design D6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupSettings {
@@ -59,6 +84,8 @@ pub struct GroupSettings {
     /// drawn individually, so a pair of same-type circuits is never hidden
     /// behind a box that costs more attention than it saves.
     pub min_size: usize,
+    /// How membership is decided; see [`GroupPolicy`].
+    pub policy: GroupPolicy,
 }
 
 impl Default for GroupSettings {
@@ -66,6 +93,7 @@ impl Default for GroupSettings {
         Self {
             enabled: true,
             min_size: 5,
+            policy: GroupPolicy::Type,
         }
     }
 }
@@ -78,11 +106,29 @@ pub struct Group {
     /// Original node indices, ascending — the order the label, the peek list
     /// and the isolate subgraph all read, and what makes them deterministic.
     pub members: Vec<usize>,
-    /// Bounding-box centre of the members' drawn positions: where the collapsed
-    /// box is drawn, so grouping needs no solve of its own (design D1).
+    /// Centre of the drawn box: where the collapsed box is placed, so grouping
+    /// needs no solve of its own (design D1).
     pub center: (f32, f32),
-    /// `(min_x, min_y, max_x, max_y)` over the members' drawn positions.
+    /// `(min_x, min_y, max_x, max_y)` of the box drawn in a *collapsed* group's
+    /// place — the members' union when they are collinear, one nominal body at
+    /// their centroid when the type is spread over both axes. [`footprint`] owns
+    /// the rule (design D5b).
+    ///
+    /// This is the collapsed box only, not the members' extent. Anything that must
+    /// reach a group's members — the expanded outline, an open member's hit area —
+    /// reads [`Self::members_bbox`]; reading this one for that purpose is what
+    /// shrinks an open group's outline away from the bodies it is supposed to
+    /// enclose.
     pub bbox: (f32, f32, f32, f32),
+    /// `(min_x, min_y, max_x, max_y)` union of the members' drawn extents, in the
+    /// same corner convention as [`Self::bbox`] (positions are top-left corners, so
+    /// a caller grows it by one body to reach the drawn frames) and **never**
+    /// compacted, however far the type is spread.
+    ///
+    /// An expanded group is only visible as the outline around its members, drawn
+    /// and hit-tested from this union, so a member body still answers as part of
+    /// its open group (design D5).
+    pub members_bbox: (f32, f32, f32, f32),
 }
 
 /// A drawn stand-in for one model node.
@@ -168,6 +214,10 @@ impl GroupedView {
 /// Only [`NodeKind::Circuit`] nodes group; controllers and jacks always map to
 /// [`ViewNode::Individual`] because they are physical endpoints of the patch, not
 /// interchangeable copies (design Goals: no grouping of controllers or jacks).
+///
+/// Which circuits join one group is [`GroupSettings::policy`]'s decision: every
+/// instance of a type, or only a drawn/cabled run of them. Either way the
+/// `min_size` gate and the ascending-index determinism apply unchanged.
 pub fn group_nodes<S: BuildHasher>(
     graph: &Graph,
     positions: &[(f32, f32)],
@@ -185,20 +235,38 @@ pub fn group_nodes<S: BuildHasher>(
         .collect();
 
     let mut merged = UnionFind::new(graph.nodes.len());
-    for (offset, &a) in candidates.iter().enumerate() {
-        for &b in &candidates[offset + 1..] {
-            if same_type(graph, a, b) && spatially_close(a, b, positions, sizes) {
-                merged.union(a, b);
+    match settings.policy {
+        // Membership is the type itself: no positional and no cabling test, so a
+        // circuit of another type between two members cannot break the group.
+        // Candidates ascend, so the first member of each type is the smallest one
+        // and the merge order stays deterministic.
+        GroupPolicy::Type => {
+            let mut first_of_type: HashMap<&str, usize> = HashMap::new();
+            for &node in &candidates {
+                let circuit = graph.nodes[node].circuit.as_str();
+                let first = *first_of_type.entry(circuit).or_insert(node);
+                merged.union(first, node);
             }
         }
-    }
+        // Membership is a place: drawn proximity first, then a short cable chain
+        // that the layout did not draw next to each other.
+        GroupPolicy::Run => {
+            for (offset, &a) in candidates.iter().enumerate() {
+                for &b in &candidates[offset + 1..] {
+                    if same_type(graph, a, b) && spatially_close(a, b, positions, sizes) {
+                        merged.union(a, b);
+                    }
+                }
+            }
 
-    let adjacency = circuit_adjacency(graph, &index);
-    let mut seen = vec![false; graph.nodes.len()];
-    for &a in &candidates {
-        for b in hops_within(a, &adjacency, &mut seen) {
-            if same_type(graph, a, b) {
-                merged.union(a, b);
+            let adjacency = circuit_adjacency(graph, &index);
+            let mut seen = vec![false; graph.nodes.len()];
+            for &a in &candidates {
+                for b in hops_within(a, &adjacency, &mut seen) {
+                    if same_type(graph, a, b) {
+                        merged.union(a, b);
+                    }
+                }
             }
         }
     }
@@ -218,12 +286,13 @@ pub fn group_nodes<S: BuildHasher>(
         if members.len() < settings.min_size {
             continue;
         }
-        let (center, bbox) = footprint(&members, positions);
+        let footprint = footprint(&members, positions);
         groups.push(Group {
             circuit: graph.nodes[members[0]].circuit.clone(),
             members,
-            center,
-            bbox,
+            center: footprint.center,
+            bbox: footprint.drawn,
+            members_bbox: footprint.members,
         });
     }
 
@@ -357,29 +426,83 @@ fn hops_within(start: usize, adjacency: &[Vec<usize>], seen: &mut [bool]) -> Vec
     reached
 }
 
-/// Group footprint from its members' drawn positions.
+/// The extents [`footprint`] derives for one group, kept apart so no caller can
+/// mistake the compacted box for the members' own extent.
+struct Footprint {
+    /// Where the collapsed box is placed (see [`Group::center`]).
+    center: (f32, f32),
+    /// The collapsed box itself (see [`Group::bbox`]).
+    drawn: (f32, f32, f32, f32),
+    /// The members' union, never compacted (see [`Group::members_bbox`]).
+    members: (f32, f32, f32, f32),
+}
+
+/// Group footprint from its members' drawn positions — one extent rule for both
+/// policies (design D5b).
+///
+/// A group says "these are all the same kind of thing", so under
+/// [`GroupPolicy::Type`] its members can sit anywhere on the canvas and their raw
+/// union would enclose the graph — a box that swallows what it is supposed to
+/// summarise. The rule is a test of shape rather than of size: when the union is
+/// thin on either axis — within [`GROUP_THIN_RATIO`] of one nominal body across, or
+/// of one body height down — the members are collinear, a single column or row of
+/// any length, and their union is the honest box. When both axes are wide the type
+/// is spread in two dimensions, so the box is one nominal body centred on the
+/// members' centroid and the group draws compactly where its type concentrates. A
+/// run component is always a tight cluster, so it takes the enclosing branch
+/// unchanged.
+///
+/// Both extents are returned: `drawn` is all a collapsed group paints, while
+/// `members` is the union the expanded outline and its hit box cover even when
+/// `drawn` compacted to a nominal body.
 ///
 /// A member without a position is skipped, so a partially populated `positions`
 /// slice still yields a usable box; a group with no known position falls back to
 /// the origin rather than inventing a spread.
-fn footprint(members: &[usize], positions: &[(f32, f32)]) -> ((f32, f32), (f32, f32, f32, f32)) {
+fn footprint(members: &[usize], positions: &[(f32, f32)]) -> Footprint {
     let mut known = members
         .iter()
         .filter_map(|&member| positions.get(member).copied());
     let Some((x, y)) = known.next() else {
-        return ((0.0, 0.0), (0.0, 0.0, 0.0, 0.0));
+        return Footprint {
+            center: (0.0, 0.0),
+            drawn: (0.0, 0.0, 0.0, 0.0),
+            members: (0.0, 0.0, 0.0, 0.0),
+        };
     };
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
+    let (mut sum_x, mut sum_y, mut count) = (x, y, 1_u32);
     for (x, y) in known {
         min_x = min_x.min(x);
         min_y = min_y.min(y);
         max_x = max_x.max(x);
         max_y = max_y.max(y);
+        sum_x += x;
+        sum_y += y;
+        count += 1;
     }
-    (
-        (min_x.midpoint(max_x), min_y.midpoint(max_y)),
-        (min_x, min_y, max_x, max_y),
-    )
+    let members_bbox = (min_x, min_y, max_x, max_y);
+    let collinear = max_x - min_x <= GROUP_THIN_RATIO * NOMINAL_WIDTH
+        || max_y - min_y <= GROUP_THIN_RATIO * NODE_WORLD_H;
+    if collinear {
+        return Footprint {
+            center: (min_x.midpoint(max_x), min_y.midpoint(max_y)),
+            drawn: members_bbox,
+            members: members_bbox,
+        };
+    }
+    let divisor = count as f32;
+    let centroid = (sum_x / divisor, sum_y / divisor);
+    Footprint {
+        center: centroid,
+        drawn: (
+            centroid.0 - NOMINAL_WIDTH / 2.0,
+            centroid.1 - NODE_WORLD_H / 2.0,
+            centroid.0 + NOMINAL_WIDTH / 2.0,
+            centroid.1 + NODE_WORLD_H / 2.0,
+        ),
+        members: members_bbox,
+    }
 }
 
 /// Node id → node index, first occurrence winning.
@@ -645,9 +768,12 @@ mod tests {
             cable(&nodes[1], &nodes[2], "_B"),
         ];
         let graph = hand_built(nodes, edges);
+        // The hop rule is run-policy behaviour; the type policy is the default but
+        // would group the pair for the wrong reason.
         let settings = GroupSettings {
             enabled: true,
             min_size: 2,
+            policy: GroupPolicy::Run,
         };
 
         let view = group_nodes(
@@ -698,9 +824,13 @@ mod tests {
             cable(&nodes[2], &nodes[3], "_C"),
         ];
         let graph = hand_built(nodes, edges);
+        // Explicit run policy: under the default type policy these two copies are
+        // members of one group regardless of cable distance, which is the shape the
+        // sibling type-policy test covers.
         let settings = GroupSettings {
             enabled: true,
             min_size: 2,
+            policy: GroupPolicy::Run,
         };
 
         let view = group_nodes(
@@ -754,10 +884,12 @@ mod tests {
         }
 
         // The member count is what held it back: at a minimum of two the same
-        // stack collapses.
+        // stack collapses. Run policy, because this asserts the minimum-size gate
+        // on one drawn stack rather than the default type policy's reach.
         let permissive = GroupSettings {
             enabled: true,
             min_size: 2,
+            policy: GroupPolicy::Run,
         };
         let grouped = group_nodes(
             &graph,
@@ -941,6 +1073,80 @@ mod tests {
                 },
             ],
             "three fan-out cables must collapse into one and the internal cable must vanish"
+        );
+    }
+
+    /// Design D5b: a stack is collinear, so its *length* must not decide whether the
+    /// box encloses it. Five members one body apart already span four body heights —
+    /// more than any compact cluster needs — and the box still wraps the stack.
+    #[test]
+    fn a_tall_column_stack_is_enclosed() {
+        let nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("encoder", i)).collect();
+        let positions: Vec<(f32, f32)> = (0..5)
+            .map(|i| (120.0, 80.0 + i as f32 * NODE_WORLD_H))
+            .collect();
+        let graph = hand_built(nodes, Vec::new());
+        let view = group_nodes(
+            &graph,
+            &positions,
+            &bodies(graph.nodes.len()),
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(view.groups.len(), 1);
+        let group = &view.groups[0];
+        let (top, bottom) = (positions[0], positions[4]);
+        assert!(
+            bottom.1 - top.1 > 3.0 * NODE_WORLD_H,
+            "the fixture must stack taller than a compact cluster spans"
+        );
+        assert_eq!(group.members_bbox, (top.0, top.1, bottom.0, bottom.1));
+        assert_eq!(
+            group.bbox, group.members_bbox,
+            "a collinear stack is enclosed, however long"
+        );
+    }
+
+    /// Design D5b: a type spread over both axes is not a stack, so the drawn box
+    /// compacts to one nominal body at the centroid — while `members_bbox` keeps the
+    /// members' union, which is what an expanded group's outline covers.
+    #[test]
+    fn a_two_axis_spread_compacts_the_drawn_box_but_keeps_the_member_union() {
+        let nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("encoder", i)).collect();
+        let positions = vec![
+            (0.0, 0.0),
+            (400.0, 0.0),
+            (0.0, 400.0),
+            (400.0, 400.0),
+            (800.0, 200.0),
+        ];
+        let graph = hand_built(nodes, Vec::new());
+        let view = group_nodes(
+            &graph,
+            &positions,
+            &bodies(graph.nodes.len()),
+            &GroupSettings::default(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(view.groups.len(), 1);
+        let group = &view.groups[0];
+        assert_eq!(group.members_bbox, (0.0, 0.0, 800.0, 400.0));
+        assert_eq!(group.center, (320.0, 200.0), "the members' centroid");
+        assert_eq!(
+            group.bbox,
+            (
+                group.center.0 - NOMINAL_WIDTH / 2.0,
+                group.center.1 - NODE_WORLD_H / 2.0,
+                group.center.0 + NOMINAL_WIDTH / 2.0,
+                group.center.1 + NODE_WORLD_H / 2.0,
+            ),
+            "a two-dimensional spread draws one nominal body at the centroid"
+        );
+        assert_ne!(
+            group.bbox, group.members_bbox,
+            "the compacted box is not the member union"
         );
     }
 }

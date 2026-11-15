@@ -26,6 +26,7 @@ ordering = "strict"  # or "barycenter"
 [graph]
 group_enabled = true  # collapse repeated circuit types into one group node
 min_group_size = 5    # instances needed before a type groups (clamped 2-64)
+group_by = "type"     # or "run": group only adjacent same-type circuits
 
 [physical]
 labels = "auto"      # off / auto / on
@@ -78,6 +79,16 @@ default minimum size.
 - `min_group_size` (2–64, default `5`): how many instances of one
   circuit type a patch needs before that type groups. Clamped on load
   and on save.
+- `group_by` (`type` default, or `run`): what makes a group. `type`
+  groups every circuit of a kind, wherever it is drawn — one encoder
+  box stands in for all encoders in the patch. `run` groups only
+  circuits of a kind that sit next to each other in the drawn layout,
+  or within two cables of each other, so a box means a place. An
+  unknown value warns once and uses `type`.
+
+A group of a spread-out type draws as one compact box where the type
+concentrates; a type whose members form a real stack is boxed around
+the stack instead.
 
 ### `[physical]` / `[physical.rack]`
 

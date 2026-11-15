@@ -74,6 +74,9 @@ pub const DEFAULT_MIN_GROUP_SIZE: usize = 5;
 pub const MIN_GROUP_SIZE: usize = 2;
 /// Largest accepted `min_group_size`, so a stray digit cannot group everything.
 pub const MAX_GROUP_SIZE: usize = 64;
+/// Grouping policy default under `[graph]`: every circuit of a type is one group
+/// (graph-same-type-grouping D2).
+pub const DEFAULT_GROUP_BY: GroupBy = GroupBy::Type;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -127,6 +130,10 @@ fn default_graph_enabled() -> bool {
 
 fn default_min_group_size() -> usize {
     DEFAULT_MIN_GROUP_SIZE
+}
+
+fn default_group_by() -> GroupBy {
+    DEFAULT_GROUP_BY
 }
 
 /// Per-label configuration under `[labels]`.
@@ -398,19 +405,54 @@ impl Default for Layout {
     }
 }
 
+/// Grouping policy under `[graph]` (graph-same-type-grouping D2): `type` collapses
+/// every circuit of a kind into one group wherever it is drawn, `run` groups only
+/// same-type circuits drawn next to each other or a couple of cables apart, so a
+/// group keeps a positional meaning. Unknown values in the file warn once on
+/// stderr and fall back to [`GroupBy::Type`]; the manual `Deserialize` keeps the
+/// rest of the file loadable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    #[default]
+    Type,
+    Run,
+}
+
+impl<'de> Deserialize<'de> for GroupBy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "type" => Self::Type,
+            "run" => Self::Run,
+            other => {
+                eprintln!("warning: unknown grouping policy \"{other}\"; valid choices: type, run");
+                Self::Type
+            }
+        })
+    }
+}
+
 /// Same-type node grouping preferences under `[graph]`
 /// (graph-same-type-grouping).
 ///
 /// `group_enabled` turns grouping on or off as a whole; `min_group_size` is the
-/// instance count at which one circuit type collapses into a single group node.
-/// The range is enforced by clamp on load and on save, so an out-of-range value
-/// in the file becomes the nearest bound and a save writes the clamped value.
+/// instance count at which one circuit type collapses into a single group node;
+/// `group_by` picks whether a group means a kind ([`GroupBy::Type`], the default)
+/// or a place ([`GroupBy::Run`]). The range is enforced by clamp on load and on
+/// save, so an out-of-range value in the file becomes the nearest bound and a save
+/// writes the clamped value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Graph {
     #[serde(default = "default_graph_enabled")]
     pub group_enabled: bool,
     #[serde(default = "default_min_group_size")]
     pub min_group_size: usize,
+    #[serde(default = "default_group_by")]
+    pub group_by: GroupBy,
 }
 
 impl Default for Graph {
@@ -418,6 +460,7 @@ impl Default for Graph {
         Self {
             group_enabled: default_graph_enabled(),
             min_group_size: default_min_group_size(),
+            group_by: default_group_by(),
         }
     }
 }
@@ -1945,6 +1988,7 @@ mod tests {
                 graph: Graph {
                     group_enabled: true,
                     min_group_size: 1,
+                    group_by: GroupBy::Type,
                 },
             },
         )

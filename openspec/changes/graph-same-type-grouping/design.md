@@ -32,7 +32,7 @@ Grouping runs after `solve_graph_positions` and consumes display positions; a gr
 
 Type policy (default): union-find over circuit nodes of the same circuit type, with no positional test, so every encoder in a patch lands in one group. Run policy: union-find that merges only when either (a) drawn extents are within a proximity ratio, or (b) distance along cables is at most the hop limit (2). Both apply the `min_group_size` gate, process nodes in ascending index, and sort every derived collection, so the same graph, positions and settings always produce an identical view.
 
-The type policy is the default because a run is broken by any interleaved circuit type: melody3 draws 54 encoders as runs of 12/7/6/6/6 under the run policy (686 → 615 bodies), while the type policy draws 686 → 148. The run policy remains for operators who want a group to mean a place rather than a kind.
+The type policy is the default because a run is broken by any interleaved circuit type: melody3 draws 54 encoders as runs of 12/7/6/6/6 under the run policy (686 → 615 bodies), while the type policy draws 686 → 148 bodies and 2230 → 215 cables. The run policy remains for operators who want a group to mean a place rather than a kind.
 
 ### D3 — Cable aggregation by mapping endpoints onto the collapsed view
 

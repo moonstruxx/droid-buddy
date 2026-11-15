@@ -8,7 +8,7 @@ The signal-flow graph SHALL group circuit nodes by circuit type at the default p
 
 Grouping SHALL be a post-solve view transform: the layout solver, the arrangement in force, determinism per input, and pin anchors SHALL be unchanged, and a group SHALL be placed at its members' centre.
 
-A collapsed group SHALL render as one box labelled `<circuit> ×<count>` in that circuit's colour. When the members' drawn extent spans no more than a small multiple of one node height on both axes the box SHALL enclose them; otherwise the box SHALL be one nominal node-sized box at the members' centroid, so a type spread across the graph draws compactly instead of covering the canvas. A group SHALL aggregate its members' incoming and outgoing cables into deduplicated group edges, and a cable whose both endpoints fall inside the group SHALL NOT be drawn while the group is collapsed.
+A collapsed group SHALL render as one box labelled `<circuit> ×<count>` in that circuit's colour. When the members' drawn extent is narrow on at least one axis — within a small multiple of a nominal node width across, or of one node height down — the box SHALL enclose them, so a single column or row is enclosed however long it gets; when both axes are wide the box SHALL be one nominal node-sized box at the members' centroid, so a type spread across the graph draws compactly instead of covering the canvas. A group SHALL aggregate its members' incoming and outgoing cables into deduplicated group edges, and a cable whose both endpoints fall inside the group SHALL NOT be drawn while the group is collapsed.
 
 A group SHALL expose its contents on hover, SHALL expand in place into its member nodes with a group outline on click or `Enter` and collapse again on repeat, and SHALL be isolatable with `o` so the pane draws that group's members together with their dimmed immediate neighbours under a refitted camera; a second `o` SHALL restore the previous view without requiring a hover or a selection. `Shift+O` SHALL toggle grouping for the whole graph.
 
@@ -36,12 +36,12 @@ Selection, diff classification, topology errors, the influence wash, and the dep
 
 #### Scenario: A spread type draws compactly
 
-- **WHEN** a type group's members are spread wider than a small multiple of one node height on either axis
+- **WHEN** a type group's members are wide on both axes — spread past a small multiple of a nominal node width across and of one node height down
 - **THEN** the group draws as one nominal node-sized box at the members' centroid rather than a box enclosing every member
 
 #### Scenario: A real stack is enclosed
 
-- **WHEN** a group's members sit within a small multiple of one node height on both axes
+- **WHEN** a group's members are narrow on at least one axis — a single column or a single row, however long
 - **THEN** the group box encloses them
 
 #### Scenario: Cables aggregate onto the group
@@ -52,7 +52,7 @@ Selection, diff classification, topology errors, the influence wash, and the dep
 #### Scenario: Expand and collapse in place
 
 - **WHEN** the user clicks a collapsed group or presses `Enter` while it is hovered
-- **THEN** its member nodes are drawn inside a group outline, and a second click or `Enter` collapses it again
+- **THEN** its member nodes are drawn inside a group outline that encloses every one of them, and a second click or `Enter` collapses it again
 
 #### Scenario: Hover peeks at contents
 

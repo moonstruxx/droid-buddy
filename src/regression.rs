@@ -1858,6 +1858,11 @@ fn regression_clean_load_keeps_plain_status() {
 fn anchor_guess_app(zoom: f32) -> App {
     let anchor = anchor_graph();
     let mut app = App::new();
+    // These regressions pin the per-node label plumbing (a guessed title
+    // reaching one circuit's scene node and the viewer), so the UNGROUPED
+    // renderer is the subject — grouping, on by default, would replace the
+    // drawn nodes with group boxes.
+    app.graph_grouping.group_enabled = false;
     app.patch = Some(anchor.patch.clone());
     app.graph = Some(anchor.graph.clone());
     app.graph_positions = anchor.positions.clone();
