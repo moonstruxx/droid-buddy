@@ -4420,6 +4420,259 @@ mod window_paint_tests {
             );
         }
     }
+
+    // ── graph-same-type-grouping: grouped paint shapes (task 4.2) ───────────
+
+    /// The smallest real arrangement that groups under the default settings: an
+    /// `App` over five `copy` nodes stacked one body apart in a column, each
+    /// feeding the next, with two of them also feeding the same `mixer`.
+    ///
+    /// `App::new` seeds `graph_grouping` from `crate::config::Graph::default()`
+    /// (`group_enabled`, `min_group_size = 5`), and the copies sit inside one
+    /// body height of each other, so drawn proximity alone merges them into
+    /// group 0 while the lone mixer stays an individual — no extra setup needed
+    /// to reach the collapsed path. The cable set doubles as the aggregation
+    /// case: four cables wholly inside the group, plus two members fanning out
+    /// to one sink.
+    fn stacked_copies_app() -> App {
+        let mut nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("copy", i, 0)).collect();
+        nodes.push(circuit_node("mixer", 0, 1));
+        let copy_cable = |name: &str, from: usize, to: usize| GraphEdge {
+            cable: name.to_string(),
+            source: NodeId::circuit("copy", from),
+            sink: NodeId::circuit("copy", to),
+        };
+        let fan_cable = |name: &str, from: usize| GraphEdge {
+            cable: name.to_string(),
+            source: NodeId::circuit("copy", from),
+            sink: NodeId::circuit("mixer", 0),
+        };
+        let graph = Graph {
+            nodes,
+            edges: vec![
+                copy_cable("_CHAIN0", 0, 1),
+                copy_cable("_CHAIN1", 1, 2),
+                copy_cable("_CHAIN2", 2, 3),
+                copy_cable("_CHAIN3", 3, 4),
+                fan_cable("_FAN_A", 0),
+                fan_cable("_FAN_B", 1),
+            ],
+            ..Graph::default()
+        };
+        let mut positions: Vec<(f32, f32)> = (0..5)
+            .map(|i| (120.0, 80.0 + i as f32 * crate::layout::NODE_WORLD_H))
+            .collect();
+        positions.push((460.0, 80.0));
+
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = positions;
+        app
+    }
+
+    /// The scene's one group stand-in, told apart by its `<circuit> ×<count>`
+    /// label.
+    fn group_body(scene: &SceneSpec) -> &NodeSpec {
+        let mut found = scene.nodes.iter().filter(|n| n.label.contains('\u{d7}'));
+        let body = found.next().expect("the scene draws a group stand-in");
+        assert!(found.next().is_none(), "exactly one group body is drawn");
+        body
+    }
+
+    /// Spec "A collapsed group draws one box" (design D1/D5): the five members
+    /// paint as a single `<circuit> ×<count>` body, and no member body appears
+    /// beside it.
+    #[test]
+    fn collapsed_group_paints_one_box_and_no_member_nodes() {
+        let app = stacked_copies_app();
+        let scene = scene_of(&app);
+
+        assert_eq!(
+            scene.nodes.len(),
+            2,
+            "the five copies collapse to one box beside the lone mixer: {:?}",
+            scene
+                .nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(group_body(&scene).label, "copy \u{d7}5");
+        assert!(
+            !scene
+                .nodes
+                .iter()
+                .any(|n| n.label == "copy" || n.label.starts_with("copy (")),
+            "no member body is drawn beside the box"
+        );
+        assert!(
+            scene.clusters.is_empty(),
+            "a collapsed group is already one body, so it gets no outline"
+        );
+
+        // The painted run is the box and the mixer, nothing per member — and
+        // the label is complete at this frame width, not ellipsized.
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        let labels: Vec<&str> = out.labels.iter().map(String::as_str).collect();
+        assert_eq!(labels, ["copy \u{d7}5", "mixer"]);
+    }
+
+    /// Spec "An expanded group draws its members" (design D5): the members
+    /// paint as their own bodies, and the group survives as one outline titled
+    /// like the collapsed box.
+    #[test]
+    fn expanded_group_paints_its_members_and_the_outline() {
+        let mut app = stacked_copies_app();
+        app.expanded_groups.insert(0);
+        let scene = scene_of(&app);
+
+        assert_eq!(scene.nodes.len(), 6, "every member draws on its own");
+        let labels: Vec<&str> = scene.nodes.iter().map(|n| n.label.as_str()).collect();
+        for member in ["copy", "copy (1)", "copy (2)", "copy (3)", "copy (4)"] {
+            assert!(
+                labels.contains(&member),
+                "an expanded group draws {member:?}: {labels:?}"
+            );
+        }
+
+        assert_eq!(scene.clusters.len(), 1, "one outline around the members");
+        let outline = &scene.clusters[0];
+        assert_eq!(outline.title, "copy \u{d7}5");
+        assert_eq!(outline.member_indices.len(), 5);
+        for &idx in &outline.member_indices {
+            let body = &scene.nodes[idx];
+            assert!(
+                body.x >= outline.x
+                    && body.x + body.w <= outline.x + outline.w
+                    && body.y >= outline.y
+                    && body.y + body.h <= outline.y + outline.h,
+                "the outline encloses member body {idx}"
+            );
+        }
+
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        for member in ["copy", "copy (1)", "copy (2)", "copy (3)", "copy (4)"] {
+            assert!(
+                out.labels.iter().any(|l| l == member),
+                "the member body {member:?} paints: {:?}",
+                out.labels
+            );
+        }
+        assert_eq!(
+            title_fonts(&out, &["copy \u{d7}5"]),
+            vec![egui::FontId::proportional(CLUSTER_TITLE_PX)],
+            "the outline paints its group label: {:?}",
+            out.labels
+        );
+        assert!(
+            out.rects.iter().any(|r| {
+                (r.rect.left() - outline.x).abs() < 0.5
+                    && (r.rect.top() - outline.y).abs() < 0.5
+                    && r.fill == egui::Color32::TRANSPARENT
+            }),
+            "the outline rectangle paints"
+        );
+    }
+
+    /// Spec "Aggregated edges" (design D3): a cable whose ends land inside one
+    /// collapsed group draws nothing, and the two members feeding the same sink
+    /// collapse onto one arrow.
+    #[test]
+    fn aggregated_edges_emit_one_arrow_per_drawn_pair() {
+        let app = stacked_copies_app();
+        assert_eq!(
+            app.graph.as_ref().unwrap().edges.len(),
+            6,
+            "fixture guard: four intra-group cables and two fan-out cables"
+        );
+        let scene = scene_of(&app);
+        assert_eq!(
+            scene.edges.len(),
+            1,
+            "the four intra-group cables drop and the duplicate fan-out deduplicates"
+        );
+
+        let box_body = group_body(&scene);
+        let mixer = scene
+            .nodes
+            .iter()
+            .find(|n| n.label == "mixer")
+            .expect("the mixer body draws on its own");
+        let edge = &scene.edges[0];
+        assert!(
+            (edge.start.0 - (box_body.x + box_body.w)).abs() < 0.01,
+            "the one arrow leaves the group box: {edge:?}"
+        );
+        assert!((edge.start.1 - (box_body.y + box_body.h / 2.0)).abs() < 0.01);
+        assert!(
+            (edge.end.0 - mixer.x).abs() < 0.01,
+            "and lands on the mixer: {edge:?}"
+        );
+        assert!((edge.end.1 - (mixer.y + mixer.h / 2.0)).abs() < 0.01);
+
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        assert_eq!(out.beziers, 1, "one aggregated cable stroke");
+        assert_eq!(out.polygons, 1, "one direction arrow");
+    }
+
+    /// Task 4.1 keeps the painter's level-of-detail rule for group labels: a box
+    /// narrower than its `<circuit> ×<count>` label paints the ellipsized text
+    /// instead — asserted on the emitted `Shape::Text`, not on `fit_label`.
+    #[test]
+    fn overlong_group_label_ellipsizes_to_its_frame() {
+        // The box's width at zoom 1, so the zoom below lands it on a chosen
+        // pixel width instead of a guessed one.
+        let full_w = group_body(&scene_of(&stacked_copies_app())).w;
+        let mut app = stacked_copies_app();
+        // 40 px: wider than one label character (so the label still paints) and
+        // narrower than the seven characters the full label needs at the fixed
+        // label font.
+        app.graph_camera = Some(GraphCamera {
+            zoom: 40.0 / full_w,
+            pan: (0.0, 0.0),
+        });
+        let scene = scene_of(&app);
+
+        let body = group_body(&scene);
+        assert_eq!(body.label, "copy \u{d7}5", "the spec keeps the full label");
+        let char_w = MONO_ADVANCE * NODE_LABEL_SIZE;
+        assert!(
+            body.w >= char_w && body.w < body.label.chars().count() as f32 * char_w,
+            "the painted frame must be narrower than the label: w {} for {:?}",
+            body.w,
+            body.label
+        );
+
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        let painted: Vec<&str> = out
+            .labels
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.starts_with("copy"))
+            .collect();
+        assert_eq!(painted.len(), 1, "one group label paints: {:?}", out.labels);
+        let text = painted[0];
+        assert!(
+            text.ends_with('\u{2026}'),
+            "the over-long label ellipsizes: {text:?}"
+        );
+        assert_ne!(
+            text, "copy \u{d7}5",
+            "the full label does not fit the frame"
+        );
+        let budget = (body.w / char_w).floor() as usize;
+        assert_eq!(
+            text.chars().count(),
+            budget,
+            "the painted label spends the whole frame budget: {text:?} in {} px",
+            body.w
+        );
+        assert!(
+            text.chars().count() as f32 * char_w <= body.w + 1e-3,
+            "the painted label fits its frame: {text:?} in {} px",
+            body.w
+        );
+    }
 }
 #[cfg(test)]
 // Small fit test: the camera frames a spread world and carries a finite
