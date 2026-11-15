@@ -1,5 +1,5 @@
 //! Persistent user preferences (`theme`, `[labels]`, `[latency]`, `[physical]`
-//! and `[physical.rack]`, `[plugins]`, `[layout]`) stored in
+//! and `[physical.rack]`, `[plugins]`, `[layout]`, `[graph]`) stored in
 //! `config.toml` under the platform data directory (`platform::config_dir`).
 //! Loaded once at startup, before the terminal UI initializes (design decision 5).
 //!
@@ -64,6 +64,20 @@ pub const DEFAULT_SLICE_FORCE: f32 = crate::layout::DEFAULT_SLICE_K;
 /// truth, so the app's sections solve matches the solver's tuned strength.
 pub const DEFAULT_SECTION_FORCE: f32 = crate::layout::DEFAULT_SECTION_HOLE_K;
 
+/// Same-type node grouping defaults under `[graph]` (graph-same-type-grouping):
+/// nodes whose circuit type occurs at least `min_group_size` times collapse into
+/// one type group out of the box; an absent table keeps that behaviour.
+pub const DEFAULT_GRAPH_GROUP_ENABLED: bool = true;
+/// Instance count at which one circuit type groups by default.
+pub const DEFAULT_MIN_GROUP_SIZE: usize = 5;
+/// Smallest accepted `min_group_size`: a group of one is just the node itself.
+pub const MIN_GROUP_SIZE: usize = 2;
+/// Largest accepted `min_group_size`, so a stray digit cannot group everything.
+pub const MAX_GROUP_SIZE: usize = 64;
+/// Grouping policy default under `[graph]`: every circuit of a type is one group
+/// (graph-same-type-grouping D2).
+pub const DEFAULT_GROUP_BY: GroupBy = GroupBy::Type;
+
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 fn default_theme() -> String {
@@ -108,6 +122,18 @@ fn default_slice_force() -> f32 {
 
 fn default_section_force() -> f32 {
     DEFAULT_SECTION_FORCE
+}
+
+fn default_graph_enabled() -> bool {
+    DEFAULT_GRAPH_GROUP_ENABLED
+}
+
+fn default_min_group_size() -> usize {
+    DEFAULT_MIN_GROUP_SIZE
+}
+
+fn default_group_by() -> GroupBy {
+    DEFAULT_GROUP_BY
 }
 
 /// Per-label configuration under `[labels]`.
@@ -379,6 +405,66 @@ impl Default for Layout {
     }
 }
 
+/// Grouping policy under `[graph]` (graph-same-type-grouping D2): `type` collapses
+/// every circuit of a kind into one group wherever it is drawn, `run` groups only
+/// same-type circuits drawn next to each other or a couple of cables apart, so a
+/// group keeps a positional meaning. Unknown values in the file warn once on
+/// stderr and fall back to [`GroupBy::Type`]; the manual `Deserialize` keeps the
+/// rest of the file loadable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    #[default]
+    Type,
+    Run,
+}
+
+impl<'de> Deserialize<'de> for GroupBy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "type" => Self::Type,
+            "run" => Self::Run,
+            other => {
+                eprintln!("warning: unknown grouping policy \"{other}\"; valid choices: type, run");
+                Self::Type
+            }
+        })
+    }
+}
+
+/// Same-type node grouping preferences under `[graph]`
+/// (graph-same-type-grouping).
+///
+/// `group_enabled` turns grouping on or off as a whole; `min_group_size` is the
+/// instance count at which one circuit type collapses into a single group node;
+/// `group_by` picks whether a group means a kind ([`GroupBy::Type`], the default)
+/// or a place ([`GroupBy::Run`]). The range is enforced by clamp on load and on
+/// save, so an out-of-range value in the file becomes the nearest bound and a save
+/// writes the clamped value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Graph {
+    #[serde(default = "default_graph_enabled")]
+    pub group_enabled: bool,
+    #[serde(default = "default_min_group_size")]
+    pub min_group_size: usize,
+    #[serde(default = "default_group_by")]
+    pub group_by: GroupBy,
+}
+
+impl Default for Graph {
+    fn default() -> Self {
+        Self {
+            group_enabled: default_graph_enabled(),
+            min_group_size: default_min_group_size(),
+            group_by: default_group_by(),
+        }
+    }
+}
+
 /// v1 settings schema. Unknown keys in the file are ignored by serde
 /// (forward-compatible with future versions). `Eq` is intentionally not
 /// derived: `[latency] per_circuit` holds `f32`, which is not `Eq`.
@@ -396,6 +482,8 @@ pub struct Settings {
     pub plugins: Plugins,
     #[serde(default)]
     pub layout: Layout,
+    #[serde(default)]
+    pub graph: Graph,
 }
 
 impl Default for Settings {
@@ -407,6 +495,7 @@ impl Default for Settings {
             physical: Physical::default(),
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         }
     }
 }
@@ -483,6 +572,10 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    settings.graph.min_group_size = settings
+        .graph
+        .min_group_size
+        .clamp(MIN_GROUP_SIZE, MAX_GROUP_SIZE);
     sanitize_physical(&mut settings.physical);
     settings
 }
@@ -547,6 +640,10 @@ pub fn save_to_dir(dir: &Path, settings: &Settings) -> io::Result<()> {
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    normalized.graph.min_group_size = normalized
+        .graph
+        .min_group_size
+        .clamp(MIN_GROUP_SIZE, MAX_GROUP_SIZE);
     sanitize_physical(&mut normalized.physical);
     // D13: stamp the baseline on every save, so a legacy config is migrated
     // exactly once and later runs honour the stored zoom.
@@ -797,6 +894,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -830,6 +928,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -904,6 +1003,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -932,6 +1032,7 @@ mod tests {
                     physical: Physical::default(),
                     plugins: Plugins::default(),
                     layout: Layout::default(),
+                    graph: Graph::default(),
                 },
             )
             .unwrap();
@@ -959,6 +1060,7 @@ mod tests {
             physical: Physical::default(),
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1030,6 +1132,7 @@ mod tests {
                 physical: Physical::default(),
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -1280,6 +1383,7 @@ mod tests {
             },
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1324,6 +1428,7 @@ mod tests {
                 },
                 plugins: Plugins::default(),
                 layout: Layout::default(),
+                graph: Graph::default(),
             },
         )
         .unwrap();
@@ -1446,6 +1551,7 @@ mod tests {
                 enabled: false,
             },
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1591,6 +1697,7 @@ mod tests {
                 slice_force: DEFAULT_SLICE_FORCE,
                 section_force: DEFAULT_SECTION_FORCE,
             },
+            graph: Graph::default(),
         };
         save_to_dir(dir.path(), &settings).unwrap();
         let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
@@ -1768,10 +1875,215 @@ mod tests {
             },
             plugins: Plugins::default(),
             layout: Layout::default(),
+            graph: Graph::default(),
         };
         save_to_dir(&cfg_dir, &settings).unwrap();
         let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
         assert!(body.contains("labels = \"on\""), "body: {body}");
         assert_eq!(load_at(&dir).physical.labels, LabelPresentation::On);
+    }
+
+    // ── graph-same-type-grouping 2.2: [graph] defaults / clamp / warn ──
+
+    #[test]
+    fn graph_defaults_when_table_missing() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join(CONFIG_FILE_NAME), "theme = \"mono\"\n").unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph, Graph::default());
+        assert!(loaded.graph.group_enabled);
+        assert_eq!(loaded.graph.min_group_size, 5);
+        assert_eq!(loaded.theme, "mono");
+    }
+
+    #[test]
+    fn min_group_size_clamped_on_load() {
+        for (raw, expected) in [(0, 2), (1, 2), (2, 2), (5, 5), (64, 64), (200, 64)] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[graph]\nmin_group_size = {raw}\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.graph.min_group_size, expected,
+                "raw {raw} should clamp to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_group_enabled_false_disables_grouping() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\ngroup_enabled = false\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert!(!loaded.graph.group_enabled);
+        assert_eq!(
+            loaded.graph.min_group_size, 5,
+            "the other key keeps its default"
+        );
+    }
+
+    #[test]
+    fn malformed_min_group_size_falls_back_to_default() {
+        // A wrong-type value fails the whole file (the `[layout] mode` and
+        // `[physical.rack]` malformed-value precedent): the loader warns once
+        // on stderr and returns `Settings::default()`, whose `[graph]` size is
+        // the default 5. This module captures no stderr, so only the fallback
+        // is asserted, as in the sibling malformed-value tests.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\nmin_group_size = \"five\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded, Settings::default());
+        assert_eq!(loaded.graph.min_group_size, 5);
+    }
+
+    #[test]
+    fn graph_save_round_trips_clamped_value() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\ngroup_enabled = false\nmin_group_size = 200\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph.min_group_size, 64);
+        save_to_dir(&cfg_dir, &loaded).unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[graph]"), "body: {body}");
+        assert!(body.contains("group_enabled = false"), "body: {body}");
+        assert!(body.contains("min_group_size = 64"), "body: {body}");
+        assert_eq!(load_at(&dir).graph, loaded.graph);
+
+        // The save path clamps too: an in-memory value below the floor is
+        // written as the floor rather than as given.
+        save_to_dir(
+            &cfg_dir,
+            &Settings {
+                theme: "classic".to_string(),
+                labels: Labels::default(),
+                latency: Latency::default(),
+                physical: Physical::default(),
+                plugins: Plugins::default(),
+                layout: Layout::default(),
+                graph: Graph {
+                    group_enabled: true,
+                    min_group_size: 1,
+                    group_by: GroupBy::Type,
+                },
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("min_group_size = 2"), "body: {body}");
+        assert_eq!(load_at(&dir).graph.min_group_size, 2);
+    }
+
+    // ── graph-same-type-grouping 2.2: [graph] group_by ──
+
+    #[test]
+    fn graph_group_by_parses_both_policies() {
+        for (raw, expected) in [("run", GroupBy::Run), ("type", GroupBy::Type)] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[graph]\ngroup_by = \"{raw}\"\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(loaded.graph.group_by, expected, "group_by = \"{raw}\"");
+        }
+    }
+
+    #[test]
+    fn graph_group_by_absent_key_is_type() {
+        // The absent-key default must hold even when the table itself is present:
+        // a `[graph]` table carrying only another key leaves the policy at `Type`.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\nmin_group_size = 7\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph.group_by, GroupBy::Type);
+        assert_eq!(
+            loaded.graph.min_group_size, 7,
+            "the present key still applies"
+        );
+    }
+
+    #[test]
+    fn graph_group_by_unknown_value_falls_back_to_type() {
+        // An unknown policy string is a warn-once value error, not a parse error:
+        // the manual `Deserialize` keeps the rest of the table and file loadable,
+        // unlike the wrong-type `min_group_size = "many"` case.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[graph]\ngroup_by = \"cluster\"\ngroup_enabled = false\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.graph.group_by, GroupBy::Type);
+        assert_eq!(loaded.graph.min_group_size, 5);
+        assert!(
+            !loaded.graph.group_enabled,
+            "the rest of the table still loads"
+        );
+        assert_eq!(loaded.theme, "classic", "the rest of the file still loads");
+    }
+
+    #[test]
+    fn graph_group_by_round_trips_through_save() {
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let settings = Settings {
+            graph: Graph {
+                group_by: GroupBy::Run,
+                ..Graph::default()
+            },
+            ..Settings::default()
+        };
+        save_to_dir(&cfg_dir, &settings).unwrap();
+        let body = std::fs::read_to_string(cfg_dir.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[graph]"), "body: {body}");
+        assert!(body.contains("group_by = \"run\""), "body: {body}");
+        assert_eq!(load_at(&dir).graph, settings.graph);
+
+        // The default policy writes its own spelling rather than omitting the key,
+        // so a saved file reads back as the policy that produced it.
+        let typed_dir = TempDir::new().unwrap();
+        let typed_cfg = typed_dir.path().join(APP_DIR_NAME);
+        save_to_dir(&typed_cfg, &Settings::default()).unwrap();
+        let body = std::fs::read_to_string(typed_cfg.join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("group_by = \"type\""), "body: {body}");
+        assert_eq!(load_at(&typed_dir).graph.group_by, GroupBy::Type);
     }
 }

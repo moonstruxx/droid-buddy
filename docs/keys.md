@@ -48,6 +48,9 @@ coloring).
 | `h` | toggle column/force layout |
 | `a` | apply arrangement / cycle layouts |
 | `f` / `i` | dependency filter / influence filter |
+| `o` | isolate group |
+| `Enter` | expand/collapse group |
+| `Shift+O` | toggle grouping |
 | `+`/`-`, `arrows` | camera zoom / pan |
 | `click minimap` | pan camera to clicked position |
 | `Alt+[`/`Alt+]` | cable tension (force solver) |

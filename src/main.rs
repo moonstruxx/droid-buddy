@@ -128,6 +128,11 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // painters and the label overlay read it from state (ADR 13) instead of
     // re-reading the config file per frame/event.
     app.labels = settings.labels.clone();
+
+    // [graph]: the same-type grouping preference (graph-same-type-grouping D6).
+    // An absent table seeds App::new's defaults, so out-of-box behavior is
+    // unchanged.
+    app.seed_graph_grouping(&settings.graph);
 }
 
 /// Bundled demo patch shown when no `argv[1]` path is given — the same fixture
@@ -367,7 +372,21 @@ mod windowed {
                             (pane.width(), pane.height()),
                         ));
                     }
-                    let scene = gui::build_scene_spec(&self.app, theme::active(), pane);
+                    // Pre-warm the grouping answer before the build: the pass is
+                    // quadratic over same-type candidates and the scene build,
+                    // holding `&App`, would recompute it on every frame. The
+                    // answer is owned here because the `&mut App` borrow that
+                    // refreshes it cannot be handed to the build as the `&App` it
+                    // takes; cloning the view is one pass over its vectors, not
+                    // the grouping pass itself. No graph loaded answers `None`,
+                    // which draws exactly what the recompute path draws.
+                    let groups = self.app.grouped_view().cloned();
+                    let scene = gui::build_scene_spec_with_view(
+                        &self.app,
+                        theme::active(),
+                        pane,
+                        groups.as_ref(),
+                    );
                     self.window.set_scene(scene.as_ref());
                     // The frame reports the window's input state; the loop
                     // owns `app`, so it maps the interactions here (D6: the
@@ -447,8 +466,8 @@ mod windowed {
     }
 }
 
-/// `seed_app` wires the `[physical]`, `[layout]` and `[labels]` sections into
-/// `App` (design D6).
+/// `seed_app` wires the `[physical]`, `[layout]`, `[labels]` and `[graph]`
+/// sections into `App` (design D6).
 #[cfg(test)]
 mod tests {
     use super::*;

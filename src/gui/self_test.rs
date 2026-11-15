@@ -74,6 +74,13 @@ impl Report {
 pub fn run(patch: Option<&Path>) -> Report {
     let mut checks = Vec::new();
     let mut app = App::new();
+    // This smoke test pins the UNGROUPED renderer: its graph check compares the
+    // scene's node count with the model graph's, which only holds when every
+    // model node is drawn on its own (grouping, on by default, collapses
+    // repeated circuit types into one group node). The grouping-specific
+    // behaviour has its own tests; here the count is the guard that the pane
+    // projected the whole graph.
+    app.graph_grouping.group_enabled = false;
 
     checks.push(Check {
         name: "patch loads",

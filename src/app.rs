@@ -884,6 +884,21 @@ pub struct App {
     /// window frame by the camera's world-space hit test. `None` when the pointer
     /// is not over a node or the graph is closed.
     pub hovered_graph_node: Option<usize>,
+    /// Group whose drawn extent the pointer is over (graph-same-type-grouping
+    /// design D4), by index into [`crate::graph_group::GroupedView::groups`].
+    /// A group draws either as one collapsed box or, once open, as its members
+    /// inside a group outline (design D5), and the graph pane's pointer path
+    /// publishes the index for both — the box it can be opened from and the
+    /// outline it can be closed by. `hovered_graph_node` stays independent of it
+    /// and may name a member under the pointer at the same time; a press then
+    /// gives the member priority for selection and the group for a collapse.
+    /// The painter reads it for the group hover peek and the pane's grouping
+    /// keys act on it, so it is cleared wherever `hovered_graph_node` is: the
+    /// pointer leaving the group's extent, the graph closing, and any grouping
+    /// answer invalidated (`invalidate_grouped_view`: the index names a group in
+    /// the answer that is going away). `None` otherwise, and while grouping is
+    /// off, when no group is drawn at all.
+    pub hovered_group: Option<usize>,
     /// Persistent world→pixel camera of the graph surface (task 2.3). Seeded by
     /// both renderers (kitty image path and box-drawing fallback) to a
     /// frame-the-graph `fit_to_world` on the first frame after open, then
@@ -1101,6 +1116,33 @@ pub struct App {
     /// node; dragging a node auto-pins it at the dropped position (design
     /// D7). Cleared on every `load_patch`.
     pub pinned: HashSet<NodeId>,
+    /// Same-type node grouping preference (graph-same-type-grouping D6),
+    /// mirrored from the `[graph]` table and seeded at startup by `seed_app`.
+    /// Held as the config type rather than the pass's own
+    /// [`crate::graph_group::GroupSettings`] because the file is the persisted
+    /// source of truth: seeding is then a plain clone, and the single
+    /// conversion to the pass's settings happens in `compute_grouped_view`. A
+    /// view preference like `tension`, so it survives `load_patch`.
+    pub graph_grouping: crate::config::Graph,
+    /// Groups the user opened, by index into [`crate::graph_group::GroupedView::groups`].
+    /// An expanded group keeps its entry but draws its members individually.
+    ///
+    /// The indices address the view that produced them, so the set is cleared
+    /// whenever the clustering inputs change (a settings change, a patch load)
+    /// rather than carried into a different clustering.
+    pub expanded_groups: HashSet<usize>,
+    /// The group drawn as its own subset (design D4), by index into
+    /// [`crate::graph_group::GroupedView::groups`]; `None` when nothing is
+    /// isolated. Presentation-only and one group at a time, cleared with the
+    /// other per-patch view state.
+    pub isolated_group: Option<usize>,
+    /// Cached grouping answer (design D1): `None` means "must recompute". The
+    /// pass is quadratic over same-type candidates and the painter reads the
+    /// view every frame, so the answer is computed once per invalidation —
+    /// every input invalidates it: the graph or its positions, the settings, an
+    /// expand, an isolate, and a patch load. Read it through
+    /// [`App::grouped_view`], never by field.
+    grouped_view: Option<crate::graph_group::GroupedView>,
     /// Select-state filtering (`g s` menu, change C task 4.1). `None` with no
     /// menu open; the assumed values feed the graph build's `GraphOptions`.
     /// Reset on patch load via `reset_graph_state`.
@@ -1225,6 +1267,7 @@ impl App {
             graph_positions: Vec::new(),
             graph_drag: None,
             hovered_graph_node: None,
+            hovered_group: None,
             graph_camera: None,
             graph_zoom_preset: Self::GRAPH_ZOOM_FIT_INDEX as u8,
             graph_canvas_px: None,
@@ -1274,6 +1317,10 @@ impl App {
             influence_subset: None,
             disabled_circuits: HashSet::new(),
             pinned: HashSet::new(),
+            graph_grouping: crate::config::Graph::default(),
+            expanded_groups: HashSet::new(),
+            isolated_group: None,
+            grouped_view: None,
             dependency_root: None,
             dependency_nodes: Vec::new(),
             dependency_edges: Vec::new(),
@@ -2206,6 +2253,7 @@ impl App {
         match view {
             ViewType::Graph => {
                 self.hovered_graph_node = None;
+                self.hovered_group = None;
             }
             ViewType::Optimizer => self.drop_optimizer_state(),
             ViewType::Physical | ViewType::SourceViewer => {}
@@ -3767,6 +3815,134 @@ impl App {
         }
     }
 
+    /// The current grouping answer, recomputed on the first read after an
+    /// invalidation.
+    ///
+    /// `None` with no graph loaded. The cache exists because grouping is a
+    /// quadratic pass over same-type candidates while the painter reads the
+    /// view every frame: the answer is computed once per input change, not per
+    /// frame (design D1). A running settle defeats that deliberately — its
+    /// interpolated display positions change every frame, so the cache is
+    /// dropped and rebuilt while it runs instead of freezing group boxes
+    /// mid-animation. Because this recomputes, a caller holding `&App` cannot
+    /// use it; pre-warm the cache before painting.
+    pub fn grouped_view(&mut self) -> Option<&crate::graph_group::GroupedView> {
+        if self.graph_settle_active() {
+            self.grouped_view = None;
+        }
+        if self.grouped_view.is_none() {
+            self.grouped_view = self.compute_grouped_view();
+        }
+        self.grouped_view.as_ref()
+    }
+
+    /// One grouping pass over the loaded graph. The drawn centres and the
+    /// per-node world extents (ADR 40) are its only geometric inputs, so the
+    /// answer never depends on the painter (design D1).
+    fn compute_grouped_view(&self) -> Option<crate::graph_group::GroupedView> {
+        let graph = self.graph.as_ref()?;
+        let positions = self.graph_display_positions();
+        let sizes = crate::layout::node_world_sizes(graph);
+        // An isolated group always draws through its members (design D4), so the
+        // isolate folds into the expanded set here instead of each consumer
+        // compensating for it — the painter, the pointer hit test and the
+        // marquee mapping then read one answer.
+        let mut expanded = self.expanded_groups.clone();
+        if let Some(group) = self.isolated_group {
+            expanded.insert(group);
+        }
+        Some(crate::graph_group::group_nodes(
+            graph,
+            &positions,
+            &sizes,
+            &self.group_settings(),
+            &expanded,
+        ))
+    }
+
+    /// The `[graph]` preference in the shape the grouping pass takes it: the one
+    /// place the config file's names are translated into the pass's own types.
+    pub(crate) fn group_settings(&self) -> crate::graph_group::GroupSettings {
+        crate::graph_group::GroupSettings {
+            enabled: self.graph_grouping.group_enabled,
+            min_size: self.graph_grouping.min_group_size,
+            policy: match self.graph_grouping.group_by {
+                crate::config::GroupBy::Type => crate::graph_group::GroupPolicy::Type,
+                crate::config::GroupBy::Run => crate::graph_group::GroupPolicy::Run,
+            },
+        }
+    }
+
+    /// Mark the cached grouping answer stale. One helper rather than field
+    /// writes at each site, so every mutation path reads as "this changed the
+    /// grouping inputs". The hovered group index belongs to the answer that is
+    /// going away, so it goes with it.
+    fn invalidate_grouped_view(&mut self) {
+        self.grouped_view = None;
+        self.hovered_group = None;
+    }
+
+    /// Seed the grouping preference from `[graph]` at startup (ADR 13: the
+    /// config loads once, before the window opens), and the settings-change
+    /// mutator. `min_group_size` decides the clustering itself, so the
+    /// expand/isolate indices recorded against the previous settings no longer
+    /// name the same groups and are dropped with the cache.
+    pub fn seed_graph_grouping(&mut self, graph: &crate::config::Graph) {
+        self.graph_grouping = graph.clone();
+        self.expanded_groups.clear();
+        self.isolated_group = None;
+        self.invalidate_grouped_view();
+    }
+
+    /// Open or close group `group`; returns whether it is expanded now. The
+    /// collapsed/expanded choice changes the drawn mapping, so it invalidates
+    /// the cache before flipping.
+    pub fn toggle_group_expanded(&mut self, group: usize) -> bool {
+        self.invalidate_grouped_view();
+        if self.expanded_groups.remove(&group) {
+            false
+        } else {
+            self.expanded_groups.insert(group);
+            true
+        }
+    }
+
+    /// Isolate group `group`, or clear the isolate when it is already the
+    /// isolated one; returns whether a group is isolated now.
+    pub fn toggle_group_isolated(&mut self, group: usize) -> bool {
+        self.invalidate_grouped_view();
+        self.isolated_group = if self.isolated_group == Some(group) {
+            None
+        } else {
+            Some(group)
+        };
+        self.isolated_group.is_some()
+    }
+
+    /// The group holding the shared circuit selection, if any — the fallback
+    /// the graph pane's isolate key reads when nothing is hovered (design D4).
+    /// `None` without a graph or a selection, and for a selected node no group
+    /// owns (a controller, a jack, or a circuit drawn on its own).
+    pub fn selected_group(&mut self) -> Option<usize> {
+        let index = {
+            let graph = self.graph.as_ref()?;
+            let id = self.selected_circuit()?;
+            graph.nodes.iter().position(|node| node.id == *id)?
+        };
+        self.grouped_view()?.group_of(index)
+    }
+
+    /// Turn the grouping pass on or off (`Shift+O`, design D7); returns the new
+    /// state. The expand/isolate indices are kept: with unchanged graph,
+    /// positions and settings the clustering is deterministic (design D2), so
+    /// the same indices name the same groups when it is switched back on, which
+    /// is what makes the toggle reversible at runtime.
+    pub fn toggle_graph_grouping(&mut self) -> bool {
+        self.graph_grouping.group_enabled = !self.graph_grouping.group_enabled;
+        self.invalidate_grouped_view();
+        self.graph_grouping.group_enabled
+    }
+
     pub fn build_graph_state(&mut self) {
         let graph = match &self.patch {
             Some(patch) => {
@@ -3792,8 +3968,12 @@ impl App {
         };
         self.graph = graph;
         self.graph_positions = positions;
+        // The grouping answer is derived from this graph and these positions, so
+        // a solve invalidates it (this covers `open_graph` and `place_view`).
+        self.invalidate_grouped_view();
         self.graph_drag = None;
         self.hovered_graph_node = None;
+        self.hovered_group = None;
         // Task 2.3: a newly opened (or re-solved) graph re-fits its camera. The
         // renderer seeds a legible `fit_to_world` on the next kitty frame; a
         // previously-zoomed/panned camera must not linger across a new solve.
@@ -3893,6 +4073,7 @@ impl App {
             self.layout.pane_mut(id).view = None;
         }
         self.hovered_graph_node = None;
+        self.hovered_group = None;
     }
 
     /// Rebuild the graph from the current patch without closing the graph
@@ -3923,6 +4104,9 @@ impl App {
         };
         self.graph = graph;
         self.graph_positions = positions;
+        // A rebuild is a new graph and a new solve: the cached grouping names
+        // nodes that no longer line up.
+        self.invalidate_grouped_view();
         self.graph_drag = None;
         // Rebuilds (tension/pin/select/processing) stay instant: no settle is
         // started and any running one is dropped.
@@ -4267,6 +4451,7 @@ impl App {
         self.graph_positions.clear();
         self.graph_drag = None;
         self.hovered_graph_node = None;
+        self.hovered_group = None;
         self.graph_camera = None;
         self.graph_zoom_preset = Self::GRAPH_ZOOM_FIT_INDEX as u8;
         self.graph_canvas_px = None;
@@ -4275,6 +4460,12 @@ impl App {
         // Manual pins are per-patch graph state: cleared on every load so a
         // new patch re-seeds its own tip on the next open (design D3/D7).
         self.pinned.clear();
+        // Expand and isolate address groups of the previous patch's graph, so
+        // view state must not survive a patch swap; they are cleared here with
+        // the cache that answered for them.
+        self.expanded_groups.clear();
+        self.isolated_group = None;
+        self.invalidate_grouped_view();
         self.select_state = None;
         self.guessed_labels.clear();
         // The dependency filter is per-patch presentation state: cleared on
@@ -4918,6 +5109,7 @@ pub fn is_entry_selectable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_group::ViewNode;
     use crate::patch::Patch;
 
     #[test]
@@ -5049,6 +5241,162 @@ mod tests {
         assert!(app.graph_settle.is_none());
         assert!(!app.graph_settle_pending);
         assert!(app.graph_positions.is_empty());
+    }
+
+    /// A small real fixture whose repeated `copy` circuits form groups, with
+    /// the graph open and the grouping preference seeded from defaults.
+    fn app_with_grouped_graph() -> App {
+        let mut app = App::new();
+        let patch = Patch::from_ini_file(Path::new("fixtures/influence_outlier.ini")).unwrap();
+        app.load_patch(patch);
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        app.open_graph();
+        let view = app
+            .grouped_view()
+            .expect("a loaded graph has a grouped view");
+        assert!(
+            !view.groups.is_empty(),
+            "the fixture must produce at least one group"
+        );
+        app
+    }
+
+    #[test]
+    fn seed_graph_grouping_takes_settings_from_config() {
+        let mut app = App::new();
+        let config = crate::config::Graph {
+            group_enabled: false,
+            min_group_size: 3,
+            group_by: crate::config::GroupBy::Run,
+        };
+        app.seed_graph_grouping(&config);
+        assert!(!app.graph_grouping.group_enabled);
+        assert_eq!(app.graph_grouping.min_group_size, 3);
+    }
+
+    #[test]
+    fn seed_graph_grouping_clears_group_view_state() {
+        // The expand/isolate indices address the previous clustering; changing
+        // the settings changes the clustering, so they cannot survive it.
+        let mut app = app_with_grouped_graph();
+        app.toggle_group_expanded(0);
+        app.toggle_group_isolated(0);
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        assert!(app.expanded_groups.is_empty());
+        assert!(app.isolated_group.is_none());
+        assert!(app.grouped_view.is_none(), "the cache goes with them");
+    }
+
+    #[test]
+    fn toggle_graph_grouping_flips_and_restores() {
+        let mut app = App::new();
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        let seeded = app.graph_grouping.group_enabled;
+        assert_eq!(
+            app.toggle_graph_grouping(),
+            !seeded,
+            "reports the new value"
+        );
+        assert_eq!(app.graph_grouping.group_enabled, !seeded);
+        assert_eq!(
+            app.toggle_graph_grouping(),
+            seeded,
+            "a second toggle restores"
+        );
+        assert_eq!(app.graph_grouping.group_enabled, seeded);
+    }
+
+    #[test]
+    fn toggle_group_expanded_flips_and_restores() {
+        let mut app = App::new();
+        assert!(app.toggle_group_expanded(0), "opens the group");
+        assert!(app.expanded_groups.contains(&0));
+        assert!(!app.toggle_group_expanded(0), "a second call closes it");
+        assert!(!app.expanded_groups.contains(&0));
+    }
+
+    #[test]
+    fn toggle_group_isolated_flips_and_restores() {
+        let mut app = App::new();
+        assert!(app.toggle_group_isolated(0), "isolating reports an isolate");
+        assert_eq!(app.isolated_group, Some(0));
+        assert!(
+            app.toggle_group_isolated(1),
+            "isolating another group switches the isolate instead of clearing it"
+        );
+        assert_eq!(app.isolated_group, Some(1));
+        assert!(!app.toggle_group_isolated(1), "a second call clears it");
+        assert!(app.isolated_group.is_none());
+    }
+
+    #[test]
+    fn grouped_view_is_none_without_a_graph() {
+        let mut app = App::new();
+        assert!(app.grouped_view().is_none());
+        assert!(
+            app.grouped_view.is_none(),
+            "with no graph there is nothing to cache"
+        );
+    }
+
+    #[test]
+    fn rebuild_graph_drops_the_cached_grouped_view() {
+        let mut app = app_with_grouped_graph();
+        let collapsed = app.grouped_view().cloned().expect("first read caches");
+        assert!(app.grouped_view.is_some(), "the first read leaves a cache");
+        let member = collapsed.groups[0].members[0];
+        assert_eq!(
+            collapsed.nodes[member],
+            ViewNode::Group(0),
+            "collapsed by default"
+        );
+
+        // Recorded behind the cache's back, exactly as a settings change would:
+        // only the invalidation itself can make the next read see it.
+        app.expanded_groups.insert(0);
+        app.rebuild_graph();
+        assert!(
+            app.grouped_view.is_none(),
+            "a rebuild drops the cached answer rather than keeping it stale"
+        );
+        let rebuilt = app
+            .grouped_view()
+            .cloned()
+            .expect("recomputed after rebuild");
+        assert_eq!(
+            rebuilt.nodes[member],
+            ViewNode::Individual(member),
+            "the next read reflects the expand that happened before the rebuild"
+        );
+    }
+
+    #[test]
+    fn grouping_state_changes_drop_the_cached_view() {
+        let mut app = app_with_grouped_graph();
+        assert!(app.grouped_view().is_some());
+        app.toggle_group_expanded(0);
+        assert!(app.grouped_view.is_none(), "an expand invalidates");
+        assert!(app.grouped_view().is_some());
+        app.toggle_group_isolated(0);
+        assert!(app.grouped_view.is_none(), "an isolate invalidates");
+        assert!(app.grouped_view().is_some());
+        app.toggle_graph_grouping();
+        assert!(app.grouped_view.is_none(), "a settings change invalidates");
+    }
+
+    #[test]
+    fn load_patch_clears_group_view_state() {
+        let mut app = app_with_grouped_graph();
+        app.toggle_group_expanded(0);
+        app.toggle_group_isolated(0);
+        assert!(!app.expanded_groups.is_empty());
+        assert_eq!(app.isolated_group, Some(0));
+
+        let patch = Patch::from_ini_file(Path::new("fixtures/own_buttons.ini")).unwrap();
+        app.load_patch(patch);
+        assert!(app.expanded_groups.is_empty(), "indices name the old graph");
+        assert!(app.isolated_group.is_none());
+        assert!(app.grouped_view.is_none());
     }
 
     #[test]

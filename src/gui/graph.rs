@@ -8,7 +8,7 @@
 //! dispatches to each frame; the camera helpers (`camera_pan`,
 //! `camera_zoom_about`) are the window's bridge to `App::graph_camera`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 // `write!` into labels/titles avoids a per-segment `format!` allocation.
 use std::fmt::Write as _;
 
@@ -16,6 +16,7 @@ use super::{MarqueeSelection, WindowFrame};
 use crate::app::App;
 use crate::diff::DiffReport;
 use crate::graph::{Graph, GraphNode, NodeKind};
+use crate::graph_group::{Group, GroupedView, ViewEdge, ViewNode};
 use crate::graph_render::{
     CableKind, ClusterSpec, EdgeDiffState, EdgeSpec, GraphCamera, NodeSpec, SceneSpec, WorldBounds,
 };
@@ -72,6 +73,14 @@ const CLUSTER_TITLE_MIN_W: f32 = CLUSTER_TITLE_MIN_CHARS as f32 * PROP_ADVANCE *
 /// Minimap node dot floor (raised from 1 px so dots stay visible when the
 /// scene is tiny).
 const MINIMAP_DOT_MIN: f32 = 2.0;
+/// Labels a group's content peek lists before it summarizes the rest as `…+N`
+/// (task 5.2): enough to recognize the run, few enough to stay one card row on
+/// a normal pane.
+const PEEK_LABEL_LIMIT: usize = 8;
+/// Characters that end the shared prefix a group's peek abbreviates with: the
+/// prefix is cut back to the last of these, so `encoder E1.1` / `encoder E1.24`
+/// peek as `encoder · E1.1–E1.24` rather than `encoder E1. · 1–24`.
+const PEEK_LABEL_SEPARATORS: [char; 6] = [' ', '\u{b7}', '-', '\u{2013}', ':', '_'];
 
 /// The camera zoom the scene was built with, derived back from the projected
 /// node height (`h = layout::NODE_WORLD_H × zoom`). The scene spec carries no
@@ -80,11 +89,22 @@ const MINIMAP_DOT_MIN: f32 = 2.0;
 /// the painter apply minimum clamps and level-of-detail thresholds
 /// (graph-zoom-node-scaling, decisions 2/3).
 fn spec_zoom(spec: &SceneSpec) -> f32 {
-    spec.nodes
-        .first()
+    // Every individually drawn node shares the same world height, so its ratio is
+    // the camera zoom exactly; a collapsed group's stand-in box is taller than
+    // one node body (it holds a stack), so the smallest ratio over the scene is
+    // the zoom whenever any individual node is drawn. It only ever understates
+    // it for a scene made entirely of group boxes, which affects LOD clamps and
+    // arrow sizing, never geometry.
+    let zoom = spec
+        .nodes
+        .iter()
         .map(|n| n.h / crate::layout::NODE_WORLD_H)
-        .filter(|z| z.is_finite() && *z > 0.0)
-        .unwrap_or(1.0)
+        .fold(f32::INFINITY, f32::min);
+    if zoom.is_finite() && zoom > 0.0 {
+        zoom
+    } else {
+        1.0
+    }
 }
 
 /// Fit a node label to its frame at the fixed [`NODE_LABEL_SIZE`] font
@@ -141,6 +161,7 @@ pub(crate) fn paint_scene(
         egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
         scene,
         selected,
+        None,
     );
 }
 
@@ -148,11 +169,17 @@ pub(crate) fn paint_scene(
 /// Each graph pane paints its pane's scene here; the scene builder must have
 /// produced coordinates inside the pane, because egui has no painter
 /// translate primitive.
+///
+/// `app` is the state the scene cannot carry: the painter reads it for the
+/// hovered collapsed group's content peek (task 5.2), whose labels only the
+/// `App` label chain resolves. A caller without one (the compat wrapper, the
+/// screenshot tool, the headless shape tests) paints the scene alone.
 pub(crate) fn paint_scene_in(
     ui: &mut egui::Ui,
     canvas: egui::Rect,
     scene: Option<&SceneSpec>,
     selected: &[usize],
+    app: Option<&App>,
 ) {
     let Some(spec) = scene else {
         return; // No scene: the swapchain clear color shows through.
@@ -273,7 +300,7 @@ pub(crate) fn paint_scene_in(
 
     // Task 3.2/3.3: selection, navigation and inspection overlays.
     let ctx = ui.ctx();
-    paint_polish(painter, canvas, scene, ctx, selected);
+    paint_polish(painter, canvas, scene, ctx, selected, app);
 }
 
 /// Fill the direction arrow at an edge's `end`, following the scene spec's
@@ -612,12 +639,18 @@ fn node_tooltip(scene: &SceneSpec, node_index: usize) -> String {
 /// hovered node's latency tooltip. Every color derives from the resolved scene
 /// spec RGB (never hardcoded). The tooltip is drawn last so it stays readable
 /// above marquee, selection, and minimap.
+///
+/// A hovered collapsed group's content peek takes the tooltip's slot (task 5.2):
+/// the pointer then rests on the group's box, so the node card would only name
+/// the circuit the box is already labelled with, while the peek names what the
+/// box hides. The node card keeps the slot whenever no group is hovered.
 fn paint_polish(
     painter: &egui::Painter,
     canvas: egui::Rect,
     scene: Option<&SceneSpec>,
     ctx: &egui::Context,
     selected: &[usize],
+    app: Option<&App>,
 ) {
     let Some(spec) = scene else {
         return;
@@ -651,13 +684,11 @@ fn paint_polish(
     // Read the input state under the context lock, then paint both overlays
     // after it: text layout takes the context write lock again, so it must not
     // run inside the ctx.input closure (same-thread reentrant write deadlock).
-    let (marquee, hover) = ctx.input(|i| {
+    let (marquee, hover, pointer) = ctx.input(|i| {
         let marquee = frame_marquee(Some(spec), i, None);
-        let hover = i
-            .pointer
-            .latest_pos()
-            .and_then(|pos| node_at(spec, pos.x, pos.y).map(|idx| (pos, idx)));
-        (marquee, hover)
+        let pointer = i.pointer.latest_pos();
+        let hover = pointer.and_then(|pos| node_at(spec, pos.x, pos.y).map(|idx| (pos, idx)));
+        (marquee, hover, pointer)
     });
     if let Some(marquee) = marquee {
         let (x, y, w, h) = marquee.rect;
@@ -671,7 +702,19 @@ fn paint_polish(
             egui::StrokeKind::Inside,
         );
     }
-    if let Some((pos, idx)) = hover {
+    // Both cards are laid out after the input read: text layout takes the
+    // context write lock again (see the note above).
+    if let Some(peek) = pointer.and_then(|pos| group_peek(app, spec, pos)) {
+        paint_tooltip_card(
+            painter,
+            spec,
+            canvas,
+            peek.anchor,
+            &peek.text,
+            peek.accent,
+            peek.color,
+        );
+    } else if let Some((pos, idx)) = hover {
         paint_tooltip(painter, spec, canvas, pos, idx);
     }
 }
@@ -686,9 +729,32 @@ fn paint_tooltip(
     node_index: usize,
 ) {
     let node = &spec.nodes[node_index];
+    paint_tooltip_card(
+        painter,
+        spec,
+        canvas,
+        pos,
+        &node_tooltip(spec, node_index),
+        node.border,
+        node.label_color,
+    );
+}
+
+/// One tooltip card (node readout or group content peek): an opaque backdrop
+/// with the accent border, placed above-right of the cursor and clamped to the
+/// canvas. Both cards share this so the peek lands where the node tooltip
+/// already does — the mechanism spec "Hover peeks at contents" reuses.
+fn paint_tooltip_card(
+    painter: &egui::Painter,
+    spec: &SceneSpec,
+    canvas: egui::Rect,
+    pos: egui::Pos2,
+    text: &str,
+    accent: (u8, u8, u8),
+    color: (u8, u8, u8),
+) {
     let font = egui::FontId::proportional(13.0);
-    let galley =
-        painter.layout_no_wrap(node_tooltip(spec, node_index), font, rgb(node.label_color));
+    let galley = painter.layout_no_wrap(text.to_string(), font, rgb(color));
     let pad = 6.0;
     let size = galley.size() + egui::vec2(pad * 2.0, pad * 2.0);
     let min_x = (pos.x + 12.0).clamp(canvas.min.x, (canvas.max.x - size.x).max(canvas.min.x));
@@ -700,14 +766,145 @@ fn paint_tooltip(
         rect,
         egui::CornerRadius::same(4),
         rgba(spec.background, 255),
-        egui::Stroke::new(1.0, rgb(node.border)),
+        egui::Stroke::new(1.0, rgb(accent)),
         egui::StrokeKind::Inside,
     );
-    painter.galley(
-        rect.min + egui::vec2(pad, pad),
-        galley,
-        rgb(node.label_color),
-    );
+    painter.galley(rect.min + egui::vec2(pad, pad), galley, rgb(color));
+}
+
+/// A collapsed group's content peek (task 5.2): the line the card shows, the
+/// pointer position it is anchored to, and the colour pair it wears — the group
+/// box's own resolved border and label tokens, so the peek reads as belonging to
+/// the box under the pointer.
+struct GroupPeek {
+    anchor: egui::Pos2,
+    text: String,
+    accent: (u8, u8, u8),
+    color: (u8, u8, u8),
+}
+
+/// The content peek for the collapsed group the pointer rests on.
+///
+/// `App::hovered_group` already means "the pointer is inside this group's drawn
+/// box" — the graph pane's pointer path publishes it from the same world-space
+/// extent `group_node_spec` paints (design D4) — so this only has to confirm the
+/// box is part of the scene being painted and read the members' labels. An
+/// expanded or isolated group draws its members instead of a box, and then
+/// there is nothing to peek at. The member labels resolve through the same
+/// chain the member titles would have used, so the peek names the nodes exactly
+/// as expanding the group would reveal them.
+fn group_peek(app: Option<&App>, scene: &SceneSpec, pos: egui::Pos2) -> Option<GroupPeek> {
+    let app = app?;
+    let group_index = app.hovered_group?;
+    let graph = app.graph.as_ref()?;
+    let view = scene_groups(app)?;
+    let group = view.groups.get(group_index)?;
+    // A collapsed group's body is labelled `<circuit> ×<count>` and is the only
+    // scene node carrying its circuit, so this finds the box the pointer is on.
+    let label = format!("{} \u{d7}{}", group.circuit, group.members.len());
+    let body = scene
+        .nodes
+        .iter()
+        .find(|node| node.circuit == group.circuit && node.label == label)?;
+    let rect = egui::Rect::from_min_size(egui::pos2(body.x, body.y), egui::vec2(body.w, body.h));
+    if !rect.contains(pos) {
+        return None;
+    }
+    let store = app.current_circuit_store();
+    let counts = instance_counts(graph);
+    let labels = LabelInputs {
+        circuit_store: &store,
+        circuit_counts: &counts,
+    };
+    let member_labels: Vec<String> = group
+        .members
+        .iter()
+        .filter_map(|&member| graph.nodes.get(member))
+        .map(|node| node_title(app, node, labels, false))
+        .collect();
+    Some(GroupPeek {
+        anchor: pos,
+        text: group_peek_line(&member_labels),
+        accent: body.border,
+        color: body.label_color,
+    })
+}
+
+/// The peek line for a collapsed group's member labels, in member order.
+///
+/// Two shapes, per spec "Hover peeks at contents":
+///
+/// - Members whose labels share a prefix show that prefix and the range their
+///   remainders span, `encoder · E1.1–E1.24`. The prefix is the shared run cut
+///   back to its last separator, so `encoder E1.1` / `encoder E1.24` peek as
+///   `encoder` + `E1.1–E1.24` rather than the unreadable `encoder E1.` + `1–24`.
+///   The range carries the member count: a span names how many instances it
+///   covers, and it is the shortest form that still says which ones.
+/// - Otherwise the first [`PEEK_LABEL_LIMIT`] labels, written in the tooltip's
+///   ` · `-separated style, followed by `…+N` for the ones that did not fit.
+///
+/// Shared-prefix form needs something to name in every label and a range that
+/// actually spans: identical labels, or a member whose label is the prefix
+/// itself (`copy`, `copy (1)`, … — the numbered-instance case), fall back to the
+/// list, which reads correctly there.
+pub(crate) fn group_peek_line(labels: &[String]) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let mut shared: Vec<char> = labels[0].chars().collect();
+    for label in &labels[1..] {
+        let run = label
+            .chars()
+            .zip(shared.iter())
+            .take_while(|(c, s)| c == *s)
+            .count();
+        shared.truncate(run);
+        if shared.is_empty() {
+            break;
+        }
+    }
+    let cut = shared
+        .iter()
+        .rposition(|c| PEEK_LABEL_SEPARATORS.contains(c))
+        .map_or(0, |i| i + 1);
+    if cut > 0 {
+        let prefix = shared[..cut].iter().collect::<String>();
+        let remainders: Vec<String> = labels
+            .iter()
+            .map(|label| label.chars().skip(cut).collect())
+            .collect();
+        let spans = remainders.len() > 1
+            && remainders.iter().all(|r| starts_a_name(r))
+            && remainders[0] != *remainders.last().expect("non-empty");
+        if spans {
+            return format!(
+                "{} \u{b7} {}\u{2013}{}",
+                prefix.trim_end(),
+                remainders[0],
+                remainders.last().expect("non-empty")
+            );
+        }
+    }
+    let shown: Vec<&str> = labels
+        .iter()
+        .take(PEEK_LABEL_LIMIT)
+        .map(String::as_str)
+        .collect();
+    let mut line = shown.join(" \u{b7} ");
+    let hidden = labels.len().saturating_sub(PEEK_LABEL_LIMIT);
+    if hidden > 0 {
+        let _ = write!(line, " \u{b7} \u{2026}+{hidden}");
+    }
+    line
+}
+
+/// Whether a label's remainder past the shared prefix still names something: it
+/// must start an alphanumeric run. A remainder opening a bracket or punctuation
+/// (`(1)`, the numbered-instance suffix) is a list entry, not a ranged instance
+/// reference, so those groups keep the list form where a span would read as
+/// `copy · (1)–(10)`.
+fn starts_a_name(remainder: &str) -> bool {
+    remainder.chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// The minimap panel: opaque scene-background backdrop, accent-bordered,
@@ -1107,6 +1304,11 @@ pub const LATENCY_STOPS: usize = 5;
 /// `CLUSTER_PAD` on every side so containers never touch the frames inside.
 const CLUSTER_PAD: f32 = 8.0;
 
+/// Padding a collapsed group's stand-in box adds on every side of its members'
+/// footprint, in world units: the box replaces a stack of frames, so it keeps
+/// about one frame's gap — the world-space counterpart of [`CLUSTER_PAD`].
+const GROUP_PAD: f32 = 6.0;
+
 /// Body radius of a node frame.
 const NODE_RADIUS: f32 = 10.0;
 
@@ -1166,6 +1368,25 @@ pub fn graph_pane_rect(app: &App, window: egui::Rect) -> Option<egui::Rect> {
 /// banner-group rectangles. The `Graph.clusters` data is untouched — only its
 /// rendering is off. Column and force modes keep the containers unchanged.
 pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<SceneSpec> {
+    let groups = scene_groups(app);
+    build_scene_spec_with_view(app, theme, pane, groups.as_ref())
+}
+
+/// [`build_scene_spec`] against an already-computed grouping answer.
+///
+/// The seam exists because `App::grouped_view` needs `&mut App` — it lazily
+/// rebuilds a cache the settle animation invalidates every frame — while the
+/// scene build only paints. A caller that owns `&mut App` pre-warms the cache
+/// and hands the borrowed view here, instead of threading `&mut` through a
+/// function that only reads. Every current caller goes through
+/// [`build_scene_spec`], which derives the same answer from `&App`; see
+/// [`scene_groups`] for why it can.
+pub(crate) fn build_scene_spec_with_view(
+    app: &App,
+    theme: &Theme,
+    pane: egui::Rect,
+    groups: Option<&GroupedView>,
+) -> Option<SceneSpec> {
     let graph = app.graph.as_ref()?;
     let mut camera = app.graph_camera.unwrap_or_default();
     // pixel = world × zoom − pan + pane.min: subtracting the pane origin from
@@ -1189,6 +1410,9 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
     // the solved `graph_positions` otherwise. Owned locally so the borrow lives
     // through the scene build.
     let display = app.graph_display_positions();
+    // An isolate (design D4) narrows the drawn set to the isolated group's
+    // members plus their immediate cable neighbours, which draw dimmed.
+    let isolate = groups.and_then(|view| isolate_view(app, graph, view));
     build_scene(
         app,
         theme,
@@ -1197,11 +1421,14 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
             positions: &display,
             camera,
             render_clusters,
+            groups,
+            isolate: isolate.as_ref(),
         },
         |idx| {
-            !filtered
-                || (dep_filtered && app.dependency_nodes.contains(&idx))
-                || (inf_filtered && app.influence_nodes.contains(&idx))
+            isolate.as_ref().is_none_or(|iso| iso.drawn(idx))
+                && (!filtered
+                    || (dep_filtered && app.dependency_nodes.contains(&idx))
+                    || (inf_filtered && app.influence_nodes.contains(&idx)))
         },
         |idx| {
             !filtered
@@ -1209,6 +1436,86 @@ pub fn build_scene_spec(app: &App, theme: &Theme, pane: egui::Rect) -> Option<Sc
                 || (inf_filtered && app.influence_edges.contains(&idx))
         },
     )
+}
+
+/// The grouped view the scene draws through, or `None` when grouping is off or
+/// no graph is loaded — which is also the "draw every model node on its own"
+/// answer, so the passes below need no separate branch for a disabled view.
+///
+/// `App` caches this answer behind `&mut self` (`App::grouped_view`) and keeps
+/// the cache field private, while the scene build holds `&App`; so the pass is
+/// recomputed here from the exact inputs the cache uses — the drawn positions,
+/// the layout's per-node world extents, the `[graph]` settings, and the
+/// expanded set — through the same pure constructor. Group indices therefore
+/// match the ones the interaction layer stores, which is what lets
+/// `App::expanded_groups` and `App::isolated_group` name the boxes drawn here.
+fn scene_groups(app: &App) -> Option<GroupedView> {
+    if !app.graph_grouping.group_enabled {
+        return None;
+    }
+    let graph = app.graph.as_ref()?;
+    let positions = app.graph_display_positions();
+    let sizes = crate::layout::node_world_sizes(graph);
+    let settings = app.group_settings();
+    // Isolating a group draws its members individually — the isolate reads as
+    // "these nodes, plus their neighbours" (design D4) — so it is expanded for
+    // the pass; its outline comes along because the group stays in the view.
+    let mut expanded = app.expanded_groups.clone();
+    if let Some(group) = app.isolated_group {
+        expanded.insert(group);
+    }
+    Some(crate::graph_group::group_nodes(
+        graph, &positions, &sizes, &settings, &expanded,
+    ))
+}
+
+/// The drawn set of an isolate (design D4): the isolated group's members, plus
+/// every node one cable away from any of them, drawn dimmed.
+struct Isolate {
+    members: HashSet<usize>,
+    neighbours: HashSet<usize>,
+}
+
+impl Isolate {
+    fn drawn(&self, node: usize) -> bool {
+        self.members.contains(&node) || self.neighbours.contains(&node)
+    }
+
+    fn dimmed(&self, node: usize) -> bool {
+        self.neighbours.contains(&node)
+    }
+}
+
+/// Resolve `App::isolated_group` against the current view: its members and
+/// their immediate cable neighbours, over the model graph (direction ignored —
+/// an isolate is about what a signal touches, either way). `None` when nothing
+/// is isolated, or when the index no longer names a group because the settings
+/// changed under it.
+fn isolate_view(app: &App, graph: &Graph, view: &GroupedView) -> Option<Isolate> {
+    let group = view.groups.get(app.isolated_group?)?;
+    let members: HashSet<usize> = group.members.iter().copied().collect();
+    let mut neighbours = HashSet::new();
+    for edge in &graph.edges {
+        let (Some(source), Some(sink)) = (
+            edge.source_index(&graph.nodes),
+            edge.sink_index(&graph.nodes),
+        ) else {
+            continue;
+        };
+        match (members.contains(&source), members.contains(&sink)) {
+            (true, false) => {
+                neighbours.insert(sink);
+            }
+            (false, true) => {
+                neighbours.insert(source);
+            }
+            _ => {}
+        }
+    }
+    Some(Isolate {
+        members,
+        neighbours,
+    })
 }
 
 /// World-space `(width, height)` node bodies as the renderer draws them
@@ -1241,14 +1548,18 @@ pub(crate) fn drawn_world_sizes(mode: crate::config::LayoutMode, graph: &Graph) 
 }
 
 /// Shared scene core inputs: the graph to map through `camera`, its solved
-/// positions, and the render switches. Bundled so `build_scene` stays under
-/// the argument-count lint.
+/// positions, the render switches, and the grouping state the passes draw
+/// through. Bundled so `build_scene` stays under the argument-count lint.
 #[derive(Clone, Copy)]
 struct SceneInput<'a> {
     graph: &'a Graph,
     positions: &'a [(f32, f32)],
     camera: GraphCamera,
     render_clusters: bool,
+    /// The grouped view to draw through, when grouping is on.
+    groups: Option<&'a GroupedView>,
+    /// The isolate's drawn set, when a group is isolated.
+    isolate: Option<&'a Isolate>,
 }
 
 /// Which way an optimizer preview moved an element's forward-loop latency.
@@ -1284,11 +1595,27 @@ struct LabelInputs<'a> {
     circuit_counts: &'a HashMap<String, usize>,
 }
 
-/// Node pass output: the drawn nodes plus the full-index to drawn-index map
-/// the edge and cluster passes need.
+/// Everything the node pass reads besides the styling context: the graph, its
+/// drawn geometry, the diff overlay, the label chain, and the grouping state.
+/// Bundled so `build_nodes` stays under the argument-count lint.
+struct NodePass<'a> {
+    graph: &'a Graph,
+    geometry: SceneGeometry<'a>,
+    diff: Option<&'a DiffReport>,
+    labels: LabelInputs<'a>,
+    groups: Option<&'a GroupedView>,
+    isolate: Option<&'a Isolate>,
+}
+
+/// Node pass output: the drawn nodes plus the two lookups the edge and cluster
+/// passes need — the drawn body for a view node (one model node, or a collapsed
+/// group standing in for several), and the drawn node for every model node
+/// (which cluster members resolve through, a collapsed member landing on its
+/// group's box).
 struct BuiltNodes {
     nodes: Vec<NodeSpec>,
-    kept: HashMap<usize, usize>,
+    bodies: HashMap<ViewNode, usize>,
+    by_node: HashMap<usize, usize>,
 }
 
 /// Edge pass output: the drawn edges plus the per-node optimizer direction the
@@ -1325,6 +1652,8 @@ fn build_scene(
         positions,
         camera,
         render_clusters,
+        groups,
+        isolate,
     } = input;
     if positions.len() != graph.nodes.len() {
         return None;
@@ -1358,14 +1687,38 @@ fn build_scene(
         circuit_counts: &circuit_counts,
     };
 
-    let mut built = build_nodes(style, graph, geometry, diff.as_ref(), labels, node_visible);
-    let edges = build_edges(style, graph, &mut built, diff.as_ref(), edge_visible);
+    let mut built = build_nodes(
+        style,
+        &NodePass {
+            graph,
+            geometry,
+            diff: diff.as_ref(),
+            labels,
+            groups,
+            isolate,
+        },
+        node_visible,
+    );
+    let edges = build_edges(
+        style,
+        graph,
+        &mut built,
+        diff.as_ref(),
+        groups,
+        isolate,
+        edge_visible,
+    );
     apply_optimizer_node_diff(style, &mut built.nodes, &edges.node_dirs);
-    let clusters = if render_clusters {
-        build_clusters(style, graph, &built.nodes, &built.kept)
+    let mut clusters = if render_clusters {
+        build_clusters(style, graph, &built.nodes, &built.by_node)
     } else {
         Vec::new()
     };
+    // Expanded groups draw their members as ordinary nodes, so the group itself
+    // is only visible as the outline around them (design D5).
+    if let Some(view) = groups {
+        clusters.extend(build_group_outlines(style, view, &built));
+    }
 
     Some(SceneSpec {
         background: theme.rgb(theme.graph_canvas_bg),
@@ -1387,35 +1740,57 @@ fn instance_counts(graph: &Graph) -> HashMap<String, usize> {
     counts
 }
 
-/// Build the visible node specs and the full-index to drawn-index map.
+/// Build the visible node specs and the two drawn-node lookups. A grouped view
+/// draws one body per collapsed group and one per individual node; without one
+/// every model node is drawn on its own.
 fn build_nodes(
     style: SceneStyle<'_>,
-    graph: &Graph,
-    geometry: SceneGeometry<'_>,
-    diff: Option<&DiffReport>,
-    labels: LabelInputs<'_>,
+    pass: &NodePass<'_>,
     node_visible: impl Fn(usize) -> bool,
 ) -> BuiltNodes {
     let SceneStyle { app, theme, zoom } = style;
-    let mut nodes = Vec::with_capacity(graph.nodes.len());
-    let mut kept: HashMap<usize, usize> = HashMap::new();
-    for (i, node) in graph.nodes.iter().enumerate() {
+    let mut nodes = Vec::with_capacity(pass.graph.nodes.len());
+    let mut bodies: HashMap<ViewNode, usize> = HashMap::new();
+    let mut by_node: HashMap<usize, usize> = HashMap::new();
+    let mut drawn_groups = vec![false; pass.groups.map_or(0, |view| view.groups.len())];
+    for (i, node) in pass.graph.nodes.iter().enumerate() {
+        // A collapsed group is one drawn body, emitted at its first member's
+        // slot: group indices ascend by first member, so the drawn order follows
+        // the groups' own ordering and stays deterministic.
+        if let Some((g, group)) = collapsed_group(pass.groups, i) {
+            if std::mem::replace(&mut drawn_groups[g], true) {
+                continue; // an earlier member already drew this box
+            }
+            if !group.members.iter().any(|&m| node_visible(m)) {
+                continue;
+            }
+            let idx = nodes.len();
+            nodes.push(group_node_spec(style, group, pass));
+            bodies.insert(ViewNode::Group(g), idx);
+            for &member in &group.members {
+                by_node.insert(member, idx);
+            }
+            continue;
+        }
         if !node_visible(i) {
             continue;
         }
-        let (px, py) = geometry
+        let (px, py) = pass
+            .geometry
             .camera
-            .world_to_pixel(geometry.positions[i].0, geometry.positions[i].1);
-        let title = node_title(app, node, labels, node_diff_marked(diff, node));
-        let (border, label_color, border_width) = node_styling(style, node, i);
+            .world_to_pixel(pass.geometry.positions[i].0, pass.geometry.positions[i].1);
+        let title = node_title(app, node, pass.labels, node_diff_marked(pass.diff, node));
+        let dimmed = pass.isolate.is_some_and(|iso| iso.dimmed(i));
+        let (border, label_color, border_width) = node_styling(style, node, i, dimmed);
 
         let idx = nodes.len();
-        kept.insert(i, idx);
+        bodies.insert(ViewNode::Individual(i), idx);
+        by_node.insert(i, idx);
         nodes.push(NodeSpec {
             x: px,
             y: py,
-            w: geometry.world[i].0 * zoom,
-            h: geometry.world[i].1 * zoom,
+            w: pass.geometry.world[i].0 * zoom,
+            h: pass.geometry.world[i].1 * zoom,
             radius: NODE_RADIUS * zoom,
             fill: theme.rgb(theme.graph_node_fill),
             border,
@@ -1428,7 +1803,208 @@ fn build_nodes(
             output_port: false,
         });
     }
-    BuiltNodes { nodes, kept }
+    BuiltNodes {
+        nodes,
+        bodies,
+        by_node,
+    }
+}
+
+/// The group a model node is collapsed into, if any. An expanded group's
+/// members map to [`ViewNode::Individual`], so this is exactly "is drawn as a
+/// group box".
+fn collapsed_group(view: Option<&GroupedView>, node: usize) -> Option<(usize, &Group)> {
+    let view = view?;
+    match view.nodes.get(node)? {
+        ViewNode::Group(g) => Some((*g, view.groups.get(*g)?)),
+        ViewNode::Individual(_) => None,
+    }
+}
+
+/// The stand-in body of a collapsed group (design D1/D5): one world-space box
+/// holding the members' `bbox` grown by a member body and [`GROUP_PAD`] on
+/// every side. Node positions are top-left corners, so the members' frames
+/// reach one body down-right of `bbox`: the box is centred on the frame union —
+/// the group's `center` shifted by half a body — which is both what makes it
+/// contain every member frame and the same footprint the expanded group's
+/// outline encloses. It is labelled `<circuit> ×<count>`, framed in the tokens
+/// that circuit's own nodes wear, and carrying the strongest highlight class any
+/// member would wear ([`group_styling`], task 6.1). Being an ordinary
+/// [`NodeSpec`] it gets the painter's zoom scaling, level-of-detail chrome and
+/// label-ellipsis rule unchanged.
+fn group_node_spec(style: SceneStyle<'_>, group: &Group, pass: &NodePass<'_>) -> NodeSpec {
+    let SceneStyle { theme, zoom, .. } = style;
+    let (min_x, min_y, max_x, max_y) = group.bbox;
+    let mut member = (0.0_f32, 0.0_f32);
+    for &m in &group.members {
+        let (w, h) = pass.geometry.world.get(m).copied().unwrap_or_default();
+        member = (member.0.max(w), member.1.max(h));
+    }
+    let world_w = (max_x - min_x) + member.0 + 2.0 * GROUP_PAD;
+    let world_h = (max_y - min_y) + member.1 + 2.0 * GROUP_PAD;
+    // Positions are node top-left corners, so the members' frames reach one body
+    // down-right of `bbox`: the box is centred on the members' *frame* union —
+    // `center` shifted by half a body — which is what makes it contain every
+    // member frame, and the same footprint the expanded group's outline encloses.
+    let centre = (
+        group.center.0 + member.0 / 2.0,
+        group.center.1 + member.1 / 2.0,
+    );
+    let (px, py) = pass.geometry.camera.world_to_pixel(centre.0, centre.1);
+    let (w, h) = (world_w * zoom, world_h * zoom);
+    let (border, label_color, border_width) = group_styling(style, group, pass);
+    NodeSpec {
+        x: px - w / 2.0,
+        y: py - h / 2.0,
+        w,
+        h,
+        radius: NODE_RADIUS * zoom,
+        fill: theme.rgb(theme.graph_node_fill),
+        border,
+        border_width,
+        label: format!("{} \u{d7}{}", group.circuit, group.members.len()),
+        label_color,
+        circuit: group.circuit.clone(),
+        instance_index: 0,
+        input_port: false,
+        output_port: false,
+    }
+}
+
+/// The structural diff class a collapsed group stands in for: a group wears the
+/// diff state of its members the way an edge wears its own (task 6.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupDiffClass {
+    Added,
+    Removed,
+}
+
+/// The strongest highlight class among a collapsed group's members (design D5,
+/// task 6.1), as `(border, label colour, border width)`.
+///
+/// Precedence, highest first — the chain nodes and edges already resolve, so a
+/// group answers with the class a member would have shown on its own:
+///
+/// 1. **Topology error**: any validation finding on a cable incident to a
+///    member. Error red outranks every overlay (guardrails), and it is the one
+///    class a reader must not miss under a collapsed box.
+/// 2. **Diff classification**: any member added/removed/changed in the report
+///    the scene shows. Ordered like the edge chain — added, then removed, then
+///    changed, which wears the added token exactly as a changed cable does.
+/// 3. **Selection or influence wash**: any member selected, or inside the active
+///    influence set. One class rather than two because that is how the node path
+///    ranks them — [`node_styling`] puts hover, selection and influence on the
+///    same highlight token and width — and a live modifier gives it the modifier
+///    hue, matching the panels wash.
+/// 4. The circuit-kind frame the box wore before: `graph_node_border` over
+///    `graph_node_title`.
+///
+/// The label colour always travels with the class, the rule the node path
+/// applies: the class colour is both frame and title, so `<circuit> ×<count>`
+/// stays legible under an error, diff or highlight frame instead of keeping a
+/// kind title token that no longer belongs to it.
+fn group_styling(
+    style: SceneStyle<'_>,
+    group: &Group,
+    pass: &NodePass<'_>,
+) -> ((u8, u8, u8), (u8, u8, u8), f32) {
+    let SceneStyle { app, theme, zoom } = style;
+    let members: Vec<&GraphNode> = group
+        .members
+        .iter()
+        .filter_map(|&member| pass.graph.nodes.get(member))
+        .collect();
+    // Border widths keep the node path's 1-vs-3 distinction, each scaled by the
+    // camera zoom with a floor so the frame never vanishes at the zoom floor.
+    let normal_border = (1.0 * zoom).max(0.5);
+    let highlight_border = (3.0 * zoom).max(1.0);
+    if group_has_topology_error(pass.graph, &members) {
+        let error = theme.rgb(theme.graph_edge_error);
+        return (error, error, highlight_border);
+    }
+    if let Some(class) = group_diff_class(pass.diff, &members) {
+        let color = match class {
+            GroupDiffClass::Added => theme.rgb(theme.graph_edge_diff_added),
+            GroupDiffClass::Removed => theme.rgb(theme.graph_edge_diff_removed),
+        };
+        return (color, color, highlight_border);
+    }
+    let selected = app
+        .selected_circuit
+        .as_ref()
+        .is_some_and(|id| members.iter().any(|node| &node.id == id));
+    let influenced = app
+        .modifier_influence
+        .as_ref()
+        .or(app.influence.as_ref())
+        .is_some_and(|state| {
+            members
+                .iter()
+                .any(|node| state.influenced_nodes.contains(&node.id))
+        });
+    if selected || influenced {
+        let highlight = if let Some(token) = app.active_modifier() {
+            theme.rgb(crate::theme::modifier_hue(token))
+        } else {
+            theme.rgb(theme.graph_node_highlight)
+        };
+        return (highlight, highlight, highlight_border);
+    }
+    (
+        theme.rgb(theme.graph_node_border),
+        theme.rgb(theme.graph_node_title),
+        normal_border,
+    )
+}
+
+/// Which structural diff class a collapsed group carries, if any: the strongest
+/// class among its members in the report the scene is showing, ordered like the
+/// edge chain (added, then removed, then changed — a changed member wears the
+/// added token, as a changed cable does). `None` without a diff, which is also
+/// why the group keeps its kind frame then.
+fn group_diff_class(diff: Option<&DiffReport>, members: &[&GraphNode]) -> Option<GroupDiffClass> {
+    let report = diff?;
+    if members
+        .iter()
+        .any(|node| report.added_nodes.contains(&node.id))
+    {
+        Some(GroupDiffClass::Added)
+    } else if members
+        .iter()
+        .any(|node| report.removed_nodes.contains(&node.id))
+    {
+        Some(GroupDiffClass::Removed)
+    } else if members.iter().any(|node| {
+        report
+            .changed_nodes
+            .iter()
+            .any(|changed| changed.id == node.id)
+    }) {
+        Some(GroupDiffClass::Added)
+    } else {
+        None
+    }
+}
+
+/// Whether any cable incident to a member carries a topology-validation finding
+/// (design D5: a group carrying an error is visually distinct, and expanding
+/// reveals the exact member). `Graph::validation` names cables, so a member is
+/// implicated through the cables that touch it.
+fn group_has_topology_error(graph: &Graph, members: &[&GraphNode]) -> bool {
+    if graph.validation.is_empty() {
+        return false;
+    }
+    let fallible: HashSet<&str> = graph
+        .validation
+        .iter()
+        .map(|issue| issue.cable.as_str())
+        .collect();
+    graph.edges.iter().any(|edge| {
+        fallible.contains(edge.cable.as_str())
+            && members
+                .iter()
+                .any(|node| node.id == edge.source || node.id == edge.sink)
+    })
 }
 
 /// Label chain (label-guess-and-screen-scale 1.3): stored label → tree-derived
@@ -1473,11 +2049,14 @@ fn node_diff_marked(diff: Option<&DiffReport>, node: &GraphNode) -> bool {
 /// active influence the influenced border/title token marks the influenced set
 /// and the rest dims; hover/selection interaction feedback stays highest. While
 /// a modifier is active (latched or held) the influence hue is the per-token
-/// `modifier_hue`, matching the panels wash (design D).
+/// `modifier_hue`, matching the panels wash (design D). `dimmed` is the
+/// isolate's neighbour set (design D4), which dims exactly like a disabled
+/// circuit so an isolate reads as "these members, those neighbours".
 fn node_styling(
     style: SceneStyle<'_>,
     node: &GraphNode,
     index: usize,
+    dimmed: bool,
 ) -> ((u8, u8, u8), (u8, u8, u8), f32) {
     let SceneStyle { app, theme, zoom } = style;
     let dim = theme.rgb(theme.graph_node_dim);
@@ -1496,7 +2075,7 @@ fn node_styling(
     // (graph-zoom-node-scaling decision 2).
     let normal_border = (1.0 * zoom).max(0.5);
     let highlight_border = (3.0 * zoom).max(1.0);
-    if app.disabled_circuits.contains(&node.id) {
+    if dimmed || app.disabled_circuits.contains(&node.id) {
         (dim, dim, normal_border)
     } else if app.hovered_graph_node == Some(index)
         || app.selected_circuit == Some(node.id.clone())
@@ -1522,11 +2101,21 @@ fn node_styling(
 
 /// Build the visible edge specs, set the port markers on the nodes they touch,
 /// and accumulate each node's optimizer direction.
+///
+/// Edges travel from the model graph to the drawn bodies through the grouped
+/// view (design D3): both endpoints resolve to their view node, a cable whose
+/// ends land inside one collapsed group is not drawn at all, and the rest
+/// deduplicate onto one arrow per drawn pair — the first cable reaching a pair
+/// owns it, so the aggregate fan-out of a stack costs one edge, not one per
+/// member. Without a grouped view every model node is its own body and nothing
+/// changes.
 fn build_edges(
     style: SceneStyle<'_>,
     graph: &Graph,
     built: &mut BuiltNodes,
     diff: Option<&DiffReport>,
+    groups: Option<&GroupedView>,
+    isolate: Option<&Isolate>,
     edge_visible: impl Fn(usize) -> bool,
 ) -> BuiltEdges {
     let SceneStyle { app, theme, zoom } = style;
@@ -1537,6 +2126,7 @@ fn build_edges(
     };
     let mut node_dirs: Vec<Option<OptDir>> = vec![None; built.nodes.len()];
     let mut edges = Vec::with_capacity(graph.edges.len());
+    let mut drawn_pairs: HashSet<ViewEdge> = HashSet::new();
     for (i, edge) in graph.edges.iter().enumerate() {
         if !edge_visible(i) {
             continue;
@@ -1547,7 +2137,22 @@ fn build_edges(
         let Some(t) = edge.sink_index(&graph.nodes) else {
             continue;
         };
-        let (Some(&si), Some(&ti)) = (built.kept.get(&s), built.kept.get(&t)) else {
+        let (source, sink) = match groups {
+            Some(view) => {
+                let (source, sink) = (view.nodes[s], view.nodes[t]);
+                // Cables entirely inside one collapsed group have nothing to
+                // draw between; the group's own body is not a loop.
+                if matches!((source, sink), (ViewNode::Group(a), ViewNode::Group(b)) if a == b) {
+                    continue;
+                }
+                if !drawn_pairs.insert(ViewEdge { source, sink }) {
+                    continue; // an earlier cable already owns this drawn pair
+                }
+                (source, sink)
+            }
+            None => (ViewNode::Individual(s), ViewNode::Individual(t)),
+        };
+        let (Some(&si), Some(&ti)) = (built.bodies.get(&source), built.bodies.get(&sink)) else {
             continue;
         };
         let start = (
@@ -1565,6 +2170,9 @@ fn build_edges(
         let incident_disabled = app.disabled_circuits.contains(&graph.nodes[s].id);
         let incident_unselected = graph.not_selected.contains(&graph.nodes[s].section_index)
             || graph.not_selected.contains(&graph.nodes[t].section_index);
+        // An isolate's dimmed neighbours (design D4) dim their cables too.
+        let incident_isolated = isolate.is_some_and(|iso| iso.dimmed(s) || iso.dimmed(t));
+        let incident_dimmed = incident_disabled || incident_unselected || incident_isolated;
         let has_error = graph
             .validation
             .iter()
@@ -1592,7 +2200,7 @@ fn build_edges(
             style,
             EdgeFlags {
                 error: has_error,
-                dimmed: incident_disabled || incident_unselected,
+                dimmed: incident_dimmed,
                 influenced,
                 diff: diff_state,
                 ramp,
@@ -1624,9 +2232,7 @@ fn build_edges(
             },
             kind,
             error: has_error,
-            dim: incident_disabled
-                || incident_unselected
-                || (app.influence.is_some() && !influenced),
+            dim: incident_dimmed || (app.influence.is_some() && !influenced),
             diff: diff_state,
             latency: ramp.map(|ramp_stop| crate::graph_render::EdgeLatency {
                 ramp_stop,
@@ -1781,11 +2387,13 @@ fn apply_optimizer_node_diff(
 /// Cluster containers are padded unions of the kept member node rects in the
 /// un-filtered graph; a filtered render (dependency or influence subset) skips
 /// them because the member index mapping does not match the full-graph range.
+/// `by_node` resolves a model index to its drawn node, so under grouping a
+/// banner group containing a collapsed group encloses that group's box.
 fn build_clusters(
     style: SceneStyle<'_>,
     graph: &Graph,
     nodes: &[NodeSpec],
-    kept: &HashMap<usize, usize>,
+    by_node: &HashMap<usize, usize>,
 ) -> Vec<ClusterSpec> {
     let SceneStyle { theme, zoom, .. } = style;
     let cluster_pad = (CLUSTER_PAD * zoom).max(2.0);
@@ -1793,35 +2401,112 @@ fn build_clusters(
         .clusters
         .iter()
         .filter_map(|cluster| {
-            let members: Vec<usize> = (cluster.section_range.start..cluster.section_range.end)
-                .filter_map(|i| kept.get(&i).copied())
-                .collect();
-            if members.is_empty() {
-                return None;
-            }
-            let mut x0 = f32::INFINITY;
-            let mut y0 = f32::INFINITY;
-            let mut x1 = f32::NEG_INFINITY;
-            let mut y1 = f32::NEG_INFINITY;
-            for &m in &members {
-                let n = &nodes[m];
-                x0 = x0.min(n.x);
-                y0 = y0.min(n.y);
-                x1 = x1.max(n.x + n.w);
-                y1 = y1.max(n.y + n.h);
-            }
+            let members = union_of(
+                nodes,
+                (cluster.section_range.start..cluster.section_range.end)
+                    .filter_map(|i| by_node.get(&i).copied()),
+                cluster_pad,
+            )?;
             Some(ClusterSpec {
-                x: x0 - cluster_pad,
-                y: y0 - cluster_pad,
-                w: (x1 + cluster_pad) - (x0 - cluster_pad),
-                h: (y1 + cluster_pad) - (y0 - cluster_pad),
+                x: members.0,
+                y: members.1,
+                w: members.2,
+                h: members.3,
                 title: cluster.title.clone(),
                 border: theme.rgb(theme.graph_cluster_border),
                 title_color: theme.rgb(theme.graph_cluster_title),
-                member_indices: members,
+                member_indices: members.4,
             })
         })
         .collect()
+}
+
+/// The outline around an expanded group (design D5: expand in place draws the
+/// member nodes with a group outline). Drawn in the cluster-container style so
+/// it reads as a container, in the tokens the group's circuit nodes wear, and
+/// titled with the same `<circuit> ×<count>` label the collapsed box carries.
+/// A collapsed group is already one drawn body and gets no outline.
+///
+/// The outline wraps the members' own drawn rects — [`Group::members_bbox`]
+/// projected through the camera — and never [`Group::bbox`]: that one is the
+/// collapsed body and compacts to a nominal box for a spread type, which would
+/// leave the outline floating between the member bodies instead of around them
+/// (ADR 40: the extent the pointer hit-tests in
+/// `handler::group_outline_box` is the same one).
+fn build_group_outlines(
+    style: SceneStyle<'_>,
+    view: &GroupedView,
+    built: &BuiltNodes,
+) -> Vec<ClusterSpec> {
+    let SceneStyle { theme, zoom, .. } = style;
+    let pad = (CLUSTER_PAD * zoom).max(2.0);
+    let mut outlines = Vec::new();
+    for (g, group) in view.groups.iter().enumerate() {
+        if group
+            .members
+            .iter()
+            .any(|&m| view.nodes.get(m) == Some(&ViewNode::Group(g)))
+        {
+            continue;
+        }
+        let Some(union) = union_of(
+            &built.nodes,
+            group
+                .members
+                .iter()
+                .filter_map(|m| built.by_node.get(m).copied()),
+            pad,
+        ) else {
+            continue;
+        };
+        outlines.push(ClusterSpec {
+            x: union.0,
+            y: union.1,
+            w: union.2,
+            h: union.3,
+            title: format!("{} \u{d7}{}", group.circuit, group.members.len()),
+            border: theme.rgb(theme.graph_node_border),
+            title_color: theme.rgb(theme.graph_node_title),
+            member_indices: union.4,
+        });
+    }
+    outlines
+}
+
+/// Padded union of the drawn rects at `members`, with the member indices it
+/// enclosed. `None` when nothing was drawn (every member filtered out). The
+/// indices are sorted and deduplicated so a collapsed group, whose members all
+/// resolve to its one box, names that box once.
+fn union_of(
+    nodes: &[NodeSpec],
+    members: impl Iterator<Item = usize>,
+    pad: f32,
+) -> Option<(f32, f32, f32, f32, Vec<usize>)> {
+    let mut indices: Vec<usize> = members.collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices.retain(|&m| m < nodes.len());
+    if indices.is_empty() {
+        return None;
+    }
+    let mut x0 = f32::INFINITY;
+    let mut y0 = f32::INFINITY;
+    let mut x1 = f32::NEG_INFINITY;
+    let mut y1 = f32::NEG_INFINITY;
+    for &m in &indices {
+        let n = &nodes[m];
+        x0 = x0.min(n.x);
+        y0 = y0.min(n.y);
+        x1 = x1.max(n.x + n.w);
+        y1 = y1.max(n.y + n.h);
+    }
+    Some((
+        x0 - pad,
+        y0 - pad,
+        (x1 + pad) - (x0 - pad),
+        (y1 + pad) - (y0 - pad),
+        indices,
+    ))
 }
 
 #[cfg(test)]
@@ -3127,8 +3812,9 @@ mod scene_builder_tests {
 mod window_paint_tests {
     use super::*;
     use crate::config::LayoutMode;
-    use crate::graph::{Graph, GraphEdge, GraphNode};
-    use crate::patch::NodeId;
+    use crate::diff::ChangedNode;
+    use crate::graph::{Graph, GraphEdge, GraphNode, TopologyIssue, TopologySeverity};
+    use crate::patch::{InfluenceSubtree, NodeId};
 
     fn circuit_node(name: &str, idx: usize, section: usize) -> GraphNode {
         GraphNode {
@@ -3169,6 +3855,9 @@ mod window_paint_tests {
         labels: Vec<String>,
         /// The `FontId` each label was painted with, parallel to `labels`.
         label_fonts: Vec<egui::FontId>,
+        /// The `Color32` each label was painted with, parallel to `labels`: the
+        /// emitted `Shape::Text` colour, which is what a reader actually sees.
+        label_colors: Vec<egui::Color32>,
         rects: Vec<egui::epaint::RectShape>,
         circles: usize,
         beziers: usize,
@@ -3209,12 +3898,18 @@ mod window_paint_tests {
         canvas: egui::Vec2,
         raw_input: egui::RawInput,
     ) -> PaintOutput {
+        paint_ui(raw_input, |ui| paint_scene(ui, canvas, scene, &[]))
+    }
+
+    /// One painted frame's shapes, for any paint entry point: `body` receives the
+    /// `Ui` the scene is painted into (the group peek needs `paint_scene_in` with
+    /// an `App`, which the compat wrapper above deliberately does not take).
+    fn paint_ui(raw_input: egui::RawInput, body: impl FnMut(&mut egui::Ui)) -> PaintOutput {
         let ctx = egui::Context::default();
-        let mut full_output = ctx.run_ui(raw_input, |ui| {
-            paint_scene(ui, canvas, scene, &[]);
-        });
+        let mut full_output = ctx.run_ui(raw_input, body);
         let mut labels = Vec::new();
         let mut label_fonts = Vec::new();
+        let mut label_colors = Vec::new();
         let mut rects = Vec::new();
         let mut circles = 0usize;
         let mut beziers = 0usize;
@@ -3224,15 +3919,11 @@ mod window_paint_tests {
                 egui::epaint::Shape::Text(t) => {
                     labels.push(t.galley.text().to_string());
                     // The painter lays every label out as a single-section
-                    // `LayoutJob`, so the section format carries the FontId.
-                    label_fonts.push(
-                        t.galley
-                            .job
-                            .sections
-                            .first()
-                            .map(|s| s.format.font_id.clone())
-                            .unwrap_or_default(),
-                    );
+                    // `LayoutJob`, so the section format carries the FontId and
+                    // the colour the galley was laid out with.
+                    let format = t.galley.job.sections.first().map(|s| &s.format);
+                    label_fonts.push(format.map(|f| f.font_id.clone()).unwrap_or_default());
+                    label_colors.push(format.map_or(egui::Color32::TRANSPARENT, |f| f.color));
                 }
                 egui::epaint::Shape::Rect(r) => rects.push(r.clone()),
                 egui::epaint::Shape::Circle(_) => circles += 1,
@@ -3245,6 +3936,7 @@ mod window_paint_tests {
         PaintOutput {
             labels,
             label_fonts,
+            label_colors,
             rects,
             circles,
             beziers,
@@ -4060,6 +4752,576 @@ mod window_paint_tests {
                 cluster.title
             );
         }
+    }
+
+    // ── graph-same-type-grouping: grouped paint shapes (task 4.2) ───────────
+
+    /// The smallest real arrangement that groups under the default settings: an
+    /// `App` over five `copy` nodes stacked one body apart in a column, each
+    /// feeding the next, with two of them also feeding the same `mixer`.
+    ///
+    /// `App::new` seeds `graph_grouping` from `crate::config::Graph::default()`
+    /// (`group_enabled`, `min_group_size = 5`), and the copies sit inside one
+    /// body height of each other, so drawn proximity alone merges them into
+    /// group 0 while the lone mixer stays an individual — no extra setup needed
+    /// to reach the collapsed path. The cable set doubles as the aggregation
+    /// case: four cables wholly inside the group, plus two members fanning out
+    /// to one sink.
+    fn stacked_copies_app() -> App {
+        let mut nodes: Vec<GraphNode> = (0..5).map(|i| circuit_node("copy", i, 0)).collect();
+        nodes.push(circuit_node("mixer", 0, 1));
+        let copy_cable = |name: &str, from: usize, to: usize| GraphEdge {
+            cable: name.to_string(),
+            source: NodeId::circuit("copy", from),
+            sink: NodeId::circuit("copy", to),
+        };
+        let fan_cable = |name: &str, from: usize| GraphEdge {
+            cable: name.to_string(),
+            source: NodeId::circuit("copy", from),
+            sink: NodeId::circuit("mixer", 0),
+        };
+        let graph = Graph {
+            nodes,
+            edges: vec![
+                copy_cable("_CHAIN0", 0, 1),
+                copy_cable("_CHAIN1", 1, 2),
+                copy_cable("_CHAIN2", 2, 3),
+                copy_cable("_CHAIN3", 3, 4),
+                fan_cable("_FAN_A", 0),
+                fan_cable("_FAN_B", 1),
+            ],
+            ..Graph::default()
+        };
+        let mut positions: Vec<(f32, f32)> = (0..5)
+            .map(|i| (120.0, 80.0 + i as f32 * crate::layout::NODE_WORLD_H))
+            .collect();
+        positions.push((460.0, 80.0));
+
+        let mut app = App::new();
+        app.graph = Some(graph);
+        app.graph_positions = positions;
+        app
+    }
+
+    /// The scene's one group stand-in, told apart by its `<circuit> ×<count>`
+    /// label.
+    fn group_body(scene: &SceneSpec) -> &NodeSpec {
+        let mut found = scene.nodes.iter().filter(|n| n.label.contains('\u{d7}'));
+        let body = found.next().expect("the scene draws a group stand-in");
+        assert!(found.next().is_none(), "exactly one group body is drawn");
+        body
+    }
+
+    /// Spec "A collapsed group draws one box" (design D1/D5): the five members
+    /// paint as a single `<circuit> ×<count>` body, and no member body appears
+    /// beside it.
+    #[test]
+    fn collapsed_group_paints_one_box_and_no_member_nodes() {
+        let app = stacked_copies_app();
+        let scene = scene_of(&app);
+
+        assert_eq!(
+            scene.nodes.len(),
+            2,
+            "the five copies collapse to one box beside the lone mixer: {:?}",
+            scene
+                .nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(group_body(&scene).label, "copy \u{d7}5");
+        assert!(
+            !scene
+                .nodes
+                .iter()
+                .any(|n| n.label == "copy" || n.label.starts_with("copy (")),
+            "no member body is drawn beside the box"
+        );
+        assert!(
+            scene.clusters.is_empty(),
+            "a collapsed group is already one body, so it gets no outline"
+        );
+
+        // The painted run is the box and the mixer, nothing per member — and
+        // the label is complete at this frame width, not ellipsized.
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        let labels: Vec<&str> = out.labels.iter().map(String::as_str).collect();
+        assert_eq!(labels, ["copy \u{d7}5", "mixer"]);
+    }
+
+    /// Spec "An expanded group draws its members" (design D5): the members
+    /// paint as their own bodies, and the group survives as one outline titled
+    /// like the collapsed box.
+    #[test]
+    fn expanded_group_paints_its_members_and_the_outline() {
+        let mut app = stacked_copies_app();
+        app.expanded_groups.insert(0);
+        let scene = scene_of(&app);
+
+        assert_eq!(scene.nodes.len(), 6, "every member draws on its own");
+        let labels: Vec<&str> = scene.nodes.iter().map(|n| n.label.as_str()).collect();
+        for member in ["copy", "copy (1)", "copy (2)", "copy (3)", "copy (4)"] {
+            assert!(
+                labels.contains(&member),
+                "an expanded group draws {member:?}: {labels:?}"
+            );
+        }
+
+        assert_eq!(scene.clusters.len(), 1, "one outline around the members");
+        let outline = &scene.clusters[0];
+        assert_eq!(outline.title, "copy \u{d7}5");
+        assert_eq!(outline.member_indices.len(), 5);
+        for &idx in &outline.member_indices {
+            let body = &scene.nodes[idx];
+            assert!(
+                body.x >= outline.x
+                    && body.x + body.w <= outline.x + outline.w
+                    && body.y >= outline.y
+                    && body.y + body.h <= outline.y + outline.h,
+                "the outline encloses member body {idx}"
+            );
+        }
+
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        for member in ["copy", "copy (1)", "copy (2)", "copy (3)", "copy (4)"] {
+            assert!(
+                out.labels.iter().any(|l| l == member),
+                "the member body {member:?} paints: {:?}",
+                out.labels
+            );
+        }
+        assert_eq!(
+            title_fonts(&out, &["copy \u{d7}5"]),
+            vec![egui::FontId::proportional(CLUSTER_TITLE_PX)],
+            "the outline paints its group label: {:?}",
+            out.labels
+        );
+        assert!(
+            out.rects.iter().any(|r| {
+                (r.rect.left() - outline.x).abs() < 0.5
+                    && (r.rect.top() - outline.y).abs() < 0.5
+                    && r.fill == egui::Color32::TRANSPARENT
+            }),
+            "the outline rectangle paints"
+        );
+    }
+
+    /// Spec "Aggregated edges" (design D3): a cable whose ends land inside one
+    /// collapsed group draws nothing, and the two members feeding the same sink
+    /// collapse onto one arrow.
+    #[test]
+    fn aggregated_edges_emit_one_arrow_per_drawn_pair() {
+        let app = stacked_copies_app();
+        assert_eq!(
+            app.graph.as_ref().unwrap().edges.len(),
+            6,
+            "fixture guard: four intra-group cables and two fan-out cables"
+        );
+        let scene = scene_of(&app);
+        assert_eq!(
+            scene.edges.len(),
+            1,
+            "the four intra-group cables drop and the duplicate fan-out deduplicates"
+        );
+
+        let box_body = group_body(&scene);
+        let mixer = scene
+            .nodes
+            .iter()
+            .find(|n| n.label == "mixer")
+            .expect("the mixer body draws on its own");
+        let edge = &scene.edges[0];
+        assert!(
+            (edge.start.0 - (box_body.x + box_body.w)).abs() < 0.01,
+            "the one arrow leaves the group box: {edge:?}"
+        );
+        assert!((edge.start.1 - (box_body.y + box_body.h / 2.0)).abs() < 0.01);
+        assert!(
+            (edge.end.0 - mixer.x).abs() < 0.01,
+            "and lands on the mixer: {edge:?}"
+        );
+        assert!((edge.end.1 - (mixer.y + mixer.h / 2.0)).abs() < 0.01);
+
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        assert_eq!(out.beziers, 1, "one aggregated cable stroke");
+        assert_eq!(out.polygons, 1, "one direction arrow");
+    }
+
+    /// Task 4.1 keeps the painter's level-of-detail rule for group labels: a box
+    /// narrower than its `<circuit> ×<count>` label paints the ellipsized text
+    /// instead — asserted on the emitted `Shape::Text`, not on `fit_label`.
+    #[test]
+    fn overlong_group_label_ellipsizes_to_its_frame() {
+        // The box's width at zoom 1, so the zoom below lands it on a chosen
+        // pixel width instead of a guessed one.
+        let full_w = group_body(&scene_of(&stacked_copies_app())).w;
+        let mut app = stacked_copies_app();
+        // 40 px: wider than one label character (so the label still paints) and
+        // narrower than the seven characters the full label needs at the fixed
+        // label font.
+        app.graph_camera = Some(GraphCamera {
+            zoom: 40.0 / full_w,
+            pan: (0.0, 0.0),
+        });
+        let scene = scene_of(&app);
+
+        let body = group_body(&scene);
+        assert_eq!(body.label, "copy \u{d7}5", "the spec keeps the full label");
+        let char_w = MONO_ADVANCE * NODE_LABEL_SIZE;
+        assert!(
+            body.w >= char_w && body.w < body.label.chars().count() as f32 * char_w,
+            "the painted frame must be narrower than the label: w {} for {:?}",
+            body.w,
+            body.label
+        );
+
+        let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+        let painted: Vec<&str> = out
+            .labels
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.starts_with("copy"))
+            .collect();
+        assert_eq!(painted.len(), 1, "one group label paints: {:?}", out.labels);
+        let text = painted[0];
+        assert!(
+            text.ends_with('\u{2026}'),
+            "the over-long label ellipsizes: {text:?}"
+        );
+        assert_ne!(
+            text, "copy \u{d7}5",
+            "the full label does not fit the frame"
+        );
+        let budget = (body.w / char_w).floor() as usize;
+        assert_eq!(
+            text.chars().count(),
+            budget,
+            "the painted label spends the whole frame budget: {text:?} in {} px",
+            body.w
+        );
+        assert!(
+            text.chars().count() as f32 * char_w <= body.w + 1e-3,
+            "the painted label fits its frame: {text:?} in {} px",
+            body.w
+        );
+    }
+
+    // ── graph-same-type-grouping: hover content peek (task 5.2) ──────────────
+
+    /// Task 5.2's line rule: a shared label prefix collapses into the range its
+    /// instances span; without one the first eight labels stand, and the rest is
+    /// summarized as `…+N`.
+    #[test]
+    fn group_peek_line_ranges_a_shared_prefix_and_lists_the_rest() {
+        assert_eq!(
+            group_peek_line(&["encoder E1.1".to_string(), "encoder E1.24".to_string()]),
+            "encoder \u{b7} E1.1\u{2013}E1.24",
+            "the prefix names the run, the range carries its extent"
+        );
+
+        let numbered: Vec<String> = (1..=10).map(|i| format!("copy ({i})")).collect();
+        assert_eq!(
+            group_peek_line(&numbered),
+            "copy (1) \u{b7} copy (2) \u{b7} copy (3) \u{b7} copy (4) \u{b7} copy (5) \u{b7} \
+             copy (6) \u{b7} copy (7) \u{b7} copy (8) \u{b7} \u{2026}+2",
+            "eight labels and a remainder count"
+        );
+
+        // One member's label *is* the shared prefix (the numbered-instance case),
+        // so there is nothing to range and the list form reads it.
+        assert_eq!(
+            group_peek_line(&["copy".to_string(), "copy (1)".to_string()]),
+            "copy \u{b7} copy (1)"
+        );
+    }
+
+    /// Spec "Hover peeks at contents" (task 5.2): the pointer resting on a
+    /// collapsed group's box paints the members' peek in the tooltip card, and
+    /// paints no such card when no group is hovered.
+    #[test]
+    fn hovered_group_peeks_at_its_member_labels() {
+        let mut app = stacked_copies_app();
+        let scene = scene_of(&app);
+        let canvas = egui::vec2(1280.0, 800.0);
+        let body = group_body(&scene);
+        let centre = egui::pos2(body.x + body.w / 2.0, body.y + body.h / 2.0);
+        let peek = "copy \u{b7} copy (1) \u{b7} copy (2) \u{b7} copy (3) \u{b7} copy (4)";
+        let pointer = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, canvas)),
+            events: vec![egui::Event::PointerMoved(centre)],
+            ..Default::default()
+        };
+        let frame = |app: Option<&App>| {
+            paint_ui(pointer(), |ui| {
+                paint_scene_in(
+                    ui,
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
+                    Some(&scene),
+                    &[],
+                    app,
+                );
+            })
+        };
+
+        let quiet = frame(None);
+        assert!(
+            !quiet.labels.iter().any(|label| label == peek),
+            "no hovered group, no peek: {:?}",
+            quiet.labels
+        );
+
+        app.hovered_group = Some(0);
+        let peeked = frame(Some(&app));
+        assert!(
+            peeked.labels.iter().any(|label| label == peek),
+            "the hovered group names its members: {:?}",
+            peeked.labels
+        );
+        assert_eq!(
+            peeked.labels.iter().filter(|label| *label == peek).count(),
+            1,
+            "one card, not one per painted member"
+        );
+        // The peek takes the card's slot rather than stacking on it, so the
+        // painted rect count is unchanged (the layout is untouched) and the last
+        // rect — the card, painted above everything — got wider.
+        assert_eq!(
+            peeked.rects.len(),
+            quiet.rects.len(),
+            "the peek replaces the node readout instead of drawing beside it"
+        );
+        let card_width = |out: &PaintOutput| out.rects.last().expect("a card rect").rect.width();
+        assert!(
+            card_width(&peeked) > card_width(&quiet),
+            "the peek card is wider than the readout it replaced: {} vs {}",
+            card_width(&peeked),
+            card_width(&quiet)
+        );
+    }
+
+    // ── graph-same-type-grouping: group-level highlights (task 6.1) ─────────
+
+    /// A collapsed group wears the strongest class any member would wear:
+    /// selection and the diff classification light it, and a topology error on a
+    /// member's cable outranks them both. Insertion order is checked too — the
+    /// class does not depend on which member carries it.
+    #[test]
+    fn collapsed_group_wears_the_strongest_member_class() {
+        let mut app = stacked_copies_app();
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_node_border),
+            "no member class: the circuit-kind frame"
+        );
+
+        app.selected_circuit = Some(NodeId::circuit("copy", 2));
+        let selected_scene = scene_of(&app);
+        let selected = group_body(&selected_scene);
+        assert_eq!(
+            selected.border,
+            theme().rgb(theme().graph_node_highlight),
+            "a selected member lights the whole box"
+        );
+        assert_eq!(
+            selected.label_color,
+            theme().rgb(theme().graph_node_highlight),
+            "the label travels with the selection class"
+        );
+
+        app.selected_circuit = None;
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            removed_nodes: vec![NodeId::circuit("copy", 4)],
+            ..Default::default()
+        });
+        let diffed_scene = scene_of(&app);
+        let diffed = group_body(&diffed_scene);
+        assert_eq!(
+            diffed.border,
+            theme().rgb(theme().graph_edge_diff_removed),
+            "a removed member puts the group in the removed class"
+        );
+        assert_eq!(
+            diffed.label_color,
+            theme().rgb(theme().graph_edge_diff_removed),
+            "the label travels with the class and stays legible"
+        );
+
+        app.graph
+            .as_mut()
+            .expect("graph")
+            .validation
+            .push(TopologyIssue {
+                cable: "_FAN_B".into(),
+                severity: TopologySeverity::Error,
+                message: "two producers".into(),
+            });
+        let errored_scene = scene_of(&app);
+        let errored = group_body(&errored_scene);
+        assert_eq!(
+            errored.border,
+            theme().rgb(theme().graph_edge_error),
+            "a topology error outranks the diff classification"
+        );
+        assert_eq!(errored.label_color, theme().rgb(theme().graph_edge_error));
+    }
+
+    /// Every diff class the report can carry, and their ranking (task 6.2): a
+    /// changed member wears the added token exactly as a changed cable does, and
+    /// added outranks removed outranks changed, so a group holding several
+    /// classes answers with the strongest one. The removed-only case is pinned
+    /// by `collapsed_group_wears_the_strongest_member_class` above.
+    #[test]
+    fn collapsed_group_diff_classes_rank_added_over_removed_over_changed() {
+        let mut app = stacked_copies_app();
+        app.diff_showing = true;
+
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 3)],
+            ..Default::default()
+        });
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_edge_diff_added),
+            "an added member puts the group in the added class"
+        );
+
+        app.diff_report = Some(DiffReport {
+            changed_nodes: vec![ChangedNode {
+                id: NodeId::circuit("copy", 1),
+                changed_params: vec!["input".into()],
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_edge_diff_added),
+            "a changed member wears the added token, like a changed cable"
+        );
+
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 4)],
+            removed_nodes: vec![NodeId::circuit("copy", 0)],
+            changed_nodes: vec![ChangedNode {
+                id: NodeId::circuit("copy", 1),
+                changed_params: vec!["input".into()],
+            }],
+            ..Default::default()
+        });
+        let ranked = scene_of(&app);
+        assert_eq!(
+            group_body(&ranked).border,
+            theme().rgb(theme().graph_edge_diff_added),
+            "added outranks removed and changed when the group holds several"
+        );
+    }
+
+    /// The influence wash lights a collapsed group through any member, and a
+    /// topology error on a member's cable outranks every other source at once —
+    /// selection, diff and influence (task 6.2).
+    #[test]
+    fn collapsed_group_topology_error_outranks_selection_diff_and_influence() {
+        let mut app = stacked_copies_app();
+        app.influence = Some(InfluenceSubtree {
+            influenced_nodes: std::iter::once(NodeId::circuit("copy", 1)).collect(),
+            ..Default::default()
+        });
+        assert_eq!(
+            group_body(&scene_of(&app)).border,
+            theme().rgb(theme().graph_node_highlight),
+            "an influenced member lights the group like a selected one"
+        );
+
+        app.selected_circuit = Some(NodeId::circuit("copy", 2));
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 3)],
+            ..Default::default()
+        });
+        app.graph
+            .as_mut()
+            .expect("graph")
+            .validation
+            .push(TopologyIssue {
+                cable: "_FAN_B".into(),
+                severity: TopologySeverity::Error,
+                message: "two producers".into(),
+            });
+        let scene = scene_of(&app);
+        let body = group_body(&scene);
+        assert_eq!(
+            body.border,
+            theme().rgb(theme().graph_edge_error),
+            "a topology error outranks selection, diff and influence together"
+        );
+        assert_eq!(
+            body.label_color,
+            theme().rgb(theme().graph_edge_error),
+            "the label travels with the error class"
+        );
+    }
+
+    /// The emitted `Shape::Text` colour, not only the `NodeSpec`: the painter
+    /// hands `label_color` straight to the galley, so the class colour a reader
+    /// sees is asserted on the painted frame (task 6.2's "label colour travels
+    /// with the strongest class").
+    #[test]
+    fn group_label_paints_in_the_strongest_class_colour() {
+        fn painted(app: &App) -> egui::Color32 {
+            let scene = scene_of(app);
+            let out = paint(Some(&scene), egui::vec2(1280.0, 800.0));
+            let mut colours = out
+                .labels
+                .iter()
+                .zip(&out.label_colors)
+                .filter(|(label, _)| label.contains('\u{d7}'))
+                .map(|(_, colour)| *colour);
+            let colour = colours.next().expect("the group label paints");
+            assert!(colours.next().is_none(), "one group label, one text shape");
+            colour
+        }
+
+        let mut app = stacked_copies_app();
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_node_title)),
+            "nothing lights the group: the kind title token paints"
+        );
+
+        app.selected_circuit = Some(NodeId::circuit("copy", 2));
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_node_highlight)),
+            "selection paints the title in the highlight token"
+        );
+
+        app.selected_circuit = None;
+        app.diff_showing = true;
+        app.diff_report = Some(DiffReport {
+            added_nodes: vec![NodeId::circuit("copy", 4)],
+            ..Default::default()
+        });
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_edge_diff_added)),
+            "a diff class paints the title in its own token"
+        );
+
+        app.graph
+            .as_mut()
+            .expect("graph")
+            .validation
+            .push(TopologyIssue {
+                cable: "_FAN_B".into(),
+                severity: TopologySeverity::Error,
+                message: "two producers".into(),
+            });
+        assert_eq!(
+            painted(&app),
+            rgb(theme().rgb(theme().graph_edge_error)),
+            "the topology error paints the title in the error token"
+        );
     }
 }
 #[cfg(test)]

@@ -294,6 +294,7 @@ use crate::app::{
     is_entry_selectable, is_picker_parent_entry, App, GraphDrag, PrefixState, SourceViewMode,
     ViewType,
 };
+use crate::graph_group::{Group, GroupedView, ViewNode};
 use crate::layout;
 use crate::patch::{ComponentKind, ComponentState, HwComponent, NodeId, Patch, ShiftGroup};
 
@@ -1097,6 +1098,50 @@ fn handle_graph_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 // subgraph rooted at the hovered node (fallback: the shared
                 // circuit selection); a second `i` restores the full graph.
                 app.toggle_influence_filter();
+                return Some(false);
+            }
+            KeyCode::Char('o') => {
+                // graph-same-type-grouping D4/D7: `o` isolates the hovered
+                // group as its own subset — the induced-subgraph shape the
+                // `f`/`i` filters already use — falling back to the group
+                // holding the shared circuit selection. With neither there is
+                // no group to isolate, so the press is silent and inert (spec
+                // "Isolate without a group is inert"). The `g o` chord still
+                // opens the optimizer: the prefix step runs before this table.
+                //
+                // An isolate restores from its own state first, and
+                // unconditionally: isolating draws the group through its
+                // members, which drops the hover that opened it (the index
+                // belonged to the grouping answer that just changed), so
+                // resolving the target from the pointer alone would leave the
+                // second press inert until the user hovered a group again.
+                let target = app
+                    .isolated_group
+                    .or(app.hovered_group)
+                    .or_else(|| app.selected_group());
+                if let Some(group) = target {
+                    app.toggle_group_isolated(group);
+                }
+                return Some(false);
+            }
+            KeyCode::Enter => {
+                // graph-same-type-grouping D7: `Enter` opens or closes the
+                // group under the pointer as the pane draws it — a collapsed
+                // box or an expanded group's outline, both of which publish
+                // `hovered_group` (`toggle_group_in_place`). Without one it
+                // falls through untouched, so the shared element chord keeps
+                // its own hovered-component rule and an inert press reports
+                // nothing (spec "Expansion without a group is inert").
+                if let Some(group) = app.hovered_group {
+                    toggle_group_in_place(app, group);
+                    return Some(false);
+                }
+            }
+            KeyCode::Char('O') => {
+                // Shift+O (winit reports it as `Char('O')`) turns the grouping
+                // pass on or off for the whole graph — the runtime reversal
+                // design D1 relies on. Group-view preference, not patch state.
+                app.toggle_graph_grouping();
                 return Some(false);
             }
             KeyCode::Char('h') if app.view_focused(ViewType::Graph) => {
@@ -1952,6 +1997,7 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
         return;
     }
     app.hovered_graph_node = None;
+    app.hovered_group = None;
     // Minimap click-to-scroll: uses renderer-published minimap geometry with
     // the same proportional mapping as the viewport indicator in ui.rs
     // (indicator: scroll * inner_h / total_lines). Click must work whenever
@@ -2291,6 +2337,7 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     }
     let Some(mut camera) = app.graph_camera else {
         app.hovered_graph_node = None;
+        app.hovered_group = None;
         return;
     };
     // Hover hit-tests must match what is drawn: while a settle animation runs
@@ -2331,8 +2378,47 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
         .unwrap_or_default();
     let min_w = App::GRAPH_MIN_HIT_PX / camera.zoom;
     let min_h = App::GRAPH_MIN_HIT_PX / camera.zoom;
-    let hit = frame.pointer.and_then(|(px, py)| {
-        let (wx, wy) = camera.pixel_to_world(px - ox, py - oy);
+    // Group extents are world-space bodies exactly like a node (design D4), so
+    // hover and click travel this same pointer path instead of a second rect
+    // list: the extents are projected through the one camera the painter draws
+    // with, and the group's index is what the hover publishes. A group draws
+    // either as one collapsed box or, once open, as its members inside an
+    // outline (design D5), so both are targets — the outline is what lets a
+    // second press reach the group it just opened. Collapsed boxes are tested
+    // first: that path keeps the priority it has always had.
+    let (collapsed_boxes, outline_boxes) = if frame.pointer.is_some() {
+        let isolated = app.isolated_group;
+        match app.grouped_view() {
+            Some(view) => (
+                collapsed_group_boxes(view, &world, isolated),
+                expanded_group_boxes(view, &world),
+            ),
+            None => (Vec::new(), Vec::new()),
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let world_point = frame
+        .pointer
+        .map(|(px, py)| camera.pixel_to_world(px - ox, py - oy));
+    let group_hit = world_point.and_then(|(wx, wy)| {
+        collapsed_boxes
+            .iter()
+            .chain(outline_boxes.iter())
+            .find(|(_, (x0, y0, x1, y1))| wx >= *x0 && wx < *x1 && wy >= *y0 && wy < *y1)
+            .map(|(group, _)| *group)
+    });
+    let previous_hover = app.hovered_graph_node;
+    app.hovered_group = if frame.pointer.is_some() {
+        group_hit
+    } else {
+        None
+    };
+    // The node hit test still sees every model node: the grouping view is a
+    // drawing answer, so a member's frame keeps answering hover (the `p`/`x`
+    // keys stay meaningful on it) while a press over a group's box opens the
+    // group instead of selecting, below (design D4).
+    let hit = world_point.and_then(|(wx, wy)| {
         display.iter().enumerate().find_map(|(i, &(x, y))| {
             let (w, h) = world.get(i).copied().unwrap_or((0.0, 0.0));
             let hw = (w.max(min_w) - w) / 2.0;
@@ -2340,7 +2426,6 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
             (wx >= x - hw && wx < x + w + hw && wy >= y - hh && wy < y + h + hh).then_some(i)
         })
     });
-    let previous_hover = app.hovered_graph_node;
     app.hovered_graph_node = if frame.pointer.is_some() { hit } else { None };
     // Back-edge sink hover (design D2): surface "reads _X 1 loop behind" in the
     // status bar when the hover enters a node that has one; a node without a
@@ -2364,10 +2449,17 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
     // scroll/cursor via repeated `select_circuit` calls.
     if let Some(marquee) = frame.marquee.as_ref() {
         if let Some(&first) = marquee.nodes.first() {
-            if let Some(node_id) = app
-                .graph
-                .as_ref()
-                .and_then(|g| g.nodes.get(first))
+            // `marquee.nodes` are scene-body indices, and a collapsed group is
+            // one body standing in for all its members, so the index no longer
+            // names the same `graph.nodes` entry once anything is grouped. The
+            // grouping view restores the mapping (design D4).
+            let primary = {
+                let isolated = app.isolated_group;
+                app.grouped_view()
+                    .and_then(|view| scene_body_node(view, isolated, first))
+            };
+            if let Some(node_id) = primary
+                .and_then(|node| app.graph.as_ref().and_then(|g| g.nodes.get(node)))
                 .map(|n| n.id.clone())
             {
                 if app.selected_circuit() != Some(&node_id) {
@@ -2412,6 +2504,19 @@ pub fn handle_graph_window_frame(frame: &crate::gui::WindowFrame, app: &mut App)
                         }
                     }
                 }
+                return;
+            }
+        }
+        // A click on a collapsed group's box opens the group instead of
+        // selecting (design D4): the members are reachable through expand or
+        // isolate, and the box is not a node, so it must not fall through to
+        // selecting whichever member's frame happens to sit under the point.
+        // An open group takes the opposite order, because its members are drawn
+        // bodies again: a press on one selects it (node hit first, as on any
+        // other node), and only the outline around them closes the group.
+        if let Some(group) = app.hovered_group {
+            if !(group_drawn_expanded(app, group) && hit.is_some()) {
+                toggle_group_in_place(app, group);
                 return;
             }
         }
@@ -2547,6 +2652,209 @@ fn graph_pane_origin(app: &App) -> (f32, f32) {
         .map_or((0.0, 0.0), |(_, rect)| {
             (f32::from(rect.x), f32::from(rect.y))
         })
+}
+
+/// Slack the painter puts around a collapsed group's member footprint, mirroring
+/// `GROUP_PAD` in `src/gui/graph.rs`.
+///
+/// The hit box must be the drawn box (ADR 40), and that pad is private to the
+/// painter, so the interaction layer carries the value too: change one and the
+/// other must follow.
+const GROUP_BOX_PAD: f32 = 6.0;
+
+/// Slack an expanded group's outline keeps around its members, in world units —
+/// at zoom 1 the counterpart of `CLUSTER_PAD` in `src/gui/graph.rs`, which the
+/// painter adds in spec space (so it is that value divided by the zoom). Carried
+/// here for the same reason as [`GROUP_BOX_PAD`]: the outline hit box must be
+/// the drawn outline (ADR 40).
+const GROUP_OUTLINE_PAD: f32 = 8.0;
+
+/// Every collapsed group's drawn box paired with its group index, ready to be
+/// projected through the camera on the graph window's pointer path.
+///
+/// Only a collapsed group draws a body: an expanded group draws its members
+/// individually, and an isolate draws its own group expanded (design D4), so
+/// neither has a box under the pointer — [`expanded_group_boxes`] carries their
+/// outline instead. Order follows the group indices, so the first match on a hit
+/// is deterministic.
+fn collapsed_group_boxes(
+    view: &GroupedView,
+    world: &[(f32, f32)],
+    isolated: Option<usize>,
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    let mut boxes = Vec::new();
+    for (group_index, group) in view.groups.iter().enumerate() {
+        if isolated == Some(group_index) {
+            continue;
+        }
+        let Some(&first) = group.members.first() else {
+            continue;
+        };
+        if !matches!(view.nodes.get(first), Some(ViewNode::Group(g)) if *g == group_index) {
+            continue;
+        }
+        boxes.push((group_index, group_world_box(group, world)));
+    }
+    boxes
+}
+
+/// World-space extent `(min_x, min_y, max_x, max_y)` of collapsed group
+/// `group`'s drawn box.
+///
+/// The members' frame union grown by one member body and [`GROUP_BOX_PAD`] on
+/// every side — node positions are top-left corners, so the union reaches one
+/// body down-right of the group's `bbox` and the box is centred on it. This is
+/// the same extent `gui::graph::group_node_spec` paints, computed from the same
+/// `world` slice the node hit test reads, so both surfaces answer one source
+/// (ADR 40).
+///
+/// Reads [`Group::bbox`], the compacted drawn box, because a collapsed group paints
+/// exactly that body; the members' own union ([`Group::members_bbox`]) belongs to
+/// the expanded outline, not to this box.
+fn group_world_box(group: &Group, world: &[(f32, f32)]) -> (f32, f32, f32, f32) {
+    let (min_x, min_y, max_x, max_y) = group.bbox;
+    let mut member = (0.0_f32, 0.0_f32);
+    for &member_index in &group.members {
+        let (w, h) = world.get(member_index).copied().unwrap_or_default();
+        member = (member.0.max(w), member.1.max(h));
+    }
+    let width = (max_x - min_x) + member.0 + 2.0 * GROUP_BOX_PAD;
+    let height = (max_y - min_y) + member.1 + 2.0 * GROUP_BOX_PAD;
+    let centre = (
+        group.center.0 + member.0 / 2.0,
+        group.center.1 + member.1 / 2.0,
+    );
+    (
+        centre.0 - width / 2.0,
+        centre.1 - height / 2.0,
+        centre.0 + width / 2.0,
+        centre.1 + height / 2.0,
+    )
+}
+
+/// Every expanded group's drawn outline paired with its group index, in the shape
+/// [`collapsed_group_boxes`] returns.
+///
+/// A group is drawn expanded when the pass lays its members out individually
+/// instead of standing one box in for them; that is also exactly the condition
+/// the painter's `build_group_outlines` skips a group on, so this enumerates the
+/// outlines that exist on screen. An isolate arrives here too: `App` folds it
+/// into the expanded set when it computes the view (design D4), so the isolated
+/// group's outline answers the pointer like any other open group's. Order follows
+/// the group indices, so the first match on a hit is deterministic.
+fn expanded_group_boxes(
+    view: &GroupedView,
+    world: &[(f32, f32)],
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    let mut boxes = Vec::new();
+    for (group_index, group) in view.groups.iter().enumerate() {
+        if group.members.is_empty() {
+            continue;
+        }
+        if group
+            .members
+            .iter()
+            .any(|&m| view.nodes.get(m) == Some(&ViewNode::Group(group_index)))
+        {
+            continue;
+        }
+        boxes.push((group_index, group_outline_box(group, world)));
+    }
+    boxes
+}
+
+/// World-space extent `(min_x, min_y, max_x, max_y)` of expanded group
+/// `group`'s drawn outline.
+///
+/// The members' union grown by [`GROUP_OUTLINE_PAD`] on every side — the same
+/// extent `gui::graph::build_group_outlines` encloses, from the same `world`
+/// slice the node hit test reads, so the outline under the pointer is the one
+/// painted (ADR 40). It reads [`Group::members_bbox`], never [`Group::bbox`]: the
+/// drawn box may have compacted to a nominal body for a spread type, which would
+/// leave the outline floating between the members instead of around them. Unlike
+/// the collapsed box it is not re-centred: an open group keeps its members where
+/// they are drawn and only wraps them.
+fn group_outline_box(group: &Group, world: &[(f32, f32)]) -> (f32, f32, f32, f32) {
+    let (min_x, min_y, max_x, max_y) = group.members_bbox;
+    let mut member = (0.0_f32, 0.0_f32);
+    for &member_index in &group.members {
+        let (w, h) = world.get(member_index).copied().unwrap_or_default();
+        member = (member.0.max(w), member.1.max(h));
+    }
+    (
+        min_x - GROUP_OUTLINE_PAD,
+        min_y - GROUP_OUTLINE_PAD,
+        max_x + member.0 + GROUP_OUTLINE_PAD,
+        max_y + member.1 + GROUP_OUTLINE_PAD,
+    )
+}
+
+/// Is group `group` drawn open on the graph — its members laid out individually
+/// inside a group outline (design D5) — rather than as one collapsed box?
+///
+/// Read from the grouping state, not from the drawn view, because the two ways to
+/// be open are stored differently: an isolate draws its group open without ever
+/// joining `App::expanded_groups` (`App::compute_grouped_view` folds it in), so a
+/// press that read only the set would act on a state the user cannot see.
+fn group_drawn_expanded(app: &App, group: usize) -> bool {
+    app.expanded_groups.contains(&group) || app.isolated_group == Some(group)
+}
+
+/// Open or close group `group` as the pane draws it; returns whether it is
+/// expanded now.
+///
+/// Closing reverses whatever draws the group open, so a repeat press always
+/// lands: an isolate goes with the isolate (clearing only the expanded set would
+/// leave the group open and the press inert), and only then is the explicit
+/// expansion dropped. `App` invalidates the grouping answer on either, which is
+/// what keeps the drawn state and the stored state together.
+fn toggle_group_in_place(app: &mut App, group: usize) -> bool {
+    if !group_drawn_expanded(app, group) {
+        return app.toggle_group_expanded(group);
+    }
+    if app.isolated_group == Some(group) {
+        app.toggle_group_isolated(group);
+    }
+    if app.expanded_groups.contains(&group) {
+        return app.toggle_group_expanded(group);
+    }
+    false
+}
+
+/// The model node a drawn scene body stands for.
+///
+/// `SceneSpec::nodes` holds drawn bodies, not model nodes: grouping emits one box
+/// at its first member's slot and skips the other members, so a scene index and
+/// a `graph.nodes` index part company as soon as anything collapses. Rebuilding
+/// the drawn order from the view restores the mapping — an individual body is
+/// its own node, and a group body resolves to the group's first member, the
+/// first of the identical circuits it stands in for. `isolated` names the group
+/// the painter draws expanded (design D4); `None` is the plain case.
+fn scene_body_node(
+    view: &GroupedView,
+    isolated: Option<usize>,
+    scene_index: usize,
+) -> Option<usize> {
+    let mut drawn: Vec<Option<usize>> = Vec::with_capacity(view.nodes.len());
+    let mut emitted = vec![false; view.groups.len()];
+    for (node, entry) in view.nodes.iter().enumerate() {
+        let ViewNode::Group(group) = *entry else {
+            drawn.push(Some(node));
+            continue;
+        };
+        if isolated == Some(group) {
+            drawn.push(Some(node));
+            continue;
+        }
+        let Some(group_view) = view.groups.get(group) else {
+            continue;
+        };
+        if std::mem::replace(&mut emitted[group], true) {
+            continue;
+        }
+        drawn.push(group_view.members.first().copied());
+    }
+    drawn.get(scene_index).copied().flatten()
 }
 
 fn adjust_value(comp: &mut HwComponent, delta: f32) {
@@ -2834,6 +3142,7 @@ mod tests {
     use crate::app::{Rect, ViewerFocus};
     use crate::events::Event;
     use crate::patch::Patch;
+    use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
 
     fn fav_lock() -> &'static Mutex<()> {
@@ -6911,6 +7220,438 @@ mod tests {
         handle_event(&key(KeyCode::Char('p')), &mut app);
         assert!(!app.pinned.contains(&node.id), "second p unpins");
         assert!(!app.processing_paused, "pause untouched throughout");
+    }
+
+    // ── graph-same-type-grouping: interaction (task 5.3) ────────────────────
+
+    /// A real fixture whose repeated `copy` circuits form a group under the
+    /// default `[graph]` settings, with the graph pane open and focused.
+    ///
+    /// Mirrors `App`'s own `app_with_grouped_graph`: `influence_outlier.ini`
+    /// drives one button into a fan-out of 24 copies, which the column layout
+    /// stacks and the grouping pass collapses, so group 0 exists with no setup
+    /// beyond loading the patch and opening the graph.
+    fn app_with_grouped_graph() -> App {
+        let patch =
+            Patch::from_ini_file(std::path::Path::new("fixtures/influence_outlier.ini")).unwrap();
+        let mut app = App::new();
+        app.load_patch(patch);
+        app.seed_graph_grouping(&crate::config::Graph::default());
+        app.open_graph();
+        let view = app
+            .grouped_view()
+            .expect("a loaded graph has a grouped view");
+        assert!(!view.groups.is_empty(), "the fixture must yield a group");
+        app
+    }
+
+    /// The grouped fixture with a published identity camera, so a window-frame
+    /// pointer maps straight to world units and back (zoom 1, pan 0).
+    fn app_with_grouped_graph_window() -> App {
+        let mut app = app_with_grouped_graph();
+        app.graph_camera = Some(crate::graph_render::GraphCamera::new());
+        app
+    }
+
+    /// Spec "Isolate a group" / keybinding "Graph grouping keys": `o` isolates
+    /// the hovered group and a second press restores the previous view.
+    ///
+    /// The toggle invalidates the grouping answer, which drops the published
+    /// hover with it (`App::invalidate_grouped_view`: the index belonged to the
+    /// answer that just changed). The hover is republished between the presses
+    /// because this test walks the pointer-resolved path the live window takes:
+    /// the isolated group's outline answers the hit test on the next frame, which
+    /// is what made the second press reachable. `o_restores_the_isolate_without_a_hover`
+    /// covers the restore on its own, with nothing resolved at all.
+    #[test]
+    fn o_isolates_the_hovered_group_and_a_second_press_restores() {
+        let mut app = app_with_grouped_graph();
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+        assert_eq!(app.isolated_group, Some(0), "o isolates the hovered group");
+        assert!(
+            app.pane_holding(ViewType::Graph).is_some(),
+            "isolating must not close the graph pane"
+        );
+
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+        assert_eq!(app.isolated_group, None, "a second o restores the view");
+    }
+
+    /// Spec "Expand and collapse in place": `Enter` over a hovered group opens
+    /// it in place, and a repeat press collapses it again.
+    ///
+    /// The republish between the presses is the next window frame's pointer pass,
+    /// not scaffolding: `App` drops the hover when the grouping answer changes,
+    /// and it is the expanded group's own outline that publishes the index back
+    /// (`window_pointer_over_an_expanded_groups_outline_publishes_the_group`). A
+    /// unit test has no frame loop, so it sets the field the frame would have
+    /// set.
+    #[test]
+    fn enter_expands_the_hovered_group_and_a_second_press_collapses() {
+        let mut app = app_with_grouped_graph();
+        assert!(app.expanded_groups.is_empty());
+
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Enter), &mut app);
+        assert!(
+            app.expanded_groups.contains(&0),
+            "Enter expands the hovered group"
+        );
+
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Enter), &mut app);
+        assert!(
+            !app.expanded_groups.contains(&0),
+            "a second Enter collapses it"
+        );
+    }
+
+    /// Spec "Expand and collapse in place" (task 5.5): an open group stays a
+    /// pointer target, so the repeat press has something to land on.
+    ///
+    /// The band between the group outline and the member bodies is the part of an
+    /// open group that is no node: it publishes the group for the hover and
+    /// nothing for the node hit test.
+    #[test]
+    fn window_pointer_over_an_expanded_groups_outline_publishes_the_group() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_grouped_graph_window();
+        app.toggle_group_expanded(0);
+        let bbox = app.grouped_view().expect("a grouped view").groups[0].members_bbox;
+        // Just inside the outline's left edge, at the members' top row: every
+        // member body starts at or right of `bbox.0`, so the point is outline
+        // band and cannot be a body.
+        let (wx, wy) = (bbox.0 - GROUP_OUTLINE_PAD / 2.0, bbox.1 + 2.0);
+        let (px, py) = app
+            .graph_camera
+            .expect("the fixture publishes an identity camera")
+            .world_to_pixel(wx, wy);
+        let (ox, oy) = graph_pane_origin(&app);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((px + ox, py + oy)),
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.hovered_group,
+            Some(0),
+            "an expanded group's outline is a group target"
+        );
+        assert_eq!(
+            app.hovered_graph_node, None,
+            "the band between the frames is no node"
+        );
+    }
+
+    /// Spec "Expand and collapse in place" (task 5.5): a press on the outline
+    /// band closes the open group again.
+    #[test]
+    fn window_press_on_an_expanded_groups_outline_collapses_it() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_grouped_graph_window();
+        app.toggle_group_expanded(0);
+        let bbox = app.grouped_view().expect("a grouped view").groups[0].members_bbox;
+        let (wx, wy) = (bbox.0 - GROUP_OUTLINE_PAD / 2.0, bbox.1 + 2.0);
+        let (px, py) = app
+            .graph_camera
+            .expect("the fixture publishes an identity camera")
+            .world_to_pixel(wx, wy);
+        let (ox, oy) = graph_pane_origin(&app);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((px + ox, py + oy)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert!(
+            !app.expanded_groups.contains(&0),
+            "the outline press closes the group"
+        );
+        assert_eq!(
+            app.hovered_group, None,
+            "the hover goes with the grouping answer it named"
+        );
+        assert!(
+            app.selected_circuit().is_none(),
+            "closing a group selects nothing"
+        );
+    }
+
+    /// Spec "Expand and collapse in place": an open group draws its members as
+    /// bodies, so a press on one still selects it and leaves the group open —
+    /// only the outline around them closes the group.
+    #[test]
+    fn window_press_on_an_expanded_group_member_selects_the_member() {
+        use crate::gui::WindowFrame;
+        let mut app = app_with_grouped_graph_window();
+        app.toggle_group_expanded(0);
+        let member = app.grouped_view().expect("a grouped view").groups[0].members[0];
+        let id = app.graph.as_ref().expect("a graph").nodes[member]
+            .id
+            .clone();
+        let (x, y) = app.graph_display_positions()[member];
+        // Interior of the member's body, not its outline-adjacent edge.
+        let (px, py) = app
+            .graph_camera
+            .expect("the fixture publishes an identity camera")
+            .world_to_pixel(x + 5.0, y + 5.0);
+        let (ox, oy) = graph_pane_origin(&app);
+        handle_graph_window_frame(
+            &WindowFrame {
+                pointer: Some((px + ox, py + oy)),
+                primary_pressed: true,
+                primary_down: true,
+                ..Default::default()
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.selected_circuit(),
+            Some(&id),
+            "a member body keeps its node press"
+        );
+        assert!(
+            app.expanded_groups.contains(&0),
+            "selecting a member leaves the group open"
+        );
+        // Both hovers survive together: the member for its node press and the
+        // group for the collapse, which is what keeps `Enter` meaningful over the
+        // body the pointer is resting on.
+        assert_eq!(
+            app.hovered_graph_node,
+            Some(member),
+            "the member is hovered"
+        );
+        assert_eq!(app.hovered_group, Some(0), "and so is its open group");
+    }
+
+    /// Spec "Isolate a group" (task 5.5): `o` restores the previous view while a
+    /// group is isolated, with nothing hovered and nothing selected — the isolate
+    /// draws through its members, so the hover that opened it is gone by then.
+    #[test]
+    fn o_restores_the_isolate_without_a_hover() {
+        let mut app = app_with_grouped_graph();
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+        assert_eq!(
+            app.isolated_group,
+            Some(0),
+            "precondition: a group is isolated"
+        );
+        // Nothing resolves a group any more: the isolate itself is the target.
+        app.hovered_group = None;
+        app.hovered_graph_node = None;
+        app.selected_circuit = None;
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+        assert_eq!(
+            app.isolated_group, None,
+            "a second o restores without a hover"
+        );
+    }
+
+    /// Spec "Expand and collapse in place": closing an isolated group drops the
+    /// isolate, since that is what draws it open — clearing only the expanded set
+    /// would leave the press inert.
+    #[test]
+    fn enter_over_an_isolated_groups_outline_restores_the_view() {
+        let mut app = app_with_grouped_graph();
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+        assert_eq!(app.isolated_group, Some(0));
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Enter), &mut app);
+        assert_eq!(
+            app.isolated_group, None,
+            "Enter closes the group the isolate drew open"
+        );
+        assert!(
+            !app.expanded_groups.contains(&0),
+            "and leaves no expansion behind"
+        );
+    }
+
+    /// Spec "Toggle grouping off": `Shift+O` (winit reports `Char('O')`)
+    /// flips grouping for the whole graph, and a second press restores it.
+    #[test]
+    fn shift_o_toggles_grouping_for_the_whole_graph() {
+        let mut app = app_with_grouped_graph();
+        assert!(app.graph_grouping.group_enabled, "grouping defaults on");
+
+        handle_event(&key(KeyCode::Char('O')), &mut app);
+        assert!(!app.graph_grouping.group_enabled, "Shift+O turns it off");
+
+        handle_event(&key(KeyCode::Char('O')), &mut app);
+        assert!(
+            app.graph_grouping.group_enabled,
+            "a second press restores it"
+        );
+    }
+
+    /// Keybinding "Isolate without a group is inert" / "Expansion without a
+    /// group is inert": with neither a hovered group, a hovered node nor a
+    /// circuit selection, both keys change no grouping state and report
+    /// nothing.
+    #[test]
+    fn o_and_enter_without_a_group_are_silent_noops() {
+        let mut app = app_with_grouped_graph();
+        // `o` falls back to the selection's group, so the fixture must have
+        // neither a hover nor a selection for this to be the empty case.
+        app.hovered_group = None;
+        app.hovered_graph_node = None;
+        app.hovered_component = None;
+        app.selected_circuit = None;
+        let status_before = app.status_message.clone();
+        let expanded_before = app.expanded_groups.clone();
+
+        for code in [KeyCode::Char('o'), KeyCode::Enter] {
+            handle_event(&key(code), &mut app);
+            assert_eq!(app.isolated_group, None, "no isolate was recorded");
+            assert_eq!(app.expanded_groups, expanded_before, "no group was opened");
+            assert_eq!(
+                app.status_message, status_before,
+                "an inert grouping key must not report anything"
+            );
+        }
+    }
+
+    /// Spec "Isolate a group": the built scene holds only the isolated group's
+    /// members plus their immediate cable neighbours — every member drawn on
+    /// its own, no group box — under a camera whose viewport frames what is
+    /// left.
+    #[test]
+    fn o_filters_the_scene_to_the_group_and_its_neighbours() {
+        let mut app = app_with_grouped_graph();
+        let canvas = (1280.0_f32, 800.0_f32);
+        let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(canvas.0, canvas.1));
+        app.fit_graph_camera(canvas);
+
+        let full_view = app.grouped_view().cloned().expect("grouped view");
+        let full = crate::gui::build_scene_spec_with_view(
+            &app,
+            crate::theme::active(),
+            pane,
+            Some(&full_view),
+        )
+        .expect("the loaded graph builds a scene");
+        assert!(
+            full.nodes.iter().any(|body| body.label.contains('\u{d7}')),
+            "guard: the unfiltered scene collapses the group into one box"
+        );
+
+        app.hovered_group = Some(0);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+        assert_eq!(app.isolated_group, Some(0));
+
+        let view = app.grouped_view().cloned().expect("grouped view");
+        assert_eq!(view.groups.len(), 1, "guard: the fixture yields one group");
+        let members: HashSet<usize> = view.groups[0].members.iter().copied().collect();
+        let graph = app.graph.as_ref().expect("the fixture has a graph");
+        // The expected drawn set, derived from the model rather than from the
+        // scene: the group's members plus every node one cable away from one.
+        let index: HashMap<&NodeId, usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (&node.id, i))
+            .collect();
+        let mut expected = members.clone();
+        for edge in &graph.edges {
+            let (Some(&source), Some(&sink)) = (index.get(&edge.source), index.get(&edge.sink))
+            else {
+                continue;
+            };
+            match (members.contains(&source), members.contains(&sink)) {
+                (true, false) => {
+                    expected.insert(sink);
+                }
+                (false, true) => {
+                    expected.insert(source);
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            expected.len() > members.len(),
+            "guard: the group must have an immediate neighbour to dim"
+        );
+
+        let scene =
+            crate::gui::build_scene_spec_with_view(&app, crate::theme::active(), pane, Some(&view))
+                .expect("the isolated graph builds a scene");
+
+        // Individual bodies are emitted in model order, so zipping the scene
+        // against the ascending expected indices proves both the membership and
+        // that no group box stands in for a member (the isolate expands it).
+        let mut drawn_order: Vec<usize> = expected.iter().copied().collect();
+        drawn_order.sort_unstable();
+        assert_eq!(
+            scene.nodes.len(),
+            drawn_order.len(),
+            "the isolate keeps exactly the members and their immediate neighbours"
+        );
+        for (body, &node_index) in scene.nodes.iter().zip(&drawn_order) {
+            let node = &graph.nodes[node_index];
+            assert_eq!(
+                body.circuit, node.circuit,
+                "drawn body order follows the model"
+            );
+            assert_eq!(body.instance_index, node.instance_index);
+        }
+        assert!(
+            !scene.nodes.iter().any(|body| body.label.contains('\u{d7}')),
+            "an isolated group draws its members, not a collapsed box"
+        );
+
+        // The camera is fitted and frames every drawn body: the viewport is
+        // non-empty and covers the filtered content instead of leaving it off
+        // screen now that most of the graph is gone.
+        let camera = app.graph_camera.expect("a fitted camera");
+        assert!(
+            camera.zoom.is_finite() && camera.zoom > 0.0,
+            "non-empty viewport: {camera:?}"
+        );
+        assert!(
+            !scene.nodes.is_empty(),
+            "the isolated scene draws something"
+        );
+        for body in &scene.nodes {
+            assert!(
+                body.x >= -1.0
+                    && body.y >= -1.0
+                    && body.x + body.w <= canvas.0 + 1.0
+                    && body.y + body.h <= canvas.1 + 1.0,
+                "drawn body {:?} lies outside the camera viewport {canvas:?}",
+                body.label
+            );
+        }
+    }
+
+    /// Spec "The g o chord still opens the optimizer": an armed `g` prefix wins
+    /// over the bare `o` isolate binding, even with a group hovered and the
+    /// graph pane focused.
+    #[test]
+    fn g_o_opens_the_optimizer_instead_of_isolating_a_hovered_group() {
+        let mut app = app_with_grouped_graph();
+        app.hovered_group = Some(0);
+
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('o')), &mut app);
+
+        assert!(
+            app.optimizer.is_some(),
+            "the prefix chord still opens the optimizer"
+        );
+        assert_eq!(
+            app.isolated_group, None,
+            "the isolate binding must not fire behind the prefix"
+        );
     }
 
     // --- GPU graph window interaction mapping (task 3.1) --------------------
