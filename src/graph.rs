@@ -777,8 +777,13 @@ fn name_to_first_node(nodes: &[GraphNode]) -> HashMap<&str, NodeId> {
 /// Build one directed edge per (cable, source, sink) combination.
 ///
 /// A cable only produces edges when it has a resolvable source; a sink name
-/// that resolves to no node is skipped rather than panicking.
-fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<GraphEdge> {
+/// that resolves to no node is skipped rather than panicking. The result is
+/// sorted deterministically: `patch.cable_index` is a `HashMap`, whose iteration
+/// order is randomized per process. Edge order feeds the layout solver's f32
+/// spring-force accumulation (non-commutative under rounding) and the renderer's
+/// shared-cell ownership, so a stable order is required for reproducible
+/// layouts (design D9).
+pub(crate) fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<GraphEdge> {
     let mut edges = Vec::new();
     for (cable, entry) in &patch.cable_index {
         for source_name in &entry.sources {
@@ -797,12 +802,6 @@ fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -> Vec<Graph
             }
         }
     }
-    // Sort deterministically: `patch.cable_index` is a HashMap, whose iteration
-    // order is randomized per process. Edge order feeds the layout solver's
-    // f32 spring-force accumulation (non-commutative under rounding) and the
-    // renderer's shared-cell ownership, so a stable order is required for
-    // reproducible layouts (design D9).
-    edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
     edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
     edges
 }
@@ -1090,12 +1089,13 @@ fn validate_influence_outliers(patch: &Patch) -> Vec<TopologyIssue> {
     issues
 }
 
-/// Compute slice index for each node (mirrors `layout::slice_index` but operates on
-/// nodes directly, without needing a full Graph).
+/// Slice index per node: the single implementation behind
+/// `layout::slice_index`, taking nodes directly so the layout layer need not
+/// rebuild a `Graph`. See that function's docs for what the slice means.
 /// - Circuit nodes: slice index = `section_index` (patch order)
 /// - Controller and `InputJack`: fixed left outer slice (0)
 /// - `OutputJack`: fixed right outer slice (max circuit slice + 1)
-fn compute_slice_index(nodes: &[GraphNode]) -> Vec<usize> {
+pub(crate) fn compute_slice_index(nodes: &[GraphNode]) -> Vec<usize> {
     let n = nodes.len();
     let mut slice = vec![0usize; n];
 
@@ -2166,27 +2166,8 @@ mod tests {
 #[cfg(test)]
 mod fixture_tests {
     use super::*;
+    use crate::test_support::fixture_graph;
     use std::path::Path;
-
-    /// Load a fixture and build its graph, deriving clusters from the patch's
-    /// own `banner_groups` exactly as a caller would (task 1.2).
-    fn fixture_graph(name: &str) -> Graph {
-        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{name}"))).unwrap();
-        let clusters: Vec<Cluster> = patch
-            .banner_groups
-            .iter()
-            .map(|g| Cluster {
-                title: g.banner.clone().unwrap_or_default(),
-                section_range: g.section_range.clone(),
-            })
-            .collect();
-        Graph::build_from_patch(
-            &patch,
-            &clusters,
-            &CostModel::default(),
-            &GraphOptions::default(),
-        )
-    }
 
     /// Cluster → `(title, section_range)` snapshot for a graph.
     fn cluster_spans(graph: &Graph) -> Vec<(String, Range<usize>)> {

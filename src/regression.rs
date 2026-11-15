@@ -16,13 +16,14 @@ use crate::handler::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind}
 
 use crate::app::Rect;
 use crate::app::{App, SourceViewMode, ViewType, ViewerFocus};
-use crate::graph::{Cluster, Graph, GraphOptions};
+use crate::graph::Graph;
 use crate::handler::{handle_event, handle_mouse_event};
 use crate::layout::{
     local_resettle, node_world_sizes, seed_positions, solve, SolveKnobs, LOCAL_ITERATIONS,
     LOCAL_RADIUS,
 };
 use crate::patch::{ComponentKind, NodeId, Patch, ShiftGroup};
+use crate::test_support::positions_bbox;
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -1011,37 +1012,6 @@ fn visual_diff_changed_node_marker_snapshot() {
 // graph → solve) so a regression in either the solver or the wiring is
 // caught on representative real patches.
 
-fn solver_fixture(name: &str) -> (Patch, Graph) {
-    let patch = Patch::from_ini_file(Path::new(name)).unwrap();
-    let clusters: Vec<Cluster> = patch
-        .banner_groups
-        .iter()
-        .map(|g| Cluster {
-            title: g.banner.clone().unwrap_or_default(),
-            section_range: g.section_range.clone(),
-        })
-        .collect();
-    let graph = Graph::build_from_patch(
-        &patch,
-        &clusters,
-        &crate::latency::CostModel::default(),
-        &GraphOptions::default(),
-    );
-    (patch, graph)
-}
-
-fn solver_bbox(positions: &[(f32, f32)]) -> (f32, f32) {
-    let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-    let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-    for (x, y) in positions {
-        min_x = min_x.min(*x);
-        max_x = max_x.max(*x);
-        min_y = min_y.min(*y);
-        max_y = max_y.max(*y);
-    }
-    (max_x - min_x, max_y - min_y)
-}
-
 fn solver_dist(a: (f32, f32), b: (f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
 }
@@ -1077,20 +1047,7 @@ fn regression_solver_single_axis_on_real_multi_banner_patch() {
         .expect("write to a String");
     }
     let patch = Patch::from_ini_str(&content, String::from("chain")).unwrap();
-    let clusters: Vec<crate::graph::Cluster> = patch
-        .banner_groups
-        .iter()
-        .map(|g| crate::graph::Cluster {
-            title: g.banner.clone().unwrap_or_default(),
-            section_range: g.section_range.clone(),
-        })
-        .collect();
-    let graph = crate::graph::Graph::build_from_patch(
-        &patch,
-        &clusters,
-        &crate::latency::CostModel::default(),
-        &crate::graph::GraphOptions::default(),
-    );
+    let graph = crate::test_support::graph_for_patch(&patch);
     assert!(
         graph.nodes.len() >= 60,
         "chain should be spec-scale, got {} nodes",
@@ -1100,7 +1057,7 @@ fn regression_solver_single_axis_on_real_multi_banner_patch() {
     for (x, y) in &positions {
         assert!(x.is_finite() && y.is_finite(), "non-finite position");
     }
-    let (w, h) = solver_bbox(&positions);
+    let (w, h) = positions_bbox(&positions);
     assert!(w > 0.0, "degenerate zero-width layout");
     assert!(
         w >= h,
@@ -1113,7 +1070,7 @@ fn regression_solver_single_axis_on_real_multi_banner_patch() {
     // of tracking the raw depth value. The aliased fixture above measured
     // 403,040 — 48× the bound — which is what the guard catches.
     let seed = seed_positions(&graph);
-    let (seed_w, _) = solver_bbox(&seed);
+    let (seed_w, _) = positions_bbox(&seed);
     assert!(
         seed_w <= 8_400.0,
         "force seed must stay proportional to the layer count: {seed_w} > 8,400 \
@@ -1126,7 +1083,7 @@ fn regression_solver_spring_dominance_on_real_cable_chain() {
     // Real cable chain (clocktool → osc → notesequencer → vca) plus an
     // isolated controller node. Spring attraction must keep cable-connected
     // circuits nearer each other than unconnected pairs settle.
-    let (_patch, graph) = solver_fixture("fixtures/graph_edge_kinds.ini");
+    let (_, graph) = crate::test_support::fixture_patch_and_graph("graph_edge_kinds.ini");
     let positions = solve(&graph, &[], SolveKnobs::default());
     let n = graph.nodes.len();
     let edge_pairs: Vec<(usize, usize)> = graph
@@ -1166,7 +1123,7 @@ fn regression_solver_cluster_cohesion_on_real_banner_groups() {
     // mixer, contour}) with real cables. cluster_index_of must map every node
     // into its group; the Mixer members must cohere into a bounded,
     // width-first cluster — not a tall/narrow vertical stripe.
-    let (_patch, graph) = solver_fixture("fixtures/cable_banner_combos.ini");
+    let (_, graph) = crate::test_support::fixture_patch_and_graph("cable_banner_combos.ini");
     for node in &graph.nodes {
         assert!(
             graph.cluster_index_of(node.section_index).is_some(),
@@ -1219,7 +1176,7 @@ fn regression_solver_pinned_tip_stays_fixed_on_real_patch() {
     // exact seed position through a full solve, a dragged node pinned at its
     // drop stays put through a local re-settle, and unpinning lets the tip
     // re-flow.
-    let (_patch, graph) = solver_fixture("fixtures/cable_banner_combos.ini");
+    let (_, graph) = crate::test_support::fixture_patch_and_graph("cable_banner_combos.ini");
     assert!(!graph.nodes.is_empty());
     let tip = 0; // first section in .ini order = the graph's tip
 

@@ -263,25 +263,7 @@ fn derive(patch: &Patch) -> Derived {
     for (id, _) in &nodes {
         first.entry(id.name()).or_insert_with(|| id.clone());
     }
-    let mut edges = Vec::new();
-    for (cable, entry) in &patch.cable_index {
-        for source_name in &entry.sources {
-            let Some(source) = first.get(source_name.as_str()) else {
-                continue;
-            };
-            for (sink_name, _) in &entry.sink_refs {
-                let Some(sink) = first.get(sink_name.as_str()) else {
-                    continue;
-                };
-                edges.push(GraphEdge {
-                    cable: cable.clone(),
-                    source: source.clone(),
-                    sink: sink.clone(),
-                });
-            }
-        }
-    }
-    edges.sort_by(|a, b| (&a.cable, &a.source, &a.sink).cmp(&(&b.cable, &b.source, &b.sink)));
+    let edges = crate::graph::build_edges(patch, &first);
     Derived { nodes, edges }
 }
 

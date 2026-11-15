@@ -1153,40 +1153,7 @@ fn circuit_depth(graph: &Graph) -> Vec<usize> {
 /// outer-column assignment in `assign_columns` so slice springs pull circuits
 /// to their patch-order columns while controllers/jacks stay at fixed edges.
 fn slice_index(graph: &Graph) -> Vec<usize> {
-    let n = graph.nodes.len();
-    let mut slice = vec![0usize; n];
-
-    // Circuit nodes: slice index = section_index (patch order)
-    for (i, node) in graph.nodes.iter().enumerate() {
-        if node.kind == NodeKind::Circuit {
-            slice[i] = node.section_index;
-        }
-    }
-
-    // Find max circuit slice for right outer placement
-    let max_circuit_slice = graph
-        .nodes
-        .iter()
-        .filter(|nd| nd.kind == NodeKind::Circuit)
-        .map(|nd| nd.section_index)
-        .max()
-        .unwrap_or(0);
-
-    // Controller and InputJack: fixed left outer slice (0)
-    // OutputJack: fixed right outer slice (max_circuit_slice + 1)
-    for (i, node) in graph.nodes.iter().enumerate() {
-        match node.kind {
-            NodeKind::Controller | NodeKind::InputJack => {
-                slice[i] = 0;
-            }
-            NodeKind::OutputJack => {
-                slice[i] = max_circuit_slice + 1;
-            }
-            NodeKind::Circuit => {}
-        }
-    }
-
-    slice
+    crate::graph::compute_slice_index(&graph.nodes)
 }
 
 /// Build-time section-hole anchor per node (sections-black-hole-solver D2):
@@ -2038,6 +2005,7 @@ mod tests {
     use crate::graph::{Cluster, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind};
     use crate::latency::CostModel;
     use crate::patch::Patch;
+    use crate::test_support::positions_bbox;
     use std::path::Path;
 
     fn node(name: &str, section_index: usize) -> GraphNode {
@@ -2369,22 +2337,7 @@ mod tests {
         // Two layers with crossed edges: A→D and B→C cross under file order
         // (layer 0 = [A, B], layer 1 = [C, D]) but not under the barycenter
         // order (layer 1 re-orders to [D, C]).
-        let graph = Graph {
-            nodes: vec![node("A", 0), node("B", 1), node("C", 2), node("D", 3)],
-            edges: vec![
-                GraphEdge {
-                    cable: "_X".to_string(),
-                    source: NodeId::circuit("A", 0),
-                    sink: NodeId::circuit("D", 0),
-                },
-                GraphEdge {
-                    cable: "_Y".to_string(),
-                    source: NodeId::circuit("B", 0),
-                    sink: NodeId::circuit("C", 0),
-                },
-            ],
-            ..Default::default()
-        };
+        let graph = crossed_layer_graph();
         let positions = seed_positions(&graph);
         let depth: Vec<usize> = positions
             .iter()
@@ -2699,18 +2652,6 @@ mod tests {
 
     // ── task 1.1 rework: single-axis, spring dominance, cohesion, pins ──────
 
-    fn bbox_span(positions: &[(f32, f32)]) -> (f32, f32) {
-        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-        for (x, y) in positions {
-            min_x = min_x.min(*x);
-            max_x = max_x.max(*x);
-            min_y = min_y.min(*y);
-            max_y = max_y.max(*y);
-        }
-        (max_x - min_x, max_y - min_y)
-    }
-
     #[test]
     fn solve_converges_along_single_axis_not_vertical_stack() {
         // Spec scenario scale: 60 circuits as three parallel chains of 20 — a
@@ -2725,7 +2666,7 @@ mod tests {
         let graph = make_graph(60, &edges);
         let positions = solve(&graph, &[], SolveKnobs::default());
         assert_finite_and_bounded(&positions);
-        let (w, h) = bbox_span(&positions);
+        let (w, h) = positions_bbox(&positions);
         assert!(w > 1000.0, "layout underuses the canvas width: {w}");
         assert!(
             w > 3.0 * h,
@@ -4846,19 +4787,6 @@ mod tests {
         let positions = solve_sections(&single, &[], SolveKnobs::default());
         assert_eq!(positions.len(), 1);
         assert_finite_and_bounded(&positions);
-    }
-
-    /// Bounding box `(width, height)` of a position set.
-    fn positions_bbox(positions: &[(f32, f32)]) -> (f32, f32) {
-        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
-        for (x, y) in positions {
-            min_x = min_x.min(*x);
-            max_x = max_x.max(*x);
-            min_y = min_y.min(*y);
-            max_y = max_y.max(*y);
-        }
-        (max_x - min_x, max_y - min_y)
     }
 
     /// Number of distinct topological-depth layers — the range of the dense

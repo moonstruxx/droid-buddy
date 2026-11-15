@@ -567,34 +567,12 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     use crate::config::LayoutOrdering;
-    use crate::graph::GraphOptions;
-    use crate::graph::{Cluster, GraphEdge, GraphNode};
-    use crate::latency::CostModel;
+    use crate::graph::{GraphEdge, GraphNode};
     use crate::layout::{estimated_widths, node_world_sizes, solve_columns};
-    use crate::patch::{NodeId, Patch};
-
-    /// A `fixtures/` patch's graph, built the way `App::build_graph_state` builds
-    /// it (banner groups → clusters, shared default cost model).
-    fn fixture_graph(name: &str) -> Graph {
-        let patch = Patch::from_ini_file(Path::new(&format!("fixtures/{name}"))).unwrap();
-        let clusters: Vec<Cluster> = patch
-            .banner_groups
-            .iter()
-            .map(|g| Cluster {
-                title: g.banner.clone().unwrap_or_default(),
-                section_range: g.section_range.clone(),
-            })
-            .collect();
-        Graph::build_from_patch(
-            &patch,
-            &clusters,
-            &CostModel::default(),
-            &GraphOptions::default(),
-        )
-    }
+    use crate::patch::NodeId;
+    use crate::test_support::fixture_graph;
 
     /// The two inputs grouping consumes, taken from the real arrangement: the
     /// drawn centres the column solver publishes and the world extents the
