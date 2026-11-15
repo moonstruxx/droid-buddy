@@ -1,0 +1,23 @@
+# Tasks
+
+## 1. Face model
+
+- [ ] 1.1 Add `CellTextPath::Face` and `FACE_HEIGHT_FRACTION` (0.66) to `src/physical.rs`: `label_text_box` gives a face cell the band `h − 0.66 w` beneath the shape, following the `Composed` precedent. Unit tests: the band at a 45, 34, 26 and 17 pt cell holds the step it must (8 pt single line at 45, one 7 pt line at 34, one 6 pt line at 26, no line at 17), the state row is kept only when the band still holds it after the label, and no egui type enters the decision <!-- agent: rusty-engineer.build, depends_on: [], touches: [src/physical.rs] -->
+- [ ] 1.2 Add `CellShape::{Pot, Encoder, Jack}` to `CellSpec` and resolve them in `physical_spec`: `ComponentKind::Knob` → `Pot`, `ComponentKind::Encoder` → `Encoder`, `CvIn`/`CvOut` → `Jack`, on the addressed branch from the kind and on the unaddressed branch from the geometry family (`P`/`E`/`CV`), leaving every other kind and every fader `None`; route `Pot`/`Encoder`/`Jack` to `CellTextPath::Face` in `cell_label_box`. Verify with the existing spec tests plus a cell-for-token check per family <!-- agent: frontend-engineer, depends_on: [1.1], touches: [src/gui/physical.rs] -->
+- [ ] 1.3 Rename `CellSpec::fader_value` to `value_frac` (the element's 0..1 position, read by the fader track and by the pot slot) across `src/gui/physical.rs` and its tests, keeping the fader face tests green <!-- agent: rusty-engineer.fast, depends_on: [], touches: [src/gui/physical.rs] -->
+
+## 2. Painters
+
+- [ ] 2.1 Add `paint_pot` beside `paint_fader`/`paint_composed` and dispatch it from `paint_cell` for `CellShape::Pot | CellShape::Encoder`: washer ring, hex nut, shaft and slot at `value_frac` on a 270° sweep (0 at 7:30, 1 at 4:30), a `0.44 w` base line under the face on `Pot` only, the 18 pt / 10 pt LOD ladder (full → ring+slot → ring+dot), and the existing paused/shift dimming. Verify with the headless paint tests in 3.1 <!-- agent: frontend-engineer, depends_on: [1.2, 1.3], touches: [src/gui/physical.rs] -->
+- [ ] 2.2 Add `paint_jack` and dispatch it for `CellShape::Jack`: bezel ring, filled socket mouth, cross cut into the mouth, the same LOD ladder and dimming <!-- agent: frontend-engineer, depends_on: [1.2], touches: [src/gui/physical.rs] -->
+- [ ] 2.3 Unaddressed faces in `paint_cell`: an unaddressed rotary drops the washer ring, keeps the nut, slot and (on a pot) the base line, and dims; an unaddressed jack keeps its full face dimmed; retire the ring-plus-dot branch for `Knob`/`Encoder` and leave every other unaddressed kind on the plain dim dot <!-- agent: frontend-engineer, depends_on: [2.1, 2.2], touches: [src/gui/physical.rs] -->
+
+## 3. Tests
+
+- [ ] 3.1 Headless egui paint tests for the faces: a 12 mm pot draws ring, nut, shaft, slot and base line at 1:1; an encoder draws the same face with no base line; both converge to ring+dot at the rack fit and keep their footprint; the slot angle follows `value_frac` at 0, 0.5 and 1 and moves by one wheel step; a jack draws bezel, mouth and cross; the state row appears only where the band holds it; the `◀`/`▶` marker still paints on a jack cell in `mono` <!-- agent: horst-engineer.build, depends_on: [2.3], touches: [src/gui/physical.rs] -->
+- [ ] 3.2 Cross-layer regression stories: the labels-fit zoom, the `auto` annotation set and the fit clamp on `fixtures/physical_multirow_rack.ini` plus an inventoried master relock to the new band, and the published element hit rects are identical to the pre-change rects for the same patch <!-- agent: horst-engineer.build, depends_on: [3.1], touches: [src/regression.rs] -->
+
+## 4. Documentation and gates
+
+- [ ] 4.1 Update `docs/labels.md` (the pot and jack label band) and `docs/views.md` (the symbols and the LOD ladder), then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's skills, and regenerate `docs/assets/module-ui.png` and `docs/assets/module-ui-labels.png` <!-- agent: devops-engineer.build, depends_on: [3.2], touches: [docs/labels.md, docs/views.md, ARCHITECTURE.md, DESIGN.md, docs/assets/] -->
+- [ ] 4.2 Run `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked` and `cargo run --release -- --self-test`, recording each exit status <!-- agent: devops-engineer.fast, depends_on: [4.1], touches: [] -->
