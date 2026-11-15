@@ -24,13 +24,13 @@
 ## 5. Interaction
 
 - [x] 5.1 In `src/handler.rs`, bind `o` (isolate), `Enter` (expand or collapse) and `Shift+O` (toggle grouping) in the graph-pane handler, route world-space group hover and click through the existing pointer path, and publish the hovered group for the painter <!-- agent: rusty-engineer.build, depends_on: [3.1, 4.1], touches: [src/handler.rs] -->
-- [ ] 5.2 Render the hover content peek in `src/gui/graph.rs`: the members' shared label prefix when one exists, otherwise the first eight labels plus `…+N` <!-- agent: frontend-engineer, depends_on: [5.1], touches: [src/gui/graph.rs] -->
+- [x] 5.2 Render the hover content peek in `src/gui/graph.rs`: the members' shared label prefix when one exists, otherwise the first eight labels plus `…+N` <!-- agent: frontend-engineer, depends_on: [5.1], touches: [src/gui/graph.rs] -->
 - [ ] 5.3 Tests: each key dispatches; `o` filters the scene and refits the camera; `o` and `Enter` without a hover are silent no-ops; the popover text follows the peek rule <!-- agent: horst-engineer.build, depends_on: [5.1, 5.2], touches: [src/handler.rs, src/gui/graph.rs] -->
-- [ ] 5.4 Add the three rows to the graph help table in `src/help.rs` and to `docs/keys.md` <!-- agent: rusty-engineer.fast, depends_on: [5.1], touches: [src/help.rs, docs/keys.md] -->
+- [x] 5.4 Add the three rows to the graph help table in `src/help.rs` and to `docs/keys.md` <!-- agent: rusty-engineer.fast, depends_on: [5.1], touches: [src/help.rs, docs/keys.md] -->
 
 ## 6. Group-level highlights
 
-- [ ] 6.1 Map the existing highlight sources onto groups in the grouped view: selection, diff classification, topology errors, the influence wash and the dependency filter light a group when any member matches, under the topology-error > diff > influence > cable-kind precedence <!-- agent: frontend-engineer, depends_on: [4.1, 5.1], touches: [src/gui/graph.rs, src/app.rs] -->
+- [x] 6.1 Map the existing highlight sources onto groups in the grouped view: selection, diff classification, topology errors, the influence wash and the dependency filter light a group when any member matches, under the topology-error > diff > influence > cable-kind precedence <!-- agent: frontend-engineer, depends_on: [4.1, 5.1], touches: [src/gui/graph.rs, src/app.rs] -->
 - [ ] 6.2 Tests: a group lights when a member is selected, diffed, or carries a topology error; the precedence order holds <!-- agent: horst-engineer.build, depends_on: [6.1], touches: [src/gui/graph.rs] -->
 
 ## 7. Documentation and gates
