@@ -46,7 +46,7 @@ The panel is 160 pt wide, its height `160 × rack_h / rack_w + 8` clamped to 56�
 
 ### D5 — Centring is a pure offset mutation
 
-`c` needs no zoom change and no solver: resolve the focused token to its hardware index, read its element rect, and set `offset = pane_centre − rect_centre` at the current zoom. With nothing focused it centres the rack. Both are pure `App` mutations over `physical_pane_rect`, so they are unit-testable without a painter and they latch the view exactly as a pan does.
+`c` needs no zoom change and no solver: resolve the focused token to its hardware index, read its element rect, and set `offset = rect_centre − pane_centre` at the current zoom, because the pane draws `screen = world − offset`. With nothing focused it centres the rack. Both are pure `App` mutations over `physical_pane_rect`, so they are unit-testable without a painter and they latch the view exactly as a pan does.
 
 ### D6 — No new token, no new title segment
 
