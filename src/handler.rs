@@ -1434,35 +1434,70 @@ fn handle_physical_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     None
 }
 
-fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
-    Some(match key.code {
+/// Terminal key table: every shared/global key that no overlay or pane step
+/// claimed.
+///
+/// A chain of per-surface steps using the same `Option<quit>` protocol as
+/// [`handle_event`], in the original arm order. This table is terminal, so its
+/// last step answers whatever reaches it and the caller never falls through.
+fn handle_shared_key(key: &KeyEvent, app: &mut App) -> bool {
+    let steps: [KeyHandler; 8] = [
+        handle_session_key,
+        handle_app_global_key,
+        handle_physical_surface_key,
+        handle_prefix_and_diff_key,
+        handle_shift_and_modifier_key,
+        handle_layout_adjust_key,
+        handle_element_key,
+        handle_navigation_key,
+    ];
+    for step in steps {
+        if let Some(quit) = step(key, app) {
+            return quit;
+        }
+    }
+    false
+}
+
+/// Quit and upload: the two paths that end the session or hand the patch to
+/// hardware.
+fn handle_session_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
         KeyCode::Char('q') => {
             // Quitting never orphans a background send: reap the child now
             // (window-close quits are covered by `UploadSend`'s `Drop`).
             app.abort_upload_send();
-            true
+            Some(true)
         }
         KeyCode::Char('c') if key.modifiers.ctrl => {
             app.abort_upload_send();
-            true
+            Some(true)
         }
         KeyCode::Char('U') => {
             // `U` (Shift+u, like `R`/`Shift+c`) opens the upload confirm
             // modal for the in-memory patch; `y`/`n` inside it send/cancel.
             app.open_upload_modal();
-            false
+            Some(false)
         }
+        _ => None,
+    }
+}
+
+/// App-wide switches that are not tied to one pane: the file picker, the
+/// global processing pause, and the focused pane's view carousel.
+fn handle_app_global_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
         KeyCode::Char('l') => {
             // Opens the picker whether or not a patch is already loaded,
             // so a loaded patch can be swapped for a different one. The dir
             // enters through `enter_picker_dir` so the listing starts unfiltered.
             app.showing_picker = true;
             app.enter_picker_dir(std::env::current_dir().unwrap_or_default());
-            false
+            Some(false)
         }
         KeyCode::Char('p') => {
             app.toggle_processing_pause();
-            false
+            Some(false)
         }
         KeyCode::Char('r') => {
             // Carousel key: rotate the focused pane's view through the views
@@ -1470,8 +1505,16 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // source viewer/optimizer for small). No-op on an empty pane and
             // for the optimizer pane, which owns `r` (restore) above.
             app.cycle_view_in_slot(true);
-            false
+            Some(false)
         }
+        _ => None,
+    }
+}
+
+/// The module UI's presentation keys that no pane table claims: the skeleton
+/// toggle, its two fits, and the label-presentation cycle.
+fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
         KeyCode::Char('s') => {
             // `s` opens/focuses the Physical tile slot (design D12). While
             // the Physical slot holds focus, `s` toggles the skeleton
@@ -1489,15 +1532,65 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             } else {
                 app.open_view(ViewType::Physical);
             }
-            false
+            Some(false)
         }
+        KeyCode::Char('f') if app.view_focused(ViewType::Physical) => {
+            // module-ui-label-fit D8: `f` performs the *labels* fit and centres
+            // the module UI, clearing the manual-navigation latch. Free here
+            // because the graph's `f` is graph-scoped and returns in the arm
+            // above.
+            fit_physical_pane(app, false);
+            Some(false)
+        }
+        KeyCode::Char('F') if app.view_focused(ViewType::Physical) => {
+            // module-ui-label-fit D8: `Shift+F` performs the *rack* fit — the
+            // whole-rack overview beside `f`'s readable-by-default label fit.
+            // Shifted glyphs arrive as their symbol, and the file picker owns
+            // `F` only inside its own overlay (which returns before this arm).
+            fit_physical_pane(app, true);
+            Some(false)
+        }
+        KeyCode::Char('a') if app.view_focused(ViewType::Physical) => {
+            // module-ui-labels D6/D10: `a` cycles the label presentation
+            // off -> auto -> on while the module UI pane holds focus, and
+            // reports the new mode. Free here because the graph's `a`
+            // (arrangement cycle) is graph-scoped and returns in the arm above;
+            // every other pane keeps its existing `a` meaning.
+            app.label_presentation = app.label_presentation.next();
+            app.status_message = format!("Labels: {}", app.label_presentation.as_str());
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// Run one of the module UI's two fits and report the rack/zoom status
+/// segment when it ran. `whole_rack` selects the `Shift+F` rack overview over
+/// `f`'s labels fit; both no-op while the pane has no measured size.
+fn fit_physical_pane(app: &mut App, whole_rack: bool) {
+    let Some((w, h)) = app.physical_pane_size() else {
+        return;
+    };
+    let fitted = if whole_rack {
+        app.fit_physical_view_rack(w, h)
+    } else {
+        app.fit_physical_view(w, h)
+    };
+    if fitted {
+        app.status_message = app.physical_status_hint().unwrap_or_default();
+    }
+}
+
+/// The vim-style `g` prefix and the diff toggle that follows it.
+fn handle_prefix_and_diff_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
         KeyCode::Char('g') => {
             // Enter prefix mode; a repeated `g` re-arms the timer via the
             // cancel-and-fall-through path above.
             app.prefix = Some(PrefixState {
                 started: Instant::now(),
             });
-            false
+            Some(false)
         }
         KeyCode::Char('d') if key.modifiers.is_none() => {
             if app.diff_report.is_some() {
@@ -1523,27 +1616,25 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                     app.status_message = String::from("Diff hidden");
                 }
             }
-            false
+            Some(false)
         }
-        KeyCode::Char('1') => {
-            app.active_shift = Some(ShiftGroup::Group1);
-            app.status_message = String::from("Shift 1 active");
-            false
-        }
-        KeyCode::Char('2') => {
-            app.active_shift = Some(ShiftGroup::Group2);
-            app.status_message = String::from("Shift 2 active");
-            false
-        }
-        KeyCode::Char('3') => {
-            app.active_shift = Some(ShiftGroup::Group3);
-            app.status_message = String::from("Shift 3 active");
-            false
-        }
-        KeyCode::Char('4') => {
-            app.active_shift = Some(ShiftGroup::Group4);
-            app.status_message = String::from("Shift 4 active");
-            false
+        _ => None,
+    }
+}
+
+/// Shift groups and the modifier latch: the two "which elements does this
+/// apply to" switches.
+fn handle_shift_and_modifier_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
+        KeyCode::Char(digit @ '1'..='4') => {
+            app.active_shift = Some(match digit {
+                '1' => ShiftGroup::Group1,
+                '2' => ShiftGroup::Group2,
+                '3' => ShiftGroup::Group3,
+                _ => ShiftGroup::Group4,
+            });
+            app.status_message = format!("Shift {digit} active");
+            Some(false)
         }
         KeyCode::Char('m') => {
             // Modifier latch alias (design D): `m` toggles the single-var
@@ -1572,8 +1663,15 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                     app.status_message = String::from("No component to latch");
                 }
             }
-            false
+            Some(false)
         }
+        _ => None,
+    }
+}
+
+/// Boundary and scale keys: the two split ratios and the panel scale ladder.
+fn handle_layout_adjust_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
         KeyCode::Char('[' | ']') => {
             // Boundary keys (spec "Adaptive pane layout"): `Alt+[`/`Alt+]`
             // move the small-pane boundary, plain `[`/`]` the left/right big
@@ -1589,117 +1687,118 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             } else {
                 adjust_big_boundary(app, delta)
             };
-            false
-        }
-        KeyCode::Char('f') if app.view_focused(ViewType::Physical) => {
-            // module-ui-label-fit D8: `f` performs the *labels* fit and centres
-            // the module UI, clearing the manual-navigation latch. Free here
-            // because the graph's `f` is graph-scoped and returns in the arm
-            // above.
-            if let Some((w, h)) = app.physical_pane_size() {
-                if app.fit_physical_view(w, h) {
-                    app.status_message = app.physical_status_hint().unwrap_or_default();
-                }
-            }
-            false
-        }
-        KeyCode::Char('F') if app.view_focused(ViewType::Physical) => {
-            // module-ui-label-fit D8: `Shift+F` performs the *rack* fit — the
-            // whole-rack overview beside `f`'s readable-by-default label fit.
-            // Shifted glyphs arrive as their symbol, and the file picker owns
-            // `F` only inside its own overlay (which returns before this arm).
-            if let Some((w, h)) = app.physical_pane_size() {
-                if app.fit_physical_view_rack(w, h) {
-                    app.status_message = app.physical_status_hint().unwrap_or_default();
-                }
-            }
-            false
-        }
-        KeyCode::Char('a') if app.view_focused(ViewType::Physical) => {
-            // module-ui-labels D6/D10: `a` cycles the label presentation
-            // off -> auto -> on while the module UI pane holds focus, and
-            // reports the new mode. Free here because the graph's `a`
-            // (arrangement cycle) is graph-scoped and returns in the arm above;
-            // every other pane keeps its existing `a` meaning.
-            app.label_presentation = app.label_presentation.next();
-            app.status_message = format!("Labels: {}", app.label_presentation.as_str());
-            false
+            Some(false)
         }
         KeyCode::Char('+' | '-') => {
             // Zoom family (change `tiled-window-manager`, 4.2): plain scales
             // the panels pane; `Shift` would scale the other pane, which the
             // graph arm above already owns while the graph is open.
             if key.modifiers.shift {
-                return Some(false);
+                return None;
             }
             cycle_panel_scale(app, matches!(key.code, KeyCode::Char('+')));
-            false
+            Some(false)
         }
-        KeyCode::Enter | KeyCode::Char(' ') => {
-            // LED chord (button-led-composition): Ctrl+Enter toggles the
-            // hovered element's folded LED, never the element itself. A
-            // silent no-op without a folded LED or while paused.
-            if key.modifiers.ctrl && matches!(key.code, KeyCode::Enter) {
-                if let Some(idx) = app.hovered_component {
-                    if !app.processing_paused {
-                        // Silent no-op unless task-3.1's resolver binds a folded
-                        // LED to the hovered element (explicit `led` pairing,
-                        // else the controller's positional default) — the same
-                        // binding the painter folds, so chord and face agree.
-                        let led_id = app
-                            .patch
-                            .as_ref()
-                            .and_then(|p| p.hw_components.get(idx))
-                            .and_then(crate::patch::folded_led_for_element);
-                        if let Some(led_id) = led_id {
-                            if let Some(patch) = &mut app.patch {
-                                if let Some(led_idx) =
-                                    patch.hw_components.iter().position(|c| c.id == led_id)
-                                {
-                                    if let Some(led) = patch.hw_components.get_mut(led_idx) {
-                                        toggle_component(led);
-                                        let state = match &led.state {
-                                            ComponentState::On => "On",
-                                            ComponentState::Led { value, .. } if *value > 0.5 => {
-                                                "On"
-                                            }
-                                            _ => "Off",
-                                        };
-                                        app.status_message = format!("LED {}: {}", led.id, state);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                return Some(false);
-            }
-            if let Some(idx) = app.hovered_component {
-                // Capture token id before mutating patch to avoid borrow conflict.
-                let token_id = app
-                    .patch
-                    .as_ref()
-                    .and_then(|p| p.hw_components.get(idx))
-                    .map(|c| c.id.clone());
-                if let Some(token) = token_id {
-                    if !app.processing_paused {
-                        if let Some(patch) = &mut app.patch {
-                            if let Some(comp) = patch.hw_components.get_mut(idx) {
-                                toggle_component(comp);
-                                app.status_message = format!("Toggled: {}", comp.label);
-                            }
-                        }
-                    }
-                    // Commit interaction: toggle AND select. Selection jumps
-                    // source_scroll to first occurrence via App::select_component.
-                    // Jump happens even while viewer is closed so reopen lands
-                    // at the correct line (initial-position rule reapplies).
-                    // While paused the toggle is skipped but selection still works.
-                    app.select_component(token);
-                }
-            }
-            false
+        _ => None,
+    }
+}
+
+/// The element chord: `Ctrl+Enter` toggles only the hovered element's folded
+/// LED, `Enter`/`Space` toggles the element and selects it.
+fn handle_element_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    if !matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')) {
+        return None;
+    }
+    // LED chord (button-led-composition): Ctrl+Enter toggles the hovered
+    // element's folded LED, never the element itself.
+    if key.modifiers.ctrl && matches!(key.code, KeyCode::Enter) {
+        toggle_folded_led(app);
+    } else {
+        toggle_hovered_element(app);
+    }
+    Some(false)
+}
+
+/// The LED chord's action. A silent no-op without a hovered element, without a
+/// folded LED bound to it (task-3.1's resolver: explicit `led` pairing, else the
+/// controller's positional default, the same binding the painter folds), or
+/// while processing is paused.
+fn toggle_folded_led(app: &mut App) {
+    let Some(idx) = app.hovered_component else {
+        return;
+    };
+    if app.processing_paused {
+        return;
+    }
+    // Resolve on the borrowed patch and carry only the LED's index out, so the
+    // mutable pass below cannot alias the immutable one.
+    let led_idx = {
+        let Some(patch) = app.patch.as_ref() else {
+            return;
+        };
+        let Some(component) = patch.hw_components.get(idx) else {
+            return;
+        };
+        let Some(led_id) = crate::patch::folded_led_for_element(component) else {
+            return;
+        };
+        let Some(led_idx) = patch.hw_components.iter().position(|c| c.id == led_id) else {
+            return;
+        };
+        led_idx
+    };
+    let Some(patch) = app.patch.as_mut() else {
+        return;
+    };
+    let Some(led) = patch.hw_components.get_mut(led_idx) else {
+        return;
+    };
+    toggle_component(led);
+    let state = match &led.state {
+        ComponentState::On => "On",
+        ComponentState::Led { value, .. } if *value > 0.5 => "On",
+        _ => "Off",
+    };
+    app.status_message = format!("LED {}: {}", led.id, state);
+}
+
+/// `Enter`/`Space`: toggle the hovered element's state and select it.
+///
+/// The selection commits even while processing is paused (the pause blocks the
+/// toggle, not the jump) and even with the source pane closed, so reopening it
+/// lands on the element's line.
+fn toggle_hovered_element(app: &mut App) {
+    let Some(idx) = app.hovered_component else {
+        return;
+    };
+    let Some(token) = app
+        .patch
+        .as_ref()
+        .and_then(|p| p.hw_components.get(idx))
+        .map(|c| c.id.clone())
+    else {
+        return;
+    };
+    if !app.processing_paused {
+        let toggled = app
+            .patch
+            .as_mut()
+            .and_then(|patch| patch.hw_components.get_mut(idx))
+            .map(|comp| {
+                toggle_component(comp);
+                comp.label.clone()
+            });
+        if let Some(label) = toggled {
+            app.status_message = format!("Toggled: {label}");
         }
+    }
+    app.select_component(token);
+}
+
+/// Movement: `j`/`k` always navigate; the arrows pan the module UI while it
+/// overflows and fall back to navigation when the rack fits.
+fn handle_navigation_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
+    match key.code {
         KeyCode::Up => {
             // Physical-view pan: arrows pan the rack only while the physical
             // pane holds focus (spec "Keys route to the focused view"), and
@@ -1709,40 +1808,40 @@ fn handle_shared_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 return Some(false);
             }
             navigate(app, -1);
-            false
+            Some(false)
         }
         KeyCode::Down => {
             if app.view_focused(ViewType::Physical) && app.physical_pan_if_overflow(0, 1) {
                 return Some(false);
             }
             navigate(app, 1);
-            false
+            Some(false)
         }
         KeyCode::Left => {
             if app.view_focused(ViewType::Physical) {
                 app.physical_pan_if_overflow(-1, 0);
             }
-            false
+            Some(false)
         }
         KeyCode::Right => {
             if app.view_focused(ViewType::Physical) {
                 app.physical_pan_if_overflow(1, 0);
             }
-            false
+            Some(false)
         }
         KeyCode::Char('k') => {
             navigate(app, -1);
-            false
+            Some(false)
         }
         KeyCode::Char('j') => {
             navigate(app, 1);
-            false
+            Some(false)
         }
         // Unreachable Esc: the focus-routing Esc above handles every Esc that
         // reaches this point (the diff/filter/select-menu/prefix/maximize paths
         // all return earlier), so it shares the wildcard's no-op fallback.
-        _ => false,
-    })
+        _ => None,
+    }
 }
 
 /// One step of the priority chain: `None` when the key is not that surface's,
@@ -1759,7 +1858,8 @@ type KeyHandler = fn(&KeyEvent, &mut App) -> Option<bool>;
 /// Handler protocol: every `handle_*_key` helper returns `Option<bool>` —
 /// `None` means "not this surface's key, fall through to the next step", and
 /// `Some(quit)` means the key was handled and this function returns `quit`.
-/// `handle_shared_key` is the terminal table, so it always answers `Some`.
+/// `handle_shared_key` is the terminal table: it composes its own per-surface
+/// steps and answers the key that survives the chain above.
 pub fn handle_event(key: &KeyEvent, app: &mut App) -> bool {
     // Reap a finished background upload first (non-blocking `try_wait`): the
     // verdict lands in the status line on the next event after completion.
@@ -1803,7 +1903,7 @@ pub fn handle_event(key: &KeyEvent, app: &mut App) -> bool {
 
     // Shared/global table (`q`, Ctrl+C, `U`, `l`, digits, ...): terminal, so it
     // answers every key that reached it.
-    handle_shared_key(key, app).unwrap_or(false)
+    handle_shared_key(key, app)
 }
 
 /// Handle mouse input: hover highlight, click-to-toggle, and scroll to
