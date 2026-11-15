@@ -716,6 +716,11 @@ pub(crate) fn paint_band(
     scene: Option<&SceneSpec>,
     selected: &[usize],
 ) {
+    // module-ui-navigation D3: the map's panel is per-frame geometry like the
+    // hit rects below, so it is cleared here and republished only by a pane that
+    // actually draws a map. A stale panel could otherwise claim a press over a
+    // surface that is no longer on screen.
+    app.physical_minimap_panel_egui = None;
     let band = to_cell_rect(ui.max_rect());
     if band_has_views(app, band) {
         paint_panes(app, ui, scene, selected);
@@ -803,6 +808,20 @@ fn paint_panes(app: &mut App, ui: &mut egui::Ui, scene: Option<&SceneSpec>, sele
                         .filter_map(|c| c.component_index.map(|i| (i, to_cell_rect(c.rect))))
                         .collect();
                 }
+                // module-ui-navigation D3: publish the map's panel rect, which
+                // the pointer path claims before element hit-testing. `None`
+                // whenever this frame drew no map (performance view, no rack, a
+                // degenerate one), so the pointer path can never claim a panel
+                // that is not painted.
+                app.physical_minimap_panel_egui = spec
+                    .as_ref()
+                    .and_then(|spec| spec.minimap.as_ref())
+                    .map(|minimap| {
+                        egui::Rect::from_min_size(
+                            egui::pos2(minimap.panel.x, minimap.panel.y),
+                            egui::vec2(minimap.panel.w, minimap.panel.h),
+                        )
+                    });
                 let painter = ui.painter().with_clip_rect(rect);
                 let title = module_ui_pane_title(app, rect);
                 draw_pane_frame(&painter, rect, focused, &title, t);

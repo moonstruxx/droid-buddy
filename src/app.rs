@@ -1110,6 +1110,14 @@ pub struct App {
     /// not there. Mirrors `graph_minimap_panel_egui`; window geometry, so it is
     /// not reset on patch load, like `physical_pane_rect`.
     pub physical_minimap_panel_egui: Option<egui::Rect>,
+    /// The live minimap marquee, `(anchor_x, anchor_y, current_x, current_y)` in
+    /// window points, or `None` while no drag on the map is down
+    /// (module-ui-navigation D2/D5). The handler owns it — a press inside the
+    /// published panel starts it, the pointer moves its current corner, release
+    /// or `Esc` ends it — and the painter only reads it, so the marquee the user
+    /// sees is always the gesture the handler is tracking. Not reset on patch
+    /// load: the next frame's pointer state owns it.
+    pub physical_minimap_drag: Option<(f32, f32, f32, f32)>,
     /// The case/rack definition the physical view packs into (design D12).
     /// Seeded from `[physical.rack]` at startup (main.rs); empty rows mean
     /// "no rack configured" and `RackLayout::pack` materializes the default
@@ -1342,6 +1350,7 @@ impl App {
             physical_fit_pending: true,
             physical_pane_rect: None,
             physical_minimap_panel_egui: None,
+            physical_minimap_drag: None,
             physical_rack_spec: crate::physical::RackSpec::default(),
             graph_window_request: GraphWindowRequest::default(),
             active_modifier_var: None,
