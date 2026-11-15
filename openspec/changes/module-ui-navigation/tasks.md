@@ -18,5 +18,5 @@
 
 ## 4. Documentation and gates
 
-- [ ] 4.1 Document the map and the two keys in `docs/views.md` § Module UI and `docs/keys.md`, then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's generator skills and bless `docs/assets/module-ui.png` with `tools/screenshots/render.sh --bless --only module-ui` <!-- agent: devops-engineer.build, depends_on: [3.3], touches: [docs/views.md, docs/keys.md, DESIGN.md, ARCHITECTURE.md, docs/assets/] -->
+- [x] 4.1 Document the map and the two keys in `docs/views.md` § Module UI and `docs/keys.md`, then regenerate `ARCHITECTURE.md` and `DESIGN.md` with the project's generator skills and bless `docs/assets/module-ui.png` with `tools/screenshots/render.sh --bless --only module-ui` <!-- agent: devops-engineer.build, depends_on: [3.3], touches: [docs/views.md, docs/keys.md, DESIGN.md, ARCHITECTURE.md, docs/assets/] -->
 - [ ] 4.2 Run `cargo fmt --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked` and `cargo run --release -- --self-test`, recording each exit status <!-- agent: devops-engineer.fast, depends_on: [4.1], touches: [] -->

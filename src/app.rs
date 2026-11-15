@@ -9528,7 +9528,7 @@ mod tests {
     /// publishes nothing on its own.
     #[test]
     fn physical_minimap_is_none_before_the_first_frame() {
-        let mut app = App::new();
+        let app = App::new();
         assert!(
             app.physical_minimap.is_none(),
             "a fresh app has painted nothing"
