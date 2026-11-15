@@ -770,9 +770,10 @@ mod tests {
         );
     }
 
-    /// Every semantic token still in the palette, in struct order. The single
-    /// enumeration the totality tests share: the `rgb()` determinism test and the
-    /// egui-bridge opacity test (task 2.7).
+    /// Every semantic token in the palette, in struct order. The single
+    /// enumeration the totality tests share: the `rgb()` determinism test, the
+    /// egui-bridge opacity test (task 2.7), and the terminal-palette Reset
+    /// sweep. A token missing here is a token no sweep ever proves.
     fn every_token(t: &Theme) -> Vec<(&'static str, Color)> {
         vec![
             ("button", t.button),
@@ -782,6 +783,8 @@ mod tests {
             ("cv_out", t.cv_out),
             ("led", t.led),
             ("fader_led_bar", t.fader_led_bar),
+            ("fader_slot", t.fader_slot),
+            ("led_ring", t.led_ring),
             ("shift1", t.shift1),
             ("shift2", t.shift2),
             ("shift3", t.shift3),
@@ -842,6 +845,10 @@ mod tests {
             ("pane_unfocused_border", t.pane_unfocused_border),
             ("optimizer_selected_bg", t.optimizer_selected_bg),
             ("optimizer_weight", t.optimizer_weight),
+            ("graph_node_diff_before", t.graph_node_diff_before),
+            ("graph_node_diff_after", t.graph_node_diff_after),
+            ("graph_edge_diff_before", t.graph_edge_diff_before),
+            ("graph_edge_diff_after", t.graph_edge_diff_after),
         ]
     }
 

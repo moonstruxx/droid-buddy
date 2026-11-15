@@ -609,6 +609,18 @@ impl Graph {
             .collect()
     }
 
+    /// A graph of `nodes` and `edges` with every derived slot empty: no
+    /// clusters, validation, latency, highlight sets, select state or section
+    /// holes. The shape a filtered view solves as its own layout — the members
+    /// cloned out of the full graph inherit none of its metadata.
+    pub(crate) fn from_parts(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> Self {
+        Self {
+            nodes,
+            edges,
+            ..Self::default()
+        }
+    }
+
     /// Build an induced subgraph from a set of node indices (e.g. influenced
     /// nodes). Keeps only edges with both endpoints in the set and clusters
     /// that intersect the member set. Returns the subset graph with node/edge
@@ -1800,17 +1812,7 @@ mod tests {
             dep_edge("_r", NodeId::circuit("root", 0), NodeId::circuit("c", 0)),
             dep_edge("_c", NodeId::circuit("c", 0), NodeId::circuit("root", 0)),
         ];
-        Graph {
-            nodes,
-            edges,
-            clusters: Vec::new(),
-            validation: Vec::new(),
-            latency: None,
-            highlighted_nodes: HashSet::new(),
-            highlighted_edges: HashSet::new(),
-            not_selected: HashSet::new(),
-            section_holes: Vec::new(),
-        }
+        Graph::from_parts(nodes, edges)
     }
 
     fn deps_of(graph: &Graph, root: &NodeId) -> Vec<NodeId> {

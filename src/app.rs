@@ -207,9 +207,7 @@ pub(crate) fn labels_file_path_from(
 use crate::diff::DiffReport;
 use crate::events::{Event, EventBus};
 use crate::favorites::FavoritesStore;
-use crate::graph::{
-    clusters_from_patch, Graph, GraphEdge, GraphNode, GraphOptions, NodeId, NodeKind,
-};
+use crate::graph::{clusters_from_patch, Graph, GraphOptions, NodeId, NodeKind};
 use crate::graph_render::{GraphCamera, WorldBounds};
 use crate::latency::CostModel;
 
@@ -3954,7 +3952,12 @@ impl App {
         self.graph_grouping.group_enabled
     }
 
-    pub fn build_graph_state(&mut self) {
+    /// Build the graph from the current patch and solve it with the current
+    /// pin set, ready to store on `self`. `seed_tip` anchors the tip before the
+    /// solve: an open seeds it so it never drifts (design D3), a rebuild must
+    /// not, so an explicit unpin of the tip survives until the next open
+    /// (design D7). Otherwise the two paths are the same build-and-solve.
+    fn build_and_solve_graph(&mut self, seed_tip: bool) -> (Option<Graph>, Vec<(f32, f32)>) {
         let graph = match &self.patch {
             Some(patch) => {
                 let clusters = clusters_from_patch(patch);
@@ -3969,14 +3972,19 @@ impl App {
         };
         let positions = match graph.as_ref() {
             Some(g) => {
-                // The tip is the layout's left anchor (design D3): seed it
-                // before the first solve so it never drifts.
-                self.seed_tip_pin(g);
+                if seed_tip {
+                    self.seed_tip_pin(g);
+                }
                 let pins = self.pinned_indices(g);
                 self.solve_graph_positions(g, &pins)
             }
             None => Vec::new(),
         };
+        (graph, positions)
+    }
+
+    pub fn build_graph_state(&mut self) {
+        let (graph, positions) = self.build_and_solve_graph(true);
         self.graph = graph;
         self.graph_positions = positions;
         // The grouping answer is derived from this graph and these positions, so
@@ -4093,28 +4101,7 @@ impl App {
     /// pane. Used after a per-circuit toggle so the renderer reflects the new
     /// disabled state while staying on the surface.
     pub fn rebuild_graph(&mut self) {
-        let graph = match &self.patch {
-            Some(patch) => {
-                let clusters = clusters_from_patch(patch);
-                Some(Graph::build_from_patch(
-                    patch,
-                    &clusters,
-                    &self.cost_model,
-                    &self.select_graph_options(),
-                ))
-            }
-            None => Some(Graph::default()),
-        };
-        let positions = match graph.as_ref() {
-            Some(g) => {
-                // Re-solve honors the current pin set. The tip is NOT re-seeded
-                // here so an explicit unpin (`p` on the tip) survives this
-                // rebuild and re-flows until the graph reopens (design D7).
-                let pins = self.pinned_indices(g);
-                self.solve_graph_positions(g, &pins)
-            }
-            None => Vec::new(),
-        };
+        let (graph, positions) = self.build_and_solve_graph(false);
         self.graph = graph;
         self.graph_positions = positions;
         // A rebuild is a new graph and a new solve: the cached grouping names
@@ -4295,25 +4282,16 @@ impl App {
         member_edges: &[usize],
     ) -> Option<(Graph, Vec<usize>)> {
         let graph = self.graph.as_ref()?;
-        let nodes: Vec<GraphNode> = member_nodes
-            .iter()
-            .map(|&i| graph.nodes[i].clone())
-            .collect();
-        let edges: Vec<GraphEdge> = member_edges
-            .iter()
-            .map(|&i| graph.edges[i].clone())
-            .collect();
-        let subset = Graph {
-            nodes,
-            edges,
-            clusters: Vec::new(),
-            validation: Vec::new(),
-            latency: None,
-            highlighted_nodes: HashSet::new(),
-            highlighted_edges: HashSet::new(),
-            not_selected: HashSet::new(),
-            section_holes: Vec::new(),
-        };
+        let subset = Graph::from_parts(
+            member_nodes
+                .iter()
+                .map(|&i| graph.nodes[i].clone())
+                .collect(),
+            member_edges
+                .iter()
+                .map(|&i| graph.edges[i].clone())
+                .collect(),
+        );
         let pins: Vec<usize> = member_nodes
             .iter()
             .enumerate()
@@ -4601,17 +4579,10 @@ impl App {
         }
         let member_set: HashSet<usize> = members.iter().copied().collect();
         let edges = graph.internal_edges(&member_set);
-        let subset = Graph {
-            nodes: members.iter().map(|&i| graph.nodes[i].clone()).collect(),
-            edges: edges.iter().map(|&i| graph.edges[i].clone()).collect(),
-            clusters: Vec::new(),
-            validation: Vec::new(),
-            latency: None,
-            highlighted_nodes: HashSet::new(),
-            highlighted_edges: HashSet::new(),
-            not_selected: HashSet::new(),
-            section_holes: Vec::new(),
-        };
+        let subset = Graph::from_parts(
+            members.iter().map(|&i| graph.nodes[i].clone()).collect(),
+            edges.iter().map(|&i| graph.edges[i].clone()).collect(),
+        );
         let pins: Vec<usize> = members
             .iter()
             .enumerate()
@@ -5127,6 +5098,7 @@ mod tests {
     use super::*;
     use crate::graph_group::ViewNode;
     use crate::patch::Patch;
+    use crate::test_support::rack_inventory;
 
     #[test]
     fn new_app_has_graph_defaults_closed() {
@@ -9262,24 +9234,10 @@ mod tests {
 
     // ---- module-ui-rack-inventory 2.3: an inventory with no patch ----
 
-    /// A one-row `[physical.rack]` inventory naming `modules` left to right —
-    /// the shape the config layer hands the app.
-    fn inventory_rack(modules: &[&str]) -> crate::physical::RackSpec {
-        crate::physical::RackSpec {
-            rows: vec![crate::physical::RackRow {
-                he: 3,
-                hp: 84.0,
-                label: None,
-                modules: modules.iter().map(|m| String::from(*m)).collect(),
-            }],
-            ..crate::physical::RackSpec::default()
-        }
-    }
-
     #[test]
     fn an_inventory_without_a_patch_builds_the_whole_rack_without_components() {
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        app.physical_rack_spec = rack_inventory(&["CV I/O", "P4B2 1", "S10 1"]);
         assert!(app.patch.is_none(), "the state under test");
 
         let (chain, rack) = app
@@ -9305,7 +9263,7 @@ mod tests {
         assert!(rack.total_width_mm > 0.0 && rack.total_height_mm > 0.0);
 
         // An inventory that omits the master still draws one at the head.
-        app.physical_rack_spec = inventory_rack(&["P4B2 1"]);
+        app.physical_rack_spec = rack_inventory(&["P4B2 1"]);
         let (head, _) = app.physical_chain_and_rack().expect("inventory rack");
         let keys: Vec<String> = head
             .modules
@@ -9318,7 +9276,7 @@ mod tests {
     #[test]
     fn the_labels_fit_equals_the_rack_fit_without_a_patch() {
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        app.physical_rack_spec = rack_inventory(&["CV I/O", "P4B2 1", "S10 1"]);
         let (chain, _) = app.physical_chain_and_rack().expect("inventory rack");
         assert!(
             app.physical_label_fit_requests(&chain).is_empty(),
@@ -9365,7 +9323,7 @@ mod tests {
     #[test]
     fn both_fits_clear_the_navigation_latch_without_a_patch() {
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["S10 1"]);
+        app.physical_rack_spec = rack_inventory(&["S10 1"]);
         let (w, h) = pane_points(LABEL_FIT_PANE);
 
         app.note_physical_navigation();
@@ -9390,7 +9348,7 @@ mod tests {
         // implementation: the same inventoried rack answers the same fits, and
         // its derived (unwritten) label adds no lift.
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1"]);
+        app.physical_rack_spec = rack_inventory(&["CV I/O", "P4B2 1"]);
         let (w, h) = pane_points(LABEL_FIT_PANE);
         let rack_fit = whole_rack_fit(&app, LABEL_FIT_PANE);
         assert!(app.fit_physical_view(w, h));

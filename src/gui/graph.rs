@@ -6147,6 +6147,23 @@ mod sliders_panel_tests {
         }
     }
 
+    /// Drive one pointer gesture on the panel at `target` — hover/register,
+    /// press, release — painting a frame for each event on one context, so egui
+    /// runs the click/drag lifecycle the row handlers read.
+    fn panel_pointer(app: &mut App, target: egui::Pos2) {
+        let ctx = egui::Context::default();
+        for events in [
+            vec![egui::Event::PointerMoved(target)],
+            vec![pointer_button(target, true)],
+            vec![pointer_button(target, false)],
+        ] {
+            let mut full = ctx.run_ui(raw_input(events), |ui| {
+                paint_sliders_panel(ui, app, pane());
+            });
+            full.textures_delta.clear();
+        }
+    }
+
     /// The marquee the frame's pointer state produces, under `consume`.
     fn marquee_in(
         scene: &SceneSpec,
@@ -6437,17 +6454,7 @@ mod sliders_panel_tests {
         let panel = sliders_panel_layout(&app, pane()).expect("panel shown in sections mode");
         let track = panel.slider_rect(0);
         let target = egui::pos2(track.min.x + 70.0, track.center().y);
-        let ctx = egui::Context::default();
-        for events in [
-            vec![egui::Event::PointerMoved(target)],
-            vec![pointer_button(target, true)],
-            vec![pointer_button(target, false)],
-        ] {
-            let mut full = ctx.run_ui(raw_input(events), |ui| {
-                paint_sliders_panel(ui, &mut app, pane());
-            });
-            full.textures_delta.clear();
-        }
+        panel_pointer(&mut app, target);
         assert!(
             app.layout_slice_force > crate::config::DEFAULT_SLICE_FORCE,
             "the drag must move the Slice knob, got {}",
@@ -6513,19 +6520,7 @@ mod sliders_panel_tests {
         );
         let center = panel.arrange.center();
         assert!(panel.rect.contains(center), "and so is its click region");
-        // Hover/register, press, release on one context: the egui button click
-        // lifecycle.
-        let ctx = egui::Context::default();
-        for events in [
-            vec![egui::Event::PointerMoved(center)],
-            vec![pointer_button(center, true)],
-            vec![pointer_button(center, false)],
-        ] {
-            let mut full = ctx.run_ui(raw_input(events), |ui| {
-                paint_sliders_panel(ui, &mut app, pane());
-            });
-            full.textures_delta.clear();
-        }
+        panel_pointer(&mut app, center);
         assert_eq!(
             app.status_message, "Arranged (sections)",
             "the Arrange button click re-solves the sections layout"
@@ -6545,17 +6540,7 @@ mod sliders_panel_tests {
         let expected = crate::layout::solve(&graph, &pins, app.force_solve_knobs());
         let panel = sliders_panel_layout(&app, pane()).expect("panel shown");
         let center = panel.arrange.center();
-        let ctx = egui::Context::default();
-        for events in [
-            vec![egui::Event::PointerMoved(center)],
-            vec![pointer_button(center, true)],
-            vec![pointer_button(center, false)],
-        ] {
-            let mut full = ctx.run_ui(raw_input(events), |ui| {
-                paint_sliders_panel(ui, &mut app, pane());
-            });
-            full.textures_delta.clear();
-        }
+        panel_pointer(&mut app, center);
         assert_eq!(
             app.status_message, "Arranged (force)",
             "the Arrange button reports the arrangement it arranged"
@@ -6582,17 +6567,7 @@ mod sliders_panel_tests {
         // The slider itself is one `slider_width` (100 pt) wide from the track's
         // left edge, so the press goes inside it rather than into the free track.
         let target = egui::pos2(track.min.x + 70.0, track.center().y);
-        let ctx = egui::Context::default();
-        for events in [
-            vec![egui::Event::PointerMoved(target)],
-            vec![pointer_button(target, true)],
-            vec![pointer_button(target, false)],
-        ] {
-            let mut full = ctx.run_ui(raw_input(events), |ui| {
-                paint_sliders_panel(ui, &mut app, pane());
-            });
-            full.textures_delta.clear();
-        }
+        panel_pointer(&mut app, target);
         assert!(
             app.layout_repulsion_force > 1.5,
             "the drag must move the Repulsion knob, got {}",

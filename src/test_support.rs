@@ -207,3 +207,18 @@ pub fn positions_bbox(positions: &[(f32, f32)]) -> (f32, f32) {
     }
     (max_x - min_x, max_y - min_y)
 }
+
+/// A one-row `[physical.rack]` inventory naming `modules` left to right — the
+/// shape the config layer hands the app, so a test that needs an inventory
+/// without a patch asserts against the model the loader builds.
+pub fn rack_inventory(modules: &[&str]) -> crate::physical::RackSpec {
+    crate::physical::RackSpec {
+        rows: vec![crate::physical::RackRow {
+            he: 3,
+            hp: 84.0,
+            label: None,
+            modules: modules.iter().map(|m| String::from(*m)).collect(),
+        }],
+        ..crate::physical::RackSpec::default()
+    }
+}

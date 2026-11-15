@@ -23,7 +23,7 @@ use crate::layout::{
     LOCAL_RADIUS,
 };
 use crate::patch::{ComponentKind, NodeId, Patch, ShiftGroup};
-use crate::test_support::positions_bbox;
+use crate::test_support::{positions_bbox, rack_inventory};
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2458,20 +2458,6 @@ const RACK_INVENTORY_FRONTS: &[(&str, Option<&str>, &str, usize, &str)] = &[
     ),
     ("r2c", None, "r2c", 2, "the two identity-less serial jacks"),
 ];
-
-/// A one-row `[physical.rack]` inventory naming `modules` left to right — the
-/// shape the config layer hands the app.
-fn rack_inventory(modules: &[&str]) -> crate::physical::RackSpec {
-    crate::physical::RackSpec {
-        rows: vec![crate::physical::RackRow {
-            he: 3,
-            hp: 84.0,
-            label: None,
-            modules: modules.iter().map(|entry| String::from(*entry)).collect(),
-        }],
-        ..crate::physical::RackSpec::default()
-    }
-}
 
 /// An app loaded from `fixture` (when given) with `modules` as its only rack
 /// inventory entry, so the chain is built through the same public path the

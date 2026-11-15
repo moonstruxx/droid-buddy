@@ -2212,6 +2212,7 @@ mod tests {
     use crate::config::LabelPresentation;
     use crate::patch::{ComponentState, HwComponent};
     use crate::physical::{ChainGaps, PlacedModule, RackMounts, RackRowPlacement};
+    use crate::test_support::rack_inventory;
 
     /// The fixed cell-label size the surface drew before per-cell fitting
     /// (label-guess-and-screen-scale, task 2.2). Kept here as the comparison
@@ -5049,20 +5050,6 @@ mod tests {
 
     // ---- module-ui-rack-inventory 2.4: an inventory with no patch ----
 
-    /// A one-row `[physical.rack]` inventory naming `modules` left to right —
-    /// the shape the config layer hands the app.
-    fn inventory_rack(modules: &[&str]) -> crate::physical::RackSpec {
-        crate::physical::RackSpec {
-            rows: vec![crate::physical::RackRow {
-                he: 3,
-                hp: 84.0,
-                label: None,
-                modules: modules.iter().map(|m| String::from(*m)).collect(),
-            }],
-            ..crate::physical::RackSpec::default()
-        }
-    }
-
     /// The default-case rack with every chain module listed in its row: an
     /// inventory that mirrors the modules the patch already declares, so the
     /// only difference under test is the inventory switch itself.
@@ -5086,7 +5073,7 @@ mod tests {
     #[test]
     fn an_inventory_without_a_patch_paints_the_rack_and_publishes_no_rects() {
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        app.physical_rack_spec = rack_inventory(&["CV I/O", "P4B2 1", "S10 1"]);
         assert!(app.patch.is_none(), "the state under test");
 
         run_paint_panes(&mut app);
@@ -5123,7 +5110,7 @@ mod tests {
     #[test]
     fn no_patch_cells_are_dimmed_and_carry_no_component_index() {
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["CV I/O", "P4B2 1", "S10 1"]);
+        app.physical_rack_spec = rack_inventory(&["CV I/O", "P4B2 1", "S10 1"]);
         app.hovered_component = Some(0);
         app.selected_component = Some(String::from("B1.1"));
 
@@ -5231,7 +5218,7 @@ mod tests {
         // none publishes a hit rect (3.2 pins the counts; this asserts the
         // shape).
         let mut app = App::new();
-        app.physical_rack_spec = inventory_rack(&["CV I/O"]);
+        app.physical_rack_spec = rack_inventory(&["CV I/O"]);
         run_paint_panes(&mut app);
         assert!(
             app.component_rects.is_empty(),
