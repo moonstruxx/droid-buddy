@@ -837,169 +837,19 @@ impl Patch {
         // Flatten modules' components into hw_components for backward compatibility
         let mut components: Vec<HwComponent> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
-        // Chain position of the next controller-declaring section (design.md
-        // Decision 2b): advances once per controller module declared in patch
-        // order — the chain order the manual requires — not a per-type counter,
-        // so a mixed chain ([m4][b32][e4]...) numbers each module by its
-        // position (B1.x, B3.x, E4.x, ...) regardless of type.
-        let mut controller_chain_pos: u32 = 0;
-        // Component id -> panel name for every token a controller-declaring
-        // section owns: tokens synthesized by a bare controller section
-        // (e.g. `[b32]` -> B1.1..B1.32) AND explicit token entries in
-        // `KNOWN_CONTROLLER_SECTIONS` sections (e.g. `[faderbank]`'s S1.1).
-        // Pinned tokens stay on their own faceplate even when another section
-        // claimed the same controller number for a different type first
-        // (first-wins on the number, but each section's own tokens are pinned
-        // to that section's panel, so two explicit types sharing number 1
-        // coexist on separate faceplates instead of merging).
-        let mut pinned_panels: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        // Controller number -> panel name, e.g. 1 -> "P2B8", 2 -> "Notebuttons".
-        // Populated from controller-declaring sections; anything not covered
-        // here falls back to a generic "Controller N" panel below. Only used
-        // for components NOT pinned to their declaring section's panel.
-        let mut controller_types: std::collections::HashMap<u32, String> =
-            std::collections::HashMap::new();
-        // Ordered controller-declaring sections, in patch order — the same
-        // recognition and numbering as `controller_types`/`pinned_panels`,
-        // exposed for the signal-flow graph's controller nodes.
-        let mut controllers: Vec<ControllerDecl> = Vec::new();
+        // Controller-declaring sections, in patch order: the chain numbering
+        // (design.md Decision 2b) and the panels their own tokens stay pinned
+        // to.
+        let mut controller_registry = ControllerRegistry::default();
 
         for section in &sections {
-            // --- LED association: scan this section for a `led = L.N` entry
-            // and identify the "element" (first hardware token in the section).
-            // Only a bare LED token names the register the circuit drives; a
-            // cable or expression value names a *value* and binds nothing (see
-            // `led_token_from_value`).
-            let led_token: Option<String> = section
-                .entries
-                .iter()
-                .find(|(k, _)| *k == "led")
-                .and_then(|(_, v)| led_token_from_value(v));
-            let element_token: Option<String> = section
-                .entries
-                .iter()
-                .find_map(|(_, v)| scan_hw_tokens(v).first().cloned());
-
-            // A bare `[p2b8]`/`[b32]`/... declaration implies the full
-            // hardware token set of that controller even when it has no
-            // key-value pairs of its own (design.md Decision 2b). The panel
-            // name is the controller type, numbered by chain position; any
-            // explicit entries in the same section are deduplicated below.
-            // Synthesized tokens are pinned to this section's panel in
-            // `pinned_panels` so they keep it even when another section
-            // claimed the same controller number first; components from
-            // circuit sections keep the `controller_types` fallback in the
-            // assignment pass below.
-            if let Some(&(_, panel, plan)) =
-                BARE_SYNTHESIS.iter().find(|entry| entry.0 == section.name)
-            {
-                controller_chain_pos += 1;
-                let n = controller_chain_pos;
-                controller_types
-                    .entry(n)
-                    .or_insert_with(|| panel.to_string());
-                controllers.push(ControllerDecl {
-                    name: section.name.clone(),
-                    panel: panel.to_string(),
-                    ordinal: n,
-                });
-                for id in synthesize_controller_tokens(&mut components, &mut seen_ids, n, plan) {
-                    pinned_panels.insert(id, panel.to_string());
-                }
-            } else if KNOWN_CONTROLLER_SECTIONS.contains(&section.name.as_str()) {
-                // Named controller sections (Notebuttons, Faderbank, ...) declare
-                // their tokens as key-value pairs; the controller number is the
-                // number embedded in the first hardware token we find. Bare
-                // known sections (no token entries) declare nothing.
-                if let Some(n) = section.entries.iter().find_map(|(_, v)| {
-                    scan_hw_tokens(v)
-                        .into_iter()
-                        .find_map(|t| leading_number(&t))
-                }) {
-                    let panel = titlecase(&section.name);
-                    controller_types.entry(n).or_insert_with(|| panel.clone());
-                    controllers.push(ControllerDecl {
-                        name: section.name.clone(),
-                        panel: panel.clone(),
-                        ordinal: n,
-                    });
-                    // Pin every token this section declares to its own
-                    // faceplate, so two explicit types sharing a controller
-                    // number coexist on separate panels instead of the later
-                    // section's tokens falling through first-wins to the
-                    // earlier section's panel (droid_tui-26q). Skip tokens
-                    // already seen: a duplicate of a bare-synthesized token
-                    // (e.g. a `[pot]` circuit driving the bare [p10]'s P3.2)
-                    // must not steal the panel its synthesizing section
-                    // pinned.
-                    for (_key, value) in &section.entries {
-                        for token in scan_hw_tokens(value) {
-                            if token_kind(&token).is_some() && !seen_ids.contains(&token) {
-                                pinned_panels.insert(token, panel.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (_key, value) in &section.entries {
-                for token in scan_hw_tokens(value) {
-                    if let Some(kind) = token_kind(&token) {
-                        let label = format!("{} {}", titlecase(&section.name), token);
-                        add_component(&mut components, &mut seen_ids, token, kind, label);
-                    }
-                }
-            }
-
-            // After add_component calls for this section, associate LED if present.
-            if let Some(led) = &led_token {
-                if let Some(element) = &element_token {
-                    if let Some(comp) = components.iter_mut().find(|c| c.id == *element) {
-                        comp.led = Some(led.clone());
-                    }
-                }
-            }
-
-            // Numbered circuit LED params (e.g. `led11 = L1.1`) pair with the
-            // same-suffix element entry in the section (`button11 = B1.1`) —
-            // the DROID convention for circuits like matrixmixer that address
-            // buttons and LEDs by a shared matrix-position suffix. The ledN
-            // VALUE (L.N) is authoritative for the LED hardware token; the
-            // serial-position-dependent numbering is already encoded by the
-            // patch author, so the parser reads it directly rather than
-            // deriving it. Match suffix against any hardware-token-valued
-            // sibling entry (buttonN, potN, encoderN, switchN, faderN, ...)
-            // in the same section, covering every schema ledN group.
-            // The element side stores its first hardware token, not the raw
-            // value: circuit inputs are commonly scaled or gated
-            // (`button1 = B4.17 * _CONTROL`), and the token is what the
-            // component list keys on.
-            let mut element_by_suffix: HashMap<&str, String> = HashMap::new();
-            for (key, value) in &section.entries {
-                // A `led*` key is the LED side of a pair, never the element
-                // being driven — exclude it so a lone `ledN` can't pair with
-                // itself when it has no same-suffix element sibling.
-                if key.starts_with("led") {
-                    continue;
-                }
-                if let Some(suffix) = leading_digits(key) {
-                    if let Some(element) = scan_hw_tokens(value).into_iter().next() {
-                        element_by_suffix.entry(suffix).or_insert(element);
-                    }
-                }
-            }
-            for (key, led) in &section.entries {
-                if let Some(led_suffix) = key.strip_prefix("led").and_then(leading_digits) {
-                    if let (Some(element), Some(led_token)) =
-                        (element_by_suffix.get(led_suffix), led_token_from_value(led))
-                    {
-                        if let Some(comp) = components.iter_mut().find(|c| c.id == *element) {
-                            comp.led = Some(led_token);
-                        }
-                    }
-                }
-            }
+            // Section dispatch first: a controller-declaring section numbers
+            // itself and pins its own tokens before this section's explicit
+            // entries are flattened into components below.
+            controller_registry.register(section, &mut components, &mut seen_ids);
+            add_section_components(&mut components, &mut seen_ids, section);
+            bind_section_led(&mut components, section);
+            bind_numbered_leds(&mut components, section);
         }
 
         if components.is_empty() {
@@ -1007,52 +857,14 @@ impl Patch {
         }
 
         // Assign shift groups by controller number (design.md Decision 2c).
-        for comp in &mut components {
-            if let Some(n) = leading_number(&comp.id) {
-                comp.shift_group = Some(match (n.saturating_sub(1)) % 4 {
-                    0 => ShiftGroup::Group1,
-                    1 => ShiftGroup::Group2,
-                    2 => ShiftGroup::Group3,
-                    _ => ShiftGroup::Group4,
-                });
-            }
-        }
-
+        assign_shift_groups(&mut components);
         // Assign each component to its physical controller panel (design.md
-        // Decision 3). CV I/O tokens are fixed jacks, not part of a pluggable
-        // controller unit, so they always share one panel regardless of number.
-        for comp in &mut components {
-            comp.controller = match comp.kind {
-                ComponentKind::CvIn | ComponentKind::CvOut => String::from("CV I/O"),
-                _ => {
-                    if let Some(panel) = pinned_panels.get(&comp.id) {
-                        // Bare-synthesized tokens keep the panel their own section
-                        // declared, regardless of who claimed the number first.
-                        panel.clone()
-                    } else {
-                        let num = leading_number(&comp.id);
-                        match num.and_then(|n| controller_types.get(&n).cloned()) {
-                            Some(name) => name,
-                            None => match num {
-                                Some(n) => format!("Controller {n}"),
-                                None => String::from("Other"),
-                            },
-                        }
-                    }
-                }
-            };
-            // Per-controller device-default LED wiring (task 1.3): only when
-            // the section yielded no explicit `led`/`ledN` association.
-            if comp.led.is_none() {
-                comp.led = device_default_led(&comp.controller, &comp.id);
-            }
-            // Assign LED capability from the controller family (one table for the
-            // whole crate: `led_capability_for_controller`).
-            comp.led_capability = led_capability_for_controller(&comp.controller);
-        }
-
-        // Assign shift groups from modules (if modules have shift group info)
-        // For now, use the previously assigned shift groups from components
+        // Decision 3), then its default LED wiring and LED capability.
+        assign_controller_panels(
+            &mut components,
+            &controller_registry.pinned_panels,
+            &controller_registry.types,
+        );
 
         let occurrence_index = build_occurrence_index(&token_spans);
         let modifier_index = build_modifier_index(&raw_lines, &sections);
@@ -1062,27 +874,8 @@ impl Patch {
         let preamble_labels = parse_preamble_labels(&raw_lines);
         let master_declaration = parse_master_declaration(&raw_lines);
 
-        // Static LED colour/brightness at load (led-register-colour D4): upgrade
-        // LEDs with a resolved source to `Led { value, rgb }`; all others keep
-        // the `Off` default assigned by `add_component`. B32 drops colour
-        // through its `White` capability (brightness only).
-        let led_resolved: Vec<(String, f32, Option<[u8; 3]>)> = components
-            .iter()
-            .filter(|c| c.kind == ComponentKind::Led)
-            .filter_map(|c| {
-                let (v, rgb) = resolve_led_initial(c, &components, &sections, &cable_index)?;
-                Some((c.id.clone(), v, rgb))
-            })
-            .collect();
-        for (id, v, rgb) in led_resolved {
-            if let Some(comp) = components.iter_mut().find(|c| c.id == id) {
-                let rgb = match comp.led_capability {
-                    Some(LedCapability::White) => None,
-                    _ => rgb,
-                };
-                comp.state = ComponentState::Led { value: v, rgb };
-            }
-        }
+        // Static LED colour/brightness at load (led-register-colour D4).
+        apply_resolved_leds(&mut components, &sections, &cable_index);
 
         Ok(Patch {
             name,
@@ -1105,7 +898,7 @@ impl Patch {
             banner_groups,
             circuit_outputs,
             preamble_labels,
-            controllers,
+            controllers: controller_registry.controllers,
             master_declaration,
         })
     }
@@ -1814,6 +1607,282 @@ fn synthesize_controller_tokens(
         }
     }
     added
+}
+
+/// Controller declarations gathered while walking a patch's sections: the chain
+/// position counter (design.md Decision 2b), the controller-number → panel
+/// fallback table, and the per-token panel pins that keep a section's own
+/// tokens on its own faceplate.
+#[derive(Default)]
+struct ControllerRegistry {
+    /// Chain position of the next controller-declaring section: advances once
+    /// per controller module declared in patch order — the chain order the
+    /// manual requires — not a per-type counter, so a mixed chain
+    /// ([m4][b32][e4]...) numbers each module by its position (B1.x, B3.x,
+    /// E4.x, ...) regardless of type.
+    chain_pos: u32,
+    /// Controller number -> panel name, e.g. 1 -> "P2B8", 2 -> "Notebuttons".
+    /// Populated from controller-declaring sections; anything not covered here
+    /// falls back to a generic "Controller N" panel in `controller_panel`. Only
+    /// used for components NOT pinned to their declaring section's panel.
+    types: HashMap<u32, String>,
+    /// Component id -> panel name for every token a controller-declaring
+    /// section owns: tokens synthesized by a bare controller section
+    /// (e.g. `[b32]` -> B1.1..B1.32) AND explicit token entries in
+    /// `KNOWN_CONTROLLER_SECTIONS` sections (e.g. `[faderbank]`'s S1.1).
+    /// Pinned tokens stay on their own faceplate even when another section
+    /// claimed the same controller number for a different type first
+    /// (first-wins on the number, but each section's own tokens are pinned
+    /// to that section's panel, so two explicit types sharing number 1
+    /// coexist on separate faceplates instead of merging).
+    pinned_panels: HashMap<String, String>,
+    /// Ordered controller-declaring sections, in patch order — the same
+    /// recognition and numbering as `types`/`pinned_panels`, exposed for the
+    /// signal-flow graph's controller nodes.
+    controllers: Vec<ControllerDecl>,
+}
+
+impl ControllerRegistry {
+    /// Record what a controller-declaring section contributes: its chain
+    /// position and panel, plus the tokens pinned to that panel. Sections that
+    /// declare no controller contribute nothing.
+    fn register(
+        &mut self,
+        section: &IniSection,
+        components: &mut Vec<HwComponent>,
+        seen_ids: &mut HashSet<String>,
+    ) {
+        if let Some(&(_, panel, plan)) = BARE_SYNTHESIS.iter().find(|entry| entry.0 == section.name)
+        {
+            // A bare `[p2b8]`/`[b32]`/... declaration implies the full
+            // hardware token set of that controller even when it has no
+            // key-value pairs of its own (design.md Decision 2b). The panel
+            // name is the controller type, numbered by chain position; any
+            // explicit entries in the same section are deduplicated by
+            // `add_section_components`. Synthesized tokens are pinned to this
+            // section's panel so they keep it even when another section
+            // claimed the same controller number first.
+            self.chain_pos += 1;
+            let n = self.chain_pos;
+            self.types.entry(n).or_insert_with(|| panel.to_string());
+            self.controllers.push(ControllerDecl {
+                name: section.name.clone(),
+                panel: panel.to_string(),
+                ordinal: n,
+            });
+            for id in synthesize_controller_tokens(components, seen_ids, n, plan) {
+                self.pinned_panels.insert(id, panel.to_string());
+            }
+        } else if KNOWN_CONTROLLER_SECTIONS.contains(&section.name.as_str()) {
+            self.register_named(section, seen_ids);
+        }
+    }
+
+    /// Named controller sections (Notebuttons, Faderbank, ...) declare their
+    /// tokens as key-value pairs; the controller number is the number embedded
+    /// in the first hardware token we find. Bare known sections (no token
+    /// entries) declare nothing.
+    fn register_named(&mut self, section: &IniSection, seen_ids: &HashSet<String>) {
+        let Some(n) = section.entries.iter().find_map(|(_, v)| {
+            scan_hw_tokens(v)
+                .into_iter()
+                .find_map(|t| leading_number(&t))
+        }) else {
+            return;
+        };
+        let panel = titlecase(&section.name);
+        self.types.entry(n).or_insert_with(|| panel.clone());
+        self.controllers.push(ControllerDecl {
+            name: section.name.clone(),
+            panel: panel.clone(),
+            ordinal: n,
+        });
+        // Pin every token this section declares to its own faceplate, so two
+        // explicit types sharing a controller number coexist on separate
+        // panels instead of the later section's tokens falling through
+        // first-wins to the earlier section's panel (droid_tui-26q). Skip
+        // tokens already seen: a duplicate of a bare-synthesized token (e.g. a
+        // `[pot]` circuit driving the bare [p10]'s P3.2) must not steal the
+        // panel its synthesizing section pinned.
+        for (_key, value) in &section.entries {
+            for token in scan_hw_tokens(value) {
+                if token_kind(&token).is_some() && !seen_ids.contains(&token) {
+                    self.pinned_panels.insert(token, panel.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Flatten one section's explicit `key = value` entries into components: every
+/// hardware token in a value becomes a component labelled by its section.
+fn add_section_components(
+    components: &mut Vec<HwComponent>,
+    seen_ids: &mut HashSet<String>,
+    section: &IniSection,
+) {
+    for (_key, value) in &section.entries {
+        for token in scan_hw_tokens(value) {
+            if let Some(kind) = token_kind(&token) {
+                let label = format!("{} {}", titlecase(&section.name), token);
+                add_component(components, seen_ids, token, kind, label);
+            }
+        }
+    }
+}
+
+/// Associate a section's `led = L.N` entry with its "element" — the first
+/// hardware token in the section. Only a bare LED token names the register the
+/// circuit drives; a cable or expression value names a *value* and binds
+/// nothing (see `led_token_from_value`).
+fn bind_section_led(components: &mut [HwComponent], section: &IniSection) {
+    let Some(led) = section
+        .entries
+        .iter()
+        .find(|(k, _)| *k == "led")
+        .and_then(|(_, v)| led_token_from_value(v))
+    else {
+        return;
+    };
+    let Some(element) = section
+        .entries
+        .iter()
+        .find_map(|(_, v)| scan_hw_tokens(v).first().cloned())
+    else {
+        return;
+    };
+    if let Some(comp) = components.iter_mut().find(|c| c.id == element) {
+        comp.led = Some(led);
+    }
+}
+
+/// Pair numbered circuit LED params (`led11 = L1.1`) with the same-suffix
+/// element entry in the section (`button11 = B1.1`) — the DROID convention for
+/// circuits like matrixmixer that address buttons and LEDs by a shared
+/// matrix-position suffix. The ledN VALUE (L.N) is authoritative for the LED
+/// hardware token; the serial-position-dependent numbering is already encoded by
+/// the patch author, so the parser reads it directly rather than deriving it.
+/// The match is against any hardware-token-valued sibling entry (buttonN, potN,
+/// encoderN, switchN, faderN, ...), covering every schema ledN group. The
+/// element side stores its first hardware token, not the raw value: circuit
+/// inputs are commonly scaled or gated (`button1 = B4.17 * _CONTROL`), and the
+/// token is what the component list keys on.
+fn bind_numbered_leds(components: &mut [HwComponent], section: &IniSection) {
+    let mut element_by_suffix: HashMap<&str, String> = HashMap::new();
+    for (key, value) in &section.entries {
+        // A `led*` key is the LED side of a pair, never the element being
+        // driven — exclude it so a lone `ledN` can't pair with itself when it
+        // has no same-suffix element sibling.
+        if key.starts_with("led") {
+            continue;
+        }
+        if let Some(suffix) = leading_digits(key) {
+            if let Some(element) = scan_hw_tokens(value).into_iter().next() {
+                element_by_suffix.entry(suffix).or_insert(element);
+            }
+        }
+    }
+    for (key, led) in &section.entries {
+        if let Some(led_suffix) = key.strip_prefix("led").and_then(leading_digits) {
+            if let (Some(element), Some(led_token)) =
+                (element_by_suffix.get(led_suffix), led_token_from_value(led))
+            {
+                if let Some(comp) = components.iter_mut().find(|c| c.id == *element) {
+                    comp.led = Some(led_token);
+                }
+            }
+        }
+    }
+}
+
+/// Assign shift groups by controller number (design.md Decision 2c).
+fn assign_shift_groups(components: &mut [HwComponent]) {
+    for comp in components {
+        if let Some(n) = leading_number(&comp.id) {
+            comp.shift_group = Some(match (n.saturating_sub(1)) % 4 {
+                0 => ShiftGroup::Group1,
+                1 => ShiftGroup::Group2,
+                2 => ShiftGroup::Group3,
+                _ => ShiftGroup::Group4,
+            });
+        }
+    }
+}
+
+/// Assign each component to its physical controller panel (design.md Decision
+/// 3), then its device-default LED wiring and its LED capability.
+fn assign_controller_panels(
+    components: &mut [HwComponent],
+    pinned_panels: &HashMap<String, String>,
+    controller_types: &HashMap<u32, String>,
+) {
+    for comp in components {
+        // CV I/O tokens are fixed jacks, not part of a pluggable controller
+        // unit, so they always share one panel regardless of number.
+        comp.controller = match comp.kind {
+            ComponentKind::CvIn | ComponentKind::CvOut => String::from("CV I/O"),
+            _ => controller_panel(&comp.id, pinned_panels, controller_types),
+        };
+        // Per-controller device-default LED wiring (task 1.3): only when the
+        // section yielded no explicit `led`/`ledN` association.
+        if comp.led.is_none() {
+            comp.led = device_default_led(&comp.controller, &comp.id);
+        }
+        // Assign LED capability from the controller family (one table for the
+        // whole crate: `led_capability_for_controller`).
+        comp.led_capability = led_capability_for_controller(&comp.controller);
+    }
+}
+
+/// The panel a non-CV component belongs to: the panel its declaring section
+/// pinned, else the panel of the controller number its id names, else a generic
+/// "Controller N" / "Other" label.
+fn controller_panel(
+    id: &str,
+    pinned_panels: &HashMap<String, String>,
+    controller_types: &HashMap<u32, String>,
+) -> String {
+    if let Some(panel) = pinned_panels.get(id) {
+        // Bare-synthesized tokens keep the panel their own section declared,
+        // regardless of who claimed the number first.
+        return panel.clone();
+    }
+    let num = leading_number(id);
+    match num.and_then(|n| controller_types.get(&n).cloned()) {
+        Some(name) => name,
+        None => match num {
+            Some(n) => format!("Controller {n}"),
+            None => String::from("Other"),
+        },
+    }
+}
+
+/// Upgrade the LEDs whose static colour/brightness resolves at load
+/// (led-register-colour D4) to `Led { value, rgb }`; all others keep the `Off`
+/// default assigned by `add_component`. B32 drops colour through its `White`
+/// capability (brightness only).
+fn apply_resolved_leds(
+    components: &mut [HwComponent],
+    sections: &[IniSection],
+    cable_index: &HashMap<String, CableIndexEntry>,
+) {
+    let led_resolved: Vec<(String, f32, Option<[u8; 3]>)> = components
+        .iter()
+        .filter(|c| c.kind == ComponentKind::Led)
+        .filter_map(|c| {
+            let (v, rgb) = resolve_led_initial(c, components, sections, cable_index)?;
+            Some((c.id.clone(), v, rgb))
+        })
+        .collect();
+    for (id, v, rgb) in led_resolved {
+        if let Some(comp) = components.iter_mut().find(|c| c.id == id) {
+            let rgb = match comp.led_capability {
+                Some(LedCapability::White) => None,
+                _ => rgb,
+            };
+            comp.state = ComponentState::Led { value: v, rgb };
+        }
+    }
 }
 
 /// Component kind for a bare-synthesis family letter (B button, L led,
@@ -2757,6 +2826,32 @@ fn format_candidate(v: f64) -> String {
 /// the default `0`/`1` pair. Signals and candidates are sorted by descending
 /// usage then lexicographic name.
 pub fn discover_select_signals(patch: &Patch) -> SelectDiscovery {
+    let (usage, kind_map) = select_usage(patch);
+    if usage.is_empty() {
+        return SelectDiscovery {
+            signals: Vec::new(),
+        };
+    }
+
+    let mut candidate_counts: CandidateCounts = usage
+        .keys()
+        .map(|sig| (sig.clone(), HashMap::new()))
+        .collect();
+    selectat_candidates(patch, &mut candidate_counts);
+    button_group_candidates(patch, &mut candidate_counts);
+    seed_default_candidates(&mut candidate_counts);
+
+    SelectDiscovery {
+        signals: ranked_signals(&usage, &kind_map, candidate_counts),
+    }
+}
+
+/// Per-signal candidate tallies: canonical value bits → (value, occurrences).
+type CandidateCounts = HashMap<String, HashMap<u64, (f64, usize)>>;
+
+/// First pass: every signal the `select` entries reference, with its usage count
+/// and the kind of its first reference.
+fn select_usage(patch: &Patch) -> (HashMap<String, usize>, HashMap<String, SelectSignalKind>) {
     let mut usage: HashMap<String, usize> = HashMap::new();
     let mut kind_map: HashMap<String, SelectSignalKind> = HashMap::new();
 
@@ -2769,14 +2864,7 @@ pub fn discover_select_signals(patch: &Patch) -> SelectDiscovery {
             if sel.is_empty() {
                 continue;
             }
-            let mut entry_signals: HashSet<String> = HashSet::new();
-            for (tok, _, _) in scan_register_refs(sel) {
-                entry_signals.insert(tok);
-            }
-            for tok in scan_internal_tokens(sel) {
-                entry_signals.insert(tok);
-            }
-            for sig in entry_signals {
+            for sig in select_entry_signals(sel) {
                 let kind = if sig.starts_with('_') {
                     SelectSignalKind::Cable
                 } else {
@@ -2788,88 +2876,128 @@ pub fn discover_select_signals(patch: &Patch) -> SelectDiscovery {
         }
     }
 
-    if usage.is_empty() {
-        return SelectDiscovery {
-            signals: Vec::new(),
-        };
-    }
+    (usage, kind_map)
+}
 
-    let mut candidate_counts: HashMap<String, HashMap<u64, (f64, usize)>> = HashMap::new();
-    for sig in usage.keys() {
-        candidate_counts.insert(sig.clone(), HashMap::new());
+/// Distinct signals one `select` value references: register refs plus internal
+/// `_`-cable tokens.
+///
+/// A set keeps each signal counted once per entry, so the per-signal increment
+/// order only affects counts, never ordering.
+fn select_entry_signals(sel: &str) -> HashSet<String> {
+    let mut entry_signals: HashSet<String> = HashSet::new();
+    for (tok, _, _) in scan_register_refs(sel) {
+        entry_signals.insert(tok);
     }
+    for tok in scan_internal_tokens(sel) {
+        entry_signals.insert(tok);
+    }
+    entry_signals
+}
 
+/// The section's last non-empty `selectat` value, if it has one.
+fn last_selectat(section: &IniSection) -> Option<String> {
+    section
+        .entries
+        .iter()
+        .rev()
+        .find(|(k, _)| *k == "selectat")
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Add one occurrence of `raw` to `tally`.
+///
+/// `-0.0` is canonicalised to `0.0` so its bits key collides with the seeded
+/// default; unparsable values are ignored.
+fn record_candidate(tally: &mut HashMap<u64, (f64, usize)>, raw: &str) {
+    if let Some(val) = parse_candidate_value(raw) {
+        let canon = if val == 0.0 { 0.0 } else { val };
+        let entry = tally.entry(canon.to_bits()).or_insert((canon, 0));
+        entry.1 += 1;
+    }
+}
+
+/// Second pass: a section's literal `selectat` is a candidate for the signal its
+/// `select` names.
+fn selectat_candidates(patch: &Patch, candidate_counts: &mut CandidateCounts) {
     for section in &patch.sections {
-        let selectat_val = section
-            .entries
-            .iter()
-            .rev()
-            .find(|(k, _)| *k == "selectat")
-            .map(|(_, v)| v.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let selectat_val = last_selectat(section);
         for (k, v) in &section.entries {
             if k != "select" {
                 continue;
             }
-            let sel = v.trim();
-            if let Some(map) = candidate_counts.get_mut(sel) {
+            if let Some(tally) = candidate_counts.get_mut(v.trim()) {
                 if let Some(sa) = &selectat_val {
-                    if let Some(val) = parse_candidate_value(sa) {
-                        let canon = if val == 0.0 { 0.0 } else { val };
-                        let bits = canon.to_bits();
-                        let entry = map.entry(bits).or_insert((canon, 0));
-                        entry.1 += 1;
-                    }
+                    record_candidate(tally, sa);
                 }
             }
         }
     }
+}
 
-    for (signal, map) in &mut candidate_counts {
+/// Third pass: the `valueN` params of a button group/button section that drives
+/// a signal through its `output` param are candidates for that signal.
+fn button_group_candidates(patch: &Patch, candidate_counts: &mut CandidateCounts) {
+    for (signal, tally) in candidate_counts.iter_mut() {
         for section in &patch.sections {
-            let lname = section.name.to_lowercase();
-            if lname != "buttongroup" && lname != "button" {
-                continue;
-            }
-            let mut drives = false;
-            for (k, v) in &section.entries {
-                let kl = k.to_lowercase();
-                let kind = load_schema().get_param_kind(&section.name, &kl);
-                let is_output = kind == Some("output") || (kind.is_none() && kl == "output");
-                if is_output && v.trim() == signal.as_str() {
-                    drives = true;
-                    break;
-                }
-            }
-            if !drives {
+            if !is_button_section(&section.name) || !drives_signal(section, signal) {
                 continue;
             }
             for (k, v) in &section.entries {
-                let kl = k.to_lowercase();
-                if !kl.starts_with("value") {
-                    continue;
-                }
-                let suffix = &kl[5..];
-                if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
-                    continue;
-                }
-                if let Some(val) = parse_candidate_value(v) {
-                    let canon = if val == 0.0 { 0.0 } else { val };
-                    let bits = canon.to_bits();
-                    let entry = map.entry(bits).or_insert((canon, 0));
-                    entry.1 += 1;
+                if is_value_param(&k.to_lowercase()) {
+                    record_candidate(tally, v);
                 }
             }
         }
     }
+}
 
-    for map in candidate_counts.values_mut() {
-        for def in [0.0f64, 1.0f64] {
-            let bits = def.to_bits();
-            map.entry(bits).or_insert((def, 0));
+/// Is this a `buttongroup` or `button` circuit section?
+fn is_button_section(name: &str) -> bool {
+    let lname = name.to_lowercase();
+    lname == "buttongroup" || lname == "button"
+}
+
+/// Does `section` send `signal` out through a parameter the schema types as
+/// `output` (or a bare `output` key when the schema has no kind for it)?
+fn drives_signal(section: &IniSection, signal: &str) -> bool {
+    for (k, v) in &section.entries {
+        let kl = k.to_lowercase();
+        let kind = load_schema().get_param_kind(&section.name, &kl);
+        let is_output = kind == Some("output") || (kind.is_none() && kl == "output");
+        if is_output && v.trim() == signal {
+            return true;
         }
     }
+    false
+}
 
+/// A `valueN` parameter key: `value` followed by one or more ASCII digits.
+fn is_value_param(key: &str) -> bool {
+    let Some(suffix) = key.strip_prefix("value") else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Seed every signal with the `0`/`1` candidates, so a signal with no literal
+/// evidence still offers both positions (at count `0`).
+fn seed_default_candidates(candidate_counts: &mut CandidateCounts) {
+    for tally in candidate_counts.values_mut() {
+        for def in [0.0_f64, 1.0_f64] {
+            tally.entry(def.to_bits()).or_insert((def, 0));
+        }
+    }
+}
+
+/// Final assembly: signals by descending usage then name, each carrying its
+/// candidates by descending count then formatted value.
+fn ranked_signals(
+    usage: &HashMap<String, usize>,
+    kind_map: &HashMap<String, SelectSignalKind>,
+    mut candidate_counts: CandidateCounts,
+) -> Vec<SelectSignal> {
     let mut names: Vec<String> = usage.keys().cloned().collect();
     names.sort_by(|a, b| {
         let ua = usage.get(a).copied().unwrap_or(0);
@@ -2877,32 +3005,36 @@ pub fn discover_select_signals(patch: &Patch) -> SelectDiscovery {
         ub.cmp(&ua).then_with(|| a.cmp(b))
     });
 
-    let mut signals: Vec<SelectSignal> = Vec::new();
-    for name in names {
-        let us = usage.get(&name).copied().unwrap_or(0);
-        let kind = kind_map
-            .get(&name)
-            .cloned()
-            .unwrap_or(SelectSignalKind::Register);
-        let cand_map = candidate_counts.remove(&name).unwrap_or_default();
-        let mut cands: Vec<SelectCandidate> = cand_map
-            .into_values()
-            .map(|(v, c)| SelectCandidate { value: v, count: c })
-            .collect();
-        cands.sort_by(|a, b| {
-            b.count
-                .cmp(&a.count)
-                .then_with(|| format_candidate(a.value).cmp(&format_candidate(b.value)))
-        });
-        signals.push(SelectSignal {
-            signal: name,
-            kind,
-            usage: us,
-            candidates: cands,
-        });
-    }
+    names
+        .into_iter()
+        .map(|name| {
+            let tally = candidate_counts.remove(&name).unwrap_or_default();
+            SelectSignal {
+                signal: name.clone(),
+                kind: kind_map
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(SelectSignalKind::Register),
+                usage: usage.get(&name).copied().unwrap_or(0),
+                candidates: ranked_candidates(tally),
+            }
+        })
+        .collect()
+}
 
-    SelectDiscovery { signals }
+/// Candidates ordered by descending count, ties broken by the canonical
+/// formatted value.
+fn ranked_candidates(tally: HashMap<u64, (f64, usize)>) -> Vec<SelectCandidate> {
+    let mut cands: Vec<SelectCandidate> = tally
+        .into_values()
+        .map(|(value, count)| SelectCandidate { value, count })
+        .collect();
+    cands.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| format_candidate(a.value).cmp(&format_candidate(b.value)))
+    });
+    cands
 }
 
 pub fn token_kind(id: &str) -> Option<ComponentKind> {

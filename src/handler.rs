@@ -38,7 +38,6 @@ impl KeyEvent {
         Self { code, modifiers }
     }
 
-    /// Convert a winit key event into the neutral shape the handler binds.
     /// Convert the parts of a winit keyboard event into the neutral shape the
     /// handler binds. Produced characters become `Char` (shifted glyphs arrive
     /// as their symbol, e.g. `?` for Shift+/), named keys map to the matching
@@ -58,47 +57,79 @@ impl KeyEvent {
         if state != winit::event::ElementState::Pressed {
             return None;
         }
-        let code = match logical_key {
-            winit::keyboard::Key::Character(ch) => {
-                let mut chars = ch.chars();
-                let c = chars.next()?;
-                if chars.next().is_some() {
-                    return None;
-                }
-                KeyCode::Char(c)
-            }
-            winit::keyboard::Key::Named(named) => match named {
-                NamedKey::Enter => KeyCode::Enter,
-                NamedKey::Escape => KeyCode::Esc,
-                NamedKey::Backspace => KeyCode::Backspace,
-                NamedKey::Tab if winit_mods.shift_key() => KeyCode::BackTab,
-                NamedKey::Tab => KeyCode::Tab,
-                NamedKey::Space => KeyCode::Char(' '),
-                NamedKey::ArrowUp => KeyCode::Up,
-                NamedKey::ArrowDown => KeyCode::Down,
-                NamedKey::ArrowLeft => KeyCode::Left,
-                NamedKey::ArrowRight => KeyCode::Right,
-                NamedKey::Home => KeyCode::Home,
-                NamedKey::End => KeyCode::End,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        let mut modifiers = Modifiers::NONE;
-        if winit_mods.shift_key() {
-            modifiers.shift = true;
-        }
-        if winit_mods.control_key() {
-            modifiers.ctrl = true;
-            modifiers.command = true;
-        }
-        if winit_mods.alt_key() {
-            modifiers.alt = true;
-        }
-        if winit_mods.super_key() {
-            modifiers.mac_cmd = true;
-        }
-        Some(Self::new(code, modifiers))
+        let code = winit_key_code(logical_key, winit_mods)?;
+        Some(Self::new(code, winit_modifiers(winit_mods)))
+    }
+}
+
+/// Neutral key code for a winit logical key, or `None` when the key is not a
+/// binding.
+fn winit_key_code(
+    logical_key: &winit::keyboard::Key,
+    winit_mods: winit::keyboard::ModifiersState,
+) -> Option<KeyCode> {
+    match logical_key {
+        winit::keyboard::Key::Character(ch) => single_char(ch.as_str()).map(KeyCode::Char),
+        winit::keyboard::Key::Named(named) => named_key_code(*named, winit_mods),
+        _ => None,
+    }
+}
+
+/// The one character a `Key::Character` produces; multi-character composition
+/// (IME, dead keys) is not a binding.
+fn single_char(ch: &str) -> Option<char> {
+    let mut chars = ch.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(c)
+}
+
+/// Named keys, split by role so each match stays small; unbound names map to
+/// `None`.
+fn named_key_code(named: NamedKey, winit_mods: winit::keyboard::ModifiersState) -> Option<KeyCode> {
+    named_editing_key(named, winit_mods).or_else(|| named_navigation_key(named))
+}
+
+/// Editing keys. Tab depends on Shift: Shift+Tab is the reverse focus step.
+fn named_editing_key(
+    named: NamedKey,
+    winit_mods: winit::keyboard::ModifiersState,
+) -> Option<KeyCode> {
+    Some(match named {
+        NamedKey::Enter => KeyCode::Enter,
+        NamedKey::Escape => KeyCode::Esc,
+        NamedKey::Backspace => KeyCode::Backspace,
+        NamedKey::Tab if winit_mods.shift_key() => KeyCode::BackTab,
+        NamedKey::Tab => KeyCode::Tab,
+        NamedKey::Space => KeyCode::Char(' '),
+        _ => return None,
+    })
+}
+
+/// Arrow and boundary keys.
+fn named_navigation_key(named: NamedKey) -> Option<KeyCode> {
+    Some(match named {
+        NamedKey::ArrowUp => KeyCode::Up,
+        NamedKey::ArrowDown => KeyCode::Down,
+        NamedKey::ArrowLeft => KeyCode::Left,
+        NamedKey::ArrowRight => KeyCode::Right,
+        NamedKey::Home => KeyCode::Home,
+        NamedKey::End => KeyCode::End,
+        _ => return None,
+    })
+}
+
+/// Modifier flags for the neutral event: Control maps to ctrl+command (the
+/// handler treats the pair as one) and Super to `mac_cmd` only.
+fn winit_modifiers(winit_mods: winit::keyboard::ModifiersState) -> Modifiers {
+    Modifiers {
+        alt: winit_mods.alt_key(),
+        ctrl: winit_mods.control_key(),
+        shift: winit_mods.shift_key(),
+        mac_cmd: winit_mods.super_key(),
+        command: winit_mods.control_key(),
     }
 }
 
@@ -2166,234 +2197,314 @@ pub fn handle_event(key: &KeyEvent, app: &mut App) -> bool {
     handle_shared_key(key, app)
 }
 
+/// One step of the mouse surface chain: `true` when the surface consumed the
+/// event, `false` to fall through to the next surface.
+type MouseHandler = fn(MouseEvent, &mut App) -> bool;
+
 /// Handle mouse input: hover highlight, click-to-toggle, and scroll to
 /// adjust knob/fader values. Hit-testing uses `app.component_rects`, which
 /// the renderer rebuilds every frame from the actual on-screen layout.
+///
+/// The array below is the surface priority chain in its original order, and
+/// that order is precedence, not preference: help closes on a click outside its
+/// modal over every surface, the picker owns the pointer before any pane, the
+/// graph pane claims a press before element hit-testing, and the source
+/// viewer's minimap and the module UI's map each claim the pointer ahead of the
+/// element under them. The first step answering `true` consumes the event; the
+/// element dispatch after the chain is terminal.
 pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
+    // An open label-edit overlay owns the pointer outright.
     if app.editing.is_some() {
         return;
     }
-    // Help modal click-outside close (design D4): a left-button Down outside
-    // the renderer-published modal rect closes help over any surface. Checked
-    // before the picker/graph branches so it works even when help
-    // overlays them (a click over the picker or graph closes help instead of
-    // selecting a file or dragging a node).
-    if app.showing_help {
-        let inside = app
-            .help_modal_rect
-            .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !inside {
-            app.close_help();
+
+    let chain: [MouseHandler; 5] = [
+        // Overlays: help, picker.
+        handle_help_mouse,
+        handle_picker_mouse,
+        // Panes and their maps: the graph pane's focus claim, then the source
+        // viewer's minimap and the module UI's map, both ahead of the element
+        // hit-test.
+        handle_graph_pane_mouse,
+        handle_source_minimap_mouse,
+        handle_module_ui_mouse,
+    ];
+    for step in chain {
+        if step(mouse, app) {
             return;
         }
     }
-    if app.showing_picker {
-        return;
+
+    // Terminal: the element under the pointer.
+    handle_element_mouse(mouse, app);
+}
+
+/// Help modal click-outside close (design D4): a left-button Down outside the
+/// renderer-published modal rect closes help over any surface. First in the
+/// chain so it works even when help overlays the picker or the graph — a click
+/// over either closes help instead of selecting a file or focusing a pane. A
+/// click inside the modal falls through to the surface underneath.
+fn handle_help_mouse(mouse: MouseEvent, app: &mut App) -> bool {
+    if !app.showing_help {
+        return false;
     }
-    // Class-layout mouse routing: the graph is a pane, not a full-screen
-    // surface, so its mouse handling applies only while the pointer is inside
-    // the graph pane's published hit rect. A left-click inside the pane
-    // focuses it (spec "Focus routing across panes": a mouse click inside a
-    // pane focuses that pane); events elsewhere fall through to the
-    // panel/source routing below, and the pointer leaving the graph pane
-    // clears node hover so the graph cannot keep a stale hover highlight.
-    let graph_pane = app.pane_hit_rects.iter().find(|(id, rect)| {
+    let inside = app
+        .help_modal_rect
+        .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !inside {
+        app.close_help();
+        return true;
+    }
+    false
+}
+
+/// The picker overlay owns the pointer for as long as it is open: it sits ahead
+/// of every pane and of element hit-testing, so a click cannot reach the patch
+/// underneath it. Its own hover/click gestures arrive through
+/// `handle_picker_frame` from the paint layer.
+fn handle_picker_mouse(_mouse: MouseEvent, app: &mut App) -> bool {
+    app.showing_picker
+}
+
+/// Class-layout mouse routing: the graph is a pane, not a full-screen
+/// surface, so its mouse handling applies only while the pointer is inside
+/// the graph pane's published hit rect. A left-click inside the pane focuses
+/// it (spec "Focus routing across panes": a mouse click inside a pane focuses
+/// that pane); events elsewhere fall through to the panel/source routing below.
+fn handle_graph_pane_mouse(mouse: MouseEvent, app: &mut App) -> bool {
+    let over_graph = app.pane_hit_rects.iter().any(|(id, rect)| {
         app.layout.pane(*id).view == Some(ViewType::Graph)
             && rect_contains(*rect, mouse.column, mouse.row)
     });
-    if let Some(_graph_pane) = graph_pane {
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            app.open_view(ViewType::Graph);
+    if !over_graph {
+        // The pointer left the graph pane, so it owns no node or group: clear
+        // here so the graph cannot keep a stale hover highlight.
+        app.hovered_graph_node = None;
+        app.hovered_group = None;
+        return false;
+    }
+    // The graph pane takes the click for focus only: node hover, selection,
+    // dragging and minimap panning are hit-tested in world space through the
+    // shared camera by `handle_graph_window_frame`, the one live pointer path
+    // (droid_tui-7e retired the terminal rect-based path).
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        app.open_view(ViewType::Graph);
+    }
+    true
+}
+
+/// Source viewer minimap click-to-scroll: uses renderer-published minimap
+/// geometry with the same proportional mapping as the viewport indicator in
+/// ui.rs (indicator: `scroll * inner_h / total_lines`). The click must work
+/// whenever the embedded viewer is visible, regardless of focus, and takes
+/// precedence over panel interactions and element hit-testing.
+fn handle_source_minimap_mouse(mouse: MouseEvent, app: &mut App) -> bool {
+    if app.pane_holding(ViewType::SourceViewer).is_none() {
+        return false;
+    }
+    let Some(rect) = app.minimap_rect else {
+        return false;
+    };
+    if !rect_contains(rect, mouse.column, mouse.row)
+        || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+    {
+        return false;
+    }
+    scroll_source_to_minimap_click(app, rect, mouse.row);
+    true
+}
+
+/// Line count the source minimap maps over: the raw source lines when the patch
+/// carries them, else one row per section, never zero.
+fn source_minimap_total_lines(app: &App) -> Option<usize> {
+    app.patch.as_ref().map(|patch| {
+        if patch.raw_lines.is_empty() {
+            patch.sections.len().max(1)
+        } else {
+            patch.raw_lines.len()
         }
-        // The graph pane takes the click for focus only: node hover, selection,
-        // dragging and minimap panning are hit-tested in world space through the
-        // shared camera by `handle_graph_window_frame`, the one live pointer path
-        // (droid_tui-7e1 retired the terminal rect-based path).
+    })
+}
+
+/// Map a click row in the source minimap onto `source_scroll`: the inverse of
+/// the viewport indicator's `scroll * inner_h / total_lines`, centered so the
+/// clicked line lands mid-viewport and clamped to the last full viewport.
+fn scroll_source_to_minimap_click(app: &mut App, rect: Rect, row_y: u16) {
+    let Some(total_lines) = source_minimap_total_lines(app) else {
+        return;
+    };
+    // Mirror ui.rs render_minimap: the inner area excludes the 1-cell border on
+    // each side; the viewport height proxy is inner_h.
+    let inner_h = rect.height.saturating_sub(2) as usize;
+    if inner_h == 0 {
         return;
     }
-    app.hovered_graph_node = None;
-    app.hovered_group = None;
-    // Minimap click-to-scroll: uses renderer-published minimap geometry with
-    // the same proportional mapping as the viewport indicator in ui.rs
-    // (indicator: scroll * inner_h / total_lines). Click must work whenever
-    // the embedded viewer is visible, regardless of focus, and takes
-    // precedence over panel interactions (picker already returned above).
-    if app.pane_holding(ViewType::SourceViewer).is_some() {
-        if let Some(rect) = app.minimap_rect {
-            if rect_contains(rect, mouse.column, mouse.row)
-                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            {
-                if let Some(patch) = app.patch.as_ref() {
-                    let total_lines = if patch.raw_lines.is_empty() {
-                        patch.sections.len().max(1)
-                    } else {
-                        patch.raw_lines.len()
-                    };
-                    // Mirror ui.rs render_minimap: inner area excludes the
-                    // 1-cell border on each side; viewport_h proxy is inner_h.
-                    let inner_h = rect.height.saturating_sub(2) as usize;
-                    if inner_h != 0 {
-                        let inner_y = rect.y.saturating_add(1);
-                        // Map click y to inner row, clamping border clicks to
-                        // the nearest inner row so the fraction stays 0..1.
-                        let row = if mouse.row < inner_y {
-                            0
-                        } else if mouse.row >= inner_y + inner_h as u16 {
-                            inner_h.saturating_sub(1)
-                        } else {
-                            (mouse.row - inner_y) as usize
-                        };
-                        // Invert indicator mapping: row = scroll * inner_h / total
-                        // -> scroll = row * total / inner_h (top-aligned).
-                        let raw_target = row * total_lines / inner_h;
-                        // Center the clicked line in the viewport, matching the
-                        // requirement's "minus viewport half" and keeping the
-                        // handler/ui mapping consistent so the indicator tracks.
-                        let viewport_h = inner_h;
-                        let centered = raw_target.saturating_sub(viewport_h / 2);
-                        let max_scroll = total_lines.saturating_sub(viewport_h);
-                        app.source_scroll = centered.min(max_scroll);
-                    }
-                }
-                return;
-            }
-        }
-    }
+    let inner_y = rect.y.saturating_add(1);
+    // Map the click y to an inner row, clamping border clicks to the nearest
+    // inner row so the fraction stays 0..1.
+    let row = if row_y < inner_y {
+        0
+    } else if row_y >= inner_y + inner_h as u16 {
+        inner_h.saturating_sub(1)
+    } else {
+        (row_y - inner_y) as usize
+    };
+    // Invert the indicator mapping: row = scroll * inner_h / total
+    // -> scroll = row * total / inner_h (top-aligned).
+    let raw_target = row * total_lines / inner_h;
+    // Center the clicked line in the viewport, matching the requirement's
+    // "minus viewport half" and keeping the handler/ui mapping consistent so
+    // the indicator tracks.
+    let viewport_h = inner_h;
+    let centered = raw_target.saturating_sub(viewport_h / 2);
+    let max_scroll = total_lines.saturating_sub(viewport_h);
+    app.source_scroll = centered.min(max_scroll);
+}
 
+/// module-ui-navigation D3: the module UI's map panel claims the pointer
+/// before element hit-testing on this path too, so a press over the map
+/// focuses no element, adjusts no value, and pans nothing. The panel is
+/// published in window points and these events are cells — the app's own
+/// cell geometry is points rounded into the grid — so the panel is compared
+/// in that same rounded space. Gestures themselves stay on the window frame
+/// path (`handle_graph_window_frame`), which is the live pointer path.
+fn handle_module_ui_mouse(mouse: MouseEvent, app: &mut App) -> bool {
+    if !physical_minimap_claims_cell(app, mouse.column, mouse.row) {
+        return false;
+    }
+    // A press on the map still focuses the pane it lives in; only the element
+    // under it loses the press.
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        focus_pane_at(app, mouse.column, mouse.row);
+    }
+    app.hovered_component = None;
+    true
+}
+
+/// Element hit-testing for the module UI — hover, press, release and wheel on
+/// the component under the pointer. Terminal step of the mouse chain, so it
+/// runs only after every surface above declined the event.
+fn handle_element_mouse(mouse: MouseEvent, app: &mut App) {
     let hit = app
         .component_rects
         .iter()
         .find(|(_, rect)| rect_contains(*rect, mouse.column, mouse.row))
         .map(|(idx, _)| *idx);
+    match mouse.kind {
+        MouseEventKind::Moved => app.hovered_component = hit,
+        MouseEventKind::Down(MouseButton::Left) => handle_element_press(mouse, app, hit),
+        MouseEventKind::Up(_) => handle_element_release(app),
+        MouseEventKind::ScrollUp => handle_element_wheel(app, hit, -1, 0.05),
+        MouseEventKind::ScrollDown => handle_element_wheel(app, hit, 1, -0.05),
+        _ => {}
+    }
+}
 
-    // module-ui-navigation D3: the module UI's map panel claims the pointer
-    // before element hit-testing on this path too, so a press over the map
-    // focuses no element, adjusts no value, and pans nothing. The panel is
-    // published in window points and these events are cells — the app's own
-    // cell geometry is points rounded into the grid — so the panel is compared
-    // in that same rounded space. Gestures themselves stay on the window frame
-    // path (`handle_graph_window_frame`), which is the live pointer path.
-    if physical_minimap_claims_cell(app, mouse.column, mouse.row) {
-        // A press on the map still focuses the pane it lives in; only the
-        // element under it loses the press.
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            focus_pane_at(app, mouse.column, mouse.row);
+/// A left press: focus the pane under the pointer, then either press the
+/// component under it or clear the selection on empty space.
+fn handle_element_press(mouse: MouseEvent, app: &mut App, hit: Option<usize>) {
+    // A click inside a pane focuses that pane (spec "Focus routing
+    // across panes"); an empty pane has no view to focus.
+    focus_pane_at(app, mouse.column, mouse.row);
+    match hit {
+        Some(idx) => press_component(mouse, app, idx),
+        None => clear_selection_on_empty_press(mouse, app),
+    }
+}
+
+/// A press on a component: hover it, toggle it (unless processing is paused),
+/// arm the modifier chord, then select it.
+fn press_component(mouse: MouseEvent, app: &mut App, idx: usize) {
+    app.hovered_component = Some(idx);
+    let Some(token) = app
+        .patch
+        .as_ref()
+        .and_then(|p| p.hw_components.get(idx))
+        .map(|c| c.id.clone())
+    else {
+        return;
+    };
+    if !app.processing_paused {
+        if let Some(patch) = &mut app.patch {
+            if let Some(comp) = patch.hw_components.get_mut(idx) {
+                toggle_component(comp);
+                app.status_message = format!("Toggled: {}", comp.label);
+            }
         }
-        app.hovered_component = None;
+    }
+    // Modifier hold: mouse Down without keyboard modifiers on a component.
+    // Sets `hold_component` so the panels paint a wash backdrop; clears
+    // when the mouse is released or leaves the panel area. Ctrl+Click /
+    // Ctrl+Shift+Click toggle the persistent single-var latch instead
+    // (design D chord); the momentary hold stays on the plain Down.
+    if mouse.modifiers.ctrl {
+        let on = app.toggle_modifier_latch(&token);
+        app.status_message = if on {
+            app.modifier_status()
+                .unwrap_or_else(|| format!("MOD {token} latched"))
+        } else {
+            String::from("Modifier latch cleared")
+        };
+    } else if mouse.modifiers == key_modifiers::NONE {
+        app.hold_component = Some(token.clone());
+        app.refresh_modifier_influence();
+        if let Some(status) = app.modifier_status() {
+            app.status_message = status;
+        }
+    }
+    app.select_component(token);
+}
+
+/// Empty-space click: clear the selection without moving `source_scroll`
+/// (deselection stability). Clicks on the minimap column (click-to-scroll owns
+/// it) and on the source viewer pane (a bare source click keeps the selection
+/// so occurrence navigation keeps working there) leave the selection alone.
+fn clear_selection_on_empty_press(mouse: MouseEvent, app: &mut App) {
+    let on_minimap = app
+        .minimap_rect
+        .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
+    let over_viewer_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
+        app.layout.pane(*id).view == Some(ViewType::SourceViewer)
+            && rect_contains(*rect, mouse.column, mouse.row)
+    });
+    if !on_minimap && !over_viewer_pane {
+        app.clear_selected_component();
+    }
+}
+
+/// Momentary hold release: drop the held token and its wash. The status clears
+/// only when no latch survives; otherwise it falls back to the latched MOD line.
+fn handle_element_release(app: &mut App) {
+    if app.hold_component.is_none() {
         return;
     }
+    app.hold_component = None;
+    app.refresh_modifier_influence();
+    if app.latched_component.is_none() {
+        app.status_message.clear();
+    } else if let Some(status) = app.modifier_status() {
+        app.status_message = status;
+    }
+}
 
-    match mouse.kind {
-        MouseEventKind::Moved => {
-            app.hovered_component = hit;
+/// Wheel on a component: pan the rack while it overflows (physical-view
+/// wheel-pan, design D5 — `physical_pan_if_overflow` also gates the viewer and
+/// graph surfaces away), otherwise step the hovered knob/fader value by
+/// `delta` in the wheel's direction.
+fn handle_element_wheel(app: &mut App, hit: Option<usize>, pan_dy: i32, delta: f32) {
+    if app.physical_pan_if_overflow(0, pan_dy) {
+        return;
+    }
+    let Some(idx) = hit else {
+        return;
+    };
+    if app.processing_paused {
+        return;
+    }
+    if let Some(patch) = &mut app.patch {
+        if let Some(comp) = patch.hw_components.get_mut(idx) {
+            adjust_value(comp, delta);
         }
-        MouseEventKind::Down(MouseButton::Left) => {
-            // A click inside a pane focuses that pane (spec "Focus routing
-            // across panes"); an empty pane has no view to focus.
-            focus_pane_at(app, mouse.column, mouse.row);
-            if let Some(idx) = hit {
-                app.hovered_component = Some(idx);
-                let token_id = app
-                    .patch
-                    .as_ref()
-                    .and_then(|p| p.hw_components.get(idx))
-                    .map(|c| c.id.clone());
-                if let Some(token) = token_id {
-                    if !app.processing_paused {
-                        if let Some(patch) = &mut app.patch {
-                            if let Some(comp) = patch.hw_components.get_mut(idx) {
-                                toggle_component(comp);
-                                app.status_message = format!("Toggled: {}", comp.label);
-                            }
-                        }
-                    }
-                    // Modifier hold: mouse Down without keyboard modifiers on a component.
-                    // Sets `hold_component` so the panels paint a wash backdrop; clears
-                    // when the mouse is released or leaves the panel area. Ctrl+Click /
-                    // Ctrl+Shift+Click toggle the persistent single-var latch instead
-                    // (design D chord); the momentary hold stays on the plain Down.
-                    if mouse.modifiers.ctrl {
-                        let on = app.toggle_modifier_latch(&token);
-                        app.status_message = if on {
-                            app.modifier_status()
-                                .unwrap_or_else(|| format!("MOD {token} latched"))
-                        } else {
-                            String::from("Modifier latch cleared")
-                        };
-                    } else if mouse.modifiers == key_modifiers::NONE {
-                        app.hold_component = Some(token.clone());
-                        app.refresh_modifier_influence();
-                        if let Some(status) = app.modifier_status() {
-                            app.status_message = status;
-                        }
-                    }
-                    app.select_component(token);
-                }
-            } else {
-                // Empty-space click: clear selection without moving
-                // source_scroll (deselection stability). Ignore clicks on the
-                // minimap column (click-to-scroll owns it) and on the source
-                // viewer pane (a bare source click keeps the selection so
-                // occurrence navigation keeps working there).
-                let on_minimap = app
-                    .minimap_rect
-                    .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
-                let over_viewer_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
-                    app.layout.pane(*id).view == Some(ViewType::SourceViewer)
-                        && rect_contains(*rect, mouse.column, mouse.row)
-                });
-                if !on_minimap && !over_viewer_pane {
-                    app.clear_selected_component();
-                }
-            }
-        }
-        MouseEventKind::Up(_) => {
-            // Momentary hold release: drop the held token and its wash. The
-            // status clears only when no latch survives; otherwise it
-            // falls back to the latched MOD line.
-            if app.hold_component.is_some() {
-                app.hold_component = None;
-                app.refresh_modifier_influence();
-                if app.latched_component.is_none() {
-                    app.status_message.clear();
-                } else if let Some(status) = app.modifier_status() {
-                    app.status_message = status;
-                }
-            }
-        }
-        MouseEventKind::ScrollUp => {
-            // Physical-view wheel-pan (4.3): when the rack overflows
-            // vertically the wheel pans instead of adjusting the hovered
-            // knob/fader value (design D5; `physical_pan_if_overflow` also
-            // gates viewer/graph surfaces away).
-            let panned = app.physical_pan_if_overflow(0, -1);
-            if !panned {
-                if let Some(idx) = hit {
-                    if !app.processing_paused {
-                        if let Some(patch) = &mut app.patch {
-                            if let Some(comp) = patch.hw_components.get_mut(idx) {
-                                adjust_value(comp, 0.05);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            let panned = app.physical_pan_if_overflow(0, 1);
-            if !panned {
-                if let Some(idx) = hit {
-                    if !app.processing_paused {
-                        if let Some(patch) = &mut app.patch {
-                            if let Some(comp) = patch.hw_components.get_mut(idx) {
-                                adjust_value(comp, -0.05);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -3520,131 +3631,195 @@ fn navigate(app: &mut App, delta: i32) {
     }
 }
 
+/// One step of the picker's key-group chain: `true` when the group recognised
+/// and consumed the key, so the following groups are not tried.
+type PickerKeyHandler = fn(&KeyEvent, &mut App) -> bool;
+
+/// Keys while the file picker is open. The picker owns every key in that
+/// state, so this always answers `false` (never a quit): the chain below only
+/// decides which group acts, and an unmatched key is a no-op.
+///
+/// Group order is binding precedence, not preference: `q` and the digits are
+/// bound commands, so they must be claimed before the generic printable arm
+/// that would otherwise auto-latch the filter on them.
 fn handle_picker_event(key: &KeyEvent, app: &mut App) -> bool {
-    match key.code {
-        KeyCode::Esc => {
-            app.reset_picker_filter();
-            app.showing_picker = false;
-            app.diff_picker_active = false;
-            false
+    let chain: [PickerKeyHandler; 7] = [
+        handle_picker_cancel_key,
+        handle_picker_navigation_key,
+        handle_picker_favourite_key,
+        handle_picker_digit_key,
+        handle_picker_filter_edit_key,
+        handle_picker_type_key,
+        handle_picker_confirm_key,
+    ];
+    for step in chain {
+        if step(key, app) {
+            break;
         }
+    }
+    false
+}
+
+/// Esc: close the picker and drop the latching filter. Both picker modes share
+/// the flag pair, so both are cleared.
+fn handle_picker_cancel_key(key: &KeyEvent, app: &mut App) -> bool {
+    if key.code != KeyCode::Esc {
+        return false;
+    }
+    app.reset_picker_filter();
+    app.showing_picker = false;
+    app.diff_picker_active = false;
+    true
+}
+
+/// Up/`k` and Down/`j`: move the highlight one row, clamped at both ends.
+fn handle_picker_navigation_key(key: &KeyEvent, app: &mut App) -> bool {
+    match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             if app.picker_index > 0 {
                 app.picker_index -= 1;
             }
-            false
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if app.picker_index < app.picker_entries.len().saturating_sub(1) {
                 app.picker_index += 1;
             }
-            false
         }
-        KeyCode::Char(c @ ('f' | 'F')) => {
-            // Precedence (file-picker spec): while the filter is latched, `f`
-            // appends like any printable character; the favourite toggle only
-            // applies while the filter is off. `Ctrl+f` is the latch toggle in
-            // both states, and Alt-modified keys do nothing.
-            if key.modifiers.ctrl {
-                // Ctrl+F toggles the latching filter (spec scenario: Toggle
-                // filter with Ctrl+f). Second press while active turns it off
-                // and clears the string.
-                if app.picker_filter_active {
-                    app.picker_filter_active = false;
-                    app.picker_filter.clear();
-                    app.status_message = String::from("Filter: off");
-                    app.refresh_picker_entries();
-                } else {
-                    app.picker_filter_active = true;
-                    app.picker_filter.clear();
-                    app.status_message = String::from("Filter: on (type to filter)");
-                }
-                return false;
-            }
-            if key.modifiers.alt {
-                return false;
-            }
-            if app.picker_filter_active {
-                append_picker_filter_char(app, c);
-                return false;
-            }
-            if key.modifiers.is_none() {
-                toggle_picker_favourite(app);
-            }
-            false
+        _ => return false,
+    }
+    true
+}
+
+/// `f`/`F` (file-picker spec precedence): while the filter is latched, `f`
+/// appends like any printable character; the favourite toggle only applies
+/// while the filter is off. `Ctrl+f` is the latch toggle in both states, and
+/// Alt-modified keys do nothing.
+fn handle_picker_favourite_key(key: &KeyEvent, app: &mut App) -> bool {
+    let KeyCode::Char(c @ ('f' | 'F')) = key.code else {
+        return false;
+    };
+    if key.modifiers.ctrl {
+        toggle_picker_filter_latch(app);
+    } else if !key.modifiers.alt {
+        if app.picker_filter_active {
+            append_picker_filter_char(app, c);
+        } else if key.modifiers.is_none() {
+            toggle_picker_favourite(app);
         }
-        KeyCode::Char(d @ '0'..='9') => {
-            // Digit keys fast-select a pinned favourite slot (0-based in the
-            // sorted favourites list). Directories navigate in, files open like
-            // Enter; out-of-range digits are silent.
-            if key.modifiers.ctrl || key.modifiers.alt {
-                return false;
-            }
-            let slot = d.to_digit(10).unwrap_or(0) as usize;
-            let favs = app.picker_entries_with_favourites();
-            if let Some(fav) = favs.get(slot) {
-                open_picker_entry(app, fav.clone());
-            }
-            false
+    }
+    true
+}
+
+/// Digits fast-select a pinned favourite slot (0-based in the sorted
+/// favourites list). Directories navigate in, files open like Enter;
+/// out-of-range digits are silent, and Ctrl/Alt-modified digits do nothing.
+fn handle_picker_digit_key(key: &KeyEvent, app: &mut App) -> bool {
+    let KeyCode::Char(d @ '0'..='9') = key.code else {
+        return false;
+    };
+    if !key.modifiers.ctrl && !key.modifiers.alt {
+        let slot = d.to_digit(10).unwrap_or(0) as usize;
+        if let Some(fav) = app.picker_entries_with_favourites().get(slot) {
+            open_picker_entry(app, fav.clone());
         }
+    }
+    true
+}
+
+/// `q` and Backspace: `q` ends the latching filter without quitting, and with
+/// the filter off it is a bound no-op (explicitly not an auto-latch);
+/// Backspace edits the filter while it is latched.
+fn handle_picker_filter_edit_key(key: &KeyEvent, app: &mut App) -> bool {
+    match key.code {
+        // The picker owns keys while open, so this arm is the only `q` route
+        // and must not fall through to the quit path.
         KeyCode::Char('q') if app.picker_filter_active => {
-            // q ends the latching filter without quitting: the picker owns
-            // keys while open, so this arm is the only q route and must not
-            // fall through to the quit path.
             app.reset_picker_filter();
             app.refresh_picker_entries();
-            false
+            true
         }
-        // `q` with the filter off is a no-op, and explicitly not an auto-latch:
-        // it is one of the picker's bound commands.
-        KeyCode::Char('q') => false,
+        KeyCode::Char('q') => true,
         KeyCode::Backspace if app.picker_filter_active => {
             app.picker_filter.pop();
             app.refresh_picker_entries();
-            false
-        }
-        KeyCode::Char(c) if app.picker_filter_active => {
-            // Digits never land here: 0-9 keep routing to the favourite-slot
-            // fast-select above while the filter is latched. Ctrl/Alt-modified
-            // characters are never appended.
-            if !key.modifiers.ctrl && !key.modifiers.alt {
-                append_picker_filter_char(app, c);
-            }
-            false
-        }
-        KeyCode::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => {
-            // Auto-latch on typing: a printable character that is not one of
-            // the bound commands above (`j`/`k`/`q`/`f`/`F`, `0`-`9`,
-            // Backspace, Enter, Esc, arrows) starts filtering. The latch opens
-            // with an empty string so the typed character is the filter's
-            // first, matching the spec's "every non-digit char appends".
-            app.picker_filter_active = true;
-            app.picker_filter.clear();
-            app.status_message = String::from("Filter: on (type to filter)");
-            append_picker_filter_char(app, c);
-            false
-        }
-        KeyCode::Enter => {
-            if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
-                if !is_entry_selectable(&selected_path) {
-                    return false;
-                }
-                // Parent ".." sentinel: navigate up to the picker dir's parent.
-                // Handled before the metadata `is_dir` branch because a bare
-                // ".." path resolves against the process cwd, not picker_dir.
-                if is_picker_parent_entry(&selected_path) {
-                    if let Some(parent) = app.picker_dir.parent().map(std::path::Path::to_path_buf)
-                    {
-                        app.enter_picker_dir(parent);
-                    }
-                    return false;
-                }
-                open_picker_entry(app, selected_path);
-            }
-            false
+            true
         }
         _ => false,
     }
+}
+
+/// Any other printable character: append it to the latched filter, or
+/// auto-latch with it as the filter's first character. Ctrl/Alt chords are
+/// never typed into the filter.
+fn handle_picker_type_key(key: &KeyEvent, app: &mut App) -> bool {
+    let KeyCode::Char(c) = key.code else {
+        return false;
+    };
+    if key.modifiers.ctrl || key.modifiers.alt {
+        return false;
+    }
+    if !app.picker_filter_active {
+        latch_picker_filter(app);
+    }
+    append_picker_filter_char(app, c);
+    true
+}
+
+/// Enter: open the highlighted entry (directories navigate in, `.ini` files
+/// load and close the picker).
+fn handle_picker_confirm_key(key: &KeyEvent, app: &mut App) -> bool {
+    if key.code != KeyCode::Enter {
+        return false;
+    }
+    confirm_picker_selection(app);
+    true
+}
+
+/// Open the highlighted picker entry, treating the parent ".." sentinel as
+/// "step up one directory".
+fn confirm_picker_selection(app: &mut App) {
+    let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() else {
+        return;
+    };
+    if !is_entry_selectable(&selected_path) {
+        return;
+    }
+    // Parent ".." sentinel: navigate up to the picker dir's parent. Handled
+    // before the metadata `is_dir` branch because a bare ".." path resolves
+    // against the process cwd, not picker_dir.
+    if is_picker_parent_entry(&selected_path) {
+        if let Some(parent) = app.picker_dir.parent().map(std::path::Path::to_path_buf) {
+            app.enter_picker_dir(parent);
+        }
+        return;
+    }
+    open_picker_entry(app, selected_path);
+}
+
+/// `Ctrl+f`: toggle the latching filter (spec scenario: Toggle filter with
+/// Ctrl+f). A second press while active turns it off and clears the string.
+fn toggle_picker_filter_latch(app: &mut App) {
+    if app.picker_filter_active {
+        unlatch_picker_filter(app);
+    } else {
+        latch_picker_filter(app);
+    }
+}
+
+/// Latch the filter on with an empty string and announce it; the character
+/// that caused the latch becomes the filter's first.
+fn latch_picker_filter(app: &mut App) {
+    app.picker_filter_active = true;
+    app.picker_filter.clear();
+    app.status_message = String::from("Filter: on (type to filter)");
+}
+
+/// Latch the filter off, clear the string and restore the full listing.
+fn unlatch_picker_filter(app: &mut App) {
+    app.picker_filter_active = false;
+    app.picker_filter.clear();
+    app.status_message = String::from("Filter: off");
+    app.refresh_picker_entries();
 }
 
 /// Append one character to the latched picker filter and re-filter the

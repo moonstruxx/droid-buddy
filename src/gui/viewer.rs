@@ -113,6 +113,9 @@ pub(crate) struct ViewerFrame {
     pub scroll_delta: f32,
 }
 
+/// Height of the viewer's bottom status strip.
+const STATUS_H: f32 = 22.0;
+
 /// Paint the source viewer. `None` draws nothing. Returns the frame's scroll
 /// report for the loop to apply.
 pub(super) fn paint_viewer(
@@ -126,34 +129,13 @@ pub(super) fn paint_viewer(
     };
     let t = crate::theme::active();
 
-    // Status strip at the bottom: hints (viewer-key accent) + transient
-    // message, on the status background.
-    let status_h = 22.0;
-    let status_rect = Rect::from_min_size(
-        Pos2::new(pane.min.x, pane.max.y - status_h),
-        Vec2::new(pane.width(), status_h),
-    );
-    painter.rect_filled(status_rect, 0.0, rgb(t.status_bg));
-    let key = rgb(t.viewer_key);
-    let text = rgb(t.text);
-    let mut x = 6.0;
-    for f in &spec.status {
-        let font = egui::FontId::proportional(11.0);
-        painter.text(
-            Pos2::new(x, status_rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            &f.text,
-            font.clone(),
-            if f.bold { text } else { key },
-        );
-        x += f.text.chars().count() as f32 * font.size * 0.55 + 2.0;
-    }
+    paint_status_strip(painter, pane, &spec.status, t);
 
     // The pane above the status strip: frame + mode title, focused panes in
     // the focus token.
     let content = Rect::from_min_size(
         pane.min,
-        Vec2::new(pane.width(), (pane.height() - status_h).max(1.0)),
+        Vec2::new(pane.width(), (pane.height() - STATUS_H).max(1.0)),
     );
     super::draw_pane_frame(painter, content, spec.focused, &spec.title, t);
 
@@ -170,111 +152,193 @@ pub(super) fn paint_viewer(
         Vec2::new(content_w, inner.height()),
     );
     if let Some(sidebar) = &spec.sidebar {
-        let srect = Rect::from_min_size(inner.min, Vec2::new(sidebar_w, inner.height()));
-        painter.rect(
-            srect,
-            0.0,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(1.0, rgb(t.accent)),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            srect.min + egui::vec2(5.0, 3.0),
-            egui::Align2::LEFT_TOP,
-            " Circuits ",
-            egui::FontId::proportional(11.0),
-            rgb(t.accent),
-        );
-        let mut y = srect.min.y + 22.0;
-        let row_h = 16.0;
-        for (i, name) in sidebar.names.iter().enumerate() {
-            if y + row_h > srect.max.y {
-                break;
-            }
-            let selected = Some(i) == sidebar.selected;
-            if selected {
-                let mut bg = rgb(t.muted);
-                bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 120);
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        Pos2::new(srect.min.x + 2.0, y),
-                        Vec2::new(sidebar_w - 4.0, row_h),
-                    ),
-                    0.0,
-                    bg,
-                );
-            }
-            painter.text(
-                Pos2::new(srect.min.x + 5.0, y),
-                egui::Align2::LEFT_TOP,
-                name,
-                egui::FontId::proportional(11.0),
-                rgb(t.text),
-            );
-            y += row_h;
-        }
+        paint_sidebar(painter, inner, sidebar_w, sidebar, t);
     }
     if let Some(minimap) = &spec.minimap {
-        let mrect = Rect::from_min_size(
-            Pos2::new(inner.max.x - minimap_w, inner.min.y),
-            Vec2::new(minimap_w, inner.height()),
-        );
-        painter.rect(
-            mrect,
-            0.0,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(1.0, rgb(t.muted)),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            mrect.min + egui::vec2(3.0, 2.0),
-            egui::Align2::LEFT_TOP,
-            " Map ",
-            egui::FontId::proportional(9.0),
-            rgb(t.muted),
-        );
-        let row_h = (mrect.height() / minimap.rows.len().max(1) as f32).clamp(1.0, 3.0);
-        for (row_idx, row) in minimap.rows.iter().enumerate() {
-            let y = mrect.min.y + row_idx as f32 * row_h + row_h * 0.5;
-            if row.reversed {
-                let mut bg = rgb(t.muted);
-                bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 160);
-                painter.rect_filled(
-                    Rect::from_min_size(mrect.min, Vec2::new(minimap_w, mrect.height())),
-                    0.0,
-                    bg,
-                );
-            }
-            painter.text(
-                Pos2::new(mrect.min.x + 2.0, y),
-                egui::Align2::LEFT_CENTER,
-                row.ch.to_string(),
-                egui::FontId::monospace(row_h.max(4.0)),
-                if row.reversed {
-                    rgb(t.text)
-                } else {
-                    rgb(row.color)
-                },
-            );
-        }
+        paint_minimap(painter, inner, minimap_w, minimap, t);
         content_rect = Rect::from_min_size(
             Pos2::new(content_rect.min.x, content_rect.min.y),
             Vec2::new(content_rect.width() - minimap_w, content_rect.height()),
         );
     }
 
-    // Content column: scrolled highlighted lines, clipped to the column.
-    if let Some(message) = &spec.empty_message {
-        if spec.lines.is_empty() {
-            painter.text(
-                content_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                message,
-                egui::FontId::proportional(13.0),
-                rgb(t.muted),
-            );
-        }
+    paint_content(painter, content_rect, spec, t);
+
+    // Wheel scroll over the content column.
+    ctx.input(|i| viewer_frame(i, content_rect))
+}
+
+/// The bottom status strip: hints (viewer-key accent) + transient message, on
+/// the status background.
+fn paint_status_strip(
+    painter: &Painter,
+    pane: Rect,
+    fragments: &[StatusFragment],
+    t: &crate::theme::Theme,
+) {
+    let status_rect = Rect::from_min_size(
+        Pos2::new(pane.min.x, pane.max.y - STATUS_H),
+        Vec2::new(pane.width(), STATUS_H),
+    );
+    painter.rect_filled(status_rect, 0.0, rgb(t.status_bg));
+    let key = rgb(t.viewer_key);
+    let text = rgb(t.text);
+    let mut x = 6.0;
+    for f in fragments {
+        let font = egui::FontId::proportional(11.0);
+        painter.text(
+            Pos2::new(x, status_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &f.text,
+            font.clone(),
+            if f.bold { text } else { key },
+        );
+        x += f.text.chars().count() as f32 * font.size * 0.55 + 2.0;
     }
+}
+
+/// The circuits sidebar column: its frame, title and entry rows.
+fn paint_sidebar(
+    painter: &Painter,
+    inner: Rect,
+    sidebar_w: f32,
+    sidebar: &SidebarSpec,
+    t: &crate::theme::Theme,
+) {
+    let srect = Rect::from_min_size(inner.min, Vec2::new(sidebar_w, inner.height()));
+    painter.rect(
+        srect,
+        0.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, rgb(t.accent)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        srect.min + egui::vec2(5.0, 3.0),
+        egui::Align2::LEFT_TOP,
+        " Circuits ",
+        egui::FontId::proportional(11.0),
+        rgb(t.accent),
+    );
+    let mut y = srect.min.y + 22.0;
+    let row_h = 16.0;
+    for (i, name) in sidebar.names.iter().enumerate() {
+        if y + row_h > srect.max.y {
+            break;
+        }
+        let row_bg = Rect::from_min_size(
+            Pos2::new(srect.min.x + 2.0, y),
+            Vec2::new(sidebar_w - 4.0, row_h),
+        );
+        paint_sidebar_row(
+            painter,
+            row_bg,
+            Pos2::new(srect.min.x + 5.0, y),
+            name,
+            Some(i) == sidebar.selected,
+            t,
+        );
+        y += row_h;
+    }
+}
+
+/// One sidebar row: the selected entry's backdrop, then its label.
+fn paint_sidebar_row(
+    painter: &Painter,
+    row_bg: Rect,
+    label_pos: Pos2,
+    name: &str,
+    selected: bool,
+    t: &crate::theme::Theme,
+) {
+    if selected {
+        let mut bg = rgb(t.muted);
+        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 120);
+        painter.rect_filled(row_bg, 0.0, bg);
+    }
+    painter.text(
+        label_pos,
+        egui::Align2::LEFT_TOP,
+        name,
+        egui::FontId::proportional(11.0),
+        rgb(t.text),
+    );
+}
+
+/// The minimap column: its frame, title and one marker glyph per row.
+fn paint_minimap(
+    painter: &Painter,
+    inner: Rect,
+    minimap_w: f32,
+    minimap: &MinimapSpec,
+    t: &crate::theme::Theme,
+) {
+    let mrect = Rect::from_min_size(
+        Pos2::new(inner.max.x - minimap_w, inner.min.y),
+        Vec2::new(minimap_w, inner.height()),
+    );
+    painter.rect(
+        mrect,
+        0.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, rgb(t.muted)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        mrect.min + egui::vec2(3.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        " Map ",
+        egui::FontId::proportional(9.0),
+        rgb(t.muted),
+    );
+    let row_h = (mrect.height() / minimap.rows.len().max(1) as f32).clamp(1.0, 3.0);
+    for (row_idx, row) in minimap.rows.iter().enumerate() {
+        let y = mrect.min.y + row_idx as f32 * row_h + row_h * 0.5;
+        paint_minimap_row(painter, mrect, y, row_h, row, t);
+    }
+}
+
+/// One minimap row: the viewport indicator's backdrop when the row is covered,
+/// then its glyph.
+fn paint_minimap_row(
+    painter: &Painter,
+    mrect: Rect,
+    y: f32,
+    row_h: f32,
+    row: &MinimapRow,
+    t: &crate::theme::Theme,
+) {
+    if row.reversed {
+        let mut bg = rgb(t.muted);
+        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 160);
+        painter.rect_filled(
+            Rect::from_min_size(mrect.min, Vec2::new(mrect.width(), mrect.height())),
+            0.0,
+            bg,
+        );
+    }
+    painter.text(
+        Pos2::new(mrect.min.x + 2.0, y),
+        egui::Align2::LEFT_CENTER,
+        row.ch.to_string(),
+        egui::FontId::monospace(row_h.max(4.0)),
+        if row.reversed {
+            rgb(t.text)
+        } else {
+            rgb(row.color)
+        },
+    );
+}
+
+/// The content column: the centered empty message (when the content is empty)
+/// and the scrolled highlighted lines, clipped to the column.
+fn paint_content(
+    painter: &Painter,
+    content_rect: Rect,
+    spec: &ViewerSpec,
+    t: &crate::theme::Theme,
+) {
+    paint_empty_message(painter, content_rect, spec, t);
     let clip = painter.with_clip_rect(content_rect);
     let font = egui::FontId::monospace(13.0);
     let line_h = font.size * 1.3;
@@ -283,75 +347,117 @@ pub(super) fn paint_viewer(
         if y + line_h > content_rect.max.y {
             break;
         }
-        let mut x = content_rect.min.x;
-        if line.fragments.is_empty() {
+        paint_line(&clip, content_rect.min.x, y, line, &font, t);
+        y += line_h;
+    }
+}
+
+/// The centered message shown while the content is empty.
+fn paint_empty_message(
+    painter: &Painter,
+    content_rect: Rect,
+    spec: &ViewerSpec,
+    t: &crate::theme::Theme,
+) {
+    let Some(message) = &spec.empty_message else {
+        return;
+    };
+    if !spec.lines.is_empty() {
+        return;
+    }
+    painter.text(
+        content_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        message,
+        egui::FontId::proportional(13.0),
+        rgb(t.muted),
+    );
+}
+
+/// One source line at `(x, y)`: the plain text when it carries no fragments,
+/// otherwise its styled runs.
+fn paint_line(
+    clip: &Painter,
+    x: f32,
+    y: f32,
+    line: &LineSpec,
+    font: &egui::FontId,
+    t: &crate::theme::Theme,
+) {
+    if line.fragments.is_empty() {
+        clip.text(
+            Pos2::new(x, y),
+            egui::Align2::LEFT_TOP,
+            &line.text,
+            font.clone(),
+            rgb(t.text),
+        );
+        return;
+    }
+    paint_fragment_runs(clip, x, y, line, font, t);
+}
+
+/// A line's styled fragments plus the unstyled gaps between them (plain theme
+/// text), so highlighted lines keep their full text.
+fn paint_fragment_runs(
+    clip: &Painter,
+    mut x: f32,
+    y: f32,
+    line: &LineSpec,
+    font: &egui::FontId,
+    t: &crate::theme::Theme,
+) {
+    let mut pos = 0usize;
+    for f in &line.fragments {
+        let start = f.range.0.min(line.text.len());
+        if start > pos {
+            let gap = line.text.get(pos..start).unwrap_or("");
+            if !gap.is_empty() {
+                clip.text(
+                    Pos2::new(x, y),
+                    egui::Align2::LEFT_TOP,
+                    gap,
+                    font.clone(),
+                    rgb(t.text),
+                );
+                x += gap.chars().count() as f32 * font.size * 0.6;
+            }
+        }
+        let frag = line
+            .text
+            .get(f.range.0..f.range.1.min(line.text.len()))
+            .unwrap_or("");
+        if !frag.is_empty() {
+            // Reversed fragments render in the theme text color over the
+            // muted backdrop (the terminal's REVERSED emphasis).
+            let color = if f.reversed {
+                rgb(t.text)
+            } else {
+                rgb(f.color)
+            };
             clip.text(
                 Pos2::new(x, y),
                 egui::Align2::LEFT_TOP,
-                &line.text,
+                frag,
+                font.clone(),
+                color,
+            );
+            x += frag.chars().count() as f32 * font.size * 0.6;
+        }
+        pos = f.range.1.max(pos);
+    }
+    if pos < line.text.len() {
+        let gap = line.text.get(pos..).unwrap_or("");
+        if !gap.is_empty() {
+            clip.text(
+                Pos2::new(x, y),
+                egui::Align2::LEFT_TOP,
+                gap,
                 font.clone(),
                 rgb(t.text),
             );
-        } else {
-            // Draw the styled fragments plus the unstyled gaps between them
-            // (plain theme text), so highlighted lines keep their full text.
-            let mut pos = 0usize;
-            for f in &line.fragments {
-                let start = f.range.0.min(line.text.len());
-                if start > pos {
-                    let gap = line.text.get(pos..start).unwrap_or("");
-                    if !gap.is_empty() {
-                        clip.text(
-                            Pos2::new(x, y),
-                            egui::Align2::LEFT_TOP,
-                            gap,
-                            font.clone(),
-                            rgb(t.text),
-                        );
-                        x += gap.chars().count() as f32 * font.size * 0.6;
-                    }
-                }
-                let frag = line
-                    .text
-                    .get(f.range.0..f.range.1.min(line.text.len()))
-                    .unwrap_or("");
-                if !frag.is_empty() {
-                    // Reversed fragments render in the theme text color over
-                    // the muted backdrop (the terminal's REVERSED emphasis).
-                    let color = if f.reversed {
-                        rgb(t.text)
-                    } else {
-                        rgb(f.color)
-                    };
-                    clip.text(
-                        Pos2::new(x, y),
-                        egui::Align2::LEFT_TOP,
-                        frag,
-                        font.clone(),
-                        color,
-                    );
-                    x += frag.chars().count() as f32 * font.size * 0.6;
-                }
-                pos = f.range.1.max(pos);
-            }
-            if pos < line.text.len() {
-                let gap = line.text.get(pos..).unwrap_or("");
-                if !gap.is_empty() {
-                    clip.text(
-                        Pos2::new(x, y),
-                        egui::Align2::LEFT_TOP,
-                        gap,
-                        font.clone(),
-                        rgb(t.text),
-                    );
-                }
-            }
         }
-        y += line_h;
     }
-
-    // Wheel scroll over the content column.
-    ctx.input(|i| viewer_frame(i, content_rect))
 }
 
 /// The viewer's wheel-scroll report: the scroll delta when the pointer is

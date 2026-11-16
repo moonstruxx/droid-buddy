@@ -1,30 +1,25 @@
 use std::collections::HashMap;
 
+/// Left-to-right evaluation of a DROID parameter expression (`A * B + C`).
+///
+/// Operands are numbers (`2.5`, `1V` = tenths of a volt), cable references
+/// (`_NAME`) and register references (`P1.1`); the operators `+ - * /` carry no
+/// precedence, so `2 + 3 * 4` is `20`. `None` means "not an expression" or a
+/// name absent from `values`.
 pub fn evaluate_droid_expr(
     expr: &str,
     values: &HashMap<String, f64, impl std::hash::BuildHasher>,
 ) -> Option<f64> {
     let bytes = expr.as_bytes();
-    let len = bytes.len();
-    let mut pos = 0usize;
-
-    let skip_ws = |pos: &mut usize| {
-        while *pos < len && bytes[*pos].is_ascii_whitespace() {
-            *pos += 1;
-        }
-    };
-
-    skip_ws(&mut pos);
-    if pos >= len {
+    let mut pos = skip_ws(bytes, 0);
+    if pos >= bytes.len() {
         return None;
     }
 
-    let mut accumulator: Option<f64> = None;
-    let mut pending_op: Option<char> = None;
-
+    let mut state = ExprState::default();
     if bytes[pos] == b'-' {
-        accumulator = Some(0.0);
-        pending_op = Some('-');
+        state.accumulator = Some(0.0);
+        state.pending_op = Some('-');
         pos += 1;
     } else if bytes[pos] == b'+' {
         return None;
@@ -33,70 +28,105 @@ pub fn evaluate_droid_expr(
     let mut expect_operand = true;
     let mut has_operand = false;
 
-    while pos < len {
-        skip_ws(&mut pos);
-        if pos >= len {
+    while pos < bytes.len() {
+        pos = skip_ws(bytes, pos);
+        if pos >= bytes.len() {
             break;
         }
         if expect_operand {
-            let (v, np) = if let Some((v, np)) = try_parse_numeric(expr, pos) {
-                (v, np)
-            } else if let Some((tok, np)) = try_parse_cable(expr, pos) {
-                let val = *values.get(&tok)?;
-                (val, np)
-            } else if let Some((tok, np)) = try_parse_register(expr, pos) {
-                let val = *values.get(&tok)?;
-                (val, np)
-            } else {
-                return None;
-            };
-            if let Some(op) = pending_op.take() {
-                let acc = accumulator?;
-                let res = match op {
-                    '+' => acc + v,
-                    '-' => acc - v,
-                    '*' => acc * v,
-                    '/' => {
-                        if v == 0.0 {
-                            0.0
-                        } else {
-                            acc / v
-                        }
-                    }
-                    _ => return None,
-                };
-                accumulator = Some(res);
-            } else {
-                if accumulator.is_some() {
-                    return None;
-                }
-                accumulator = Some(v);
-            }
-            pos = np;
+            let (value, next) = resolve_operand(expr, pos, values)?;
+            state.apply(value)?;
+            pos = next;
             expect_operand = false;
             has_operand = true;
         } else {
-            let c = bytes[pos] as char;
-            if c == '+' || c == '-' || c == '*' || c == '/' {
-                pending_op = Some(c);
-                pos += 1;
-                expect_operand = true;
-            } else {
-                return None;
-            }
+            state.pending_op = Some(operator_at(bytes[pos])?);
+            pos += 1;
+            expect_operand = true;
         }
     }
 
-    if expect_operand {
+    if expect_operand || !has_operand || state.pending_op.is_some() {
         return None;
     }
-    if !has_operand {
-        return None;
+    state.accumulator
+}
+
+/// The running result of the walk: the value so far and the operator waiting
+/// for its right-hand operand.
+#[derive(Default)]
+struct ExprState {
+    accumulator: Option<f64>,
+    pending_op: Option<char>,
+}
+
+impl ExprState {
+    /// Fold `value` in under the pending operator, or start the accumulator.
+    ///
+    /// A pending operator without an accumulator, or a second value with no
+    /// operator between them, is not an expression.
+    fn apply(&mut self, value: f64) -> Option<()> {
+        if let Some(op) = self.pending_op.take() {
+            let acc = self.accumulator?;
+            self.accumulator = Some(combine(op, acc, value)?);
+            return Some(());
+        }
+        if self.accumulator.is_some() {
+            return None;
+        }
+        self.accumulator = Some(value);
+        Some(())
     }
-    if pending_op.is_some() {
-        return None;
+}
+
+/// Index of the first non-whitespace byte at or after `pos`.
+fn skip_ws(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
     }
-    accumulator
+    i
+}
+
+/// The four single-character operators, or `None` for anything else.
+fn operator_at(byte: u8) -> Option<char> {
+    let c = byte as char;
+    matches!(c, '+' | '-' | '*' | '/').then_some(c)
+}
+
+/// Resolve the operand starting at `pos` — a number, a cable reference or a
+/// register reference, in that order — returning it with the index just past
+/// it.
+fn resolve_operand(
+    expr: &str,
+    pos: usize,
+    values: &HashMap<String, f64, impl std::hash::BuildHasher>,
+) -> Option<(f64, usize)> {
+    if let Some(numeric) = try_parse_numeric(expr, pos) {
+        return Some(numeric);
+    }
+    if let Some((tok, next)) = try_parse_cable(expr, pos) {
+        return Some((*values.get(&tok)?, next));
+    }
+    let (tok, next) = try_parse_register(expr, pos)?;
+    Some((*values.get(&tok)?, next))
+}
+
+/// Apply one operator. Division by zero yields `0.0`, matching the firmware.
+fn combine(op: char, acc: f64, value: f64) -> Option<f64> {
+    Some(match op {
+        '+' => acc + value,
+        '-' => acc - value,
+        '*' => acc * value,
+        '/' => {
+            if value == 0.0 {
+                0.0
+            } else {
+                acc / value
+            }
+        }
+        _ => return None,
+    })
 }
 
 fn try_parse_numeric(s: &str, pos: usize) -> Option<(f64, usize)> {
