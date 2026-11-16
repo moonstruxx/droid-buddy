@@ -137,6 +137,35 @@ become too small. The pane title and the status line name the fit that
 ran (`fit(labels)` / `fit(rack)`), and drop the name once you zoom or
 pan yourself.
 
+**The pane draws a map of the rack.** A minimap sits inset in the pane's
+bottom-right whenever the pane has a rack, including when the whole rack
+already fits, so it is a persistent place-finder rather than an overflow
+warning. It shows the rack case outline, one rect per module faceplate, the
+focused element's module in the focus colour, and a viewport box marking the
+part of the rack the pane currently shows; when everything is visible the
+box is clamped inside the map and reads as the whole rack being on screen.
+The panel is 160 pt wide and its height follows the rack's aspect, 56 to
+120 pt, so a wide single-row case keeps the floor: the 17-faceplate multirow
+rack lands on 56 pt with about 8.9 pt per module, which is why the map shows
+place and extent and never module names.
+
+**The map is a pointer surface.** A click centres the pane on the clicked
+rack point at the current zoom; a drag of three points or more fits the zoom
+to the dragged region; `Esc` cancels a marquee without closing the pane. The
+wheel over the map does nothing — the pane keeps zooming about the pointer
+everywhere else. The panel claims presses and the wheel before element
+hit-testing, so a click on the map never focuses an element and a wheel over
+it never adjusts a value. The map is drawn in the skeleton presentation too
+and is absent in the [performance view](#performance-view), which already
+shows the rack compactly.
+
+**`c` and `Shift+C` move the camera.** `c` centres the pane on the focused
+element at the current zoom, or on the rack when nothing is focused.
+`Shift+C` applies the labels fit and re-arms automatic fitting: after a
+manual pan or zoom, a later patch load or pane resize fits the view again.
+`f` and `Shift+F` keep their own meanings, and the pair means on this pane
+what it already means on the signal-flow graph.
+
 `a` cycles the label presentation. `off` draws in-cell labels only; `on`
 annotates every addressed element that carries a written label, outside
 the rack with a leader line; `auto` — the default — annotates exactly the
@@ -161,6 +190,10 @@ the drawn cells.
   elsewhere, `s` toggles the skeleton reference presentation, `p` opens
   the [performance view](#performance-view), `R` resets all element
   states, `e` edits the label (or opens validation).
+- `c` centres the focused element (or the rack with nothing focused),
+  `Shift+C` reapplies the labels fit and re-arms automatic fitting; a
+  click on the map jumps to that place and a drag frames the dragged
+  region.
   ![Module UI](assets/module-ui.png)
   ![Module UI at the labels fit](assets/module-ui-labels.png)
   ![Module UI at the rack fit](assets/module-ui-fit-rack.png)

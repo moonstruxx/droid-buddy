@@ -20,7 +20,8 @@ use egui::{Painter, Pos2, Rect, Vec2};
 use crate::app::App;
 use crate::patch::{ComponentKind, ComponentState, NodeId, ShiftGroup};
 use crate::physical::{
-    ElementCell, PhysicalLayout, PhysicalModule, RackLayout, RackSpec, ScreenMapping,
+    ElementCell, MiniMap, PhysicalLayout, PhysicalModule, RackLayout, RackSpec, RectPt,
+    ScreenMapping,
 };
 use crate::theme::Color;
 
@@ -266,6 +267,19 @@ pub(crate) struct PhysicalSpec {
     /// element under the pointer, anchored to its cell and flipped to stay
     /// inside the pane. `None` with no hovered element.
     pub hover: Option<CalloutSpec>,
+    /// The module UI's minimap (module-ui-navigation D1/D2): the rack, one rect
+    /// per module and the pane's viewport mapped into the bottom-right panel,
+    /// with the focused module named. `None` with no rack, when the model
+    /// refuses a degenerate one, and in the performance view — that view is
+    /// already the compact picture of the whole rack, so it carries no second
+    /// map.
+    pub minimap: Option<MiniMap>,
+    /// The live minimap marquee as `(anchor_x, anchor_y, current_x,
+    /// current_y)` in window points — the space the pointer arrives in and the
+    /// panel is drawn in — or `None` while no drag on the map is down. Read from
+    /// `App::physical_minimap_drag`: the handler owns the gesture, the painter
+    /// only paints what it is given.
+    pub minimap_drag: Option<(f32, f32, f32, f32)>,
     /// Skeleton presentation: module outlines + cell markers only.
     pub skeleton: bool,
     /// Global processing pause: everything renders dimmed.
@@ -806,10 +820,62 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
                 .and_then(|cell| hover_callout(pane, &cell))
         })
     };
+    // Module UI minimap (module-ui-navigation D1/D2): the rack's extent at the
+    // current zoom, one rect per placed module and the focused module's index,
+    // mapped into the panel inset in the pane's bottom-right corner. Everything
+    // but the panel is in rack-local points — the space `physical_offset` lives
+    // in and the space a click or a marquee names — so `minimap_rack_point`
+    // returns exactly what `physical_center_on_rect` consumes. The panel itself
+    // lands in window points, where the pointer arrives.
+    //
+    // The performance view builds no map (spec: No map in the performance view):
+    // it already presents the whole rack compactly, so a second picture of the
+    // same rack beside it would only be a smaller duplicate.
+    let minimap = if app.showing_performance {
+        None
+    } else {
+        let origin = geom.case_rect.min;
+        let module_rects: Vec<RectPt> = geom
+            .module_rects
+            .iter()
+            .map(|&(_, rect)| {
+                RectPt::new(
+                    rect.min.x - origin.x,
+                    rect.min.y - origin.y,
+                    rect.width(),
+                    rect.height(),
+                )
+            })
+            .collect();
+        // The focused module is the one holding `selected_component`'s resolved
+        // element: the same token the cells mark as highlighted, resolved the
+        // way `App::physical_element_rect` resolves it (the module must also
+        // declare a cell for the token, else nothing of it is drawn to point
+        // at). `position` over `geom.module_rects` is the index into the
+        // `modules` payload, which is built from that same list in that order.
+        let focused = app.selected_component.as_deref().and_then(|token| {
+            geom.module_rects.iter().position(|&(mi, _)| {
+                chain.modules.get(mi).is_some_and(|module| {
+                    module.components.iter().any(|comp| comp.id == token)
+                        && chain.cell_for(mi, token).is_some()
+                })
+            })
+        });
+        crate::physical::rack_minimap(
+            RectPt::new(0.0, 0.0, geom.case_rect.width(), geom.case_rect.height()),
+            &module_rects,
+            focused,
+            RectPt::new(pane.min.x, pane.min.y, pane.width(), pane.height()),
+            app.physical_offset,
+            app.physical_zoom,
+        )
+    };
     Some(PhysicalSpec {
         performance,
         annotations,
         hover,
+        minimap,
+        minimap_drag: app.physical_minimap_drag,
         background: crate::theme::active().graph_canvas_bg,
         case_rect: geom.case_rect,
         mounts: geom.mounts,
@@ -1389,9 +1455,114 @@ pub(crate) fn paint_physical(
     if let Some(hover) = &spec.hover {
         paint_callouts(&painter, std::slice::from_ref(hover), spec.paused);
     }
+    // Module UI minimap (module-ui-navigation D1/D2): the panel, the rack's
+    // modules, the focused module, the live marquee and the viewport box. Drawn
+    // last so it sits on top of the rack it navigates — the same precedence the
+    // graph canvas gives its own map — and in the skeleton presentation too,
+    // because the map is about place, not about how much detail the rack draws.
+    if let Some(minimap) = &spec.minimap {
+        paint_minimap(
+            &painter,
+            minimap,
+            spec.background,
+            spec.minimap_drag,
+            spec.paused,
+        );
+    }
 
     drop(painter);
     ui.ctx().input(|i| physical_frame(i, pane, Some(spec)))
+}
+
+/// The module UI's minimap (module-ui-navigation D1/D2/D6): the panel backdrop
+/// in the rack's own background with an `accent` border, the case outline and
+/// one rect per module in `muted`, the focused module in `focus_border`, the
+/// live region-zoom marquee and the viewport box in `accent`.
+///
+/// The case outline is the transform's own world bounds mapped back through the
+/// same scale the model used, so the picture the user sees is the answer the
+/// pointer path inverts — the painter never re-derives a scale (D2).
+///
+/// `drag` is `(anchor_x, anchor_y, current_x, current_y)` in window points —
+/// the space the pointer arrives in and the panel is drawn in — or `None` with
+/// no drag down. Every colour passes through [`dim`], so a paused frame dims the
+/// map with the rest of the surface.
+fn paint_minimap(
+    painter: &Painter,
+    minimap: &MiniMap,
+    background: Color,
+    drag: Option<(f32, f32, f32, f32)>,
+    paused: bool,
+) {
+    let t = crate::theme::active();
+    let panel = rect_pt(minimap.panel);
+    // An opaque backdrop: the rack behind the panel must not show through the
+    // map and make a module edge read as a cell edge.
+    painter.rect_filled(panel, 0.0, rgb(background));
+    let accent = dim(rgb(t.accent), paused);
+    painter.rect(
+        panel,
+        0.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, accent),
+        egui::StrokeKind::Inside,
+    );
+    // The case outline, then the modules over it: the map reads as a rack of
+    // faceplates rather than a loose set of rects.
+    let (_, _, bw, bh, ix, iy, sx, sy) = minimap.transform;
+    let case = Rect::from_min_size(Pos2::new(ix, iy), Vec2::new(bw * sx, bh * sy));
+    let edge = dim(rgb(t.muted), paused);
+    painter.rect(
+        case,
+        0.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, edge),
+        egui::StrokeKind::Inside,
+    );
+    let focused_color = dim(rgb(t.focus_border), paused);
+    for (index, module) in minimap.modules.iter().enumerate() {
+        let color = if minimap.focused == Some(index) {
+            focused_color
+        } else {
+            edge
+        };
+        painter.rect(
+            rect_pt(*module),
+            0.0,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    // The marquee sits above the modules (it names a part of the map) and below
+    // the viewport box, which stays readable through its translucent fill — the
+    // order the graph canvas gives the same pair. Clipped to the panel so a drag
+    // that ran past the map cannot smear over the rack around it.
+    if let Some((ax, ay, bx, by)) = drag {
+        let marquee = Rect::from_two_pos(Pos2::new(ax, ay), Pos2::new(bx, by)).intersect(panel);
+        let fill = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40);
+        painter.rect_filled(marquee, 0.0, fill);
+        painter.rect(
+            marquee,
+            0.0,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.rect(
+        rect_pt(minimap.viewport),
+        0.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, accent),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// A [`RectPt`] as an egui rect: the model works in plain floats so its
+/// geometry stays testable without a painter.
+fn rect_pt(rect: RectPt) -> Rect {
+    Rect::from_min_size(Pos2::new(rect.x, rect.y), Vec2::new(rect.w, rect.h))
 }
 
 /// Draw one element cell: skeleton marker, compact state cell, or the fader
@@ -2845,6 +3016,10 @@ mod tests {
             performance: None,
             annotations: Vec::new(),
             hover: None,
+            // The paint tests build their own spec; the map is `physical_spec`'s
+            // payload and has its own coverage (task 3.2 builds one per case).
+            minimap: None,
+            minimap_drag: None,
             skeleton,
             paused,
         }
@@ -7988,5 +8163,456 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- module-ui-navigation 3.2: the minimap's paint ----
+
+    /// The dense rack the minimap paint stories draw: sixteen bare P2B8 fronts
+    /// and the CV I/O master, 457.2 × 128.5 mm — 3.56:1, so its panel height
+    /// lands on the [`crate::physical::RACK_MINIMAP_MIN_H`] floor and its
+    /// seventeen modules stay a readable width inside the map.
+    const MINIMAP_FIXTURE: &str = "fixtures/physical_multirow_rack.ini";
+
+    /// The written labels the labels fit is measured over (the fixture carries
+    /// none of its own), so the pane opens at the 1.44 labels fit rather than
+    /// the 0.370 rack fit — the two states the paint is pinned at.
+    const MINIMAP_LABELS: &[(&str, &str)] = &[
+        ("P1.1", "Cutoff"),
+        ("P1.2", "Resonance"),
+        ("P2.1", "Cutoff"),
+        ("B1.1", "Trigger input"),
+        ("I1", "Gate input"),
+    ];
+
+    /// The module UI's `BigLeft` pane in a 1280 × 800 window: the 640 × 800
+    /// pane both fits are measured against.
+    fn minimap_pane() -> Rect {
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 800.0))
+    }
+
+    /// An app on [`MINIMAP_FIXTURE`] with [`MINIMAP_LABELS`] written into its
+    /// preamble, through the production `load_patch`.
+    fn minimap_app() -> App {
+        let mut patch = crate::patch::Patch::from_ini_file(std::path::Path::new(MINIMAP_FIXTURE))
+            .unwrap_or_else(|e| panic!("{MINIMAP_FIXTURE} must parse: {e}"));
+        for (token, label) in MINIMAP_LABELS {
+            patch
+                .preamble_labels
+                .insert((*token).to_string(), (*label).to_string());
+        }
+        let mut app = App::new();
+        assert!(app.load_patch(patch), "the fixture must load");
+        app
+    }
+
+    /// The spec `paint_physical` draws, built by the production builder over
+    /// [`minimap_pane`] — so the map under test is the one the pane publishes,
+    /// not a hand-built one.
+    fn minimap_spec(app: &App) -> PhysicalSpec {
+        physical_spec(app, minimap_pane()).expect("the fixture rack draws")
+    }
+
+    /// Every `Shape::Rect` a whole-spec paint emits, as `(rect, fill, stroke
+    /// width, stroke colour)`, so a minimap assertion can name the exact rect
+    /// and token that painted it.
+    fn painted_spec_rects(
+        spec: &PhysicalSpec,
+        pane: Rect,
+    ) -> Vec<(Rect, egui::Color32, f32, egui::Color32)> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(pane),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            paint_physical(ui, pane, Some(spec));
+        });
+        let mut rects = Vec::new();
+        for cs in &full_output.shapes {
+            if let egui::epaint::Shape::Rect(r) = &cs.shape {
+                rects.push((r.rect, r.fill, r.stroke.width, r.stroke.color));
+            }
+        }
+        full_output.textures_delta.clear();
+        rects
+    }
+
+    /// The painter's float math can leave a rect a hair off its source, so
+    /// compare within a tenth of a point.
+    fn rects_match(a: Rect, b: Rect) -> bool {
+        (a.min.x - b.min.x).abs() < 0.1
+            && (a.min.y - b.min.y).abs() < 0.1
+            && (a.max.x - b.max.x).abs() < 0.1
+            && (a.max.y - b.max.y).abs() < 0.1
+    }
+
+    /// `true` when the paint emitted an unfilled 1 pt outline exactly at
+    /// `target` in `color` — the minimap's outline idiom for the panel, the
+    /// case, the modules, the marquee and the viewport box.
+    fn strokes_rect(
+        rects: &[(Rect, egui::Color32, f32, egui::Color32)],
+        target: Rect,
+        color: egui::Color32,
+    ) -> bool {
+        rects.iter().any(|(rect, fill, width, stroke)| {
+            rects_match(*rect, target)
+                && *fill == egui::Color32::TRANSPARENT
+                && (*width - 1.0).abs() < 1e-3
+                && *stroke == color
+        })
+    }
+
+    /// The case outline `paint_minimap` derives from the published transform:
+    /// the world bounds mapped back through the model's own scale.
+    fn minimap_case(minimap: &MiniMap) -> Rect {
+        let (_, _, bw, bh, ix, iy, sx, sy) = minimap.transform;
+        Rect::from_min_size(Pos2::new(ix, iy), Vec2::new(bw * sx, bh * sy))
+    }
+
+    /// The panel's map area: the panel inset by
+    /// [`crate::physical::RACK_MINIMAP_INSET`], where the case, the modules and
+    /// the clamped viewport box live.
+    fn minimap_inner(panel: Rect) -> Rect {
+        let inset = crate::physical::RACK_MINIMAP_INSET;
+        Rect::from_min_max(
+            panel.min + Vec2::splat(inset),
+            panel.max - Vec2::splat(inset),
+        )
+    }
+
+    #[test]
+    fn the_minimap_panel_and_one_rect_per_module_paint_at_the_labels_fit() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(app.fit_physical_view(640.0, 800.0), "the labels fit runs");
+        assert!(
+            (app.physical_zoom - 1.44).abs() < 0.01,
+            "the pane opens at the labels fit, which overflows it: {}",
+            app.physical_zoom
+        );
+
+        let spec = minimap_spec(&app);
+        let minimap = spec.minimap.as_ref().expect("the rack draws a map");
+        assert_eq!(minimap.modules.len(), 17, "one rect per faceplate");
+
+        // D2: 160 pt wide, the rack-aspect height clamped to the 56 pt floor
+        // for this 3.56:1 rack, inset 8 pt from the pane's bottom-right corner.
+        let pane = minimap_pane();
+        let panel = rect_pt(minimap.panel);
+        assert!(
+            (panel.width() - crate::physical::RACK_MINIMAP_WIDTH).abs() < 0.01,
+            "the panel is 160 pt wide: {panel:?}"
+        );
+        assert!(
+            (panel.height() - crate::physical::RACK_MINIMAP_MIN_H).abs() < 0.01,
+            "a 3.56:1 rack lands on the 56 pt height floor: {panel:?}"
+        );
+        let pad = crate::physical::RACK_MINIMAP_PAD;
+        assert!((panel.max.x - (pane.max.x - pad)).abs() < 0.01, "{panel:?}");
+        assert!((panel.max.y - (pane.max.y - pad)).abs() < 0.01, "{panel:?}");
+
+        let rects = painted_spec_rects(&spec, pane);
+        let accent = rgb(crate::theme::active().accent);
+        let muted = rgb(crate::theme::active().muted);
+        assert!(
+            rects
+                .iter()
+                .any(|(rect, fill, ..)| rects_match(*rect, panel) && *fill == rgb(spec.background)),
+            "the panel backdrop is opaque in the rack's own background"
+        );
+        assert!(
+            strokes_rect(&rects, panel, accent),
+            "the panel border is a 1 pt accent stroke"
+        );
+
+        let case = minimap_case(minimap);
+        assert!(
+            strokes_rect(&rects, case, muted),
+            "the case outline is muted: {case:?}"
+        );
+        let inner = minimap_inner(panel);
+        assert!(
+            inner.contains(case.min) && inner.contains(case.max),
+            "the case stays off the panel's border: {case:?} in {inner:?}"
+        );
+        for (index, module) in minimap.modules.iter().enumerate() {
+            let rect = rect_pt(*module);
+            assert!(
+                case.contains(rect.min) && case.contains(rect.max),
+                "module {index} sits inside the case outline: {rect:?} in {case:?}"
+            );
+            assert!(
+                rect.width() > 6.0,
+                "module {index} is wide enough to read as a faceplate: {}",
+                rect.width()
+            );
+            assert!(
+                strokes_rect(&rects, rect, muted),
+                "module {index} paints a muted 1 pt rect at {rect:?}"
+            );
+        }
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_minimap_viewport_box_is_a_sub_rect_of_the_map_at_the_labels_fit() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(app.fit_physical_view(640.0, 800.0), "the labels fit runs");
+
+        let spec = minimap_spec(&app);
+        let minimap = spec.minimap.as_ref().expect("the rack draws a map");
+        let panel = rect_pt(minimap.panel);
+        let inner = minimap_inner(panel);
+        let viewport = rect_pt(minimap.viewport);
+        let case = minimap_case(minimap);
+
+        // The pane shows about a quarter of the rack, so the box is a strict
+        // sub-rect of the map — not the whole rack.
+        assert!(
+            inner.contains(viewport.min) && inner.contains(viewport.max),
+            "the viewport box stays inside the map area: {viewport:?} in {inner:?}"
+        );
+        assert!(
+            viewport.width() < case.width() - 1.0,
+            "the labels fit overflows the pane, so the box is narrower than the rack: {} of {}",
+            viewport.width(),
+            case.width()
+        );
+        assert!(
+            viewport.area() < case.area() * 0.5,
+            "the box marks the visible part, not the whole rack: {} of {}",
+            viewport.area(),
+            case.area()
+        );
+
+        let rects = painted_spec_rects(&spec, minimap_pane());
+        let accent = rgb(crate::theme::active().accent);
+        assert!(
+            strokes_rect(&rects, viewport, accent),
+            "the viewport box is a 1 pt accent stroke: {viewport:?}"
+        );
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_minimap_viewport_box_clamps_into_the_map_at_the_rack_fit() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(
+            app.fit_physical_view_rack(640.0, 800.0),
+            "the rack fit runs"
+        );
+        assert!(
+            (app.physical_zoom - 0.370).abs() < 0.005,
+            "the rack fit is the 37 % overview: {}",
+            app.physical_zoom
+        );
+
+        let spec = minimap_spec(&app);
+        let minimap = spec
+            .minimap
+            .as_ref()
+            .expect("the map is drawn when the rack fits");
+        let panel = rect_pt(minimap.panel);
+        let inner = minimap_inner(panel);
+        let viewport = rect_pt(minimap.viewport);
+
+        // The raw box overruns the panel when the whole rack is visible; the
+        // model clamps it to the map's inner area, where it reads as "the whole
+        // rack is visible" — a box filling the map, never a degenerate line.
+        assert!(
+            rects_match(viewport, inner),
+            "the clamped box fills the map area: {viewport:?} vs {inner:?}"
+        );
+        assert!(
+            viewport.width() > 0.0 && viewport.height() > 0.0,
+            "{viewport:?}"
+        );
+
+        let rects = painted_spec_rects(&spec, minimap_pane());
+        let accent = rgb(crate::theme::active().accent);
+        assert!(
+            strokes_rect(&rects, viewport, accent),
+            "the clamped viewport box still paints in accent: {viewport:?}"
+        );
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_minimap_focused_module_strokes_in_the_focus_token() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(app.fit_physical_view(640.0, 800.0), "the labels fit runs");
+        app.selected_component = Some("P1.1".to_string());
+
+        let spec = minimap_spec(&app);
+        let minimap = spec.minimap.as_ref().expect("the rack draws a map");
+        let focused = minimap
+            .focused
+            .expect("the selected element names a module");
+        // The focus names the module P1.1's own cell lives on: map that cell
+        // through the published transform and check the named rect holds it, so
+        // the assertion does not depend on the rack's packing order.
+        let cell = spec
+            .cells
+            .iter()
+            .find(|cell| cell.component_index == Some(hw_index(&app, "P1.1")))
+            .expect("P1.1 renders a cell");
+        let (bx, by, _, _, ix, iy, sx, sy) = minimap.transform;
+        let local = cell.rect.center() - spec.case_rect.min.to_vec2();
+        let mapped = Pos2::new(ix + (local.x - bx) * sx, iy + (local.y - by) * sy);
+        let focused_rect = rect_pt(minimap.modules[focused]);
+        assert!(
+            focused_rect.contains(mapped),
+            "the focused module is the one holding P1.1's cell: {mapped:?} in {focused_rect:?}"
+        );
+
+        let rects = painted_spec_rects(&spec, minimap_pane());
+        let focus = rgb(crate::theme::active().focus_border);
+        let muted = rgb(crate::theme::active().muted);
+        assert_ne!(focus, muted, "the focus token is tellable from the rest");
+        let mut focused_rects = 0;
+        for (index, module) in minimap.modules.iter().enumerate() {
+            let rect = rect_pt(*module);
+            let expected = if index == focused { focus } else { muted };
+            assert!(
+                strokes_rect(&rects, rect, expected),
+                "module {index} strokes in {}: {rect:?}",
+                if index == focused {
+                    "focus_border"
+                } else {
+                    "muted"
+                }
+            );
+            if index == focused {
+                focused_rects += 1;
+            }
+        }
+        assert_eq!(focused_rects, 1, "one module carries the focus stroke");
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_minimap_marquee_paints_only_while_a_drag_is_down() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(app.fit_physical_view(640.0, 800.0), "the labels fit runs");
+        let pane = minimap_pane();
+        let mut spec = minimap_spec(&app);
+        let panel = rect_pt(spec.minimap.as_ref().expect("the rack draws a map").panel);
+        let accent = rgb(crate::theme::active().accent);
+        let fill = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40);
+        let marquee = Rect::from_min_size(panel.min + Vec2::new(10.0, 10.0), Vec2::new(60.0, 30.0));
+
+        spec.minimap_drag = Some((marquee.min.x, marquee.min.y, marquee.max.x, marquee.max.y));
+        let dragged = painted_spec_rects(&spec, pane);
+        assert!(
+            dragged
+                .iter()
+                .any(|(rect, painted, ..)| rects_match(*rect, marquee) && *painted == fill),
+            "a drag paints the marquee's accent fill at {marquee:?}"
+        );
+        assert!(
+            strokes_rect(&dragged, marquee, accent),
+            "the marquee is stroked in accent: {marquee:?}"
+        );
+
+        // A drag that ran past the map clips to the panel: it can only name
+        // what the map draws.
+        let overrun = Rect::from_two_pos(panel.min - Vec2::new(20.0, 20.0), panel.center());
+        spec.minimap_drag = Some((overrun.min.x, overrun.min.y, overrun.max.x, overrun.max.y));
+        let clipped = overrun.intersect(panel);
+        let painted = painted_spec_rects(&spec, pane);
+        assert!(
+            painted
+                .iter()
+                .any(|(rect, painted, ..)| rects_match(*rect, clipped) && *painted == fill),
+            "a drag past the map clips to the panel: {clipped:?}"
+        );
+
+        // No drag down, no marquee: the same rect is no longer a filled rect.
+        spec.minimap_drag = None;
+        let idle = painted_spec_rects(&spec, pane);
+        assert!(
+            !idle
+                .iter()
+                .any(|(rect, painted, ..)| rects_match(*rect, marquee) && *painted == fill),
+            "no drag paints no marquee at {marquee:?}"
+        );
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_performance_view_paints_no_minimap() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(app.fit_physical_view(640.0, 800.0), "the labels fit runs");
+        let pane = minimap_pane();
+
+        let normal = minimap_spec(&app);
+        let panel = rect_pt(normal.minimap.as_ref().expect("the rack draws a map").panel);
+        assert!(
+            painted_spec_rects(&normal, pane)
+                .iter()
+                .any(|(rect, ..)| rects_match(*rect, panel)),
+            "the normal view paints the panel at {panel:?}"
+        );
+
+        app.showing_performance = true;
+        let perf = minimap_spec(&app);
+        assert!(
+            perf.minimap.is_none(),
+            "the performance view is already the compact rack: no second map"
+        );
+        let rects = painted_spec_rects(&perf, pane);
+        assert!(
+            !rects.iter().any(|(rect, ..)| rects_match(*rect, panel)),
+            "no panel rect paints where the map would be: {panel:?}"
+        );
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
+    }
+
+    #[test]
+    fn the_skeleton_presentation_paints_the_minimap() {
+        crate::theme::set_test_theme(Some(crate::theme::Theme::mono()));
+        let mut app = minimap_app();
+        assert!(app.fit_physical_view(640.0, 800.0), "the labels fit runs");
+        app.physical_show_skeleton = true;
+
+        let spec = minimap_spec(&app);
+        assert!(spec.skeleton, "the skeleton presentation is on");
+        let minimap = spec
+            .minimap
+            .as_ref()
+            .expect("the map is about place, not detail: the skeleton draws it");
+        assert_eq!(minimap.modules.len(), 17, "one rect per faceplate");
+
+        let pane = minimap_pane();
+        let panel = rect_pt(minimap.panel);
+        let viewport = rect_pt(minimap.viewport);
+        let case = minimap_case(minimap);
+        let rects = painted_spec_rects(&spec, pane);
+        let accent = rgb(crate::theme::active().accent);
+        let muted = rgb(crate::theme::active().muted);
+        assert!(
+            strokes_rect(&rects, panel, accent),
+            "the skeleton still paints the panel border"
+        );
+        assert!(
+            strokes_rect(&rects, case, muted),
+            "the skeleton still paints the case outline"
+        );
+        assert!(
+            strokes_rect(&rects, viewport, accent),
+            "the skeleton still paints the viewport box"
+        );
+        for (index, module) in minimap.modules.iter().enumerate() {
+            assert!(
+                strokes_rect(&rects, rect_pt(*module), muted),
+                "the skeleton still paints module {index}"
+            );
+        }
+        crate::theme::set_test_theme(Some(crate::theme::Theme::classic()));
     }
 }

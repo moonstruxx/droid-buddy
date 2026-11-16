@@ -1101,6 +1101,25 @@ pub struct App {
     /// tests that never render. Not reset on patch load — pane geometry is a
     /// property of the window arrangement, not the patch.
     pub physical_pane_rect: Option<Rect>,
+    /// The module UI's minimap as last painted (module-ui-navigation D2): the
+    /// panel it occupies, one rect per module, the viewport box, the focused
+    /// module, and — the part the pointer path reads — the transform from rack
+    /// points into the panel. Published whole so the handler inverts the
+    /// painter's own answer instead of re-deriving a scale (D2: painter and
+    /// pointer read one answer). Republished every frame from the pane dispatch
+    /// (`gui::paint_panes`) and left `None` whenever no map is drawn — before the
+    /// first frame, in the performance view, and with no rack — so a stale map
+    /// can never claim a press over a surface that is not there. Window
+    /// geometry, so it is not reset on patch load, like `physical_pane_rect`.
+    pub physical_minimap: Option<crate::physical::MiniMap>,
+    /// The live minimap marquee, `(anchor_x, anchor_y, current_x, current_y)` in
+    /// window points, or `None` while no drag on the map is down
+    /// (module-ui-navigation D2/D5). The handler owns it — a press inside the
+    /// published panel starts it, the pointer moves its current corner, release
+    /// or `Esc` ends it — and the painter only reads it, so the marquee the user
+    /// sees is always the gesture the handler is tracking. Not reset on patch
+    /// load: the next frame's pointer state owns it.
+    pub physical_minimap_drag: Option<(f32, f32, f32, f32)>,
     /// The case/rack definition the physical view packs into (design D12).
     /// Seeded from `[physical.rack]` at startup (main.rs); empty rows mean
     /// "no rack configured" and `RackLayout::pack` materializes the default
@@ -1332,6 +1351,8 @@ impl App {
             physical_nav_latched: false,
             physical_fit_pending: true,
             physical_pane_rect: None,
+            physical_minimap: None,
+            physical_minimap_drag: None,
             physical_rack_spec: crate::physical::RackSpec::default(),
             graph_window_request: GraphWindowRequest::default(),
             active_modifier_var: None,
@@ -2816,6 +2837,152 @@ impl App {
         self.physical_zoom = target;
         self.scale_factor = target;
         self.note_physical_navigation();
+    }
+
+    /// Centre the module UI on `rect`, a rect in rack points — the pure offset
+    /// mutation behind `c` and a minimap click (module-ui-navigation D5).
+    ///
+    /// `rect` is in *world* points: `mm × PHYSICAL_POINTS_PER_MM × zoom`, the
+    /// space [`crate::physical::ScreenMapping`] names before its offset is
+    /// subtracted, with the rack's top-left at the origin. The painter draws
+    /// `screen = world − offset` (`physical::fit_offset` documents the same
+    /// convention), so putting the rect's centre on the pane's centre is
+    /// `offset = rect_centre − pane_centre`. A zero-size rect centres on a
+    /// point, which is exactly what a minimap click asks for.
+    ///
+    /// Latches the view through [`Self::note_physical_navigation`], as a pan
+    /// does, so an automatic fit trigger cannot discard the jump; the zoom is
+    /// never touched. Returns whether it moved — `false` before the pane size
+    /// is known (headless tests that never rendered).
+    pub fn physical_center_on_rect(&mut self, rect: crate::physical::RectPt) -> bool {
+        let Some((pane_w, pane_h)) = self.physical_pane_size() else {
+            return false;
+        };
+        if pane_w <= 0.0 || pane_h <= 0.0 {
+            return false;
+        }
+        self.physical_offset = (
+            rect.x + rect.w / 2.0 - pane_w / 2.0,
+            rect.y + rect.h / 2.0 - pane_h / 2.0,
+        );
+        self.note_physical_navigation();
+        true
+    }
+
+    /// `token`'s element rect in rack points at the current zoom, or `None`
+    /// when no placed faceplate carries that token or its faceplate declares
+    /// no cell for it.
+    ///
+    /// Resolved from the chain and rack the painter builds
+    /// ([`Self::physical_chain_and_rack`]) and the same `cell_for` lookup
+    /// `rack_geometry` makes, so the jump lands on the cell that is actually
+    /// drawn: module origin plus row offset plus the cell's own mm rect, scaled
+    /// once by points-per-mm × zoom. `physical_full_rects` cannot answer this —
+    /// it is a u16 cell grid that the egui painter no longer publishes — so the
+    /// live geometry is the only source that stays true.
+    fn physical_element_rect(&self, token: &str) -> Option<crate::physical::RectPt> {
+        let (chain, rack) = self.physical_chain_and_rack()?;
+        let scale = crate::physical::PHYSICAL_POINTS_PER_MM * f64::from(self.physical_zoom);
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        for row in &rack.rows {
+            for placed in &row.modules {
+                let Some(module) = chain.modules.get(placed.module_index) else {
+                    continue;
+                };
+                if !module.components.iter().any(|comp| comp.id == token) {
+                    continue;
+                }
+                let Some(cell) = chain.cell_for(placed.module_index, token) else {
+                    continue;
+                };
+                let x_mm = placed.rect_mm.x_mm + cell.rect_mm.x_mm;
+                let y_mm = row.y_mm + placed.rect_mm.y_mm + cell.rect_mm.y_mm;
+                return Some(crate::physical::RectPt::new(
+                    (x_mm * scale) as f32,
+                    (y_mm * scale) as f32,
+                    (cell.rect_mm.w_mm * scale) as f32,
+                    (cell.rect_mm.h_mm * scale) as f32,
+                ));
+            }
+        }
+        None
+    }
+
+    /// Centre the module UI on the element `token` — the focused hardware token,
+    /// `App::selected_component` (`c` on the module-UI pane,
+    /// module-ui-navigation D4/D5).
+    ///
+    /// A silent no-op returning `false` when the token resolves to no drawn
+    /// cell: an unknown token, a fallback faceplate with no cells, or no patch
+    /// at all. With nothing focused there is no token to pass — the caller
+    /// falls back to [`Self::physical_center_on_rack`].
+    pub fn physical_center_on_component(&mut self, token: &str) -> bool {
+        let Some(rect) = self.physical_element_rect(token) else {
+            return false;
+        };
+        self.physical_center_on_rect(rect)
+    }
+
+    /// Centre the module UI on the whole rack extent at the current zoom — the
+    /// fallback of `c` when nothing is focused.
+    ///
+    /// The rack's world rect starts at the origin (`rack_geometry` draws the
+    /// case from `mm 0,0`), so this is [`Self::physical_center_on_rect`] over
+    /// the live extent from `rack_extent_points` — the same source the fits and
+    /// the overflow judge read. Latches the view; the zoom is untouched.
+    pub fn physical_center_on_rack(&mut self) -> bool {
+        let Some(rack) = self.physical_rack_for_fit() else {
+            return false;
+        };
+        let (w, h) = crate::physical::rack_extent_points(&rack, f64::from(self.physical_zoom));
+        if w <= 0.0 || h <= 0.0 {
+            return false;
+        }
+        self.physical_center_on_rect(crate::physical::RectPt::new(0.0, 0.0, w, h))
+    }
+
+    /// Fit the module UI to a rack region — the minimap marquee's region zoom
+    /// (module-ui-navigation D2/D5), `(min_x, min_y, max_x, max_y)` in rack
+    /// points at the current zoom.
+    ///
+    /// The region is named in the same space [`Self::physical_center_on_rect`]
+    /// consumes (`mm × PHYSICAL_POINTS_PER_MM × zoom`), so framing it is the
+    /// point-space form of `physical::fit_zoom`: the current zoom scaled by the
+    /// pane/region ratio on the tighter axis, clamped to
+    /// `ZOOM_MIN..=ZOOM_MAX` so a tiny marquee cannot leave the supported range.
+    /// The region's centre then lands on the pane's centre exactly as a click
+    /// does — `offset = centre − pane_centre`, with the centre scaled by the
+    /// effective ratio. A region zoom is manual navigation, so the view latches
+    /// through [`Self::note_physical_navigation`] and the fit marker drops.
+    ///
+    /// Returns whether it moved — `false` before the pane size is known or for
+    /// a degenerate region.
+    pub fn physical_fit_region(&mut self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> bool {
+        let Some((pane_w, pane_h)) = self.physical_pane_size() else {
+            return false;
+        };
+        let (w, h) = (max_x - min_x, max_y - min_y);
+        let current = self.physical_zoom;
+        if pane_w <= 0.0 || pane_h <= 0.0 || current <= 0.0 || w <= 0.0 || h <= 0.0 {
+            return false;
+        }
+        let target = (current * (pane_w / w).min(pane_h / h)).clamp(
+            crate::physical::ZOOM_MIN as f32,
+            crate::physical::ZOOM_MAX as f32,
+        );
+        // The effective ratio (after the clamp) drives the offset, so a region
+        // that would need a zoom outside the range still lands centred.
+        let ratio = target / current;
+        self.physical_offset = (
+            (min_x + w / 2.0) * ratio - pane_w / 2.0,
+            (min_y + h / 2.0) * ratio - pane_h / 2.0,
+        );
+        self.physical_zoom = target;
+        self.scale_factor = target;
+        self.note_physical_navigation();
+        true
     }
 
     /// One step of physical-view panning in screen cells (4.3): arrow keys
@@ -8919,6 +9086,542 @@ mod tests {
         assert!(app.fit_physical_view(500.0, 400.0));
         assert!(!app.physical_nav_latched);
         assert_eq!(app.physical_fit_zoom, Some(app.physical_zoom));
+    }
+
+    // ---- module-ui-navigation 1.2: centring the view on a place ----
+
+    /// The centre offset must be the mirror of the painter's mapping:
+    /// `screen = world - offset`, so centring a rect puts its centre on the
+    /// pane's centre and nothing else about the view moves.
+    #[test]
+    fn physical_center_on_rect_puts_the_rect_centre_on_the_pane_centre() {
+        let mut app = App::new();
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        let rect = crate::physical::RectPt::new(120.0, 80.0, 40.0, 24.0);
+        for zoom in [0.5_f32, 1.0, 2.0] {
+            app.physical_zoom = zoom;
+            app.physical_fit_zoom = Some(zoom);
+            app.physical_fit_mode = Some(FitMode::Labels);
+            app.physical_nav_latched = false;
+            app.physical_fit_pending = true;
+
+            assert!(
+                app.physical_center_on_rect(rect),
+                "a published pane centres"
+            );
+
+            let screen_cx = rect.x + rect.w / 2.0 - app.physical_offset.0;
+            let screen_cy = rect.y + rect.h / 2.0 - app.physical_offset.1;
+            assert!(
+                (screen_cx - 320.0).abs() < 1e-3 && (screen_cy - 260.0).abs() < 1e-3,
+                "the rect centre lands on the pane centre at zoom {zoom}: ({screen_cx}, {screen_cy})"
+            );
+            assert_eq!(app.physical_zoom, zoom, "centring never rescales the view");
+            assert!(
+                app.physical_nav_latched,
+                "a jump latches the view exactly as a pan does"
+            );
+            assert_eq!(
+                app.physical_fit_zoom, None,
+                "the status stops claiming a fit the user left"
+            );
+            assert_eq!(app.physical_fit_mode, None);
+            assert!(
+                app.physical_fit_pending,
+                "a centre arms no fit and consumes none"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_center_on_component_centres_the_element_cell() {
+        // A written label makes `B1.1` a label-fit request too, so the cell the
+        // jump resolves is cross-checked against the size the fit measures for
+        // the same token (a different code path over the same mm cell).
+        let mut app = label_fit_app(&[("B1.1", "Trigger input")]);
+        app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+        let (chain, _) = app
+            .physical_chain_and_rack()
+            .expect("the fixture has a rack");
+        let request = app
+            .physical_label_fit_requests(&chain)
+            .into_iter()
+            .find(|request| request.label == "Trigger input")
+            .expect("the written label is a fit request");
+
+        for zoom in [0.5_f32, 1.0, 2.0] {
+            app.physical_zoom = zoom;
+            app.physical_nav_latched = false;
+            let rect = app
+                .physical_element_rect("B1.1")
+                .expect("B1.1 is a drawn P4B2 cell");
+            assert!(
+                (rect.w - request.w * zoom).abs() < 1e-3
+                    && (rect.h - request.h * zoom).abs() < 1e-3,
+                "the jump resolves the cell the label fit sizes at zoom {zoom}: {:?} vs {}x{}",
+                rect,
+                request.w,
+                request.h
+            );
+
+            assert!(
+                app.physical_center_on_component("B1.1"),
+                "a focused token centres"
+            );
+            let screen_cx = rect.x + rect.w / 2.0 - app.physical_offset.0;
+            let screen_cy = rect.y + rect.h / 2.0 - app.physical_offset.1;
+            assert!(
+                (screen_cx - 130.0).abs() < 1e-2 && (screen_cy - 100.0).abs() < 1e-2,
+                "the element centre lands on the pane centre at zoom {zoom}: ({screen_cx}, {screen_cy})"
+            );
+            assert_eq!(app.physical_zoom, zoom, "centring never rescales the view");
+            assert!(app.physical_nav_latched);
+        }
+    }
+
+    #[test]
+    fn physical_center_on_rack_centres_the_extent() {
+        let mut app = label_fit_app(&[]);
+        app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+        let (rack_w, rack_h) = rack_extent_mm(&app);
+        for zoom in [0.5_f32, 1.0, 2.0] {
+            app.physical_zoom = zoom;
+            app.physical_nav_latched = false;
+            assert!(app.physical_center_on_rack(), "the fixture has a rack");
+
+            // Centring the whole extent at the *current* zoom is the fit's own
+            // centring (`fit_offset`) at that zoom, reached from the other side.
+            let (fit_x, fit_y) =
+                crate::physical::fit_offset(rack_w, rack_h, 260.0, 200.0, f64::from(zoom));
+            assert!(
+                (app.physical_offset.0 - fit_x).abs() < 1e-3
+                    && (app.physical_offset.1 - fit_y).abs() < 1e-3,
+                "the rack centre is the fit offset at the current zoom {zoom}: {:?} vs ({fit_x}, {fit_y})",
+                app.physical_offset
+            );
+            assert_eq!(app.physical_zoom, zoom, "centring never rescales the view");
+            assert!(app.physical_nav_latched);
+        }
+    }
+
+    #[test]
+    fn physical_centre_is_a_silent_no_op_without_a_pane_or_a_cell() {
+        let mut app = label_fit_app(&[]);
+        // No published pane (a headless test that never rendered): nothing to
+        // centre in, and no latch either.
+        app.physical_offset = (5.0, 6.0);
+        app.physical_nav_latched = false;
+        assert!(!app.physical_center_on_component("B1.1"));
+        assert!(!app.physical_center_on_rack());
+        assert_eq!(app.physical_offset, (5.0, 6.0));
+        assert!(!app.physical_nav_latched, "a no-op must not latch the view");
+
+        app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+        // A token on no faceplate, and a string that is not a token at all.
+        assert!(!app.physical_center_on_component("B9.9"));
+        assert!(!app.physical_center_on_component("nonsense"));
+        assert_eq!(app.physical_offset, (5.0, 6.0));
+        assert!(!app.physical_nav_latched);
+
+        // Neither a patch nor an inventory: no rack to centre.
+        let mut empty = App::new();
+        empty.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+        assert!(!empty.physical_center_on_rack());
+    }
+
+    // ---- module-ui-navigation 3.1: the region fit, the published map and the
+    // re-arm -------------------------------------------------------------
+
+    /// The 17-faceplate multirow fixture (457.2 × 128.5 mm: sixteen 5 HP P2B8
+    /// fronts plus the 8 HP CV master), loaded through the production path so
+    /// the rack these tests measure is the rack the pane paints.
+    fn multirow_app() -> App {
+        let patch = Patch::from_ini_file(Path::new("fixtures/physical_multirow_rack.ini"))
+            .expect("the multirow fixture parses");
+        let mut app = App::new();
+        assert!(app.load_patch(patch), "the multirow fixture loads clean");
+        app
+    }
+
+    /// Paint one real band frame through the production dispatch
+    /// (`gui::paint_band`) over a headless egui context: the path that
+    /// publishes `physical_minimap` (module-ui-navigation D2/D3).
+    fn paint_one_band_frame(app: &mut App) {
+        let ctx = egui::Context::default();
+        let win = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(win),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            crate::gui::paint_band(app, ui, None, &[]);
+        });
+        // epaint panics when a `FullOutput` with unapplied deltas drops, which
+        // would turn one failed assertion below into a process abort.
+        out.textures_delta.clear();
+    }
+
+    /// The module-UI pane the last painted frame published, in egui points.
+    fn painted_physical_pane(app: &App) -> egui::Rect {
+        let (_, cells) = app
+            .pane_hit_rects
+            .iter()
+            .find(|(id, _)| *id == PaneId::BigLeft)
+            .expect("the module UI pane is published");
+        egui::Rect::from_min_size(
+            egui::pos2(f32::from(cells.x), f32::from(cells.y)),
+            egui::vec2(f32::from(cells.width), f32::from(cells.height)),
+        )
+    }
+
+    /// module-ui-navigation D5: framing a region is the point-space form of
+    /// `physical::fit_zoom` — the current zoom scaled by the pane/region ratio
+    /// on the tighter axis — and the region's centre lands on the pane's
+    /// centre. A region zoom is manual navigation, so it latches the view and
+    /// drops the fit marker, exactly as a pan does.
+    #[test]
+    fn physical_fit_region_frames_the_region_on_the_tighter_axis() {
+        let mut app = App::new();
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        app.physical_zoom = 1.0;
+        app.physical_offset = (0.0, 0.0);
+        app.physical_fit_zoom = Some(1.0);
+        app.physical_fit_mode = Some(FitMode::Labels);
+        app.physical_nav_latched = false;
+        app.physical_fit_pending = true;
+
+        // A 200 × 100 pt region: 640/200 = 3.2 binds over 520/100 = 5.2, so the
+        // zoom is 3.2 and the centre (200, 100) × 3.2 − pane centre (320, 260)
+        // leaves the offset (320, 60).
+        assert!(app.physical_fit_region(100.0, 50.0, 300.0, 150.0));
+        assert!(
+            (app.physical_zoom - 3.2).abs() < 1e-4,
+            "the tighter axis sets the zoom: {}",
+            app.physical_zoom
+        );
+        assert_eq!(
+            app.scale_factor, app.physical_zoom,
+            "the painter's scale factor follows the region zoom"
+        );
+        assert!(
+            (app.physical_offset.0 - 320.0).abs() < 1e-3
+                && (app.physical_offset.1 - 60.0).abs() < 1e-3,
+            "the region centre lands on the pane centre: {:?}",
+            app.physical_offset
+        );
+        // The same assertion from the painter's side: `screen = world − offset`
+        // puts the region's centre exactly on the pane's centre.
+        let ratio = app.physical_zoom / 1.0;
+        assert!(
+            (200.0 * ratio - app.physical_offset.0 - 320.0).abs() < 1e-3
+                && (100.0 * ratio - app.physical_offset.1 - 260.0).abs() < 1e-3,
+            "the framed region reads centred on the pane"
+        );
+        assert!(app.physical_nav_latched, "a region zoom latches the view");
+        assert_eq!(
+            app.physical_fit_zoom, None,
+            "the status stops claiming a fit the user left"
+        );
+        assert_eq!(app.physical_fit_mode, None);
+        assert!(
+            app.physical_fit_pending,
+            "a region zoom arms no fit and consumes none"
+        );
+
+        // A region taller than wide binds the height axis instead: 520/400 =
+        // 1.3. The region is smaller than the pane there, so the offset turns
+        // negative — the same sign `fit_offset` gives a rack that fits.
+        app.physical_zoom = 1.0;
+        assert!(app.physical_fit_region(100.0, 0.0, 300.0, 400.0));
+        assert!(
+            (app.physical_zoom - 1.3).abs() < 1e-4,
+            "the height axis binds: {}",
+            app.physical_zoom
+        );
+        assert!(
+            (app.physical_offset.0 + 60.0).abs() < 1e-3 && app.physical_offset.1.abs() < 1e-3,
+            "a region smaller than the pane centres with a negative offset: {:?}",
+            app.physical_offset
+        );
+    }
+
+    /// module-ui-navigation D5: a tiny marquee cannot leave the supported zoom
+    /// range, and the *effective* ratio (after the clamp) still centres the
+    /// region — the fit never drifts off the zoom it stored.
+    #[test]
+    fn physical_fit_region_clamps_the_zoom_and_still_centres() {
+        let mut app = App::new();
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        app.physical_nav_latched = false;
+
+        // A 10 × 10 pt marquee would need 64×: the ceiling binds at 4.0, and
+        // the centre (105, 105) × 4 lands on (100, 160).
+        app.physical_zoom = 1.0;
+        assert!(app.physical_fit_region(100.0, 100.0, 110.0, 110.0));
+        assert_eq!(
+            app.physical_zoom,
+            crate::physical::ZOOM_MAX as f32,
+            "a tiny region clamps to the ceiling"
+        );
+        assert!(
+            (app.physical_offset.0 - 100.0).abs() < 1e-3
+                && (app.physical_offset.1 - 160.0).abs() < 1e-3,
+            "the clamped zoom still centres the region: {:?}",
+            app.physical_offset
+        );
+
+        // A 4000 × 4000 pt region would need 0.16×: the floor binds at 0.25,
+        // and the centre (2000, 2000) × 0.25 lands on (180, 240).
+        app.physical_zoom = 1.0;
+        assert!(app.physical_fit_region(0.0, 0.0, 4000.0, 4000.0));
+        assert_eq!(
+            app.physical_zoom,
+            crate::physical::ZOOM_MIN as f32,
+            "a huge region clamps to the floor"
+        );
+        assert!(
+            (app.physical_offset.0 - 180.0).abs() < 1e-3
+                && (app.physical_offset.1 - 240.0).abs() < 1e-3,
+            "the floor-clamped zoom still centres the region: {:?}",
+            app.physical_offset
+        );
+    }
+
+    /// module-ui-navigation D5: a degenerate region or pane is a silent no-op —
+    /// no zoom, no offset, no latch — so a marquee that collapses cannot move
+    /// the view or steal the automatic fits.
+    #[test]
+    fn physical_fit_region_refuses_a_degenerate_region_or_pane() {
+        let mut app = App::new();
+        app.physical_zoom = 1.0;
+        app.physical_offset = (5.0, 6.0);
+        app.physical_nav_latched = false;
+        // No published pane (a headless test that never rendered): no window to
+        // frame a region in.
+        assert!(!app.physical_fit_region(0.0, 0.0, 100.0, 50.0));
+        assert_eq!((app.physical_zoom, app.physical_offset), (1.0, (5.0, 6.0)));
+        assert!(!app.physical_nav_latched, "a no-op must not latch the view");
+
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        for (min_x, min_y, max_x, max_y) in [
+            (100.0, 100.0, 100.0, 200.0), // zero width
+            (100.0, 100.0, 200.0, 100.0), // zero height
+            (200.0, 100.0, 100.0, 200.0), // inverted on both axes
+        ] {
+            assert!(
+                !app.physical_fit_region(min_x, min_y, max_x, max_y),
+                "degenerate region {min_x},{min_y}..{max_x},{max_y} must be refused"
+            );
+            assert_eq!((app.physical_zoom, app.physical_offset), (1.0, (5.0, 6.0)));
+            assert!(!app.physical_nav_latched);
+        }
+
+        // A zero zoom has no ratio to scale.
+        app.physical_zoom = 0.0;
+        assert!(!app.physical_fit_region(0.0, 0.0, 100.0, 50.0));
+        app.physical_zoom = 1.0;
+
+        // A degenerate pane is refused by the fit itself, not only by the
+        // publisher (`note_physical_pane_rect` drops a zero-size rect before it
+        // can land, so this guard is only reachable by a direct write).
+        app.physical_pane_rect = Some(Rect::new(0, 0, 0, 520));
+        assert!(!app.physical_fit_region(0.0, 0.0, 100.0, 50.0));
+        assert_eq!((app.physical_zoom, app.physical_offset), (1.0, (5.0, 6.0)));
+        assert!(!app.physical_nav_latched);
+    }
+
+    /// module-ui-navigation D2/D3: `physical_minimap` is per-frame geometry —
+    /// `Some` after a painted frame that drew a rack, and it holds *that*
+    /// frame's map, so the pointer path can never invert a stale one.
+    #[test]
+    fn physical_minimap_publishes_the_map_the_pane_drew() {
+        let mut app = multirow_app();
+        paint_one_band_frame(&mut app);
+
+        let map = app
+            .physical_minimap
+            .as_ref()
+            .expect("a racked frame publishes a map");
+        let pane = painted_physical_pane(&app);
+        let panel = egui::Rect::from_min_size(
+            egui::pos2(map.panel.x, map.panel.y),
+            egui::vec2(map.panel.w, map.panel.h),
+        );
+        assert!(
+            panel.min.x >= pane.min.x
+                && panel.min.y >= pane.min.y
+                && panel.max.x <= pane.max.x + 0.5
+                && panel.max.y <= pane.max.y + 0.5,
+            "the panel {panel:?} must sit inside the painted pane {pane:?}"
+        );
+
+        // One rect per placed module: the fixture's seventeen faceplates.
+        let (_, rack) = app
+            .physical_chain_and_rack()
+            .expect("the fixture has a rack");
+        let modules: usize = rack.rows.iter().map(|row| row.modules.len()).sum();
+        assert_eq!(
+            modules, 17,
+            "the multirow fixture is the seventeen-faceplate rack"
+        );
+        assert_eq!(
+            map.modules.len(),
+            modules,
+            "the published map carries one rect per placed module"
+        );
+
+        // The map's world bounds are the rack extent at the zoom this frame
+        // drew: the published map tracks the app, not a fixed scale.
+        let (extent_w, extent_h) =
+            crate::physical::rack_extent_points(&rack, f64::from(app.physical_zoom));
+        let (_, _, bw, bh, _, _, sx, sy) = map.transform;
+        assert!(
+            (bw - extent_w).abs() < 1.0 && (bh - extent_h).abs() < 1.0,
+            "world bounds {bw} × {bh} must be the rack extent {extent_w} × {extent_h}"
+        );
+        assert!(
+            sx > 0.0 && sy > 0.0,
+            "the published transform is invertible: {sx} × {sy}"
+        );
+    }
+
+    /// module-ui-navigation D2: the performance view presents the whole rack
+    /// itself, so it draws no map — and the frame that draws none must clear
+    /// the previous frame's publication rather than leave it claimable.
+    #[test]
+    fn physical_minimap_is_none_on_a_performance_view_frame() {
+        let mut app = multirow_app();
+        paint_one_band_frame(&mut app);
+        assert!(
+            app.physical_minimap.is_some(),
+            "the normal frame publishes a map to clear"
+        );
+
+        app.showing_performance = true;
+        paint_one_band_frame(&mut app);
+        assert!(
+            app.physical_minimap.is_none(),
+            "the performance view draws no map, so none is published"
+        );
+    }
+
+    /// module-ui-navigation D2: with no rack to map (`physical_spec` refuses a
+    /// patchless, inventory-less pane) nothing is published, and a frame that
+    /// draws no rack drops the map an earlier frame published.
+    #[test]
+    fn physical_minimap_is_none_on_a_rackless_frame() {
+        let mut app = multirow_app();
+        paint_one_band_frame(&mut app);
+        assert!(app.physical_minimap.is_some(), "a racked frame publishes");
+
+        app.patch = None;
+        app.physical_rack_spec = crate::physical::RackSpec::default();
+        paint_one_band_frame(&mut app);
+        assert!(
+            app.physical_minimap.is_none(),
+            "a rackless frame must not keep the previous map alive"
+        );
+    }
+
+    /// module-ui-navigation D2: the field is what the last painted frame drew,
+    /// so it is `None` before any frame — including after a patch load, which
+    /// publishes nothing on its own.
+    #[test]
+    fn physical_minimap_is_none_before_the_first_frame() {
+        let app = App::new();
+        assert!(
+            app.physical_minimap.is_none(),
+            "a fresh app has painted nothing"
+        );
+
+        let mut loaded = multirow_app();
+        assert!(
+            loaded.physical_minimap.is_none(),
+            "loading a patch publishes no map before a frame draws it"
+        );
+        paint_one_band_frame(&mut loaded);
+        assert!(
+            loaded.physical_minimap.is_some(),
+            "the first racked frame is what publishes it"
+        );
+    }
+
+    /// module-ui-navigation D4: `Shift+C` runs the labels fit, whose
+    /// `physical_nav_latched = false` is the re-arm — the automatic triggers fit
+    /// again after a manual pan without another keypress.
+    #[test]
+    fn shift_c_refit_rearms_the_automatic_triggers_after_a_pan() {
+        let mut app = multirow_app();
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        app.apply_physical_fit_triggers();
+        let fitted = app.physical_zoom;
+        assert!(!app.physical_nav_latched);
+
+        // A pan latches the view: the resize trigger no longer refits.
+        app.physical_pan_by(30.0, 20.0);
+        assert!(app.physical_nav_latched);
+        assert_eq!(app.physical_fit_zoom, None, "a pan drops the fit marker");
+        app.note_physical_pane_rect(Rect::new(0, 0, 500, 400));
+        app.apply_physical_fit_triggers();
+        assert_eq!(
+            app.physical_zoom, fitted,
+            "the latch must suppress the resize trigger"
+        );
+
+        // `Shift+C`: the labels fit over the published pane, which clears the
+        // latch and the fit marker as a side effect of fitting.
+        let (w, h) = app.physical_pane_size().expect("the pane is published");
+        assert!(app.fit_physical_view(w, h));
+        assert!(
+            !app.physical_nav_latched,
+            "the refit re-arms the automatic triggers"
+        );
+        let refit = app.physical_zoom;
+        assert_eq!(app.physical_fit_zoom, Some(refit));
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Labels));
+
+        // Re-armed: the next automatic trigger fits with no keypress.
+        app.note_physical_pane_rect(Rect::new(0, 0, 700, 560));
+        app.apply_physical_fit_triggers();
+        assert!(
+            app.physical_zoom > refit,
+            "a wider pane must refit after the re-arm: {} vs {refit}",
+            app.physical_zoom
+        );
+    }
+
+    /// module-ui-navigation D4: `f` and `Shift+F` keep the effects they had —
+    /// both run over a latched view and clear the latch, `f` landing on the
+    /// labels fit and `Shift+F` on the plain rack fit.
+    #[test]
+    fn f_and_shift_f_keep_their_fits_after_a_pan() {
+        let mut app = label_fit_app(&[("B1.1", "Trigger input")]);
+        app.note_physical_pane_rect(LABEL_FIT_PANE);
+        app.physical_zoom = 1.0;
+        app.physical_pan_by(12.0, -8.0);
+        assert!(app.physical_nav_latched);
+
+        let (w, h) = pane_points(LABEL_FIT_PANE);
+        assert!(app.fit_physical_view(w, h));
+        let labels = app.physical_zoom;
+        let rack = whole_rack_fit(&app, LABEL_FIT_PANE);
+        assert!(
+            f64::from(labels) > rack + FIT_EPS,
+            "f is the labels fit: {labels} vs rack {rack}"
+        );
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Labels));
+        assert!(!app.physical_nav_latched, "f clears the latch");
+
+        app.physical_pan_by(5.0, 5.0);
+        assert!(app.physical_nav_latched);
+        assert!(app.fit_physical_view_rack(w, h));
+        assert!(
+            (f64::from(app.physical_zoom) - rack).abs() < FIT_EPS,
+            "Shift+F is the plain rack fit: {} vs {rack}",
+            app.physical_zoom
+        );
+        assert_eq!(app.physical_fit_mode, Some(FitMode::Rack));
+        assert!(!app.physical_nav_latched, "Shift+F clears the latch");
     }
 
     // ---- module-ui-label-fit 2.1 (red): the labels-first fit clamp ----

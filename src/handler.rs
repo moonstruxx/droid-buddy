@@ -187,8 +187,18 @@ pub(crate) fn handle_physical_frame(frame: &PhysicalFrame, app: &mut crate::app:
         };
     }
     // A wheel over an adjustable element is a value adjust, never a camera
-    // gesture: no zoom and no pan may ride along with it.
-    if let Some((index, delta)) = frame.value_adjust {
+    // gesture: no zoom and no pan may ride along with it. The minimap panel
+    // claims the wheel before any element does (module-ui-navigation D3): it is
+    // painted opaque, so an element beneath it is not what the pointer is over.
+    // The wheel's intent is resolved in the painter (`adjustable_cell_at`), which
+    // this layer never sees, so the claim is made on the geometry both sides
+    // publish — the wheel's cell and the panel rect — and a cell the panel
+    // overlaps at all is dropped: the pointer may have been inside the panel, and
+    // a value hidden under the map must never change.
+    if let Some((index, delta)) = frame
+        .value_adjust
+        .filter(|(index, _)| !physical_minimap_covers_cell(app, *index))
+    {
         if !app.processing_paused {
             if let Some(comp) = app
                 .patch
@@ -211,6 +221,65 @@ pub(crate) fn handle_physical_frame(frame: &PhysicalFrame, app: &mut crate::app:
         let factor = factor.clamp(1.0 / MAX_ZOOM_STEP, MAX_ZOOM_STEP);
         app.physical_zoom_about(factor, anchor);
     }
+}
+
+/// Whether a cell-space pointer lies on the module UI's minimap panel — the
+/// terminal mouse path's form of the panel's precedence (module-ui-navigation
+/// D3), mirroring [`claim_physical_minimap`] on the window path. `false` with no
+/// map drawn and for a pointer outside the pane the map belongs to, so a panel
+/// rect left over from another arrangement cannot claim a click.
+fn physical_minimap_claims_cell(app: &crate::app::App, column: u16, row: u16) -> bool {
+    let Some(panel) = app.physical_minimap.as_ref().map(|map| map.panel) else {
+        return false;
+    };
+    let in_pane = app.pane_hit_rects.iter().any(|(id, rect)| {
+        app.layout.pane(*id).view == Some(ViewType::Physical) && rect_contains(*rect, column, row)
+    });
+    if !in_pane {
+        return false;
+    }
+    // The panel is window points and these events are cells — the app's own cell
+    // geometry is points rounded into the grid — so the panel is compared in
+    // that same rounded space.
+    rect_pt_contains(panel, (f32::from(column) + 0.5, f32::from(row) + 0.5))
+}
+
+/// Whether the module UI's minimap panel overlaps the element cell published for
+/// `index` — the wheel's half of the panel's pointer precedence
+/// (module-ui-navigation D3). `false` with no map drawn, so the wheel keeps its
+/// exact current meaning on a surface without one.
+fn physical_minimap_covers_cell(app: &crate::app::App, index: usize) -> bool {
+    let Some(panel) = app.physical_minimap.as_ref().map(|map| map.panel) else {
+        return false;
+    };
+    app.component_rects.iter().any(|(cell, rect)| {
+        *cell == index
+            && panel_overlaps_cell(
+                panel,
+                (rect.x, rect.y),
+                (rect.x + rect.width, rect.y + rect.height),
+            )
+    })
+}
+
+/// Whether a window point lies inside a model rect (min-inclusive, max-inclusive
+/// so the panel's own edges stay the map's).
+fn rect_pt_contains(rect: crate::physical::RectPt, point: (f32, f32)) -> bool {
+    point.0 >= rect.x
+        && point.0 <= rect.x + rect.w
+        && point.1 >= rect.y
+        && point.1 <= rect.y + rect.h
+}
+
+/// Whether a model rect overlaps the cell spanned by `(x0, y0)..(x1, y1)` — an
+/// inclusive-touch test, so a cell the panel covers at all counts as covered.
+fn panel_overlaps_cell(
+    panel: crate::physical::RectPt,
+    (x0, y0): (u16, u16),
+    (x1, y1): (u16, u16),
+) -> bool {
+    let (cx0, cy0, cx1, cy1) = (f32::from(x0), f32::from(y0), f32::from(x1), f32::from(y1));
+    panel.x <= cx1 && cx0 <= panel.x + panel.w && panel.y <= cy1 && cy0 <= panel.y + panel.h
 }
 
 /// Apply the source pane's per-frame input report: the wheel delta it saw over
@@ -831,6 +900,13 @@ fn handle_focus_routing_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // the graph key table below never sees an Esc that reached this far.
     if key.code == KeyCode::Esc && app.minimap_drag.take().is_some() {
         app.status_message = String::from("Minimap zoom cancelled");
+        return Some(false);
+    }
+    // The module UI's minimap marquee is the same kind of transient state on its
+    // own pane (module-ui-navigation D4): Esc drops the marquee, leaves the zoom
+    // and the pane untouched, and the next Esc closes the view as before.
+    if key.code == KeyCode::Esc && app.physical_minimap_drag.take().is_some() {
+        app.status_message = String::from("Minimap marquee cancelled");
         return Some(false);
     }
     let shift = key.modifiers.shift;
@@ -1712,6 +1788,38 @@ fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             app.status_message = format!("Labels: {}", app.label_presentation.as_str());
             Some(false)
         }
+        KeyCode::Char('c') if app.view_focused(ViewType::Physical) => {
+            // module-ui-navigation D4/D5: bare `c` centres the view on the
+            // focused element and falls back to the rack when nothing is
+            // focused — the meaning `c` already has on the graph surface. Free
+            // here: the only `c` claims elsewhere are the `g c` latency chord
+            // (armed prefix, returns above) and Ctrl+C quit (`handle_session_key`
+            // guards its modifier), and the graph's own `c` is graph-scoped.
+            let token = app.selected_component.clone();
+            let status = if token
+                .as_deref()
+                .is_some_and(|token| app.physical_center_on_component(token))
+            {
+                format!("Centred on {}", token.as_deref().unwrap_or_default())
+            } else if app.physical_center_on_rack() {
+                String::from("Centred on rack")
+            } else {
+                String::from("Nothing to centre")
+            };
+            app.status_message = status;
+            Some(false)
+        }
+        KeyCode::Char('C') if app.view_focused(ViewType::Physical) => {
+            // module-ui-navigation D4: `Shift+C` is the graph's `Shift+C` on
+            // this surface — refit now — and the labels fit is what it refits
+            // to. The fit clears `physical_nav_latched` and the fit marker as a
+            // side effect, which is the re-arm: the automatic triggers (view
+            // open, patch load, rack change, pane resize) fit the view again
+            // without another keypress. `f` reaches the same fit but is the
+            // plain manual one; the status line reports the zoom landed on.
+            fit_physical_pane(app, false);
+            Some(false)
+        }
         _ => None,
     }
 }
@@ -2158,6 +2266,23 @@ pub fn handle_mouse_event(mouse: MouseEvent, app: &mut App) {
         .find(|(_, rect)| rect_contains(*rect, mouse.column, mouse.row))
         .map(|(idx, _)| *idx);
 
+    // module-ui-navigation D3: the module UI's map panel claims the pointer
+    // before element hit-testing on this path too, so a press over the map
+    // focuses no element, adjusts no value, and pans nothing. The panel is
+    // published in window points and these events are cells — the app's own
+    // cell geometry is points rounded into the grid — so the panel is compared
+    // in that same rounded space. Gestures themselves stay on the window frame
+    // path (`handle_graph_window_frame`), which is the live pointer path.
+    if physical_minimap_claims_cell(app, mouse.column, mouse.row) {
+        // A press on the map still focuses the pane it lives in; only the
+        // element under it loses the press.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            focus_pane_at(app, mouse.column, mouse.row);
+        }
+        app.hovered_component = None;
+        return;
+    }
+
     match mouse.kind {
         MouseEventKind::Moved => {
             app.hovered_component = hit;
@@ -2426,6 +2551,14 @@ fn route_physical_pane_pointer(frame: &crate::gui::WindowFrame, app: &mut App) -
         app.hovered_component = None;
         return false;
     }
+    // module-ui-navigation D3: the map's panel is painted over the rack, so it
+    // claims the pointer before element hit-testing — a press there focuses no
+    // element and starts no drag, and a gesture already anchored on it keeps the
+    // pointer wherever the drag ends. Checked before the hit below, so no cell
+    // under the panel can win the frame.
+    if claim_physical_minimap(frame, app) {
+        return true;
+    }
     let hit = app
         .component_rects
         .iter()
@@ -2464,6 +2597,133 @@ fn route_physical_pane_pointer(frame: &crate::gui::WindowFrame, app: &mut App) -
         }
     }
     true
+}
+
+/// Claim the module UI's minimap panel for this pointer frame
+/// (module-ui-navigation D3); `true` = the pointer belongs to the map and the
+/// frame is done.
+///
+/// Precedence is the whole point: the panel is painted opaque over the rack, so
+/// a press on it must reach neither element hit-testing nor a node drag, and a
+/// gesture that started there owns the pointer wherever it ends — a drag can run
+/// off the panel, and its release must still be the map's.
+///
+/// No pane-origin shift applies here, unlike [`apply_minimap_press`]: the graph
+/// publishes its panel canvas-relative while its pointer arrives in window
+/// space, but this panel is published straight from the pane's absolute rect
+/// (`gui::paint_panes`), so panel and pointer are already in the same space.
+/// Both the panel and the transform the release inverts are the painter's own
+/// published answer ([`crate::app::App::physical_minimap`]), never a second
+/// derivation of the same geometry (design D2).
+fn claim_physical_minimap(frame: &crate::gui::WindowFrame, app: &mut App) -> bool {
+    // A gesture in flight answers first, before the panel is consulted: the map
+    // can be dropped mid-drag (performance view, patch load) and the marquee
+    // must still end with it rather than linger.
+    if app.physical_minimap_drag.is_some() {
+        if frame.primary_released {
+            release_physical_minimap_drag(app);
+            return true;
+        }
+        if let Some(pointer) = frame.pointer {
+            update_physical_minimap_drag(app, pointer);
+        }
+        return true;
+    }
+    let Some(pointer) = frame.pointer else {
+        return false;
+    };
+    let Some(panel) = app.physical_minimap.as_ref().map(|map| map.panel) else {
+        return false;
+    };
+    if !rect_pt_contains(panel, pointer) {
+        return false;
+    }
+    // Nothing beneath the panel is hovered: the hover reveal and Enter/Space
+    // must not name an element the map covers.
+    app.hovered_component = None;
+    if frame.primary_pressed {
+        // A press on the map still focuses the pane it lives in (spec "Focus
+        // routing across panes"); only the element under it loses the press.
+        focus_pane_at(
+            app,
+            pointer.0.round().max(0.0) as u16,
+            pointer.1.round().max(0.0) as u16,
+        );
+        // A click is a zero-extent drag: the anchor is placed here and the
+        // release decides between centring and region zoom, so the view cannot
+        // jump on the press frame.
+        let (ax, ay) = clamp_to_physical_minimap(panel, pointer);
+        app.physical_minimap_drag = Some((ax, ay, ax, ay));
+    }
+    true
+}
+
+/// Clamp a window point into the minimap's map area — the panel inset by
+/// [`crate::physical::RACK_MINIMAP_INSET`], the area the case and its modules
+/// are drawn in. A drag that left the map lands on the nearest edge, so the
+/// marquee never names rack the panel does not show.
+fn clamp_to_physical_minimap(panel: crate::physical::RectPt, point: (f32, f32)) -> (f32, f32) {
+    let inset = crate::physical::RACK_MINIMAP_INSET;
+    let (w, h) = (panel.w - 2.0 * inset, panel.h - 2.0 * inset);
+    let (x0, y0, x1, y1) = if w > 0.0 && h > 0.0 {
+        (
+            panel.x + inset,
+            panel.y + inset,
+            panel.x + inset + w,
+            panel.y + inset + h,
+        )
+    } else {
+        (panel.x, panel.y, panel.x + panel.w, panel.y + panel.h)
+    };
+    (point.0.clamp(x0, x1), point.1.clamp(y0, y1))
+}
+
+/// Extend the live module-UI marquee to `pointer` for one drag frame, clamped
+/// into the map area. A no-op without a marquee in flight.
+fn update_physical_minimap_drag(app: &mut App, pointer: (f32, f32)) {
+    let Some((ax, ay, _cx, _cy)) = app.physical_minimap_drag else {
+        return;
+    };
+    let Some(panel) = app.physical_minimap.as_ref().map(|map| map.panel) else {
+        return;
+    };
+    let (cx, cy) = clamp_to_physical_minimap(panel, pointer);
+    app.physical_minimap_drag = Some((ax, ay, cx, cy));
+}
+
+/// Finish a module-UI map gesture on release. A click — a marquee shorter than
+/// [`MINIMAP_DRAG_MIN_PX`] on either axis, the graph map's own threshold —
+/// centres the pane on the rack point under the press; a real drag fits the zoom
+/// to the rack region the marquee covers. The marquee is always cleared.
+///
+/// Both answers come from the published map's own transform (design D2): the
+/// pointer inverts the painter's scale rather than deriving a second one.
+fn release_physical_minimap_drag(app: &mut App) {
+    let Some((ax, ay, cx, cy)) = app.physical_minimap_drag.take() else {
+        return;
+    };
+    // The map can vanish mid-gesture (a patch load, the performance view); the
+    // marquee goes with it rather than naming rack nothing can be fitted to.
+    let Some(transform) = app.physical_minimap.as_ref().map(|map| map.transform) else {
+        return;
+    };
+    if (cx - ax).abs() < MINIMAP_DRAG_MIN_PX || (cy - ay).abs() < MINIMAP_DRAG_MIN_PX {
+        // A click: a zero-size rect centres the pane on the point under the
+        // press, at the current zoom.
+        let (x, y) = crate::physical::minimap_rack_point(transform, (ax, ay));
+        if app.physical_center_on_rect(crate::physical::RectPt::new(x, y, 0.0, 0.0)) {
+            app.status_message = format!("Minimap: centred on ({x:.0}, {y:.0})");
+        }
+        return;
+    }
+    let (min_x, min_y, max_x, max_y) =
+        crate::physical::minimap_rack_bounds(transform, (ax, ay), (cx, cy));
+    if app.physical_fit_region(min_x, min_y, max_x, max_y) {
+        app.status_message = format!(
+            "Minimap zoom {}%: rack ({min_x:.0}, {min_y:.0})-({max_x:.0}, {max_y:.0})",
+            (app.physical_zoom * 100.0) as u32
+        );
+    }
 }
 
 /// Optimizer pane pointer routing (optimizer-click-focus): a click on a candidate

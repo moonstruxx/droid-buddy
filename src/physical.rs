@@ -1687,6 +1687,235 @@ pub fn rack_extent_points(rack: &RackLayout, zoom: f64) -> (f32, f32) {
 }
 
 // ---------------------------------------------------------------------------
+// Module UI minimap (module-ui-navigation D1/D2)
+// ---------------------------------------------------------------------------
+
+/// The minimap panel's width in points (design D2): wide enough that one rect
+/// per module still reads on the seventeen-faceplate rack, narrow enough that
+/// the map stays a navigation aid beside the rack rather than over it.
+pub const RACK_MINIMAP_WIDTH: f32 = 160.0;
+
+/// The padding the panel keeps around the rack (design D2): added to the
+/// rack-aspect height and used as the panel's distance from the pane's
+/// bottom-right corner, so the map sits inset from the pane edge.
+pub const RACK_MINIMAP_PAD: f32 = 8.0;
+
+/// The panel's height clamp in points (design D2): a tall rack stops at
+/// [`RACK_MINIMAP_MAX_H`] so the map never covers the pane it navigates, and a
+/// very wide one keeps [`RACK_MINIMAP_MIN_H`] so the viewport box stays
+/// legible.
+pub const RACK_MINIMAP_MIN_H: f32 = 56.0;
+pub const RACK_MINIMAP_MAX_H: f32 = 120.0;
+
+/// Inset between the panel's outer edge and its map area, in points: the case
+/// outline and the viewport box stay off the panel's own border, and the
+/// marquee's clamp uses the same inner rect, so a drag can only name what the
+/// map draws. It is half of [`RACK_MINIMAP_PAD`], so the `+ 8` in the panel's
+/// height is exactly the padding above and below the rack's own aspect — the
+/// same 4 pt inset the graph's minimap uses.
+pub const RACK_MINIMAP_INSET: f32 = 4.0;
+
+/// Shortest rack span a marquee frames on either axis, in rack points: a
+/// one-point drag (or a map whose scale guard collapsed) still names a region
+/// the region fit can frame instead of a degenerate span.
+pub const RACK_MINIMAP_MIN_SPAN: f32 = 1.0;
+
+/// Axis-aligned rectangle in points — the point-space sibling of [`RectMm`]
+/// (`x` grows right, `y` grows down, `w`/`h` are the drawn extent). The module
+/// UI's minimap works in this space so no egui type crosses the boundary and
+/// the geometry stays unit-testable without a painter.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RectPt {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl RectPt {
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+}
+
+/// The graph minimap's published transform, restated in the same shape —
+/// `(bx, by, bw, bh, ix, iy, sx, sy)`: the world bounds, the panel position of
+/// the world's top-left corner, and the per-axis scale — so the two surfaces
+/// read alike. `physical` never imports `gui` (the dependency runs the other
+/// way), so the tuple is restated rather than shared.
+pub type MinimapTransform = (f32, f32, f32, f32, f32, f32, f32, f32);
+
+/// The module UI's minimap for one frame (design D1/D2): the panel it occupies,
+/// one rect per module, the visible window as a box, the focused module's index
+/// into [`MiniMap::modules`], and the transform mapping rack points into the
+/// panel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MiniMap {
+    /// The panel rect the map is drawn in, and the pointer area it claims.
+    pub panel: RectPt,
+    /// One rect per module, in the panel's points.
+    pub modules: Vec<RectPt>,
+    /// The pane's visible window over the rack, clamped into the map area.
+    pub viewport: RectPt,
+    /// Index into [`MiniMap::modules`] of the focused module, when it has one.
+    pub focused: Option<usize>,
+    /// The [`MinimapTransform`] from rack points into the panel.
+    pub transform: MinimapTransform,
+}
+
+/// The module UI's minimap (design D1/D2): one isotropic scale over the rack's
+/// case rect, a 160 pt panel whose height follows the rack's aspect, one rect
+/// per module, and the pane's visible window as a box.
+///
+/// `case`, `modules` and `pane` are in points at `zoom` — the space the painter
+/// draws in, with the rack's top-left at the case rect's origin (`screen =
+/// world − offset`, the convention [`fit_offset`] documents). The picture is
+/// therefore the same at every zoom — it is the rack's shape, not the current
+/// view — and `zoom` names that space, refused when it has no size. `case` is
+/// the rack's extent from [`rack_extent_points`], the same live-geometry source
+/// `App::physical_overflow` reads, so the map's "you are here" and the arrow
+/// keys' overflow decision cannot disagree about where the rack ends. `offset`
+/// is `App::physical_offset`: it is the world point at the pane's top-left, so
+/// the pane's visible window is the screen window plus the offset.
+///
+/// The world is rack-local, so `minimap_rack_point` returns rack points the
+/// caller can centre on or frame. `None` when the rack has no extent (nothing
+/// to map, and no invertible scale to publish — the same refusal the graph's
+/// `minimap_layout` makes for an empty scene) or when the pane or the zoom has
+/// no size.
+pub fn rack_minimap(
+    case: RectPt,
+    modules: &[RectPt],
+    focused: Option<usize>,
+    pane: RectPt,
+    offset: (f32, f32),
+    zoom: f32,
+) -> Option<MiniMap> {
+    if pane.w <= 0.0 || pane.h <= 0.0 || !zoom.is_finite() || zoom <= 0.0 {
+        return None;
+    }
+    let (bx, by, bw, bh) = (case.x, case.y, case.w, case.h);
+    if bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    // The panel follows the rack's aspect (design D2): the multirow rack is
+    // about 2.5:1, so a fixed square panel would waste half its area and make
+    // seventeen modules narrower than the text-free rects need.
+    let panel_h = (RACK_MINIMAP_WIDTH * bh / bw + RACK_MINIMAP_PAD)
+        .clamp(RACK_MINIMAP_MIN_H, RACK_MINIMAP_MAX_H);
+    let panel = RectPt::new(
+        pane.x + pane.w - RACK_MINIMAP_PAD - RACK_MINIMAP_WIDTH,
+        pane.y + pane.h - RACK_MINIMAP_PAD - panel_h,
+        RACK_MINIMAP_WIDTH,
+        panel_h,
+    );
+    let inner = RectPt::new(
+        panel.x + RACK_MINIMAP_INSET,
+        panel.y + RACK_MINIMAP_INSET,
+        panel.w - 2.0 * RACK_MINIMAP_INSET,
+        panel.h - 2.0 * RACK_MINIMAP_INSET,
+    );
+    if inner.w <= 0.0 || inner.h <= 0.0 {
+        return None;
+    }
+    // One isotropic scale (design D1), so a rack that is wide and short maps
+    // wide and short and its proportions survive; the fitted extent is centred
+    // in the inner area, which keeps the shape true whatever the panel's own
+    // aspect leaves over.
+    let scale = (inner.w / bw).min(inner.h / bh);
+    let (ix, iy) = (
+        inner.x + (inner.w - bw * scale) / 2.0,
+        inner.y + (inner.h - bh * scale) / 2.0,
+    );
+    let map = |wx: f32, wy: f32| (ix + (wx - bx) * scale, iy + (wy - by) * scale);
+    let mapped = modules
+        .iter()
+        .map(|m| {
+            let (x0, y0) = map(m.x, m.y);
+            let (x1, y1) = map(m.x + m.w, m.y + m.h);
+            RectPt::new(x0, y0, x1 - x0, y1 - y0)
+        })
+        .collect();
+    // The pane's visible window in rack points: `offset` is the world point at
+    // the pane's top-left, so the window starts there and spans the pane.
+    let (v0x, v0y) = map(offset.0, offset.1);
+    let (v1x, v1y) = map(offset.0 + pane.w, offset.1 + pane.h);
+    // Clamp the box into the map's inner area: when the whole rack is visible
+    // the raw box overruns the panel, and clamping makes it read as "everything
+    // is visible" — a box filling the map, never a degenerate line. Zoomed in,
+    // the box is already a sub-rect and is unchanged. Clamping to the inner
+    // rect rather than the panel edge keeps it off the panel's own border.
+    let (cx, cy) = (
+        v0x.clamp(inner.x, inner.x + inner.w),
+        v0y.clamp(inner.y, inner.y + inner.h),
+    );
+    let (cx2, cy2) = (
+        v1x.clamp(inner.x, inner.x + inner.w),
+        v1y.clamp(inner.y, inner.y + inner.h),
+    );
+    Some(MiniMap {
+        panel,
+        modules: mapped,
+        viewport: RectPt::new(cx, cy, cx2 - cx, cy2 - cy),
+        focused: focused.filter(|index| *index < modules.len()),
+        transform: (bx, by, bw, bh, ix, iy, scale, scale),
+    })
+}
+
+/// The rack point under a minimap position: the inverse of [`rack_minimap`]'s
+/// forward map, so the pointer path and the painter read one answer instead of
+/// each re-deriving a scale.
+///
+/// `point` is in the transform's space — pane points, since the panel is placed
+/// from the pane's corner — and the result is rack points at the current zoom.
+/// A non-positive scale (a hand-built or collapsed transform) maps to the world
+/// bounds' origin instead of dividing by zero, exactly as the graph's
+/// `minimap_world_point` does; callers that must not navigate from a degenerate
+/// map gate on the scale themselves.
+pub fn minimap_rack_point(transform: MinimapTransform, point: (f32, f32)) -> (f32, f32) {
+    let (bx, by, _bw, _bh, ix, iy, sx, sy) = transform;
+    let wx = if sx > 0.0 {
+        bx + (point.0 - ix) / sx
+    } else {
+        bx
+    };
+    let wy = if sy > 0.0 {
+        by + (point.1 - iy) / sy
+    } else {
+        by
+    };
+    (wx, wy)
+}
+
+/// The rack rectangle a marquee between two minimap positions names, as
+/// `(min_x, min_y, max_x, max_y)` — the shape the region fit consumes.
+///
+/// `a` and `b` are the drag's corners in the transform's space, in either
+/// order: the result is normalised, because a drag runs in any direction. A
+/// zero-span axis is widened to [`RACK_MINIMAP_MIN_SPAN`] about its midpoint,
+/// so a one-point marquee still produces a rect the fit can frame instead of
+/// collapsing onto a degenerate span guard.
+pub fn minimap_rack_bounds(
+    transform: MinimapTransform,
+    a: (f32, f32),
+    b: (f32, f32),
+) -> (f32, f32, f32, f32) {
+    let (ax, ay) = minimap_rack_point(transform, a);
+    let (bx, by) = minimap_rack_point(transform, b);
+    let (min_x, max_x) = (ax.min(bx), ax.max(bx));
+    let (min_y, max_y) = (ay.min(by), ay.max(by));
+    let span_x = (max_x - min_x).max(RACK_MINIMAP_MIN_SPAN);
+    let span_y = (max_y - min_y).max(RACK_MINIMAP_MIN_SPAN);
+    let (cx, cy) = (f32::midpoint(min_x, max_x), f32::midpoint(min_y, max_y));
+    (
+        cx - span_x / 2.0,
+        cy - span_y / 2.0,
+        cx + span_x / 2.0,
+        cy + span_y / 2.0,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Per-cell label layout (module-ui-label-fit D1–D6)
 // ---------------------------------------------------------------------------
 
@@ -4465,6 +4694,311 @@ mod tests {
             wf <= FIT_PANE_W + 1e-2 && hf <= FIT_PANE_H + 1e-2,
             "fit must not overflow: {wf} × {hf}"
         );
+    }
+
+    // -- module-ui-navigation 1.1: the minimap model (D1/D2) -----------------
+
+    /// A 640 × 520 module-UI pane at the pane origin (design D3's measuring
+    /// pane), the pane every minimap test places its panel in.
+    fn minimap_pane() -> RectPt {
+        RectPt::new(0.0, 0.0, FIT_PANE_W, FIT_PANE_H)
+    }
+
+    /// The map's inner area — the panel inset by `RACK_MINIMAP_INSET`, which is
+    /// where the case outline, the module rects and the viewport box live.
+    fn minimap_inner(panel: RectPt) -> (f32, f32, f32, f32) {
+        (
+            panel.x + RACK_MINIMAP_INSET,
+            panel.y + RACK_MINIMAP_INSET,
+            panel.w - 2.0 * RACK_MINIMAP_INSET,
+            panel.h - 2.0 * RACK_MINIMAP_INSET,
+        )
+    }
+
+    #[test]
+    fn rack_minimap_transform_round_trips_through_its_inverse() {
+        // D2: the painter and the pointer read one transform, so every panel
+        // position must come back as the rack point it covers.
+        let rack = rack_extent_fixture(92.94, 128.5);
+        let zoom = 1.0_f32;
+        let (w, h) = rack_extent_points(&rack, f64::from(zoom));
+        let case = RectPt::new(0.0, 0.0, w, h);
+        let modules = [
+            RectPt::new(0.0, 0.0, w / 2.0, h),
+            RectPt::new(w / 2.0, 0.0, w / 2.0, h),
+        ];
+        let map = rack_minimap(case, &modules, None, minimap_pane(), (0.0, 0.0), zoom)
+            .expect("a real rack publishes a map");
+        let (bx, by, bw, bh, ix, iy, sx, sy) = map.transform;
+        assert!(sx > 0.0 && sy > 0.0, "a live rack has an invertible scale");
+        // The world bounds are the case rect's, and one scale serves both axes.
+        assert!(
+            (bw - w).abs() < 1e-3 && (bh - h).abs() < 1e-3,
+            "world bounds"
+        );
+        assert!(
+            (sx - sy).abs() < 1e-6,
+            "the scale is isotropic: {sx} vs {sy}"
+        );
+        for (px, py) in [
+            (ix, iy),
+            (ix + 40.0, iy + 30.0),
+            (ix + bw * sx, iy + bh * sy),
+            (ix + bw * sx / 3.0, iy + bh * sy / 2.0),
+        ] {
+            let (wx, wy) = minimap_rack_point(map.transform, (px, py));
+            // Forward through the published transform again: the round trip
+            // must land back on the same panel point within a point.
+            let back = (ix + (wx - bx) * sx, iy + (wy - by) * sy);
+            assert!(
+                (back.0 - px).abs() < 1.0 && (back.1 - py).abs() < 1.0,
+                "{px},{py} round-tripped to {},{}",
+                back.0,
+                back.1
+            );
+            // And the rack point it names stays inside the case.
+            assert!(
+                wx >= bx - 1.0 && wx <= bx + bw + 1.0 && wy >= by - 1.0 && wy <= by + bh + 1.0,
+                "rack point {wx},{wy} escaped the case"
+            );
+        }
+    }
+
+    #[test]
+    fn rack_minimap_panel_height_clamps_at_both_ends() {
+        // D2: 160 × rack_h / rack_w + 8, clamped 56..=120, inset 8 pt from the
+        // pane's bottom-right corner.
+        let height_for = |w: f32, h: f32| {
+            rack_minimap(
+                RectPt::new(0.0, 0.0, w, h),
+                &[],
+                None,
+                minimap_pane(),
+                (0.0, 0.0),
+                1.0,
+            )
+            .expect("a real rack publishes a map")
+            .panel
+            .h
+        };
+        // The design's measuring rack shape: 2.5:1 wants 160/2.5 + 8 = 72 pt.
+        assert!((height_for(250.0, 100.0) - 72.0).abs() < 1e-3, "2.5:1 rack");
+        // A tall rack would want 328 pt: the ceiling binds.
+        assert_eq!(height_for(100.0, 200.0), RACK_MINIMAP_MAX_H);
+        // A very wide rack would want 12 pt: the floor binds.
+        assert_eq!(height_for(4000.0, 100.0), RACK_MINIMAP_MIN_H);
+        // The panel keeps its 160 pt width and sits 8 pt inside the pane's
+        // bottom-right corner on both axes.
+        let pane = minimap_pane();
+        let map = rack_minimap(
+            RectPt::new(0.0, 0.0, 250.0, 100.0),
+            &[],
+            None,
+            pane,
+            (0.0, 0.0),
+            1.0,
+        )
+        .expect("a real rack publishes a map");
+        assert_eq!(map.panel.w, RACK_MINIMAP_WIDTH);
+        assert!(
+            (map.panel.x + map.panel.w - (pane.x + pane.w - RACK_MINIMAP_PAD)).abs() < 1e-4,
+            "right edge inset"
+        );
+        assert!(
+            (map.panel.y + map.panel.h - (pane.y + pane.h - RACK_MINIMAP_PAD)).abs() < 1e-4,
+            "bottom edge inset"
+        );
+    }
+
+    #[test]
+    fn rack_minimap_refuses_a_degenerate_rack() {
+        // D2: a rack with no extent has nothing to map and no invertible scale,
+        // so the pane gets no map at all — the graph's `minimap_layout` refusal.
+        for case in [
+            RectPt::new(0.0, 0.0, 0.0, 128.5),
+            RectPt::new(0.0, 0.0, 92.94, 0.0),
+            RectPt::new(0.0, 0.0, -5.0, -5.0),
+        ] {
+            assert!(
+                rack_minimap(case, &[], None, minimap_pane(), (0.0, 0.0), 1.0).is_none(),
+                "degenerate case {case:?} must publish no map"
+            );
+        }
+        // A pane or zoom with no size has no window either.
+        assert!(rack_minimap(
+            RectPt::new(0.0, 0.0, 100.0, 50.0),
+            &[],
+            None,
+            RectPt::new(0.0, 0.0, 0.0, FIT_PANE_H),
+            (0.0, 0.0),
+            1.0
+        )
+        .is_none());
+        assert!(rack_minimap(
+            RectPt::new(0.0, 0.0, 100.0, 50.0),
+            &[],
+            None,
+            minimap_pane(),
+            (0.0, 0.0),
+            0.0
+        )
+        .is_none());
+        // A transform with no scale publishes no invertible mapping: the
+        // inverse answers the world origin rather than dividing by zero.
+        let degenerate = (0.0, 0.0, 100.0, 50.0, 10.0, 20.0, 0.0, 0.0);
+        assert_eq!(
+            minimap_rack_point(degenerate, (40.0, 60.0)),
+            (0.0, 0.0),
+            "a zero scale must not divide"
+        );
+        // And the map never publishes a zero scale of its own.
+        let map = rack_minimap(
+            RectPt::new(0.0, 0.0, 100.0, 50.0),
+            &[],
+            None,
+            minimap_pane(),
+            (0.0, 0.0),
+            1.0,
+        )
+        .expect("a real rack publishes a map");
+        let (_, _, _, _, _, _, sx, sy) = map.transform;
+        assert!(sx > 0.0 && sy > 0.0, "published scale {sx} × {sy}");
+    }
+
+    #[test]
+    fn rack_minimap_viewport_fills_the_map_when_the_rack_fits() {
+        // The box must read "everything is visible" at the rack fit: the raw
+        // window overruns the map there, so the clamp keeps it inside the inner
+        // area and it covers everything drawn — never a box hanging outside the
+        // panel, and never one that leaves a module outside itself.
+        let (w_mm, h_mm) = (92.94, 128.5);
+        let rack = rack_extent_fixture(w_mm, h_mm);
+        let zoom = fit_zoom(w_mm, h_mm, FIT_PANE_W, FIT_PANE_H);
+        let (w, h) = rack_extent_points(&rack, zoom);
+        let (ox, oy) = fit_offset(w_mm, h_mm, FIT_PANE_W, FIT_PANE_H, zoom);
+        let case = RectPt::new(0.0, 0.0, w, h);
+        let map = rack_minimap(case, &[case], None, minimap_pane(), (ox, oy), zoom as f32)
+            .expect("a real rack publishes a map");
+        let (ix, iy, iw, ih) = minimap_inner(map.panel);
+        let view = map.viewport;
+        assert!(
+            view.x >= ix - 0.5
+                && view.y >= iy - 0.5
+                && view.x + view.w <= ix + iw + 0.5
+                && view.y + view.h <= iy + ih + 0.5,
+            "viewport {view:?} must stay inside the inner area {ix},{iy} {iw} × {ih}"
+        );
+        // Everything drawn sits inside the box: at the rack fit no module can
+        // read as hidden.
+        for module in &map.modules {
+            assert!(
+                module.x >= view.x - 0.5
+                    && module.y >= view.y - 0.5
+                    && module.x + module.w <= view.x + view.w + 0.5
+                    && module.y + module.h <= view.y + view.h + 0.5,
+                "module {module:?} must be inside the viewport {view:?}"
+            );
+        }
+        // A rack far smaller than the pane maps its window well past the panel:
+        // the clamp turns that into exactly the whole map area.
+        let tiny = RectPt::new(0.0, 0.0, 100.0, 50.0);
+        let tiny_offset = fit_offset(
+            100.0 / PHYSICAL_POINTS_PER_MM,
+            50.0 / PHYSICAL_POINTS_PER_MM,
+            FIT_PANE_W,
+            FIT_PANE_H,
+            1.0,
+        );
+        let filled = rack_minimap(tiny, &[], None, minimap_pane(), tiny_offset, 1.0)
+            .expect("a real rack publishes a map");
+        let (fx, fy, fw, fh) = minimap_inner(filled.panel);
+        assert!(
+            (filled.viewport.x - fx).abs() < 0.5
+                && (filled.viewport.y - fy).abs() < 0.5
+                && (filled.viewport.w - fw).abs() < 0.5
+                && (filled.viewport.h - fh).abs() < 0.5,
+            "a fitted window must fill the map area: {:?} vs {fx},{fy} {fw} × {fh}",
+            filled.viewport
+        );
+        // Panning away leaves a sub-rect that stays inside the map.
+        let panned = rack_minimap(
+            case,
+            &[],
+            None,
+            minimap_pane(),
+            (ox + 60.0, oy),
+            zoom as f32,
+        )
+        .expect("a real rack publishes a map");
+        assert!(
+            panned.viewport.w < iw && panned.viewport.x >= ix - 0.5,
+            "a panned viewport {:?} stays a sub-rect inside the map",
+            panned.viewport
+        );
+    }
+
+    #[test]
+    fn rack_minimap_maps_one_rect_per_module_with_the_focused_index() {
+        // D1/D2: the case outline plus one rect per module, in order, inside the
+        // map area — and the focused module's index carried through, dropped
+        // when it names no module.
+        let rack = rack_extent_fixture(100.0, 40.0);
+        let (w, h) = rack_extent_points(&rack, 1.0);
+        let case = RectPt::new(0.0, 0.0, w, h);
+        let modules: Vec<RectPt> = (0..17)
+            .map(|i| RectPt::new(w * i as f32 / 17.0, 0.0, w / 17.0, h))
+            .collect();
+        let map = rack_minimap(case, &modules, Some(4), minimap_pane(), (0.0, 0.0), 1.0)
+            .expect("a real rack publishes a map");
+        assert_eq!(map.modules.len(), modules.len(), "one rect per module");
+        assert_eq!(map.focused, Some(4));
+        let (ix, iy, iw, ih) = minimap_inner(map.panel);
+        for (index, rect) in map.modules.iter().enumerate() {
+            assert!(
+                rect.x >= ix - 0.01
+                    && rect.y >= iy - 0.01
+                    && rect.x + rect.w <= ix + iw + 0.01
+                    && rect.y + rect.h <= iy + ih + 0.01,
+                "module {index} at {rect:?} escaped the map area"
+            );
+        }
+        // The rects keep the rack's order: each one starts where the last ended.
+        for pair in map.modules.windows(2) {
+            assert!(
+                (pair[0].x + pair[0].w - pair[1].x).abs() < 0.01,
+                "module rects must tile in rack order"
+            );
+        }
+        // An out-of-range focus names no module and is dropped.
+        let unfocused = rack_minimap(case, &modules, Some(17), minimap_pane(), (0.0, 0.0), 1.0)
+            .expect("a real rack publishes a map");
+        assert_eq!(unfocused.focused, None);
+    }
+
+    #[test]
+    fn minimap_rack_bounds_widens_a_zero_span() {
+        // A click (or a one-point marquee) names a zero-span rect, which the
+        // region fit would turn into a degenerate span; the bounds keep a small
+        // positive span around the point, in either drag direction.
+        let transform: MinimapTransform = (0.0, 0.0, 1000.0, 500.0, 14.0, 104.0, 0.144, 0.112);
+        let at = (40.0, 60.0);
+        let (min_x, min_y, max_x, max_y) = minimap_rack_bounds(transform, at, at);
+        assert!(max_x > min_x && max_y > min_y, "span: {min_x}..{max_x}");
+        assert!(
+            (max_x - min_x - RACK_MINIMAP_MIN_SPAN).abs() < 1e-3
+                && (max_y - min_y - RACK_MINIMAP_MIN_SPAN).abs() < 1e-3,
+            "a zero-span drag keeps exactly the floor span"
+        );
+        let (px, py) = minimap_rack_point(transform, at);
+        assert!(
+            min_x <= px && px <= max_x && min_y <= py && py <= max_y,
+            "the point stays inside the kept span"
+        );
+        // A real drag is normalised whichever corner it started from.
+        let forward = minimap_rack_bounds(transform, (20.0, 30.0), (120.0, 130.0));
+        let backward = minimap_rack_bounds(transform, (120.0, 130.0), (20.0, 30.0));
+        assert_eq!(forward, backward, "the drag direction must not matter");
+        assert!(forward.2 > forward.0 && forward.3 > forward.1, "normalised");
     }
 
     // -- module-ui-label-fit 1.2: the pure label layout (D1-D6) --------------

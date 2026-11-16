@@ -15,6 +15,9 @@ coloring).
 | `Enter`/`Space` | toggle component |
 | `+`/`-` | zoom presets |
 | `f` / `Shift+F` | fit written labels, each in its cell (rack may pan) / fit whole rack to pane (overview) |
+| `c` / `Shift+C` | centre focused element (else rack) / fit written labels and re-arm auto-fit |
+| `click minimap` | centre the pane on the clicked rack point |
+| `drag minimap` | fit the zoom to the dragged region |
 | `a` | cycle label presentation |
 | `arrows` | pan rack on overflow |
 | `wheel` | adjust knob/fader, else zoom about pointer |

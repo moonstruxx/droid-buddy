@@ -14,6 +14,10 @@ use std::path::Path;
 use crate::handler::key_modifiers;
 use crate::handler::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
+fn shift_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, key_modifiers::SHIFT)
+}
+
 use crate::app::Rect;
 use crate::app::{App, SourceViewMode, ViewType, ViewerFocus};
 use crate::graph::Graph;
@@ -5465,4 +5469,720 @@ fn regression_faceplate_faces_publish_the_geometry_hit_rects() {
             }
         }
     }
+}
+
+// ── module-ui-navigation (task 3.3): the map and its keys, end to end ─────
+//
+// The change's wiring claims, each on the dense rack
+// (`fixtures/physical_multirow_rack.ini`) through the production paths: the
+// window pointer frame (`handler::handle_graph_window_frame`), the painted band
+// (`gui::paint_band`, which publishes the pane rects, the element hit rects and
+// the map the pane drew), the physical frame applier and `handle_event`.
+//
+//   * a click inside a map module rect centres the pane on that module, and the
+//     repainted viewport box follows it;
+//   * a marquee of three points or more on both axes fits the dragged region
+//     and latches the view, a shorter drag stays a click;
+//   * the panel claims a press and the wheel's value step before any element
+//     cell under it, while the same window point without a published map does
+//     reach that element;
+//   * `c` centres the focused element (else the rack) through `handle_event`,
+//     `Shift+C` refits and re-arms the automatic fits, and `Esc` drops a marquee
+//     without closing the pane.
+
+/// The window these stories paint: 1280 × 800, so the module UI's `BigLeft`
+/// pane is the 640 × 800 [`face_multirow_pane`] both fits are measured against.
+fn module_ui_navigation_window() -> egui::Rect {
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 800.0))
+}
+
+/// Paint one whole window frame through the production band entry point — the
+/// window loop's draw step — which publishes the module UI's pane rect, its
+/// element hit rects and the minimap the pane drew.
+fn module_ui_navigation_paint(app: &mut App) {
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        screen_rect: Some(module_ui_navigation_window()),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw, |ui| {
+        crate::gui::paint_band(app, ui, None, &[]);
+    });
+    out.textures_delta.clear();
+}
+
+/// The same frame with the pointer parked at `pos` and one wheel notch, so the
+/// module UI's own input report runs and the pane dispatch applies it.
+fn module_ui_navigation_paint_with_wheel(app: &mut App, pos: egui::Pos2, delta: f32) {
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        screen_rect: Some(module_ui_navigation_window()),
+        events: vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, delta),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw, |ui| {
+        crate::gui::paint_band(app, ui, None, &[]);
+    });
+    out.textures_delta.clear();
+}
+
+/// The published pane rect the module UI is drawn in (`BigLeft` in this
+/// window).
+fn module_ui_navigation_pane(app: &App) -> egui::Rect {
+    let (_, cell) = app
+        .pane_hit_rects
+        .iter()
+        .find(|(id, _)| *id == crate::panes::PaneId::BigLeft)
+        .expect("the painted frame publishes the module UI's pane");
+    egui::Rect::from_min_size(
+        egui::Pos2::new(f32::from(cell.x), f32::from(cell.y)),
+        egui::Vec2::new(f32::from(cell.width), f32::from(cell.height)),
+    )
+}
+
+/// One window pointer frame: a press, a move while the gesture is down, or a
+/// release, at `point`.
+fn module_ui_navigation_frame(
+    point: egui::Pos2,
+    pressed: bool,
+    down: bool,
+    released: bool,
+) -> crate::gui::WindowFrame {
+    crate::gui::WindowFrame {
+        pointer: Some((point.x, point.y)),
+        primary_pressed: pressed,
+        primary_down: down || pressed,
+        primary_released: released,
+        ..Default::default()
+    }
+}
+
+/// The map the painted frame published — every story reads that one answer
+/// instead of re-deriving the geometry.
+fn module_ui_navigation_map(app: &App) -> &crate::physical::MiniMap {
+    app.physical_minimap
+        .as_ref()
+        .expect("the painted module-UI frame publishes a minimap")
+}
+
+/// A published model rect as an egui rect, for containment tests.
+fn module_ui_navigation_rect(rect: crate::physical::RectPt) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::Pos2::new(rect.x, rect.y),
+        egui::Vec2::new(rect.w, rect.h),
+    )
+}
+
+/// The rack point under a map point. Written out here rather than called, so
+/// the stories' expectations do not share the handler's inverse.
+fn module_ui_navigation_rack_point(
+    map: &crate::physical::MiniMap,
+    point: egui::Pos2,
+) -> egui::Pos2 {
+    let (bx, by, _bw, _bh, ix, iy, sx, sy) = map.transform;
+    egui::Pos2::new(bx + (point.x - ix) / sx, by + (point.y - iy) / sy)
+}
+
+/// The placed module rects in rack-local points at `zoom`, in the order
+/// `physical_spec` publishes them (row order, then placement order) — the
+/// geometry source the map's module rects are mapped from.
+fn module_ui_navigation_module_rects(
+    rack: &crate::physical::RackLayout,
+    zoom: f32,
+) -> Vec<egui::Rect> {
+    let ppm = crate::physical::PHYSICAL_POINTS_PER_MM as f32 * zoom;
+    let mut rects = Vec::new();
+    for row in &rack.rows {
+        for placed in &row.modules {
+            rects.push(egui::Rect::from_min_size(
+                egui::Pos2::new(
+                    placed.rect_mm.x_mm as f32 * ppm,
+                    (row.y_mm + placed.rect_mm.y_mm) as f32 * ppm,
+                ),
+                egui::Vec2::new(
+                    placed.rect_mm.w_mm as f32 * ppm,
+                    placed.rect_mm.h_mm as f32 * ppm,
+                ),
+            ));
+        }
+    }
+    rects
+}
+
+/// The dense rack at its labels fit — the overflowing state the map exists for
+/// (the pane shows about a quarter of the rack's width, so the viewport box is
+/// a sub-rect that can follow a jump). Returns the app and the rack geometry
+/// the stories measure against.
+fn module_ui_navigation_app() -> (
+    App,
+    crate::physical::PhysicalLayout,
+    crate::physical::RackLayout,
+) {
+    let patch = face_labelled_multirow_patch(FACE_MULTIROW_LABELS);
+    let (chain, rack) = face_multirow_chain_and_rack(&patch);
+    let app = face_fitted_app(patch, face_multirow_pane());
+    assert!(
+        (app.physical_zoom - FACE_MULTIROW_LABEL_LIFT as f32).abs() < 1e-3,
+        "the stories need the overflowing labels fit, not the rack fit: {}",
+        app.physical_zoom
+    );
+    (app, chain, rack)
+}
+
+/// The cell rect of `token` in rack-local points at `zoom` (no offset), the
+/// space `physical_center_on_rect` and the map's inverse name.
+fn module_ui_navigation_cell_rect(
+    chain: &crate::physical::PhysicalLayout,
+    rack: &crate::physical::RackLayout,
+    zoom: f32,
+    token: &str,
+) -> egui::Rect {
+    let mapping = crate::physical::ScreenMapping::new(
+        crate::physical::PHYSICAL_POINTS_PER_MM,
+        f64::from(zoom),
+        0.0,
+        0.0,
+    );
+    face_geometry_cell_rect(chain, rack, &mapping, token)
+        .unwrap_or_else(|| panic!("{token} must resolve to a geometry cell"))
+}
+
+#[test]
+fn regression_module_ui_map_click_centres_on_the_module_and_the_viewport_follows() {
+    let (mut app, _chain, rack) = module_ui_navigation_app();
+    module_ui_navigation_paint(&mut app);
+
+    let pane = module_ui_navigation_pane(&app);
+    assert_eq!(
+        (pane.min, pane.size()),
+        (egui::Pos2::ZERO, egui::Vec2::new(640.0, 800.0)),
+        "the module UI draws in the 640 × 800 BigLeft pane"
+    );
+
+    let map = module_ui_navigation_map(&app).clone();
+    assert_eq!(map.modules.len(), 17, "one rect per faceplate");
+
+    // D2: the map is the 160 pt panel inset 8 pt from the pane's bottom-right,
+    // its height on the 56 pt floor for this 3.56:1 rack.
+    let panel = module_ui_navigation_rect(map.panel);
+    assert!(
+        (panel.width() - crate::physical::RACK_MINIMAP_WIDTH).abs() < 1e-3
+            && (panel.height() - crate::physical::RACK_MINIMAP_MIN_H).abs() < 1e-3,
+        "the panel is 160 × 56 pt: {panel:?}"
+    );
+    assert!(
+        (panel.max.x - (pane.max.x - crate::physical::RACK_MINIMAP_PAD)).abs() < 1e-3
+            && (panel.max.y - (pane.max.y - crate::physical::RACK_MINIMAP_PAD)).abs() < 1e-3,
+        "the panel is inset 8 pt from the pane's bottom-right: {panel:?}"
+    );
+    assert_eq!(
+        (panel.min, panel.size()),
+        (egui::Pos2::new(472.0, 736.0), egui::Vec2::new(160.0, 56.0)),
+        "the map occupies the pane's bottom-right corner"
+    );
+
+    // The click: the centre of the fourth module's rect on the map, inside the
+    // map's inner area (not its inset border).
+    let target = 3usize;
+    let map_module = module_ui_navigation_rect(map.modules[target]);
+    let click = map_module.center();
+    assert!(
+        panel
+            .shrink(crate::physical::RACK_MINIMAP_INSET)
+            .contains(click),
+        "the click lands on the map's inner area, not its border: {click:?}"
+    );
+    // The module's centre in rack points, from the rack geometry the map is
+    // drawn from — the point the click must centre on.
+    let module_centre =
+        module_ui_navigation_module_rects(&rack, app.physical_zoom)[target].center();
+
+    let zoom_before = app.physical_zoom;
+    let viewport_before = map.viewport;
+
+    // Press: the panel claims it and anchors a marquee; no element is focused.
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(click, true, true, false),
+        &mut app,
+    );
+    assert!(
+        app.physical_minimap_drag.is_some(),
+        "a press on the map anchors the marquee"
+    );
+    assert!(
+        app.selected_component.is_none(),
+        "a press on the map focuses no element: {:?}",
+        app.selected_component
+    );
+
+    // Release at the same point: a zero-extent marquee is a click.
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(click, false, false, true),
+        &mut app,
+    );
+    assert!(
+        app.physical_minimap_drag.is_none(),
+        "the release ends the gesture"
+    );
+
+    assert!(
+        (app.physical_zoom - zoom_before).abs() < 1e-6,
+        "a click must not zoom: {} vs {zoom_before}",
+        app.physical_zoom
+    );
+    let expected = (
+        module_centre.x - pane.width() / 2.0,
+        module_centre.y - pane.height() / 2.0,
+    );
+    assert!(
+        (app.physical_offset.0 - expected.0).abs() < 0.5
+            && (app.physical_offset.1 - expected.1).abs() < 0.5,
+        "the module's centre ({module_centre:?}) must land on the pane's centre: \
+         offset {:?} vs {expected:?}",
+        app.physical_offset
+    );
+    assert!(
+        app.status_message.starts_with("Minimap: centred on"),
+        "the status names the click: {:?}",
+        app.status_message
+    );
+
+    // A repainted frame publishes a viewport box that moved onto the module.
+    module_ui_navigation_paint(&mut app);
+    let map_after = module_ui_navigation_map(&app).clone();
+    let distance = |rect: crate::physical::RectPt| {
+        let centre = module_ui_navigation_rect(rect).center();
+        (centre - click).length()
+    };
+    assert!(
+        distance(map_after.viewport) < distance(viewport_before),
+        "the viewport box follows the jump: {:?} -> {:?}",
+        viewport_before,
+        map_after.viewport
+    );
+    let viewport_centre = module_ui_navigation_rect(map_after.viewport).center();
+    assert!(
+        (viewport_centre.x - click.x).abs() < 1.0,
+        "the box is centred on the clicked module: {viewport_centre:?} vs {click:?}"
+    );
+}
+
+#[test]
+fn regression_module_ui_map_drag_frames_the_region_and_a_short_drag_centres() {
+    let (mut app, _chain, _rack) = module_ui_navigation_app();
+    module_ui_navigation_paint(&mut app);
+
+    let pane = module_ui_navigation_pane(&app);
+    let map = module_ui_navigation_map(&app).clone();
+    let inner = module_ui_navigation_rect(map.panel).shrink(crate::physical::RACK_MINIMAP_INSET);
+    let anchor = egui::Pos2::new(500.0, 754.0);
+    let end = egui::Pos2::new(560.0, 774.0);
+    assert!(
+        inner.contains(anchor) && inner.contains(end),
+        "the marquee runs inside the map area: {anchor:?}..{end:?} in {inner:?}"
+    );
+
+    // The region the marquee names, and the zoom the region fit must land on.
+    let zoom_before = app.physical_zoom;
+    let rack_anchor = module_ui_navigation_rack_point(&map, anchor);
+    let rack_end = module_ui_navigation_rack_point(&map, end);
+    let region_w = (rack_end.x - rack_anchor.x).abs();
+    let region_h = (rack_end.y - rack_anchor.y).abs();
+    let expected = (zoom_before * (pane.width() / region_w).min(pane.height() / region_h)).clamp(
+        crate::physical::ZOOM_MIN as f32,
+        crate::physical::ZOOM_MAX as f32,
+    );
+    assert!(
+        (expected - zoom_before).abs() > 0.1,
+        "the dragged region must change the zoom: {expected} vs {zoom_before}"
+    );
+
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(anchor, true, true, false),
+        &mut app,
+    );
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(end, false, true, false),
+        &mut app,
+    );
+    let live = app
+        .physical_minimap_drag
+        .expect("the marquee tracks the pointer");
+    assert!(
+        (live.2 - end.x).abs() < 1e-3 && (live.3 - end.y).abs() < 1e-3,
+        "the marquee's current corner follows the pointer: {live:?}"
+    );
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(end, false, false, true),
+        &mut app,
+    );
+
+    assert!(
+        app.physical_minimap_drag.is_none(),
+        "the release ends the marquee"
+    );
+    assert!(
+        (app.physical_zoom - expected).abs() < 1e-3,
+        "the drag frames the region: {} vs {expected}",
+        app.physical_zoom
+    );
+    assert!(
+        app.physical_nav_latched,
+        "a region zoom is manual navigation and latches the view"
+    );
+    assert!(
+        app.status_message.starts_with("Minimap zoom"),
+        "the status names the region zoom: {:?}",
+        app.status_message
+    );
+
+    // A marquee under three points on either axis stays a click: the zoom is
+    // untouched and the pane centres on the press point.
+    module_ui_navigation_paint(&mut app);
+    let map = module_ui_navigation_map(&app).clone();
+    let zoom_after_region = app.physical_zoom;
+    let short_anchor = egui::Pos2::new(552.0, 764.0);
+    let short_end = egui::Pos2::new(554.0, 766.0);
+    let click_centre = module_ui_navigation_rack_point(&map, short_anchor);
+
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(short_anchor, true, true, false),
+        &mut app,
+    );
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(short_end, false, true, false),
+        &mut app,
+    );
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(short_end, false, false, true),
+        &mut app,
+    );
+
+    assert!(
+        (app.physical_zoom - zoom_after_region).abs() < 1e-6,
+        "a sub-threshold drag is a click, not a region zoom: {} vs {zoom_after_region}",
+        app.physical_zoom
+    );
+    let expected = (
+        click_centre.x - pane.width() / 2.0,
+        click_centre.y - pane.height() / 2.0,
+    );
+    assert!(
+        (app.physical_offset.0 - expected.0).abs() < 0.5
+            && (app.physical_offset.1 - expected.1).abs() < 0.5,
+        "the click centres on the press point: offset {:?} vs {expected:?}",
+        app.physical_offset
+    );
+}
+
+#[test]
+fn regression_module_ui_map_panel_claims_the_press_and_the_wheel() {
+    let (mut app, chain, rack) = module_ui_navigation_app();
+    module_ui_navigation_paint(&mut app);
+
+    let pane = module_ui_navigation_pane(&app);
+    let map = module_ui_navigation_map(&app).clone();
+    let panel = module_ui_navigation_rect(map.panel);
+    let centre = panel.center();
+
+    // Park the view so the pot P1.1's cell sits under the panel's centre: the
+    // map is painted opaque over the rack, so this is the overlap D3 is about.
+    let cell = module_ui_navigation_cell_rect(&chain, &rack, app.physical_zoom, "P1.1");
+    app.physical_offset = (cell.center().x - centre.x, cell.center().y - centre.y);
+    app.physical_nav_latched = true; // parked by hand, as a pan would latch it
+    module_ui_navigation_paint(&mut app);
+
+    // The panel is the rack's shape, not the view's: a pan does not move it.
+    let panel_after = module_ui_navigation_rect(module_ui_navigation_map(&app).panel);
+    assert!(
+        (panel_after.min - panel.min).length() < 1e-3
+            && (panel_after.size() - panel.size()).length() < 1e-3,
+        "the panel must not follow the view: {panel_after:?} vs {panel:?}"
+    );
+
+    let idx = idx_for(&app, "P1.1");
+    let published = app
+        .component_rects
+        .iter()
+        .find(|(index, _)| *index == idx)
+        .map(|(_, rect)| {
+            egui::Rect::from_min_size(
+                egui::Pos2::new(f32::from(rect.x), f32::from(rect.y)),
+                egui::Vec2::new(f32::from(rect.width), f32::from(rect.height)),
+            )
+        })
+        .expect("P1.1 publishes a hit rect");
+    assert!(
+        published.contains(centre) && panel_after.contains(centre),
+        "the panel and the element cell overlap at {centre:?}: {published:?} in {panel_after:?}"
+    );
+    assert!(
+        (pane.width(), pane.height()) == (640.0, 800.0),
+        "the stories measure against the 640 × 800 pane"
+    );
+
+    let value = |app: &App| match app.patch.as_ref().unwrap().hw_components[idx].state {
+        crate::patch::ComponentState::Value(v) => v,
+        ref other => panic!("P1.1 must be a pot, got {other:?}"),
+    };
+    let before = value(&app);
+
+    // The wheel's value step is dropped while the panel covers the cell.
+    crate::handler::handle_physical_frame(
+        &crate::gui::PhysicalFrame {
+            value_adjust: Some((idx, 0.05)),
+            ..Default::default()
+        },
+        &mut app,
+    );
+    assert_eq!(
+        value(&app),
+        before,
+        "the panel claims the wheel before the element under it"
+    );
+
+    // With no map published the same step adjusts the value.
+    let map = app
+        .physical_minimap
+        .take()
+        .expect("the painted frame published a map");
+    crate::handler::handle_physical_frame(
+        &crate::gui::PhysicalFrame {
+            value_adjust: Some((idx, 0.05)),
+            ..Default::default()
+        },
+        &mut app,
+    );
+    assert!(
+        (value(&app) - (before + 0.05)).abs() < 1e-6,
+        "without a map the wheel adjusts P1.1: {} vs {}",
+        value(&app),
+        before + 0.05
+    );
+
+    // ... and the same window point now focuses the element the panel covers.
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(centre, true, true, false),
+        &mut app,
+    );
+    assert_eq!(
+        app.selected_component.as_deref(),
+        Some("P1.1"),
+        "without a map the press reaches the element under the panel"
+    );
+    assert_eq!(app.hovered_component, Some(idx));
+    assert_eq!(app.status_message, "Focused: P1.1");
+
+    // Republish the map: the same point focuses nothing and adjusts nothing.
+    app.physical_minimap = Some(map);
+    app.clear_selected_component();
+    app.hovered_component = None;
+    let value_before_press = value(&app);
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(centre, true, true, false),
+        &mut app,
+    );
+    assert!(
+        app.selected_component.is_none(),
+        "the panel claims the press: {:?}",
+        app.selected_component
+    );
+    assert!(
+        app.hovered_component.is_none(),
+        "nothing under the panel is hovered: {:?}",
+        app.hovered_component
+    );
+    assert!(
+        app.physical_minimap_drag.is_some(),
+        "a press on the panel anchors a marquee"
+    );
+    assert_eq!(
+        value(&app),
+        value_before_press,
+        "a press on the panel adjusts no value"
+    );
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(centre, false, false, true),
+        &mut app,
+    );
+    assert!(app.physical_minimap_drag.is_none());
+}
+
+#[test]
+fn regression_module_ui_c_and_shift_c_end_to_end() {
+    let (mut app, chain, rack) = module_ui_navigation_app();
+    module_ui_navigation_paint(&mut app);
+    let pane = module_ui_navigation_pane(&app);
+    assert!(
+        app.view_focused(ViewType::Physical),
+        "the module UI holds focus at startup"
+    );
+    let fitted_zoom = app.physical_zoom;
+
+    // `c` with a focused element centres that element, at the current zoom.
+    app.select_component(String::from("P2.1"));
+    let pot = module_ui_navigation_cell_rect(&chain, &rack, fitted_zoom, "P2.1");
+    handle_event(&key(KeyCode::Char('c')), &mut app);
+    assert!(
+        (app.physical_offset.0 - (pot.center().x - pane.width() / 2.0)).abs() < 0.5
+            && (app.physical_offset.1 - (pot.center().y - pane.height() / 2.0)).abs() < 0.5,
+        "`c` centres P2.1: offset {:?} vs centre {:?}",
+        app.physical_offset,
+        pot.center()
+    );
+    assert_eq!(app.status_message, "Centred on P2.1");
+    assert!(
+        (app.physical_zoom - fitted_zoom).abs() < 1e-6,
+        "centring never zooms: {} vs {fitted_zoom}",
+        app.physical_zoom
+    );
+
+    // With nothing focused it centres the rack extent instead.
+    app.clear_selected_component();
+    let (rack_w, rack_h) = crate::physical::rack_extent_points(&rack, f64::from(app.physical_zoom));
+    handle_event(&key(KeyCode::Char('c')), &mut app);
+    assert!(
+        (app.physical_offset.0 - (rack_w / 2.0 - pane.width() / 2.0)).abs() < 0.5
+            && (app.physical_offset.1 - (rack_h / 2.0 - pane.height() / 2.0)).abs() < 0.5,
+        "`c` with nothing focused centres the rack: offset {:?}",
+        app.physical_offset
+    );
+    assert_eq!(app.status_message, "Centred on rack");
+
+    // On a pane that does not hold the module UI, `c` does nothing.
+    open_viewer(&mut app);
+    if app.view_focused(ViewType::Physical) {
+        let id = app
+            .pane_holding(ViewType::SourceViewer)
+            .expect("the viewer holds a pane");
+        app.layout.focus = id;
+    }
+    assert!(
+        !app.view_focused(ViewType::Physical),
+        "focus must be off the module UI for this step"
+    );
+    let parked = (
+        app.physical_offset,
+        app.physical_zoom,
+        app.status_message.clone(),
+    );
+    handle_event(&key(KeyCode::Char('c')), &mut app);
+    assert_eq!(
+        (
+            app.physical_offset,
+            app.physical_zoom,
+            app.status_message.clone()
+        ),
+        parked,
+        "`c` on another pane must not touch the module UI"
+    );
+
+    // Back on the module UI: pan, zoom, then `Shift+C` refits and re-arms.
+    let module_pane = app
+        .pane_holding(ViewType::Physical)
+        .expect("the module UI holds a pane");
+    app.layout.focus = module_pane;
+    module_ui_navigation_paint(&mut app);
+
+    handle_event(&key(KeyCode::Right), &mut app);
+    assert!(
+        app.physical_nav_latched,
+        "an arrow pan latches the view against automatic fits"
+    );
+    let panned = app.physical_offset;
+    assert!(
+        (panned.0 - parked.0 .0).abs() > 1.0,
+        "the arrow must have panned the view: {panned:?} vs {:?}",
+        parked.0
+    );
+
+    module_ui_navigation_paint_with_wheel(&mut app, egui::Pos2::new(20.0, 20.0), -50.0);
+    let zoomed = app.physical_zoom;
+    assert!(
+        zoomed > fitted_zoom,
+        "the wheel zooms in: {zoomed} vs {fitted_zoom}"
+    );
+
+    handle_event(&shift_key(KeyCode::Char('C')), &mut app);
+    assert!(
+        !app.physical_nav_latched,
+        "`Shift+C` re-arms the automatic fit triggers"
+    );
+    assert!(
+        (app.physical_zoom - fitted_zoom).abs() < 1e-3,
+        "`Shift+C` refits to the labels fit: {} vs {fitted_zoom}",
+        app.physical_zoom
+    );
+    let (fit_x, fit_y) = crate::physical::fit_offset(
+        rack.total_width_mm,
+        rack.total_height_mm,
+        pane.width(),
+        pane.height(),
+        f64::from(app.physical_zoom),
+    );
+    assert!(
+        (app.physical_offset.0 - fit_x).abs() < 0.5 && (app.physical_offset.1 - fit_y).abs() < 0.5,
+        "the refit centres the rack: offset {:?} vs ({fit_x}, {fit_y})",
+        app.physical_offset
+    );
+    assert!(
+        app.status_message.contains("fit(labels)"),
+        "the status reports the fit the key landed on: {:?}",
+        app.status_message
+    );
+}
+
+#[test]
+fn regression_module_ui_esc_cancels_the_marquee_and_keeps_the_pane() {
+    let (mut app, _chain, _rack) = module_ui_navigation_app();
+    module_ui_navigation_paint(&mut app);
+
+    let map = module_ui_navigation_map(&app).clone();
+    let inner = module_ui_navigation_rect(map.panel).shrink(crate::physical::RACK_MINIMAP_INSET);
+    let anchor = egui::Pos2::new(500.0, 754.0);
+    let end = egui::Pos2::new(560.0, 774.0);
+    assert!(inner.contains(anchor) && inner.contains(end));
+
+    let (zoom, offset) = (app.physical_zoom, app.physical_offset);
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(anchor, true, true, false),
+        &mut app,
+    );
+    crate::handler::handle_graph_window_frame(
+        &module_ui_navigation_frame(end, false, true, false),
+        &mut app,
+    );
+    assert!(
+        app.physical_minimap_drag.is_some(),
+        "a marquee is down before Esc"
+    );
+
+    handle_event(&key(KeyCode::Esc), &mut app);
+
+    assert!(
+        app.physical_minimap_drag.is_none(),
+        "Esc drops the marquee instead of closing the pane"
+    );
+    assert_eq!(app.status_message, "Minimap marquee cancelled");
+    assert!(
+        app.pane_holding(ViewType::Physical).is_some(),
+        "the module UI pane stays open"
+    );
+    assert!(
+        (app.physical_zoom - zoom).abs() < 1e-6,
+        "the cancelled marquee leaves the zoom: {} vs {zoom}",
+        app.physical_zoom
+    );
+    assert_eq!(
+        app.physical_offset, offset,
+        "and leaves the view where it was"
+    );
 }
