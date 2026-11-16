@@ -18,7 +18,7 @@
 use egui::{Painter, Pos2, Rect, Vec2};
 
 use crate::app::App;
-use crate::patch::{ComponentKind, ComponentState, NodeId, ShiftGroup};
+use crate::patch::{ComponentKind, ComponentState, HwComponent, NodeId, ShiftGroup};
 use crate::physical::{
     ElementCell, MiniMap, PhysicalLayout, PhysicalModule, RackLayout, RackSpec, RectPt,
     ScreenMapping,
@@ -378,498 +378,26 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         app.physical_rack_spec.clone()
     };
     let rack = RackLayout::pack(&chain, &rack_spec);
-    // `mm_to_screen` returns screen cells and `rack_geometry` scales them to
-    // points, so the pane origin is folded into the offset in cell units
-    // (offset is subtracted: `screen = mm·factor·zoom − offset`). The
-    // performance view ignores the user pan/zoom and centers a compact
-    // (~1/4-area) rack instead; the overlay keeps label rects clear of it.
-    let pane_dx = f64::from(pane.min.x);
-    let pane_dy = f64::from(pane.min.y);
-    let normal_mapping = || {
-        ScreenMapping::new(
-            crate::physical::PHYSICAL_POINTS_PER_MM,
-            f64::from(app.physical_zoom),
-            f64::from(app.physical_offset.0) - pane_dx,
-            f64::from(app.physical_offset.1) - pane_dy,
-        )
-    };
-    let m = if app.showing_performance {
-        performance_mapping(&rack, pane).unwrap_or_else(normal_mapping)
-    } else {
-        normal_mapping()
-    };
+    let m = spec_mapping(app, &rack, pane);
     let geom = rack_geometry(&rack, &chain, &m);
-    let mut cells = Vec::new();
-
-    // The physical chain clones components per module, so the module-local cell
-    // index is not the `patch.hw_components` index the handler's
-    // `component_rects` hit-testing uses. Map by token id to recover the global
-    // index for every real element.
-    // With no patch this map is empty, so no cell can claim a global index and
-    // the inventory rack publishes no hit rect (D4/D6).
-    let index_of: std::collections::HashMap<&str, usize> =
-        patch.map_or_else(Default::default, |patch| {
-            patch
-                .hw_components
-                .iter()
-                .enumerate()
-                .map(|(i, c)| (c.id.as_str(), i))
-                .collect()
-        });
-
-    // Persistent selection emphasis (droid_tui-8ia): the shared element
-    // selection (`selected_component`) keeps the clicked cell marked after the
-    // pointer leaves, and the graph-node selection (`selected_circuit`) marks
-    // every hardware cell of that circuit's section. Both reuse the hover
-    // backdrop below so the module UI shows one selection language.
-    let selected_circuit_cells: std::collections::HashSet<usize> =
-        app.circuit_hw_token_indices().into_iter().collect();
-
-    // Track which LED tokens are folded into elements (so we don't render them standalone)
-    let mut folded_leds: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // One binding source (button-led-composition D3): the shared
-    // `folded_led_for_element` resolver feeds both the fill and the
-    // suppression, so painter and handler cannot disagree.
-    //
-    // The positional twin is suppressed as well, not only the bound LED: the
-    // LED physically sits *inside* the button, so a fold-rule face must never
-    // leave its register rendering as a standalone cell. That covers a face
-    // bound to another register explicitly (L1.4 on B1.2 leaves L1.2 unfurled
-    // otherwise) and any pairing the parser could not resolve.
-    for module in &chain.modules {
-        for comp in &module.components {
-            if comp.kind != crate::patch::ComponentKind::Button {
-                continue;
-            }
-            if fold_shape_for_controller(&comp.controller).is_none() {
-                continue;
-            }
-            if let Some(led_token) = crate::patch::folded_led_for_element(comp) {
-                folded_leds.insert(led_token);
-            }
-            for led_token in crate::patch::positional_leds_for_element(&comp.controller, &comp.id) {
-                folded_leds.insert(led_token);
-            }
-        }
+    let cells = CellPass {
+        app,
+        patch,
+        chain: &chain,
+        geom: &geom,
+        index_of: component_index_of(patch),
+        selected_circuit_cells: app.circuit_hw_token_indices().into_iter().collect(),
+        folded_leds: folded_led_tokens(&chain),
     }
-
-    // Render all element cells from geometry (including unused ones)
-    for &(mi, ci, rect, mark, ref family) in &geom.cells {
-        let module = &chain.modules[mi];
-
-        // Global `patch.hw_components` index for a real element; `None` for an
-        // unused geometry cell (rendered dimmed and unlabelled, never hit).
-        let component_index = if ci < module.components.len() {
-            index_of.get(module.components[ci].id.as_str()).copied()
-        } else {
-            None
-        };
-
-        // Suppression (button-led-composition D4): a folded LED publishes no
-        // cell, so it is neither painted nor hit-testable. The skeleton and
-        // the full render share this filter, so they stay coincident — and
-        // `paint_panes` republishes `component_rects` from these cells, so
-        // the LED hit rects drop with no second change.
-        if ci < module.components.len() && folded_leds.contains(&module.components[ci].id) {
-            continue;
-        }
-
-        // Fold suppression (unreferenced-elements D2): an unaddressed L cell
-        // on a fold-rule controller never renders standalone — its face (or
-        // dimmed unaddressed face) already shows the floor fill. Recover the
-        // token via the cell label and apply the same per-controller rule.
-        if ci >= module.components.len() {
-            let ordinal = ci - module.components.len();
-            let unaddressed = unaddressed_cells(module, chain.inventory_driven);
-            if let Some(unaddr) = unaddressed.get(ordinal) {
-                if unaddr.kind_letter == Some('L')
-                    && fold_shape_for_controller(&module.geometry_key).is_some()
-                {
-                    continue;
-                }
-            }
-        }
-        // ci might be out of bounds for patch components if it's an unused element
-        // In that case, we still render the cell but dimmed and unlabelled
-        //
-        // A chain built without a patch has no components at all, so every
-        // inventory cell lands in the unaddressed branch; binding `addressed`
-        // here keeps that branch the only reader of a patch.
-        let addressed: Option<&crate::patch::Patch> = if ci < module.components.len() {
-            patch
-        } else {
-            None
-        };
-        let (
-            glyph,
-            state_text,
-            color,
-            label,
-            kind,
-            is_fader,
-            value_frac,
-            led_state,
-            led_rgb,
-            shape,
-            label_color,
-        ) = if let Some(patch) = addressed {
-            let comp = &module.components[ci];
-            let is_shift_active = app
-                .active_shift
-                .is_some_and(|g| comp.shift_group == Some(g));
-            // The geometry cell is the one source for both faceplate facts: the
-            // `kind` the switch glyph path reads, and the family that says this
-            // element is a fader. P8S8/M4 sliders are addressed with `P`
-            // registers but live in the geometry's `F` family, so the flag
-            // cannot come from the token's own letter (module-ui-label-fit D5);
-            // the label fit already classifies the same family as
-            // `CellTextPath::Fader`, and the painter now agrees instead of
-            // drawing every fader as a compact cell.
-            let element_cell = chain.cell_for(mi, &comp.id);
-            let switch_kind = element_cell.and_then(|c| c.kind.as_deref());
-            let is_fader = element_cell.is_some_and(|c| c.family == "F");
-            let value_frac = value_frac_for(&comp.state);
-            // The element's face (faceplate-pot-jack-symbols D1): the shape is the
-            // kind, so a pot, encoder and CV jack paint their own symbol and the
-            // label is fitted to the band beneath it. A fader is a knob/encoder
-            // cell that draws the fader track instead, so it never carries a face;
-            // a button keeps the per-controller composed rule; nothing else has
-            // one.
-            let button_shape = if comp.kind == crate::patch::ComponentKind::Button {
-                fold_shape_for_controller(&comp.controller)
-            } else {
-                None
-            };
-            let shape = match comp.kind {
-                crate::patch::ComponentKind::Button => button_shape,
-                crate::patch::ComponentKind::Knob if !is_fader => Some(CellShape::Pot),
-                crate::patch::ComponentKind::Encoder if !is_fader => Some(CellShape::Encoder),
-                crate::patch::ComponentKind::CvIn | crate::patch::ComponentKind::CvOut => {
-                    Some(CellShape::Jack)
-                }
-                _ => None,
-            };
-            let (glyph, state_text, color) =
-                cell_visuals(comp, is_shift_active, is_fader, switch_kind);
-            // The folded LED (if any) drives the inner fill of a composed button
-            // face only — a pot keeps its own symbol and no folded fill.
-            let folded = button_shape
-                .is_some()
-                .then(|| crate::patch::folded_led_for_element(comp))
-                .flatten();
-            let folded_comp = folded
-                .as_deref()
-                .and_then(|led| module.components.iter().find(|c| c.id == *led));
-            let led_state = folded_comp.map(|c| match &c.state {
-                crate::patch::ComponentState::Value(v) => *v,
-                crate::patch::ComponentState::On | crate::patch::ComponentState::Active => 1.0,
-                crate::patch::ComponentState::Off => 0.0,
-                crate::patch::ComponentState::Led { value, .. } => *value,
-            });
-            let led_rgb = folded_comp.and_then(|c| match &c.state {
-                crate::patch::ComponentState::Led { value: _, rgb } => *rgb,
-                _ => None,
-            });
-            // Use shift-aware label resolver
-            let shift = app.active_shift.map_or(1, |g| g as u8);
-            let layers_enabled = app.labels.layers_enabled;
-            let max_shift_layer = app.labels.max_shift_layer;
-            let hw_store = app.current_hw_store();
-            let label =
-                patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store);
-            // A composed face carries the state on its outline (D6), so
-            // the glyph and the state-text row go away; the outline color
-            // is the state channel (off `muted`, on the button token).
-            if button_shape.is_some() {
-                let on = matches!(comp.state, crate::patch::ComponentState::On);
-                let outline = if on {
-                    color
-                } else {
-                    crate::theme::active().muted
-                };
-                (
-                    String::new(),
-                    String::new(),
-                    outline,
-                    label,
-                    comp.kind,
-                    false,
-                    0.0,
-                    led_state,
-                    led_rgb,
-                    shape,
-                    // The label keeps the element's own token: the shape's
-                    // outline alone carries the state, so an off face does not
-                    // drag its label down to `muted`.
-                    color,
-                )
-            } else {
-                (
-                    glyph, state_text, color, label, comp.kind, is_fader, value_frac, led_state,
-                    led_rgb, shape, color,
-                )
-            }
-        } else {
-            // Unused element - render dimmed and unlabelled. The family comes
-            // from the geometry cell (D2) rather than a guess: an unaddressed
-            // rotary reads as a dim pot/encoder face, an unaddressed CV jack as
-            // a dim socket face, and the remaining families keep the plain dot.
-            // The face is what makes an unused position read as hardware, so the
-            // symbol family — not brightness — carries it (faceplate-pot-jack-
-            // symbols D5).
-            let (glyph, color, kind) = match family.as_str() {
-                "CV" => match mark {
-                    crate::gui::physical::PortMark::PortIn => (
-                        "\u{25C0}".into(),
-                        crate::theme::active().cv_in,
-                        crate::patch::ComponentKind::CvIn,
-                    ),
-                    _ => (
-                        "\u{25B6}".into(),
-                        crate::theme::active().cv_out,
-                        crate::patch::ComponentKind::CvOut,
-                    ),
-                },
-                "E" => (
-                    "\u{25C9}".into(),
-                    crate::theme::active().knob,
-                    crate::patch::ComponentKind::Encoder,
-                ),
-                "P" => (
-                    "\u{25C9}".into(),
-                    crate::theme::active().knob,
-                    crate::patch::ComponentKind::Knob,
-                ),
-                _ => (
-                    "\u{00B7}".into(),
-                    crate::theme::active().muted,
-                    crate::patch::ComponentKind::Button,
-                ),
-            };
-            (
-                glyph,
-                String::new(),
-                color,
-                String::new(),
-                kind,
-                false,
-                0.0,
-                None,
-                None,
-                match family.as_str() {
-                    "P" => Some(CellShape::Pot),
-                    "E" => Some(CellShape::Encoder),
-                    "CV" => Some(CellShape::Jack),
-                    _ => None,
-                },
-                color,
-            )
-        };
-
-        // Shift slot mirrors the `cell_visuals` group→token match; unaddressed
-        // cells (`ci >= len`) are always `None` (D2).
-        let shift_color = if ci < module.components.len() {
-            let comp = &module.components[ci];
-            if app
-                .active_shift
-                .is_some_and(|g| comp.shift_group == Some(g))
-            {
-                let t = crate::theme::active();
-                match comp.shift_group {
-                    Some(ShiftGroup::Group1) => Some(t.shift1),
-                    Some(ShiftGroup::Group2) => Some(t.shift2),
-                    Some(ShiftGroup::Group3) => Some(t.shift3),
-                    Some(ShiftGroup::Group4) => Some(t.shift4),
-                    None => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        // The active shift tints the label too, on every kind (the shift slot
-        // is built for all of them, not only buttons).
-        let label_color = shift_color.unwrap_or(label_color);
-        let is_dimmed = label.is_empty(); // unused elements are dimmed
-        let mut cell = CellSpec {
-            rect,
-            glyph,
-            label,
-            state_text,
-            color,
-            label_color,
-            is_fader,
-            value_frac,
-            component_index,
-            mark,
-            highlighted: component_index.is_some_and(|i| {
-                app.hovered_component == Some(i)
-                    || selected_circuit_cells.contains(&i)
-                    || app.selected_component.as_deref() == Some(module.components[ci].id.as_str())
-            }),
-            shift_color,
-            modifier_wash: None,
-            dimmed: is_dimmed,
-            kind,
-            led_state,
-            led_rgb,
-            shape,
-            label_layout: None,
-        };
-        // D1: the cell's own box answers once what its label looks like — the
-        // painter draws these lines and the annotation filter reads the same
-        // `None` instead of re-deriving a fit test that could drift.
-        cell.label_layout = cell_label_layout(&cell);
-        cells.push(cell);
-    }
-    let modules = geom
-        .module_rects
-        .iter()
-        .map(|&(mi, rect)| ModuleSpec {
-            rect,
-            title: format!("{} {}", chain.modules[mi].controller, 1),
-        })
-        .collect();
-    let db8e_bands = geom
-        .db8e_bands
-        .iter()
-        .map(|&(_, rect)| Db8eBand {
-            rect,
-            state: crate::physical::db8e_display_state_for_layout(&chain),
-        })
-        .collect();
+    .cells();
+    let modules = module_specs(&chain, &geom);
+    let db8e_bands = db8e_band_specs(&chain, &geom);
     // The overlay explodes the labels of patch elements; with no patch there is
     // none to explode, but the compact rack itself still paints.
-    let performance = if app.showing_performance {
-        patch.map(|patch| performance_overlay(patch, app, geom.case_rect, &cells))
-    } else {
-        None
-    };
-    // Label annotations (D10): `off` draws none, `auto` annotates exactly the
-    // addressed cells whose label has no in-cell layout (the restated rule of
-    // module-ui-label-fit D9), `on` every addressed label. The performance view
-    // already explodes every label big around a compact rack, so it carries no
-    // second annotation layer. Candidates are the same cells the painter
-    // consumes (rect + label + layout).
-    let annotations = if app.showing_performance {
-        Vec::new()
-    } else if let Some(patch) = patch {
-        // `auto` only annotates labels the user actually wrote: a derived token
-        // name ("Button B1.3") is mechanical, so annotating every derived name a
-        // narrow cell ellipsizes would flood the field with noise. `on` draws
-        // every addressed label on request, derived names included.
-        let shift = app.active_shift.map_or(1, |g| g as u8);
-        let layers_enabled = app.labels.layers_enabled;
-        let max_shift_layer = app.labels.max_shift_layer;
-        let hw_store = app.current_hw_store();
-        let explicitly_labelled = |cell: &CellSpec| -> bool {
-            cell.component_index
-                .and_then(|i| patch.hw_components.get(i))
-                .is_some_and(|comp| {
-                    patch
-                        .explicit_hw_label(
-                            &comp.id,
-                            shift,
-                            layers_enabled,
-                            max_shift_layer,
-                            &hw_store,
-                        )
-                        .is_some()
-                })
-        };
-        let sources: Vec<CellSpec> = cells
-            .iter()
-            .filter(|cell| {
-                cell.component_index.is_some()
-                    && !cell.label.is_empty()
-                    && match app.label_presentation {
-                        crate::config::LabelPresentation::Off => false,
-                        crate::config::LabelPresentation::Auto => {
-                            cell.label_layout.is_none() && explicitly_labelled(cell)
-                        }
-                        crate::config::LabelPresentation::On => true,
-                    }
-            })
-            .map(|cell| with_resolved_state(cell, patch))
-            .collect();
-        let candidates: Vec<&CellSpec> = sources.iter().collect();
-        budget_annotations(pane, geom.case_rect, &candidates).callouts
-    } else {
-        // No patch means no component and no written label: an inventory cell
-        // is unaddressed, so there is nothing to annotate (D6).
-        Vec::new()
-    };
-    // Hover reveal (D11): the full label plus state of the element under the
-    // pointer, anchored to its cell and drawn in every presentation mode and in
-    // the skeleton. `physical_spec` takes no pointer, so the handler-published
-    // `hovered_component` is the single input; the performance view already
-    // explodes every label and draws no second callout.
-    let hover = if app.showing_performance {
-        None
-    } else {
-        patch.and_then(|patch| {
-            app.hovered_component
-                .and_then(|index| {
-                    cells
-                        .iter()
-                        .find(|cell| cell.component_index == Some(index))
-                })
-                .map(|cell| with_resolved_state(cell, patch))
-                .and_then(|cell| hover_callout(pane, &cell))
-        })
-    };
-    // Module UI minimap (module-ui-navigation D1/D2): the rack's extent at the
-    // current zoom, one rect per placed module and the focused module's index,
-    // mapped into the panel inset in the pane's bottom-right corner. Everything
-    // but the panel is in rack-local points — the space `physical_offset` lives
-    // in and the space a click or a marquee names — so `minimap_rack_point`
-    // returns exactly what `physical_center_on_rect` consumes. The panel itself
-    // lands in window points, where the pointer arrives.
-    //
-    // The performance view builds no map (spec: No map in the performance view):
-    // it already presents the whole rack compactly, so a second picture of the
-    // same rack beside it would only be a smaller duplicate.
-    let minimap = if app.showing_performance {
-        None
-    } else {
-        let origin = geom.case_rect.min;
-        let module_rects: Vec<RectPt> = geom
-            .module_rects
-            .iter()
-            .map(|&(_, rect)| {
-                RectPt::new(
-                    rect.min.x - origin.x,
-                    rect.min.y - origin.y,
-                    rect.width(),
-                    rect.height(),
-                )
-            })
-            .collect();
-        // The focused module is the one holding `selected_component`'s resolved
-        // element: the same token the cells mark as highlighted, resolved the
-        // way `App::physical_element_rect` resolves it (the module must also
-        // declare a cell for the token, else nothing of it is drawn to point
-        // at). `position` over `geom.module_rects` is the index into the
-        // `modules` payload, which is built from that same list in that order.
-        let focused = app.selected_component.as_deref().and_then(|token| {
-            geom.module_rects.iter().position(|&(mi, _)| {
-                chain.modules.get(mi).is_some_and(|module| {
-                    module.components.iter().any(|comp| comp.id == token)
-                        && chain.cell_for(mi, token).is_some()
-                })
-            })
-        });
-        crate::physical::rack_minimap(
-            RectPt::new(0.0, 0.0, geom.case_rect.width(), geom.case_rect.height()),
-            &module_rects,
-            focused,
-            RectPt::new(pane.min.x, pane.min.y, pane.width(), pane.height()),
-            app.physical_offset,
-            app.physical_zoom,
-        )
-    };
+    let performance = performance_spec(app, patch, geom.case_rect, &cells);
+    let annotations = label_annotations(app, patch, pane, geom.case_rect, &cells);
+    let hover = hover_reveal(app, patch, pane, &cells);
+    let minimap = spec_minimap(app, &chain, &geom, pane);
     Some(PhysicalSpec {
         performance,
         annotations,
@@ -887,6 +415,660 @@ pub(crate) fn physical_spec(app: &App, pane: egui::Rect) -> Option<PhysicalSpec>
         skeleton: app.physical_show_skeleton,
         paused: app.processing_paused,
     })
+}
+
+/// The mapping this frame's spec draws and publishes hit geometry in.
+///
+/// `mm_to_screen` returns screen cells and `rack_geometry` scales them to
+/// points, so the pane origin is folded into the offset in cell units (offset is
+/// subtracted: `screen = mm·factor·zoom − offset`). The performance view ignores
+/// the user pan/zoom and centers a compact (~1/4-area) rack instead; the overlay
+/// keeps label rects clear of it. Degenerate performance input falls back to the
+/// normal mapping rather than dropping the frame.
+fn spec_mapping(app: &App, rack: &RackLayout, pane: egui::Rect) -> ScreenMapping {
+    let pane_dx = f64::from(pane.min.x);
+    let pane_dy = f64::from(pane.min.y);
+    let normal_mapping = || {
+        ScreenMapping::new(
+            crate::physical::PHYSICAL_POINTS_PER_MM,
+            f64::from(app.physical_zoom),
+            f64::from(app.physical_offset.0) - pane_dx,
+            f64::from(app.physical_offset.1) - pane_dy,
+        )
+    };
+    if app.showing_performance {
+        performance_mapping(rack, pane).unwrap_or_else(normal_mapping)
+    } else {
+        normal_mapping()
+    }
+}
+
+/// The `patch.hw_components` index of every real element, keyed by token id.
+///
+/// The physical chain clones components per module, so the module-local cell
+/// index is not the `patch.hw_components` index the handler's `component_rects`
+/// hit-testing uses; the token is the only stable key. With no patch this map is
+/// empty, so no cell can claim a global index and the inventory rack publishes
+/// no hit rect (D4/D6).
+fn component_index_of(
+    patch: Option<&crate::patch::Patch>,
+) -> std::collections::HashMap<&str, usize> {
+    patch.map_or_else(Default::default, |patch| {
+        patch
+            .hw_components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.as_str(), i))
+            .collect()
+    })
+}
+
+/// Every LED token folded into a button face (button-led-composition D3/D4).
+///
+/// One binding source feeds both the fill and the suppression: the shared
+/// `folded_led_for_element` resolver plus the positional twin. The positional
+/// twin is suppressed as well, not only the bound LED — the LED physically sits
+/// *inside* the button, so a fold-rule face must never leave its register
+/// rendering as a standalone cell. That covers a face bound to another register
+/// explicitly (L1.4 on B1.2 leaves L1.2 unfurled otherwise) and any pairing the
+/// parser could not resolve.
+fn folded_led_tokens(chain: &PhysicalLayout) -> std::collections::HashSet<String> {
+    let mut folded_leds: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for module in &chain.modules {
+        for comp in &module.components {
+            if comp.kind != ComponentKind::Button {
+                continue;
+            }
+            if fold_shape_for_controller(&comp.controller).is_none() {
+                continue;
+            }
+            if let Some(led_token) = crate::patch::folded_led_for_element(comp) {
+                folded_leds.insert(led_token);
+            }
+            for led_token in crate::patch::positional_leds_for_element(&comp.controller, &comp.id) {
+                folded_leds.insert(led_token);
+            }
+        }
+    }
+    folded_leds
+}
+
+/// The composed button face a cell folds its LED into, if its controller has the
+/// fold rule (button-led-composition D2). Only button-kind cells fold; every
+/// other kind and controller keeps the glyph rendering and standalone LED cells.
+fn composed_button_face(comp: &HwComponent) -> Option<CellShape> {
+    if comp.kind == ComponentKind::Button {
+        fold_shape_for_controller(&comp.controller)
+    } else {
+        None
+    }
+}
+
+/// The face an addressed element draws instead of a glyph (faceplate-pot-jack-
+/// symbols D1): a button keeps the composed face its controller rule already
+/// resolved, a pot or encoder that is not a fader draws its own symbol, a CV
+/// socket draws the jack mouth, and every other kind has no face.
+///
+/// A fader is a knob/encoder cell that draws the fader track instead, so it
+/// never carries a face — `button_shape` is passed in because the fold rule is
+/// the one decision the caller also needs for the LED fill.
+fn resolve_cell_shape(
+    comp: &HwComponent,
+    is_fader: bool,
+    button_shape: Option<CellShape>,
+) -> Option<CellShape> {
+    match comp.kind {
+        ComponentKind::Button => button_shape,
+        ComponentKind::Knob if !is_fader => Some(CellShape::Pot),
+        ComponentKind::Encoder if !is_fader => Some(CellShape::Encoder),
+        ComponentKind::CvIn | ComponentKind::CvOut => Some(CellShape::Jack),
+        _ => None,
+    }
+}
+
+/// The folded LED's live channels for a composed button face
+/// (button-led-composition D2): the bound register's brightness (the inner fill)
+/// and RGB colour, read from the module's own clone of that register.
+///
+/// Both `None` when the element folds nothing, and also when the face is a pot,
+/// encoder or jack — only a composed button face carries a folded fill.
+fn folded_led_channels(
+    comp: &HwComponent,
+    module: &PhysicalModule,
+) -> (Option<f32>, Option<[u8; 3]>) {
+    let Some(led_token) =
+        composed_button_face(comp).and_then(|_| crate::patch::folded_led_for_element(comp))
+    else {
+        return (None, None);
+    };
+    let Some(led) = module.components.iter().find(|c| c.id == led_token) else {
+        return (None, None);
+    };
+    let brightness = match &led.state {
+        ComponentState::Value(v) => *v,
+        ComponentState::On | ComponentState::Active => 1.0,
+        ComponentState::Off => 0.0,
+        ComponentState::Led { value, .. } => *value,
+    };
+    let rgb = match &led.state {
+        ComponentState::Led { rgb, .. } => *rgb,
+        _ => None,
+    };
+    (Some(brightness), rgb)
+}
+
+/// The active shift group's tint for this element, or `None` when no shift is
+/// held, the element declares no group, or the cell is unaddressed.
+///
+/// Mirrors the `cell_visuals` group→token match, so the shift slot and the glyph
+/// colour can never disagree about which group is lit.
+fn shift_color_for(app: &App, comp: Option<&HwComponent>) -> Option<Color> {
+    let comp = comp?;
+    let group = comp.shift_group?;
+    if !app
+        .active_shift
+        .is_some_and(|g| comp.shift_group == Some(g))
+    {
+        return None;
+    }
+    let t = crate::theme::active();
+    match group {
+        ShiftGroup::Group1 => Some(t.shift1),
+        ShiftGroup::Group2 => Some(t.shift2),
+        ShiftGroup::Group3 => Some(t.shift3),
+        ShiftGroup::Group4 => Some(t.shift4),
+    }
+}
+
+/// Whether this cell carries the shared selection emphasis (droid_tui-8ia): the
+/// hovered element, any hardware cell of the selected circuit, or the selected
+/// component's own token. Both persistent selections reuse the hover backdrop so
+/// the module UI shows one selection language.
+fn cell_highlighted(
+    app: &App,
+    comp: Option<&HwComponent>,
+    component_index: Option<usize>,
+    selected_circuit_cells: &std::collections::HashSet<usize>,
+) -> bool {
+    let Some(index) = component_index else {
+        return false;
+    };
+    app.hovered_component == Some(index)
+        || selected_circuit_cells.contains(&index)
+        || app.selected_component.as_deref() == comp.map(|c| c.id.as_str())
+}
+
+/// The resolved paint channels one geometry cell contributes: the glyph/state
+/// the kind renders, its colour, its label, the face it draws instead of a
+/// glyph, the element's 0..1 position and any folded LED.
+///
+/// The addressed and unaddressed branches both produce one, so the cell
+/// assembly reads a single shape instead of two parallel tuples.
+struct CellChannels {
+    glyph: String,
+    state_text: String,
+    color: Color,
+    label: String,
+    kind: ComponentKind,
+    is_fader: bool,
+    value_frac: f32,
+    led_state: Option<f32>,
+    led_rgb: Option<[u8; 3]>,
+    shape: Option<CellShape>,
+    label_color: Color,
+}
+
+impl CellChannels {
+    /// The channels of an unaddressed cell: an unused geometry position, or an
+    /// inventory cell no patch component addresses.
+    ///
+    /// It renders dimmed and unlabelled, but the geometry family — not
+    /// brightness — carries the symbol (faceplate-pot-jack-symbols D5): an
+    /// unaddressed rotary reads as a dim pot/encoder face, an unaddressed CV jack
+    /// as a dim socket face, and the remaining families keep the plain dot, so
+    /// the position reads as hardware instead of collapsing into a speck.
+    fn unaddressed(family: &str, mark: PortMark) -> Self {
+        let (glyph, color, kind) = match family {
+            "CV" => match mark {
+                PortMark::PortIn => (
+                    "\u{25C0}".into(),
+                    crate::theme::active().cv_in,
+                    ComponentKind::CvIn,
+                ),
+                _ => (
+                    "\u{25B6}".into(),
+                    crate::theme::active().cv_out,
+                    ComponentKind::CvOut,
+                ),
+            },
+            "E" => (
+                "\u{25C9}".into(),
+                crate::theme::active().knob,
+                ComponentKind::Encoder,
+            ),
+            "P" => (
+                "\u{25C9}".into(),
+                crate::theme::active().knob,
+                ComponentKind::Knob,
+            ),
+            _ => (
+                "\u{00B7}".into(),
+                crate::theme::active().muted,
+                ComponentKind::Button,
+            ),
+        };
+        let shape = match family {
+            "P" => Some(CellShape::Pot),
+            "E" => Some(CellShape::Encoder),
+            "CV" => Some(CellShape::Jack),
+            _ => None,
+        };
+        Self {
+            glyph,
+            state_text: String::new(),
+            color,
+            label: String::new(),
+            kind,
+            is_fader: false,
+            value_frac: 0.0,
+            led_state: None,
+            led_rgb: None,
+            shape,
+            label_color: color,
+        }
+    }
+}
+
+/// One frame's per-cell resolution pass: the state every geometry cell needs
+/// (patch, chain, fold set, selection set, global index map) bundled so the
+/// addressed and unaddressed branches share one source and the pass stays under
+/// the argument-count lint.
+struct CellPass<'a> {
+    app: &'a App,
+    patch: Option<&'a crate::patch::Patch>,
+    chain: &'a PhysicalLayout,
+    geom: &'a RackGeometry,
+    index_of: std::collections::HashMap<&'a str, usize>,
+    selected_circuit_cells: std::collections::HashSet<usize>,
+    folded_leds: std::collections::HashSet<String>,
+}
+
+impl CellPass<'_> {
+    /// Every published cell, in `rack_geometry`'s emission order: a module's
+    /// addressed elements first, then its unaddressed positions.
+    fn cells(&self) -> Vec<CellSpec> {
+        let mut cells = Vec::new();
+        for &(mi, ci, rect, mark, ref family) in &self.geom.cells {
+            if let Some(cell) = self.cell(mi, ci, rect, mark, family) {
+                cells.push(cell);
+            }
+        }
+        cells
+    }
+
+    /// One geometry cell's spec, or `None` when the cell publishes nothing.
+    fn cell(
+        &self,
+        mi: usize,
+        ci: usize,
+        rect: Rect,
+        mark: PortMark,
+        family: &str,
+    ) -> Option<CellSpec> {
+        let module = &self.chain.modules[mi];
+        let comp = module.components.get(ci);
+        // Global `patch.hw_components` index for a real element; `None` for an
+        // unused geometry cell (rendered dimmed and unlabelled, never hit).
+        let component_index = comp.and_then(|c| self.index_of.get(c.id.as_str()).copied());
+        if self.is_suppressed(module, ci, comp) {
+            return None;
+        }
+        // A chain built without a patch has no components at all, so every
+        // inventory cell lands in the unaddressed branch; binding the pair here
+        // keeps that branch the only reader of a patch.
+        let channels = match (self.patch, comp) {
+            (Some(patch), Some(comp)) => self.addressed_channels(patch, module, mi, comp),
+            _ => CellChannels::unaddressed(family, mark),
+        };
+        let shift_color = shift_color_for(self.app, comp);
+        let CellChannels {
+            glyph,
+            state_text,
+            color,
+            label,
+            kind,
+            is_fader,
+            value_frac,
+            led_state,
+            led_rgb,
+            shape,
+            label_color,
+        } = channels;
+        // The active shift tints the label too, on every kind (the shift slot is
+        // built for all of them, not only buttons).
+        let label_color = shift_color.unwrap_or(label_color);
+        let is_dimmed = label.is_empty(); // unused elements are dimmed
+        let mut cell = CellSpec {
+            rect,
+            glyph,
+            label,
+            state_text,
+            color,
+            label_color,
+            is_fader,
+            value_frac,
+            component_index,
+            mark,
+            highlighted: cell_highlighted(
+                self.app,
+                comp,
+                component_index,
+                &self.selected_circuit_cells,
+            ),
+            shift_color,
+            modifier_wash: None,
+            dimmed: is_dimmed,
+            kind,
+            led_state,
+            led_rgb,
+            shape,
+            label_layout: None,
+        };
+        // D1: the cell's own box answers once what its label looks like — the
+        // painter draws these lines and the annotation filter reads the same
+        // `None` instead of re-deriving a fit test that could drift.
+        cell.label_layout = cell_label_layout(&cell);
+        Some(cell)
+    }
+
+    /// Whether this cell publishes nothing: a folded LED (D4 — the LED sits
+    /// inside its button, so it is neither painted nor hit-testable) or an
+    /// unaddressed `L` cell on a fold-rule controller (unreferenced-elements D2
+    /// — its face, or dimmed unaddressed face, already shows the floor fill).
+    ///
+    /// The skeleton and the full render share this filter, so they stay
+    /// coincident — and `paint_panes` republishes `component_rects` from these
+    /// cells, so the LED hit rects drop with no second change.
+    fn is_suppressed(
+        &self,
+        module: &PhysicalModule,
+        ci: usize,
+        comp: Option<&HwComponent>,
+    ) -> bool {
+        if comp.is_some_and(|c| self.folded_leds.contains(&c.id)) {
+            return true;
+        }
+        // Fold suppression recovers the token from the unaddressed cell's own
+        // label and applies the same per-controller rule.
+        let Some(ordinal) = ci.checked_sub(module.components.len()) else {
+            return false;
+        };
+        unaddressed_cells(module, self.chain.inventory_driven)
+            .get(ordinal)
+            .is_some_and(|unaddr| {
+                unaddr.kind_letter == Some('L')
+                    && fold_shape_for_controller(&module.geometry_key).is_some()
+            })
+    }
+
+    /// The resolved channels of an addressed element.
+    ///
+    /// The geometry cell is the one source for both faceplate facts: the `kind`
+    /// the switch glyph path reads, and the family that says this element is a
+    /// fader. P8S8/M4 sliders are addressed with `P` registers but live in the
+    /// geometry's `F` family, so the flag cannot come from the token's own letter
+    /// (module-ui-label-fit D5); the label fit already classifies the same family
+    /// as `CellTextPath::Fader`, and the painter agrees instead of drawing every
+    /// fader as a compact cell.
+    ///
+    /// A composed face carries the button's state on its outline (D6), so the
+    /// glyph and the state-text row go away and the outline colour becomes the
+    /// state channel (off `muted`, on the button token). The label keeps the
+    /// element's own token: the shape's outline alone carries the state, so an
+    /// off face does not drag its label down to `muted`.
+    fn addressed_channels(
+        &self,
+        patch: &crate::patch::Patch,
+        module: &PhysicalModule,
+        mi: usize,
+        comp: &HwComponent,
+    ) -> CellChannels {
+        let is_shift_active = self
+            .app
+            .active_shift
+            .is_some_and(|g| comp.shift_group == Some(g));
+        let element_cell = self.chain.cell_for(mi, &comp.id);
+        let switch_kind = element_cell.and_then(|c| c.kind.as_deref());
+        let is_fader = element_cell.is_some_and(|c| c.family == "F");
+        let value_frac = value_frac_for(&comp.state);
+        let button_shape = composed_button_face(comp);
+        let shape = resolve_cell_shape(comp, is_fader, button_shape);
+        let (glyph, state_text, color) = cell_visuals(comp, is_shift_active, is_fader, switch_kind);
+        let (led_state, led_rgb) = folded_led_channels(comp, module);
+        // Shift-aware label resolver.
+        let shift = self.app.active_shift.map_or(1, |g| g as u8);
+        let layers_enabled = self.app.labels.layers_enabled;
+        let max_shift_layer = self.app.labels.max_shift_layer;
+        let hw_store = self.app.current_hw_store();
+        let label =
+            patch.display_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store);
+        if button_shape.is_some() {
+            let on = matches!(comp.state, ComponentState::On);
+            let outline = if on {
+                color
+            } else {
+                crate::theme::active().muted
+            };
+            CellChannels {
+                glyph: String::new(),
+                state_text: String::new(),
+                color: outline,
+                label,
+                kind: comp.kind,
+                is_fader: false,
+                value_frac: 0.0,
+                led_state,
+                led_rgb,
+                shape,
+                label_color: color,
+            }
+        } else {
+            CellChannels {
+                glyph,
+                state_text,
+                color,
+                label,
+                kind: comp.kind,
+                is_fader,
+                value_frac,
+                led_state,
+                led_rgb,
+                shape,
+                label_color: color,
+            }
+        }
+    }
+}
+
+/// The placed module outlines: one per module `rack_geometry` placed, titled by
+/// its controller and its instance ordinal within that controller.
+fn module_specs(chain: &PhysicalLayout, geom: &RackGeometry) -> Vec<ModuleSpec> {
+    geom.module_rects
+        .iter()
+        .map(|&(mi, rect)| ModuleSpec {
+            rect,
+            title: format!("{} {}", chain.modules[mi].controller, 1),
+        })
+        .collect()
+}
+
+/// The DB8E OLED display bands (`db8e-oled-display-placeholder`): the bordered
+/// upper-band rects above the B-grid, each carrying the state text derived from
+/// the patch. Decorative only — they publish no hit rect.
+fn db8e_band_specs(chain: &PhysicalLayout, geom: &RackGeometry) -> Vec<Db8eBand> {
+    let state = crate::physical::db8e_display_state_for_layout(chain);
+    geom.db8e_bands
+        .iter()
+        .map(|&(_, rect)| Db8eBand { rect, state })
+        .collect()
+}
+
+/// The performance-view overlay (performance-view 1.3), present exactly when
+/// `App.showing_performance` was on at spec-build time. With no patch there is
+/// no element to explode, but the compact rack itself still paints.
+fn performance_spec(
+    app: &App,
+    patch: Option<&crate::patch::Patch>,
+    case_rect: Rect,
+    cells: &[CellSpec],
+) -> Option<PerformanceOverlay> {
+    if app.showing_performance {
+        patch.map(|patch| performance_overlay(patch, app, case_rect, cells))
+    } else {
+        None
+    }
+}
+
+/// The label-presentation annotations (module-ui-labels D10): `off` draws none,
+/// `auto` annotates exactly the addressed cells whose label has no in-cell layout
+/// (the restated rule of module-ui-label-fit D9), `on` every addressed label.
+///
+/// `auto` only annotates labels the user actually wrote: a derived token name
+/// ("Button B1.3") is mechanical, so annotating every derived name a narrow cell
+/// ellipsizes would flood the field with noise. `on` draws every addressed label
+/// on request, derived names included. The performance view already explodes
+/// every label big around a compact rack, so it carries no second annotation
+/// layer, and a patch-less inventory rack has nothing to annotate (D6).
+fn label_annotations(
+    app: &App,
+    patch: Option<&crate::patch::Patch>,
+    pane: Rect,
+    case_rect: Rect,
+    cells: &[CellSpec],
+) -> Vec<CalloutSpec> {
+    if app.showing_performance {
+        return Vec::new();
+    }
+    // No patch means no component and no written label: an inventory cell is
+    // unaddressed, so there is nothing to annotate (D6).
+    let Some(patch) = patch else {
+        return Vec::new();
+    };
+    let shift = app.active_shift.map_or(1, |g| g as u8);
+    let layers_enabled = app.labels.layers_enabled;
+    let max_shift_layer = app.labels.max_shift_layer;
+    let hw_store = app.current_hw_store();
+    let explicitly_labelled = |cell: &CellSpec| -> bool {
+        cell.component_index
+            .and_then(|i| patch.hw_components.get(i))
+            .is_some_and(|comp| {
+                patch
+                    .explicit_hw_label(&comp.id, shift, layers_enabled, max_shift_layer, &hw_store)
+                    .is_some()
+            })
+    };
+    // Candidates are the same cells the painter consumes (rect + label + layout).
+    let sources: Vec<CellSpec> = cells
+        .iter()
+        .filter(|cell| {
+            cell.component_index.is_some()
+                && !cell.label.is_empty()
+                && match app.label_presentation {
+                    crate::config::LabelPresentation::Off => false,
+                    crate::config::LabelPresentation::Auto => {
+                        cell.label_layout.is_none() && explicitly_labelled(cell)
+                    }
+                    crate::config::LabelPresentation::On => true,
+                }
+        })
+        .map(|cell| with_resolved_state(cell, patch))
+        .collect();
+    let candidates: Vec<&CellSpec> = sources.iter().collect();
+    budget_annotations(pane, case_rect, &candidates).callouts
+}
+
+/// The hover reveal (module-ui-labels D11): the full label plus state of the
+/// element under the pointer, anchored to its cell and flipped to stay inside the
+/// pane, drawn in every presentation mode and in the skeleton.
+///
+/// `physical_spec` takes no pointer, so the handler-published `hovered_component`
+/// is the single input; the performance view already explodes every label and
+/// draws no second callout.
+fn hover_reveal(
+    app: &App,
+    patch: Option<&crate::patch::Patch>,
+    pane: Rect,
+    cells: &[CellSpec],
+) -> Option<CalloutSpec> {
+    if app.showing_performance {
+        return None;
+    }
+    let patch = patch?;
+    app.hovered_component
+        .and_then(|index| {
+            cells
+                .iter()
+                .find(|cell| cell.component_index == Some(index))
+        })
+        .map(|cell| with_resolved_state(cell, patch))
+        .and_then(|cell| hover_callout(pane, &cell))
+}
+
+/// The module UI's minimap (module-ui-navigation D1/D2): the rack's extent at
+/// the current zoom, one rect per placed module and the focused module's index,
+/// mapped into the panel inset in the pane's bottom-right corner.
+///
+/// Everything but the panel is in rack-local points — the space
+/// `physical_offset` lives in and the space a click or a marquee names — so
+/// `minimap_rack_point` returns exactly what `physical_center_on_rect` consumes.
+/// The panel itself lands in window points, where the pointer arrives. The
+/// performance view builds no map: it already presents the whole rack compactly,
+/// so a second picture of the same rack beside it would only be a smaller
+/// duplicate.
+fn spec_minimap(
+    app: &App,
+    chain: &PhysicalLayout,
+    geom: &RackGeometry,
+    pane: Rect,
+) -> Option<MiniMap> {
+    if app.showing_performance {
+        return None;
+    }
+    let origin = geom.case_rect.min;
+    let module_rects: Vec<RectPt> = geom
+        .module_rects
+        .iter()
+        .map(|&(_, rect)| {
+            RectPt::new(
+                rect.min.x - origin.x,
+                rect.min.y - origin.y,
+                rect.width(),
+                rect.height(),
+            )
+        })
+        .collect();
+    // The focused module is the one holding `selected_component`'s resolved
+    // element: the same token the cells mark as highlighted, resolved the way
+    // `App::physical_element_rect` resolves it (the module must also declare a
+    // cell for the token, else nothing of it is drawn to point at). `position`
+    // over `geom.module_rects` is the index into the `modules` payload, which is
+    // built from that same list in that order.
+    let focused = app.selected_component.as_deref().and_then(|token| {
+        geom.module_rects.iter().position(|&(mi, _)| {
+            chain.modules.get(mi).is_some_and(|module| {
+                module.components.iter().any(|comp| comp.id == token)
+                    && chain.cell_for(mi, token).is_some()
+            })
+        })
+    });
+    crate::physical::rack_minimap(
+        RectPt::new(0.0, 0.0, geom.case_rect.width(), geom.case_rect.height()),
+        &module_rects,
+        focused,
+        RectPt::new(pane.min.x, pane.min.y, pane.width(), pane.height()),
+        app.physical_offset,
+        app.physical_zoom,
+    )
 }
 
 /// Centered compact mapping for the performance view (performance-view 1.3):

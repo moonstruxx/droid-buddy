@@ -1047,6 +1047,23 @@ mod tests {
         );
     }
 
+    /// The one validation issue the modal tests drive: a single error with a
+    /// real span, so the modal paints a row and the spec builder has something
+    /// to summarise. Shared by the paint, spec and gating tests so all three
+    /// assert against the same issue instead of three drifting literals.
+    fn sample_validation_issues() -> Vec<ValidationIssue> {
+        vec![ValidationIssue {
+            span: crate::patch::Span {
+                line: 0,
+                col_start: 0,
+                col_end: 4,
+            },
+            severity: Severity::Error,
+            code: "unknown_circuit".into(),
+            message: "unknown circuit foo".into(),
+        }]
+    }
+
     #[test]
     fn diff_surface_paints_an_opaque_card() {
         let spec = DiffSpec {
@@ -1124,16 +1141,7 @@ mod tests {
     #[test]
     fn dialog_text_never_matches_its_own_background() {
         let size = Vec2::new(400.0, 300.0);
-        let issues = vec![ValidationIssue {
-            span: crate::patch::Span {
-                line: 0,
-                col_start: 0,
-                col_end: 4,
-            },
-            severity: Severity::Error,
-            code: "unknown_circuit".into(),
-            message: "unknown circuit foo".into(),
-        }];
+        let issues = sample_validation_issues();
         let validation = validation_spec(&issues, 0);
         assert_dialog_text_readable("validation modal", size, |p, c, ctx| {
             paint_validation_modal(p, c, ctx, Some(&validation));
@@ -1211,16 +1219,7 @@ mod tests {
 
     #[test]
     fn validation_modal_renders_title_and_issue() {
-        let issues = vec![ValidationIssue {
-            span: crate::patch::Span {
-                line: 0,
-                col_start: 0,
-                col_end: 4,
-            },
-            severity: Severity::Error,
-            code: "unknown_circuit".into(),
-            message: "unknown circuit foo".into(),
-        }];
+        let issues = sample_validation_issues();
         let spec = validation_spec(&issues, 0);
         let labels = painted_labels(Vec2::new(400.0, 300.0), |p, c, ctx| {
             paint_validation_modal(p, c, ctx, Some(&spec));
@@ -1522,16 +1521,7 @@ mod tests {
         assert!(validation_spec_for(&app).is_none());
         app.showing_validation = true;
         assert!(validation_spec_for(&app).is_none());
-        app.validation_issues = vec![ValidationIssue {
-            span: crate::patch::Span {
-                line: 0,
-                col_start: 0,
-                col_end: 4,
-            },
-            severity: Severity::Error,
-            code: "unknown_circuit".into(),
-            message: "unknown circuit foo".into(),
-        }];
+        app.validation_issues = sample_validation_issues();
         assert_eq!(
             validation_spec_for(&app).expect("modal shown").rows.len(),
             1

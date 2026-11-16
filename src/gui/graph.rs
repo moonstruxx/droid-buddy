@@ -4017,6 +4017,28 @@ mod window_paint_tests {
         crate::theme::active()
     }
 
+    /// A minimal label-less node frame at `x`: no ports and no radius, so a paint
+    /// test can assert only what the frame and the minimap draw. Shared by the
+    /// minimap dot-floor and marquee tests, which need the same tiny scene.
+    fn tiny_node(x: f32) -> NodeSpec {
+        NodeSpec {
+            x,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+            radius: 0.0,
+            fill: (20, 20, 20),
+            border: (200, 200, 200),
+            border_width: 1.0,
+            label: String::new(),
+            label_color: (255, 255, 255),
+            circuit: String::new(),
+            instance_index: 0,
+            input_port: false,
+            output_port: false,
+        }
+    }
+
     /// Shapes `paint_scene` emits, bucketed by kind so the four-state tests can
     /// assert on what the window actually draws (labels, node frames, ports,
     /// edges, arrowheads, minimap) without depending on egui mesh internals.
@@ -4561,25 +4583,9 @@ mod window_paint_tests {
     fn window_paint_minimap_dots_have_two_px_floor() {
         // A spread of tiny node frames that overflows a small canvas, so the
         // minimap draws and every dot shrinks below the floor.
-        let node = |x: f32| NodeSpec {
-            x,
-            y: 0.0,
-            w: 0.5,
-            h: 0.5,
-            radius: 0.0,
-            fill: (20, 20, 20),
-            border: (200, 200, 200),
-            border_width: 1.0,
-            label: String::new(),
-            label_color: (255, 255, 255),
-            circuit: String::new(),
-            instance_index: 0,
-            input_port: false,
-            output_port: false,
-        };
         let scene = SceneSpec {
             background: (10, 10, 10),
-            nodes: vec![node(0.0), node(500.0), node(1000.0)],
+            nodes: vec![tiny_node(0.0), tiny_node(500.0), tiny_node(1000.0)],
             edges: vec![],
             clusters: vec![],
         };
@@ -4613,25 +4619,9 @@ mod window_paint_tests {
     /// a 1 px accent stroke.
     #[test]
     fn window_paint_draws_the_minimap_marquee_only_while_dragging() {
-        let node = |x: f32| NodeSpec {
-            x,
-            y: 0.0,
-            w: 0.5,
-            h: 0.5,
-            radius: 0.0,
-            fill: (20, 20, 20),
-            border: (200, 200, 200),
-            border_width: 1.0,
-            label: String::new(),
-            label_color: (255, 255, 255),
-            circuit: String::new(),
-            instance_index: 0,
-            input_port: false,
-            output_port: false,
-        };
         let scene = SceneSpec {
             background: (10, 10, 10),
-            nodes: vec![node(0.0), node(500.0), node(1000.0)],
+            nodes: vec![tiny_node(0.0), tiny_node(500.0), tiny_node(1000.0)],
             edges: vec![],
             clusters: vec![],
         };
