@@ -204,6 +204,38 @@ enum Mode {
     Optimize,
 }
 
+/// Option values accumulated while scanning argv, before they are assembled
+/// into a [`Command`].
+struct Options {
+    json: bool,
+    no_plugins: bool,
+    deny: Severity,
+    strategy: OptimizeScope,
+    weight: f32,
+    candidate: usize,
+    write: Option<String>,
+    stdout: bool,
+    patch: Option<PatchSource>,
+}
+
+impl Default for Options {
+    /// The documented defaults: gate on errors, banner strategy, weight `0.0`,
+    /// candidate `0`, no output target, no patch yet.
+    fn default() -> Self {
+        Self {
+            json: false,
+            no_plugins: false,
+            deny: Severity::Error,
+            strategy: OptimizeScope::Banner,
+            weight: 0.0,
+            candidate: 0,
+            write: None,
+            stdout: false,
+            patch: None,
+        }
+    }
+}
+
 /// Parse `args`, where `args[0]` is the subcommand and the rest are options
 /// plus exactly one patch operand.
 ///
@@ -219,25 +251,9 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     if first == "--help" || first == "-h" {
         return Ok(Command::Help);
     }
-    let mode = match first.as_str() {
-        "analyze" => Mode::Analyze,
-        "optimize" => Mode::Optimize,
-        other => {
-            return Err(UsageError::new(format!(
-                "unknown subcommand `{other}`: expected `analyze` or `optimize`"
-            )));
-        }
-    };
+    let mode = parse_mode(first)?;
 
-    let mut json = false;
-    let mut no_plugins = false;
-    let mut deny = Severity::Error;
-    let mut strategy = OptimizeScope::Banner;
-    let mut weight = 0.0_f32;
-    let mut candidate = 0_usize;
-    let mut write: Option<String> = None;
-    let mut stdout = false;
-    let mut patch: Option<PatchSource> = None;
+    let mut options = Options::default();
     let mut options_done = false;
 
     let mut i = 1;
@@ -252,140 +268,19 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
 
         // A lone `-` is the stdin operand, not an option.
         if !options_done && arg.starts_with('-') && arg != "-" {
-            match arg {
-                "--help" | "-h" => return Ok(Command::Help),
-                "--json" => json = true,
-                "--no-plugins" => no_plugins = true,
-                "--deny" => {
-                    if mode == Mode::Optimize {
-                        return Err(UsageError::new(
-                            "`--deny` applies to `analyze`: `optimize` reports no findings to gate on",
-                        ));
-                    }
-                    let raw = value_of(args, &mut i, "--deny")?;
-                    deny = match raw {
-                        "error" => Severity::Error,
-                        "warning" => Severity::Warning,
-                        other => {
-                            return Err(UsageError::new(format!(
-                                "invalid value `{other}` for `--deny`: expected `error` or `warning`"
-                            )));
-                        }
-                    };
-                }
-                "--strategy" => {
-                    require_optimize(mode, "--strategy")?;
-                    let raw = value_of(args, &mut i, "--strategy")?;
-                    strategy = match raw {
-                        "banner" => OptimizeScope::Banner,
-                        "global" => OptimizeScope::Global,
-                        "minmax" => OptimizeScope::MinMax,
-                        other => {
-                            return Err(UsageError::new(format!(
-                                "invalid value `{other}` for `--strategy`: expected `banner`, `global` or `minmax`"
-                            )));
-                        }
-                    };
-                }
-                "--weight" => {
-                    require_optimize(mode, "--weight")?;
-                    let raw = value_of(args, &mut i, "--weight")?;
-                    let parsed: f32 = raw.parse().map_err(|_| {
-                        UsageError::new(format!(
-                            "invalid value `{raw}` for `--weight`: expected a number in 0.0..=1.0"
-                        ))
-                    })?;
-                    if !(0.0..=1.0).contains(&parsed) {
-                        return Err(UsageError::new(format!(
-                            "value `{raw}` for `--weight` is outside 0.0..=1.0"
-                        )));
-                    }
-                    weight = parsed;
-                }
-                "--candidate" => {
-                    require_optimize(mode, "--candidate")?;
-                    let raw = value_of(args, &mut i, "--candidate")?;
-                    candidate = raw.parse().map_err(|_| {
-                        UsageError::new(format!(
-                            "invalid value `{raw}` for `--candidate`: expected a non-negative integer"
-                        ))
-                    })?;
-                }
-                "--write" => {
-                    require_optimize(mode, "--write")?;
-                    write = Some(value_of(args, &mut i, "--write")?.to_owned());
-                }
-                "--stdout" => {
-                    require_optimize(mode, "--stdout")?;
-                    stdout = true;
-                }
-                other => {
-                    return Err(UsageError::new(format!(
-                        "unknown option `{other}`: see `--help`"
-                    )));
-                }
+            if arg == "--help" || arg == "-h" {
+                return Ok(Command::Help);
             }
+            parse_option(mode, args, &mut i, arg, &mut options)?;
             i += 1;
             continue;
         }
 
-        if patch.is_some() {
-            return Err(UsageError::new(format!(
-                "unexpected extra operand `{arg}`: exactly one patch is accepted"
-            )));
-        }
-        patch = Some(if arg == "-" {
-            PatchSource::Stdin
-        } else {
-            PatchSource::File(arg.to_owned())
-        });
+        accept_operand(&mut options, arg)?;
         i += 1;
     }
 
-    let patch = patch.ok_or_else(|| {
-        UsageError::new("missing patch operand: give a path or `-` for standard input")
-    })?;
-
-    if write.is_some() && stdout {
-        return Err(UsageError::new(
-            "options `--write` and `--stdout` are mutually exclusive: choose one output target",
-        ));
-    }
-
-    match mode {
-        Mode::Analyze => Ok(Command::Analyze(AnalyzeRequest {
-            patch,
-            json,
-            no_plugins,
-            deny,
-        })),
-        Mode::Optimize => {
-            let output = if let Some(path) = write {
-                // `write_to_ini` refuses to overwrite its source and derives
-                // the collision suffix from the destination, so it needs a
-                // real source path rather than a fabricated one (design D8).
-                if matches!(patch, PatchSource::Stdin) {
-                    return Err(UsageError::new(
-                        "`--write` needs a patch path: standard input cannot be written back, use `--stdout`",
-                    ));
-                }
-                Some(OutputTarget::Write(path))
-            } else if stdout {
-                Some(OutputTarget::Stdout)
-            } else {
-                None
-            };
-            Ok(Command::Optimize(OptimizeRequest {
-                patch,
-                json,
-                no_plugins,
-                strategy,
-                weight,
-                candidate,
-                output,
-            }))
-        }
-    }
+    into_command(mode, options)
 }
 
 /// Take the next argv entry as an option value, advancing the cursor past it.
@@ -408,6 +303,201 @@ fn require_optimize(mode: Mode, option: &str) -> Result<(), UsageError> {
         Err(UsageError::new(format!(
             "option `{option}` is only valid for `optimize`"
         )))
+    }
+}
+
+/// Map the subcommand name to its mode.
+fn parse_mode(first: &str) -> Result<Mode, UsageError> {
+    match first {
+        "analyze" => Ok(Mode::Analyze),
+        "optimize" => Ok(Mode::Optimize),
+        other => Err(UsageError::new(format!(
+            "unknown subcommand `{other}`: expected `analyze` or `optimize`"
+        ))),
+    }
+}
+
+/// Apply the option named by `arg`, consuming its value (if it takes one) by
+/// advancing `cursor` past that value.
+///
+/// The arms are exact-name lookups, so their order carries no meaning; each
+/// one delegates to a helper that owns the value's grammar and its
+/// subcommand guard.
+fn parse_option(
+    mode: Mode,
+    args: &[String],
+    cursor: &mut usize,
+    arg: &str,
+    options: &mut Options,
+) -> Result<(), UsageError> {
+    match arg {
+        "--json" => options.json = true,
+        "--no-plugins" => options.no_plugins = true,
+        "--deny" => options.deny = parse_deny(mode, args, cursor)?,
+        "--strategy" => options.strategy = parse_strategy(mode, args, cursor)?,
+        "--weight" => options.weight = parse_weight(mode, args, cursor)?,
+        "--candidate" => options.candidate = parse_candidate(mode, args, cursor)?,
+        "--write" => options.write = Some(parse_write(mode, args, cursor)?),
+        "--stdout" => {
+            parse_stdout(mode)?;
+            options.stdout = true;
+        }
+        other => {
+            return Err(UsageError::new(format!(
+                "unknown option `{other}`: see `--help`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `--deny <error|warning>`: the severity gate, which only `analyze` has
+/// findings for.
+fn parse_deny(mode: Mode, args: &[String], cursor: &mut usize) -> Result<Severity, UsageError> {
+    if mode == Mode::Optimize {
+        return Err(UsageError::new(
+            "`--deny` applies to `analyze`: `optimize` reports no findings to gate on",
+        ));
+    }
+    let raw = value_of(args, cursor, "--deny")?;
+    match raw {
+        "error" => Ok(Severity::Error),
+        "warning" => Ok(Severity::Warning),
+        other => Err(UsageError::new(format!(
+            "invalid value `{other}` for `--deny`: expected `error` or `warning`"
+        ))),
+    }
+}
+
+/// `--strategy <banner|global|minmax>`: which candidate strategies to search.
+fn parse_strategy(
+    mode: Mode,
+    args: &[String],
+    cursor: &mut usize,
+) -> Result<OptimizeScope, UsageError> {
+    require_optimize(mode, "--strategy")?;
+    let raw = value_of(args, cursor, "--strategy")?;
+    match raw {
+        "banner" => Ok(OptimizeScope::Banner),
+        "global" => Ok(OptimizeScope::Global),
+        "minmax" => Ok(OptimizeScope::MinMax),
+        other => Err(UsageError::new(format!(
+            "invalid value `{other}` for `--strategy`: expected `banner`, `global` or `minmax`"
+        ))),
+    }
+}
+
+/// `--weight <0.0..=1.0>`: the objective weight trading total latency against
+/// the worst edge.
+fn parse_weight(mode: Mode, args: &[String], cursor: &mut usize) -> Result<f32, UsageError> {
+    require_optimize(mode, "--weight")?;
+    let raw = value_of(args, cursor, "--weight")?;
+    let parsed: f32 = raw.parse().map_err(|_| {
+        UsageError::new(format!(
+            "invalid value `{raw}` for `--weight`: expected a number in 0.0..=1.0"
+        ))
+    })?;
+    if !(0.0..=1.0).contains(&parsed) {
+        return Err(UsageError::new(format!(
+            "value `{raw}` for `--weight` is outside 0.0..=1.0"
+        )));
+    }
+    Ok(parsed)
+}
+
+/// `--candidate <n>`: which reported candidate the output option acts on.
+fn parse_candidate(mode: Mode, args: &[String], cursor: &mut usize) -> Result<usize, UsageError> {
+    require_optimize(mode, "--candidate")?;
+    let raw = value_of(args, cursor, "--candidate")?;
+    raw.parse().map_err(|_| {
+        UsageError::new(format!(
+            "invalid value `{raw}` for `--candidate`: expected a non-negative integer"
+        ))
+    })
+}
+
+/// `--write <path>`: the save-as target for the selected candidate.
+fn parse_write(mode: Mode, args: &[String], cursor: &mut usize) -> Result<String, UsageError> {
+    require_optimize(mode, "--write")?;
+    Ok(value_of(args, cursor, "--write")?.to_owned())
+}
+
+/// `--stdout`: emit the selected candidate on standard output.
+fn parse_stdout(mode: Mode) -> Result<(), UsageError> {
+    require_optimize(mode, "--stdout")
+}
+
+/// Record the single patch operand, rejecting a second one.
+fn accept_operand(options: &mut Options, arg: &str) -> Result<(), UsageError> {
+    if options.patch.is_some() {
+        return Err(UsageError::new(format!(
+            "unexpected extra operand `{arg}`: exactly one patch is accepted"
+        )));
+    }
+    options.patch = Some(if arg == "-" {
+        PatchSource::Stdin
+    } else {
+        PatchSource::File(arg.to_owned())
+    });
+    Ok(())
+}
+
+/// Resolve `--write`/`--stdout` into an output target, refusing to write back
+/// over standard input.
+fn output_target(
+    write: Option<String>,
+    stdout: bool,
+    patch: &PatchSource,
+) -> Result<Option<OutputTarget>, UsageError> {
+    if let Some(path) = write {
+        // `write_to_ini` refuses to overwrite its source and derives the
+        // collision suffix from the destination, so it needs a real source
+        // path rather than a fabricated one (design D8).
+        if matches!(patch, PatchSource::Stdin) {
+            return Err(UsageError::new(
+                "`--write` needs a patch path: standard input cannot be written back, use `--stdout`",
+            ));
+        }
+        Ok(Some(OutputTarget::Write(path)))
+    } else if stdout {
+        Ok(Some(OutputTarget::Stdout))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Assemble the invocation, applying the checks that need the whole argv: the
+/// patch operand is required, and the two output targets are exclusive.
+fn into_command(mode: Mode, options: Options) -> Result<Command, UsageError> {
+    let patch = options.patch.ok_or_else(|| {
+        UsageError::new("missing patch operand: give a path or `-` for standard input")
+    })?;
+
+    if options.write.is_some() && options.stdout {
+        return Err(UsageError::new(
+            "options `--write` and `--stdout` are mutually exclusive: choose one output target",
+        ));
+    }
+
+    match mode {
+        Mode::Analyze => Ok(Command::Analyze(AnalyzeRequest {
+            patch,
+            json: options.json,
+            no_plugins: options.no_plugins,
+            deny: options.deny,
+        })),
+        Mode::Optimize => {
+            let output = output_target(options.write, options.stdout, &patch)?;
+            Ok(Command::Optimize(OptimizeRequest {
+                patch,
+                json: options.json,
+                no_plugins: options.no_plugins,
+                strategy: options.strategy,
+                weight: options.weight,
+                candidate: options.candidate,
+                output,
+            }))
+        }
     }
 }
 

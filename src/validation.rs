@@ -220,82 +220,144 @@ fn expression_problem(value: &str) -> Option<&'static str> {
     }
     // Only calculations are checked: without any operator the value is a bare
     // number, register, cable name — or text, which is not this check's job.
-    if !toks.iter().any(|t| {
-        matches!(
-            t,
-            ExprTok::Mul
-                | ExprTok::Div
-                | ExprTok::Plus
-                | ExprTok::Minus
-                | ExprTok::OpenBracket
-                | ExprTok::CloseBracket
-        )
-    }) {
+    if !toks.iter().any(|tok| is_calculation_token(*tok)) {
         return None;
     }
-    if toks
-        .iter()
-        .any(|t| matches!(t, ExprTok::OpenBracket | ExprTok::CloseBracket))
-    {
-        return Some("brackets are not allowed (DROID reads A * B + C only)");
+    if toks.iter().any(|tok| is_bracket_token(*tok)) {
+        return Some(BRACKETS_ONLY);
     }
-    let mut mults = 0usize;
-    let mut offsets = 0usize;
-    let mut expect_operand = true;
-    let mut after_div = false;
-    let mut unary_minus_ok = true;
-    for tok in &toks {
-        match tok {
-            ExprTok::Operand { number } => {
-                if !expect_operand {
-                    return Some("two values without an operator between them");
-                }
-                if after_div && !number {
-                    return Some("you can only divide by a fixed number");
-                }
-                after_div = false;
-                expect_operand = false;
-                unary_minus_ok = false;
-            }
-            ExprTok::Mul | ExprTok::Div => {
-                if expect_operand {
-                    return Some("operator without a value before it");
-                }
-                if *tok == ExprTok::Div {
-                    after_div = true;
-                } else {
-                    mults += 1;
-                    if mults > 1 {
-                        return Some("only one multiplication is allowed (A * B + C)");
-                    }
-                }
-                expect_operand = true;
-                unary_minus_ok = true;
-            }
-            ExprTok::Plus | ExprTok::Minus => {
-                if expect_operand {
-                    // unary minus is the documented shorthand for -1 * x
-                    if *tok == ExprTok::Minus && unary_minus_ok {
-                        continue;
-                    }
-                    return Some("operator without a value before it");
-                }
-                offsets += 1;
-                if offsets > 1 {
-                    return Some("only one offset (+ / -) is allowed (A * B + C)");
-                }
-                expect_operand = true;
-                unary_minus_ok = true;
-            }
-            ExprTok::OpenBracket | ExprTok::CloseBracket => {
-                return Some("brackets are not allowed (DROID reads A * B + C only)");
-            }
+    calculation_grammar_problem(&toks)
+}
+
+/// The grammar messages, verbatim: the validation modal and the ten-check
+/// matrix read them.
+const BRACKETS_ONLY: &str = "brackets are not allowed (DROID reads A * B + C only)";
+const TWO_VALUES_WITHOUT_OPERATOR: &str = "two values without an operator between them";
+const DIVIDE_BY_FIXED_NUMBER_ONLY: &str = "you can only divide by a fixed number";
+const OPERATOR_WITHOUT_VALUE: &str = "operator without a value before it";
+const ONLY_ONE_MULTIPLICATION: &str = "only one multiplication is allowed (A * B + C)";
+const ONLY_ONE_OFFSET: &str = "only one offset (+ / -) is allowed (A * B + C)";
+const ENDS_WITH_OPERATOR: &str = "the value ends with an operator";
+
+/// Does this token take part in a calculation? A value with none of them is
+/// not this check's business.
+fn is_calculation_token(tok: ExprTok) -> bool {
+    matches!(
+        tok,
+        ExprTok::Mul
+            | ExprTok::Div
+            | ExprTok::Plus
+            | ExprTok::Minus
+            | ExprTok::OpenBracket
+            | ExprTok::CloseBracket
+    )
+}
+
+/// A bracket, which the grammar never allows.
+fn is_bracket_token(tok: ExprTok) -> bool {
+    matches!(tok, ExprTok::OpenBracket | ExprTok::CloseBracket)
+}
+
+/// Walk the tokens enforcing `A * B + C`, naming the first violation.
+fn calculation_grammar_problem(toks: &[ExprTok]) -> Option<&'static str> {
+    let mut grammar = CalculationGrammar::default();
+    let problem = toks.iter().find_map(|tok| grammar.accept(*tok));
+    if problem.is_some() {
+        return problem;
+    }
+    grammar.ends_with_operator()
+}
+
+/// The state `A * B + C` allows: how many multiplications and offsets have
+/// been seen, whether the next token must be an operand, and whether a
+/// divisor and a unary minus are still legal there.
+struct CalculationGrammar {
+    mults: usize,
+    offsets: usize,
+    expect_operand: bool,
+    after_div: bool,
+    unary_minus_ok: bool,
+}
+
+impl Default for CalculationGrammar {
+    fn default() -> Self {
+        Self {
+            mults: 0,
+            offsets: 0,
+            expect_operand: true,
+            after_div: false,
+            unary_minus_ok: true,
         }
     }
-    if expect_operand {
-        return Some("the value ends with an operator");
+}
+
+impl CalculationGrammar {
+    /// Accept one token, or name the violation it causes.
+    fn accept(&mut self, tok: ExprTok) -> Option<&'static str> {
+        match tok {
+            ExprTok::Operand { number } => self.accept_operand(number),
+            ExprTok::Mul | ExprTok::Div => self.accept_factor(tok),
+            ExprTok::Plus | ExprTok::Minus => self.accept_offset(tok),
+            ExprTok::OpenBracket | ExprTok::CloseBracket => Some(BRACKETS_ONLY),
+        }
     }
-    None
+
+    /// A value: it must be expected, and it must be a number right after a
+    /// division.
+    fn accept_operand(&mut self, number: bool) -> Option<&'static str> {
+        if !self.expect_operand {
+            return Some(TWO_VALUES_WITHOUT_OPERATOR);
+        }
+        if self.after_div && !number {
+            return Some(DIVIDE_BY_FIXED_NUMBER_ONLY);
+        }
+        self.after_div = false;
+        self.expect_operand = false;
+        self.unary_minus_ok = false;
+        None
+    }
+
+    /// `*` or `/`: it needs a value before it, and only one multiplication is
+    /// allowed.
+    fn accept_factor(&mut self, tok: ExprTok) -> Option<&'static str> {
+        if self.expect_operand {
+            return Some(OPERATOR_WITHOUT_VALUE);
+        }
+        if tok == ExprTok::Div {
+            self.after_div = true;
+        } else {
+            self.mults += 1;
+            if self.mults > 1 {
+                return Some(ONLY_ONE_MULTIPLICATION);
+            }
+        }
+        self.expect_operand = true;
+        self.unary_minus_ok = true;
+        None
+    }
+
+    /// `+` or `-`: it needs a value before it, only one offset is allowed, and
+    /// a leading `-` is the documented shorthand for `-1 * x`.
+    fn accept_offset(&mut self, tok: ExprTok) -> Option<&'static str> {
+        if self.expect_operand {
+            if tok == ExprTok::Minus && self.unary_minus_ok {
+                return None;
+            }
+            return Some(OPERATOR_WITHOUT_VALUE);
+        }
+        self.offsets += 1;
+        if self.offsets > 1 {
+            return Some(ONLY_ONE_OFFSET);
+        }
+        self.expect_operand = true;
+        self.unary_minus_ok = true;
+        None
+    }
+
+    /// A trailing operator leaves the value incomplete.
+    fn ends_with_operator(&self) -> Option<&'static str> {
+        self.expect_operand.then_some(ENDS_WITH_OPERATOR)
+    }
 }
 
 fn extract_jack_tokens(value: &str) -> Vec<String> {
