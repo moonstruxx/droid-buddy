@@ -2437,60 +2437,96 @@ pub(crate) fn cell_visuals(
 ) -> (String, String, Color) {
     let t = crate::theme::active();
     match comp.kind {
-        ComponentKind::Button => {
-            let on = matches!(comp.state, ComponentState::On);
-            (
-                if on { "\u{25CF}" } else { "\u{25CB}" }.into(),
-                if on { "ON" } else { "OFF" }.into(),
-                if is_shift_active {
-                    match comp.shift_group {
-                        Some(ShiftGroup::Group1) => t.shift1,
-                        Some(ShiftGroup::Group2) => t.shift2,
-                        Some(ShiftGroup::Group3) => t.shift3,
-                        Some(ShiftGroup::Group4) => t.shift4,
-                        None => t.button,
-                    }
-                } else {
-                    t.button
-                },
-            )
-        }
+        ComponentKind::Button => button_visuals(comp, is_shift_active, t),
         ComponentKind::CvIn => ("\u{25C0}".into(), "CV IN".into(), t.cv_in),
         ComponentKind::CvOut => ("\u{25B6}".into(), "CV OUT".into(), t.cv_out),
-        ComponentKind::Knob | ComponentKind::Encoder if fader => {
-            let val = match &comp.state {
-                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
-                _ => "---".into(),
-            };
-            ("\u{25AE}".into(), val, t.fader_led_bar)
-        }
-        ComponentKind::Knob | ComponentKind::Encoder => {
-            let val = match &comp.state {
-                ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
-                _ => "---".into(),
-            };
-            ("\u{25C9}".into(), val, t.knob)
-        }
-        ComponentKind::Switch => {
-            let round = switch_kind == Some("rotary");
-            let (glyph, state) = match &comp.state {
-                ComponentState::Value(v) => ("\u{25C9}", format!("{:.0}%", v * 100.0)),
-                ComponentState::On if round => ("\u{25C9}", "ON".into()),
-                ComponentState::On => ("\u{25A3}", "ON".into()),
-                _ if round => ("\u{25CB}", "OFF".into()),
-                _ => ("\u{25A1}", "OFF".into()),
-            };
-            (glyph.into(), state, t.switch)
-        }
-        ComponentKind::Led => {
-            let on = matches!(comp.state, ComponentState::On);
-            (
-                if on { "\u{25CF}" } else { "\u{25CB}" }.into(),
-                if on { "ON" } else { "OFF" }.into(),
-                t.led,
-            )
-        }
+        ComponentKind::Knob | ComponentKind::Encoder => rotary_visuals(comp, fader, t),
+        ComponentKind::Switch => switch_visuals(comp, switch_kind, t),
+        ComponentKind::Led => led_visuals(comp, t),
     }
+}
+
+/// The shared filled/hollow disc pair and its ON/OFF text, for the kinds whose
+/// state is a plain on/off (buttons and LEDs).
+fn on_off_visuals(comp: &HwComponent) -> (String, String) {
+    let on = matches!(comp.state, ComponentState::On);
+    (
+        if on { "\u{25CF}" } else { "\u{25CB}" }.into(),
+        if on { "ON" } else { "OFF" }.into(),
+    )
+}
+
+/// A button cell: the on/off disc and the button token, or the active shift
+/// group's token while that group is held.
+fn button_visuals(
+    comp: &HwComponent,
+    is_shift_active: bool,
+    t: &crate::theme::Theme,
+) -> (String, String, Color) {
+    let (glyph, state) = on_off_visuals(comp);
+    (glyph, state, button_color(comp, is_shift_active, t))
+}
+
+/// A button's base color: the shift-group token while the group is active,
+/// else the plain button token.
+fn button_color(comp: &HwComponent, is_shift_active: bool, t: &crate::theme::Theme) -> Color {
+    if !is_shift_active {
+        return t.button;
+    }
+    match comp.shift_group {
+        Some(ShiftGroup::Group1) => t.shift1,
+        Some(ShiftGroup::Group2) => t.shift2,
+        Some(ShiftGroup::Group3) => t.shift3,
+        Some(ShiftGroup::Group4) => t.shift4,
+        None => t.button,
+    }
+}
+
+/// A knob/encoder cell: the amber LED strip when the element is fader-marked,
+/// else the disc, with the state as a percentage.
+fn rotary_visuals(
+    comp: &HwComponent,
+    fader: bool,
+    t: &crate::theme::Theme,
+) -> (String, String, Color) {
+    let val = percent_text(&comp.state);
+    if fader {
+        ("\u{25AE}".into(), val, t.fader_led_bar)
+    } else {
+        ("\u{25C9}".into(), val, t.knob)
+    }
+}
+
+/// A state's value as a whole-percent label, `---` when it carries no value.
+fn percent_text(state: &ComponentState) -> String {
+    match state {
+        ComponentState::Value(v) => format!("{:.0}%", v * 100.0),
+        _ => "---".into(),
+    }
+}
+
+/// A switch cell: rotary-annotated switches use round glyphs, every other
+/// switch the square pair; the state text is the same either way.
+fn switch_visuals(
+    comp: &HwComponent,
+    switch_kind: Option<&str>,
+    t: &crate::theme::Theme,
+) -> (String, String, Color) {
+    let round = switch_kind == Some("rotary");
+    let (glyph, state) = match &comp.state {
+        ComponentState::Value(_) => ("\u{25C9}", percent_text(&comp.state)),
+        ComponentState::On if round => ("\u{25C9}", "ON".into()),
+        ComponentState::On => ("\u{25A3}", "ON".into()),
+        _ if round => ("\u{25CB}", "OFF".into()),
+        _ => ("\u{25A1}", "OFF".into()),
+    };
+    (glyph.into(), state, t.switch)
+}
+
+/// An LED cell: the on/off disc in the LED token.
+fn led_visuals(comp: &HwComponent, t: &crate::theme::Theme) -> (String, String, Color) {
+    let (glyph, state) = on_off_visuals(comp);
+    (glyph, state, t.led)
 }
 
 /// The unaddressed cells `rack_geometry` emits for `module`, in the order
