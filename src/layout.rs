@@ -1371,15 +1371,50 @@ pub fn node_world_sizes(graph: &Graph) -> Vec<(f32, f32)> {
 /// callers exclude nodes that must not join the sweeps (outer-column nodes,
 /// design D4) without building a subgraph. No RNG and a fixed sweep count
 /// make the result deterministic: same inputs → same layers.
+///
+/// The grouping, the adjacent-layer choice and the barycenter accumulation
+/// each live in their own helper; this function is the sweep schedule.
 fn crossing_minimized_layers(
     n: usize,
     edges: &[(usize, usize)],
     depth: &[usize],
     active: &[bool],
 ) -> Vec<Vec<usize>> {
-    // Group node indices by depth into layers, preserving file order within
-    // each layer. Depth can exceed `n` on cyclic graphs, so layers live in a
-    // map keyed by depth, not a fixed-size vec.
+    let mut layers = group_layers_by_depth(n, depth, active);
+
+    // Current within-layer order per node (0-based).
+    let mut order = layer_orders(&layers, n);
+
+    for sweep in 0..CROSSING_SWEEPS {
+        let left_to_right = sweep % 2 == 0;
+        let layer_indices: Vec<usize> = if left_to_right {
+            (0..layers.len()).collect()
+        } else {
+            (0..layers.len()).rev().collect()
+        };
+        for &li in &layer_indices {
+            // A layer at the edge the pass comes from has nothing to order
+            // against on this sweep.
+            let Some(adj_li) = adjacent_layer_index(li, layers.len(), left_to_right) else {
+                continue;
+            };
+            let (sum, count) = barycenter_sums(n, edges, &layers[li], &layers[adj_li], &order);
+            let sorted = barycenter_sorted(&layers[li], &sum, &count, &order);
+
+            for (pos, &i) in sorted.iter().enumerate() {
+                order[i] = pos;
+            }
+            layers[li] = sorted;
+        }
+    }
+
+    layers
+}
+
+/// Group the `active` node indices into layers by `depth`, preserving file
+/// order within each layer. Depth can exceed `n` on cyclic graphs, so layers
+/// live in a map keyed by depth, not a fixed-size vec.
+fn group_layers_by_depth(n: usize, depth: &[usize], active: &[bool]) -> Vec<Vec<usize>> {
     let mut layers: Vec<Vec<usize>> = Vec::new();
     let mut layer_of_depth: HashMap<usize, usize> = HashMap::new();
     for (i, &d) in depth.iter().enumerate().take(n) {
@@ -1392,86 +1427,87 @@ fn crossing_minimized_layers(
         });
         layers[li].push(i);
     }
+    layers
+}
 
-    // Current within-layer order per node (0-based).
+/// Initial within-layer order per node (0-based), read off the layer lists.
+fn layer_orders(layers: &[Vec<usize>], n: usize) -> Vec<usize> {
     let mut order = vec![0usize; n];
-    for layer in &layers {
+    for layer in layers {
         for (pos, &i) in layer.iter().enumerate() {
             order[i] = pos;
         }
     }
+    order
+}
 
-    for sweep in 0..CROSSING_SWEEPS {
-        let left_to_right = sweep % 2 == 0;
-        let layer_indices: Vec<usize> = if left_to_right {
-            (0..layers.len()).collect()
-        } else {
-            (0..layers.len()).rev().collect()
-        };
-        for &li in &layer_indices {
-            let adj_li = if left_to_right {
-                if li == 0 {
-                    continue;
-                }
-                li - 1
-            } else {
-                if li + 1 >= layers.len() {
-                    continue;
-                }
-                li + 1
-            };
-            let layer = &layers[li];
-            let adj_layer = &layers[adj_li];
+/// The layer one pass compares `li` against: the previous layer when sweeping
+/// left to right, the next one when sweeping back. `None` at the edge the pass
+/// starts from.
+fn adjacent_layer_index(li: usize, layer_count: usize, left_to_right: bool) -> Option<usize> {
+    if left_to_right {
+        li.checked_sub(1)
+    } else if li + 1 < layer_count {
+        Some(li + 1)
+    } else {
+        None
+    }
+}
 
-            // Membership masks for O(1) edge classification.
-            let mut in_layer = vec![false; n];
-            for &i in layer {
-                in_layer[i] = true;
-            }
-            let mut in_adj = vec![false; n];
-            for &i in adj_layer {
-                in_adj[i] = true;
-            }
-
-            // Barycenter = mean of neighbor orders in the adjacent layer.
-            let mut sum = vec![0.0f32; n];
-            let mut count = vec![0usize; n];
-            for &(u, v) in edges {
-                if in_layer[u] && in_adj[v] {
-                    sum[u] += order[v] as f32;
-                    count[u] += 1;
-                } else if in_layer[v] && in_adj[u] {
-                    sum[v] += order[u] as f32;
-                    count[v] += 1;
-                }
-            }
-
-            // Stable sort by barycenter; neighbor-less nodes keep their
-            // current order (barycenter = current order). `sort_by` is stable,
-            // so equal barycenters preserve the current relative order.
-            let mut sorted = layer.clone();
-            sorted.sort_by(|&a, &b| {
-                let ba = if count[a] > 0 {
-                    sum[a] / count[a] as f32
-                } else {
-                    order[a] as f32
-                };
-                let bb = if count[b] > 0 {
-                    sum[b] / count[b] as f32
-                } else {
-                    order[b] as f32
-                };
-                ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            for (pos, &i) in sorted.iter().enumerate() {
-                order[i] = pos;
-            }
-            layers[li] = sorted;
-        }
+/// Barycenter inputs for one layer against its adjacent layer: the per-node
+/// sum of neighbor orders and the per-node neighbor count. Membership masks
+/// give O(1) edge classification.
+fn barycenter_sums(
+    n: usize,
+    edges: &[(usize, usize)],
+    layer: &[usize],
+    adj_layer: &[usize],
+    order: &[usize],
+) -> (Vec<f32>, Vec<usize>) {
+    let mut in_layer = vec![false; n];
+    for &i in layer {
+        in_layer[i] = true;
+    }
+    let mut in_adj = vec![false; n];
+    for &i in adj_layer {
+        in_adj[i] = true;
     }
 
-    layers
+    let mut sum = vec![0.0f32; n];
+    let mut count = vec![0usize; n];
+    for &(u, v) in edges {
+        if in_layer[u] && in_adj[v] {
+            sum[u] += order[v] as f32;
+            count[u] += 1;
+        } else if in_layer[v] && in_adj[u] {
+            sum[v] += order[u] as f32;
+            count[v] += 1;
+        }
+    }
+    (sum, count)
+}
+
+/// Stable sort of one layer by barycenter. Neighbor-less nodes keep their
+/// current order (barycenter = current order), and `sort_by` being stable
+/// means equal barycenters preserve the current relative order.
+fn barycenter_sorted(layer: &[usize], sum: &[f32], count: &[usize], order: &[usize]) -> Vec<usize> {
+    let mut sorted = layer.to_vec();
+    sorted.sort_by(|&a, &b| {
+        let ba = barycenter_of(a, sum, count, order);
+        let bb = barycenter_of(b, sum, count, order);
+        ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sorted
+}
+
+/// One node's barycenter: the mean of its neighbor orders in the adjacent
+/// layer, or its current order when it has no neighbor there.
+fn barycenter_of(node: usize, sum: &[f32], count: &[usize], order: &[usize]) -> f32 {
+    if count[node] > 0 {
+        sum[node] / count[node] as f32
+    } else {
+        order[node] as f32
+    }
 }
 
 /// Deterministic within-layer ordering that reduces edge crossings between

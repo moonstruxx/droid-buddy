@@ -38,7 +38,6 @@ impl KeyEvent {
         Self { code, modifiers }
     }
 
-    /// Convert a winit key event into the neutral shape the handler binds.
     /// Convert the parts of a winit keyboard event into the neutral shape the
     /// handler binds. Produced characters become `Char` (shifted glyphs arrive
     /// as their symbol, e.g. `?` for Shift+/), named keys map to the matching
@@ -58,47 +57,79 @@ impl KeyEvent {
         if state != winit::event::ElementState::Pressed {
             return None;
         }
-        let code = match logical_key {
-            winit::keyboard::Key::Character(ch) => {
-                let mut chars = ch.chars();
-                let c = chars.next()?;
-                if chars.next().is_some() {
-                    return None;
-                }
-                KeyCode::Char(c)
-            }
-            winit::keyboard::Key::Named(named) => match named {
-                NamedKey::Enter => KeyCode::Enter,
-                NamedKey::Escape => KeyCode::Esc,
-                NamedKey::Backspace => KeyCode::Backspace,
-                NamedKey::Tab if winit_mods.shift_key() => KeyCode::BackTab,
-                NamedKey::Tab => KeyCode::Tab,
-                NamedKey::Space => KeyCode::Char(' '),
-                NamedKey::ArrowUp => KeyCode::Up,
-                NamedKey::ArrowDown => KeyCode::Down,
-                NamedKey::ArrowLeft => KeyCode::Left,
-                NamedKey::ArrowRight => KeyCode::Right,
-                NamedKey::Home => KeyCode::Home,
-                NamedKey::End => KeyCode::End,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        let mut modifiers = Modifiers::NONE;
-        if winit_mods.shift_key() {
-            modifiers.shift = true;
-        }
-        if winit_mods.control_key() {
-            modifiers.ctrl = true;
-            modifiers.command = true;
-        }
-        if winit_mods.alt_key() {
-            modifiers.alt = true;
-        }
-        if winit_mods.super_key() {
-            modifiers.mac_cmd = true;
-        }
-        Some(Self::new(code, modifiers))
+        let code = winit_key_code(logical_key, winit_mods)?;
+        Some(Self::new(code, winit_modifiers(winit_mods)))
+    }
+}
+
+/// Neutral key code for a winit logical key, or `None` when the key is not a
+/// binding.
+fn winit_key_code(
+    logical_key: &winit::keyboard::Key,
+    winit_mods: winit::keyboard::ModifiersState,
+) -> Option<KeyCode> {
+    match logical_key {
+        winit::keyboard::Key::Character(ch) => single_char(ch.as_str()).map(KeyCode::Char),
+        winit::keyboard::Key::Named(named) => named_key_code(*named, winit_mods),
+        _ => None,
+    }
+}
+
+/// The one character a `Key::Character` produces; multi-character composition
+/// (IME, dead keys) is not a binding.
+fn single_char(ch: &str) -> Option<char> {
+    let mut chars = ch.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(c)
+}
+
+/// Named keys, split by role so each match stays small; unbound names map to
+/// `None`.
+fn named_key_code(named: NamedKey, winit_mods: winit::keyboard::ModifiersState) -> Option<KeyCode> {
+    named_editing_key(named, winit_mods).or_else(|| named_navigation_key(named))
+}
+
+/// Editing keys. Tab depends on Shift: Shift+Tab is the reverse focus step.
+fn named_editing_key(
+    named: NamedKey,
+    winit_mods: winit::keyboard::ModifiersState,
+) -> Option<KeyCode> {
+    Some(match named {
+        NamedKey::Enter => KeyCode::Enter,
+        NamedKey::Escape => KeyCode::Esc,
+        NamedKey::Backspace => KeyCode::Backspace,
+        NamedKey::Tab if winit_mods.shift_key() => KeyCode::BackTab,
+        NamedKey::Tab => KeyCode::Tab,
+        NamedKey::Space => KeyCode::Char(' '),
+        _ => return None,
+    })
+}
+
+/// Arrow and boundary keys.
+fn named_navigation_key(named: NamedKey) -> Option<KeyCode> {
+    Some(match named {
+        NamedKey::ArrowUp => KeyCode::Up,
+        NamedKey::ArrowDown => KeyCode::Down,
+        NamedKey::ArrowLeft => KeyCode::Left,
+        NamedKey::ArrowRight => KeyCode::Right,
+        NamedKey::Home => KeyCode::Home,
+        NamedKey::End => KeyCode::End,
+        _ => return None,
+    })
+}
+
+/// Modifier flags for the neutral event: Control maps to ctrl+command (the
+/// handler treats the pair as one) and Super to `mac_cmd` only.
+fn winit_modifiers(winit_mods: winit::keyboard::ModifiersState) -> Modifiers {
+    Modifiers {
+        alt: winit_mods.alt_key(),
+        ctrl: winit_mods.control_key(),
+        shift: winit_mods.shift_key(),
+        mac_cmd: winit_mods.super_key(),
+        command: winit_mods.control_key(),
     }
 }
 
@@ -3600,131 +3631,195 @@ fn navigate(app: &mut App, delta: i32) {
     }
 }
 
+/// One step of the picker's key-group chain: `true` when the group recognised
+/// and consumed the key, so the following groups are not tried.
+type PickerKeyHandler = fn(&KeyEvent, &mut App) -> bool;
+
+/// Keys while the file picker is open. The picker owns every key in that
+/// state, so this always answers `false` (never a quit): the chain below only
+/// decides which group acts, and an unmatched key is a no-op.
+///
+/// Group order is binding precedence, not preference: `q` and the digits are
+/// bound commands, so they must be claimed before the generic printable arm
+/// that would otherwise auto-latch the filter on them.
 fn handle_picker_event(key: &KeyEvent, app: &mut App) -> bool {
-    match key.code {
-        KeyCode::Esc => {
-            app.reset_picker_filter();
-            app.showing_picker = false;
-            app.diff_picker_active = false;
-            false
+    let chain: [PickerKeyHandler; 7] = [
+        handle_picker_cancel_key,
+        handle_picker_navigation_key,
+        handle_picker_favourite_key,
+        handle_picker_digit_key,
+        handle_picker_filter_edit_key,
+        handle_picker_type_key,
+        handle_picker_confirm_key,
+    ];
+    for step in chain {
+        if step(key, app) {
+            break;
         }
+    }
+    false
+}
+
+/// Esc: close the picker and drop the latching filter. Both picker modes share
+/// the flag pair, so both are cleared.
+fn handle_picker_cancel_key(key: &KeyEvent, app: &mut App) -> bool {
+    if key.code != KeyCode::Esc {
+        return false;
+    }
+    app.reset_picker_filter();
+    app.showing_picker = false;
+    app.diff_picker_active = false;
+    true
+}
+
+/// Up/`k` and Down/`j`: move the highlight one row, clamped at both ends.
+fn handle_picker_navigation_key(key: &KeyEvent, app: &mut App) -> bool {
+    match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             if app.picker_index > 0 {
                 app.picker_index -= 1;
             }
-            false
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if app.picker_index < app.picker_entries.len().saturating_sub(1) {
                 app.picker_index += 1;
             }
-            false
         }
-        KeyCode::Char(c @ ('f' | 'F')) => {
-            // Precedence (file-picker spec): while the filter is latched, `f`
-            // appends like any printable character; the favourite toggle only
-            // applies while the filter is off. `Ctrl+f` is the latch toggle in
-            // both states, and Alt-modified keys do nothing.
-            if key.modifiers.ctrl {
-                // Ctrl+F toggles the latching filter (spec scenario: Toggle
-                // filter with Ctrl+f). Second press while active turns it off
-                // and clears the string.
-                if app.picker_filter_active {
-                    app.picker_filter_active = false;
-                    app.picker_filter.clear();
-                    app.status_message = String::from("Filter: off");
-                    app.refresh_picker_entries();
-                } else {
-                    app.picker_filter_active = true;
-                    app.picker_filter.clear();
-                    app.status_message = String::from("Filter: on (type to filter)");
-                }
-                return false;
-            }
-            if key.modifiers.alt {
-                return false;
-            }
-            if app.picker_filter_active {
-                append_picker_filter_char(app, c);
-                return false;
-            }
-            if key.modifiers.is_none() {
-                toggle_picker_favourite(app);
-            }
-            false
+        _ => return false,
+    }
+    true
+}
+
+/// `f`/`F` (file-picker spec precedence): while the filter is latched, `f`
+/// appends like any printable character; the favourite toggle only applies
+/// while the filter is off. `Ctrl+f` is the latch toggle in both states, and
+/// Alt-modified keys do nothing.
+fn handle_picker_favourite_key(key: &KeyEvent, app: &mut App) -> bool {
+    let KeyCode::Char(c @ ('f' | 'F')) = key.code else {
+        return false;
+    };
+    if key.modifiers.ctrl {
+        toggle_picker_filter_latch(app);
+    } else if !key.modifiers.alt {
+        if app.picker_filter_active {
+            append_picker_filter_char(app, c);
+        } else if key.modifiers.is_none() {
+            toggle_picker_favourite(app);
         }
-        KeyCode::Char(d @ '0'..='9') => {
-            // Digit keys fast-select a pinned favourite slot (0-based in the
-            // sorted favourites list). Directories navigate in, files open like
-            // Enter; out-of-range digits are silent.
-            if key.modifiers.ctrl || key.modifiers.alt {
-                return false;
-            }
-            let slot = d.to_digit(10).unwrap_or(0) as usize;
-            let favs = app.picker_entries_with_favourites();
-            if let Some(fav) = favs.get(slot) {
-                open_picker_entry(app, fav.clone());
-            }
-            false
+    }
+    true
+}
+
+/// Digits fast-select a pinned favourite slot (0-based in the sorted
+/// favourites list). Directories navigate in, files open like Enter;
+/// out-of-range digits are silent, and Ctrl/Alt-modified digits do nothing.
+fn handle_picker_digit_key(key: &KeyEvent, app: &mut App) -> bool {
+    let KeyCode::Char(d @ '0'..='9') = key.code else {
+        return false;
+    };
+    if !key.modifiers.ctrl && !key.modifiers.alt {
+        let slot = d.to_digit(10).unwrap_or(0) as usize;
+        if let Some(fav) = app.picker_entries_with_favourites().get(slot) {
+            open_picker_entry(app, fav.clone());
         }
+    }
+    true
+}
+
+/// `q` and Backspace: `q` ends the latching filter without quitting, and with
+/// the filter off it is a bound no-op (explicitly not an auto-latch);
+/// Backspace edits the filter while it is latched.
+fn handle_picker_filter_edit_key(key: &KeyEvent, app: &mut App) -> bool {
+    match key.code {
+        // The picker owns keys while open, so this arm is the only `q` route
+        // and must not fall through to the quit path.
         KeyCode::Char('q') if app.picker_filter_active => {
-            // q ends the latching filter without quitting: the picker owns
-            // keys while open, so this arm is the only q route and must not
-            // fall through to the quit path.
             app.reset_picker_filter();
             app.refresh_picker_entries();
-            false
+            true
         }
-        // `q` with the filter off is a no-op, and explicitly not an auto-latch:
-        // it is one of the picker's bound commands.
-        KeyCode::Char('q') => false,
+        KeyCode::Char('q') => true,
         KeyCode::Backspace if app.picker_filter_active => {
             app.picker_filter.pop();
             app.refresh_picker_entries();
-            false
-        }
-        KeyCode::Char(c) if app.picker_filter_active => {
-            // Digits never land here: 0-9 keep routing to the favourite-slot
-            // fast-select above while the filter is latched. Ctrl/Alt-modified
-            // characters are never appended.
-            if !key.modifiers.ctrl && !key.modifiers.alt {
-                append_picker_filter_char(app, c);
-            }
-            false
-        }
-        KeyCode::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => {
-            // Auto-latch on typing: a printable character that is not one of
-            // the bound commands above (`j`/`k`/`q`/`f`/`F`, `0`-`9`,
-            // Backspace, Enter, Esc, arrows) starts filtering. The latch opens
-            // with an empty string so the typed character is the filter's
-            // first, matching the spec's "every non-digit char appends".
-            app.picker_filter_active = true;
-            app.picker_filter.clear();
-            app.status_message = String::from("Filter: on (type to filter)");
-            append_picker_filter_char(app, c);
-            false
-        }
-        KeyCode::Enter => {
-            if let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() {
-                if !is_entry_selectable(&selected_path) {
-                    return false;
-                }
-                // Parent ".." sentinel: navigate up to the picker dir's parent.
-                // Handled before the metadata `is_dir` branch because a bare
-                // ".." path resolves against the process cwd, not picker_dir.
-                if is_picker_parent_entry(&selected_path) {
-                    if let Some(parent) = app.picker_dir.parent().map(std::path::Path::to_path_buf)
-                    {
-                        app.enter_picker_dir(parent);
-                    }
-                    return false;
-                }
-                open_picker_entry(app, selected_path);
-            }
-            false
+            true
         }
         _ => false,
     }
+}
+
+/// Any other printable character: append it to the latched filter, or
+/// auto-latch with it as the filter's first character. Ctrl/Alt chords are
+/// never typed into the filter.
+fn handle_picker_type_key(key: &KeyEvent, app: &mut App) -> bool {
+    let KeyCode::Char(c) = key.code else {
+        return false;
+    };
+    if key.modifiers.ctrl || key.modifiers.alt {
+        return false;
+    }
+    if !app.picker_filter_active {
+        latch_picker_filter(app);
+    }
+    append_picker_filter_char(app, c);
+    true
+}
+
+/// Enter: open the highlighted entry (directories navigate in, `.ini` files
+/// load and close the picker).
+fn handle_picker_confirm_key(key: &KeyEvent, app: &mut App) -> bool {
+    if key.code != KeyCode::Enter {
+        return false;
+    }
+    confirm_picker_selection(app);
+    true
+}
+
+/// Open the highlighted picker entry, treating the parent ".." sentinel as
+/// "step up one directory".
+fn confirm_picker_selection(app: &mut App) {
+    let Some(selected_path) = app.picker_entries.get(app.picker_index).cloned() else {
+        return;
+    };
+    if !is_entry_selectable(&selected_path) {
+        return;
+    }
+    // Parent ".." sentinel: navigate up to the picker dir's parent. Handled
+    // before the metadata `is_dir` branch because a bare ".." path resolves
+    // against the process cwd, not picker_dir.
+    if is_picker_parent_entry(&selected_path) {
+        if let Some(parent) = app.picker_dir.parent().map(std::path::Path::to_path_buf) {
+            app.enter_picker_dir(parent);
+        }
+        return;
+    }
+    open_picker_entry(app, selected_path);
+}
+
+/// `Ctrl+f`: toggle the latching filter (spec scenario: Toggle filter with
+/// Ctrl+f). A second press while active turns it off and clears the string.
+fn toggle_picker_filter_latch(app: &mut App) {
+    if app.picker_filter_active {
+        unlatch_picker_filter(app);
+    } else {
+        latch_picker_filter(app);
+    }
+}
+
+/// Latch the filter on with an empty string and announce it; the character
+/// that caused the latch becomes the filter's first.
+fn latch_picker_filter(app: &mut App) {
+    app.picker_filter_active = true;
+    app.picker_filter.clear();
+    app.status_message = String::from("Filter: on (type to filter)");
+}
+
+/// Latch the filter off, clear the string and restore the full listing.
+fn unlatch_picker_filter(app: &mut App) {
+    app.picker_filter_active = false;
+    app.picker_filter.clear();
+    app.status_message = String::from("Filter: off");
+    app.refresh_picker_entries();
 }
 
 /// Append one character to the latched picker filter and re-filter the
