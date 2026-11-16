@@ -1554,14 +1554,7 @@ pub(crate) fn run_iterations_with_forces(
     let index = node_index(graph);
     let edges = edge_pairs(graph, &index);
     let pinned_mask: Vec<bool> = (0..n).map(|i| pinned.contains(&i)).collect();
-    // A cable bundle between the same two circuits is one connection: count
-    // parallel edges so the spring force is applied once per pair, not once
-    // per cable (design gv5). Without this, a button feeding 11 inputs of one
-    // circuit creates an 11×-stiff oscillator that never settles.
-    let mut edge_multiplicity: HashMap<(usize, usize), usize> = HashMap::new();
-    for &(u, v) in &edges {
-        *edge_multiplicity.entry((u, v)).or_insert(0) += 1;
-    }
+    let edge_multiplicity = edge_multiplicities(&edges);
     // Cluster membership for cohesion / section holes; `None` = node in no banner
     // group.
     let member_of: Vec<Option<usize>> = (0..n)
@@ -1605,183 +1598,70 @@ pub(crate) fn run_iterations_with_forces(
         // Rebuild the uniform repulsion grid from current positions (D9). The
         // cell is graph-adaptive in both arrangements (see `cell_size` above) so
         // the 3x3 neighbour scan covers every pair the size-aware force reaches.
-        let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-        for (i, &pos) in positions.iter().enumerate().take(n) {
-            grid.entry(cell_of(pos, cell_size)).or_default().push(i);
-        }
+        let field = RepulsionField {
+            grid: repulsion_grid(positions, n, cell_size),
+            extents: &extents,
+            cell_size,
+        };
 
         let mut accel = vec![(0.0f32, 0.0f32); n];
+        accumulate_springs(
+            positions,
+            &mut accel,
+            &edges,
+            &edge_multiplicity,
+            knobs.tension,
+        );
 
-        // Cable springs (both modes): bundle-normalized spring force along edges.
-        for &(u, v) in &edges {
-            let m = edge_multiplicity[&(u, v)] as f32;
-            let f = spring_force(positions[u], positions[v], knobs.tension);
-            accel[u].0 += f.0 / m;
-            accel[u].1 += f.1 / m;
-            accel[v].0 -= f.0 / m;
-            accel[v].1 -= f.1 / m;
-        }
-
-        // Repulsion and mode-specific springs.
         if mode == LayoutMode::Sections {
-            // Sections mode: slice springs + section-hole springs + size-aware repulsion
-            let node_targets = node_targets.as_ref().unwrap();
-            let hole_anchors = holes.as_ref().unwrap();
-
-            // Slice springs: pull each node toward its own seed target in both
-            // axes — `(slot_x, slot_y + rank · stack pitch)`, so a multi-node
-            // lane's stacked members keep the full pitch instead of collapsing
-            // onto one `slot_y` (task 3.9, defect A). The seed already sits on
-            // that target, and this is what keeps the wrapped row structure
-            // stable under cable pull. Deliberately weak (SLICE_K): cables can
-            // still drag a node within its lane band, and repulsion can spread
-            // the members of a multi-node lane further.
-            for (i, &pos) in positions.iter().enumerate().take(n) {
-                let (target_x, target_y) = node_targets[i];
-                accel[i].0 += (target_x - pos.0) * knobs.slice_k;
-                accel[i].1 += (target_y - pos.1) * knobs.slice_k;
-            }
-
-            // Section-hole springs: pull cluster members toward their fixed anchor
-            // (both x and y). Anchors are fixed black holes computed once at solve start.
-            // Only circuit nodes feel the section-hole spring; controllers/jacks only feel
-            // slice springs and repulsion (D2: sections are circuit groupings).
-            for (i, &pos) in positions.iter().enumerate().take(n) {
-                if let Some((anchor_x, anchor_y)) = hole_anchors[i] {
-                    if graph.nodes[i].kind == NodeKind::Circuit {
-                        accel[i].0 += (anchor_x - pos.0) * knobs.section_k;
-                        accel[i].1 += (anchor_y - pos.1) * knobs.section_k;
-                    }
-                }
-            }
-
-            // Size-aware repulsion (design D1): two bodies repel until their
-            // center distance reaches `required = 0.5 * (extent_i + extent_j)`,
-            // the separation at which their `max(width, height)` extents stop
-            // overlapping. `cell_size` was sized from the largest extent, so the
-            // 3x3 scan below sees every such pair.
-            for (i, &pos) in positions.iter().enumerate().take(n) {
-                let (cx, cy) = cell_of(pos, cell_size);
-                let extent_i = extents[i];
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
-                            continue;
-                        };
-                        for &j in neighbors {
-                            if i >= j {
-                                continue;
-                            }
-                            let required = extent_i.midpoint(extents[j]);
-                            let f = repulsion_force_size_aware(
-                                pos,
-                                positions[j],
-                                required,
-                                knobs.repulsion,
-                            );
-                            accel[i].0 += f.0;
-                            accel[i].1 += f.1;
-                            accel[j].0 -= f.0;
-                            accel[j].1 -= f.1;
-                        }
-                    }
-                }
-            }
-            // Note: cohesion is intentionally omitted in sections mode —
-            // section-hole springs provide the clustering.
+            let targets = node_targets.as_ref().unwrap();
+            accumulate_slice_springs(positions, &mut accel, targets, knobs.slice_k, n);
+            accumulate_hole_springs(
+                positions,
+                &mut accel,
+                holes.as_ref().unwrap(),
+                graph,
+                knobs.section_k,
+                n,
+            );
+            accumulate_repulsion(
+                positions,
+                &mut accel,
+                &field,
+                n,
+                knobs.repulsion,
+                repulsion_force_size_aware,
+            );
         } else {
-            // Force mode: size-aware repulsion + weak cohesion.
-            //
-            // The predicate is the same one sections mode uses — the linear
-            // penetration ramp inside `required` (design D1/D3), because a point
-            // force with a fixed cutoff cannot separate wide bodies: node
-            // extents reach ~496 while `REPULSION_RADIUS` is 120, so two wide
-            // bodies were never pushed apart at all. Beyond `required` the
-            // solver keeps the historical inverse-square falloff, so the spread
-            // between *already clear* neighbours is unchanged and long chains
-            // cannot collapse; that falloff keeps its own `REPULSION_RADIUS`
-            // cutoff, so the wider grid cell only lets the ramp see wide pairs.
-            for (i, &pos) in positions.iter().enumerate().take(n) {
-                let (cx, cy) = cell_of(pos, cell_size);
-                let extent_i = extents[i];
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        let Some(neighbors) = grid.get(&(cx + dx, cy + dy)) else {
-                            continue;
-                        };
-                        for &j in neighbors {
-                            if i >= j {
-                                continue;
-                            }
-                            let required = extent_i.midpoint(extents[j]);
-                            let f = repulsion_force_with_falloff(
-                                pos,
-                                positions[j],
-                                required,
-                                knobs.repulsion,
-                            );
-                            accel[i].0 += f.0;
-                            accel[i].1 += f.1;
-                            accel[j].0 -= f.0;
-                            accel[j].1 -= f.1;
-                        }
-                    }
-                }
-            }
-
-            // Per-cluster cohesion: pull members toward their centroid (D3).
-            if !graph.clusters.is_empty() {
-                let mut members: Vec<Vec<usize>> = vec![Vec::new(); graph.clusters.len()];
-                for (i, cluster) in member_of.iter().enumerate() {
-                    if let Some(c) = cluster {
-                        members[*c].push(i);
-                    }
-                }
-                for list in &members {
-                    if list.is_empty() {
-                        continue;
-                    }
-                    let (mut sx, mut sy) = (0.0f32, 0.0f32);
-                    for &i in list {
-                        sx += positions[i].0;
-                        sy += positions[i].1;
-                    }
-                    let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
-                    for &i in list {
-                        accel[i].0 += (cx - positions[i].0) * knobs.cohesion;
-                        accel[i].1 += (cy - positions[i].1) * knobs.cohesion;
-                    }
-                }
-            }
+            accumulate_repulsion(
+                positions,
+                &mut accel,
+                &field,
+                n,
+                knobs.repulsion,
+                repulsion_force_with_falloff,
+            );
+            accumulate_cohesion(
+                positions,
+                &mut accel,
+                &member_of,
+                graph.clusters.len(),
+                knobs.cohesion,
+            );
         }
 
-        let mut kinetic = 0.0f32;
-        for i in 0..n {
-            if pinned_mask[i] || active.is_some_and(|act| !act[i]) {
-                continue;
-            }
-            let a = clamp(accel[i], MAX_DISPLACEMENT);
-            velocity[i].0 = (velocity[i].0 + a.0) * FRICTION;
-            velocity[i].1 = (velocity[i].1 + a.1) * FRICTION;
-            positions[i].0 += velocity[i].0;
-            positions[i].1 += velocity[i].1;
-            kinetic += velocity[i].0 * velocity[i].0 + velocity[i].1 * velocity[i].1;
-        }
+        let kinetic = integrate(positions, &mut velocity, &accel, &pinned_mask, active, n);
 
         // Sections mode: a node may only fine-tune inside the space the seed
-        // reserved for it (see [`SECTIONS_TETHER`]). Applied to the position
-        // rather than to the acceleration so it bounds the whole trajectory: a
-        // runaway node can no longer drag its cable neighbours across the grid.
+        // reserved for it (see [`SECTIONS_TETHER`]).
         if mode == LayoutMode::Sections {
-            let node_targets = node_targets.as_ref().unwrap();
-            for i in 0..n {
-                if pinned_mask[i] || active.is_some_and(|act| !act[i]) {
-                    continue;
-                }
-                let (target_x, target_y) = node_targets[i];
-                positions[i].0 = target_x + clamp_axis(positions[i].0 - target_x, SECTIONS_TETHER);
-                positions[i].1 = target_y + clamp_axis(positions[i].1 - target_y, SECTIONS_TETHER);
-            }
+            apply_sections_tether(
+                positions,
+                node_targets.as_ref().unwrap(),
+                &pinned_mask,
+                active,
+                n,
+            );
         }
 
         if kinetic < ENERGY_THRESHOLD {
@@ -1790,34 +1670,258 @@ pub(crate) fn run_iterations_with_forces(
     }
 
     // Non-overlap is a post-condition of every path that produces positions
-    // (design D3), not a tuning hope: the integrator is clamped, so a strong
-    // spring can still drag one body onto another and lose the push. The pass is
-    // bounded and deterministic and never compacts — it only resolves
-    // penetration, so the relaxation still decides where circuits live.
-    //
-    // `movable` mirrors the integrator's own policy, so separation can never
-    // move a body the solve was not allowed to move: a pinned node stays exactly
-    // where it is (an anchor others are pushed away from), and an inactive node
-    // — outside a drag's neighbourhood, or an anchor in a local re-settle —
-    // stays exactly where it is too (design D4). For `solve` and `local_resettle`
-    // that is the whole policy: exact pin honoring yields to the invariant only
-    // on the column path (see [`solve_columns_pinned`]), where pins carry
-    // off-grid positions from a previous force solve or drag.
-    //
-    // Sections keeps the fixed `SEPARATION_PASSES` budget *and* the single
-    // node-index sweep order, so its output is byte-identical under the knob
-    // plumbing. Force mode converges instead ([`separate_overlaps_converging`]):
-    // cohesion piles a banner group onto one centroid, and how many sweeps that
-    // pile needs is a property of the knob tuple, not of the arrangement.
-    let movable: Vec<bool> = (0..n)
+    // (design D3), not a tuning hope.
+    finish_non_overlap(positions, &sizes, &pinned_mask, active, mode);
+    iterations
+}
+
+/// One iteration's repulsion context: the uniform grid rebuilt from the current
+/// positions, the body extents it is keyed by, and the cell size both were
+/// built for.
+struct RepulsionField<'a> {
+    grid: HashMap<(i32, i32), Vec<usize>>,
+    extents: &'a [f32],
+    cell_size: f32,
+}
+
+/// Size-aware repulsion shape: one arrangement's `(force_x, force_y)` on `a`
+/// for a pair at `required` separation, scaled by `gain`.
+type RepulsionForce = fn((f32, f32), (f32, f32), f32, f32) -> (f32, f32);
+
+/// Uniform repulsion grid for one iteration (D9): each node indexed by the cell
+/// its current position falls in.
+fn repulsion_grid(
+    positions: &[(f32, f32)],
+    n: usize,
+    cell_size: f32,
+) -> HashMap<(i32, i32), Vec<usize>> {
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, &pos) in positions.iter().enumerate().take(n) {
+        grid.entry(cell_of(pos, cell_size)).or_default().push(i);
+    }
+    grid
+}
+
+/// Parallel-edge counts per node pair. A cable bundle between the same two
+/// circuits is one connection: count parallel edges so the spring force is
+/// applied once per pair, not once per cable (design gv5). Without this, a
+/// button feeding 11 inputs of one circuit creates an 11×-stiff oscillator that
+/// never settles.
+fn edge_multiplicities(edges: &[(usize, usize)]) -> HashMap<(usize, usize), usize> {
+    let mut counts: HashMap<(usize, usize), usize> = HashMap::new();
+    for &(u, v) in edges {
+        *counts.entry((u, v)).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Cable springs (both modes): bundle-normalized spring force along edges.
+fn accumulate_springs(
+    positions: &[(f32, f32)],
+    accel: &mut [(f32, f32)],
+    edges: &[(usize, usize)],
+    edge_multiplicity: &HashMap<(usize, usize), usize>,
+    tension: f32,
+) {
+    for &(u, v) in edges {
+        let m = edge_multiplicity[&(u, v)] as f32;
+        let f = spring_force(positions[u], positions[v], tension);
+        accel[u].0 += f.0 / m;
+        accel[u].1 += f.1 / m;
+        accel[v].0 -= f.0 / m;
+        accel[v].1 -= f.1 / m;
+    }
+}
+
+/// Sections mode: pull each node toward its own seed target in both axes —
+/// `(slot_x, slot_y + rank · stack pitch)`, so a multi-node lane's stacked
+/// members keep the full pitch instead of collapsing onto one `slot_y`
+/// (task 3.9, defect A). The seed already sits on that target, and this is what
+/// keeps the wrapped row structure stable under cable pull. Deliberately weak
+/// (`SLICE_K`): cables can still drag a node within its lane band, and repulsion
+/// can spread the members of a multi-node lane further.
+fn accumulate_slice_springs(
+    positions: &[(f32, f32)],
+    accel: &mut [(f32, f32)],
+    targets: &[(f32, f32)],
+    slice_k: f32,
+    n: usize,
+) {
+    for (i, &pos) in positions.iter().enumerate().take(n) {
+        let (target_x, target_y) = targets[i];
+        accel[i].0 += (target_x - pos.0) * slice_k;
+        accel[i].1 += (target_y - pos.1) * slice_k;
+    }
+}
+
+/// Sections mode: pull cluster members toward their fixed anchor (both x and
+/// y). Anchors are fixed black holes computed once at solve start. Only circuit
+/// nodes feel the section-hole spring; controllers/jacks only feel slice
+/// springs and repulsion (D2: sections are circuit groupings).
+fn accumulate_hole_springs(
+    positions: &[(f32, f32)],
+    accel: &mut [(f32, f32)],
+    holes: &[Option<(f32, f32)>],
+    graph: &Graph,
+    section_k: f32,
+    n: usize,
+) {
+    for (i, &pos) in positions.iter().enumerate().take(n) {
+        if let Some((anchor_x, anchor_y)) = holes[i] {
+            if graph.nodes[i].kind == NodeKind::Circuit {
+                accel[i].0 += (anchor_x - pos.0) * section_k;
+                accel[i].1 += (anchor_y - pos.1) * section_k;
+            }
+        }
+    }
+}
+
+/// Size-aware repulsion (design D1/D3) over the uniform grid: two bodies repel
+/// until their center distance reaches `required = 0.5 * (extent_i + extent_j)`,
+/// the separation at which their `max(width, height)` extents stop overlapping.
+/// `cell_size` was sized from the largest extent, so the 3x3 scan sees every
+/// such pair, and each unordered pair visits once (`i < j`).
+fn accumulate_repulsion(
+    positions: &[(f32, f32)],
+    accel: &mut [(f32, f32)],
+    field: &RepulsionField<'_>,
+    n: usize,
+    gain: f32,
+    force: RepulsionForce,
+) {
+    for (i, &pos) in positions.iter().enumerate().take(n) {
+        let (cx, cy) = cell_of(pos, field.cell_size);
+        let extent_i = field.extents[i];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let Some(neighbors) = field.grid.get(&(cx + dx, cy + dy)) else {
+                    continue;
+                };
+                for &j in neighbors {
+                    if i >= j {
+                        continue;
+                    }
+                    let required = extent_i.midpoint(field.extents[j]);
+                    let f = force(pos, positions[j], required, gain);
+                    accel[i].0 += f.0;
+                    accel[i].1 += f.1;
+                    accel[j].0 -= f.0;
+                    accel[j].1 -= f.1;
+                }
+            }
+        }
+    }
+}
+
+/// Force mode: per-cluster cohesion — pull each banner group's members toward
+/// their centroid (D3).
+fn accumulate_cohesion(
+    positions: &[(f32, f32)],
+    accel: &mut [(f32, f32)],
+    member_of: &[Option<usize>],
+    cluster_count: usize,
+    cohesion: f32,
+) {
+    if cluster_count == 0 {
+        return;
+    }
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); cluster_count];
+    for (i, cluster) in member_of.iter().enumerate() {
+        if let Some(c) = cluster {
+            members[*c].push(i);
+        }
+    }
+    for list in &members {
+        if list.is_empty() {
+            continue;
+        }
+        let (mut sx, mut sy) = (0.0f32, 0.0f32);
+        for &i in list {
+            sx += positions[i].0;
+            sy += positions[i].1;
+        }
+        let (cx, cy) = (sx / list.len() as f32, sy / list.len() as f32);
+        for &i in list {
+            accel[i].0 += (cx - positions[i].0) * cohesion;
+            accel[i].1 += (cy - positions[i].1) * cohesion;
+        }
+    }
+}
+
+/// Velocity/position integration for every node the solve may move, returning
+/// the total kinetic energy it measured — the freeze signal.
+fn integrate(
+    positions: &mut [(f32, f32)],
+    velocity: &mut [(f32, f32)],
+    accel: &[(f32, f32)],
+    pinned_mask: &[bool],
+    active: Option<&[bool]>,
+    n: usize,
+) -> f32 {
+    let mut kinetic = 0.0f32;
+    for i in 0..n {
+        if pinned_mask[i] || active.is_some_and(|act| !act[i]) {
+            continue;
+        }
+        let a = clamp(accel[i], MAX_DISPLACEMENT);
+        velocity[i].0 = (velocity[i].0 + a.0) * FRICTION;
+        velocity[i].1 = (velocity[i].1 + a.1) * FRICTION;
+        positions[i].0 += velocity[i].0;
+        positions[i].1 += velocity[i].1;
+        kinetic += velocity[i].0 * velocity[i].0 + velocity[i].1 * velocity[i].1;
+    }
+    kinetic
+}
+
+/// Sections mode: a node may only fine-tune inside the space the seed reserved
+/// for it (see [`SECTIONS_TETHER`]). Applied to the position rather than to the
+/// acceleration so it bounds the whole trajectory: a runaway node can no longer
+/// drag its cable neighbours across the grid.
+fn apply_sections_tether(
+    positions: &mut [(f32, f32)],
+    targets: &[(f32, f32)],
+    pinned_mask: &[bool],
+    active: Option<&[bool]>,
+    n: usize,
+) {
+    for i in 0..n {
+        if pinned_mask[i] || active.is_some_and(|act| !act[i]) {
+            continue;
+        }
+        let (target_x, target_y) = targets[i];
+        positions[i].0 = target_x + clamp_axis(positions[i].0 - target_x, SECTIONS_TETHER);
+        positions[i].1 = target_y + clamp_axis(positions[i].1 - target_y, SECTIONS_TETHER);
+    }
+}
+
+/// The non-overlap post-condition (design D3): resolve whatever penetration the
+/// clamped integrator left, moving only bodies the solve was allowed to move.
+/// `movable` mirrors the integrator's own policy, so separation can never move a
+/// body the solve was not allowed to move: a pinned node stays exactly where it
+/// is (an anchor others are pushed away from), and an inactive node — outside a
+/// drag's neighbourhood, or an anchor in a local re-settle — stays exactly where
+/// it is too (design D4).
+///
+/// Sections keeps the fixed [`SEPARATION_PASSES`] budget *and* the single
+/// node-index sweep order, so its output is byte-identical under the knob
+/// plumbing. Force mode converges instead ([`separate_overlaps_converging`]):
+/// cohesion piles a banner group onto one centroid, and how many sweeps that
+/// pile needs is a property of the knob tuple, not of the arrangement.
+fn finish_non_overlap(
+    positions: &mut [(f32, f32)],
+    sizes: &[(f32, f32)],
+    pinned_mask: &[bool],
+    active: Option<&[bool]>,
+    mode: LayoutMode,
+) {
+    let movable: Vec<bool> = (0..pinned_mask.len())
         .map(|i| !pinned_mask[i] && active.is_none_or(|act| act[i]))
         .collect();
     if mode == LayoutMode::Sections {
-        separate_overlaps(positions, &sizes, &movable, SEPARATION_PASSES);
+        separate_overlaps(positions, sizes, &movable, SEPARATION_PASSES);
     } else {
-        separate_overlaps_converging(positions, &sizes, &movable, FORCE_SEPARATION_MAX_PASSES);
+        separate_overlaps_converging(positions, sizes, &movable, FORCE_SEPARATION_MAX_PASSES);
     }
-    iterations
 }
 
 /// Force on `a` pulling it toward `b` along the edge (Hooke's law).

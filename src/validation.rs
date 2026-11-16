@@ -98,98 +98,107 @@ fn tokenize_expr(value: &str) -> Option<Vec<ExprTok>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        let c = chars[i];
-        if c.is_whitespace() {
+        if chars[i].is_whitespace() {
             i += 1;
             continue;
         }
-        match c {
-            '*' => {
-                out.push(ExprTok::Mul);
-                i += 1;
-            }
-            '/' => {
-                out.push(ExprTok::Div);
-                i += 1;
-            }
-            '+' => {
-                out.push(ExprTok::Plus);
-                i += 1;
-            }
-            '-' => {
-                out.push(ExprTok::Minus);
-                i += 1;
-            }
-            '(' => {
-                out.push(ExprTok::OpenBracket);
-                i += 1;
-            }
-            ')' => {
-                out.push(ExprTok::CloseBracket);
-                i += 1;
-            }
-            '_' => {
-                let start = i;
-                i += 1;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                if i == start + 1 {
-                    return None;
-                }
-                out.push(ExprTok::Operand { number: false });
-            }
-            c if c.is_ascii_digit() => {
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
-                    i += 1;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-                if i < chars.len() && (chars[i] == 'V' || chars[i] == '%') {
-                    i += 1;
-                }
-                out.push(ExprTok::Operand { number: true });
-            }
-            c if c.is_ascii_uppercase() => {
-                // register: P1.1, B3.16, G1.5, O1, L1.2 …
-                let start = i;
-                i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i == start + 1 {
-                    // `on` / `off`
-                    let rest = &chars[start..];
-                    let is_on = rest.starts_with(&['o', 'n']) && rest.len() == 2;
-                    let is_off =
-                        rest.len() == 3 && rest[0] == 'o' && rest[1] == 'f' && rest[2] == 'f';
-                    if is_on || is_off {
-                        out.push(ExprTok::Operand { number: false });
-                        return Some(out);
-                    }
-                    return None;
-                }
-                if i < chars.len() && chars[i] == '.' {
-                    let dot = i;
-                    i += 1;
-                    let digits_start = i;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    if i == digits_start {
-                        i = dot;
-                    }
-                }
-                out.push(ExprTok::Operand { number: false });
-            }
-            _ => return None,
-        }
+        let (token, next) = scan_expr_token(&chars, i)?;
+        out.push(token);
+        i = next;
     }
     Some(out)
+}
+
+/// Classify the token starting at `start`, returning it with the index just
+/// past it. `None` means the input is not an expression.
+fn scan_expr_token(chars: &[char], start: usize) -> Option<(ExprTok, usize)> {
+    if let Some(operator) = operator_token(chars[start]) {
+        return Some((operator, start + 1));
+    }
+    match chars[start] {
+        '_' => scan_cable_name(chars, start),
+        c if c.is_ascii_digit() => Some(scan_number(chars, start)),
+        c if c.is_ascii_uppercase() => scan_register(chars, start),
+        _ => None,
+    }
+}
+
+/// The one-character operators and brackets of the grammar.
+fn operator_token(c: char) -> Option<ExprTok> {
+    match c {
+        '*' => Some(ExprTok::Mul),
+        '/' => Some(ExprTok::Div),
+        '+' => Some(ExprTok::Plus),
+        '-' => Some(ExprTok::Minus),
+        '(' => Some(ExprTok::OpenBracket),
+        ')' => Some(ExprTok::CloseBracket),
+        _ => None,
+    }
+}
+
+/// A `_NAME` cable reference: an operand, never a number. A lone `_` is not a
+/// token.
+fn scan_cable_name(chars: &[char], start: usize) -> Option<(ExprTok, usize)> {
+    let mut i = start + 1;
+    while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    if i == start + 1 {
+        return None;
+    }
+    Some((ExprTok::Operand { number: false }, i))
+}
+
+/// A number: an optional fraction, then an optional `V`/`%` unit suffix.
+fn scan_number(chars: &[char], start: usize) -> (ExprTok, usize) {
+    let mut i = start;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+        i += 1;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i < chars.len() && (chars[i] == 'V' || chars[i] == '%') {
+        i += 1;
+    }
+    (ExprTok::Operand { number: true }, i)
+}
+
+/// A register reference (`P1.1`, `B3.16`, `G1.5`, `O1`, `L1.2` …), or a bare
+/// `on` / `off` word, which ends the value.
+fn scan_register(chars: &[char], start: usize) -> Option<(ExprTok, usize)> {
+    let mut i = start + 1;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start + 1 {
+        return scan_on_off(chars, start);
+    }
+    // A trailing `.` without digits is not part of the register.
+    if i < chars.len() && chars[i] == '.' {
+        let dot = i;
+        i += 1;
+        let digits_start = i;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digits_start {
+            i = dot;
+        }
+    }
+    Some((ExprTok::Operand { number: false }, i))
+}
+
+/// A bare `on` / `off` word: an operand that ends the value, so it consumes
+/// the remainder.
+fn scan_on_off(chars: &[char], start: usize) -> Option<(ExprTok, usize)> {
+    let rest = &chars[start..];
+    let is_on = rest.starts_with(&['o', 'n']) && rest.len() == 2;
+    let is_off = rest.len() == 3 && rest[0] == 'o' && rest[1] == 'f' && rest[2] == 'f';
+    (is_on || is_off).then_some((ExprTok::Operand { number: false }, chars.len()))
 }
 
 /// Grammar violations of DROID's parameter values (manual §5.7, "Summary and
