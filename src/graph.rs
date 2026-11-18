@@ -12,10 +12,10 @@ use crate::geometry::{BindingFeatures, RackGeometry, WiringContext, WiringOutlie
 use crate::latency::{forward_latency, CostModel, LatencyData};
 use crate::layout::compute_section_holes;
 use crate::patch::{
-    scan_hw_tokens_wide, scan_internal_tokens, scan_register_refs, InfluenceContext,
-    InfluenceSubtree, Patch,
+    scan_hw_tokens_wide, scan_internal_tokens, scan_register_refs, ControllerDecl,
+    InfluenceContext, InfluenceSubtree, IniSection, Patch,
 };
-use crate::schema::load_schema;
+use crate::schema::{load_schema, Schema};
 
 // Euclidean-distance wiring-outlier detection is delegated to the learned
 // decision table (`geometry::WiringOutlierScorer`, embedded artifact from
@@ -173,73 +173,88 @@ enum SelectClass {
     Unknown,
 }
 
+/// The value of `section`'s first entry whose key matches `name`
+/// case-insensitively.
+fn select_entry<'a>(section: &'a IniSection, name: &str) -> Option<&'a str> {
+    section
+        .entries
+        .iter()
+        .find(|(key, _)| key.to_lowercase() == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// The signal root a `select` expression names: a lone, whole-expression
+/// register ref, or a lone whole-expression internal cable for `_`-prefixed
+/// expressions. Embedded or ambiguous expressions yield `None`.
+fn select_root(expression: &str) -> Option<String> {
+    let registers = scan_register_refs(expression);
+    if registers.len() == 1 && registers[0].0 == expression {
+        return Some(registers[0].0.clone());
+    }
+    if !expression.starts_with('_') {
+        return None;
+    }
+    let cables = scan_internal_tokens(expression);
+    if cables.len() == 1 && cables[0] == expression {
+        Some(cables[0].clone())
+    } else {
+        None
+    }
+}
+
+/// Compare one value against the assumed value for `root` signal.
+fn classify_against(state: &HashMap<String, f64>, root: &str, value: f64) -> SelectClass {
+    match state.get(root) {
+        Some(assumed) if (value - assumed).abs() < 1e-9 => SelectClass::Selected,
+        Some(_) => SelectClass::NotSelected,
+        None => SelectClass::Unknown,
+    }
+}
+
+/// The `selectat` verdict for a section, or `None` when it declares no
+/// evaluable `selectat` — the caller then compares the `select` expression.
+fn classify_selectat(
+    section: &IniSection,
+    root: &str,
+    options: &GraphOptions,
+) -> Option<SelectClass> {
+    let raw = select_entry(section, "selectat").map(str::trim)?;
+    let value = crate::expression::evaluate_droid_expr(raw, &HashMap::new())
+        .or_else(|| raw.parse::<f64>().ok())?;
+    Some(classify_against(&options.state, root, value))
+}
+
+/// Classify one section's select state (change C 4.1): no `select` entry means
+/// always selected; an empty or unresolvable expression means unknown.
+fn classify_section(section: &IniSection, options: &GraphOptions) -> SelectClass {
+    let Some(raw) = select_entry(section, "select") else {
+        return SelectClass::Selected;
+    };
+    let expression = raw.trim();
+    if expression.is_empty() {
+        return SelectClass::Unknown;
+    }
+    let Some(root) = select_root(expression) else {
+        return SelectClass::Unknown;
+    };
+    // If the section has a `selectat` value, the circuit is selected when that
+    // literal equals the assumed value for the root signal. This matches
+    // DROID's `select` / `selectat` wiring where a shared switch chooses one of
+    // several circuits by value.
+    if let Some(class) = classify_selectat(section, &root, options) {
+        return class;
+    }
+    let Some(eval) = crate::expression::evaluate_droid_expr(expression, &options.state) else {
+        return SelectClass::Unknown;
+    };
+    classify_against(&options.state, &root, eval)
+}
+
 fn classify_sections(patch: &Patch, options: &GraphOptions) -> Vec<SelectClass> {
     patch
         .sections
         .iter()
-        .map(|section| {
-            let select_value = section
-                .entries
-                .iter()
-                .find(|(k, _)| k.to_lowercase() == "select")
-                .map(|(_, v)| v.as_str());
-            let Some(raw) = select_value else {
-                return SelectClass::Selected;
-            };
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return SelectClass::Unknown;
-            }
-            let root: Option<String> = {
-                let regs = scan_register_refs(trimmed);
-                if regs.len() == 1 && regs[0].0 == trimmed {
-                    Some(regs[0].0.clone())
-                } else if trimmed.starts_with('_') {
-                    let cables = scan_internal_tokens(trimmed);
-                    if cables.len() == 1 && cables[0] == trimmed {
-                        Some(cables[0].clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
-            let Some(root) = root else {
-                return SelectClass::Unknown;
-            };
-            // If the section has a `selectat` value, the circuit is selected
-            // when that literal equals the assumed value for the root signal.
-            // This matches DROID's `select` / `selectat` wiring where a shared
-            // switch chooses one of several circuits by value.
-            if let Some(selectat_raw) = section
-                .entries
-                .iter()
-                .find(|(k, _)| k.to_lowercase() == "selectat")
-                .map(|(_, v)| v.trim())
-            {
-                if let Some(v) =
-                    crate::expression::evaluate_droid_expr(selectat_raw, &HashMap::new())
-                        .or_else(|| selectat_raw.parse::<f64>().ok())
-                {
-                    match options.state.get(&root) {
-                        Some(assumed) if (v - assumed).abs() < 1e-9 => {
-                            return SelectClass::Selected
-                        }
-                        Some(_) => return SelectClass::NotSelected,
-                        None => return SelectClass::Unknown,
-                    }
-                }
-            }
-            let Some(eval) = crate::expression::evaluate_droid_expr(trimmed, &options.state) else {
-                return SelectClass::Unknown;
-            };
-            match options.state.get(&root) {
-                Some(assumed) if (eval - assumed).abs() < 1e-9 => SelectClass::Selected,
-                Some(_) => SelectClass::NotSelected,
-                None => SelectClass::Unknown,
-            }
-        })
+        .map(|section| classify_section(section, options))
         .collect()
 }
 
@@ -489,7 +504,49 @@ impl Graph {
         layers_enabled: bool,
         max_shift_layer: u8,
     ) -> HashMap<NodeId, String> {
-        // Reverse adjacency, built once: sink index -> (source index, cable).
+        let sources = LabelSources {
+            patch,
+            circuits: circuit_store,
+            hw: hw_store,
+            shift,
+            layers_enabled,
+            max_shift_layer,
+        };
+        // Reverse adjacency, built once for the whole pass.
+        let incoming = self.incoming_by_index();
+
+        let mut out = HashMap::new();
+        for root in self.circuit_roots() {
+            // A stored label always wins: guessed entries only cover circuits
+            // without one.
+            if patch
+                .circuit_label(&self.nodes[root].id, circuit_store)
+                .is_some()
+            {
+                continue;
+            }
+            if let Some(label) = self.nearest_explicit_label(root, &sources, &incoming) {
+                out.insert(self.nodes[root].id.clone(), label);
+            }
+        }
+        out
+    }
+
+    /// Indices of the circuit nodes, ascending: the only guess roots.
+    fn circuit_roots(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.kind == NodeKind::Circuit)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Reverse adjacency as `sink index -> (source index, cable)`, producers
+    /// sorted by (node index, cable) and deduped so the walk order is
+    /// deterministic. Edges whose endpoint is unknown are dropped, as in
+    /// `upstream_dependencies`.
+    fn incoming_by_index(&self) -> HashMap<usize, Vec<(usize, &str)>> {
         let mut node_index: HashMap<&NodeId, usize> = HashMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
             node_index.entry(&node.id).or_insert(i);
@@ -510,87 +567,73 @@ impl Graph {
             producers.sort_unstable();
             producers.dedup();
         }
+        incoming
+    }
 
-        let mut out = HashMap::new();
-        let roots: Vec<usize> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.kind == NodeKind::Circuit)
-            .map(|(i, _)| i)
-            .collect();
-        for root in roots {
-            // A stored label always wins: guessed entries only cover circuits
-            // without one.
-            if patch
-                .circuit_label(&self.nodes[root].id, circuit_store)
-                .is_some()
-            {
+    /// Nearest explicit label upstream of `root`, excluding `root` itself: a
+    /// BFS over the reverse adjacency that stops at the first hit and never
+    /// expands a controller/input-jack leaf (its incoming LED-write edges are
+    /// not dependencies).
+    ///
+    /// The walk mirrors `upstream_dependencies`, so visit order matches it.
+    /// Cycle-safe: each node enters the queue once.
+    fn nearest_explicit_label(
+        &self,
+        root: usize,
+        sources: &LabelSources<'_>,
+        incoming: &HashMap<usize, Vec<(usize, &str)>>,
+    ) -> Option<String> {
+        // BFS over (node, discovery cable): the cable is the register edge a
+        // controller/jack node was reached through, carrying its port token
+        // (`_REG:{token}`). The root carries none.
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut queue: VecDeque<(usize, Option<&str>)> = VecDeque::new();
+        visited.insert(root);
+        queue.push_back((root, None));
+        while let Some((idx, via)) = queue.pop_front() {
+            if idx != root {
+                if let Some(label) = self.explicit_label_at(idx, via, sources) {
+                    return Some(label);
+                }
+            }
+            if matches!(
+                self.nodes[idx].kind,
+                NodeKind::Controller | NodeKind::InputJack
+            ) {
+                // Controller/input-jack leaf: never follow incoming edges.
                 continue;
             }
-            // BFS over (node, discovery cable): the cable is the register
-            // edge a controller/jack node was reached through, carrying its
-            // port token (`_REG:{token}`). The root carries none.
-            let mut visited: HashSet<usize> = HashSet::new();
-            let mut queue: VecDeque<(usize, Option<&str>)> = VecDeque::new();
-            visited.insert(root);
-            queue.push_back((root, None));
-            let mut found: Option<String> = None;
-            while let Some((idx, via)) = queue.pop_front() {
-                if idx != root {
-                    let node = &self.nodes[idx];
-                    let hit = match node.kind {
-                        NodeKind::Circuit => patch.circuit_label(&node.id, circuit_store),
-                        _ => via
-                            .and_then(|cable| cable.strip_prefix(REG_EDGE_PREFIX))
-                            .and_then(|token| {
-                                patch.explicit_hw_label(
-                                    token,
-                                    shift,
-                                    layers_enabled,
-                                    max_shift_layer,
-                                    hw_store,
-                                )
-                            })
-                            // Defensive fallback for hand-built graphs whose
-                            // non-circuit nodes are reached via cable edges:
-                            // a jack node carries its own token.
-                            .or_else(|| match &node.id {
-                                NodeId::Jack(tok) => patch.explicit_hw_label(
-                                    tok,
-                                    shift,
-                                    layers_enabled,
-                                    max_shift_layer,
-                                    hw_store,
-                                ),
-                                _ => None,
-                            }),
-                    };
-                    if let Some(label) = hit {
-                        found = Some(label);
-                        break;
+            if let Some(producers) = incoming.get(&idx) {
+                for &(src, cable) in producers {
+                    if visited.insert(src) {
+                        queue.push_back((src, Some(cable)));
                     }
                 }
-                if matches!(
-                    self.nodes[idx].kind,
-                    NodeKind::Controller | NodeKind::InputJack
-                ) {
-                    // Controller/input-jack leaf: never follow incoming edges.
-                    continue;
-                }
-                if let Some(producers) = incoming.get(&idx) {
-                    for &(src, cable) in producers {
-                        if visited.insert(src) {
-                            queue.push_back((src, Some(cable)));
-                        }
-                    }
-                }
-            }
-            if let Some(label) = found {
-                out.insert(self.nodes[root].id.clone(), label);
             }
         }
-        out
+        None
+    }
+
+    /// The explicit label `idx` carries, if any: a circuit's stored label, or
+    /// the stored-or-preamble label of the token on the register edge it was
+    /// reached through.
+    fn explicit_label_at(
+        &self,
+        idx: usize,
+        via: Option<&str>,
+        sources: &LabelSources<'_>,
+    ) -> Option<String> {
+        let node = &self.nodes[idx];
+        match node.kind {
+            NodeKind::Circuit => sources.patch.circuit_label(&node.id, sources.circuits),
+            _ => via
+                .and_then(|cable| cable.strip_prefix(REG_EDGE_PREFIX))
+                .and_then(|token| sources.hw_label(token))
+                // Defensive fallback for hand-built graphs whose non-circuit
+                // nodes are reached via cable edges: a jack node carries its
+                // own token.
+                .or_else(|| sources.node_id_label(&node.id)),
+        }
     }
 
     /// Edge indices whose endpoints are both in `members` (a node-index set) -
@@ -818,6 +861,39 @@ pub(crate) fn build_edges(patch: &Patch, node_by_name: &HashMap<&str, NodeId>) -
     edges
 }
 
+/// Label stores plus the active shift layer: the sources a guessed label may
+/// resolve through. Bundled so the upstream walk carries one reference instead
+/// of five values.
+struct LabelSources<'a> {
+    patch: &'a Patch,
+    circuits: &'a HashMap<NodeId, String>,
+    hw: &'a HashMap<String, BTreeMap<u8, String>>,
+    shift: u8,
+    layers_enabled: bool,
+    max_shift_layer: u8,
+}
+
+impl LabelSources<'_> {
+    /// Stored-or-preamble label of one hardware token at the effective layer.
+    fn hw_label(&self, token: &str) -> Option<String> {
+        self.patch.explicit_hw_label(
+            token,
+            self.shift,
+            self.layers_enabled,
+            self.max_shift_layer,
+            self.hw,
+        )
+    }
+
+    /// A node id's own token label: jacks carry one, controllers do not.
+    fn node_id_label(&self, id: &NodeId) -> Option<String> {
+        match id {
+            NodeId::Jack(token) => self.hw_label(token),
+            _ => None,
+        }
+    }
+}
+
 /// Cable prefix of register edges (`_REG:{token}`); the token after the prefix
 /// is the port token a controller/jack node was reached through
 /// (label-guess-and-screen-scale 1.1).
@@ -841,110 +917,166 @@ const CONTROLLER_REGISTER_PREFIXES: &str = "PBESLR";
 /// and a controller with that unit number exists; otherwise it is a jack on
 /// the master (input when the letter is I, N, or a controller-register
 /// letter without a matching unit, output otherwise).
-fn build_register_nodes_and_edges(patch: &Patch) -> (Vec<GraphNode>, Vec<GraphEdge>) {
-    let schema = load_schema();
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    let mut seen_jacks: HashSet<String> = HashSet::new();
-    let mut seen_edges: HashSet<(NodeId, NodeId, String)> = HashSet::new();
-
-    // 1. Create controller nodes from the patch's controller list.
-    for ctrl in &patch.controllers {
-        nodes.push(GraphNode {
+/// One controller node per declared controller, in patch order.
+fn controller_nodes(patch: &Patch) -> Vec<GraphNode> {
+    patch
+        .controllers
+        .iter()
+        .map(|ctrl| GraphNode {
             id: NodeId::Controller(ctrl.name.clone(), ctrl.ordinal as usize),
             kind: NodeKind::Controller,
             circuit: ctrl.panel.clone(),
             instance_index: ctrl.ordinal as usize,
             section_index: 0,
-        });
-    }
+        })
+        .collect()
+}
 
-    // 2. Build occurrence-counted node IDs for each section so register edges
-    //    target the correct circuit instance.
+/// The controller declaring `unit`, when `letter` names a controller-register
+/// family. `None` for master-jack families and for letters with no matching
+/// unit.
+fn controller_for_unit(patch: &Patch, letter: char, unit: u32) -> Option<&ControllerDecl> {
+    if !CONTROLLER_REGISTER_PREFIXES.contains(letter) {
+        return None;
+    }
+    patch
+        .controllers
+        .iter()
+        .find(|controller| controller.ordinal == unit)
+}
+
+/// Occurrence-counted circuit node ids, one per section, in section order, so
+/// register edges target the correct circuit instance.
+fn section_node_ids(patch: &Patch) -> Vec<NodeId> {
     let mut instance_counts: HashMap<&str, usize> = HashMap::new();
-    let section_node_ids: Vec<NodeId> = patch
+    patch
         .sections
         .iter()
         .map(|section| {
             let count = instance_counts.entry(section.name.as_str()).or_insert(0);
-            let idx = *count;
+            let index = *count;
             *count += 1;
-            NodeId::circuit(&section.name, idx)
+            NodeId::circuit(&section.name, index)
         })
-        .collect();
+        .collect()
+}
 
-    // 3. Scan each section's entries for register references and build edges.
-    for (section_idx, section) in patch.sections.iter().enumerate() {
-        let circuit = &section.name;
-        let circuit_node = &section_node_ids[section_idx];
+/// Whether a parameter writes its register refs (circuit → target) rather than
+/// reads them: catalog-driven, with the `output`/`led` key convention as the
+/// unknown-circuit fallback.
+fn register_param_is_output(schema: &Schema, circuit: &str, key: &str) -> bool {
+    schema.get_param_kind(circuit, key).map_or_else(
+        || {
+            let lower = key.to_lowercase();
+            lower.contains("output") || lower.contains("led")
+        },
+        |kind| kind == "output",
+    )
+}
 
+/// The node a register ref targets: the declared controller for a
+/// controller-family letter with a matching unit, otherwise a master jack named
+/// by the token.
+fn register_target(controller: Option<&ControllerDecl>, token: &str) -> NodeId {
+    match controller {
+        Some(decl) => NodeId::Controller(decl.name.clone(), decl.ordinal as usize),
+        None => NodeId::Jack(token.to_string()),
+    }
+}
+
+/// Node kind for a jack: input for the `I`/`N` master families and for a
+/// controller-family letter with no matching unit; output otherwise.
+fn jack_kind(letter: char, has_controller: bool) -> NodeKind {
+    let reads = letter == 'I' || letter == 'N';
+    if reads || (CONTROLLER_REGISTER_PREFIXES.contains(letter) && !has_controller) {
+        NodeKind::InputJack
+    } else {
+        NodeKind::OutputJack
+    }
+}
+
+/// Push the jack node for `target` on first sight; controller targets add no
+/// node here because their node already exists.
+fn push_jack_node(
+    nodes: &mut Vec<GraphNode>,
+    seen_jacks: &mut HashSet<String>,
+    target: &NodeId,
+    kind: NodeKind,
+) {
+    let NodeId::Jack(token) = target else {
+        return;
+    };
+    if seen_jacks.insert(token.clone()) {
+        nodes.push(GraphNode {
+            id: NodeId::Jack(token.clone()),
+            kind,
+            circuit: token.clone(),
+            instance_index: 0,
+            section_index: 0,
+        });
+    }
+}
+
+/// Push one register edge, deduplicated on (source, sink, cable). Direction
+/// comes from the parameter kind: an output writes (circuit → target), an input
+/// reads (target → circuit).
+fn push_register_edge(
+    edges: &mut Vec<GraphEdge>,
+    seen_edges: &mut HashSet<(NodeId, NodeId, String)>,
+    circuit_node: &NodeId,
+    target: NodeId,
+    token: &str,
+    is_output: bool,
+) {
+    let (source, sink) = if is_output {
+        (circuit_node.clone(), target)
+    } else {
+        (target, circuit_node.clone())
+    };
+    let cable = format!("_REG:{token}");
+    if seen_edges.insert((source.clone(), sink.clone(), cable.clone())) {
+        edges.push(GraphEdge {
+            cable,
+            source,
+            sink,
+        });
+    }
+}
+
+fn build_register_nodes_and_edges(patch: &Patch) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    let schema = load_schema();
+    let mut nodes = controller_nodes(patch);
+    let mut edges = Vec::new();
+    let mut seen_jacks: HashSet<String> = HashSet::new();
+    let mut seen_edges: HashSet<(NodeId, NodeId, String)> = HashSet::new();
+    let section_node_ids = section_node_ids(patch);
+
+    for (section_index, section) in patch.sections.iter().enumerate() {
+        let circuit_node = &section_node_ids[section_index];
         for (key, value) in &section.entries {
-            let is_output = schema.get_param_kind(circuit, key).map_or_else(
-                || {
-                    // Fallback: output/led families write, everything else reads.
-                    let lk = key.to_lowercase();
-                    lk.contains("output") || lk.contains("led")
-                },
-                |k| k == "output",
-            );
-
+            let is_output = register_param_is_output(schema, &section.name, key);
             for (token, unit, _pin) in scan_register_refs(value) {
-                let Some(prefix) = token.chars().next() else {
+                let Some(letter) = token.chars().next() else {
                     continue;
                 };
-
                 // Classify target: controller node or jack node.
-                let upper = prefix.to_ascii_uppercase();
-                let target = if CONTROLLER_REGISTER_PREFIXES.contains(upper)
-                    && patch.controllers.iter().any(|c| c.ordinal == unit)
-                {
-                    let ctrl = patch
-                        .controllers
-                        .iter()
-                        .find(|c| c.ordinal == unit)
-                        .unwrap();
-                    NodeId::Controller(ctrl.name.clone(), ctrl.ordinal as usize)
-                } else {
-                    NodeId::Jack(token.clone())
-                };
-
-                // Create jack nodes on demand.
-                if let NodeId::Jack(ref tok) = target {
-                    if seen_jacks.insert(tok.clone()) {
-                        let kind = if upper == 'I'
-                            || upper == 'N'
-                            || (CONTROLLER_REGISTER_PREFIXES.contains(upper)
-                                && !patch.controllers.iter().any(|c| c.ordinal == unit))
-                        {
-                            NodeKind::InputJack
-                        } else {
-                            NodeKind::OutputJack
-                        };
-                        nodes.push(GraphNode {
-                            id: NodeId::Jack(tok.clone()),
-                            kind,
-                            circuit: tok.clone(),
-                            instance_index: 0,
-                            section_index: 0,
-                        });
-                    }
-                }
-
-                // Build edge with direction from catalog.
-                let (src, sink) = if is_output {
-                    (circuit_node.clone(), target)
-                } else {
-                    (target, circuit_node.clone())
-                };
-
-                let cable = format!("_REG:{token}");
-                if seen_edges.insert((src.clone(), sink.clone(), cable.clone())) {
-                    edges.push(GraphEdge {
-                        cable,
-                        source: src,
-                        sink,
-                    });
-                }
+                let upper = letter.to_ascii_uppercase();
+                let controller = controller_for_unit(patch, upper, unit);
+                let target = register_target(controller, &token);
+                push_jack_node(
+                    &mut nodes,
+                    &mut seen_jacks,
+                    &target,
+                    jack_kind(upper, controller.is_some()),
+                );
+                push_register_edge(
+                    &mut edges,
+                    &mut seen_edges,
+                    circuit_node,
+                    target,
+                    &token,
+                    is_output,
+                );
             }
         }
     }

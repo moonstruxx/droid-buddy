@@ -318,6 +318,61 @@ palettes! {
     graph_edge_diff_after: Blue, Reset, Gray,
 }
 
+/// The ANSI-16 tier in xterm index order: `ANSI16[i]` is the named variant for
+/// index `i`. One ordering shared by the named-variant hop in [`Theme::rgb`]
+/// and [`modifier_hue`], so the two cannot disagree about which hue an index
+/// means.
+const ANSI16: [Color; 16] = [
+    Color::Black,
+    Color::Red,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Gray,
+    Color::DarkGray,
+    Color::LightRed,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightBlue,
+    Color::LightMagenta,
+    Color::LightCyan,
+    Color::White,
+];
+
+/// The ANSI-16 → RGB table, in xterm index order: `ANSI16_RGB[i]` is the triple
+/// for [`ANSI16`]`[i]`. Shared by the named variants in [`Theme::rgb`] and the
+/// 0..=15 head of the xterm-256 map so `Color::Red` and `Color::Indexed(1)`
+/// agree.
+const ANSI16_RGB: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00),
+    (0xff, 0x00, 0x00),
+    (0x00, 0xff, 0x00),
+    (0xff, 0xff, 0x00),
+    (0x00, 0x00, 0xff),
+    (0xff, 0x00, 0xff),
+    (0x00, 0xff, 0xff),
+    (0x80, 0x80, 0x80),
+    (0x40, 0x40, 0x40),
+    (0xff, 0x80, 0x80),
+    (0x80, 0xff, 0x80),
+    (0xff, 0xff, 0x80),
+    (0x80, 0x80, 0xff),
+    (0xff, 0x80, 0xff),
+    (0x80, 0xff, 0xff),
+    (0xff, 0xff, 0xff),
+];
+
+/// The xterm index of a named ANSI-16 variant, or `None` for `Reset` and the
+/// `Rgb`/`Indexed` passthroughs.
+fn ansi16_index(color: Color) -> Option<u8> {
+    ANSI16
+        .iter()
+        .position(|candidate| *candidate == color)
+        .map(|index| index as u8)
+}
+
 impl Theme {
     /// The `Color → RGB` hop (design D9): the single source of pixel colors
     /// for the kitty rasterizer. ANSI-16 tokens map to fixed triples (pure
@@ -333,24 +388,11 @@ impl Theme {
     pub fn rgb(&self, color: Color) -> (u8, u8, u8) {
         match color {
             Color::Reset => (0xff, 0xff, 0xff),
-            Color::Black => ansi16_rgb(0),
-            Color::Red => ansi16_rgb(1),
-            Color::Green => ansi16_rgb(2),
-            Color::Yellow => ansi16_rgb(3),
-            Color::Blue => ansi16_rgb(4),
-            Color::Magenta => ansi16_rgb(5),
-            Color::Cyan => ansi16_rgb(6),
-            Color::Gray => ansi16_rgb(7),
-            Color::DarkGray => ansi16_rgb(8),
-            Color::LightRed => ansi16_rgb(9),
-            Color::LightGreen => ansi16_rgb(10),
-            Color::LightYellow => ansi16_rgb(11),
-            Color::LightBlue => ansi16_rgb(12),
-            Color::LightMagenta => ansi16_rgb(13),
-            Color::LightCyan => ansi16_rgb(14),
-            Color::White => ansi16_rgb(15),
             Color::Rgb(r, g, b) => (r, g, b),
             Color::Indexed(v) => xterm256_rgb(v),
+            // Every remaining variant is an ANSI-16 name, resolved through the
+            // shared index → table hop; the fallback keeps the hop total.
+            named => ansi16_index(named).map_or((0xff, 0xff, 0xff), ansi16_rgb),
         }
     }
 
@@ -380,29 +422,15 @@ impl Theme {
     }
 }
 
-/// The single ANSI-16 → RGB table, shared by the named variants in
+/// The single ANSI-16 → RGB lookup, shared by the named variants in
 /// [`Theme::rgb`] and the 0..=15 head of the xterm-256 map so `Color::Red`
 /// and `Color::Indexed(1)` agree. Out-of-range indices degrade to the bright
 /// neutral (same as `Reset`) so the hop stays total without panicking.
 fn ansi16_rgb(v: u8) -> (u8, u8, u8) {
-    match v {
-        0 => (0x00, 0x00, 0x00),
-        1 => (0xff, 0x00, 0x00),
-        2 => (0x00, 0xff, 0x00),
-        3 => (0xff, 0xff, 0x00),
-        4 => (0x00, 0x00, 0xff),
-        5 => (0xff, 0x00, 0xff),
-        6 => (0x00, 0xff, 0xff),
-        7 => (0x80, 0x80, 0x80),
-        8 => (0x40, 0x40, 0x40),
-        9 => (0xff, 0x80, 0x80),
-        10 => (0x80, 0xff, 0x80),
-        11 => (0xff, 0xff, 0x80),
-        12 => (0x80, 0x80, 0xff),
-        13 => (0xff, 0x80, 0xff),
-        14 => (0x80, 0xff, 0xff),
-        _ => (0xff, 0xff, 0xff),
-    }
+    ANSI16_RGB
+        .get(usize::from(v))
+        .copied()
+        .unwrap_or((0xff, 0xff, 0xff))
 }
 
 /// Standard xterm-256 → RGB (deterministic): 16-color head mirroring
@@ -516,25 +544,8 @@ pub fn modifier_hue(token: &str) -> Color {
     for b in token.bytes() {
         hash = hash.wrapping_mul(31).wrapping_add(u32::from(b));
     }
-    let idx = (hash % 16) as u8;
-    match idx {
-        0 => Color::Black,
-        1 => Color::Red,
-        2 => Color::Green,
-        3 => Color::Yellow,
-        4 => Color::Blue,
-        5 => Color::Magenta,
-        6 => Color::Cyan,
-        7 => Color::Gray,
-        8 => Color::DarkGray,
-        9 => Color::LightRed,
-        10 => Color::LightGreen,
-        11 => Color::LightYellow,
-        12 => Color::LightBlue,
-        13 => Color::LightMagenta,
-        14 => Color::LightCyan,
-        _ => Color::White,
-    }
+    let index = (hash % 16) as usize;
+    ANSI16.get(index).copied().unwrap_or(Color::White)
 }
 
 #[cfg(test)]

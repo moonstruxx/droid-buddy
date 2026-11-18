@@ -731,6 +731,150 @@ fn unaddressed_faceplate(
     }
 }
 
+/// The embedded controller geometry, degrading to the fallback table with a
+/// one-time warning when the data is missing or malformed — never a panic.
+fn load_controller_geometry() -> ControllerGeometry {
+    match ControllerGeometry::load() {
+        Ok(data) => data,
+        Err(e) => {
+            warn_once(
+                &DATA_WARN,
+                &format!("controller geometry data unavailable, using fallbacks: {e}"),
+            );
+            ControllerGeometry::fallback()
+        }
+    }
+}
+
+/// Group the patch's components into `(controller, module instance)` faceplates
+/// in declaration order, exactly as the pre-inventory chain grouped them. CV I/O
+/// components belong to the master faceplate, not a module of their own.
+fn patch_faceplates(
+    data: &ControllerGeometry,
+    patch: Option<&Patch>,
+    master: &mut PhysicalModule,
+    fallback_w: f64,
+    fallback_h: f64,
+) -> Vec<PatchFaceplate> {
+    let Some(patch) = patch else {
+        return Vec::new();
+    };
+    let mut faceplates: Vec<PatchFaceplate> = Vec::new();
+    for comp in &patch.hw_components {
+        if comp.controller == "CV I/O" {
+            master.components.push(comp.clone());
+            continue;
+        }
+        let instance = comp.module_instance();
+        let existing = faceplates
+            .iter_mut()
+            .find(|plate| plate.controller == comp.controller && plate.module_instance == instance);
+        if let Some(plate) = existing {
+            plate.components.push(comp.clone());
+            continue;
+        }
+        faceplates.push(patch_faceplate(data, comp, fallback_w, fallback_h));
+    }
+    faceplates
+}
+
+/// The chain for a patch under an inventory: the compatibility path when the
+/// inventory is empty, the inventory order otherwise.
+fn assemble_chain(
+    data: &ControllerGeometry,
+    master: PhysicalModule,
+    faceplates: Vec<PatchFaceplate>,
+    inventory: &[ModuleKey],
+    fallback_w: f64,
+    fallback_h: f64,
+) -> Vec<PhysicalModule> {
+    if inventory.is_empty() {
+        return compatibility_chain(master, faceplates);
+    }
+    inventory_chain(data, master, faceplates, inventory, fallback_w, fallback_h)
+}
+
+/// The pre-inventory chain, byte for byte: the master faceplate at chain
+/// position 0, then the patch chain in declaration order.
+fn compatibility_chain(
+    master: PhysicalModule,
+    faceplates: Vec<PatchFaceplate>,
+) -> Vec<PhysicalModule> {
+    let mut modules = Vec::with_capacity(1 + faceplates.len());
+    modules.push(master);
+    modules.extend(faceplates.into_iter().map(PatchFaceplate::into_module));
+    modules
+}
+
+/// The chain the inventory names, in inventory order: the master faceplate on
+/// its key position (prepended when the inventory omits it), each named
+/// faceplate on its inventory position, an unaddressed faceplate for a key the
+/// patch does not address, then the remaining patch modules in declaration order
+/// so no patch hardware disappears.
+fn inventory_chain(
+    data: &ControllerGeometry,
+    master: PhysicalModule,
+    faceplates: Vec<PatchFaceplate>,
+    inventory: &[ModuleKey],
+    fallback_w: f64,
+    fallback_h: f64,
+) -> Vec<PhysicalModule> {
+    let mut placed = vec![false; faceplates.len()];
+    let mut master_placed = false;
+    let mut modules: Vec<PhysicalModule> = Vec::with_capacity(inventory.len() + faceplates.len());
+    for key in inventory {
+        if is_master_key(key) {
+            // A repeated key would duplicate the faceplate and break the
+            // uniqueness `RackSpec.assign` relies on.
+            if master_placed {
+                continue;
+            }
+            master_placed = true;
+            modules.push(master.clone());
+            continue;
+        }
+        if let Some(ix) = faceplate_position(&faceplates, &placed, key) {
+            placed[ix] = true;
+            modules.push(faceplates[ix].clone().into_module());
+            continue;
+        }
+        modules.push(unaddressed_faceplate(data, key, fallback_w, fallback_h));
+    }
+    if !master_placed {
+        modules.insert(0, master);
+    }
+    append_unplaced(&mut modules, faceplates, &placed);
+    modules
+}
+
+/// The position of the faceplate `key` names, skipping positions an earlier
+/// inventory key already claimed.
+fn faceplate_position(
+    faceplates: &[PatchFaceplate],
+    placed: &[bool],
+    key: &ModuleKey,
+) -> Option<usize> {
+    faceplates.iter().enumerate().position(|(ix, plate)| {
+        !placed[ix]
+            && plate.geometry_key == key.controller
+            && plate.module_instance.map(|n| n as usize) == Some(key.instance)
+    })
+}
+
+/// Append the patch modules the inventory does not name, in declaration order.
+fn append_unplaced(
+    modules: &mut Vec<PhysicalModule>,
+    faceplates: Vec<PatchFaceplate>,
+    placed: &[bool],
+) {
+    let unplaced = faceplates
+        .into_iter()
+        .enumerate()
+        .filter(|(ix, _)| !placed[*ix])
+        .map(|(_, plate)| plate.into_module());
+    modules.extend(unplaced);
+}
+
 impl PhysicalLayout {
     /// Build the ordered controller chain for a patch under `model`.
     ///
@@ -763,102 +907,19 @@ impl PhysicalLayout {
     /// Missing/malformed geometry data and unknown controllers degrade to the
     /// fallback width with a one-time warning — never a panic.
     pub fn build(patch: Option<&Patch>, model: MasterModel, inventory: &[ModuleKey]) -> Self {
-        let data = match ControllerGeometry::load() {
-            Ok(d) => d,
-            Err(e) => {
-                warn_once(
-                    &DATA_WARN,
-                    &format!("controller geometry data unavailable, using fallbacks: {e}"),
-                );
-                ControllerGeometry::fallback()
-            }
-        };
+        let data = load_controller_geometry();
         let master_key = model.geometry_key();
         let fallback_w = data.fallback_width_mm();
         let fallback_h = data.fallback_height_mm();
 
         let mut master = master_faceplate(&data, master_key, fallback_w, fallback_h);
-
-        // Patch faceplates in declaration order, grouped by (controller,
-        // instance) exactly as the pre-inventory chain grouped them. CV I/O
-        // components belong to the master faceplate, not a module of their own.
-        let mut faceplates: Vec<PatchFaceplate> = Vec::new();
-        if let Some(patch) = patch {
-            for comp in &patch.hw_components {
-                if comp.controller == "CV I/O" {
-                    master.components.push(comp.clone());
-                    continue;
-                }
-                let instance = comp.module_instance();
-                if let Some(plate) = faceplates.iter_mut().find(|plate| {
-                    plate.controller == comp.controller && plate.module_instance == instance
-                }) {
-                    plate.components.push(comp.clone());
-                    continue;
-                }
-                faceplates.push(patch_faceplate(&data, comp, fallback_w, fallback_h));
-            }
-        }
-
-        let mut modules: Vec<PhysicalModule> = Vec::new();
-        if inventory.is_empty() {
-            // Compatibility path: master at chain position 0, then the patch
-            // chain in declaration order — byte-identical to the chain before
-            // the rack inventory existed.
-            modules.push(master);
-            modules.extend(faceplates.into_iter().map(PatchFaceplate::into_module));
-        } else {
-            let mut placed = vec![false; faceplates.len()];
-            let mut master_placed = false;
-            for key in inventory {
-                if is_master_key(key) {
-                    // A repeated key would duplicate the faceplate and break
-                    // the uniqueness `RackSpec.assign` relies on.
-                    if master_placed {
-                        continue;
-                    }
-                    master_placed = true;
-                    modules.push(master.clone());
-                    continue;
-                }
-                let found = faceplates.iter().enumerate().position(|(ix, plate)| {
-                    !placed[ix]
-                        && plate.geometry_key == key.controller
-                        && plate.module_instance.map(|n| n as usize) == Some(key.instance)
-                });
-                if let Some(ix) = found {
-                    placed[ix] = true;
-                    modules.push(faceplates[ix].clone().into_module());
-                } else {
-                    modules.push(unaddressed_faceplate(&data, key, fallback_w, fallback_h));
-                }
-            }
-            if !master_placed {
-                modules.insert(0, master);
-            }
-            modules.extend(
-                faceplates
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(ix, _)| !placed[*ix])
-                    .map(|(_, plate)| plate.into_module()),
-            );
-        }
-
-        // Lay the chain out contiguously: each module starts after the
-        // previous module's width plus the inter-module gap.
-        let gap = data.chain_gap_mm();
-        let mut x = 0.0;
-        for m in &mut modules {
-            m.rect_mm.x_mm = x;
-            x += m.rect_mm.w_mm + gap;
-        }
-        let total_width = x - gap;
-        let total_height = modules.iter().map(|m| m.rect_mm.h_mm).fold(0.0, f64::max);
+        let faceplates = patch_faceplates(&data, patch, &mut master, fallback_w, fallback_h);
+        let modules = assemble_chain(&data, master, faceplates, inventory, fallback_w, fallback_h);
+        let (modules, total_width, total_height) = Self::place_chain(modules, data.chain_gap_mm());
 
         Self {
             modules,
-            total_width_mm: total_width.max(0.0),
+            total_width_mm: total_width,
             total_height_mm: total_height,
             chain_gaps_mm: data.meta.chain_gaps_mm.clone(),
             hp_mm: data.hp_mm(),
@@ -867,6 +928,20 @@ impl PhysicalLayout {
             fallback_height_mm: fallback_h,
             inventory_driven: !inventory.is_empty(),
         }
+    }
+
+    /// Lay the chain out contiguously: each module starts after the previous
+    /// module's width plus the inter-module gap. Returns the chain with its
+    /// published width and height in mm.
+    fn place_chain(mut modules: Vec<PhysicalModule>, gap: f64) -> (Vec<PhysicalModule>, f64, f64) {
+        let mut x = 0.0;
+        for m in &mut modules {
+            m.rect_mm.x_mm = x;
+            x += m.rect_mm.w_mm + gap;
+        }
+        let total_width = (x - gap).max(0.0);
+        let total_height = modules.iter().map(|m| m.rect_mm.h_mm).fold(0.0, f64::max);
+        (modules, total_width, total_height)
     }
 
     /// Look up the element cell for a hardware token on a module.
@@ -1242,6 +1317,140 @@ fn place_in_row(
     fills[row] = x + module.rect_mm.w_mm;
 }
 
+/// Row-listed modules claim their row first, in list order: the row each module
+/// belongs to, and the module indices per row in list order.
+///
+/// A key that repeats, names a module the chain lacks, or names a controller the
+/// geometry registry does not know is skipped: one faceplate lives in one row,
+/// and `build` already reported entries it could not resolve to a module.
+fn listed_rows(chain: &PhysicalLayout, spec: &RackSpec) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
+    let mut listed_row: Vec<Option<usize>> = vec![None; chain.modules.len()];
+    let mut listed: Vec<Vec<usize>> = vec![Vec::new(); spec.rows.len()];
+    for (row_index, row) in spec.rows.iter().enumerate() {
+        for entry in &row.modules {
+            let Some(module_index) = chain_index_for_entry(chain, entry) else {
+                continue;
+            };
+            if listed_row[module_index].is_some() {
+                continue;
+            }
+            listed_row[module_index] = Some(row_index);
+            listed[row_index].push(module_index);
+        }
+    }
+    (listed_row, listed)
+}
+
+/// Place every module the spec does not list by row, in chain order: an explicit
+/// `assign` override wins whenever it names a row of the spec (an out-of-range
+/// override falls back to auto-pack), otherwise the module takes the auto-pack
+/// row. An override never moves the auto-pack cursor (D10).
+fn auto_pack(
+    chain: &PhysicalLayout,
+    spec: &RackSpec,
+    hp_mm: f64,
+    gap: f64,
+    listed_row: &[Option<usize>],
+    fills: &mut [f64],
+    placements: &mut [Vec<PlacedModule>],
+) {
+    let mut cursor = 0usize;
+    for (module_index, module) in chain.modules.iter().enumerate() {
+        if listed_row[module_index].is_some() {
+            continue;
+        }
+        let override_row = spec
+            .assign
+            .get(&module.key())
+            .copied()
+            .filter(|&row| row < spec.rows.len());
+        let row = if let Some(row) = override_row {
+            row
+        } else {
+            auto_row(spec, fills, cursor, module.rect_mm.w_mm, hp_mm, gap)
+        };
+        place_in_row(
+            chain,
+            gap,
+            fills,
+            placements,
+            row,
+            module_index,
+            override_row.is_some(),
+        );
+        if override_row.is_none() {
+            cursor = row;
+        }
+    }
+}
+
+/// The auto-pack row for a module of `width_mm`: the current row while the
+/// module fits, else the next one.
+///
+/// An empty row always accepts its first module, even an over-wide one:
+/// otherwise a module wider than every configured row would skip to the last row
+/// and leave leading rows empty. A non-empty row fills until the module fits,
+/// with the last row accepting overflow (D10).
+fn auto_row(
+    spec: &RackSpec,
+    fills: &[f64],
+    cursor: usize,
+    width_mm: f64,
+    hp_mm: f64,
+    gap: f64,
+) -> usize {
+    let mut row = cursor;
+    loop {
+        let capacity = spec.rows[row].hp * hp_mm;
+        let row_empty = fills[row] <= 0.0;
+        let x = if row_empty { 0.0 } else { fills[row] + gap };
+        if row_empty || x + width_mm <= capacity || row + 1 >= spec.rows.len() {
+            break row;
+        }
+        row += 1;
+    }
+}
+
+/// Stack the rows under the top mount, separated by fold bars. Returns the rows,
+/// the bars between them and the bottom edge in mm.
+fn stack_rows(
+    chain: &PhysicalLayout,
+    spec: &RackSpec,
+    fills: &[f64],
+    mut placements: Vec<Vec<PlacedModule>>,
+    rows_width: f64,
+    mut y: f64,
+) -> (Vec<RackRowPlacement>, Vec<FoldBar>, f64) {
+    let mut rows: Vec<RackRowPlacement> = Vec::with_capacity(spec.rows.len());
+    let mut fold_bars: Vec<FoldBar> = Vec::new();
+    for (i, row) in spec.rows.iter().enumerate() {
+        let height_mm = row_height_mm(chain, row.he);
+        rows.push(RackRowPlacement {
+            he: row.he,
+            hp: row.hp,
+            label: row.label.clone(),
+            y_mm: y,
+            height_mm,
+            modules: std::mem::take(&mut placements[i]),
+            fill_width_mm: fills[i],
+        });
+        y += height_mm;
+        if i + 1 < spec.rows.len() {
+            fold_bars.push(FoldBar {
+                after_row: i,
+                rect_mm: RectMm {
+                    x_mm: 0.0,
+                    y_mm: y,
+                    w_mm: rows_width,
+                    h_mm: FOLD_BAR_HEIGHT_MM,
+                },
+            });
+            y += FOLD_BAR_HEIGHT_MM;
+        }
+    }
+    (rows, fold_bars, y)
+}
+
 impl RackLayout {
     /// Pack the chain into the rack's rows (D10).
     ///
@@ -1266,26 +1475,7 @@ impl RackLayout {
         let hp_mm = chain.hp_mm.max(0.001);
         let gap = chain.chain_gaps_mm.inter_module.max(0.0);
 
-        // Row-listed modules claim their row first, in list order. A key that
-        // repeats, names a module the chain lacks, or names a controller the
-        // geometry registry does not know is skipped: one faceplate lives in
-        // one row, and `build` already reported entries it could not resolve
-        // to a module.
-        let mut listed_row: Vec<Option<usize>> = vec![None; chain.modules.len()];
-        let mut listed: Vec<Vec<usize>> = vec![Vec::new(); spec.rows.len()];
-        for (row_index, row) in spec.rows.iter().enumerate() {
-            for entry in &row.modules {
-                let Some(module_index) = chain_index_for_entry(chain, entry) else {
-                    continue;
-                };
-                if listed_row[module_index].is_some() {
-                    continue;
-                }
-                listed_row[module_index] = Some(row_index);
-                listed[row_index].push(module_index);
-            }
-        }
-
+        let (listed_row, listed) = listed_rows(chain, &spec);
         // fills[i] = used mm width; placements[i] in placement order.
         let mut fills = vec![0.0; spec.rows.len()];
         let mut placements: Vec<Vec<PlacedModule>> = vec![Vec::new(); spec.rows.len()];
@@ -1304,84 +1494,23 @@ impl RackLayout {
             }
         }
 
-        let mut cursor = 0usize;
-        for (module_index, module) in chain.modules.iter().enumerate() {
-            if listed_row[module_index].is_some() {
-                continue;
-            }
-            let override_row = spec
-                .assign
-                .get(&module.key())
-                .copied()
-                .filter(|&r| r < spec.rows.len());
-            let row = if let Some(r) = override_row {
-                r
-            } else {
-                let mut r = cursor;
-                loop {
-                    let capacity = spec.rows[r].hp * hp_mm;
-                    let row_empty = fills[r] <= 0.0;
-                    let x = if row_empty { 0.0 } else { fills[r] + gap };
-                    // An empty row always accepts its first module, even
-                    // an over-wide one: otherwise a module wider than
-                    // every configured row would skip to the last row and
-                    // leave leading rows empty. A non-empty row fills
-                    // until the module fits, with the last row accepting
-                    // overflow (D10).
-                    if row_empty || x + module.rect_mm.w_mm <= capacity || r + 1 >= spec.rows.len()
-                    {
-                        break r;
-                    }
-                    r += 1;
-                }
-            };
-            place_in_row(
-                chain,
-                gap,
-                &mut fills,
-                &mut placements,
-                row,
-                module_index,
-                override_row.is_some(),
-            );
-            if override_row.is_none() {
-                cursor = row;
-            }
-        }
+        auto_pack(
+            chain,
+            &spec,
+            hp_mm,
+            gap,
+            &listed_row,
+            &mut fills,
+            &mut placements,
+        );
 
         // Vertical mm geometry: top mount, then rows separated by fold bars.
         let rows_width = spec.rows.iter().map(|r| r.hp * hp_mm).fold(0.0, f64::max);
         let top_mount_h = spec.top_mount_te * hp_mm;
         let side_mount_w = spec.side_mount_te * hp_mm;
 
-        let mut y = top_mount_h;
-        let mut rows: Vec<RackRowPlacement> = Vec::with_capacity(spec.rows.len());
-        let mut fold_bars: Vec<FoldBar> = Vec::new();
-        for (i, row) in spec.rows.iter().enumerate() {
-            rows.push(RackRowPlacement {
-                he: row.he,
-                hp: row.hp,
-                label: row.label.clone(),
-                y_mm: y,
-                height_mm: row_height_mm(chain, row.he),
-                modules: std::mem::take(&mut placements[i]),
-                fill_width_mm: fills[i],
-            });
-            y += rows[i].height_mm;
-            if i + 1 < spec.rows.len() {
-                fold_bars.push(FoldBar {
-                    after_row: i,
-                    rect_mm: RectMm {
-                        x_mm: 0.0,
-                        y_mm: y,
-                        w_mm: rows_width,
-                        h_mm: FOLD_BAR_HEIGHT_MM,
-                    },
-                });
-                y += FOLD_BAR_HEIGHT_MM;
-            }
-        }
-
+        let (rows, fold_bars, y) =
+            stack_rows(chain, &spec, &fills, placements, rows_width, top_mount_h);
         let rows_region_h = y - top_mount_h;
         let total_height = y;
         let total_width = rows_width + 2.0 * side_mount_w;

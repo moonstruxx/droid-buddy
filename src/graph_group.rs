@@ -230,51 +230,113 @@ pub fn group_nodes<S: BuildHasher>(
     }
 
     let index = node_index(graph);
-    let candidates: Vec<usize> = (0..graph.nodes.len())
+    let candidates = circuit_candidates(graph);
+    let mut merged = merge_candidates(
+        graph,
+        &candidates,
+        &index,
+        positions,
+        sizes,
+        settings.policy,
+    );
+    let groups = collapsible_groups(
+        graph,
+        &candidates,
+        &mut merged,
+        settings.min_size,
+        positions,
+    );
+    let nodes = view_nodes(graph, &groups, expanded);
+    let edges = view_edges(graph, &index, &nodes);
+    GroupedView {
+        groups,
+        nodes,
+        edges,
+    }
+}
+
+/// Indices of the nodes grouping may touch: circuits only, ascending.
+///
+/// Controllers and jacks are physical endpoints of the patch, not interchangeable
+/// copies, so they never take part in a merge.
+fn circuit_candidates(graph: &Graph) -> Vec<usize> {
+    (0..graph.nodes.len())
         .filter(|&node| graph.nodes[node].kind == NodeKind::Circuit)
-        .collect();
+        .collect()
+}
 
+/// Fill one union-find component per would-be group, per `policy`.
+fn merge_candidates(
+    graph: &Graph,
+    candidates: &[usize],
+    index: &HashMap<&NodeId, usize>,
+    positions: &[(f32, f32)],
+    sizes: &[(f32, f32)],
+    policy: GroupPolicy,
+) -> UnionFind {
     let mut merged = UnionFind::new(graph.nodes.len());
-    match settings.policy {
-        // Membership is the type itself: no positional and no cabling test, so a
-        // circuit of another type between two members cannot break the group.
-        // Candidates ascend, so the first member of each type is the smallest one
-        // and the merge order stays deterministic.
-        GroupPolicy::Type => {
-            let mut first_of_type: HashMap<&str, usize> = HashMap::new();
-            for &node in &candidates {
-                let circuit = graph.nodes[node].circuit.as_str();
-                let first = *first_of_type.entry(circuit).or_insert(node);
-                merged.union(first, node);
-            }
-        }
-        // Membership is a place: drawn proximity first, then a short cable chain
-        // that the layout did not draw next to each other.
-        GroupPolicy::Run => {
-            for (offset, &a) in candidates.iter().enumerate() {
-                for &b in &candidates[offset + 1..] {
-                    if same_type(graph, a, b) && spatially_close(a, b, positions, sizes) {
-                        merged.union(a, b);
-                    }
-                }
-            }
+    match policy {
+        GroupPolicy::Type => merge_by_type(graph, candidates, &mut merged),
+        GroupPolicy::Run => merge_by_run(graph, candidates, index, positions, sizes, &mut merged),
+    }
+    merged
+}
 
-            let adjacency = circuit_adjacency(graph, &index);
-            let mut seen = vec![false; graph.nodes.len()];
-            for &a in &candidates {
-                for b in hops_within(a, &adjacency, &mut seen) {
-                    if same_type(graph, a, b) {
-                        merged.union(a, b);
-                    }
-                }
+/// Membership is the type itself: no positional and no cabling test, so a
+/// circuit of another type between two members cannot break the group.
+/// Candidates ascend, so the first member of each type is the smallest one
+/// and the merge order stays deterministic.
+fn merge_by_type(graph: &Graph, candidates: &[usize], merged: &mut UnionFind) {
+    let mut first_of_type: HashMap<&str, usize> = HashMap::new();
+    for &node in candidates {
+        let circuit = graph.nodes[node].circuit.as_str();
+        let first = *first_of_type.entry(circuit).or_insert(node);
+        merged.union(first, node);
+    }
+}
+
+/// Membership is a place: drawn proximity first, then a short cable chain
+/// that the layout did not draw next to each other.
+fn merge_by_run(
+    graph: &Graph,
+    candidates: &[usize],
+    index: &HashMap<&NodeId, usize>,
+    positions: &[(f32, f32)],
+    sizes: &[(f32, f32)],
+    merged: &mut UnionFind,
+) {
+    for (offset, &a) in candidates.iter().enumerate() {
+        for &b in &candidates[offset + 1..] {
+            if same_type(graph, a, b) && spatially_close(a, b, positions, sizes) {
+                merged.union(a, b);
             }
         }
     }
 
-    // Roots are the components' smallest member, so keying by root orders the
-    // groups by ascending first member and every member vector stays ascending.
+    let adjacency = circuit_adjacency(graph, index);
+    let mut seen = vec![false; graph.nodes.len()];
+    for &a in candidates {
+        for b in hops_within(a, &adjacency, &mut seen) {
+            if same_type(graph, a, b) {
+                merged.union(a, b);
+            }
+        }
+    }
+}
+
+/// The components that pass `min_size`, ordered by ascending first member.
+///
+/// Roots are the components' smallest member, so keying by root orders the
+/// groups by ascending first member and every member vector stays ascending.
+fn collapsible_groups(
+    graph: &Graph,
+    candidates: &[usize],
+    merged: &mut UnionFind,
+    min_size: usize,
+    positions: &[(f32, f32)],
+) -> Vec<Group> {
     let mut members_by_root: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for &node in &candidates {
+    for &node in candidates {
         members_by_root
             .entry(merged.find(node))
             .or_default()
@@ -283,7 +345,7 @@ pub fn group_nodes<S: BuildHasher>(
 
     let mut groups: Vec<Group> = Vec::new();
     for members in members_by_root.into_values() {
-        if members.len() < settings.min_size {
+        if members.len() < min_size {
             continue;
         }
         let footprint = footprint(&members, positions);
@@ -295,7 +357,15 @@ pub fn group_nodes<S: BuildHasher>(
             members_bbox: footprint.members,
         });
     }
+    groups
+}
 
+/// Which stand-in each model node draws as: a collapsed group's index, or itself.
+fn view_nodes<S: BuildHasher>(
+    graph: &Graph,
+    groups: &[Group],
+    expanded: &HashSet<usize, S>,
+) -> Vec<ViewNode> {
     let mut nodes: Vec<ViewNode> = (0..graph.nodes.len()).map(ViewNode::Individual).collect();
     for (g, group) in groups.iter().enumerate() {
         if expanded.contains(&g) {
@@ -305,7 +375,15 @@ pub fn group_nodes<S: BuildHasher>(
             nodes[member] = ViewNode::Group(g);
         }
     }
+    nodes
+}
 
+/// Cables resolved onto the stand-ins, in first-occurrence order.
+///
+/// A cable entirely inside one collapsed group has nothing to draw
+/// between; cables that merely share endpoints collapse into one arrow,
+/// which is where the drawn-edge reduction comes from (design D3).
+fn view_edges(graph: &Graph, index: &HashMap<&NodeId, usize>, nodes: &[ViewNode]) -> Vec<ViewEdge> {
     let mut edges: Vec<ViewEdge> = Vec::new();
     let mut distinct: HashSet<ViewEdge> = HashSet::new();
     for edge in &graph.edges {
@@ -316,9 +394,6 @@ pub fn group_nodes<S: BuildHasher>(
             source: nodes[source],
             sink: nodes[sink],
         };
-        // A cable entirely inside one collapsed group has nothing to draw
-        // between; cables that merely share endpoints collapse into one arrow,
-        // which is where the drawn-edge reduction comes from (design D3).
         if matches!(
             (edge.source, edge.sink),
             (ViewNode::Group(a), ViewNode::Group(b)) if a == b
@@ -329,12 +404,7 @@ pub fn group_nodes<S: BuildHasher>(
             edges.push(edge);
         }
     }
-
-    GroupedView {
-        groups,
-        nodes,
-        edges,
-    }
+    edges
 }
 
 /// Whether two nodes are interchangeable copies of one circuit type.

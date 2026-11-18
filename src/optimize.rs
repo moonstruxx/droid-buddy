@@ -342,45 +342,52 @@ fn evaluate_order(order: &[usize], eval: &EvalCtx<'_>) -> LatencySummary {
 /// (D2).
 fn cmp_summaries(a: &LatencySummary, b: &LatencySummary, objective: Objective) -> Ordering {
     match objective {
-        Objective::MinSum => a
-            .avg
-            .total_cmp(&b.avg)
-            .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
-            .then_with(|| a.max.total_cmp(&b.max)),
-        Objective::MinMax => a
-            .max
-            .total_cmp(&b.max)
-            .then_with(|| a.avg.total_cmp(&b.avg))
-            .then_with(|| a.back_edge_count.cmp(&b.back_edge_count)),
-        Objective::Weighted(w) => {
-            let w = if w.is_finite() {
-                w.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            if w == 0.0 {
-                return a
-                    .avg
-                    .total_cmp(&b.avg)
-                    .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
-                    .then_with(|| a.max.total_cmp(&b.max));
-            }
-            if w == 1.0 {
-                return a
-                    .max
-                    .total_cmp(&b.max)
-                    .then_with(|| a.avg.total_cmp(&b.avg))
-                    .then_with(|| a.back_edge_count.cmp(&b.back_edge_count));
-            }
-            let w = f64::from(w);
-            let blended_a = (1.0 - w) * f64::from(a.avg) + w * f64::from(a.max);
-            let blended_b = (1.0 - w) * f64::from(b.avg) + w * f64::from(b.max);
-            blended_a
-                .total_cmp(&blended_b)
-                .then_with(|| a.avg.total_cmp(&b.avg))
-                .then_with(|| a.max.total_cmp(&b.max))
-                .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
-        }
+        Objective::MinSum => cmp_min_sum(a, b),
+        Objective::MinMax => cmp_min_max(a, b),
+        Objective::Weighted(w) => cmp_weighted(a, b, blend_weight(w)),
+    }
+}
+
+/// `MinSum` order: total average first, then back edges, then the maximum.
+fn cmp_min_sum(a: &LatencySummary, b: &LatencySummary) -> Ordering {
+    a.avg
+        .total_cmp(&b.avg)
+        .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
+        .then_with(|| a.max.total_cmp(&b.max))
+}
+
+/// `MinMax` order: the bottleneck first, then the average, then back edges.
+fn cmp_min_max(a: &LatencySummary, b: &LatencySummary) -> Ordering {
+    a.max
+        .total_cmp(&b.max)
+        .then_with(|| a.avg.total_cmp(&b.avg))
+        .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
+}
+
+/// `Weighted` order over the blend `(1−w)·avg + w·max`; the `w = 0` and `w = 1`
+/// boundaries delegate to the pure comparators so the ordering is identical there.
+fn cmp_weighted(a: &LatencySummary, b: &LatencySummary, weight: f64) -> Ordering {
+    if weight == 0.0 {
+        return cmp_min_sum(a, b);
+    }
+    if weight == 1.0 {
+        return cmp_min_max(a, b);
+    }
+    let blended_a = (1.0 - weight) * f64::from(a.avg) + weight * f64::from(a.max);
+    let blended_b = (1.0 - weight) * f64::from(b.avg) + weight * f64::from(b.max);
+    blended_a
+        .total_cmp(&blended_b)
+        .then_with(|| a.avg.total_cmp(&b.avg))
+        .then_with(|| a.max.total_cmp(&b.max))
+        .then_with(|| a.back_edge_count.cmp(&b.back_edge_count))
+}
+
+/// The blend weight clamped to `[0, 1]`, with non-finite treated as `0.0`.
+fn blend_weight(w: f32) -> f64 {
+    if w.is_finite() {
+        f64::from(w.clamp(0.0, 1.0))
+    } else {
+        0.0
     }
 }
 
@@ -695,6 +702,26 @@ fn search_local(
     search_local_with_budget(domains, sections, eval, objective, SEARCH_STEPS)
 }
 
+/// Start from the seeded order, but never worse than the identity order: the
+/// identity is always a candidate (design D1), so a bounded search can only
+/// improve on the original.
+fn seed_best_of_seed_and_identity(
+    seed: &[usize],
+    section_count: usize,
+    eval: &EvalCtx<'_>,
+    objective: Objective,
+) -> (Vec<usize>, LatencySummary) {
+    let mut best_order = seed.to_vec();
+    let mut best_summary = evaluate_order(&best_order, eval);
+    let identity: Vec<usize> = (0..section_count).collect();
+    let identity_summary = evaluate_order(&identity, eval);
+    if better(&identity_summary, &best_summary, objective) {
+        best_order = identity;
+        best_summary = identity_summary;
+    }
+    (best_order, best_summary)
+}
+
 /// Heuristic search: seeded from the FAS-indegree rank (producers before
 /// consumers, design D1), then first-improvement hill-climbing over safe swaps
 /// within each domain, bounded by the caller's `budget_limit`. Tracks the best
@@ -708,14 +735,8 @@ fn search_local_with_budget(
     budget_limit: usize,
 ) -> (Vec<usize>, LatencySummary) {
     let mut order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
-    let mut best_order = order.clone();
-    let mut best_summary = evaluate_order(&best_order, eval);
-    let identity: Vec<usize> = (0..sections.len()).collect();
-    let identity_summary = evaluate_order(&identity, eval);
-    if better(&identity_summary, &best_summary, objective) {
-        best_order = identity;
-        best_summary = identity_summary;
-    }
+    let (mut best_order, mut best_summary) =
+        seed_best_of_seed_and_identity(&order, sections.len(), eval, objective);
     let mut budget = budget_limit;
     loop {
         let mut improved = false;
@@ -874,14 +895,8 @@ fn search_vns_with_budget(
     let _ = &coarse_derived; // exercised for intra-group zero-cost filtering
                              // --- uncoarsen: fine seed ---
     let order = fas_indegree_seed(domains, sections, &eval.derived.edges, &eval.derived.nodes);
-    let mut best_order = order.clone();
-    let mut best_summary = evaluate_order(&best_order, eval);
-    let identity: Vec<usize> = (0..sections.len()).collect();
-    let identity_summary = evaluate_order(&identity, eval);
-    if better(&identity_summary, &best_summary, objective) {
-        best_order = identity;
-        best_summary = identity_summary;
-    }
+    let (mut best_order, mut best_summary) =
+        seed_best_of_seed_and_identity(&order, sections.len(), eval, objective);
     let mut current = best_order.clone();
     let mut budget = budget_limit;
     let mut radius = domains

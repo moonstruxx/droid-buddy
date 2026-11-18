@@ -339,61 +339,63 @@ pub struct SelectState {
     pub hide_unselected: bool,
 }
 
-fn classify_for_status(section: &crate::patch::IniSection, opts: &GraphOptions) -> u8 {
-    let raw = section
+/// First entry value stored under `key`, matched case-insensitively.
+fn entry_value<'a>(section: &'a crate::patch::IniSection, key: &str) -> Option<&'a str> {
+    section
         .entries
         .iter()
-        .find(|(k, _)| k.to_lowercase() == "select")
-        .map(|(_, v)| v.as_str());
-    let Some(raw) = raw else {
+        .find(|(k, _)| k.to_lowercase() == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// Root signal a `select` value names: the whole value must be exactly one
+/// hardware register reference, or one `_cable` internal token.
+fn select_root(trimmed: &str) -> Option<String> {
+    let regs = crate::patch::scan_register_refs(trimmed);
+    if regs.len() == 1 && regs[0].0 == trimmed {
+        return Some(regs[0].0.clone());
+    }
+    if trimmed.starts_with('_') {
+        let cables = crate::patch::scan_internal_tokens(trimmed);
+        if cables.len() == 1 && cables[0] == trimmed {
+            return Some(cables[0].clone());
+        }
+    }
+    None
+}
+
+/// Status of a resolved `select` value against the assumed state: 0 selected,
+/// 1 unselected, 2 unknown.
+fn status_for_value(state: &HashMap<String, f64>, root: &str, value: f64) -> u8 {
+    match state.get(root) {
+        Some(assumed) if (value - assumed).abs() < 1e-9 => 0,
+        Some(_) => 1,
+        None => 2,
+    }
+}
+
+fn classify_for_status(section: &crate::patch::IniSection, opts: &GraphOptions) -> u8 {
+    let Some(raw) = entry_value(section, "select") else {
         return 0;
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return 2;
     }
-    let root: Option<String> = {
-        let regs = crate::patch::scan_register_refs(trimmed);
-        if regs.len() == 1 && regs[0].0 == trimmed {
-            Some(regs[0].0.clone())
-        } else if trimmed.starts_with('_') {
-            let cables = crate::patch::scan_internal_tokens(trimmed);
-            if cables.len() == 1 && cables[0] == trimmed {
-                Some(cables[0].clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-    let Some(root) = root else {
+    let Some(root) = select_root(trimmed) else {
         return 2;
     };
-    if let Some(selectat_raw) = section
-        .entries
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "selectat")
-        .map(|(_, v)| v.trim())
-    {
-        if let Some(v) = crate::expression::evaluate_droid_expr(selectat_raw, &HashMap::new())
-            .or_else(|| selectat_raw.parse::<f64>().ok())
-        {
-            return match opts.state.get(&root) {
-                Some(a) if (v - a).abs() < 1e-9 => 0,
-                Some(_) => 1,
-                None => 2,
-            };
+    if let Some(selectat_raw) = entry_value(section, "selectat").map(str::trim) {
+        let selectat = crate::expression::evaluate_droid_expr(selectat_raw, &HashMap::new())
+            .or_else(|| selectat_raw.parse::<f64>().ok());
+        if let Some(value) = selectat {
+            return status_for_value(&opts.state, &root, value);
         }
     }
     let Some(eval) = crate::expression::evaluate_droid_expr(trimmed, &opts.state) else {
         return 2;
     };
-    match opts.state.get(&root) {
-        Some(a) if (eval - a).abs() < 1e-9 => 0,
-        Some(_) => 1,
-        None => 2,
-    }
+    status_for_value(&opts.state, &root, eval)
 }
 
 /// Grabbed-node state for a graph drag (design D1/D7). Holds the index of the
