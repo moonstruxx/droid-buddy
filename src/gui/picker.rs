@@ -18,7 +18,7 @@
 use egui::{Context, Painter, Pos2, Rect, Vec2};
 
 use crate::app::{is_picker_parent_entry, picker_entry_display_name, App};
-use crate::theme::Color;
+use crate::theme::{Color, Theme};
 
 /// Wheel motion below this many points is treated as no scroll (trackpad
 /// jitter), so a deliberate wheel notch moves the list exactly one row.
@@ -26,6 +26,8 @@ const PICKER_WHEEL_EPSILON: f32 = 0.5;
 /// Dim factor applied to non-selectable (non-`.ini`) file rows, matching the
 /// selected-row background's alpha-dim idiom.
 const PICKER_DIM_FACTOR: f32 = 0.55;
+/// One picker row's height in points.
+const PICKER_ROW_H: f32 = 16.0;
 
 /// One picker row for painting: the display label (★-prefixed for favourites,
 /// `..` sentinel untouched), its favourite/dir flags, and whether it is the
@@ -238,19 +240,41 @@ pub(super) fn paint_picker(
         return PickerFrame::default();
     };
     let theme = crate::theme::active();
+    let picker_rect = picker_rect(canvas);
+    paint_picker_header(painter, picker_rect, theme, spec);
 
-    // Centered overlay: 70% width, 50% height, at least 40×20, centered.
+    let inner = picker_rect.shrink(4.0);
+    let content_top = picker_content_top(painter, picker_rect, inner, theme, spec);
+    let (capacity, separator) = picker_capacity(inner, content_top, spec);
+    // Viewport scrolling: the list windows around the highlighted row so the
+    // selection is always visible, however long the directory listing is.
+    let layout = RowLayout {
+        inner,
+        content_top,
+        first: scroll_window(spec.selected, spec.rows.len(), capacity),
+        capacity,
+        separator,
+    };
+    let row_rects = paint_picker_rows(painter, theme, spec, layout);
+    ctx.input(|i| picker_frame(i, &row_rects))
+}
+
+/// The centered overlay rect: 70% width, 50% height, at least 40×20.
+fn picker_rect(canvas: Vec2) -> Rect {
     let width = (canvas.x * 0.70).clamp(40.0, canvas.x - 4.0).max(40.0);
     let height = (canvas.y * 0.50).clamp(20.0, canvas.y - 4.0).max(20.0);
-    let picker_rect = Rect::from_min_size(
+    Rect::from_min_size(
         Pos2::new((canvas.x - width) / 2.0, (canvas.y - height) / 2.0),
         Vec2::new(width, height),
-    );
+    )
+}
 
-    // Background + border (muted bg, accent border, title).
-    painter.rect_filled(picker_rect, 0.0, rgb(theme.muted));
+/// Background + border (muted bg, accent border) with the title and the picker
+/// directory subtitle under it, when each is provided.
+fn paint_picker_header(painter: &Painter, rect: Rect, theme: &Theme, spec: &PickerSpec) {
+    painter.rect_filled(rect, 0.0, rgb(theme.muted));
     painter.rect(
-        picker_rect,
+        rect,
         0.0,
         egui::Color32::TRANSPARENT,
         egui::Stroke::new(1.0, rgb(theme.accent)),
@@ -258,62 +282,104 @@ pub(super) fn paint_picker(
     );
     if !spec.title.is_empty() {
         painter.text(
-            picker_rect.min + egui::vec2(6.0, 3.0),
+            rect.min + egui::vec2(6.0, 3.0),
             egui::Align2::LEFT_TOP,
             &spec.title,
             egui::FontId::proportional(12.0),
             rgb(theme.accent),
         );
     }
-    // Picker directory subtitle under title, if provided.
-    if !spec.picker_dir.is_empty() && picker_rect.height() >= 24.0 {
+    if !spec.picker_dir.is_empty() && rect.height() >= 24.0 {
         painter.text(
-            picker_rect.min + egui::vec2(6.0, 18.0),
+            rect.min + egui::vec2(6.0, 18.0),
             egui::Align2::LEFT_TOP,
             &spec.picker_dir,
             egui::FontId::proportional(10.0),
             rgb(theme.text),
         );
     }
+}
 
-    let inner = picker_rect.shrink(4.0);
-    let content_top = if let Some(filter) = &spec.filter {
-        // Filter line under the dir subtitle (or in its slot when there is
-        // no dir line). Row content starts below it only in this branch, so
-        // `filter: None` keeps the pre-filter layout byte-identical.
-        let filter_y = if spec.picker_dir.is_empty() {
-            18.0
+/// The y of the first row: below the filter line when there is one, in the
+/// subtitle's slot or below it otherwise. `filter: None` keeps the pre-filter
+/// layout byte-identical.
+fn picker_content_top(
+    painter: &Painter,
+    rect: Rect,
+    inner: Rect,
+    theme: &Theme,
+    spec: &PickerSpec,
+) -> f32 {
+    let Some(filter) = &spec.filter else {
+        return if spec.picker_dir.is_empty() {
+            inner.min.y + 16.0
         } else {
-            31.0
+            inner.min.y + 30.0
         };
-        painter.text(
-            picker_rect.min + egui::vec2(6.0, filter_y),
-            egui::Align2::LEFT_TOP,
-            format!("filter: {filter}"),
-            egui::FontId::proportional(10.0),
-            rgb(theme.text),
-        );
-        inner.min.y + (filter_y - 4.0) + 16.0
-    } else if spec.picker_dir.is_empty() {
-        inner.min.y + 16.0
-    } else {
-        inner.min.y + 30.0
     };
-    let row_h = 16.0;
-    // Viewport scrolling: the list windows around the highlighted row so the
-    // selection is always visible, however long the directory listing is. One
-    // row is reserved for the favourites separator so it never pushes the last
-    // entry out of the viewport.
-    let capacity_raw = ((inner.max.y - content_top) / row_h).floor().max(0.0) as usize;
+    // Filter line under the dir subtitle (or in its slot when there is no dir
+    // line). Row content starts below it only in this branch.
+    let filter_y = if spec.picker_dir.is_empty() {
+        18.0
+    } else {
+        31.0
+    };
+    painter.text(
+        rect.min + egui::vec2(6.0, filter_y),
+        egui::Align2::LEFT_TOP,
+        format!("filter: {filter}"),
+        egui::FontId::proportional(10.0),
+        rgb(theme.text),
+    );
+    inner.min.y + (filter_y - 4.0) + 16.0
+}
+
+/// How many rows fit under `content_top` (at least one), and whether the
+/// favourites separator row is drawn in that window. One row is reserved for
+/// the separator so it never pushes the last entry out of the viewport.
+fn picker_capacity(inner: Rect, content_top: f32, spec: &PickerSpec) -> (usize, bool) {
+    let capacity_raw = ((inner.max.y - content_top) / PICKER_ROW_H)
+        .floor()
+        .max(0.0) as usize;
     let separator = spec.has_favourites && spec.fav_count < spec.rows.len();
     let capacity = capacity_raw.saturating_sub(usize::from(separator)).max(1);
-    let first = scroll_window(spec.selected, spec.rows.len(), capacity);
+    (capacity, separator)
+}
+
+/// The windowed row list's layout: the box it paints into, the y of its first
+/// row, the first row index shown, how many fit, and whether the favourites
+/// separator rides along.
+#[derive(Clone, Copy)]
+struct RowLayout {
+    inner: Rect,
+    content_top: f32,
+    first: usize,
+    capacity: usize,
+    separator: bool,
+}
+
+/// Paint the windowed rows and return the (index, rect) pairs the frame report
+/// hit-tests against, recording the real row index rather than the on-screen
+/// position so hit-testing stays index-correct while the list is windowed.
+fn paint_picker_rows(
+    painter: &Painter,
+    theme: &Theme,
+    spec: &PickerSpec,
+    layout: RowLayout,
+) -> Vec<(usize, Rect)> {
+    let RowLayout {
+        inner,
+        content_top,
+        first,
+        capacity,
+        separator,
+    } = layout;
     let mut row_y = content_top;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
 
     for (idx, row) in spec.rows.iter().enumerate().skip(first).take(capacity) {
         // Separator between favourites and listing.
-        if separator && idx == spec.fav_count && row_y + row_h <= inner.max.y {
+        if separator && idx == spec.fav_count && row_y + PICKER_ROW_H <= inner.max.y {
             painter.text(
                 Pos2::new(inner.min.x + 4.0, row_y),
                 egui::Align2::LEFT_TOP,
@@ -321,9 +387,9 @@ pub(super) fn paint_picker(
                 egui::FontId::proportional(10.0),
                 rgb(theme.text),
             );
-            row_y += row_h;
+            row_y += PICKER_ROW_H;
         }
-        if row_y + row_h > inner.max.y {
+        if row_y + PICKER_ROW_H > inner.max.y {
             break;
         }
         let is_selected = idx == spec.selected;
@@ -331,53 +397,60 @@ pub(super) fn paint_picker(
         let text = format!("{}{}", prefix, row.label);
 
         let bg = if is_selected {
-            let mut tint = rgb(theme.muted);
-            tint = egui::Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 90);
-            Some(tint)
+            let tint = rgb(theme.muted);
+            Some(egui::Color32::from_rgba_unmultiplied(
+                tint.r(),
+                tint.g(),
+                tint.b(),
+                90,
+            ))
         } else {
             None
         };
         let rect = Rect::from_min_size(
             Pos2::new(inner.min.x + 2.0, row_y),
-            Vec2::new(inner.width() - 4.0, row_h),
+            Vec2::new(inner.width() - 4.0, PICKER_ROW_H),
         );
         // Background for selected row.
         if let Some(tint) = bg {
             painter.rect_filled(rect, 0.0, tint);
         }
-        let base_fg = if row.is_favourite {
-            if row.is_dir {
-                theme.picker_fav_dir
-            } else {
-                theme.picker_fav_file
-            }
-        } else {
-            theme.text
-        };
-        // Non-selectable file rows (anything that is not a `.ini` or a
-        // directory) dim so the selectable patch files stand out; the same
-        // alpha-dim idiom as the selected-row background, and favourite
-        // colours are left untouched.
-        let mut fg = rgb(base_fg);
-        if !row.is_favourite && !row.is_selectable {
-            fg = fg.gamma_multiply(PICKER_DIM_FACTOR);
-        }
-        // Selected keeps bold emphasis; favourite colour stays.
-        let font = egui::FontId::proportional(11.0);
         painter.text(
             Pos2::new(inner.min.x + 6.0, row_y),
             egui::Align2::LEFT_TOP,
             text,
-            font,
-            fg,
+            egui::FontId::proportional(11.0),
+            row_foreground(theme, row),
         );
-        // The real row index is recorded, not the on-screen position, so hover
-        // and click hit-testing stay index-correct while the list is windowed.
         row_rects.push((idx, rect));
-        row_y += row_h;
+        row_y += PICKER_ROW_H;
     }
+    row_rects
+}
 
-    ctx.input(|i| picker_frame(i, &row_rects))
+/// The colour token a row starts from: favourite dirs and files carry their own
+/// tokens, everything else the text token.
+fn picker_row_token(theme: &Theme, row: &PickerRow) -> Color {
+    if row.is_favourite {
+        if row.is_dir {
+            theme.picker_fav_dir
+        } else {
+            theme.picker_fav_file
+        }
+    } else {
+        theme.text
+    }
+}
+
+/// Row foreground: non-selectable file rows (anything that is not a `.ini` or a
+/// directory) dim so the selectable patch files stand out — the same alpha-dim
+/// idiom as the selected-row background, with favourite colours left untouched.
+fn row_foreground(theme: &Theme, row: &PickerRow) -> egui::Color32 {
+    let mut fg = rgb(picker_row_token(theme, row));
+    if !row.is_favourite && !row.is_selectable {
+        fg = fg.gamma_multiply(PICKER_DIM_FACTOR);
+    }
+    fg
 }
 
 /// Raw wheel delta (points) accumulated from this frame's events. egui 0.36

@@ -92,21 +92,13 @@ pub(crate) fn paint_validation_modal(
         return ValidationFrame::default();
     };
     let theme = crate::theme::active();
-    let width = (canvas.x * 0.60)
-        .clamp(40.0, 80.0 * 10.0)
-        .min(canvas.x - 8.0)
-        .max(24.0 * 8.0);
-    let height = (canvas.y * 0.70)
-        .clamp(12.0 * 16.0, 40.0 * 16.0)
-        .min(canvas.y - 8.0);
-    // Fallback to canvas-relative sizing similar to ui.rs centered logic.
+    // Canvas-relative centred sizing, the same logic `ui.rs` used.
     let cw = (canvas.x * 0.60).clamp(24.0 * 6.0, 80.0 * 6.0);
     let ch = (canvas.y * 0.70).clamp(10.0 * 12.0, 40.0 * 12.0);
     let rect = Rect::from_center_size(
         Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
         Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
     );
-    let _ = (width, height);
     painter.rect_filled(rect, 8.0, rgb(theme.muted));
     painter.rect(
         rect,
@@ -180,6 +172,31 @@ pub(crate) fn paint_validation_modal(
     ValidationFrame::default()
 }
 
+// ── Shared modal frame ───────────────────────────────────────────────────────
+
+/// The centred modal panel the select menu and the help modal share: a muted
+/// fill inside the validation-modal border, 70 % of the canvas height (clamped
+/// to the row band) and the caller's width, both kept inside the canvas by a
+/// 4 pt margin. Returns the panel rect the caller paints its title and rows
+/// into.
+fn modal_frame(painter: &Painter, canvas: Vec2, width: f32) -> Rect {
+    let t = crate::theme::active();
+    let ch = (canvas.y * 0.70).clamp(10.0 * 12.0, 40.0 * 12.0);
+    let rect = Rect::from_center_size(
+        Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
+        Vec2::new(width.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
+    );
+    painter.rect_filled(rect, 8.0, rgb(t.muted));
+    painter.rect(
+        rect,
+        8.0,
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
+        egui::StrokeKind::Inside,
+    );
+    rect
+}
+
 // ── Select-state menu ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -211,19 +228,7 @@ pub(super) fn paint_select_menu(
     };
     let t = crate::theme::active();
     let cw = (canvas.x * 0.60).clamp(24.0 * 6.0, 80.0 * 6.0);
-    let ch = (canvas.y * 0.70).clamp(10.0 * 12.0, 40.0 * 12.0);
-    let rect = Rect::from_center_size(
-        Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
-        Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
-    );
-    painter.rect_filled(rect, 8.0, rgb(t.muted));
-    painter.rect(
-        rect,
-        8.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
-        egui::StrokeKind::Inside,
-    );
+    let rect = modal_frame(painter, canvas, cw);
     painter.text(
         rect.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
@@ -276,19 +281,7 @@ pub(super) fn paint_select_menu(
 pub(super) fn paint_help(painter: &Painter, canvas: Vec2, view: crate::help::HelpView) {
     let t = crate::theme::active();
     let cw = (canvas.x * 0.50).clamp(24.0 * 6.0, 80.0 * 6.0);
-    let ch = (canvas.y * 0.70).clamp(10.0 * 12.0, 40.0 * 12.0);
-    let rect = Rect::from_center_size(
-        Pos2::new(canvas.x / 2.0, canvas.y / 2.0),
-        Vec2::new(cw.min(canvas.x - 8.0), ch.min(canvas.y - 8.0)),
-    );
-    painter.rect_filled(rect, 8.0, rgb(t.muted));
-    painter.rect(
-        rect,
-        8.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(1.5, rgb(t.validation_modal_border)),
-        egui::StrokeKind::Inside,
-    );
+    let rect = modal_frame(painter, canvas, cw);
     painter.text(
         rect.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,

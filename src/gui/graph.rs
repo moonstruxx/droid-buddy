@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use super::{MarqueeSelection, WindowFrame};
 use crate::app::App;
 use crate::diff::DiffReport;
-use crate::graph::{Graph, GraphNode, NodeKind};
+use crate::graph::{Graph, GraphEdge, GraphNode, NodeKind};
 use crate::graph_group::{Group, GroupedView, ViewEdge, ViewNode};
 use crate::graph_render::{
     CableKind, ClusterSpec, EdgeDiffState, EdgeSpec, GraphCamera, NodeSpec, SceneSpec, WorldBounds,
@@ -2206,12 +2206,9 @@ fn build_edges(
     isolate: Option<&Isolate>,
     edge_visible: impl Fn(usize) -> bool,
 ) -> BuiltEdges {
-    let SceneStyle { app, theme, zoom } = style;
-    let latency = if app.latency_coloring {
-        graph.latency.as_ref()
-    } else {
-        None
-    };
+    let SceneStyle { app, zoom, .. } = style;
+    // Latency colouring only applies while the app has it enabled.
+    let latency = graph.latency.as_ref().filter(|_| app.latency_coloring);
     let mut node_dirs: Vec<Option<OptDir>> = vec![None; built.nodes.len()];
     let mut edges = Vec::with_capacity(graph.edges.len());
     let mut drawn_pairs: HashSet<ViewEdge> = HashSet::new();
@@ -2219,63 +2216,20 @@ fn build_edges(
         if !edge_visible(i) {
             continue;
         }
-        let Some(s) = edge.source_index(&graph.nodes) else {
+        let Some(cable) = drawn_cable(graph, edge, groups, &mut drawn_pairs) else {
             continue;
         };
-        let Some(t) = edge.sink_index(&graph.nodes) else {
+        let Some(anchor) = edge_geometry(built, &cable) else {
             continue;
         };
-        let (source, sink) = match groups {
-            Some(view) => {
-                let (source, sink) = (view.nodes[s], view.nodes[t]);
-                // Cables entirely inside one collapsed group have nothing to
-                // draw between; the group's own body is not a loop.
-                if matches!((source, sink), (ViewNode::Group(a), ViewNode::Group(b)) if a == b) {
-                    continue;
-                }
-                if !drawn_pairs.insert(ViewEdge { source, sink }) {
-                    continue; // an earlier cable already owns this drawn pair
-                }
-                (source, sink)
-            }
-            None => (ViewNode::Individual(s), ViewNode::Individual(t)),
-        };
-        let (Some(&si), Some(&ti)) = (built.bodies.get(&source), built.bodies.get(&sink)) else {
-            continue;
-        };
-        let start = (
-            built.nodes[si].x + built.nodes[si].w,
-            built.nodes[si].y + built.nodes[si].h / 2.0,
-        );
-        let end = (
-            built.nodes[ti].x,
-            built.nodes[ti].y + built.nodes[ti].h / 2.0,
-        );
-        let Some(ctrl) = edge_ctrl(start, end) else {
-            continue;
-        };
-
-        let incident_disabled = app.disabled_circuits.contains(&graph.nodes[s].id);
-        let incident_unselected = graph.not_selected.contains(&graph.nodes[s].section_index)
-            || graph.not_selected.contains(&graph.nodes[t].section_index);
-        // An isolate's dimmed neighbours (design D4) dim their cables too.
-        let incident_isolated = isolate.is_some_and(|iso| iso.dimmed(s) || iso.dimmed(t));
-        let incident_dimmed = incident_disabled || incident_unselected || incident_isolated;
+        let dimmed = incident_dimmed(app, graph, &cable, isolate);
         let has_error = graph
             .validation
             .iter()
             .any(|issue| issue.cable == edge.cable);
         let kind = crate::graph_render::cable_kind(graph, &edge.cable);
         let opt_dir = edge_opt_dir(app, graph, i, &edge.cable);
-        if let Some(dir) = opt_dir {
-            for &j in &[si, ti] {
-                match (node_dirs[j], dir) {
-                    (Some(OptDir::Worse), _) | (Some(OptDir::Better), OptDir::Better) => {}
-                    (None, d) => node_dirs[j] = Some(d),
-                    (Some(OptDir::Better), OptDir::Worse) => node_dirs[j] = Some(OptDir::Worse),
-                }
-            }
-        }
+        record_node_dirs(&mut node_dirs, anchor.source, anchor.sink, opt_dir);
         let diff_state = edge_diff_state(diff, &edge.cable);
         let (ramp, back_edge) = edge_ramp(latency, i);
 
@@ -2284,43 +2238,31 @@ fn build_edges(
             .as_ref()
             .or(app.influence.as_ref())
             .is_some_and(|s| s.influenced_edges.contains(&edge.cable));
-        let mut color = edge_color(
+        let color = edge_preview_color(
             style,
             EdgeFlags {
                 error: has_error,
-                dimmed: incident_dimmed,
+                dimmed,
                 influenced,
                 diff: diff_state,
                 ramp,
                 register: edge.cable.starts_with("_REG:"),
                 kind,
             },
+            opt_dir,
         );
-        // Optimizer-preview diff overrides the kind/latency color (but sits
-        // below error/influence/disabled above): latency got worse = red,
-        // better = blue (optimizer-click-focus).
-        if let Some(dir) = opt_dir {
-            color = match dir {
-                OptDir::Worse => theme.rgb(theme.graph_edge_diff_before),
-                OptDir::Better => theme.rgb(theme.graph_edge_diff_after),
-            };
-        }
 
-        built.nodes[si].output_port = true;
-        built.nodes[ti].input_port = true;
+        built.nodes[anchor.source].output_port = true;
+        built.nodes[anchor.sink].input_port = true;
         edges.push(EdgeSpec {
-            start,
-            end,
-            ctrl,
+            start: anchor.start,
+            end: anchor.end,
+            ctrl: anchor.ctrl,
             color,
-            width: if influenced {
-                ((EDGE_WIDTH + 1.0) * zoom).max(0.75)
-            } else {
-                (EDGE_WIDTH * zoom).max(0.5)
-            },
+            width: edge_width(zoom, influenced),
             kind,
             error: has_error,
-            dim: incident_dimmed || (app.influence.is_some() && !influenced),
+            dim: edge_dim(app, dimmed, influenced),
             diff: diff_state,
             latency: ramp.map(|ramp_stop| crate::graph_render::EdgeLatency {
                 ramp_stop,
@@ -2331,6 +2273,164 @@ fn build_edges(
     BuiltEdges { edges, node_dirs }
 }
 
+/// One cable resolved onto the drawn graph: the model nodes it connects (for
+/// the styling lookups) and the view nodes it draws between (for the bodies).
+struct DrawnCable {
+    source_model: usize,
+    sink_model: usize,
+    source: ViewNode,
+    sink: ViewNode,
+}
+
+/// Resolve one cable onto the drawn bodies through the grouped view (design
+/// D3): `None` when an endpoint is not in the graph, the cable lands inside one
+/// collapsed group, or an earlier cable already owns the drawn pair — the first
+/// cable reaching a pair owns it, so a stack's aggregate fan-out costs one
+/// edge, not one per member.
+fn drawn_cable(
+    graph: &Graph,
+    edge: &GraphEdge,
+    groups: Option<&GroupedView>,
+    drawn_pairs: &mut HashSet<ViewEdge>,
+) -> Option<DrawnCable> {
+    let source_model = edge.source_index(&graph.nodes)?;
+    let sink_model = edge.sink_index(&graph.nodes)?;
+    let Some(view) = groups else {
+        return Some(DrawnCable {
+            source_model,
+            sink_model,
+            source: ViewNode::Individual(source_model),
+            sink: ViewNode::Individual(sink_model),
+        });
+    };
+    let (source, sink) = (view.nodes[source_model], view.nodes[sink_model]);
+    // Cables entirely inside one collapsed group have nothing to draw
+    // between; the group's own body is not a loop.
+    if matches!((source, sink), (ViewNode::Group(a), ViewNode::Group(b)) if a == b) {
+        return None;
+    }
+    drawn_pairs
+        .insert(ViewEdge { source, sink })
+        .then_some(DrawnCable {
+            source_model,
+            sink_model,
+            source,
+            sink,
+        })
+}
+
+/// Drawn geometry of one cable: the node indices whose ports it marks, plus the
+/// Bézier endpoints and control point the spec carries.
+struct EdgeGeometry {
+    source: usize,
+    sink: usize,
+    start: (f32, f32),
+    end: (f32, f32),
+    ctrl: (f32, f32),
+}
+
+/// Project one drawn cable onto its source/sink bodies: from the source body's
+/// right edge to the sink body's left edge. `None` when either body was not
+/// drawn, or the cable is degenerate (coincident bodies).
+fn edge_geometry(built: &BuiltNodes, cable: &DrawnCable) -> Option<EdgeGeometry> {
+    let source = *built.bodies.get(&cable.source)?;
+    let sink = *built.bodies.get(&cable.sink)?;
+    let start = (
+        built.nodes[source].x + built.nodes[source].w,
+        built.nodes[source].y + built.nodes[source].h / 2.0,
+    );
+    let end = (
+        built.nodes[sink].x,
+        built.nodes[sink].y + built.nodes[sink].h / 2.0,
+    );
+    let ctrl = edge_ctrl(start, end)?;
+    Some(EdgeGeometry {
+        source,
+        sink,
+        start,
+        end,
+        ctrl,
+    })
+}
+
+/// Whether a cable touching `cable`'s endpoints reads as dimmed: a disabled
+/// circuit, an unselected section, or an isolate's dimmed neighbour, which dims
+/// its cables too (design D4).
+fn incident_dimmed(
+    app: &App,
+    graph: &Graph,
+    cable: &DrawnCable,
+    isolate: Option<&Isolate>,
+) -> bool {
+    let (source, sink) = (cable.source_model, cable.sink_model);
+    let disabled = app.disabled_circuits.contains(&graph.nodes[source].id);
+    let unselected = graph
+        .not_selected
+        .contains(&graph.nodes[source].section_index)
+        || graph
+            .not_selected
+            .contains(&graph.nodes[sink].section_index);
+    let isolated = isolate.is_some_and(|iso| iso.dimmed(source) || iso.dimmed(sink));
+    disabled || unselected || isolated
+}
+
+/// Accumulate one edge's optimizer direction onto the two ports it touches.
+/// Worse wins over better, so a regression mark never disappears under an
+/// improvement mark on a sibling edge.
+fn record_node_dirs(
+    node_dirs: &mut [Option<OptDir>],
+    source: usize,
+    sink: usize,
+    dir: Option<OptDir>,
+) {
+    let Some(dir) = dir else {
+        return;
+    };
+    for &j in &[source, sink] {
+        match (node_dirs[j], dir) {
+            (Some(OptDir::Worse), _) | (Some(OptDir::Better), OptDir::Better) => {}
+            (None, d) => node_dirs[j] = Some(d),
+            (Some(OptDir::Better), OptDir::Worse) => node_dirs[j] = Some(OptDir::Worse),
+        }
+    }
+}
+
+/// The edge's stroke colour: the precedence chain, then the optimizer-preview
+/// diff override (which sits below error/influence/disabled): latency got worse
+/// = red, better = blue (optimizer-click-focus).
+fn edge_preview_color(
+    style: SceneStyle<'_>,
+    flags: EdgeFlags,
+    opt_dir: Option<OptDir>,
+) -> (u8, u8, u8) {
+    let color = edge_color(style, flags);
+    let Some(dir) = opt_dir else {
+        return color;
+    };
+    let theme = style.theme;
+    match dir {
+        OptDir::Worse => theme.rgb(theme.graph_edge_diff_before),
+        OptDir::Better => theme.rgb(theme.graph_edge_diff_after),
+    }
+}
+
+/// Stroke width of one cable: an influenced edge is one point wider, both
+/// scaled with the camera zoom and floored so the cable never vanishes.
+fn edge_width(zoom: f32, influenced: bool) -> f32 {
+    if influenced {
+        ((EDGE_WIDTH + 1.0) * zoom).max(0.75)
+    } else {
+        (EDGE_WIDTH * zoom).max(0.5)
+    }
+}
+
+/// Whether the cable is dimmed: incident dimming, or the dimmed rest of an
+/// influence.
+fn edge_dim(app: &App, dimmed: bool, influenced: bool) -> bool {
+    dimmed || (app.influence.is_some() && !influenced)
+}
+
+/// Optimizer-preview diff direction for one edge (optimizer-click-focus):
 /// Optimizer-preview diff direction for one edge (optimizer-click-focus):
 /// compare the current forward-loop latency against the captured file-order
 /// baseline by cable name. `None` when the diff is inactive or this edge is

@@ -968,7 +968,161 @@ fn publish_window_canvas(app: &mut App, canvas_px: (f32, f32)) {
     }
 }
 
+/// The graph gestures this frame's keyboard events map to. Read before
+/// `run_ui` consumes the input: keyboard events are one-shot in egui, so the
+/// raw events must be translated first.
+fn window_graph_keys(events: &[egui::Event]) -> Vec<WindowGraphKey> {
+    events.iter().filter_map(window_graph_key).collect()
+}
+
+/// The gesture one raw input event maps to, if any.
+fn window_graph_key(event: &egui::Event) -> Option<WindowGraphKey> {
+    match event {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => window_graph_key_for(*key, *modifiers),
+        _ => None,
+    }
+}
+
+/// Modifier-aware gesture mapping. `x`/`p`/`e`/`c` require no modifier held at
+/// all; `c` additionally accepts Shift, which refits. Ctrl+C quits in the DROID
+/// key dispatch before egui sees the event, and this guard still excludes
+/// ctrl/alt/command so the mapping never shadows the quit.
+fn window_graph_key_for(key: egui::Key, modifiers: egui::Modifiers) -> Option<WindowGraphKey> {
+    if no_modifiers(modifiers) {
+        return plain_window_graph_key(key);
+    }
+    // Design D3: `c` centers the pane camera, Shift+c refits against the pane
+    // size — mirror of the terminal graph keys.
+    if key == egui::Key::C && !modifiers.ctrl && !modifiers.alt && !modifiers.command {
+        return Some(WindowGraphKey::FitGraph);
+    }
+    None
+}
+
+/// Whether the event carries no modifier at all.
+fn no_modifiers(modifiers: egui::Modifiers) -> bool {
+    !(modifiers.shift || modifiers.ctrl || modifiers.alt || modifiers.command)
+}
+
+/// The unmodified gestures of the graph pane.
+fn plain_window_graph_key(key: egui::Key) -> Option<WindowGraphKey> {
+    match key {
+        egui::Key::X => Some(WindowGraphKey::ToggleProcessing),
+        egui::Key::P => Some(WindowGraphKey::TogglePin),
+        egui::Key::E => Some(WindowGraphKey::BeginEdit),
+        egui::Key::C => Some(WindowGraphKey::CenterGraph),
+        _ => None,
+    }
+}
+
+/// Snapshot the frame's pointer, wheel and key report for the loop (task 3.1).
+/// `sliders_panel` owns the pointer inside its rect, exactly like the canvas hit
+/// paths' early claim, and while `picker_open` the graph camera must not pan or
+/// zoom behind the modal that owns the wheel and the drag.
+fn window_frame_from_input(
+    i: &egui::InputState,
+    sliders_panel: Option<egui::Rect>,
+    picker_open: bool,
+    keys: Vec<WindowGraphKey>,
+    scene: Option<&SceneSpec>,
+) -> WindowFrame {
+    let pointer = i
+        .pointer
+        .latest_pos()
+        .map(|p| (p.x, p.y))
+        .filter(|&(px, py)| !sliders_panel.is_some_and(|rect| rect.contains(egui::pos2(px, py))));
+    // Task 3.2/3.3: middle-drag pans the shared camera, wheel zooms about the
+    // cursor, and an empty-canvas left drag selects nodes. `smooth_scroll_delta.y`
+    // is positive when scrolling down (zoom out), so the negation makes
+    // wheel-up zoom in.
+    let pan_delta = if !picker_open && i.pointer.middle_down() {
+        let d = i.pointer.delta();
+        (d.x, d.y)
+    } else {
+        (0.0, 0.0)
+    };
+    let zoom = if !picker_open && i.smooth_scroll_delta.y.abs() > f32::EPSILON {
+        let factor = ((-i.smooth_scroll_delta.y) * graph::ZOOM_SENSITIVITY).exp();
+        let factor = factor.clamp(1.0 / graph::MAX_ZOOM_STEP, graph::MAX_ZOOM_STEP);
+        pointer.map(|p| (factor, p))
+    } else {
+        None
+    };
+    WindowFrame {
+        pointer,
+        primary_pressed: i.pointer.primary_pressed(),
+        primary_down: i.pointer.primary_down(),
+        primary_released: i.pointer.primary_released(),
+        keys,
+        pan_delta,
+        zoom,
+        marquee: graph::frame_marquee(scene, i, sliders_panel),
+    }
+}
+
 impl EguiSurface {
+    /// Resize the wgpu surface config to `w`×`h` and reconfigure the surface.
+    fn configure_canvas(&mut self, w: u32, h: u32) {
+        self.canvas.config.width = w;
+        self.canvas.config.height = h;
+        self.canvas
+            .surface
+            .configure(&self.canvas.device, &self.canvas.config);
+    }
+
+    /// Mirror a window resize into the wgpu surface. main.rs forwards no window
+    /// events yet (task 3.1 wires them), so resizes are detected here.
+    fn sync_surface_size(&mut self, w: u32, h: u32) {
+        if (w, h) == self.size_px {
+            return;
+        }
+        self.size_px = (w, h);
+        self.configure_canvas(w, h);
+    }
+
+    /// This frame's egui input, with the window forced in as the single source
+    /// of truth for size and scale until real winit events flow.
+    fn take_raw_input(
+        &mut self,
+        window: &Window,
+        canvas: (f32, f32),
+        scale: f32,
+    ) -> egui::RawInput {
+        let mut raw_input = self.winit_state.take_egui_input(window);
+        raw_input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(canvas.0, canvas.1),
+        ));
+        raw_input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(scale);
+        raw_input
+    }
+
+    /// Acquire this frame's surface texture, reconfiguring a surface that
+    /// reports itself suboptimal (no longer matching its config) so the next
+    /// frame presents correctly. `None` on a lost/outdated/occluded surface.
+    fn acquire_surface_frame(&mut self, w: u32, h: u32) -> Option<wgpu::SurfaceTexture> {
+        match self.canvas.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => Some(frame),
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                self.configure_canvas(w, h);
+                Some(frame)
+            }
+            other => {
+                eprintln!("[warn] graph window frame acquire failed: {other:?}");
+                None
+            }
+        }
+    }
+
     /// Paint one egui frame into the window and present it, reporting the
     /// frame's input state (task 3.1) for the loop to map onto `App`
     /// mutations. Pointer positions are egui points; the scene is painted 1:1
@@ -991,77 +1145,18 @@ impl EguiSurface {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         let scale = window.scale_factor() as f32;
+        let canvas = (w as f32 / scale, h as f32 / scale);
 
         // The canvas is the visible graph pane: publish its size in points
         // every frame and seed the first-frame fit (design D1/D2).
-        publish_window_canvas(app, (w as f32 / scale, h as f32 / scale));
+        publish_window_canvas(app, canvas);
+        self.sync_surface_size(w, h);
 
-        // main.rs forwards no window events yet (task 3.1 wires them), so
-        // resizes are detected here and mirrored into the wgpu surface.
-        if (w, h) != self.size_px {
-            self.size_px = (w, h);
-            self.canvas.config.width = w;
-            self.canvas.config.height = h;
-            self.canvas
-                .surface
-                .configure(&self.canvas.device, &self.canvas.config);
-        }
-
-        let mut raw_input = self.winit_state.take_egui_input(window);
-        // The window is the single source of truth for size/scale until real
-        // winit events flow; egui must see the current values every frame.
-        raw_input.screen_rect = Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(w as f32 / scale, h as f32 / scale),
-        ));
-        raw_input
-            .viewports
-            .entry(egui::ViewportId::ROOT)
-            .or_default()
-            .native_pixels_per_point = Some(scale);
-
-        // Extract keyboard events from raw_input BEFORE run_ui consumes them.
-        // Keyboard events are one-shot in egui — key_pressed() only returns true
-        // for the frame the event arrived. After run_ui takes ownership of
-        // raw_input, the keyboard events are gone. Pointer state (position,
-        // button state) is accumulated and survives, so it can be read after.
-        let window_keys: Vec<WindowGraphKey> = raw_input
-            .events
-            .iter()
-            .filter_map(|e| {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } = e
-                {
-                    let no_mod =
-                        !(modifiers.shift || modifiers.ctrl || modifiers.alt || modifiers.command);
-                    match key {
-                        egui::Key::X if no_mod => Some(WindowGraphKey::ToggleProcessing),
-                        egui::Key::P if no_mod => Some(WindowGraphKey::TogglePin),
-                        egui::Key::E if no_mod => Some(WindowGraphKey::BeginEdit),
-                        // Design D3: `c` centers the pane camera, Shift+c
-                        // refits against the pane size — mirror of the terminal
-                        // graph keys. Ctrl+C quits in the DROID key dispatch
-                        // before egui sees the event, and this guard still
-                        // excludes ctrl/alt/command so the mapping never
-                        // shadows the quit.
-                        egui::Key::C if !modifiers.ctrl && !modifiers.alt && !modifiers.command => {
-                            Some(if modifiers.shift {
-                                WindowGraphKey::FitGraph
-                            } else {
-                                WindowGraphKey::CenterGraph
-                            })
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let raw_input = self.take_raw_input(window, canvas, scale);
+        // Extract keyboard events from raw_input BEFORE run_ui consumes them:
+        // they are one-shot in egui, while pointer state (position, button
+        // state) is accumulated and can be read after.
+        let window_keys = window_graph_keys(&raw_input.events);
 
         let mut full_output = self.context.run_ui(raw_input, |ui| {
             // ADR 35: the arrangement decides the paint. With nothing open
@@ -1072,11 +1167,8 @@ impl EguiSurface {
             paint_overlays(app, ui);
         });
 
-        // Task 3.1: snapshot the processed input so the loop can drive `App`
-        // mutations (hit-testing happens in handler.rs against the shared
-        // camera). `e` requires no modifiers, mirroring the terminal `e`;
-        // `x`/`p` have no modifier guard there either.
-        //
+        let window_rect =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(canvas.0, canvas.1));
         // Overlay pointer priority (sections-black-hole-solver 4.3): the
         // sections sliders panel rect, resolved through the same window → cell
         // → pane chain `paint_panes` paints from. The canvas paths below
@@ -1084,51 +1176,17 @@ impl EguiSurface {
         // minimap click applies — so a press on the panel never starts a node
         // drag, a node select, or a marquee. The panel's own egui widgets read
         // egui's pointer state directly, so they keep working.
-        let window_rect = egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(w as f32 / scale, h as f32 / scale),
-        );
         let sliders_panel = graph::sliders_panel_window_rect(app, window_rect);
         // While the picker overlay is open it owns the wheel and the pointer
         // drag (its own frame report above), so the graph camera must not also
         // pan or zoom behind the modal.
         let picker_open = app.showing_picker;
-        let window_frame = self.context.input(|i| {
-            let pointer = i
-                .pointer
-                .latest_pos()
-                .map(|p| (p.x, p.y))
-                .filter(|&(px, py)| {
-                    !sliders_panel.is_some_and(|rect| rect.contains(egui::pos2(px, py)))
-                });
-            // Task 3.2/3.3: middle-drag pans the shared camera, wheel zooms
-            // about the cursor, and an empty-canvas left drag selects nodes.
-            // `smooth_scroll_delta.y` is positive when scrolling down (zoom
-            // out), so the negation makes wheel-up zoom in.
-            let pan_delta = if !picker_open && i.pointer.middle_down() {
-                let d = i.pointer.delta();
-                (d.x, d.y)
-            } else {
-                (0.0, 0.0)
-            };
-            let zoom = if !picker_open && i.smooth_scroll_delta.y.abs() > f32::EPSILON {
-                let factor = ((-i.smooth_scroll_delta.y) * graph::ZOOM_SENSITIVITY).exp();
-                let factor = factor.clamp(1.0 / graph::MAX_ZOOM_STEP, graph::MAX_ZOOM_STEP);
-                pointer.map(|p| (factor, p))
-            } else {
-                None
-            };
-            WindowFrame {
-                pointer,
-                primary_pressed: i.pointer.primary_pressed(),
-                primary_down: i.pointer.primary_down(),
-                primary_released: i.pointer.primary_released(),
-                keys: window_keys,
-                pan_delta,
-                zoom,
-                marquee: graph::frame_marquee(scene, i, sliders_panel),
-            }
-        });
+        // Task 3.1: snapshot the processed input so the loop can drive `App`
+        // mutations (hit-testing happens in handler.rs against the shared
+        // camera).
+        let window_frame = self
+            .context
+            .input(|i| window_frame_from_input(i, sliders_panel, picker_open, window_keys, scene));
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
 
@@ -1173,24 +1231,10 @@ impl EguiSurface {
             }
         }
 
-        let frame = match self.canvas.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            // The surface no longer matches its config; reconfigure now so
-            // the next frame presents correctly.
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.canvas.config.width = w;
-                self.canvas.config.height = h;
-                self.canvas
-                    .surface
-                    .configure(&self.canvas.device, &self.canvas.config);
-                frame
-            }
-            other => {
-                // Lost/outdated/occluded: skip this frame; the next redraw
-                // (or resize reconfiguration) retries. Input is still valid.
-                eprintln!("[warn] graph window frame acquire failed: {other:?}");
-                return window_frame;
-            }
+        let Some(frame) = self.acquire_surface_frame(w, h) else {
+            // Lost/outdated/occluded: skip this frame; the next redraw (or
+            // resize reconfiguration) retries. Input is still valid.
+            return window_frame;
         };
         let view = frame
             .texture

@@ -1752,6 +1752,10 @@ fn rect_pt(rect: RectPt) -> Rect {
 /// of the track), mirroring `ui.rs::render_physical_cell` /
 /// `render_fader_track` / the skeleton cell rendering. Shared with the
 /// module UI's faceplate cells.
+///
+/// A dispatcher only: each presentation (skeleton marker, fader, face, LED
+/// chrome, compact label) paints in its own step below, so the order the cell
+/// stacks them in stays readable here and every step stays testable on its own.
 pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, paused: bool) {
     let rect = cell.rect;
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -1759,36 +1763,11 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     }
 
     if skeleton {
-        let (marker, color) = match cell.mark {
-            PortMark::PortIn => ("\u{25C0}", crate::theme::active().cv_in),
-            PortMark::PortOut => ("\u{25B6}", crate::theme::active().cv_out),
-            PortMark::Cell => ("\u{00B7}", crate::theme::active().muted),
-        };
-        let size = (rect.height() * 0.6).clamp(6.0, 14.0);
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            marker,
-            egui::FontId::monospace(size),
-            dim(rgb(color), paused),
-        );
+        paint_skeleton_marker(painter, cell, paused);
         return;
     }
 
-    // Hover / selected-circuit hardware emphasis: a muted backdrop.
-    if cell.highlighted {
-        let mut bg = rgb(crate::theme::active().muted);
-        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 90);
-        painter.rect_filled(rect, 0.0, bg);
-    }
-
-    // Modifier-hold wash: a low-alpha tinted backdrop on the held component so the
-    // user can see which modifier is active while holding the mouse button.
-    if let Some(wash) = cell.modifier_wash {
-        let mut bg = rgb(wash);
-        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 50);
-        painter.rect_filled(rect, 0.0, bg);
-    }
+    paint_cell_backdrops(painter, cell);
 
     // The composed face's outline is the state channel; every other path's
     // `base` is already the element's own colour. Labels never read this — they
@@ -1806,14 +1785,7 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     // (faceplate-pot-jack-symbols D1). Either way the face replaces the compact
     // `◉` corner marker and the compact label lines, so nothing below this point
     // paints on such a cell.
-    if let Some(shape) = cell.shape {
-        match shape {
-            CellShape::Pot | CellShape::Encoder => paint_pot(painter, cell, shape, base, paused),
-            CellShape::Jack => paint_jack(painter, cell, base, paused),
-            CellShape::Round | CellShape::Rect => {
-                paint_composed(painter, cell, shape, base, paused);
-            }
-        }
+    if paint_face(painter, cell, base, paused) {
         return;
     }
 
@@ -1823,44 +1795,110 @@ pub(super) fn paint_cell(painter: &Painter, cell: &CellSpec, skeleton: bool, pau
     // (faceplate-pot-jack-symbols D5). Every other unreferenced kind keeps the
     // plain dimmed marker below.
 
-    // Standalone LED chrome for non-composed cells: outline ring plus inset
-    // core (fader-led-contrast 2.1). The ring is field chrome and stays
-    // full-bright (also while paused); the core carries the value with a
-    // brightness floor so an off-LED still shows its field.
-    if let Some(led_value) = cell.led_state {
-        let level = led_value.clamp(0.0, 1.0).max(0.25);
-        let led_color = if let Some(rgb) = cell.led_rgb {
-            // Use the RGB colour from the patch, hue preserved
-            let scale = |c: u8| ((f32::from(c) * level).round().clamp(0.0, 255.0)) as u8;
-            egui::Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
-        } else {
-            // White-only LED: brightness maps to white intensity
-            let intensity = (level * 255.0) as u8;
-            egui::Color32::from_rgb(intensity, intensity, intensity)
-        };
-        // Draw LED indicator in the top-right corner of the cell
-        let led_size = (rect.height() * 0.3).clamp(4.0, 10.0);
-        let led_rect = Rect::from_min_size(
-            Pos2::new(rect.max.x - led_size - 2.0, rect.min.y + 2.0),
-            Vec2::new(led_size, led_size),
-        );
-        painter.rect_stroke(
-            led_rect,
-            led_size * 0.3,
-            egui::Stroke::new(1.0, rgb(crate::theme::active().led_ring)),
-            egui::StrokeKind::Inside,
-        );
-        let core = led_rect.shrink(led_size * 0.25);
-        painter.rect_filled(core, led_size * 0.2, led_color);
+    paint_led_chrome(painter, cell);
+    paint_compact_cell(painter, cell, paused);
+}
+
+/// The skeleton presentation of a cell: its in/out port marker, or the plain
+/// dot every other cell shows. Marker height follows the cell at a 6–14 pt
+/// clamp, and the paused dim applies like everywhere else.
+fn paint_skeleton_marker(painter: &Painter, cell: &CellSpec, paused: bool) {
+    let (marker, color) = match cell.mark {
+        PortMark::PortIn => ("\u{25C0}", crate::theme::active().cv_in),
+        PortMark::PortOut => ("\u{25B6}", crate::theme::active().cv_out),
+        PortMark::Cell => ("\u{00B7}", crate::theme::active().muted),
+    };
+    let size = (cell.rect.height() * 0.6).clamp(6.0, 14.0);
+    painter.text(
+        cell.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        marker,
+        egui::FontId::monospace(size),
+        dim(rgb(color), paused),
+    );
+}
+
+/// The cell-sized backdrops a full-render cell paints before its content:
+/// the hover / selected-circuit emphasis and the modifier-hold wash.
+fn paint_cell_backdrops(painter: &Painter, cell: &CellSpec) {
+    // Hover / selected-circuit hardware emphasis: a muted backdrop.
+    if cell.highlighted {
+        let mut bg = rgb(crate::theme::active().muted);
+        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 90);
+        painter.rect_filled(cell.rect, 0.0, bg);
     }
 
-    // Compact cell (module-ui-label-fit D3/D4): the state glyph is a small
-    // corner marker, then the fitted label lines, then the state row the
-    // layout kept. The label text is clipped short of the marker column: a
-    // fitted line spans the whole cell (at 103 % zoom "Encoder" fills its
-    // 27 pt cell), so an unclipped line painted straight through the marker
-    // and an addressed rotary read as an empty position. The marker is painted
-    // last, outside the clip, so it can never be overdrawn.
+    // Modifier-hold wash: a low-alpha tinted backdrop on the held component so the
+    // user can see which modifier is active while holding the mouse button.
+    if let Some(wash) = cell.modifier_wash {
+        let mut bg = rgb(wash);
+        bg = egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 50);
+        painter.rect_filled(cell.rect, 0.0, bg);
+    }
+}
+
+/// Paint the symbol a cell draws instead of a glyph, dispatching on
+/// [`CellShape`] over the same 18 pt / 10 pt face ladder the painters use.
+/// `true` when a face painted, so the caller stops at it.
+fn paint_face(painter: &Painter, cell: &CellSpec, base: Color, paused: bool) -> bool {
+    let Some(shape) = cell.shape else {
+        return false;
+    };
+    match shape {
+        CellShape::Pot | CellShape::Encoder => paint_pot(painter, cell, shape, base, paused),
+        CellShape::Jack => paint_jack(painter, cell, base, paused),
+        CellShape::Round | CellShape::Rect => {
+            paint_composed(painter, cell, shape, base, paused);
+        }
+    }
+    true
+}
+
+/// Standalone LED chrome for non-composed cells: outline ring plus inset
+/// core (fader-led-contrast 2.1). The ring is field chrome and stays
+/// full-bright (also while paused); the core carries the value with a
+/// brightness floor so an off-LED still shows its field.
+fn paint_led_chrome(painter: &Painter, cell: &CellSpec) {
+    let Some(led_value) = cell.led_state else {
+        return;
+    };
+    let rect = cell.rect;
+    let level = led_value.clamp(0.0, 1.0).max(0.25);
+    let led_color = if let Some(rgb) = cell.led_rgb {
+        // Use the RGB colour from the patch, hue preserved
+        let scale = |c: u8| ((f32::from(c) * level).round().clamp(0.0, 255.0)) as u8;
+        egui::Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
+    } else {
+        // White-only LED: brightness maps to white intensity
+        let intensity = (level * 255.0) as u8;
+        egui::Color32::from_rgb(intensity, intensity, intensity)
+    };
+    // Draw LED indicator in the top-right corner of the cell
+    let led_size = (rect.height() * 0.3).clamp(4.0, 10.0);
+    let led_rect = Rect::from_min_size(
+        Pos2::new(rect.max.x - led_size - 2.0, rect.min.y + 2.0),
+        Vec2::new(led_size, led_size),
+    );
+    painter.rect_stroke(
+        led_rect,
+        led_size * 0.3,
+        egui::Stroke::new(1.0, rgb(crate::theme::active().led_ring)),
+        egui::StrokeKind::Inside,
+    );
+    let core = led_rect.shrink(led_size * 0.25);
+    painter.rect_filled(core, led_size * 0.2, led_color);
+}
+
+/// The compact cell (module-ui-label-fit D3/D4): the state glyph as a small
+/// corner marker, the fitted label lines, then the state row the layout kept.
+///
+/// The label text is clipped short of the marker column: a fitted line spans
+/// the whole cell (at 103 % zoom "Encoder" fills its 27 pt cell), so an
+/// unclipped line painted straight through the marker and an addressed rotary
+/// read as an empty position. The marker is painted last, outside the clip, so
+/// it can never be overdrawn.
+fn paint_compact_cell(painter: &Painter, cell: &CellSpec, paused: bool) {
+    let rect = cell.rect;
     let color = dim(rgb(cell.label_color), paused || cell.dimmed);
     let Some(layout) = cell.label_layout.as_ref() else {
         paint_state_marker(painter, cell, color);
@@ -2552,15 +2590,16 @@ fn unaddressed_cells(module: &PhysicalModule, inventory_driven: bool) -> Vec<&El
 /// `ui.rs::physical_skeleton_geometry`): the case outline, mounts, labeled
 /// fold bars, module outlines, and element-cell rects with their port
 /// markers. Pure so tests assert the mm→point mapping without a window.
+///
+/// A dispatcher only: the case chrome is mapped here and each placed module
+/// contributes its outline, its cells and its DB8E band through the named
+/// steps below.
 pub(crate) fn rack_geometry(
     rack: &RackLayout,
     chain: &PhysicalLayout,
     mapping: &ScreenMapping,
 ) -> RackGeometry {
-    let cell = |mm: crate::physical::RectMm| -> Rect {
-        let (x, y, w, h) = mapping.mm_to_screen(mm);
-        Rect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(w as f32, h as f32))
-    };
+    let cell = |mm: crate::physical::RectMm| -> Rect { screen_rect(mapping, mm) };
     let case_rect = cell(crate::physical::RectMm {
         x_mm: 0.0,
         y_mm: 0.0,
@@ -2588,108 +2627,11 @@ pub(crate) fn rack_geometry(
     for row in &rack.rows {
         for placed in &row.modules {
             let abs_y_mm = row.y_mm + placed.rect_mm.y_mm;
-            let module_rect = cell(crate::physical::RectMm {
-                x_mm: placed.rect_mm.x_mm,
-                y_mm: abs_y_mm,
-                w_mm: placed.rect_mm.w_mm,
-                h_mm: placed.rect_mm.h_mm,
-            });
+            let module_rect = placed_module_rect(placed, abs_y_mm, mapping);
             module_rects.push((placed.module_index, module_rect));
             let module = &chain.modules[placed.module_index];
-            for (cell_index, component) in module.components.iter().enumerate() {
-                let Some(cell_mm) = chain.cell_for(placed.module_index, &component.id) else {
-                    continue;
-                };
-                if cell_mm.element.is_none() {
-                    continue; // not a faceplate element cell (e.g. fallback)
-                }
-                let mark = match cell_mm.kind_letter {
-                    Some('I') => PortMark::PortIn,
-                    Some('O') => PortMark::PortOut,
-                    _ => PortMark::Cell,
-                };
-                let rect = cell(crate::physical::RectMm {
-                    x_mm: placed.rect_mm.x_mm + cell_mm.rect_mm.x_mm,
-                    y_mm: abs_y_mm + cell_mm.rect_mm.y_mm,
-                    w_mm: cell_mm.rect_mm.w_mm,
-                    h_mm: cell_mm.rect_mm.h_mm,
-                });
-                cells.push((
-                    placed.module_index,
-                    cell_index,
-                    rect,
-                    mark,
-                    cell_mm.family.clone(),
-                ));
-            }
-            // Unaddressed cells (unreferenced-elements D1/D3): every
-            // geometry-declared cell no component addresses, in deterministic
-            // family/row/col order, with `ci = components.len() + ordinal` so
-            // the spec's `ci`-based branch renders them dimmed via the
-            // existing `None` path. Same `cell()` mapping as addressed cells.
-            // The chain flag owns the rule (module-ui-rack-inventory D4): an
-            // inventory-driven chain draws every module's whole declared
-            // front, identity-less cells included; a patch-derived chain
-            // keeps the pre-inventory set and suppresses the auto-added
-            // master faceplate, so bare full fronts stay byte-identical (D5).
-            for (ordinal, unaddr) in unaddressed_cells(module, chain.inventory_driven)
-                .into_iter()
-                .enumerate()
-            {
-                let mark = match unaddr.kind_letter {
-                    Some('I') => PortMark::PortIn,
-                    Some('O') => PortMark::PortOut,
-                    _ => PortMark::Cell,
-                };
-                let rect = cell(crate::physical::RectMm {
-                    x_mm: placed.rect_mm.x_mm + unaddr.rect_mm.x_mm,
-                    y_mm: abs_y_mm + unaddr.rect_mm.y_mm,
-                    w_mm: unaddr.rect_mm.w_mm,
-                    h_mm: unaddr.rect_mm.h_mm,
-                });
-                cells.push((
-                    placed.module_index,
-                    module.components.len() + ordinal,
-                    rect,
-                    mark,
-                    unaddr.family.clone(),
-                ));
-            }
-
-            // DB8E OLED display placeholder (db8e-oled-display-placeholder):
-            // the bordered upper-band rect above the B-grid. Band height
-            // derives from the module's B-grid top (`cells["B"]` min y_mm,
-            // fallback literal 38.0) so geometry drift never hard-codes the
-            // constant; the rect insets the faceplate by 1 pt with the module
-            // border's two strokes subtracted (port of the terminal
-            // placeholder's clipped-rect fix).
-            if module.geometry_key == "db8e" {
-                let b_top_mm = module
-                    .cells
-                    .get("B")
-                    .and_then(|cells| {
-                        cells
-                            .iter()
-                            .map(|c| c.rect_mm.y_mm)
-                            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    })
-                    .unwrap_or(38.0);
-                let ratio = if module.rect_mm.h_mm > 0.0 {
-                    (b_top_mm / module.rect_mm.h_mm).clamp(0.0, 1.0)
-                } else {
-                    0.295
-                };
-                let band_h = (f64::from(module_rect.height()) * ratio).round() as f32;
-                if module_rect.width() >= 3.0 && band_h >= 3.0 {
-                    db8e_bands.push((
-                        placed.module_index,
-                        Rect::from_min_size(
-                            module_rect.min + Vec2::new(1.0, 1.0),
-                            Vec2::new(module_rect.width() - 2.0, band_h - 2.0),
-                        ),
-                    ));
-                }
-            }
+            cells.extend(module_cells(chain, module, placed, abs_y_mm, mapping));
+            db8e_bands.extend(db8e_display_band(module, placed.module_index, module_rect));
         }
     }
 
@@ -2701,6 +2643,154 @@ pub(crate) fn rack_geometry(
         cells,
         db8e_bands,
     }
+}
+
+/// A [`crate::physical::RectMm`] as an egui rect in the pane's points — the
+/// one mm→point conversion every rect `rack_geometry` emits goes through.
+fn screen_rect(mapping: &ScreenMapping, mm: crate::physical::RectMm) -> Rect {
+    let (x, y, w, h) = mapping.mm_to_screen(mm);
+    Rect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(w as f32, h as f32))
+}
+
+/// A placed module's absolute screen outline: its rack-local x plus the row's
+/// y offset, mapped into points.
+fn placed_module_rect(
+    placed: &crate::physical::PlacedModule,
+    abs_y_mm: f64,
+    mapping: &ScreenMapping,
+) -> Rect {
+    screen_rect(
+        mapping,
+        crate::physical::RectMm {
+            x_mm: placed.rect_mm.x_mm,
+            y_mm: abs_y_mm,
+            w_mm: placed.rect_mm.w_mm,
+            h_mm: placed.rect_mm.h_mm,
+        },
+    )
+}
+
+/// The port mark a geometry cell's `kind_letter` draws in the skeleton: an
+/// input port, an output port, or the plain cell dot.
+fn port_mark(kind_letter: Option<char>) -> PortMark {
+    match kind_letter {
+        Some('I') => PortMark::PortIn,
+        Some('O') => PortMark::PortOut,
+        _ => PortMark::Cell,
+    }
+}
+
+/// One geometry cell's absolute screen rect: the placed module's origin plus
+/// the cell's chain-local `rect_mm`.
+fn placed_cell_rect(
+    placed: &crate::physical::PlacedModule,
+    cell_mm: &crate::physical::ElementCell,
+    abs_y_mm: f64,
+    mapping: &ScreenMapping,
+) -> Rect {
+    screen_rect(
+        mapping,
+        crate::physical::RectMm {
+            x_mm: placed.rect_mm.x_mm + cell_mm.rect_mm.x_mm,
+            y_mm: abs_y_mm + cell_mm.rect_mm.y_mm,
+            w_mm: cell_mm.rect_mm.w_mm,
+            h_mm: cell_mm.rect_mm.h_mm,
+        },
+    )
+}
+
+/// Every cell one placed module emits, in emission order: its addressed
+/// elements first, then the unaddressed positions (unreferenced-elements
+/// D1/D3).
+///
+/// The unaddressed cells carry `ci = components.len() + ordinal` so the spec's
+/// `ci`-based branch renders them dimmed via the existing `None` path, and they
+/// come in deterministic family/row/col order with the same rect mapping as the
+/// addressed ones. The chain flag owns the rule (module-ui-rack-inventory D4):
+/// an inventory-driven chain draws every module's whole declared front,
+/// identity-less cells included; a patch-derived chain keeps the pre-inventory
+/// set and suppresses the auto-added master faceplate, so bare full fronts stay
+/// byte-identical (D5).
+fn module_cells(
+    chain: &PhysicalLayout,
+    module: &PhysicalModule,
+    placed: &crate::physical::PlacedModule,
+    abs_y_mm: f64,
+    mapping: &ScreenMapping,
+) -> Vec<(usize, usize, Rect, PortMark, String)> {
+    let mut cells = Vec::new();
+    for (cell_index, component) in module.components.iter().enumerate() {
+        let Some(cell_mm) = chain.cell_for(placed.module_index, &component.id) else {
+            continue;
+        };
+        if cell_mm.element.is_none() {
+            continue; // not a faceplate element cell (e.g. fallback)
+        }
+        cells.push((
+            placed.module_index,
+            cell_index,
+            placed_cell_rect(placed, cell_mm, abs_y_mm, mapping),
+            port_mark(cell_mm.kind_letter),
+            cell_mm.family.clone(),
+        ));
+    }
+    for (ordinal, unaddr) in unaddressed_cells(module, chain.inventory_driven)
+        .into_iter()
+        .enumerate()
+    {
+        cells.push((
+            placed.module_index,
+            module.components.len() + ordinal,
+            placed_cell_rect(placed, unaddr, abs_y_mm, mapping),
+            port_mark(unaddr.kind_letter),
+            unaddr.family.clone(),
+        ));
+    }
+    cells
+}
+
+/// The module's B-grid top in mm (`cells["B"]` minimum y), falling back to the
+/// literal 38.0 so geometry drift never hard-codes the band constant.
+fn b_grid_top_mm(module: &PhysicalModule) -> f64 {
+    module
+        .cells
+        .get("B")
+        .and_then(|cells| {
+            cells
+                .iter()
+                .map(|c| c.rect_mm.y_mm)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        })
+        .unwrap_or(38.0)
+}
+
+/// The DB8E OLED display band above a placed module's B-grid
+/// (db8e-oled-display-placeholder), when the module is a DB8E and the band is
+/// big enough to paint.
+///
+/// Band height derives from the module's B-grid top as a fraction of its own
+/// height (the literal 0.295 when the height is degenerate); the rect insets the
+/// faceplate by 1 pt with the module border's two strokes subtracted (port of
+/// the terminal placeholder's clipped-rect fix).
+fn db8e_display_band(
+    module: &PhysicalModule,
+    module_index: usize,
+    module_rect: Rect,
+) -> Option<(usize, Rect)> {
+    if module.geometry_key != "db8e" {
+        return None;
+    }
+    let ratio = if module.rect_mm.h_mm > 0.0 {
+        (b_grid_top_mm(module) / module.rect_mm.h_mm).clamp(0.0, 1.0)
+    } else {
+        0.295
+    };
+    let band_h = (f64::from(module_rect.height()) * ratio).round() as f32;
+    let band = Rect::from_min_size(
+        module_rect.min + Vec2::new(1.0, 1.0),
+        Vec2::new(module_rect.width() - 2.0, band_h - 2.0),
+    );
+    (module_rect.width() >= 3.0 && band_h >= 3.0).then_some((module_index, band))
 }
 
 /// Pure rack skeleton geometry in points (see [`rack_geometry`]).
