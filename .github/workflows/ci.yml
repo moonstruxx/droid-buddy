@@ -67,6 +67,21 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked
 
+      # The code-health gate (guardrails: Code Health). Complexity budget,
+      # duplicated blocks and new `#[allow(dead_code)]` sites; the baseline
+      # makes it fail on new debt only, so the recorded offenders can be paid
+      # down without reddening every push.
+      - name: Code-health gate
+        if: runner.os == 'Linux'
+        run: python3 scripts/codehealth.py
+
+      # `controller_geometry.json` is generated output: the checker proves the
+      # committed JSON still matches what `tools/acquire_geometry.py` derives,
+      # so a hand edit cannot slip through CI.
+      - name: Geometry data gate
+        if: runner.os == 'Linux'
+        run: python3 tools/acquire_geometry.py --check
+
       - name: Tests
         run: cargo test --locked
 

@@ -1,0 +1,5 @@
+# Code-health baseline: pre-existing offenders recorded by
+# `python3 scripts/codehealth.py --update-baseline`.
+# Remove a line when the offender is fixed; never add one by hand.
+# budget: 15 decision points per function; duplicate window 8 lines
+
