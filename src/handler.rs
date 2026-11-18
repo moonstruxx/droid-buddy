@@ -4318,6 +4318,27 @@ mod tests {
         }
     }
 
+    /// Fork a sender that is still running when the assertion reads it. The
+    /// payload path travels as the trailing argument (`spawn_upload` appends
+    /// it), so the fake must accept one: a bare `sleep 30` exits at once with
+    /// an extra-operand usage error, and `poll_upload` then reaps it before the
+    /// key is routed, which is exactly the race this helper removes. `sh -c`
+    /// takes the path as `$0` and sleeps for the whole assertion.
+    fn spawn_live_send(app: &mut App) {
+        let payload = app.upload_payload().expect("fixture renders");
+        app.spawn_upload(
+            "sh",
+            &[String::from("-c"), String::from("sleep 30")],
+            &payload,
+            "hw:2,0,0",
+        )
+        .expect("spawn sh -c 'sleep 30'");
+        assert!(
+            app.upload_send.is_some(),
+            "the fake sender must stay running"
+        );
+    }
+
     #[test]
     fn big_u_without_patch_reports_and_opens_nothing() {
         let mut app = App::new();
@@ -4377,9 +4398,7 @@ mod tests {
     #[test]
     fn big_u_blocked_while_send_in_flight() {
         let mut app = app_with_fixture();
-        let payload = app.upload_payload().expect("fixture renders");
-        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
-            .expect("spawn sleep");
+        spawn_live_send(&mut app);
         let quit = handle_event(&upload_key(), &mut app);
         assert!(!quit);
         assert!(app.upload_modal.is_none());
@@ -4390,9 +4409,7 @@ mod tests {
     #[test]
     fn quit_aborts_running_send() {
         let mut app = app_with_fixture();
-        let payload = app.upload_payload().expect("fixture renders");
-        app.spawn_upload("sleep", &["30".to_string()], &payload, "hw:2,0,0")
-            .expect("spawn sleep");
+        spawn_live_send(&mut app);
         let quit = handle_event(&key(KeyCode::Char('q')), &mut app);
         assert!(quit);
         assert!(app.upload_send.is_none());
