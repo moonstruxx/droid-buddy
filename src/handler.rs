@@ -532,58 +532,73 @@ fn open_embedded_viewer(app: &mut App) {
 fn handle_edit_overlay_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Inline label-edit overlay eats all keys (highest priority: overlay > picker > prefix > graph > source > panels).
     if app.editing.is_some() {
-        match key.code {
-            KeyCode::Esc => {
-                app.cancel_edit();
-                app.status_message = String::from("Edit cancelled");
-                return Some(false);
-            }
-            KeyCode::Enter => {
-                match app.commit_edit() {
-                    Ok(()) => app.status_message = String::from("Label saved"),
-                    Err(e) => app.status_message = format!("Save failed: {e}"),
-                }
-                return Some(false);
-            }
-            KeyCode::Backspace => {
-                if let Some(state) = app.editing.as_mut() {
-                    state.draft.pop();
-                }
-                return Some(false);
-            }
-            KeyCode::Char(c)
-                if key.modifiers.is_none() || key.modifiers == key_modifiers::SHIFT =>
-            {
-                if c.is_ascii_digit() && c != '0' {
-                    let settings = crate::config::load(
-                        &crate::theme::canonical_theme_name,
-                        crate::theme::THEMES,
-                    );
-                    let max = if settings.labels.layers_enabled {
-                        settings.labels.max_shift_layer.clamp(1, 8)
-                    } else {
-                        1
-                    };
-                    let digit = c.to_digit(10).unwrap() as u8;
-                    if (1..=max).contains(&digit) && app.cycle_edit_layer(digit) {
-                        if let Some(line) = app.editing_status_line(
-                            settings.labels.layers_enabled,
-                            settings.labels.max_shift_layer,
-                        ) {
-                            app.status_message = line;
-                        }
-                        return Some(false);
-                    }
-                }
-                if let Some(state) = app.editing.as_mut() {
-                    state.draft.push(c);
-                }
-                return Some(false);
-            }
-            _ => return Some(false),
-        }
+        return Some(handle_edit_state_key(key, app));
     }
     None
+}
+
+/// The overlay's own table: transport keys first, then draft typing. Every code
+/// is consumed while the overlay is open, including unbound ones — nothing may
+/// reach the surfaces beneath it.
+fn handle_edit_state_key(key: &KeyEvent, app: &mut App) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_edit();
+            app.status_message = String::from("Edit cancelled");
+        }
+        KeyCode::Enter => commit_label_edit(app),
+        KeyCode::Backspace => {
+            if let Some(state) = app.editing.as_mut() {
+                state.draft.pop();
+            }
+        }
+        KeyCode::Char(c) if key.modifiers.is_none() || key.modifiers == key_modifiers::SHIFT => {
+            handle_edit_draft_char(app, c);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn commit_label_edit(app: &mut App) {
+    match app.commit_edit() {
+        Ok(()) => app.status_message = String::from("Label saved"),
+        Err(e) => app.status_message = format!("Save failed: {e}"),
+    }
+}
+
+/// Typing a draft: a layer digit cycles the shift layer instead of entering the
+/// character, and any rejected digit still types itself.
+fn handle_edit_draft_char(app: &mut App, c: char) {
+    if apply_edit_layer_digit(app, c) {
+        return;
+    }
+    if let Some(state) = app.editing.as_mut() {
+        state.draft.push(c);
+    }
+}
+
+fn apply_edit_layer_digit(app: &mut App, c: char) -> bool {
+    if !c.is_ascii_digit() || c == '0' {
+        return false;
+    }
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    let max = if settings.labels.layers_enabled {
+        settings.labels.max_shift_layer.clamp(1, 8)
+    } else {
+        1
+    };
+    let digit = c as u8 - b'0';
+    if !(1..=max).contains(&digit) || !app.cycle_edit_layer(digit) {
+        return false;
+    }
+    if let Some(line) = app.editing_status_line(
+        settings.labels.layers_enabled,
+        settings.labels.max_shift_layer,
+    ) {
+        app.status_message = line;
+    }
+    true
 }
 
 fn handle_help_modal_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
@@ -986,135 +1001,181 @@ fn handle_optimizer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // holds focus (mirroring the graph/viewer pane dispatch). Esc already
     // closed the slot above via `close_focused_view`; unhandled keys fall
     // through so q/Ctrl+C quit and `l` still opens the picker.
-    if app.view_focused(ViewType::Optimizer) {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                let len = app.optimizer.as_ref().map_or(0, |s| s.candidates.len());
-                if let Some(state) = app.optimizer.as_mut() {
-                    if state.cursor + 1 < len {
-                        state.cursor += 1;
-                    }
-                }
-                return Some(false);
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(state) = app.optimizer.as_mut() {
-                    if state.cursor > 0 {
-                        state.cursor -= 1;
-                    }
-                }
-                return Some(false);
-            }
-            KeyCode::Enter => {
-                let idx = app.optimizer.as_ref().map_or(0, |s| s.cursor);
-                app.optimizer_preview(idx);
-                return Some(false);
-            }
-            KeyCode::Char('r') => {
-                app.optimizer_restore();
-                return Some(false);
-            }
-            KeyCode::Char('s') => {
-                let idx = app.optimizer.as_ref().map_or(0, |s| s.cursor);
-                app.optimizer_export(idx);
-                return Some(false);
-            }
-            // Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1`
-            // snap to the endpoints. Returned here so the split-ratio
-            // handlers never see them while the optimizer pane is focused.
-            KeyCode::Char('[') => {
-                if let Some(state) = app.optimizer.as_ref() {
-                    app.optimizer_set_weight(state.weight - 0.1);
-                }
-                return Some(false);
-            }
-            KeyCode::Char(']') => {
-                if let Some(state) = app.optimizer.as_ref() {
-                    app.optimizer_set_weight(state.weight + 0.1);
-                }
-                return Some(false);
-            }
-            KeyCode::Char('0') => {
-                app.optimizer_set_weight(0.0);
-                return Some(false);
-            }
-            KeyCode::Char('1') => {
-                app.optimizer_set_weight(1.0);
-                return Some(false);
-            }
-            _ => {}
-        }
+    if app.view_focused(ViewType::Optimizer)
+        && (handle_optimizer_nav_key(app, &key.code)
+            || handle_optimizer_action_key(app, &key.code)
+            || handle_optimizer_weight_key(app, &key.code))
+    {
+        return Some(false);
     }
     None
 }
 
+/// Candidate navigation: `j`/`Down` and `k`/`Up` move the cursor, clamped to
+/// the candidate list.
+fn handle_optimizer_nav_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            let len = app.optimizer.as_ref().map_or(0, |s| s.candidates.len());
+            if let Some(state) = app.optimizer.as_mut() {
+                if state.cursor + 1 < len {
+                    state.cursor += 1;
+                }
+            }
+            true
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Some(state) = app.optimizer.as_mut() {
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The candidate's three verbs: preview, restore the baseline, export.
+fn handle_optimizer_action_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Enter => {
+            let idx = app.optimizer.as_ref().map_or(0, |s| s.cursor);
+            app.optimizer_preview(idx);
+            true
+        }
+        KeyCode::Char('r') => {
+            app.optimizer_restore();
+            true
+        }
+        KeyCode::Char('s') => {
+            let idx = app.optimizer.as_ref().map_or(0, |s| s.cursor);
+            app.optimizer_export(idx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Weight slider (design D5): `[`/`]` step ±0.1 in [0,1], `0`/`1` snap to the
+/// endpoints. Claimed here so the split-ratio handlers never see the brackets
+/// while the optimizer pane is focused.
+fn handle_optimizer_weight_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('[') => step_optimizer_weight(app, -0.1),
+        KeyCode::Char(']') => step_optimizer_weight(app, 0.1),
+        KeyCode::Char('0') => app.optimizer_set_weight(0.0),
+        KeyCode::Char('1') => app.optimizer_set_weight(1.0),
+        _ => return false,
+    }
+    true
+}
+
+/// A step only exists relative to a candidate list; the snap keys above stay
+/// unconditional because they also recover from an absent one.
+fn step_optimizer_weight(app: &mut App, delta: f32) {
+    if let Some(state) = app.optimizer.as_ref() {
+        app.optimizer_set_weight(state.weight + delta);
+    }
+}
+
 fn handle_label_edit_entry_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Label edit overlay entry: `e` (lowercase, no mods) with priority graph hover > source header > panel hover.
-    if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.patch.is_some() {
-        // 1) Graph hovered node -> Circuit
-        if let Some(idx) = app.hovered_graph_node {
-            if begin_graph_node_edit(app, idx) {
-                return Some(false);
-            }
-        }
-        // 2) Source header focused -> Circuit instance at source_scroll
-        let source_focused = app.focused_view() == Some(ViewType::SourceViewer);
-        if source_focused {
-            if let Some(patch) = app.patch.as_ref() {
-                let line = app.source_scroll;
-                let mut chosen: Option<usize> = None;
-                for (i, sec) in patch.sections.iter().enumerate() {
-                    if sec.header_span.line <= line {
-                        chosen = Some(i);
-                    } else {
-                        break;
-                    }
-                }
-                if let Some(idx) = chosen {
-                    let name = patch.sections[idx].name.clone();
-                    let mut counts: HashMap<String, usize> = HashMap::new();
-                    let mut node: Option<NodeId> = None;
-                    for (i, sec) in patch.sections.iter().enumerate() {
-                        let entry = counts.entry(sec.name.clone()).or_insert(0);
-                        if i == idx {
-                            node = Some(NodeId::circuit(&name, *entry));
-                            break;
-                        }
-                        *entry += 1;
-                    }
-                    if let Some(nid) = node {
-                        let draft = app
-                            .current_patch_path
-                            .as_ref()
-                            .and_then(|p| app.label_store.circuit_label(p, &nid))
-                            .unwrap_or_default();
-                        app.editing = Some(crate::app::EditState::new_circuit(nid.clone(), draft));
-                        let settings2 = crate::config::load(
-                            &crate::theme::canonical_theme_name,
-                            crate::theme::THEMES,
-                        );
-                        if let Some(line) = app.editing_status_line(
-                            settings2.labels.layers_enabled,
-                            settings2.labels.max_shift_layer,
-                        ) {
-                            app.status_message = line;
-                        } else {
-                            app.status_message =
-                                format!("Editing circuit {}:{}", nid.name(), nid.instance());
-                        }
-                        return Some(false);
-                    }
-                }
-            }
-        }
-        // 3) Panel hovered component -> HW token with current shift layer
-        if let Some(hover) = app.hovered_component {
-            if begin_hw_label_edit(app, hover) {
-                return Some(false);
-            }
-        }
+    let wants_edit =
+        matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.patch.is_some();
+    if wants_edit
+        && (begin_hovered_graph_edit(app)
+            || begin_source_header_circuit_edit(app)
+            || begin_hovered_component_edit(app))
+    {
+        return Some(false);
     }
     None
+}
+
+fn begin_hovered_graph_edit(app: &mut App) -> bool {
+    match app.hovered_graph_node {
+        Some(index) => begin_graph_node_edit(app, index),
+        None => false,
+    }
+}
+
+fn begin_hovered_component_edit(app: &mut App) -> bool {
+    match app.hovered_component {
+        Some(index) => begin_hw_label_edit(app, index),
+        None => false,
+    }
+}
+
+/// Source-header `e`: the instance whose header span contains the cursor line.
+/// Mapping is by span (not by scroll arithmetic) because section bodies share
+/// the section's identity.
+fn begin_source_header_circuit_edit(app: &mut App) -> bool {
+    if !app.view_focused(ViewType::SourceViewer) {
+        return false;
+    }
+    let Some(patch) = app.patch.as_ref() else {
+        return false;
+    };
+    let Some(index) = section_index_at_line(patch, app.source_scroll) else {
+        return false;
+    };
+    let Some(nid) = section_instance_at(patch, index) else {
+        return false;
+    };
+    let draft = app
+        .current_patch_path
+        .as_ref()
+        .and_then(|p| app.label_store.circuit_label(p, &nid))
+        .unwrap_or_default();
+    open_circuit_edit(app, &nid, draft);
+    true
+}
+
+/// The last section whose header sits at or above `line` — the section the
+/// cursor line falls under (headers are ordered by construction).
+fn section_index_at_line(patch: &Patch, line: usize) -> Option<usize> {
+    let mut chosen = None;
+    for (i, section) in patch.sections.iter().enumerate() {
+        if section.header_span.line <= line {
+            chosen = Some(i);
+        } else {
+            break;
+        }
+    }
+    chosen
+}
+
+/// A section's identity is its name plus its occurrence ordinal: the parser
+/// keeps repeats, so the same circuit name appears once per instance.
+fn section_instance_at(patch: &Patch, index: usize) -> Option<NodeId> {
+    let name = patch.sections[index].name.clone();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut node = None;
+    for (i, section) in patch.sections.iter().enumerate() {
+        let entry = counts.entry(section.name.clone()).or_insert(0);
+        if i == index {
+            node = Some(NodeId::circuit(&name, *entry));
+            break;
+        }
+        *entry += 1;
+    }
+    node
+}
+
+/// Open the circuit label overlay: the one place its status line is composed,
+/// so every surface that starts a circuit edit reports the same layer sentence.
+fn open_circuit_edit(app: &mut App, nid: &NodeId, draft: String) {
+    app.editing = Some(crate::app::EditState::new_circuit(nid.clone(), draft));
+    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
+    if let Some(line) = app.editing_status_line(
+        settings.labels.layers_enabled,
+        settings.labels.max_shift_layer,
+    ) {
+        app.status_message = line;
+    } else {
+        app.status_message = format!("Editing circuit {}:{}", nid.name(), nid.instance());
+    }
 }
 
 /// Open the HW label overlay for `app.patch.hw_components[index]`, which two
@@ -1510,160 +1571,182 @@ fn handle_viewer_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Embedded viewer pane handling, routed only while the source viewer pane
     // holds focus (spec "Keys route to the focused view"). Global keys (`q`,
     // Ctrl+C, `l`) fall through to the shared dispatch below.
-    if app.view_focused(ViewType::SourceViewer) {
-        match key.code {
-            KeyCode::Char('t') => {
-                app.source_view_mode = match app.source_view_mode {
-                    SourceViewMode::Raw => SourceViewMode::Prettified,
-                    SourceViewMode::Prettified => SourceViewMode::Raw,
-                };
-                return Some(false);
-            }
-            KeyCode::Char('[' | ']') => {
-                // Plain brackets move the left/right big-pane boundary; the
-                // source viewer does not own them (spec "Adaptive pane
-                // layout").
-                let delta = if matches!(key.code, KeyCode::Char('[')) {
-                    -0.1
-                } else {
-                    0.1
-                };
-                app.status_message = adjust_big_boundary(app, delta);
-                return Some(false);
-            }
-            // Pause toggle stays live when source focused (global q/l level).
-            KeyCode::Char('p') => {
-                app.toggle_processing_pause();
-                return Some(false);
-            }
-            KeyCode::Char('j') => {
-                app.source_scroll = app.source_scroll.saturating_add(1);
-                return Some(false);
-            }
-            KeyCode::Char('k') => {
-                app.source_scroll = app.source_scroll.saturating_sub(1);
-                return Some(false);
-            }
-            KeyCode::Down => {
-                if app.selected_component.is_some() {
-                    let next = app.occurrence_cursor.saturating_add(1);
-                    app.jump_to_occurrence(next);
-                }
-                return Some(false);
-            }
-            KeyCode::Up => {
-                if app.selected_component.is_some() {
-                    let prev = app.occurrence_cursor.saturating_sub(1);
-                    app.jump_to_occurrence(prev);
-                }
-                return Some(false);
-            }
-            KeyCode::Home => {
-                if app.selected_component.is_some() {
-                    app.jump_to_occurrence(0);
-                }
-                return Some(false);
-            }
-            KeyCode::End => {
-                if let Some(token) = app.selected_component.clone() {
-                    if let Some(patch) = app.patch.as_ref() {
-                        if let Some(spans) = patch.occurrence_index.get(&token) {
-                            if !spans.is_empty() {
-                                app.jump_to_occurrence(spans.len() - 1);
-                            }
-                        }
-                    }
-                }
-                return Some(false);
-            }
-            _ => {}
-        }
+    if app.view_focused(ViewType::SourceViewer)
+        && (handle_viewer_mode_key(app, &key.code)
+            || handle_viewer_scroll_key(app, &key.code)
+            || handle_viewer_occurrence_key(app, &key.code))
+    {
+        return Some(false);
     }
     None
+}
+
+/// The viewer's presentation rows: `t`, the pane boundary and the pause
+/// toggle. The three steps' codes are disjoint, so their order is arbitrary.
+fn handle_viewer_mode_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('t') => {
+            app.source_view_mode = match app.source_view_mode {
+                SourceViewMode::Raw => SourceViewMode::Prettified,
+                SourceViewMode::Prettified => SourceViewMode::Raw,
+            };
+            true
+        }
+        KeyCode::Char('[' | ']') => {
+            // Plain brackets move the left/right big-pane boundary; the
+            // source viewer does not own them (spec "Adaptive pane
+            // layout").
+            let delta = if matches!(code, KeyCode::Char('[')) {
+                -0.1
+            } else {
+                0.1
+            };
+            app.status_message = adjust_big_boundary(app, delta);
+            true
+        }
+        // Pause toggle stays live when source focused (global q/l level).
+        KeyCode::Char('p') => {
+            app.toggle_processing_pause();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_viewer_scroll_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Char('j') => {
+            app.source_scroll = app.source_scroll.saturating_add(1);
+            true
+        }
+        KeyCode::Char('k') => {
+            app.source_scroll = app.source_scroll.saturating_sub(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_viewer_occurrence_key(app: &mut App, code: &KeyCode) -> bool {
+    match code {
+        KeyCode::Down => {
+            step_occurrence(app, true);
+            true
+        }
+        KeyCode::Up => {
+            step_occurrence(app, false);
+            true
+        }
+        KeyCode::Home => {
+            if app.selected_component.is_some() {
+                app.jump_to_occurrence(0);
+            }
+            true
+        }
+        KeyCode::End => {
+            jump_to_last_occurrence(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Occurrence cursor movement is a no-op without a selected token, which is
+/// how `Up`/`Down` stay free for other surfaces' meaning.
+fn step_occurrence(app: &mut App, forward: bool) {
+    if app.selected_component.is_some() {
+        let next = if forward {
+            app.occurrence_cursor.saturating_add(1)
+        } else {
+            app.occurrence_cursor.saturating_sub(1)
+        };
+        app.jump_to_occurrence(next);
+    }
+}
+
+fn jump_to_last_occurrence(app: &mut App) {
+    let Some(token) = app.selected_component.clone() else {
+        return;
+    };
+    let last = app
+        .patch
+        .as_ref()
+        .and_then(|patch| patch.occurrence_index.get(&token))
+        .filter(|spans| !spans.is_empty())
+        .map(Vec::len)
+        .map(|len| len - 1);
+    if let Some(last) = last {
+        app.jump_to_occurrence(last);
+    }
 }
 
 fn handle_label_edit_focus_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Label edit overlay entry (`e` on focused datum): overlay > picker > prefix > graph > source > panels.
     // Priority: graph hovered node -> viewer source header -> panel hovered token.
-    if matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.editing.is_none() {
-        // Graph surface takes precedence when it holds focus.
-        if app.view_focused(ViewType::Graph) {
-            if let Some(idx) = app.hovered_graph_node {
-                if let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() {
-                    let draft = app
-                        .current_circuit_store()
-                        .get(&node.id)
-                        .cloned()
-                        .unwrap_or_default();
-                    app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
-                    let settings = crate::config::load(
-                        &crate::theme::canonical_theme_name,
-                        crate::theme::THEMES,
-                    );
-                    if let Some(line) = app.editing_status_line(
-                        settings.labels.layers_enabled,
-                        settings.labels.max_shift_layer,
-                    ) {
-                        app.status_message = line;
-                    } else {
-                        app.status_message =
-                            format!("Editing circuit {}:{}", node.id.name(), node.id.instance());
-                    }
-                    return Some(false);
-                }
-            }
-        }
-        // Source header (viewer) — resolve to section instance at source focus.
-        if app.view_focused(ViewType::SourceViewer) {
-            if let Some(patch) = app.patch.as_ref() {
-                // Use selected component's section or fallback to first section.
-                let target_idx = app
-                    .selected_component
-                    .as_ref()
-                    .and_then(|tok| patch.occurrence_index.get(tok))
-                    .and_then(|spans| spans.first())
-                    .map_or(0, |s| s.line);
-                // Map line to section index via sections' spans - approximate: pick section containing target line.
-                let mut counts: std::collections::HashMap<String, usize> =
-                    std::collections::HashMap::new();
-                for section in &patch.sections {
-                    let entry = counts.entry(section.name.clone()).or_insert(0);
-                    let nid = NodeId::circuit(&section.name, *entry);
-                    // First section as fallback when no better mapping.
-                    if target_idx == 0 {
-                        let draft = app
-                            .current_circuit_store()
-                            .get(&nid)
-                            .cloned()
-                            .unwrap_or_default();
-                        app.editing = Some(crate::app::EditState::new_circuit(nid.clone(), draft));
-                        let settings = crate::config::load(
-                            &crate::theme::canonical_theme_name,
-                            crate::theme::THEMES,
-                        );
-                        if let Some(line) = app.editing_status_line(
-                            settings.labels.layers_enabled,
-                            settings.labels.max_shift_layer,
-                        ) {
-                            app.status_message = line;
-                        } else {
-                            app.status_message =
-                                format!("Editing circuit {}:{}", nid.name(), nid.instance());
-                        }
-                        return Some(false);
-                    }
-                    *entry += 1;
-                }
-            }
-        }
-        // Panel hovered token (fallback) - requires patch and hover.
-        if let Some(idx) = app.hovered_component {
-            if begin_hw_label_edit(app, idx) {
-                return Some(false);
-            }
-        }
+    let wants_edit =
+        matches!(key.code, KeyCode::Char('e')) && key.modifiers.is_none() && app.editing.is_none();
+    if wants_edit
+        && (begin_focused_graph_node_edit(app)
+            || begin_focused_source_header_edit(app)
+            || begin_hovered_component_edit(app))
+    {
+        return Some(false);
     }
     None
+}
+
+/// Graph-focused `e`: the hovered node's label, drafted from the resolved
+/// circuit store (layer-aware) rather than the raw bucket.
+fn begin_focused_graph_node_edit(app: &mut App) -> bool {
+    if !app.view_focused(ViewType::Graph) {
+        return false;
+    }
+    let Some(idx) = app.hovered_graph_node else {
+        return false;
+    };
+    let Some(node) = app.graph.as_ref().and_then(|g| g.nodes.get(idx)).cloned() else {
+        return false;
+    };
+    let draft = app
+        .current_circuit_store()
+        .get(&node.id)
+        .cloned()
+        .unwrap_or_default();
+    open_circuit_edit(app, &node.id, draft);
+    true
+}
+
+/// Source-focused `e`: the section the selection points at. No selected
+/// occurrence falls back to the first section, which is why the target is a
+/// line number and not an index; a selected occurrence starts no edit here and
+/// lets the panel fallback run.
+fn begin_focused_source_header_edit(app: &mut App) -> bool {
+    if !app.view_focused(ViewType::SourceViewer) {
+        return false;
+    }
+    let Some(patch) = app.patch.as_ref() else {
+        return false;
+    };
+    let target_line = app
+        .selected_component
+        .as_ref()
+        .and_then(|tok| patch.occurrence_index.get(tok))
+        .and_then(|spans| spans.first())
+        .map_or(0, |s| s.line);
+    if target_line != 0 {
+        return false;
+    }
+    let Some(first) = patch.sections.first() else {
+        return false;
+    };
+    let nid = NodeId::circuit(&first.name, 0);
+    let draft = app
+        .current_circuit_store()
+        .get(&nid)
+        .cloned()
+        .unwrap_or_default();
+    open_circuit_edit(app, &nid, draft);
+    true
 }
 
 fn handle_physical_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
@@ -1781,16 +1864,7 @@ fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // presentation switch (mirroring how `p` acts on the graph
             // surface). Free in the normal-key path — the optimizer
             // overlay's `s` (export) returns earlier.
-            if app.view_focused(ViewType::Physical) {
-                app.physical_show_skeleton = !app.physical_show_skeleton;
-                app.status_message = if app.physical_show_skeleton {
-                    String::from("Skeleton: on")
-                } else {
-                    String::from("Skeleton: off")
-                };
-            } else {
-                app.open_view(ViewType::Physical);
-            }
+            handle_physical_skeleton_key(app);
             Some(false)
         }
         KeyCode::Char('f') if app.view_focused(ViewType::Physical) => {
@@ -1826,18 +1900,7 @@ fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // here: the only `c` claims elsewhere are the `g c` latency chord
             // (armed prefix, returns above) and Ctrl+C quit (`handle_session_key`
             // guards its modifier), and the graph's own `c` is graph-scoped.
-            let token = app.selected_component.clone();
-            let status = if token
-                .as_deref()
-                .is_some_and(|token| app.physical_center_on_component(token))
-            {
-                format!("Centred on {}", token.as_deref().unwrap_or_default())
-            } else if app.physical_center_on_rack() {
-                String::from("Centred on rack")
-            } else {
-                String::from("Nothing to centre")
-            };
-            app.status_message = status;
+            center_physical_view(app);
             Some(false)
         }
         KeyCode::Char('C') if app.view_focused(ViewType::Physical) => {
@@ -1853,6 +1916,38 @@ fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// The `s` arm: focus decides whether `s` opens the slot or toggles the
+/// skeleton, so that branch lives with the skeleton state, not the key table.
+fn handle_physical_skeleton_key(app: &mut App) {
+    if app.view_focused(ViewType::Physical) {
+        app.physical_show_skeleton = !app.physical_show_skeleton;
+        app.status_message = if app.physical_show_skeleton {
+            String::from("Skeleton: on")
+        } else {
+            String::from("Skeleton: off")
+        };
+    } else {
+        app.open_view(ViewType::Physical);
+    }
+}
+
+/// The `c` arm: element first, rack second, reported in one place so the three
+/// outcomes stay in that order.
+fn center_physical_view(app: &mut App) {
+    let token = app.selected_component.clone();
+    let status = if token
+        .as_deref()
+        .is_some_and(|token| app.physical_center_on_component(token))
+    {
+        format!("Centred on {}", token.as_deref().unwrap_or_default())
+    } else if app.physical_center_on_rack() {
+        String::from("Centred on rack")
+    } else {
+        String::from("Nothing to centre")
+    };
+    app.status_message = status;
 }
 
 /// Run one of the module UI's two fits and report the rack/zoom status
@@ -2568,16 +2663,7 @@ fn begin_graph_node_edit(app: &mut App, idx: usize) -> bool {
         .as_ref()
         .and_then(|p| app.label_store.circuit_label(p, &node.id))
         .unwrap_or_default();
-    app.editing = Some(crate::app::EditState::new_circuit(node.id.clone(), draft));
-    let settings = crate::config::load(&crate::theme::canonical_theme_name, crate::theme::THEMES);
-    if let Some(line) = app.editing_status_line(
-        settings.labels.layers_enabled,
-        settings.labels.max_shift_layer,
-    ) {
-        app.status_message = line;
-    } else {
-        app.status_message = format!("Editing circuit {}:{}", node.id.name(), node.id.instance());
-    }
+    open_circuit_edit(app, &node.id, draft);
     true
 }
 
