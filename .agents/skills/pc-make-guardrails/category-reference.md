@@ -13,6 +13,8 @@ From the documents and code graph analysis, extract concrete, actionable rules i
 - Dependencies: package manager, lockfile rules, upgrade policy, forbidden packages
 - Git workflow: branch naming, commit message format, PR process (platform-specific from `harness.json`)
 - Domain-specific rules: anything in `openspec/config.yaml` context or `ARCHITECTURE.md` constraints/risks sections
+- Documentation: which artifacts are derived and by which command, which hand-written page tracks which source of truth, which facts are duplicated and where, and what a verification pass must check. Always emit this category — it does not depend on the source documents.
+- Code health: dead-code policy and the lint that denies it, the complexity budget with the exact command that measures it and the failure threshold, the duplication rule (window size, what counts, where a shared helper belongs), and whether the budget is a ratchet with a recorded baseline. Always emit this category — it does not depend on the source documents.
 
 Each rule must be:
 - Concrete: "Use `pnpm` not `npm`" not "Use the right package manager"
@@ -45,6 +47,12 @@ license: MIT
 - <rule>
 
 ## Testing
+- <rule>
+
+## Documentation
+- <rule>
+
+## Code Health
 - <rule>
 
 ## Build & Deployment

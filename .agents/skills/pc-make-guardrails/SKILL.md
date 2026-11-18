@@ -45,6 +45,8 @@ Analyze `ARCHITECTURE.md` and other project files to generate or update a `pc-gu
 
    From the documents and code graph analysis, extract concrete, actionable rules. Follow the [category reference](category-reference.md) for the full list of categories, rule quality standards, and the skill file template.
 
+   Always emit the `Documentation` and `Code Health` sections. `Documentation` records which artifacts are derived and by which command, which hand-written page tracks which source of truth, and which facts are duplicated; `Code Health` records the dead-code ban, the complexity budget with the command that measures it, the duplication rule and the ratchet that makes the budget enforceable. Both hold whatever the source documents say today, so neither is conditional on the extraction.
+
 4. **Write the skill**
 
    Write (or update) `.agents/skills/pc-guardrails-project/SKILL.md` using the template from the [category reference](category-reference.md). Only include sections that have real rules. Omit empty sections.
