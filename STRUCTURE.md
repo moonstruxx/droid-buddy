@@ -8,14 +8,17 @@ droid_tui/
 │   ├── main.rs                 # binary entry — winit event loop + egui paint
 │   ├── lib.rs                  # library root — module wiring (pub mod …)
 │   ├── app.rs                  # App state struct + class-based pane layout + helpers
+│   ├── cli.rs                  # headless `analyze`/`optimize` argv parsing + dispatch
+│   ├── report.rs               # versioned CLI report shape (report_version 1)
 │   ├── handler.rs              # keyboard + mouse event handling
 │   ├── patch.rs                # domain model + hand-rolled .ini parser
 │   ├── schema.rs               # embedded DROID circuit schema + jack table
-│   ├── validation.rs           # 10 check patch validation (droid-lsp + value grammar)
+│   ├── validation.rs           # 12 check patch validation (droid-lsp + value grammar)
 │   ├── diff.rs                 # pure patch-diff model (DiffReport)
 │   ├── graph.rs                # signal-flow graph model + topology validation
 │   ├── layout.rs               # column arrangement (default) + force solver
 │   ├── graph_anim.rs           # pure settle-animation driver (open-animation)
+│   ├── graph_group.rs          # post-solve same-type grouping (view transform)
 │   ├── graph_render.rs         # backend-neutral SceneSpec types
 │   ├── geometry.rs             # rack-geometry model + wiring-outlier scorer
 │   ├── physical.rs             # physical 1:1 layout model (mm grid)
@@ -24,6 +27,8 @@ droid_tui/
 │   ├── optimize.rs             # latency-optimized patch generation
 │   ├── panes.rs                # class-based pane layout model (PaneLayout/PaneId)
 │   ├── performance.rs          # pure side-bound callout layout (performance view)
+│   ├── platform.rs             # one resolution of every user-data path
+│   ├── rack.rs                 # master resolution (MasterPlan) + rack inventory
 │   ├── store.rs                # shared on-disk rules for the user TOML stores
 │   ├── sysex.rs                # pure MIDI SysEx payload builder
 │   ├── test_support.rs         # cfg(test) shared fixtures (catalog schema, two-cluster graph)
@@ -43,13 +48,16 @@ droid_tui/
 │       ├── overlays.rs         # validation modal / select menu / labels / diff / optimizer
 │       └── graph.rs            # signal-flow canvas + minimap + tooltip
 ├── tests/
+│   ├── cli.rs                  # headless-CLI contract: exit codes, JSON shape, report-key drift guard
+│   ├── force_arrangement_invariants.rs  # solver determinism + non-overlap invariants
 │   └── perf_gate.rs            # profiling gate: budgeted watchdog phases over the scale anchor
 ├── fixtures/                   # test fixtures: *.ini patches, plugins/, picker_test/,
-│                               #   validation/*.ini (10-check matrix)
+│                               #   validation/*.ini (12-check matrix)
 ├── corpus/                     # patch corpus + analysis CSVs (features.csv, rendermetrics.csv)
 │                               #   + good/*.ini curated gold patches (generator variants removed)
 ├── tools/                      # developer analysis tools (Python fit/build scripts + artifacts)
-├── scripts/                    # developer scripts (profile-gate.sh, gen_own_scale.py)
+├── scripts/                    # developer scripts (profile-gate.sh, gen_own_scale.py,
+│                               #   codehealth.py + codehealth-baseline.txt)
 ├── assets/                     # JetBrainsMono-Regular.ttf (UI font)
 ├── ext/droid-lsp/              # vendored git submodule — schema/validation source of truth
 ├── patches_remote/             # remote DROID patch files (reference .ini patches + Generators/)
@@ -81,8 +89,8 @@ droid_tui/
 
 **`tests/`:**
 - Purpose: integration tests that need the full crate.
-- Contains: `perf_gate.rs` — budgeted pure phases over the scale anchor `fixtures/own_scale.ini`.
-- Key files: `perf_gate.rs`.
+- Contains: `perf_gate.rs` (budgeted pure phases over the scale anchor `fixtures/own_scale.ini`), `cli.rs` (the headless-CLI contract, spawning the binary), `force_arrangement_invariants.rs` (solver determinism and non-overlap).
+- Key files: `perf_gate.rs`, `cli.rs`.
 
 **`fixtures/`:**
 - Purpose: `.ini` patch files and supporting data exercising every parser/graph/validation/physical path.
@@ -110,7 +118,7 @@ droid_tui/
 **Configuration:** `Cargo.toml` (manifest); `src/config.rs` (XDG `config.toml` load/save); `controller_geometry.json` and `rack_geometry.json` (geometry data loaded relative to `CARGO_MANIFEST_DIR`).
 **Core logic:** `src/patch.rs` (domain + parser), `src/app.rs` (state), `src/handler.rs` (input), `src/graph.rs` + `src/layout.rs` (signal-flow graph + solver), `src/schema.rs` + `src/validation.rs` (schema + validation).
 **Rendering:** `src/gui/` (egui surfaces), `src/theme.rs` (color tokens), `src/graph_render.rs` (scene spec).
-**Tests:** co-located `#[cfg(test)] mod tests` in every source file, plus `src/regression.rs` (cross-layer) and `tests/perf_gate.rs` (integration).
+**Tests:** co-located `#[cfg(test)] mod tests` in every source file, plus `src/regression.rs` (cross-layer) and the three `tests/` binaries (`cli`, `force_arrangement_invariants`, `perf_gate`).
 
 ## Naming Conventions
 

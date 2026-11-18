@@ -82,17 +82,23 @@ rebuild, not a reinstall.
 Run it with `./target/release/droid_tui [patch.ini]`, or
 `droid_tui.exe [patch.ini]` on Windows.
 
-## The five gates
+## The gates
 
-Every change must pass these, and CI runs the same set (the doc gate on
-Linux). All must exit 0.
+Every change must pass these, and CI runs the same set. All must exit 0.
+The Rust gates run on all three platforms; the lint, doc, data and harness
+gates run once on Linux (design decision 5).
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+python3 scripts/codehealth.py
+python3 tools/acquire_geometry.py --check
 cargo test --locked
 cargo build --release --locked
+cargo run --release --locked --quiet -- --self-test fixtures/own_buttons.ini
+cargo build --manifest-path tools/screenshots/Cargo.toml --locked
+cargo test --release --test perf_gate --locked
 ```
 
 | Gate | Catches |
@@ -100,8 +106,13 @@ cargo build --release --locked
 | `cargo fmt --check` | formatting drift; fix with plain `cargo fmt` |
 | clippy with `-D warnings` | lints over every target and feature; warnings are errors. `clippy::pedantic` is on crate-wide, with a reasoned allow-list in `Cargo.toml` `[lints.clippy]` |
 | rustdoc with `-D warnings` | broken intra-doc links — how a rename silently rots the docs |
+| `scripts/codehealth.py` | a function above 15 decision points, a duplicated 8-line block, or a new `#[allow(dead_code)]`; `scripts/codehealth-baseline.txt` records the pre-existing offenders so the gate fails on new debt only |
+| `tools/acquire_geometry.py --check` | `controller_geometry.json` drifting from what the generator derives |
 | `cargo test --locked` | unit tests, the `src/regression.rs` stories, and the Linux perf gate |
 | `cargo build --release --locked` | release-profile breakage the test profile does not show |
+| `--self-test` | the real paint dispatch, both panes and the published hit geometry, headless |
+| the `tools/screenshots` build | a new `gui/` surface the screenshot harness no longer compiles |
+| the release perf gate | a gated phase over budget (Linux only; see [The performance gate](#the-performance-gate)) |
 
 `--locked` turns a stale `Cargo.lock` into a failure instead of a silent
 re-resolve, so a dependency change has to be committed with its lock
@@ -110,13 +121,15 @@ commands still pass locally without `--locked`, but then a stale
 lockfile would not fail.
 
 The `[lints.clippy]` table in `Cargo.toml` turns on `clippy::pedantic`
-for the whole crate and is the only place a lint is turned off. Every
-entry in its allow-list carries the reason it is off — the f32
-geometry casts, float equality on colours, the flag structs that mirror
-the patch format's independent options, and the prose docs — so the
-exception policy is one reviewable table rather than `#[allow]`s
-scattered through `src/`. Adding an `#[allow]` in the code needs a
-reason at the site and should stay rare.
+for the whole crate and is the crate-wide exception policy. Every entry in
+its allow-list carries the reason it is off — the f32 geometry casts, float
+equality on colours, the flag structs that mirror the patch format's
+independent options, and the prose docs. A per-site `#[allow]` is the narrow
+exception: it needs a reason on the same line, it stays rare, and the only
+category that needs no reason is the `#[path]`-staging shims in
+`src/gui/mod.rs`, which exist for the screenshot harness and disappear from a
+normal build. `scripts/codehealth.py` fails on a new `#[allow(dead_code)]`
+outside those shims.
 
 The allow-list is also where a *newer* clippy on CI is handled: clippy ships
 lints over time (1.99 added `assert_is_empty`, which this suite's ~110
@@ -126,7 +139,7 @@ proves less than it looks. Run `rustup update stable` when CI reports an
 unknown lint, reproduce locally, and decide once: fix the sites, or add one
 reasoned line to the table.
 
-The release performance gate is a sixth command, Linux only:
+The release performance gate is Linux only:
 
 ```sh
 cargo test --release --test perf_gate --locked
@@ -141,7 +154,7 @@ cargo test --release --test perf_gate --locked
 
 | Job | Runner | Timeout | Runs |
 |---|---|---|---|
-| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, tests, release build, self-test, screenshot harness, perf gate |
+| `ubuntu-latest` | `ubuntu-latest` | 60 min | fmt, clippy, rustdoc, code-health gate, geometry gate, tests, release build, self-test, screenshot harness, perf gate |
 | `windows-latest` | `windows-latest` | 45 min | tests, release build, self-test |
 | `macos-latest` | `macos-latest` | 45 min | tests, release build, self-test |
 

@@ -63,10 +63,14 @@ comes from theme tokens — no hardcoded RGB.
 
 ### `[layout]`
 
-- `mode` (`column` default / `force`): the graph arrangement. `h` on
-  the graph pane toggles at runtime.
-- `ordering` (`strict` default / `barycenter`): within-column node
-  order for the column arrangement.
+- `mode` (`column` default / `force` / `sections`): the graph
+  arrangement — the deterministic column layout, the force solver, or
+  the sections solver. `h` on the graph pane cycles it at runtime.
+- `ordering` (`strict` default / `barycenter` / `patch`): within-column
+  node order for the column arrangement.
+- `slice_force` / `section_force` (floats, default `SLICE_K` /
+  `SECTION_HOLE_K`): the sections-mode slice-spring and section-hole
+  stiffness. The sliders panel retunes them live for the session.
 
 ### `[graph]`
 
@@ -109,6 +113,8 @@ row holds. Omit `[physical.rack]` for the auto-packed default case.
   is true size (one millimetre is 3.7795 pt). The view fits itself on its
   first frame, so the opening zoom is the fit's rather than the seed's;
   `+`/`-` step the presets and the wheel zooms at runtime.
+- `show_skeleton` (bool, default `false`): open the pane in the skeleton
+  presentation, where `s` toggles it at runtime.
 - `offset_x` / `offset_y` (points, default `0.0`): the pan seed, replaced
   on that same first frame by the fit's centring.
 
