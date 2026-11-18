@@ -360,40 +360,63 @@ impl CalculationGrammar {
     }
 }
 
+/// A byte that continues an identifier or register token (`B1`, `P2B8`,
+/// `_CABLE`).
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// A byte that may not follow a complete jack token: `B1.4` is still one token,
+/// `B1` ends at anything else.
+fn continues_token(byte: u8) -> bool {
+    is_token_char(byte) || byte == b'.'
+}
+
+/// Whether a jack token starts at `i`: an upper-case letter followed by a digit,
+/// at a word boundary.
+fn starts_jack_token(bytes: &[u8], i: usize) -> bool {
+    let boundary_ok = i == 0 || !is_token_char(bytes[i - 1]);
+    let Some(&next) = bytes.get(i + 1) else {
+        return false;
+    };
+    boundary_ok && bytes[i].is_ascii_uppercase() && next.is_ascii_digit()
+}
+
+/// The index past the run of ASCII digits starting at `start`.
+fn scan_digits(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    i
+}
+
+/// The index past the jack token starting at `i` (which `starts_jack_token`
+/// accepted): the kind letter, its instance digits, then an optional `.element`
+/// suffix. A trailing dot without digits is not part of the token.
+fn scan_jack_token(bytes: &[u8], i: usize) -> usize {
+    let mut i = scan_digits(bytes, i + 1);
+    let has_element =
+        bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+    if has_element {
+        i = scan_digits(bytes, i + 1);
+    }
+    i
+}
+
+/// The jack tokens in `value` (`B1.17`, `M4.2`, `P2B8`), in source order.
 fn extract_jack_tokens(value: &str) -> Vec<String> {
     let bytes = value.as_bytes();
-    let len = bytes.len();
     let mut out = Vec::new();
     let mut i = 0;
-    while i < len {
-        let c = bytes[i] as char;
-        // Must be A-Z, followed by digit, with word boundary before
-        let boundary_ok =
-            i == 0 || !((bytes[i - 1] as char).is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-        if c.is_ascii_uppercase()
-            && boundary_ok
-            && i + 1 < len
-            && (bytes[i + 1] as char).is_ascii_digit()
-        {
-            let start = i;
-            i += 1;
-            while i < len && (bytes[i] as char).is_ascii_digit() {
-                i += 1;
-            }
-            if i < len && bytes[i] == b'.' && i + 1 < len && (bytes[i + 1] as char).is_ascii_digit()
-            {
-                i += 1;
-                while i < len && (bytes[i] as char).is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let clean_end = i >= len
-                || !((bytes[i] as char).is_ascii_alphanumeric()
-                    || bytes[i] == b'_'
-                    || bytes[i] == b'.');
+    while i < bytes.len() {
+        if starts_jack_token(bytes, i) {
+            let end = scan_jack_token(bytes, i);
+            let clean_end = bytes.get(end).is_none_or(|byte| !continues_token(*byte));
             if clean_end {
-                out.push(value[start..i].to_string());
+                out.push(value[i..end].to_string());
             }
+            i = end;
             continue;
         }
         i += 1;
@@ -654,121 +677,178 @@ fn check_entries(
     is_known_circuit: bool,
     issues: &mut Vec<ValidationIssue>,
 ) -> HashMap<String, usize> {
-    // Track seen params for this section
+    let valid_params = valid_param_names(schema, section, is_known_circuit);
+    // `seen` keeps the first line each param appeared on; the required-parameter
+    // scan needs it once the whole section is known, so it outlives the loop.
     let mut seen: HashMap<String, usize> = HashMap::new();
-    let valid_param_set: Option<HashSet<String>> = if is_known_circuit {
-        schema
-            .get_param_names(&section.name)
-            .map(|v| v.into_iter().collect())
-    } else {
-        None
-    };
-
-    // Missing-required check needs seen after full scan, but we collect now.
-    // We do per-entry checks inline.
     for entry in &section.detailed_entries {
-        // 2. duplicate param (second occurrence)
-        if let Some(_first) = seen.get(&entry.key) {
-            issues.push(ValidationIssue {
-                span: entry.value_span,
-                severity: Severity::Warning,
-                code: "duplicate_param".to_string(),
-                message: format!(
-                    "Duplicate parameter \"{}\" in [{}]",
-                    entry.key, section.name
-                ),
-            });
-        } else {
-            seen.insert(entry.key.clone(), entry.line);
-        }
+        check_duplicate_param(section, entry, &mut seen, issues);
+        check_unknown_param(section, entry, valid_params.as_ref(), issues);
+        check_invalid_expression(section, entry, issues);
+        check_invalid_jack(entry, issues);
+        check_undefined_cable(schema, section, entry, facts, issues);
+    }
+    seen
+}
 
-        // 3. unknown param (only for known circuits)
-        if let Some(ref valid) = valid_param_set {
-            if !valid.contains(&entry.key) {
-                issues.push(ValidationIssue {
-                    span: entry.value_span,
-                    severity: Severity::Error,
-                    code: "unknown_param".to_string(),
-                    message: format!(
-                        "Unknown parameter \"{}\" for circuit \"{}\"",
-                        entry.key, section.name
-                    ),
-                });
-            }
-        }
+/// The param names the schema accepts for this section, or `None` when the
+/// circuit is unknown (no param list to judge against).
+fn valid_param_names(
+    schema: &Schema,
+    section: &IniSection,
+    is_known_circuit: bool,
+) -> Option<HashSet<String>> {
+    if !is_known_circuit {
+        return None;
+    }
+    schema
+        .get_param_names(&section.name)
+        .map(|names| names.into_iter().collect())
+}
 
-        // 3b. expression grammar: DROID evaluates `A * B + C` only, so a
-        // bracketed or chained calculation is an invalid parameter value
-        // and the firmware refuses the whole patch.
-        if let Some(problem) = expression_problem(&entry.value) {
-            issues.push(ValidationIssue {
-                span: entry.value_span,
-                severity: Severity::Error,
-                code: "invalid_expression".to_string(),
-                message: format!(
-                    "Invalid value \"{}\" for \"{}\" in [{}]: {problem}",
-                    entry.value.trim(),
-                    entry.key,
-                    section.name
-                ),
-            });
-        }
+/// Duplicate param (check 2): the second occurrence warns at its own value
+/// span, the first one is what `seen` records.
+fn check_duplicate_param(
+    section: &IniSection,
+    entry: &IniEntry,
+    seen: &mut HashMap<String, usize>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if seen.contains_key(&entry.key) {
+        issues.push(ValidationIssue {
+            span: entry.value_span,
+            severity: Severity::Warning,
+            code: "duplicate_param".to_string(),
+            message: format!(
+                "Duplicate parameter \"{}\" in [{}]",
+                entry.key, section.name
+            ),
+        });
+        return;
+    }
+    seen.insert(entry.key.clone(), entry.line);
+}
 
-        // 4. invalid jack: scan value for jack tokens, validate each
-        // Skip numeric and cable values: if value is pure numeric or starts with '_' skip jack check
-        let trimmed = entry.value.trim();
-        let is_numeric = trimmed.parse::<f64>().is_ok();
-        let is_cable = trimmed.starts_with('_');
-        if !is_numeric && !is_cable {
-            let jack_tokens = extract_jack_tokens(&entry.value);
-            let mut invalid_msg: Option<String> = None;
-            for tok in &jack_tokens {
-                if !is_valid_jack(tok) {
-                    // produce detailed message via validate_jack
-                    if let Some((prefix, mod_num, ch)) = parse_jack_for_validate(tok) {
-                        if let Some(msg) = validate_jack(&prefix, mod_num, ch) {
-                            invalid_msg = Some(msg);
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Some(msg) = invalid_msg {
-                issues.push(ValidationIssue {
-                    span: entry.value_span,
-                    severity: Severity::Warning,
-                    code: "invalid_jack".to_string(),
-                    message: msg,
-                });
-            }
-        }
+/// Unknown param (check 3) — only a circuit the schema knows has a param list
+/// to judge against.
+fn check_unknown_param(
+    section: &IniSection,
+    entry: &IniEntry,
+    valid_params: Option<&HashSet<String>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(valid) = valid_params else {
+        return;
+    };
+    if valid.contains(&entry.key) {
+        return;
+    }
+    issues.push(ValidationIssue {
+        span: entry.value_span,
+        severity: Severity::Error,
+        code: "unknown_param".to_string(),
+        message: format!(
+            "Unknown parameter \"{}\" for circuit \"{}\"",
+            entry.key, section.name
+        ),
+    });
+}
 
-        // 6. undefined cable (sink references never defined)
-        // For each cable in this entry's value (excluding pure output defs already considered)
-        let is_def = is_cable_definition(schema, &section.name, &entry.key, &entry.value);
-        if !is_def {
-            let cables = crate::patch::scan_internal_tokens(&entry.value);
-            // dedup per entry to avoid duplicate warnings for same cable repeated in same value expression
-            let mut seen_cable: HashSet<String> = HashSet::new();
-            for cable in cables {
-                if !seen_cable.insert(cable.clone()) {
-                    continue;
-                }
-                if !facts.defined_names.contains(&cable) {
-                    issues.push(ValidationIssue {
-                        span: entry.value_span,
-                        severity: Severity::Warning,
-                        code: "undefined_cable".to_string(),
-                        message: format!(
-                            "Virtual cable \"{cable}\" is used but never defined as an output"
-                        ),
-                    });
-                }
-            }
+/// Expression grammar (check 3b): DROID evaluates `A * B + C` only, so a
+/// bracketed or chained calculation is an invalid parameter value and the
+/// firmware refuses the whole patch.
+fn check_invalid_expression(
+    section: &IniSection,
+    entry: &IniEntry,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(problem) = expression_problem(&entry.value) else {
+        return;
+    };
+    issues.push(ValidationIssue {
+        span: entry.value_span,
+        severity: Severity::Error,
+        code: "invalid_expression".to_string(),
+        message: format!(
+            "Invalid value \"{}\" for \"{}\" in [{}]: {problem}",
+            entry.value.trim(),
+            entry.key,
+            section.name
+        ),
+    });
+}
+
+/// Invalid jack (check 4): the first jack token in the value that the firmware
+/// cannot accept is reported at the value span. Numeric and cable values carry
+/// no jack reference, so they are skipped wholesale.
+fn check_invalid_jack(entry: &IniEntry, issues: &mut Vec<ValidationIssue>) {
+    if is_plain_scalar(&entry.value) {
+        return;
+    }
+    let Some(message) = first_invalid_jack_message(&entry.value) else {
+        return;
+    };
+    issues.push(ValidationIssue {
+        span: entry.value_span,
+        severity: Severity::Warning,
+        code: "invalid_jack".to_string(),
+        message,
+    });
+}
+
+/// A value the jack scan does not inspect: a pure number or a cable reference.
+fn is_plain_scalar(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.parse::<f64>().is_ok() || trimmed.starts_with('_')
+}
+
+/// The detailed reason the first unusable jack token in `value` is unusable.
+fn first_invalid_jack_message(value: &str) -> Option<String> {
+    for token in extract_jack_tokens(value) {
+        if let Some(message) = invalid_jack_message(&token) {
+            return Some(message);
         }
     }
+    None
+}
 
-    seen
+/// `None` when `token` is a jack the firmware accepts, otherwise the reason it
+/// rejects it.
+fn invalid_jack_message(token: &str) -> Option<String> {
+    if is_valid_jack(token) {
+        return None;
+    }
+    let (prefix, module, channel) = parse_jack_for_validate(token)?;
+    validate_jack(&prefix, module, channel)
+}
+
+/// Undefined cable (check 6): a sink reference no section defines as an output.
+/// One warning per distinct cable in the value.
+fn check_undefined_cable(
+    schema: &Schema,
+    section: &IniSection,
+    entry: &IniEntry,
+    facts: &CableFacts,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if is_cable_definition(schema, &section.name, &entry.key, &entry.value) {
+        return;
+    }
+    let mut seen_cable: HashSet<String> = HashSet::new();
+    for cable in crate::patch::scan_internal_tokens(&entry.value) {
+        if !seen_cable.insert(cable.clone()) {
+            continue;
+        }
+        if facts.defined_names.contains(&cable) {
+            continue;
+        }
+        issues.push(ValidationIssue {
+            span: entry.value_span,
+            severity: Severity::Warning,
+            code: "undefined_cable".to_string(),
+            message: format!("Virtual cable \"{cable}\" is used but never defined as an output"),
+        });
+    }
 }
 
 fn check_missing_required(

@@ -387,45 +387,15 @@ impl Module {
     /// Returns a vector of modules, each containing components that share the same
     /// controller. The first module will have the most common controller, etc.
     pub fn from_ini_sections(sections: &[String]) -> Vec<Self> {
-        use std::collections::HashMap;
-
         let mut controller_components: HashMap<String, Vec<HwComponent>> = HashMap::new();
 
         for section in sections {
-            // Strip leading/trailing whitespace
             let stripped = section.trim();
-
-            // Skip empty lines and comments
             if stripped.is_empty() || stripped.starts_with('#') {
                 continue;
             }
-
-            // Parse section name: remove [ and ]
-            let section_name = stripped
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-                .unwrap_or(stripped);
-
-            // Extract controller from section name pattern like [button], [knob], etc.
-            let controller = if section_name.is_empty() {
-                "Unused".to_string()
-            } else {
-                let first_char = section_name.chars().next().unwrap_or('/');
-                // Map hardware token kinds to controller names
-                match first_char {
-                    'B' => "P2B8",
-                    'L' => "Led",
-                    'P' => "Pot",
-                    'O' => "CV Out",
-                    'I' => "CV In",
-                    'E' => "Encoder",
-                    'S' => "Switch",
-                    _ => "Unused",
-                }
-                .to_string()
-            };
-
-            // Group component under the inferred controller
+            let section_name = unbracketed_section_name(stripped);
+            let controller = controller_for_section(section_name);
             controller_components
                 .entry(controller.clone())
                 .or_default()
@@ -441,23 +411,54 @@ impl Module {
                 });
         }
 
-        // Convert to Module objects, sorted by number of components (largest first)
-        let mut modules: Vec<Module> = controller_components
-            .into_iter()
-            .map(|(controller, components)| {
-                let model_name = components
-                    .first()
-                    .map_or_else(|| controller.clone(), |c| c.label.clone());
-
-                Module::new(controller, model_name, ModuleWidth::EightHP)
-            })
-            .collect();
-
-        // Sort by component count descending
-        modules.sort_by_key(|b| std::cmp::Reverse(b.component_count()));
-
-        modules
+        modules_from_components(controller_components)
     }
+}
+
+/// `[button]` → `button`: the section name without its surrounding brackets
+/// (a name with no brackets is returned unchanged).
+fn unbracketed_section_name(stripped: &str) -> &str {
+    stripped
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(stripped)
+}
+
+/// Controller name implied by a section name's leading hardware-token letter;
+/// an unrecognised or empty name lands in "Unused".
+fn controller_for_section(section_name: &str) -> String {
+    match section_name.chars().next() {
+        Some('B') => "P2B8",
+        Some('L') => "Led",
+        Some('P') => "Pot",
+        Some('O') => "CV Out",
+        Some('I') => "CV In",
+        Some('E') => "Encoder",
+        Some('S') => "Switch",
+        _ => "Unused",
+    }
+    .to_string()
+}
+
+/// Grouped components → one module per controller, largest first.
+fn modules_from_components(
+    controller_components: HashMap<String, Vec<HwComponent>>,
+) -> Vec<Module> {
+    let mut modules: Vec<Module> = controller_components
+        .into_iter()
+        .map(|(controller, components)| {
+            let model_name = components
+                .first()
+                .map_or_else(|| controller.clone(), |c| c.label.clone());
+
+            Module::new(controller, model_name, ModuleWidth::EightHP)
+        })
+        .collect();
+
+    // Sort by component count descending
+    modules.sort_by_key(|b| std::cmp::Reverse(b.component_count()));
+
+    modules
 }
 
 /// Shift groups — modifier keys that change the behavior/label of a group of components
@@ -467,6 +468,34 @@ pub enum ShiftGroup {
     Group2,
     Group3,
     Group4,
+}
+
+/// A stored label normalised for display: `None` when absent or blank, so the
+/// caller's fallback chain continues.
+fn trimmed_stored_label(stored: Option<&String>) -> Option<String> {
+    let trimmed = stored?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Stored label for `token` at `layer`, falling back to layer 1 when the
+/// effective layer has no label of its own.
+fn stored_hw_label(
+    hw_store: &HashMap<String, BTreeMap<u8, String>>,
+    token: &str,
+    layer: u8,
+) -> Option<String> {
+    let per_token = hw_store.get(token)?;
+    if let Some(label) = trimmed_stored_label(per_token.get(&layer)) {
+        return Some(label);
+    }
+    if layer == 1 {
+        return None;
+    }
+    trimmed_stored_label(per_token.get(&1))
 }
 
 impl Patch {
@@ -605,38 +634,10 @@ impl Patch {
         hw_store: &HashMap<String, BTreeMap<u8, String>>,
     ) -> String {
         let effective = Self::effective_shift(shift, layers_enabled, max_shift_layer);
-        if let Some(per_token) = hw_store.get(token) {
-            if let Some(v) = per_token.get(&effective).and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            }) {
-                return v;
-            }
-            if effective != 1 {
-                if let Some(v) = per_token.get(&1).and_then(|s| {
-                    let t = s.trim();
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t.to_string())
-                    }
-                }) {
-                    return v;
-                }
-            }
+        if let Some(v) = stored_hw_label(hw_store, token, effective) {
+            return v;
         }
-        if let Some(v) = self.preamble_labels.get(token).and_then(|s| {
-            let t = s.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        }) {
+        if let Some(v) = trimmed_stored_label(self.preamble_labels.get(token)) {
             return v;
         }
         Self::derived_label(token)
@@ -656,38 +657,10 @@ impl Patch {
         hw_store: &HashMap<String, BTreeMap<u8, String>>,
     ) -> Option<String> {
         let effective = Self::effective_shift(shift, layers_enabled, max_shift_layer);
-        if let Some(per_token) = hw_store.get(token) {
-            if let Some(v) = per_token.get(&effective).and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            }) {
-                return Some(v);
-            }
-            if effective != 1 {
-                if let Some(v) = per_token.get(&1).and_then(|s| {
-                    let t = s.trim();
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t.to_string())
-                    }
-                }) {
-                    return Some(v);
-                }
-            }
+        if let Some(v) = stored_hw_label(hw_store, token, effective) {
+            return Some(v);
         }
-        self.preamble_labels.get(token).and_then(|s| {
-            let t = s.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        })
+        trimmed_stored_label(self.preamble_labels.get(token))
     }
 
     /// Pure circuit label lookup: stored per-instance override if present and
@@ -697,14 +670,7 @@ impl Patch {
         node: &NodeId,
         circuit_store: &HashMap<NodeId, String>,
     ) -> Option<String> {
-        circuit_store.get(node).and_then(|s| {
-            let t = s.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        })
+        trimmed_stored_label(circuit_store.get(node))
     }
 
     /// Convenience: circuit label with derived fallback to the circuit name.
@@ -1040,84 +1006,39 @@ impl Patch {
         disabled: &HashSet<NodeId>,
         sinks: &InfluenceSinks,
     ) -> InfluenceSubtree {
+        let mut subtree = InfluenceSubtree::default();
         if root_vars.is_empty() {
-            return InfluenceSubtree::default();
+            return subtree;
         }
         let node_ids = build_node_ids(&self.sections);
-        // Dedup + sort roots for deterministic seed order.
-        let mut seen_root: HashSet<String> = HashSet::new();
-        let mut roots: Vec<String> = Vec::new();
-        for r in root_vars {
-            if seen_root.insert(r.clone()) {
-                roots.push(r.clone());
-            }
-        }
-        roots.sort();
-        let mut queue: VecDeque<String> = roots.into_iter().collect();
+        let mut queue: VecDeque<String> = sorted_unique_roots(root_vars).into_iter().collect();
         let mut visited_cables: HashSet<String> = HashSet::new();
         let mut visited_nodes: HashSet<NodeId> = HashSet::new();
-        let mut influenced_nodes: HashSet<NodeId> = HashSet::new();
-        let mut influenced_edges: HashSet<String> = HashSet::new();
         while let Some(cable) = queue.pop_front() {
             if !visited_cables.insert(cable.clone()) {
                 continue;
             }
-            influenced_edges.insert(cable.clone());
-            // Collect per-param sink entries for this cable, then sort for determinism.
-            let mut sink_entries: Vec<(NodeId, usize, String)> = Vec::new();
-            if let Some(entries) = sinks.sinks.get(&cable) {
-                for &(sink_idx, ref param_key) in entries {
-                    let nid = node_ids
-                        .get(sink_idx)
-                        .cloned()
-                        .unwrap_or_else(|| NodeId::circuit(&self.sections[sink_idx].name, 0));
-                    sink_entries.push((nid, sink_idx, param_key.clone()));
-                }
-            }
-            // Sort by (section_name, param_key, section_index) for deterministic BFS expansion.
-            sink_entries.sort_by(|a, b| {
-                let an = a.0.name();
-                let bn = b.0.name();
-                an.cmp(bn)
-                    .then_with(|| a.2.cmp(&b.2))
-                    .then_with(|| a.1.cmp(&b.1))
-            });
-            // Dedup per (NodeId, param_key) to keep per-param distinct but avoid duplicate pushes for same param.
-            let mut seen_sink: HashSet<(NodeId, String)> = HashSet::new();
-            for (nid, sink_idx, param_key) in sink_entries {
-                let dedup_key = (nid.clone(), param_key.clone());
-                if !seen_sink.insert(dedup_key) {
+            subtree.influenced_edges.insert(cable.clone());
+            let sink_entries = cable_sink_entries(sinks, &node_ids, &self.sections, &cable);
+            for (nid, sink_idx) in sink_entries {
+                let first_visit = visited_nodes.insert(nid.clone());
+                // `visited` implies `influenced`, so a repeat visit only
+                // re-asserts a node the walk already reached.
+                subtree.influenced_nodes.insert(nid.clone());
+                if !first_visit {
                     continue;
                 }
-                if !visited_nodes.insert(nid.clone()) {
-                    // Node already visited — its outputs have been queued, but still mark as influenced (already).
-                    // Ensure influenced_nodes contains it (visited implies influenced).
-                    influenced_nodes.insert(nid);
-                    continue;
-                }
-                influenced_nodes.insert(nid.clone());
-                // Structural hop: if sink has output ports, queue its outputs.
                 // A disabled circuit is a dead end — its own cells stay
                 // influenced, but nothing downstream of it is reached.
-                if !disabled.contains(&nid) {
-                    if let Some(outputs) = self.circuit_outputs.get(sink_idx) {
-                        if !outputs.is_empty() {
-                            let mut sorted_outputs = outputs.clone();
-                            sorted_outputs.sort();
-                            for out in sorted_outputs {
-                                if !visited_cables.contains(&out) && !queue.contains(&out) {
-                                    queue.push_back(out);
-                                }
-                            }
-                        }
-                    }
+                if disabled.contains(&nid) {
+                    continue;
                 }
+                let fresh =
+                    fresh_sink_outputs(&self.circuit_outputs, sink_idx, &visited_cables, &queue);
+                queue.extend(fresh.into_iter().cloned());
             }
         }
-        InfluenceSubtree {
-            influenced_nodes,
-            influenced_edges,
-        }
+        subtree
     }
 
     /// Hardware tokens that appear as param values in the influenced sink
@@ -1149,6 +1070,74 @@ impl Patch {
             .filter(|id| influenced.contains(id))
             .collect()
     }
+}
+
+/// Distinct roots in sorted order — the influence walk's deterministic seed
+/// order.
+fn sorted_unique_roots(root_vars: &[String]) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut roots: Vec<String> = Vec::new();
+    for root in root_vars {
+        if seen.insert(root.as_str()) {
+            roots.push(root.clone());
+        }
+    }
+    roots.sort();
+    roots
+}
+
+/// The sink entries of one cable as `(node, section index)`, deduplicated per
+/// `(node, param)` and sorted by `(section_name, param_key, section_index)` —
+/// the walk's expansion order (D9).
+fn cable_sink_entries(
+    sinks: &InfluenceSinks,
+    node_ids: &[NodeId],
+    sections: &[IniSection],
+    cable: &str,
+) -> Vec<(NodeId, usize)> {
+    let Some(entries) = sinks.sinks.get(cable) else {
+        return Vec::new();
+    };
+    let mut sink_entries: Vec<(NodeId, usize, &String)> = Vec::new();
+    for (sink_idx, param_key) in entries {
+        let nid = node_ids
+            .get(*sink_idx)
+            .cloned()
+            .unwrap_or_else(|| NodeId::circuit(&sections[*sink_idx].name, 0));
+        sink_entries.push((nid, *sink_idx, param_key));
+    }
+    sink_entries.sort_by(|a, b| {
+        a.0.name()
+            .cmp(b.0.name())
+            .then_with(|| a.2.cmp(b.2))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    let mut seen: HashSet<(NodeId, &String)> = HashSet::new();
+    sink_entries
+        .into_iter()
+        .filter(|(nid, _, param_key)| seen.insert((nid.clone(), *param_key)))
+        .map(|(nid, sink_idx, _)| (nid, sink_idx))
+        .collect()
+}
+
+/// Output cables of `sink_idx`, sorted, that the walk has neither traversed
+/// nor queued yet — the structural hop frontier of one sink circuit. A sink
+/// without output ports is a leaf.
+fn fresh_sink_outputs<'a>(
+    circuit_outputs: &'a [Vec<String>],
+    sink_idx: usize,
+    visited_cables: &HashSet<String>,
+    queue: &VecDeque<String>,
+) -> Vec<&'a String> {
+    let Some(outputs) = circuit_outputs.get(sink_idx) else {
+        return Vec::new();
+    };
+    let mut sorted: Vec<&String> = outputs.iter().collect();
+    sorted.sort();
+    sorted
+        .into_iter()
+        .filter(|out| !visited_cables.contains(*out) && !queue.contains(*out))
+        .collect()
 }
 
 /// Precomputed per-cable sink index for the influence BFS: one pass over
@@ -1983,72 +1972,83 @@ pub fn positional_leds_for_element(controller: &str, element_token: &str) -> Vec
     match ctrl.as_str() {
         // B32: 32 buttons, 32 LEDs, 1:1 mapping (white-only)
         "b32" | "notebuttons" => {
-            if element_kind == 'B' {
-                match dotted_instance_element(element_token, 'B') {
-                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
-                    None => vec![format!("L{}", element_num)],
-                }
-            } else {
-                vec![]
-            }
+            button_positional_leds(element_kind, element_token, element_num, None)
         }
         // P2B8 / P4B2 / M4: 1:1 button→LED mapping on this rack, so the LED
         // keeps the element's instance and number (`L1.n`) when the token omits
         // the instance.
         "p2b8" | "p4b2" | "m4" | "motorfader" => {
-            if element_kind == 'B' {
-                match dotted_instance_element(element_token, 'B') {
-                    Some((inst, n)) => vec![format!("L{inst}.{n}")],
-                    None => vec![format!("L1.{}", element_num)],
-                }
-            } else {
-                vec![]
-            }
+            button_positional_leds(element_kind, element_token, element_num, Some(1))
         }
         // E4: 4 encoders, 128 LEDs total (32 per encoder ring)
-        "e4" | "encoder" => {
-            if element_kind == 'E' {
-                let start = (element_num - 1) * 32 + 1;
-                (start..start + 32).map(|n| format!("L{n}")).collect()
-            } else {
-                vec![]
-            }
-        }
+        "e4" | "encoder" => encoder_positional_leds(element_kind, element_num),
         // P8S8: 8 sliders with LEDs inside each slider cap
-        "p8s8" | "faderbank" => {
-            if element_kind == 'F' || element_kind == 'P' {
-                vec![format!("L1.{}", element_num)]
-            } else {
-                vec![]
-            }
-        }
+        "p8s8" | "faderbank" => slider_positional_leds(element_kind, element_num),
         // Master: 16 CV jacks with 16 RGB LEDs (4x4 grid)
-        "master" | "cv i/o" => {
-            if matches!(element_kind, 'I' | 'O') {
-                vec![format!("R{}", element_num)]
-            } else {
-                vec![]
-            }
-        }
-        // G8: 8 gate jacks with 8 RGB LEDs (one above each jack)
-        "g8" => {
-            if element_kind == 'G' {
-                vec![format!("R{}", element_num + 16)] // R17-R24 for first G8
-            } else {
-                vec![]
-            }
-        }
-        // X7: 4 gate outputs with 8 LEDs
-        "x7" => {
-            if element_kind == 'G' {
-                vec![format!("R{}", element_num + 48)] // R49-R56 for first X7
-            } else {
-                vec![]
-            }
-        }
+        "master" | "cv i/o" => cv_jack_positional_leds(element_kind, element_num),
+        // G8: 8 gate jacks with 8 RGB LEDs (one above each jack),
+        // R17-R24 for the first G8.
+        "g8" => gate_positional_leds(element_kind, element_num, 16),
+        // X7: 4 gate outputs with 8 LEDs, R49-R56 for the first X7.
+        "x7" => gate_positional_leds(element_kind, element_num, 48),
         // Master18 / any other family: no positional LED default.
-        _ => vec![],
+        _ => Vec::new(),
     }
+}
+
+/// Positional LEDs of a 1:1 button controller. A dotted token keeps its own
+/// instance (`B2.5` → `L2.5`); an undotted one uses `instance` when the family
+/// carries it (`L1.5`) or the bare number (`L5`).
+fn button_positional_leds(
+    element_kind: char,
+    element_token: &str,
+    element_num: u32,
+    instance: Option<u32>,
+) -> Vec<String> {
+    if element_kind != 'B' {
+        return Vec::new();
+    }
+    match (dotted_instance_element(element_token, 'B'), instance) {
+        (Some((inst, n)), _) => vec![format!("L{inst}.{n}")],
+        (None, Some(inst)) => vec![format!("L{inst}.{element_num}")],
+        (None, None) => vec![format!("L{element_num}")],
+    }
+}
+
+/// E4 encoder ring: 32 consecutive LEDs per encoder.
+fn encoder_positional_leds(element_kind: char, element_num: u32) -> Vec<String> {
+    if element_kind != 'E' {
+        return Vec::new();
+    }
+    let start = (element_num - 1) * 32 + 1;
+    (start..start + 32).map(|n| format!("L{n}")).collect()
+}
+
+/// P8S8 slider-cap LED for an `F`/`P` element.
+fn slider_positional_leds(element_kind: char, element_num: u32) -> Vec<String> {
+    if element_kind == 'F' || element_kind == 'P' {
+        vec![format!("L1.{element_num}")]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Master CV jack LED: `I1..I8` / `O1..O8` sit on the `R1..R8` register row.
+fn cv_jack_positional_leds(element_kind: char, element_num: u32) -> Vec<String> {
+    if matches!(element_kind, 'I' | 'O') {
+        vec![format!("R{element_num}")]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Gate jack LED: `R{num + offset}`, the offset placing the controller's LED row
+/// after the CV jacks.
+fn gate_positional_leds(element_kind: char, element_num: u32, offset: u32) -> Vec<String> {
+    if element_kind != 'G' {
+        return Vec::new();
+    }
+    vec![format!("R{}", element_num + offset)]
 }
 
 /// Single source of truth for the element-to-LED binding (button-led-composition D3).
@@ -2318,38 +2318,63 @@ fn scan_token_ranges(value: &str, letters: &[char]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < len {
-        let c = bytes[i] as char;
-        let boundary_ok =
-            i == 0 || !((bytes[i - 1] as char).is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-        let starts_token = letters.contains(&c)
-            && i + 1 < len
-            && (bytes[i + 1] as char).is_ascii_digit()
-            && boundary_ok;
-        if starts_token {
-            let start = i;
-            i += 1;
-            while i < len && (bytes[i] as char).is_ascii_digit() {
-                i += 1;
+        if token_starts_at(bytes, i, letters) {
+            let end = token_run_end(bytes, i);
+            if token_ends_cleanly(bytes, end) {
+                out.push((i, end));
             }
-            if i < len && bytes[i] == b'.' && i + 1 < len && (bytes[i + 1] as char).is_ascii_digit()
-            {
-                i += 1;
-                while i < len && (bytes[i] as char).is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let clean_end = i >= len
-                || !((bytes[i] as char).is_ascii_alphanumeric()
-                    || bytes[i] == b'_'
-                    || bytes[i] == b'.');
-            if clean_end {
-                out.push((start, i));
-            }
+            i = end;
             continue;
         }
         i += 1;
     }
     out
+}
+
+/// True when byte `i` may begin a token: at the value start, or after a
+/// character that is neither alphanumeric nor `_`.
+fn token_boundary(bytes: &[u8], i: usize) -> bool {
+    i == 0 || !((bytes[i - 1] as char).is_ascii_alphanumeric() || bytes[i - 1] == b'_')
+}
+
+/// True when the byte after `i` is a digit — the letter-then-digit shape of a
+/// hardware token.
+fn digit_follows(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit()
+}
+
+/// True when a token over `letters` starts at byte `i`.
+fn token_starts_at(bytes: &[u8], i: usize, letters: &[char]) -> bool {
+    letters.contains(&(bytes[i] as char)) && token_boundary(bytes, i) && digit_follows(bytes, i)
+}
+
+/// End index of the digit run starting at `i`.
+fn skip_digits(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+        i += 1;
+    }
+    i
+}
+
+/// End of the token run starting at `start`: its integer part plus the optional
+/// `.pin` suffix.
+fn token_run_end(bytes: &[u8], start: usize) -> usize {
+    let mut i = skip_digits(bytes, start + 1);
+    if i < bytes.len() && bytes[i] == b'.' && digit_follows(bytes, i) {
+        i = skip_digits(bytes, i + 1);
+    }
+    i
+}
+
+/// True when the token ending at `i` is followed by a character that cannot
+/// continue it, so `B1.1.2` and `B1.1x` are rejected.
+fn token_ends_cleanly(bytes: &[u8], i: usize) -> bool {
+    i >= bytes.len() || !token_continues(bytes[i])
+}
+
+/// True when `byte` could extend a hardware token.
+fn token_continues(byte: u8) -> bool {
+    (byte as char).is_ascii_alphanumeric() || byte == b'_' || byte == b'.'
 }
 
 fn scan_hw_tokens_with_letters(value: &str, letters: &[char]) -> Vec<String> {

@@ -65,6 +65,50 @@ fn default_true() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Token grammar — the parser behind `RackGeometry::resolve`
+// ---------------------------------------------------------------------------
+
+/// Parse a hardware token into `(kind letter, module instance, element)`.
+///
+/// Mirrors `HwComponent::module_instance()` / `leading_number()` in
+/// `src/patch.rs`: the leading digit-run after the kind letter is the module
+/// instance, the digits after the dot are the (1-based) element. Singletons
+/// carry no digits and default to 1.
+fn token_parts(token: &str) -> Option<(char, usize, u32)> {
+    let kind = token.chars().next()?;
+    if !kind.is_ascii_alphabetic() {
+        return None;
+    }
+    let digits: String = token
+        .chars()
+        .skip(1)
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let instance: usize = digits.parse().unwrap_or(1);
+    if instance == 0 {
+        return None;
+    }
+    let element = dot_element(token);
+    if element == 0 {
+        return None;
+    }
+    Some((kind.to_ascii_uppercase(), instance, element))
+}
+
+/// The element number after the dot (1-based), `1` when the token has none.
+fn dot_element(token: &str) -> u32 {
+    let Some(dot) = token.find('.') else {
+        return 1;
+    };
+    token[dot + 1..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(1)
+}
+
+// ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
 
@@ -97,118 +141,101 @@ impl RackGeometry {
     /// controller names (`B32`/`b32`, `E4`/`e4`) share the same element grid via
     /// case-insensitive grid-key resolution.
     pub fn resolve(&self, token: &str) -> Option<(u8, u8)> {
-        let token = token.trim();
-        if token.is_empty() {
+        let (kind, instance, element) = token_parts(token.trim())?;
+        let grid_key = Self::grid_key_for_kind(kind)?;
+        let grid = self.grid(grid_key)?;
+        let (rack, slot) = self.slot_for(grid_key, instance, grid)?;
+        let (off_x, off_y) = Self::grid_offset(grid, element);
+
+        let abs_x = slot.x + off_x;
+        let abs_y = rack.y + off_y;
+        if !Self::in_bounds(abs_x, abs_y) {
             return None;
         }
-        let mut chars = token.chars();
-        let kind_raw = chars.next()?;
-        if !kind_raw.is_ascii_alphabetic() {
-            return None;
+        Some((abs_x as u8, abs_y as u8))
+    }
+
+    /// The grid key a token kind resolves on (case-insensitive). `L` is
+    /// co-located with `B`; the single-column controllers share `r2c`.
+    fn grid_key_for_kind(kind: char) -> Option<&'static str> {
+        match kind {
+            'B' | 'L' => Some("b32"),
+            'E' => Some("e4"),
+            'R' | 'M' | 'P' | 'O' | 'I' | 'S' | 'G' => Some("r2c"),
+            _ => None,
         }
-        let kind = kind_raw.to_ascii_uppercase();
+    }
 
-        // leading_number: skip 1 char, take digits (like patch.rs::leading_number)
-        let digits: String = token
-            .chars()
-            .skip(1)
-            .take_while(char::is_ascii_digit)
-            .collect();
-        let instance: usize = digits.parse().unwrap_or(1);
-        if instance == 0 {
-            return None;
-        }
+    /// The grid declaration for `grid_key`, matched case-insensitively.
+    fn grid(&self, grid_key: &str) -> Option<&Grid> {
+        self.grids
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(grid_key))
+            .map(|(_, grid)| grid)
+    }
 
-        // element number: digits after '.' (1-based), fallback to 1 for singletons
-        let element: u32 = if let Some(dot) = token.find('.') {
-            token[dot + 1..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .unwrap_or(1)
-        } else {
-            1
-        };
-        if element == 0 {
-            return None;
-        }
+    /// Every controller slot whose grid matches, in rack then slot declaration
+    /// order.
+    fn candidate_slots<'a>(&'a self, grid_key: &str) -> Vec<(&'a Rack, &'a ControllerSlot)> {
+        self.racks
+            .iter()
+            .flat_map(|rack| rack.controllers.iter().map(move |slot| (rack, slot)))
+            .filter(|(_, slot)| slot.grid.eq_ignore_ascii_case(grid_key))
+            .collect()
+    }
 
-        // Map token kind to grid key (case-insensitive). L is co-located with B.
-        let grid_key = match kind {
-            'B' | 'L' => "b32",
-            'E' => "e4",
-            'R' | 'M' | 'P' | 'O' | 'I' | 'S' | 'G' => "r2c",
-            _ => return None,
-        };
-
-        // Find candidate controller slots whose grid matches (case-insensitive)
-        let mut candidates: Vec<(&Rack, &ControllerSlot)> = Vec::new();
-        for rack in &self.racks {
-            for slot in &rack.controllers {
-                if slot.grid.eq_ignore_ascii_case(grid_key) {
-                    candidates.push((rack, slot));
-                }
-            }
+    /// The `(rack, slot)` a token `instance` lands on for `grid`.
+    ///
+    /// Singleton controllers (`r2c`) represent a single physical jack column
+    /// shared across all racks/instances. Cycling by instance would place I1
+    /// on R1 and O4 on R2 (12 units apart) — a bogus distance for CV I/O that
+    /// physically sits on the same controller — so they always pick the first
+    /// matching slot (R1's R2C) deterministically. Matrix and stack grids
+    /// cycle through their candidates by instance.
+    fn slot_for(
+        &self,
+        grid_key: &str,
+        instance: usize,
+        grid: &Grid,
+    ) -> Option<(&Rack, &ControllerSlot)> {
+        let candidates = self.candidate_slots(grid_key);
+        if matches!(grid, Grid::Singleton) {
+            return candidates.first().copied();
         }
         if candidates.is_empty() {
             return None;
         }
-        // Lookup grid (case-insensitive) before selecting slot so we can
-        // handle singletons deterministically.
-        let grid = self
-            .grids
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(grid_key))
-            .map(|(_, v)| v)?;
-        // Singleton controllers (r2c) represent a single physical jack column
-        // shared across all racks/instances. Cycling by instance would place
-        // I1 on R1 and O4 on R2 (12 units apart) — a bogus distance for CV I/O
-        // that physically sits on the same controller. Always pick the first
-        // matching slot (R1's R2C) deterministically.
-        let (rack, slot) = if matches!(grid, Grid::Singleton) {
-            candidates[0]
-        } else {
-            let idx = (instance - 1) % candidates.len();
-            candidates[idx]
-        };
+        let index = (instance - 1) % candidates.len();
+        Some(candidates[index])
+    }
 
-        let (off_x, off_y) = match grid {
+    /// The `(x, y)` offset of `element` within a controller grid, in B32-grid
+    /// units. Rows run row-wise for `b32`; the column-wise fallback keeps a
+    /// vertical orientation readable.
+    fn grid_offset(grid: &Grid, element: u32) -> (i32, i32) {
+        match grid {
             Grid::Matrix {
                 cols,
-                rows: _,
+                rows,
                 row_wise,
                 orientation: _,
             } => {
                 let cols = u32::from(*cols);
                 if *row_wise {
-                    let col = (element - 1) % cols;
-                    let row = (element - 1) / cols;
-                    (col as i32, row as i32)
+                    (((element - 1) % cols) as i32, ((element - 1) / cols) as i32)
                 } else {
-                    // column-wise fallback (not used for B32)
-                    let rows = match grid {
-                        Grid::Matrix { rows, .. } => u32::from(*rows),
-                        _ => 4,
-                    };
-                    let row = (element - 1) % rows;
-                    let col = (element - 1) / rows;
-                    (col as i32, row as i32)
+                    let rows = u32::from(*rows);
+                    (((element - 1) / rows) as i32, ((element - 1) % rows) as i32)
                 }
             }
-            Grid::Stack { count: _, pitch_y } => {
-                let row = (element - 1) as i32 * i32::from(*pitch_y);
-                (0, row)
-            }
+            Grid::Stack { count: _, pitch_y } => (0, (element - 1) as i32 * i32::from(*pitch_y)),
             Grid::Singleton => (0, 0),
-        };
-
-        let abs_x = slot.x + off_x;
-        let abs_y = rack.y + off_y;
-        if !(0..=255).contains(&abs_x) || !(0..=255).contains(&abs_y) {
-            return None;
         }
-        Some((abs_x as u8, abs_y as u8))
+    }
+
+    /// Whether a grid coordinate is representable in a resolved position.
+    fn in_bounds(x: i32, y: i32) -> bool {
+        (0..=255).contains(&x) && (0..=255).contains(&y)
     }
 
     /// Euclidean distance between two absolute positions in B32-grid units.
