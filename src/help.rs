@@ -113,6 +113,13 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("g c", "toggle latency coloring"),
             ("d", "toggle diff overlay"),
             ("p", "open performance view"),
+            // `view-maximize-and-performance-labels` 1.2: the performance
+            // view's label-scale pair (`Shift`+`+`/`-`, bound only while that
+            // view shows).
+            (
+                "Shift++/Shift+-",
+                "performance view: scale callout labels 5%",
+            ),
             ("R", "reset element states"),
             ("U", "upload patch to DROID (confirm modal)"),
             ("y", "send upload (confirm modal)"),
@@ -127,6 +134,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Home/End", "jump to first/last occurrence"),
             ("t", "toggle raw/prettified"),
             ("Tab/Shift+Tab", "cycle pane focus"),
+            ("f", "maximize focused pane"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
             ("Alt+s", "swap small panes"),
@@ -178,6 +186,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("click minimap", "pan camera to clicked position"),
             ("drag minimap", "zoom to dragged region"),
             ("Alt+[/Alt+]", "cable tension"),
+            ("f", "maximize focused pane"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
             ("Alt+s", "swap small panes"),
@@ -202,6 +211,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("s", "export"),
             ("[/]", "adjust weight"),
             ("0/1", "snap weight"),
+            ("f", "maximize focused pane"),
             ("z", "maximize focused pane"),
             ("Alt+b", "swap big pane view"),
             ("Alt+s", "swap small panes"),
@@ -375,11 +385,13 @@ mod tests {
 
     #[test]
     fn keybindings_include_pane_layout_keys() {
-        // Change `pane-class-layout` task 3.3 (keybinding spec "The help modal
-        // tables SHALL list all three keys"): `z`, `Alt+b`, and `Alt+s` act on
-        // the band from any focused pane, so every pane view's table lists
-        // them. The centered overlays (picker, validation) do not.
+        // Change `pane-class-layout` task 3.3 + `view-maximize-and-performance-
+        // labels` 1.2 (keybinding spec "The help modal tables SHALL list all
+        // four keys"): `z`/`f` (maximize), `Alt+b`, and `Alt+s` act on the band
+        // from any focused pane, so every pane view's table lists them. The
+        // centered overlays (picker, validation) do not.
         let z = ("z", "maximize focused pane");
+        let f = ("f", "maximize focused pane");
         let alt_b = ("Alt+b", "swap big pane view");
         let alt_s = ("Alt+s", "swap small panes");
         for view in [
@@ -389,13 +401,13 @@ mod tests {
             HelpView::Optimizer,
         ] {
             let rows = keybindings(view);
-            for row in [z, alt_b, alt_s] {
+            for row in [z, f, alt_b, alt_s] {
                 assert!(rows.contains(&row), "view {view:?} must document {row:?}");
             }
         }
         for view in [HelpView::Validation, HelpView::Picker] {
             let rows = keybindings(view);
-            for row in [z, alt_b, alt_s] {
+            for row in [z, f, alt_b, alt_s] {
                 assert!(
                     !rows.contains(&row),
                     "view {view:?} must not document {row:?}"
@@ -604,6 +616,10 @@ mod tests {
         ("1-4", "shift groups"),
         ("Esc", "close Module UI view"),
         ("p", "open performance view"),
+        (
+            "Shift++/Shift+-",
+            "performance view: scale callout labels 5%",
+        ),
         ("R", "reset element states"),
         // Graph surface.
         ("x", "toggle circuit processing"),
@@ -729,6 +745,12 @@ mod tests {
             ("U", "upload patch to DROID (confirm modal)"),
             ("y", "send upload (confirm modal)"),
             ("n", "cancel upload (confirm modal)"),
+            // `view-maximize-and-performance-labels` 1.2: the performance
+            // view's label-scale pair, bound only on this surface.
+            (
+                "Shift++/Shift+-",
+                "performance view: scale callout labels 5%",
+            ),
         ] {
             assert!(
                 table.contains(&(key, desc)),
@@ -798,6 +820,7 @@ mod tests {
             "l",
             "middle-drag",
             "R",
+            "Shift++/Shift+-",
             "Shift+C",
             "Shift+F",
             "m",
@@ -836,10 +859,17 @@ mod tests {
     fn module_ui_table_names_performance_view_keys() {
         // `performance-view` 2.1: the Module UI table names the view-scoped
         // `p` (the shared `pause processing` row no longer applies on this
-        // surface) and the `R` element-state reset.
+        // surface) and the `R` element-state reset. Change
+        // `view-maximize-and-performance-labels` 1.2 adds the shifted `+`/`-`
+        // pair, which only this surface binds (label scale, next to the `p`
+        // row that opens the view).
         let table = keybindings(HelpView::ModuleUi);
         assert!(table.contains(&("p", "open performance view")));
         assert!(table.contains(&("R", "reset element states")));
+        assert!(table.contains(&(
+            "Shift++/Shift+-",
+            "performance view: scale callout labels 5%"
+        )));
     }
 
     #[test]
