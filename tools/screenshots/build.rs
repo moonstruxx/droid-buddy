@@ -71,6 +71,15 @@ fn main() {
             if let Some(name) = declaration {
                 if surfaces.contains(&name) {
                     let path = root.join(format!("src/gui/{name}.rs"));
+                    // `self_test` is the headless runner the binary's `--self-test`
+                    // drives; the harness stages it only so `gui/mod.rs` compiles,
+                    // never calls it, and every item in it reads as dead code here.
+                    if name == "self_test" {
+                        return format!(
+                            "#[allow(dead_code)] // staged for compilation, never run by the harness\n#[path = \"{}\"] mod {name};",
+                            path.display()
+                        );
+                    }
                     return format!("#[path = \"{}\"] mod {name};", path.display());
                 }
             }
