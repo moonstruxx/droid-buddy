@@ -4,8 +4,9 @@ Every crate this repository resolves, why it is here, the features in use, and h
 tree it drags in. The point is subtraction: a crate without a proven consumer is removed,
 and a crate used only by tests belongs in `[dev-dependencies]` (YAGNI for crates).
 
-Measured **2026-11-19** with `cargo 1.100.0`, `cargo tree` over both manifests, no
-`Cargo.lock` changes. A "tree" figure below is the number of **unique packages** in that
+Measured **2026-11-19** with `cargo 1.100.0`, `cargo tree` over both manifests.
+The `risk` column is the crate's class from [`SECURITY.md`](SECURITY.md) — a crate that
+carries another crate's finding reports that class. A "tree" figure below is the number of **unique packages** in that
 crate's own subtree (normal edges), so the figures overlap and sum past the project total.
 
 ```
@@ -15,24 +16,24 @@ tools/screenshots manifest  296 packages (pinned to the app's resolved versions)
 
 ## Runtime dependencies (`Cargo.toml` → `[dependencies]`)
 
-| crate | version | features in use | tree | why it is here |
-|---|---|---|---|---|
-| `winit` | 0.30.13 | `default` (x11, wayland, rwh_06, sctk-adwaita, memmap2) | 93 | The only window/event loop. `main.rs` owns the `EventLoop`; `handler.rs` converts key/mouse events; `gui/mod.rs` creates the window. |
-| `egui` | 0.36.1 | `default` (default_fonts), `bytemuck` | 66 | Every surface's paint code (`gui/*`), the shared `egui::Shape` output the tests assert on, and the `theme::egui_color` bridge. |
-| `egui-winit` | 0.36.1 | `default` (clipboard/arboard, wayland, x11, links) | 205 | Bridges winit input and IME/clipboard state into egui — the largest subtree here, because it pulls the whole Wayland/X11 stack. |
-| `egui-wgpu` | 0.36.1 | `default`, `fragile-send-sync-non-atomic-wasm` | 115 | egui's wgpu painter: turns the frame's shapes into GPU draw calls. |
-| `wgpu` | 30.0.1 | `default` (vulkan, gles, metal, dx12, web*), `parking_lot`, `wgsl` | 81 | The GPU device/surface/queue behind `egui-wgpu`; `gui/mod.rs` owns the surface configuration. |
-| `serde` | 1.0.229 | `derive`, `std` | 9 | Every persisted or reported shape: `config`, `app`, `patch`, `physical`, `geometry`, `schema`, `report`, `plugin`, `favorites`, `store`. |
-| `serde_json` | 1.0.151 | `std` | 5 | The CLI's JSON report (`report`/`cli`), and parsing the two embedded JSON data files (`circuits.json` in `schema`, the geometry files in `geometry`/`physical`). |
-| `toml` | 0.9.12 | `default` (parse, display, serde, std) | 8 | The user stores (`config.toml`, `labels.toml`, `favourites.toml`, `plugins/*.toml`) read **and** written through `config.rs`, `store.rs`, `plugin.rs`. |
-| `color-eyre` | 0.6.5 | `default` (track-caller, tracing-error, capture-spantrace) | 29 | `main.rs`'s error result and the human-readable failure report on a bad startup; not used in the library. |
-| `egui_kittest` | 0.36.1 | `snapshot`, `wgpu` | 168 | **Test-only.** Runs a real egui frame headlessly and exposes the painted widgets through AccessKit, so the graph journeys assert `get_by_label("<circuit>")` after an input-driven repaint. Belongs in `[dev-dependencies]` — see `droid_tui-4fy`. |
+| crate | version | features in use | tree | risk | why it is here |
+|---|---|---|---|---|---|
+| `winit` | 0.30.13 | `default` (x11, wayland, rwh_06, sctk-adwaita, memmap2) | 93 | low | The only window/event loop. `main.rs` owns the `EventLoop`; `handler.rs` converts key/mouse events; `gui/mod.rs` creates the window. |
+| `egui` | 0.36.1 | `default` (default_fonts), `bytemuck` | 66 | none | Every surface's paint code (`gui/*`), the shared `egui::Shape` output the tests assert on, and the `theme::egui_color` bridge. |
+| `egui-winit` | 0.36.1 | `default` (clipboard/arboard, wayland, x11, links) | 205 | none | Bridges winit input and IME/clipboard state into egui — the largest subtree here, because it pulls the whole Wayland/X11 stack. |
+| `egui-wgpu` | 0.36.1 | `default`, `fragile-send-sync-non-atomic-wasm` | 115 | none | egui's wgpu painter: turns the frame's shapes into GPU draw calls. |
+| `wgpu` | 30.0.1 | `default` (vulkan, gles, metal, dx12, web*), `parking_lot`, `wgsl` | 81 | none | The GPU device/surface/queue behind `egui-wgpu`; `gui/mod.rs` owns the surface configuration. |
+| `serde` | 1.0.229 | `derive`, `std` | 9 | none | Every persisted or reported shape: `config`, `app`, `patch`, `physical`, `geometry`, `schema`, `report`, `plugin`, `favorites`, `store`. |
+| `serde_json` | 1.0.151 | `std` | 5 | none | The CLI's JSON report (`report`/`cli`), and parsing the two embedded JSON data files (`circuits.json` in `schema`, the geometry files in `geometry`/`physical`). |
+| `toml` | 0.9.12 | `default` (parse, display, serde, std) | 8 | none | The user stores (`config.toml`, `labels.toml`, `favourites.toml`, `plugins/*.toml`) read **and** written through `config.rs`, `store.rs`, `plugin.rs`. |
+| `color-eyre` | 0.6.5 | `default` (track-caller, tracing-error, capture-spantrace) | 29 | none | `main.rs`'s error result and the human-readable failure report on a bad startup; not used in the library. |
+| `egui_kittest` | 0.36.1 | `snapshot`, `wgpu` | 168 | none | **Test-only.** Runs a real egui frame headlessly and exposes the painted widgets through AccessKit, so the graph journeys assert `get_by_label("<circuit>")` after an input-driven repaint. Belongs in `[dev-dependencies]` — see `droid_tui-4fy`. |
 
 ## Dev dependencies (`Cargo.toml` → `[dev-dependencies]`)
 
-| crate | version | features | tree | why it is here |
-|---|---|---|---|---|
-| `tempfile` | 3.27.0 | `default` | 9 | `TempDir`/`tempdir` for every test that writes a config, store, plugin or staged `.syx` file without touching the real data directory. |
+| crate | version | features | tree | risk | why it is here |
+|---|---|---|---|---|---|
+| `tempfile` | 3.27.0 | `default` | 9 | none | `TempDir`/`tempdir` for every test that writes a config, store, plugin or staged `.syx` file without touching the real data directory. |
 
 ## Tools crate (`tools/screenshots/Cargo.toml`)
 
@@ -56,6 +57,10 @@ versions `Cargo.lock` resolves so the harness and the tests build one tree.
   (`miniz_oxide`), and **`toml` 0.9 + 1.1** — our direct pin is 0.9 while something in the
   tree asks for 1.x. Moving the direct dependency to 1.x is the one duplicate this
   repository can collapse on its own; the rest belong to `winit`/`wgpu`.
+- **One advisory touched this tree.** `RUSTSEC-2026-0486` (`rustix` xattr UB) was in the
+  shipped lock via `egui-winit`'s clipboard path and is remediated at `1.1.6`; the one
+  open finding is the unmaintained `ttf-parser`, inherited from `winit`. Full evaluation,
+  classification scale and re-run recipe: [`SECURITY.md`](SECURITY.md).
 - **`egui-winit` is the widest leaf to prune.** It alone carries 205 packages because of the
   Wayland/X11 client stack. If the app ever settles on one display backend, that is where
   the tree shrinks.
@@ -78,6 +83,9 @@ cargo tree -p <crate> --prefix none --format "{p}" | sort -u | wc -l
 
 # 4. prove the consumer before removing anything
 rg -n "<crate>::" src/ tests/ tools/
+
+# 5. vulnerability + maintenance scan: every resolved package against OSV
+#    (the recipe and the classification scale live in SECURITY.md)
 ```
 
 Verdicts, in order of preference: **remove** (no consumer), **move to
@@ -86,4 +94,4 @@ Verdicts, in order of preference: **remove** (no consumer), **move to
 above). Removals are subtraction only — never `cargo update`, never a version bump in the
 same change, and `Cargo.lock` may only shrink by the removed crates.
 
-<!-- Last updated: 2026-11-19 · initial dependency inventory: 10 runtime, 1 dev, 8 tool-crate deps; 314 packages (239 normal edges); 15 doubly-versioned crate names, of which `toml` 0.9 vs 1.1 is the only one this repo can collapse itself; `egui_kittest` recorded as test-only pending droid_tui-4fy. -->
+<!-- Last updated: 2026-11-19 · security pass: `risk` column added to both tables (class from SECURITY.md; `winit` low via the inherited unmaintained `ttf-parser`, everything else none after the rustix 1.1.6 bump), the OSV scan added as audit step 5, and the rustix/tar-parser facts recorded. Initial inventory: 10 runtime, 1 dev, 8 tool-crate deps; 314 packages (239 normal edges); 15 doubly-versioned crate names, of which `toml` 0.9 vs 1.1 is the only one this repo can collapse itself; `egui_kittest` recorded as test-only pending droid_tui-4fy. -->
