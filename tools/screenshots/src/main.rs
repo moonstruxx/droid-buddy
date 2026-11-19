@@ -78,8 +78,6 @@ pub mod plugin;
 // resolving it.
 #[path = "../../../src/rack.rs"]
 pub mod rack;
-#[path = "../../../src/rendermetrics.rs"]
-pub mod rendermetrics;
 #[path = "../../../src/schema.rs"]
 pub mod schema;
 // The shared on-disk store rules (`labels.toml` / `favourites.toml`): `app.rs`

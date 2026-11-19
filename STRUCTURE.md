@@ -38,7 +38,6 @@ droid_tui/
 │   ├── theme.rs                # semantic color-token layer + palettes
 │   ├── help.rs                 # help-content module (`?` modal)
 │   ├── events.rs               # synchronous observer event bus
-│   ├── rendermetrics.rs        # render-feature extractor + scorer
 │   ├── regression.rs           # cross-layer model/story regression tests (cfg(test))
 │   └── gui/                    # egui surfaces (window shell dispatch)
 │       ├── mod.rs              # surface dispatch + pane dispatch + WindowFrame
@@ -53,7 +52,7 @@ droid_tui/
 │   └── perf_gate.rs            # profiling gate: budgeted watchdog phases over the scale anchor
 ├── fixtures/                   # test fixtures: *.ini patches, plugins/, picker_test/,
 │                               #   validation/*.ini (12-check matrix)
-├── corpus/                     # patch corpus + analysis CSVs (features.csv, rendermetrics.csv)
+├── corpus/                     # patch corpus + analysis CSV (features.csv)
 │                               #   + good/*.ini curated gold patches (generator variants removed)
 ├── tools/                      # developer analysis tools (Python fit/build scripts + artifacts)
 ├── scripts/                    # developer scripts (profile-gate.sh, gen_own_scale.py,
@@ -99,12 +98,12 @@ droid_tui/
 
 **`corpus/`:**
 - Purpose: patch corpus plus the feature CSVs that drive the offline outlier-model fits.
-- Contains: `features.csv`, `rendermetrics.csv`, and `good/*.ini` curated gold patches (deterministic generator variants removed; regenerate via `tools/build_features.py`).
+- Contains: `features.csv` and `good/*.ini` curated gold patches (deterministic generator variants removed; regenerate via `tools/build_features.py`).
 - Key files: `features.csv` (input to `tools/fit_outlier_model.py`).
 
 **`tools/`:**
 - Purpose: developer-only analysis tooling, not shipped in the binary.
-- Contains: Python fit/build scripts and the embedded model artifacts they produce (`outlier_artifact.txt`, `influence_stats.txt`, `render_artifact.txt`).
+- Contains: Python fit/build scripts and the embedded model artifacts they produce (`outlier_artifact.txt`, `influence_stats.txt`).
 - Key files: `fit_outlier_model.py`, `fit_render_model.py`, `build_features.py`.
 
 **`ext/droid-lsp/`:**

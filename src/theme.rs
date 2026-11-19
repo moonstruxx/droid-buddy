@@ -348,10 +348,9 @@ const ANSI16: [Color; 16] = [
 ///
 /// This is the authoritative table for **rendering**: the kitty rasterizer and
 /// the egui bridge (`Theme::egui_color`) both come through [`Theme::rgb`], so
-/// these are the pixels a surface actually paints. Any contrast measurement
-/// that answers "what does the user see" must resolve tokens through
-/// [`Theme::rgb`] too, not through `rendermetrics::color_to_rgb` — that
-/// function keeps a different table on purpose (see its doc comment).
+/// these are the pixels a surface actually paints. Any contrast measurement is
+/// taken by resolving tokens through [`Theme::rgb`] and measuring the result
+/// (there is no second ANSI table in the crate).
 const ANSI16_RGB: [(u8, u8, u8); 16] = [
     (0x00, 0x00, 0x00),
     (0xff, 0x00, 0x00),
@@ -1181,6 +1180,29 @@ mod tests {
         }
     }
 
+    /// WCAG 2.x relative luminance of an sRGB channel value.
+    fn channel_luminance(channel: u8) -> f32 {
+        let s = f32::from(channel) / 255.0;
+        if s <= 0.039_28 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// WCAG 2.x relative luminance of an sRGB color.
+    fn rgb_luminance(r: u8, g: u8, b: u8) -> f32 {
+        0.2126 * channel_luminance(r)
+            + 0.7152 * channel_luminance(g)
+            + 0.0722 * channel_luminance(b)
+    }
+
+    /// WCAG 2.x contrast ratio between two relative luminances (1.0..=21.0).
+    fn contrast_ratio(a: f32, b: f32) -> f32 {
+        let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
     #[test]
     fn cluster_title_meets_text_contrast_in_every_palette() {
         // Theming spec, cluster-title contrast floor: a banner-group name is
@@ -1189,15 +1211,12 @@ mod tests {
         // (4.5:1) against that palette's *own* `graph_canvas_bg` — the
         // surface the title is painted on. Both tokens resolve through
         // `Theme::rgb`, the palette's single Color → RGB hop, so the test
-        // measures the pixels the graph actually draws (this is why the
-        // resolution is not `rendermetrics::color_to_rgb`, whose ANSI table
-        // differs for the gray pair).
+        // measures the pixels the graph actually draws.
         //
         // A palette that defers both tokens to the terminal (`Reset`) has no
         // RGB pair and defers to the host scheme instead of meeting the floor;
         // `terminal` is the only such palette, asserted below so the exemption
         // cannot silently widen to a palette that ships real colors.
-        use crate::rendermetrics::{contrast_ratio, rgb_luminance};
 
         const TEXT_CONTRAST_FLOOR: f32 = 4.5;
         let mut deferred: Vec<&'static str> = Vec::new();

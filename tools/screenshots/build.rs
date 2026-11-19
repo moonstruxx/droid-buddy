@@ -28,7 +28,6 @@ fn main() {
         "performance",
         "physical",
         "plugin",
-        "rendermetrics",
         "schema",
         "store",
         "sysex",
