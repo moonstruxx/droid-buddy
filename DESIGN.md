@@ -104,6 +104,10 @@ typography:
     code-small: 11
     graph-node-label: 12-fixed-across-zoom
     module-cell-label: 10-fixed-across-zoom
+    performance-callout-headline: "14-28-with-view-zoom"
+    performance-callout-state: "0.8-of-headline-min-9"
+    label-scale-range: "50-400-percent-in-5-percent-steps"
+    label-scale-default: 100
   weight:
     emphasis: bold
     de-emphasis: dim
@@ -254,6 +258,35 @@ The module UI is the hardware map: a physical 1:1 faceplate model of the rack, a
 - **Element state rendering**: each element renders its live state (composed button faces per above, other buttons and switches with a glyph, knobs and encoders with their face and, where the band holds it, a percentage, faders with a vertical track and a bar in the `fader_led_bar` token, CV I/O with its socket face and direction). Adjoined element-cell hit rects are clamped at draw time so distinct cells never publish overlapping rects at any zoom preset.
 - **Border abutment and switch placement**: adjacent module borders abut exactly at every zoom preset; switch cells place per the controller's geometry data and never collapse onto a neighboring control's cell when geometry lacks a matching switch cell.
 
+## Performance View
+
+The Module UI's exploded-label reading mode (`p`): the rack shrinks to a compact
+presentation at half the whole-rack fit, centred, and every written label that has no
+in-cell layout is drawn as a large callout in the side field with a leader line back to
+its cell. It is the same rack, the same cells and the same tokens — only the scale and
+the label placement change.
+
+- **Zoom**: the compact rack is the half fit multiplied by the Module UI's zoom, clamped
+  at the whole-rack fit, so `+`/`-` and the wheel grow it from a quarter of the pane to
+  the whole pane and it never overflows. No pan is needed or offered, and the zoom is
+  shared: entering the view keeps the current zoom, leaving it keeps whatever the view
+  set, so the two surfaces are one camera setting.
+- **Labels follow the zoom**: a callout's size is the 14 pt headline times the zoom up to
+  a 2× cap times the user's base scale — readable when the rack is small, never larger
+  than the rack it describes. Headline is monospace, the state row is `0.8` of it with a
+  9 pt floor, and the padding stays fixed so growth comes from the type and the row
+  offset, not from the frame.
+- **Base scale is the operator's knob**: `Shift`+`+`/`-` steps it 5 % at a time between
+  50 % and 400 %, reports the result in the status line, and persists it as
+  `[labels] performance_scale`. It exists because the honest tension in this view is type
+  size against the side field the callouts need: at high zoom the field shrinks, and the
+  operator — not a rule — decides how much label is still worth the space.
+- **One size, two readers**: the effective size drives both the placement budget and the
+  painter, so a label is never measured at one size and drawn at another; a scaled label
+  cannot overlap its neighbour or the rack as a result. Annotations and the hover reveal
+  outside this view keep their fixed 14 pt, because they are annotations on hardware, not
+  the content of a reading view.
+
 ## Status Bar
 
 A dark-gray band at the bottom, bordered and left-aligned. It shows the current status message, appends `| SHIFT n ACTIVE` in the group color when a shift is active, appends `| MOD B1.1 → N cells / M cables` in the modifier hue when a modifier is active (both can coexist), and permanently displays the current display setting as `Scale`. It also surfaces transient hints such as cable tension and latency summaries.
@@ -378,3 +411,5 @@ Face correctness is proven by headless egui assertions: each surface's paint rou
 <!-- Last updated: 2026-11-15T23:24:07+01:00 · faceplate-pot-jack-symbols: the Module UI's element list is now true — a pot draws a pot face (washer ring, hex nut, shaft, value slot on a 270° sweep, base line), an encoder the same face without the base line, a CV jack a bezel ring, filled mouth and cut cross — with detail on the drawn ring diameter (full at 18 pt, ring plus slot from 10 pt, ring plus dot below) and the label fitted to the `h − 0.66 w` band beneath the face. The unaddressed-rotary ring-plus-centre-dot rule now applies only below the reduced step; at full detail an unaddressed rotary drops the washer ring and an unaddressed jack keeps its whole face. New `geometry` token group for the symbol proportions; the `Knob / Encoder` glyph row, the composed-face anatomy bullet and the element-state bullet follow. No colour token changed. -->
 
 <!-- Last updated: 2026-11-19T01:45:43+01:00 · view-maximize-and-performance-labels: the band has two maximize keys (`z` and `f`, same non-latching rules), the module UI’s labels fit and the graph’s dependency filter both sit on `Shift+F` (pane-scoped, so one glyph, one meaning per pane) and the rack fit moved to the `g f` chord. The performance view now zooms: the compact rack is `fit × 0.5 × zoom` clamped at the whole-rack fit, so `+`/`-` and the wheel scale it without a pan, and its callouts follow the zoom (14 pt × `min(zoom, 2)`) with an independent base scale on `Shift`+`+`/`-` (5 % steps, 50–400 %, persisted as `[labels] performance_scale`). Callout size is one number per frame shared by placement and paint, so a scaled label is never measured at one size and drawn at another; annotations and the hover reveal keep the fixed 14 pt. -->
+
+<!-- Last updated: 2026-11-19T13:14:10+01:00 · performance-view-and-render-metrics-cleanup: the performance view has a section of its own now — the compact rack is the half fit times the shared zoom clamped at the whole-rack fit (no pan), callouts follow that zoom up to the 2× cap times the operator's base scale (`Shift`+`+`/`-`, 5 % steps, 50–400 %, persisted as `[labels] performance_scale`), and the effective size drives placement and paint together. Typography gains the callout ladder and the scale range as explicit tokens. Nothing token-related moved otherwise: the panel-surface render metrics the crate dropped had no colour, type or spacing behind it. -->
