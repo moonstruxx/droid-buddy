@@ -6186,3 +6186,516 @@ fn regression_module_ui_esc_cancels_the_marquee_and_keeps_the_pane() {
         "and leaves the view where it was"
     );
 }
+
+// ── view-maximize-and-performance-labels (task 3.2): cross-layer stories ──
+//
+// Each story drives production keys through `handle_event` and then asserts
+// what the *next frame* would see — the App state a painter reads, the
+// arrangement the band lays out, and the painted/spec geometry. The
+// single-function behaviour itself is pinned in `handler.rs` and
+// `gui/physical.rs`; these stories exist to prove the layers agree.
+
+/// A real fixture loaded through the production loader, so the module UI, the
+/// graph and the optimizer all have the state a running app builds.
+fn cross_layer_app(fixture: &str) -> App {
+    let patch = Patch::from_ini_file(Path::new(fixture))
+        .unwrap_or_else(|err| panic!("{fixture} must parse: {err}"));
+    let mut app = App::new();
+    assert!(app.load_patch(patch), "{fixture} must load clean");
+    app
+}
+
+/// The arrangement's four views in tree order — what "restore the
+/// arrangement" means below, independent of which pane was maximized.
+fn arrangement_views(app: &App) -> [Option<ViewType>; 4] {
+    [
+        app.layout.big_left.view,
+        app.layout.big_right.view,
+        app.layout.small_top.view,
+        app.layout.small_bottom.view,
+    ]
+}
+
+/// A performance-view pane for the geometry assertions: one fixed window-space
+/// rect, so the spec's rack extent is comparable across key presses.
+fn performance_story_pane() -> egui::Rect {
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(800.0, 600.0))
+}
+
+/// Apply the public part of `main.rs::seed_app` (that function is private to
+/// the binary): the stories seed a fresh `App` exactly as startup does, so a
+/// restart's persisted settings reach the same state the windowed loop builds.
+fn seed_app_from_settings(app: &mut App, settings: &crate::config::Settings) {
+    app.cost_model = crate::latency::CostModel::from_config(settings);
+    app.seed_physical_view(&settings.physical);
+    app.layout_mode = settings.layout.mode;
+    app.layout_ordering = settings.layout.ordering;
+    app.layout_slice_force = settings.layout.slice_force;
+    app.layout_section_force = settings.layout.section_force;
+    let knobs = crate::layout::SolveKnobs::default();
+    app.layout_repulsion_force = knobs.repulsion;
+    app.layout_cohesion_force = knobs.cohesion;
+    app.labels = settings.labels.clone();
+    app.performance_label_scale = settings.labels.performance_scale as f32;
+    app.seed_graph_grouping(&settings.graph);
+}
+
+/// Serialises the favourite-picker story's environment override with its peers
+/// (same pattern the handler tests use); the write itself goes to the temp dir.
+fn regression_fav_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Point the platform data directory at `dir` for one test, restoring the
+/// previous values on drop. Both variables are set because the platform rule
+/// prefers `%APPDATA%` on Windows and XDG everywhere else.
+struct RegressionDataDir {
+    xdg: Option<std::ffi::OsString>,
+    appdata: Option<std::ffi::OsString>,
+}
+
+impl RegressionDataDir {
+    fn new(dir: &Path) -> Self {
+        let xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let appdata = std::env::var_os("APPDATA");
+        std::env::set_var("XDG_CONFIG_HOME", dir);
+        std::env::set_var("APPDATA", dir);
+        Self { xdg, appdata }
+    }
+}
+
+impl Drop for RegressionDataDir {
+    fn drop(&mut self) {
+        match self.xdg.take() {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match self.appdata.take() {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+    }
+}
+
+#[test]
+fn regression_f_maximizes_every_pane_and_clears_like_z() {
+    // One case per view the band can focus: module UI, graph, source viewer,
+    // optimizer. Each opens the view through its real key, then `f` must
+    // maximize whichever pane ended up focused.
+    let cases: [(&str, fn(&mut App)); 4] = [
+        ("module UI", |_| {}),
+        ("graph", |app| {
+            handle_event(&key(KeyCode::Char('g')), app);
+            handle_event(&key(KeyCode::Char('g')), app);
+        }),
+        ("source viewer", |app| {
+            handle_event(&key(KeyCode::Tab), app);
+        }),
+        ("optimizer", |app| {
+            handle_event(&key(KeyCode::Char('g')), app);
+            handle_event(&key(KeyCode::Char('o')), app);
+        }),
+    ];
+
+    for (name, open) in cases {
+        let mut app = cross_layer_app("fixtures/own_buttons.ini");
+        open(&mut app);
+
+        let focused = app.layout.focus;
+        assert!(
+            app.layout.pane(focused).view.is_some(),
+            "{name}: the open key must leave a view in the focused pane"
+        );
+        let views = arrangement_views(&app);
+
+        // `f` fills the band with the focused pane and leaves the arrangement
+        // intact underneath — the state the geometry override reads.
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(
+            app.layout.maximized,
+            Some(focused),
+            "{name}: f must maximize the focused pane"
+        );
+        assert_eq!(app.status_message, "Maximized");
+        assert_eq!(
+            arrangement_views(&app),
+            views,
+            "{name}: maximize must not disturb the arrangement"
+        );
+
+        // A second `f` restores it.
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, None, "{name}: f again must restore");
+        assert_eq!(app.status_message, "Layout restored");
+        assert_eq!(arrangement_views(&app), views, "{name}: f again restores");
+
+        // `Tab` clears on the focus change and restores the arrangement.
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(focused));
+        handle_event(&key(KeyCode::Tab), &mut app);
+        assert_eq!(app.layout.maximized, None, "{name}: Tab must clear");
+        assert_eq!(arrangement_views(&app), views, "{name}: Tab restores");
+
+        // `Esc` clears before it would close the (now focused) view.
+        let second_focus = app.layout.focus;
+        let second_view = app.layout.pane(second_focus).view;
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(second_focus));
+        handle_event(&key(KeyCode::Esc), &mut app);
+        assert_eq!(app.layout.maximized, None, "{name}: Esc must clear");
+        assert_eq!(
+            app.layout.pane(second_focus).view,
+            second_view,
+            "{name}: Esc restores the arrangement instead of closing a view"
+        );
+        assert_eq!(arrangement_views(&app), views, "{name}: Esc restores");
+    }
+}
+
+#[test]
+fn regression_picker_keeps_f_for_favourites_while_the_band_stays_put() {
+    let _guard = regression_fav_lock().lock().unwrap();
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let _env = RegressionDataDir::new(data_dir.path());
+
+    let mut app = App::new();
+    // A real picker listing: `fixtures/picker_test` is the stable directory the
+    // handler tests use, with a known patch file in it.
+    app.favorites = crate::favorites::FavoritesStore::default();
+    app.picker_dir = std::path::PathBuf::from("fixtures/picker_test");
+    app.showing_picker = true;
+    app.refresh_picker_entries();
+    app.picker_index = app
+        .picker_entries
+        .iter()
+        .position(|path| path.file_name().is_some_and(|n| n == "patch_a.ini"))
+        .expect("the picker must list patch_a.ini");
+
+    let layout_before = app.layout.clone();
+    let views_before = arrangement_views(&app);
+
+    handle_event(&key(KeyCode::Char('f')), &mut app);
+
+    // The picker's meaning wins: the favourite toggles, the band does not move.
+    assert!(
+        app.layout.maximized.is_none(),
+        "f in the picker must not maximize the band"
+    );
+    assert_eq!(app.layout, layout_before, "the arrangement is unchanged");
+    assert_eq!(arrangement_views(&app), views_before);
+    assert_eq!(
+        app.favorites.favourites.len(),
+        1,
+        "f toggles the highlighted entry's favourite"
+    );
+    assert!(
+        app.status_message.starts_with("Favourited"),
+        "status: {:?}",
+        app.status_message
+    );
+    assert!(app.showing_picker, "the picker stays open");
+}
+
+#[test]
+fn regression_shift_f_splits_by_pane_labels_fit_vs_dependency_filter() {
+    // The module UI half: a pane small enough that the labels fit lifts above
+    // the whole-rack fit, so the two fits are distinguishable by zoom too.
+    let mut app = cross_layer_app("fixtures/module_ui_labels.ini");
+    app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+    app.apply_physical_fit_triggers();
+
+    // Establish the rack fit first (`g f`), so `Shift+F` has somewhere to lift
+    // from.
+    handle_event(&key(KeyCode::Char('g')), &mut app);
+    handle_event(&key(KeyCode::Char('f')), &mut app);
+    let rack_fit = app.physical_zoom;
+    assert_eq!(
+        app.physical_fit_mode,
+        Some(crate::app::FitMode::Rack),
+        "g f applies the rack fit"
+    );
+    assert!(
+        app.status_message.contains("fit(rack)"),
+        "status: {:?}",
+        app.status_message
+    );
+
+    handle_event(&shift_key(KeyCode::Char('F')), &mut app);
+    assert_eq!(
+        app.physical_fit_mode,
+        Some(crate::app::FitMode::Labels),
+        "Shift+F on the module UI applies the labels fit"
+    );
+    assert!(
+        app.status_message.contains("fit(labels)"),
+        "status: {:?}",
+        app.status_message
+    );
+    assert!(
+        app.physical_zoom > rack_fit,
+        "the labels fit lifts above the rack fit: {} vs {rack_fit}",
+        app.physical_zoom
+    );
+    let labels_zoom = app.physical_zoom;
+    assert!(
+        app.layout.maximized.is_none(),
+        "Shift+F never maximizes the band"
+    );
+    assert!(
+        app.dependency_root.is_none(),
+        "the module UI's Shift+F must not touch the graph filter"
+    );
+
+    // The graph half of the same key: collapse to the two-big-pane arrangement
+    // (the small viewer closes) so the graph has a visible pane beside the
+    // module UI, focus the empty right half and open the graph there.
+    handle_event(&key(KeyCode::Tab), &mut app); // focus the source viewer
+    handle_event(&key(KeyCode::Esc), &mut app); // close it; the right half is one big pane
+    assert!(!app.layout.has_small_view());
+    app.layout.focus = crate::panes::PaneId::BigRight;
+    handle_event(&key(KeyCode::Char('g')), &mut app);
+    handle_event(&key(KeyCode::Char('g')), &mut app);
+    assert_eq!(
+        app.pane_holding(ViewType::Graph),
+        Some(crate::panes::PaneId::BigRight),
+        "the graph takes the focused big pane"
+    );
+    assert!(
+        app.pane_holding(ViewType::Physical).is_some(),
+        "the module UI pane stays open"
+    );
+    app.hovered_graph_node = Some(0);
+
+    handle_event(&shift_key(KeyCode::Char('F')), &mut app);
+    assert!(
+        app.dependency_root.is_some(),
+        "Shift+F on the graph engages the dependency filter"
+    );
+    assert!(
+        app.status_message.starts_with("Dependencies of "),
+        "status: {:?}",
+        app.status_message
+    );
+    assert_eq!(
+        app.physical_zoom, labels_zoom,
+        "the graph's Shift+F leaves the module UI zoom alone"
+    );
+    assert_eq!(
+        app.physical_fit_mode,
+        Some(crate::app::FitMode::Labels),
+        "the graph's Shift+F leaves the module UI fit alone"
+    );
+
+    // A second press toggles the filter off without touching the fit.
+    handle_event(&shift_key(KeyCode::Char('F')), &mut app);
+    assert!(app.dependency_root.is_none());
+    assert_eq!(app.physical_zoom, labels_zoom);
+}
+
+#[test]
+fn regression_g_f_fits_an_unfocused_module_ui_and_reports_without_one() {
+    let mut app = cross_layer_app("fixtures/module_ui_labels.ini");
+    app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+    app.apply_physical_fit_triggers();
+    let labels_fit = app.physical_zoom;
+    assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Labels));
+
+    // Focus leaves the module UI; the fit is pane-scoped, not focus-scoped.
+    handle_event(&key(KeyCode::Tab), &mut app);
+    assert!(!app.view_focused(ViewType::Physical));
+    assert!(app.pane_holding(ViewType::Physical).is_some());
+    let focused_before = app.layout.focus;
+
+    handle_event(&key(KeyCode::Char('g')), &mut app);
+    handle_event(&key(KeyCode::Char('f')), &mut app);
+    assert_eq!(
+        app.physical_fit_mode,
+        Some(crate::app::FitMode::Rack),
+        "g f applies the rack fit wherever the module UI sits"
+    );
+    assert!(
+        app.status_message.contains("fit(rack)"),
+        "status: {:?}",
+        app.status_message
+    );
+    assert!(
+        app.physical_zoom < labels_fit,
+        "the rack fit sits below the labels fit: {} vs {labels_fit}",
+        app.physical_zoom
+    );
+    assert_eq!(app.layout.focus, focused_before, "g f must not move focus");
+    assert!(app.layout.maximized.is_none(), "g f never maximizes");
+
+    // With no module UI pane the prefix reports instead of acting.
+    let mut bare = cross_layer_app("fixtures/own_buttons.ini");
+    bare.open_view(ViewType::Graph); // focus is BigLeft, so the graph replaces it
+    assert!(
+        bare.pane_holding(ViewType::Physical).is_none(),
+        "the graph took the module UI's pane"
+    );
+    let layout_before = bare.layout.clone();
+    let zoom_before = bare.physical_zoom;
+    handle_event(&key(KeyCode::Char('g')), &mut bare);
+    handle_event(&key(KeyCode::Char('f')), &mut bare);
+    assert_eq!(bare.status_message, "No module UI pane open");
+    assert_eq!(bare.layout, layout_before, "the band is unchanged");
+    assert_eq!(bare.physical_zoom, zoom_before, "the zoom is unchanged");
+}
+
+#[test]
+fn regression_performance_zoom_grows_rack_and_labels_shift_minus_only_labels() {
+    let mut app = cross_layer_app("fixtures/own_buttons.ini");
+    let pane = performance_story_pane();
+
+    // Enter the view through its key, on the focused module UI.
+    handle_event(&key(KeyCode::Char('p')), &mut app);
+    assert!(app.showing_performance, "p opens the performance view");
+    assert!(app.view_focused(ViewType::Physical));
+    // 100 % is the comparison point: the zoom the view is documented against.
+    app.physical_zoom = 1.0;
+    app.physical_offset = (0.0, 0.0);
+    app.performance_label_scale = 1.0;
+
+    let base = crate::gui::physical_spec(&app, pane).expect("a loaded patch draws");
+    let base_overlay = base.performance.as_ref().expect("the overlay is present");
+    let (base_w, base_h) = (
+        base_overlay.rack_rect.width(),
+        base_overlay.rack_rect.height(),
+    );
+    let base_size = base_overlay
+        .callouts
+        .first()
+        .expect("a labelled fixture yields callouts")
+        .label_size;
+    assert!(
+        (base_size - 14.0).abs() < 1e-4,
+        "100 % zoom and 100 % scale is the 14 pt reference: {base_size}"
+    );
+
+    // Plain `+` is the view's zoom: the shared preset ladder moves it to 150 %.
+    handle_event(&key(KeyCode::Char('+')), &mut app);
+    assert!(
+        (app.physical_zoom - 1.5).abs() < 1e-4,
+        "the key's zoom applies: {}",
+        app.physical_zoom
+    );
+    assert!(
+        app.status_message.contains("150%"),
+        "the status reports the new zoom: {:?}",
+        app.status_message
+    );
+
+    let zoomed = crate::gui::physical_spec(&app, pane).expect("spec after zoom");
+    let zoomed_overlay = zoomed.performance.as_ref().expect("overlay after zoom");
+    let (zoom_w, zoom_h) = (
+        zoomed_overlay.rack_rect.width(),
+        zoomed_overlay.rack_rect.height(),
+    );
+    assert!(
+        zoom_w > base_w && zoom_h > base_h,
+        "the rack extent must grow with the zoom: {zoom_w}x{zoom_h} vs {base_w}x{base_h}"
+    );
+    let zoomed_size = zoomed_overlay
+        .callouts
+        .first()
+        .expect("callouts survive the zoom")
+        .label_size;
+    assert!(
+        zoomed_size > base_size,
+        "the callouts must grow with the rack: {zoomed_size} vs {base_size}"
+    );
+    assert!(
+        (zoomed_size - 21.0).abs() < 1e-4,
+        "14 pt × 150 % zoom: {zoomed_size}"
+    );
+
+    // Shift+minus shrinks the base scale only; the rack keeps its zoom.
+    handle_event(&shift_key(KeyCode::Char('_')), &mut app);
+    assert!(
+        (app.performance_label_scale - 0.95).abs() < 1e-5,
+        "Shift+- steps the scale to 95 %: {}",
+        app.performance_label_scale
+    );
+    assert!(
+        app.status_message.contains("Labels 95%"),
+        "the status reports the scale: {:?}",
+        app.status_message
+    );
+
+    let shrunk = crate::gui::physical_spec(&app, pane).expect("spec after the scale step");
+    let shrunk_overlay = shrunk.performance.as_ref().expect("overlay after scale");
+    assert!(
+        (shrunk_overlay.rack_rect.width() - zoom_w).abs() < 1e-3
+            && (shrunk_overlay.rack_rect.height() - zoom_h).abs() < 1e-3,
+        "the rack must keep its extent: {}x{} vs {zoom_w}x{zoom_h}",
+        shrunk_overlay.rack_rect.width(),
+        shrunk_overlay.rack_rect.height()
+    );
+    let shrunk_size = shrunk_overlay
+        .callouts
+        .first()
+        .expect("callouts survive the scale step")
+        .label_size;
+    assert!(
+        shrunk_size < zoomed_size,
+        "the labels must shrink: {shrunk_size} vs {zoomed_size}"
+    );
+    assert!(
+        (shrunk_size - 14.0 * 1.5 * 0.95).abs() < 1e-3,
+        "14 pt × 150 % zoom × 95 % scale: {shrunk_size}"
+    );
+    assert!(
+        (app.physical_zoom - 1.5).abs() < 1e-4,
+        "Shift+- must not change the zoom"
+    );
+}
+
+#[test]
+fn regression_restart_restores_the_performance_label_scale() {
+    // Save a config the way the app does, then read it back through the loader:
+    // the persisted 115 % must reach the fresh App's seed.
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut settings = crate::config::Settings::default();
+    settings.labels.performance_scale = 1.15;
+    crate::config::save_to_dir(dir.path(), &settings).expect("the config saves");
+    let path = dir.path().join("config.toml");
+    let body = std::fs::read_to_string(&path).expect("the saved config is readable");
+    assert!(
+        body.contains("performance_scale = 1.15"),
+        "the setting is persisted: {body}"
+    );
+
+    let canonicalize = |_theme: &str| Some("classic");
+    let loaded = crate::config::load_from(&path, &canonicalize, &[]);
+    assert!(
+        (loaded.labels.performance_scale - 1.15).abs() < 1e-6,
+        "the loader returns 115 %: {}",
+        loaded.labels.performance_scale
+    );
+
+    // A restart: fresh App, production patch load, the same seeding `main.rs`
+    // performs at startup, then the performance view at the 100 % zoom.
+    let mut app = cross_layer_app("fixtures/own_buttons.ini");
+    seed_app_from_settings(&mut app, &loaded);
+    assert!(
+        (app.performance_label_scale - 1.15).abs() < 1e-6,
+        "a restart seeds the persisted scale: {}",
+        app.performance_label_scale
+    );
+    app.showing_performance = true;
+    app.physical_zoom = 1.0;
+
+    let pane = performance_story_pane();
+    let spec = crate::gui::physical_spec(&app, pane).expect("a loaded patch draws");
+    let overlay = spec.performance.as_ref().expect("the overlay is present");
+    let callout = overlay
+        .callouts
+        .first()
+        .expect("a labelled fixture yields callouts");
+    assert!(
+        (callout.label_size - 14.0 * 1.15).abs() < 1e-4,
+        "the callout draws at 115 % of the 14 pt reference: {}",
+        callout.label_size
+    );
+}
