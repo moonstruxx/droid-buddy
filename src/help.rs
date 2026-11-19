@@ -69,10 +69,18 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
     match view {
         HelpView::ModuleUi => vec![
             ("+/-", "zoom presets"),
-            // module-ui-label-fit D8: two fits — `f` is the readable one (the
-            // rack may then overflow and pan), `Shift+F` the overview.
-            ("f", "fit written labels (each in its cell; rack may pan)"),
-            ("Shift+F", "fit whole rack to pane (overview)"),
+            // module-ui-label-fit D8, re-homed by
+            // `view-maximize-and-performance-labels` D2: `f` and `z` are the
+            // band's non-latching maximize pair. The readable fit moved to
+            // `Shift+F` (labels each in their cell; the rack may then overflow
+            // and pan) and the overview to the `g f` chord, because shifted
+            // glyphs and prefix chords are distinct keys.
+            ("f", "maximize focused pane"),
+            (
+                "Shift+F",
+                "fit written labels (each in its cell; rack may pan)",
+            ),
+            ("g f", "fit whole rack to pane (overview)"),
             ("a", "cycle label presentation"),
             // module-ui-navigation D4/D5: the camera pair the graph already
             // binds, meaning the same thing on this surface.
@@ -100,7 +108,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("r", "cycle view in focused pane"),
             ("Esc", "close Module UI view"),
             ("l", "open file picker"),
-            ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+            ("g", "prefix mode (g v/g g/g d/g o/g c/g s/g f)"),
             ("g s", "open select-state menu"),
             ("g c", "toggle latency coloring"),
             ("d", "toggle diff overlay"),
@@ -128,7 +136,7 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("Esc", "close viewer"),
             ("?", "show this help"),
             ("l", "open file picker"),
-            ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+            ("g", "prefix mode (g v/g g/g d/g o/g c/g s/g f)"),
             ("p", "pause processing"),
             ("1-4", "shift groups"),
             ("m", "latch modifier"),
@@ -152,12 +160,15 @@ pub fn keybindings(view: HelpView) -> Vec<(&'static str, &'static str)> {
             ("h", "toggle column/force layout"),
             ("a", "apply arrangement / cycle layouts"),
             ("S", "toggle forces panel (force/sections)"),
-            ("f", "dependency filter"),
+            // `view-maximize-and-performance-labels` D2: the dependency filter
+            // sits on `Shift+F` because `f` is the band's maximize; `i` keeps
+            // the influence filter.
+            ("Shift+F", "dependency filter"),
             ("i", "influence filter"),
             // graph-same-type-grouping D7: the grouping controls sit next to the
             // filters they compose with — `o` isolates the hovered/selected
-            // group like the `f`/`i` induced subgraphs, `Enter` folds a group
-            // open or shut, `Shift+O` reverses grouping for the whole graph.
+            // group like the `Shift+F`/`i` induced subgraphs, `Enter` folds a
+            // group open or shut, `Shift+O` reverses grouping for the graph.
             ("o", "isolate group"),
             ("Enter", "expand/collapse group"),
             ("Shift+O", "toggle grouping"),
@@ -419,13 +430,19 @@ mod tests {
         // binds, the skeleton toggle, and Esc closing the view.
         let module_ui = keybindings(HelpView::ModuleUi);
         assert!(module_ui.contains(&("+/-", "zoom presets")));
-        // module-ui-label-fit 2.4 / D8: `f` fits the written labels (the rack
-        // may then exceed the pane), `Shift+F` fits the whole rack.
-        assert!(module_ui.contains(&("f", "fit written labels (each in its cell; rack may pan)")));
-        assert!(module_ui.contains(&("Shift+F", "fit whole rack to pane (overview)")));
+        // Change `view-maximize-and-performance-labels` 1.2 / D2: `f` and `z`
+        // are the band's maximize pair, the labels fit moved to `Shift+F`, and
+        // the rack fit to the `g f` chord.
+        assert!(module_ui.contains(&("f", "maximize focused pane")));
+        assert!(module_ui.contains(&("z", "maximize focused pane")));
+        assert!(module_ui.contains(&(
+            "Shift+F",
+            "fit written labels (each in its cell; rack may pan)"
+        )));
+        assert!(module_ui.contains(&("g f", "fit whole rack to pane (overview)")));
         assert!(
-            !module_ui.contains(&("f", "fit rack to pane")),
-            "`f` is the labels fit, not the single rack fit it used to be"
+            !module_ui.contains(&("f", "fit written labels (each in its cell; rack may pan)")),
+            "`f` is the maximize, not the labels fit it used to be"
         );
         assert!(module_ui.contains(&("a", "cycle label presentation")));
         assert!(module_ui.contains(&("wheel", "adjust knob/fader value, else zoom about pointer")));
@@ -443,11 +460,12 @@ mod tests {
 
     #[test]
     fn module_ui_fit_rows_name_the_two_fits() {
-        // module-ui-label-fit 2.4 / D8: the two fit rows must name the fits the
-        // status reports (`app::FitMode::as_str`) — `f` the labels fit (every
-        // written label in its cell, the rack may then overflow and pan),
-        // `Shift+F` the whole-rack overview. The retired single-fit wording must
-        // not survive on `f`.
+        // module-ui-label-fit 2.4 / D8, re-homed by
+        // `view-maximize-and-performance-labels` 1.2: the two fit rows must name
+        // the fits the status reports (`app::FitMode::as_str`) — `Shift+F` the
+        // labels fit (every written label in its cell, the rack may then
+        // overflow and pan), `g f` the whole-rack overview. `f` is the band's
+        // maximize, so the retired fit wording must not survive on it.
         let table = keybindings(HelpView::ModuleUi);
         let desc = |key: &str| {
             table.iter().find(|(k, _)| *k == key).map_or_else(
@@ -456,21 +474,27 @@ mod tests {
             )
         };
 
-        let labels = desc("f");
+        let labels = desc("Shift+F");
         assert!(
             labels.contains("labels") && labels.contains("cell"),
-            "`f` is the labels fit — each written label in its cell: {labels:?}"
+            "`Shift+F` is the labels fit — each written label in its cell: {labels:?}"
         );
         assert!(
             labels.contains("may pan"),
-            "`f` must say the rack may exceed the pane and pan: {labels:?}"
+            "`Shift+F` must say the rack may exceed the pane and pan: {labels:?}"
         );
 
-        let rack = desc("Shift+F");
-        assert!(rack.contains("rack"), "`Shift+F` is the rack fit: {rack:?}");
+        let rack = desc("g f");
+        assert!(rack.contains("rack"), "`g f` is the rack fit: {rack:?}");
         assert!(
             rack.contains("overview"),
-            "`Shift+F` must name the overview it is: {rack:?}"
+            "`g f` must name the overview it is: {rack:?}"
+        );
+
+        assert_eq!(
+            desc("f"),
+            "maximize focused pane",
+            "`f` is the band's maximize since `view-maximize-and-performance-labels` D2"
         );
 
         // The status names the same two fits; a rename on either side is a
@@ -515,7 +539,15 @@ mod tests {
         // binding (plain brackets adjust the pane split in the class layout).
         let graph = keybindings(HelpView::Graph);
         assert!(graph.contains(&("h", "toggle column/force layout")));
-        assert!(graph.contains(&("f", "dependency filter")));
+        // Change `view-maximize-and-performance-labels` 1.2: the dependency
+        // filter sits on `Shift+F` because `f` is the band's maximize.
+        assert!(graph.contains(&("Shift+F", "dependency filter")));
+        assert!(
+            !graph
+                .iter()
+                .any(|(key, desc)| *key == "f" && *desc == "dependency filter"),
+            "`f` no longer means the dependency filter"
+        );
         assert!(graph.contains(&("i", "influence filter")));
         assert!(graph.contains(&("g s", "open select-state menu")));
         assert!(graph.contains(&("Alt+[/Alt+]", "cable tension")));
@@ -539,6 +571,7 @@ mod tests {
     const ALL_KNOWN_ROWS: &[(&str, &str)] = &[
         // Band / pane-layout keys (any pane view, both classes).
         ("z", "maximize focused pane"),
+        ("f", "maximize focused pane"),
         ("Alt+b", "swap big pane view"),
         ("Alt+s", "swap small panes"),
         ("r", "cycle view in focused pane"),
@@ -547,8 +580,11 @@ mod tests {
         ("Tab/Shift+Tab", "cycle pane focus"),
         // Module UI (the physical faceplate surface).
         ("+/-", "zoom presets"),
-        ("f", "fit written labels (each in its cell; rack may pan)"),
-        ("Shift+F", "fit whole rack to pane (overview)"),
+        (
+            "Shift+F",
+            "fit written labels (each in its cell; rack may pan)",
+        ),
+        ("g f", "fit whole rack to pane (overview)"),
         ("a", "cycle label presentation"),
         ("c", "centre focused element (else rack)"),
         ("Shift+C", "fit written labels and re-arm auto-fit"),
@@ -578,7 +614,7 @@ mod tests {
         ("d", "diff overlay"),
         ("h", "toggle column/force layout"),
         ("a", "apply arrangement / cycle layouts"),
-        ("f", "dependency filter"),
+        ("Shift+F", "dependency filter"),
         ("i", "influence filter"),
         ("o", "isolate group"),
         ("Enter", "expand/collapse group"),
@@ -620,7 +656,7 @@ mod tests {
         // Global keys present on most views.
         ("?", "show this help"),
         ("l", "open file picker"),
-        ("g", "prefix mode (g v/g g/g d/g o/g c/g s)"),
+        ("g", "prefix mode (g v/g g/g d/g o/g c/g s/g f)"),
         ("g s", "open select-state menu"),
         ("g c", "toggle latency coloring"),
         ("d", "toggle diff overlay"),
@@ -653,10 +689,16 @@ mod tests {
             ("j/k", "navigate"),
             ("click", "focus element across source + graph"),
             ("+/-", "zoom presets"),
-            // module-ui-label-fit 2.4: the handler binds `f` to the labels fit
-            // and `Shift+F` to the rack fit while the module UI holds focus.
-            ("f", "fit written labels (each in its cell; rack may pan)"),
-            ("Shift+F", "fit whole rack to pane (overview)"),
+            // module-ui-label-fit 2.4, re-homed by
+            // `view-maximize-and-performance-labels` 1.2: `Shift+F` is the labels
+            // fit and `g f` the rack fit while the module UI holds focus; `f` is
+            // the band's maximize.
+            ("f", "maximize focused pane"),
+            (
+                "Shift+F",
+                "fit written labels (each in its cell; rack may pan)",
+            ),
+            ("g f", "fit whole rack to pane (overview)"),
             ("a", "cycle label presentation"),
             ("wheel", "adjust knob/fader value, else zoom about pointer"),
             ("Ctrl+wheel", "zoom about pointer"),
@@ -750,6 +792,7 @@ mod tests {
             "f",
             "g",
             "g c",
+            "g f",
             "g s",
             "j/k",
             "l",
