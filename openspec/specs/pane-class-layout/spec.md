@@ -92,11 +92,15 @@ Exactly one pane SHALL be focused. `Tab` SHALL move focus forward through the pa
 
 ### Requirement: Non-latching maximize
 
-`z` SHALL toggle the focused pane to fill the whole main band and back to its arrangement. Maximize SHALL NOT latch: pressing `z` again, moving focus to another pane, or pressing `Esc` SHALL restore the arrangement. While a pane is maximized the other panes SHALL not render.
+`z` and `f` SHALL toggle the focused pane to fill the whole main band and back to its arrangement. Maximize SHALL NOT latch: pressing `z` or `f` again, moving focus to another pane, or pressing `Esc` SHALL restore the arrangement. While a pane is maximized the other panes SHALL not render.
 
 #### Scenario: Maximize the focused pane
 - **WHEN** a small pane is focused and the user presses `z`
 - **THEN** that pane fills the main band and the other panes are hidden
+
+#### Scenario: f is the second maximize binding
+- **WHEN** any pane is focused and the user presses `f`
+- **THEN** that pane fills the main band, and pressing `f` again restores the arrangement
 
 #### Scenario: Restore the arrangement
 - **WHEN** a pane is maximized and the user presses `z` again
