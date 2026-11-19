@@ -442,6 +442,7 @@ fn init_surface(window: &Window) -> Result<(), String> {
         // SAFETY: the window lives in the WINDOW thread-local and is dropped
         // only after this surface (close() and destroy_window_for_panic both
         // clear the EGUI slot before WINDOW).
+        #[allow(unsafe_code)] // the crate's only unsafe site; see SAFETY above
         let surface = unsafe {
             instance
                 .create_surface_unsafe(

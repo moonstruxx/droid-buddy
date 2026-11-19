@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 use color_eyre::Result;
 
 use droid_tui::app::{App, GraphWindowRequest};
