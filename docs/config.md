@@ -15,6 +15,7 @@ theme = "classic"
 [labels]
 layers_enabled = true
 max_shift_layer = 4
+performance_scale = 1.0
 
 [latency]
 # per_circuit = { vco = 1.5 }
@@ -53,6 +54,13 @@ comes from theme tokens — no hardcoded RGB.
   layers. Off coerces display to layer 1 while preserving 2–N.
 - `max_shift_layer` (1–8, default `4`): how many layers the `e`
   overlay cycles with `1`–`N`. Clamped on load and on save.
+- `performance_scale` (0.5–4.0, default `1.0`): the base size of the
+  [performance view](views.md#performance-view)'s callouts, as a
+  multiplier of the 14 pt reference the view ships with. The drawn size
+  is that reference times the current zoom (capped at 200 %) times this
+  value, so `1.0` at 100 % zoom is exactly the compact presentation.
+  `Shift`+`+`/`-` step it by 5 % in that view; the value is clamped on
+  load and on save, and an absent field means `1.0`.
 
 ### `[latency]`
 
@@ -173,7 +181,7 @@ the rows auto-pack, as before.
 The view opens at the **labels fit**: the greater of the whole-rack fit
 and the zoom every written label needs to be drawn whole, clamped to the
 supported range, so a dense rack opens zoomed past the pane and pans.
-`f` re-applies it and `Shift+F` applies the **rack fit** instead — the
+`Shift+F` re-applies it and `g f` applies the **rack fit** instead — the
 whole rack in the pane, labels shrinking away where cells become too
 small. The status line names which ran (`fit(labels)` / `fit(rack)`).
 Neither the fit nor its mode is written back to this file.

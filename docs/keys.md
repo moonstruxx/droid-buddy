@@ -4,7 +4,7 @@ The in-app `?` modal shows the key table for the focused view — it is
 the authority if this page ever disagrees. `g` arms a prefix for 1 s;
 the chords are `g v` (source viewer), `g g` (graph), `g d` (diff
 picker), `g o` (optimizer), `g s` (select-state menu), `g c` (latency
-coloring).
+coloring), `g f` (rack fit).
 
 ## Module UI
 
@@ -14,7 +14,9 @@ coloring).
 | `click` | focus element across source + graph |
 | `Enter`/`Space` | toggle component |
 | `+`/`-` | zoom presets |
-| `f` / `Shift+F` | fit written labels, each in its cell (rack may pan) / fit whole rack to pane (overview) |
+| `Shift+F` | fit written labels, each in its cell (rack may pan) |
+| `g f` | fit whole rack to pane (overview) |
+| `f` / `z` | maximize focused pane |
 | `c` / `Shift+C` | centre focused element (else rack) / fit written labels and re-arm auto-fit |
 | `click minimap` | centre the pane on the clicked rack point |
 | `drag minimap` | fit the zoom to the dragged region |
@@ -28,6 +30,29 @@ coloring).
 | `d` | toggle diff overlay |
 | `p` / `R` | open performance view / reset element states |
 | `U` / `y` / `n` | upload confirm / send / cancel |
+
+## Performance view (`p`)
+
+`p` on the Module UI pane opens the exploded-label presentation. Its zoom
+and label-scale keys are read only while that view is showing in the
+focused pane.
+
+| Key | Action |
+|---|---|
+| `+`/`-` | zoom the rack and its callouts (compact quarter of the pane up to the whole pane) |
+| `wheel` | same zoom (the compact rack stays centred) |
+| `Shift`+`+` / `Shift`+`-` | step the callout base scale by 5 % (50–400 %) |
+| `R` / `Esc` | reset element states / leave the view |
+
+How the shifted pair arrives depends on the layout, because the key is
+bound by the glyph it produces. `Shift+-` produces `_` on both layouts,
+so the down step is one key everywhere. `Shift++` produces `*` where `+`
+is itself unshifted (German) and `+` carrying the shift flag where it is
+not (US); both forms are accepted, but on the second kind of layout the
+plain `+` press is therefore the label step rather than the zoom step,
+and the wheel is what zooms the rack up. Outside this view the pair
+keeps its other meaning: on the graph pane it scales the other pane's
+zoom, and on any other pane it does nothing.
 
 ## Source viewer
 
@@ -50,7 +75,7 @@ coloring).
 | `c` / `Shift+c` | center graph / fit and center |
 | `h` | toggle column/force layout |
 | `a` | apply arrangement / cycle layouts |
-| `f` / `i` | dependency filter / influence filter |
+| `Shift+F` / `i` | dependency filter / influence filter |
 | `o` | isolate group |
 | `Enter` | expand/collapse group |
 | `Shift+O` | toggle grouping |
@@ -99,7 +124,7 @@ coloring).
 |---|---|
 | `Tab` / `Shift+Tab` | cycle pane focus |
 | `r` | cycle view in focused pane (optimizer: restore) |
-| `z` | maximize focused pane |
+| `z` / `f` | maximize focused pane (non-latching — again, or `Tab`/`Esc`, restores) |
 | `Alt+b` / `Alt+s` | swap big panes / swap small panes |
 | `Esc` | close focused view |
 

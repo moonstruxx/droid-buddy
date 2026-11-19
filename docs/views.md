@@ -11,10 +11,12 @@ open) or two stacked **small** panes. Every view belongs to a class:
 
 `Tab` / `Shift+Tab` cycle focus across the open panes in tree order,
 `r` rotates the focused pane through its class carousel
-(big: graph → Module UI; small: source viewer → optimizer), `z`
-maximizes the focused pane, `Alt+b` / `Alt+s` swap same-class panes,
-`Esc` closes the focused view. `[` / `]` move the left/right split
-(30–70 %), `Alt+[` / `Alt+]` move the small-pane split.
+(big: graph → Module UI; small: source viewer → optimizer), `z` and `f`
+both maximize the focused pane, `Alt+b` / `Alt+s` swap same-class panes,
+`Esc` closes the focused view. The maximize does not latch: the same key
+again, a focus change, or `Esc` restores the arrangement. `[` / `]` move
+the left/right split (30–70 %), `Alt+[` / `Alt+]` move the small-pane
+split.
 
 ## Module UI
 
@@ -128,14 +130,15 @@ stacks its label one glyph per line in the column beside it.
 opens, when a patch loads, when the rack changes, and when the pane is
 resized — until you zoom or pan yourself, which the view then leaves
 alone until you ask for a fit again. Both fits scale the rack and centre
-it. `f` is the labels fit: the fitted zoom is the greater of the
+it. `Shift+F` is the labels fit: the fitted zoom is the greater of the
 whole-rack fit and the zoom every written label needs to be drawn whole,
 so a dense patch opens zoomed past the pane and pans rather than
-shrinking its labels away. `Shift+F` is the rack fit, the overview — the
+shrinking its labels away. `g f` is the rack fit, the overview — the
 whole rack in the pane, with labels shrinking away wherever the cells
 become too small. The pane title and the status line name the fit that
 ran (`fit(labels)` / `fit(rack)`), and drop the name once you zoom or
-pan yourself.
+pan yourself. `f` no longer fits anything: it is the band's maximize, so
+it reaches this pane like every other one (see [Keys](keys.md#module-ui)).
 
 **The pane draws a map of the rack.** A minimap sits inset in the pane's
 bottom-right whenever the pane has a rack, including when the whole rack
@@ -163,8 +166,8 @@ shows the rack compactly.
 element at the current zoom, or on the rack when nothing is focused.
 `Shift+C` applies the labels fit and re-arms automatic fitting: after a
 manual pan or zoom, a later patch load or pane resize fits the view again.
-`f` and `Shift+F` keep their own meanings, and the pair means on this pane
-what it already means on the signal-flow graph.
+The pair means on this pane what it already means on the signal-flow
+graph, and the two fits keep their own keys (`Shift+F` and `g f`).
 
 `a` cycles the label presentation. `off` draws in-cell labels only; `on`
 annotates every addressed element that carries a written label, outside
@@ -223,7 +226,7 @@ layout).
   arrows pan, clicking the minimap pans to the clicked point, and dragging
   a rectangle across the minimap zooms the camera to that region. The
   minimap is drawn at every zoom, so both gestures stay available.
-- `f` filters to the hovered node's upstream-dependency subgraph
+- `Shift+F` filters to the hovered node's upstream-dependency subgraph
   (`Esc` clears the filter first); `i` toggles the influence filter.
 - `g s` opens the select-state menu (assume `select` values; sections
   reclassify to Selected/NotSelected/Unknown); `g c` toggles cable
@@ -289,6 +292,30 @@ bar shows `Diff scope: <token> (N cables)`.
 a compact centered rack with big side-bound callouts and leader
 lines. Activating an element updates its callout live, `R` resets all
 element states, `Esc` leaves the view.
+
+**The zoom belongs to the view.** The rack is drawn at half the
+whole-rack fit, multiplied by the module UI's own zoom and clamped to
+that fit, so the `+`/`-` presets and the wheel grow it from a quarter of
+the pane up to the whole pane and stop there. The clamp is why the view
+never pans: the rack cannot overflow, so no pan state exists. It is also
+why entering and leaving the view cost nothing — there is one zoom,
+shared with the module UI pane, so the pane keeps whatever the
+performance view set and the view opens at whatever the pane had.
+
+**Labels follow that zoom here, and only here.** A callout's effective
+size is 14 pt × the zoom (capped at 200 %) × its base scale, so 100 %
+zoom at a 100 % base scale is exactly the presentation the view shipped
+with and 200 % draws 28 pt callouts. The base scale is a knob of its
+own: `Shift`+`+` / `Shift`+`-` step it by 5 %, clamped to 50–400 % and
+persisted as `[labels] performance_scale`; which glyph `Shift`+`+`
+arrives as depends on the keyboard layout, as [Keys](keys.md#performance-view-p)
+notes. The same effective size drives the placement budget and the
+painted text, so a scaled callout is never placed in a rect measured for
+a different size — and a large enough scale can reflow the callout
+field, which is deterministic rather than drifting. Labels outside this
+view keep their fixed sizes: the graph's node labels and cluster titles,
+the in-cell module labels, the label annotations and the hover reveal
+never follow a zoom.
 
 ## Select-state menu (`g s`)
 
