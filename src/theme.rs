@@ -345,6 +345,13 @@ const ANSI16: [Color; 16] = [
 /// for [`ANSI16`]`[i]`. Shared by the named variants in [`Theme::rgb`] and the
 /// 0..=15 head of the xterm-256 map so `Color::Red` and `Color::Indexed(1)`
 /// agree.
+///
+/// This is the authoritative table for **rendering**: the kitty rasterizer and
+/// the egui bridge (`Theme::egui_color`) both come through [`Theme::rgb`], so
+/// these are the pixels a surface actually paints. Any contrast measurement
+/// that answers "what does the user see" must resolve tokens through
+/// [`Theme::rgb`] too, not through `rendermetrics::color_to_rgb` — that
+/// function keeps a different table on purpose (see its doc comment).
 const ANSI16_RGB: [(u8, u8, u8); 16] = [
     (0x00, 0x00, 0x00),
     (0xff, 0x00, 0x00),

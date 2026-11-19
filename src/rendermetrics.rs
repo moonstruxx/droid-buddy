@@ -40,9 +40,11 @@
 //! panel-surface tokens (the component-kind colors actually used by this
 //! patch, plus `text`/`muted` which always render, plus the four shift colors
 //! when the patch uses shift groups) and the assumed terminal background.
-//! Colors are resolved to the palettes' intended ANSI-16 sRGB values; a
-//! `Color::Reset` token (terminal palette) is unresolvable and skipped, so a
-//! fully-reset theme yields `None`.
+//! Colors are resolved through a legacy authoring table
+//! (`color_to_rgb`) — deliberately not the rendering table; see that
+//! function's doc comment for the divergence and for what not to measure with
+//! it. A `Color::Reset` token (terminal palette) is unresolvable and skipped,
+//! so a fully-reset theme yields `None`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -582,9 +584,27 @@ fn min_contrast(patch: &Patch, theme: &Theme) -> Option<f32> {
         .reduce(f32::min)
 }
 
-/// Resolve a theme color to sRGB using the palettes' intended ANSI-16 values
-/// (documented in the module docs). `Color::Rgb` passes through; `Reset` and
-/// `Indexed` (index beyond the 16 named colors) are unresolvable.
+/// Resolve a theme color to sRGB for the panel-surface contrast metric.
+///
+/// **This is not the render table.** `Color::Rgb` passes through; `Reset` and
+/// `Indexed` (index beyond the 16 named colors) are unresolvable. The named
+/// ANSI-16 values are the palettes' *authoring* approximation — 192/128 for
+/// the gray pair — deliberately different from [`crate::theme`]'s
+/// `ANSI16_RGB` (128/64), which is what the kitty and egui paths actually
+/// paint. Three consequences follow, and they are the reason the split still
+/// exists:
+///
+/// - the two tables disagree on `Gray`/`DarkGray`, so `classic`'s minimum
+///   contrast reads 5.25 here and 2.03 through `Theme::rgb`;
+/// - the `Light*` variants are absent here, so `filter_map` in
+///   [`min_contrast`] silently drops them from the minimum;
+/// - the ratio is taken against an assumed black background
+///   ([`DEFAULT_BG_RGB`]), not against a rendered surface.
+///
+/// Keeping it stable keeps the fitted render artifact, `corpus/rendermetrics.csv`
+/// and the stdlib Python replica (`tools/build_rendermetrics.py`) in agreement.
+/// Do not use this function for a palette guard or any "what does the user
+/// see" measurement — resolve through [`Theme::rgb`] instead.
 fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     match color {
         Color::Rgb(r, g, b) => Some((r, g, b)),
