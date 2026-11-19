@@ -13,7 +13,7 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Unit tests where the builders' own tests do not already cover the contract: `callout_size` grows linearly with the size while the pad stays fixed, the state row stays at `0.8 ×` the headline, a scaled `place_labels` run over `fixtures/physical_multirow_rack.ini` keeps every label disjoint from the rack and from every other label, and `Labels` deserialisation defaults/clamps as specified. <!-- agent: horst-engineer.build, depends_on: [2.1, 2.2, 2.3], touches: [src/gui/physical.rs, src/config.rs, src/performance.rs] -->
+- [x] 3.1 Unit tests where the builders' own tests do not already cover the contract: `callout_size` grows linearly with the size while the pad stays fixed, the state row stays at `0.8 ×` the headline, a scaled `place_labels` run over `fixtures/physical_multirow_rack.ini` keeps every label disjoint from the rack and from every other label, and `Labels` deserialisation defaults/clamps as specified. <!-- agent: horst-engineer.build, depends_on: [2.1, 2.2, 2.3], touches: [src/gui/physical.rs, src/config.rs, src/performance.rs] -->
 - [ ] 3.2 Cross-layer regression stories through `handle_event` and the paint path: `f` maximizes from each pane and clears on `Tab`/`Esc` like `z`; the picker keeps `f`; `Shift+F` splits by pane (labels fit vs dependency filter) and `g f` fits the rack; entering the performance view and pressing `+` enlarges both rack and labels while `Shift`+`-` shrinks only the labels; a restart (fresh `App` seeded from a saved config) restores the scale. <!-- agent: horst-engineer.build, depends_on: [1.1, 2.3], touches: [src/regression.rs] -->
 
 ## 4. Documentation and gates

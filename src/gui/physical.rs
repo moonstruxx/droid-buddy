@@ -4537,6 +4537,293 @@ mod tests {
         );
     }
 
+    #[test]
+    fn callout_size_grows_linearly_with_the_text_and_keeps_its_pad() {
+        // D4: only the text follows the size. Doubling it adds exactly the
+        // text's own advance / line box, and the pad contributes the same
+        // `2 × CALLOUT_PAD` at both sizes.
+        for (headline, state) in [
+            ("Cutoff", "on"),
+            ("B1.1", ""),
+            ("Trigger input", "off (shift 2)"),
+        ] {
+            let base = callout_size(headline, state, CALLOUT_LABEL_SIZE);
+            let doubled = callout_size(headline, state, CALLOUT_LABEL_SIZE * 2.0);
+
+            let chars = headline.chars().count().max(state.chars().count()).max(1) as f32;
+            let lines = if state.is_empty() { 1.0 } else { 2.0 };
+
+            let base_text_w = chars * MONO_ADVANCE * CALLOUT_LABEL_SIZE;
+            let doubled_text_w = chars * MONO_ADVANCE * CALLOUT_LABEL_SIZE * 2.0;
+            assert!(
+                (base.0 - base_text_w - 2.0 * CALLOUT_PAD).abs() < 1e-4,
+                "'{headline}': the width is one text line plus the fixed pad, got {}",
+                base.0
+            );
+            assert!(
+                (doubled.0 - base.0 - base_text_w).abs() < 1e-4,
+                "'{headline}': 2× the size must add exactly the text advance: {base:?} -> {doubled:?}"
+            );
+            assert!(
+                ((doubled.0 - doubled_text_w) - (base.0 - base_text_w)).abs() < 1e-4,
+                "'{headline}': the width pad must not scale: {base:?} -> {doubled:?}"
+            );
+
+            let base_text_h = lines * CALLOUT_LABEL_SIZE * 1.25;
+            let doubled_text_h = lines * CALLOUT_LABEL_SIZE * 2.0 * 1.25;
+            assert!(
+                (base.1 - base_text_h - 2.0 * CALLOUT_PAD).abs() < 1e-4,
+                "'{headline}': the height is {lines} text line(s) plus the fixed pad, got {}",
+                base.1
+            );
+            assert!(
+                (doubled.1 - base.1 - base_text_h).abs() < 1e-4,
+                "'{headline}': 2× the size must add exactly the line box: {base:?} -> {doubled:?}"
+            );
+            assert!(
+                ((doubled.1 - doubled_text_h) - (base.1 - base_text_h)).abs() < 1e-4,
+                "'{headline}': the height pad must not scale: {base:?} -> {doubled:?}"
+            );
+        }
+    }
+
+    /// `paint_callouts` text runs with origin and galley extent, so a test can
+    /// tell the headline from the state row and check the rows do not collide.
+    fn painted_callout_rows(callouts: &[CalloutSpec]) -> Vec<(String, egui::FontId, Pos2, Vec2)> {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut full_output = ctx.run_ui(raw_input, |ui| {
+            paint_callouts(ui.painter(), callouts, false);
+        });
+        let mut rows = Vec::new();
+        for cs in &full_output.shapes {
+            if let egui::epaint::Shape::Text(t) = &cs.shape {
+                let font = t.galley.job.sections[0].format.font_id.clone();
+                rows.push((t.galley.text().to_string(), font, t.pos, t.galley.size()));
+            }
+        }
+        full_output.textures_delta.clear();
+        rows
+    }
+
+    #[test]
+    fn callout_state_row_tracks_the_scaled_size_at_eight_tenths() {
+        // Paint one callout exactly as `performance_overlay` builds it and
+        // return (its rect, headline run, state run).
+        let paint = |size: f32| {
+            let (w, h) = callout_size("Cutoff", "on", size);
+            let callouts = vec![CalloutSpec {
+                label_rect: Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(w, h)),
+                anchor: Pos2::new(120.0, 90.0),
+                label: "Cutoff".to_string(),
+                state_text: "on".to_string(),
+                color: crate::theme::active().knob,
+                highlighted: false,
+                label_size: size,
+            }];
+            let rows = painted_callout_rows(&callouts);
+            let headline = rows
+                .iter()
+                .find(|(text, ..)| text == "Cutoff")
+                .cloned()
+                .expect("the headline row paints");
+            let state = rows
+                .iter()
+                .find(|(text, ..)| text == "on")
+                .cloned()
+                .expect("the state row paints");
+            (callouts[0].label_rect, headline, state)
+        };
+
+        // 100 %: the state row is 0.8 × the headline and sits one scaled line
+        // box lower, not at a fixed step.
+        let (rect, headline, state) = paint(CALLOUT_LABEL_SIZE);
+        assert_eq!(headline.1, egui::FontId::monospace(CALLOUT_LABEL_SIZE));
+        assert_eq!(
+            state.1,
+            egui::FontId::proportional(CALLOUT_LABEL_SIZE * 0.8),
+            "the state row is 0.8 × the headline size"
+        );
+        assert!((headline.2.x - (rect.min.x + CALLOUT_PAD)).abs() < 1e-3);
+        let base_gap = state.2.y - headline.2.y;
+        assert!(
+            (base_gap - CALLOUT_LABEL_SIZE * 1.25).abs() < 1e-3,
+            "the state row sits one line box below the headline: {base_gap}"
+        );
+        assert!(
+            state.2.y >= headline.2.y + headline.3.y - 1e-3,
+            "the state row must start below the headline galley: {:?} vs {:?}",
+            state.2,
+            headline.2
+        );
+
+        // 200 %: both rows scale with the size and the gap follows it, so the
+        // larger state row still cannot reach its headline.
+        let (scaled_rect, scaled_headline, scaled_state) = paint(CALLOUT_LABEL_SIZE * 2.0);
+        assert_eq!(
+            scaled_headline.1,
+            egui::FontId::monospace(CALLOUT_LABEL_SIZE * 2.0)
+        );
+        assert_eq!(
+            scaled_state.1,
+            egui::FontId::proportional(CALLOUT_LABEL_SIZE * 2.0 * 0.8)
+        );
+        let scaled_gap = scaled_state.2.y - scaled_headline.2.y;
+        assert!(
+            (scaled_gap - 2.0 * base_gap).abs() < 1e-3,
+            "the row gap follows the scaled size: base {base_gap}, scaled {scaled_gap}"
+        );
+        assert!(
+            scaled_state.2.y >= scaled_headline.2.y + scaled_headline.3.y - 1e-3,
+            "a scaled state row must not overlap its headline: {:?} vs {:?}",
+            scaled_state.2,
+            scaled_headline.2
+        );
+        assert!(
+            scaled_state.2.y + scaled_state.3.y <= scaled_rect.max.y - CALLOUT_PAD + 1e-3,
+            "the scaled state row stays inside the measured rect: {} + {} > {}",
+            scaled_state.2.y,
+            scaled_state.3.y,
+            scaled_rect.max.y - CALLOUT_PAD
+        );
+
+        // The existing 9 pt floor keeps a small callout's state row legible.
+        for size in [5.0, 10.0] {
+            let (_, _, state) = paint(size);
+            assert_eq!(
+                state.1,
+                egui::FontId::proportional(9.0),
+                "size {size} keeps the 9 pt floor"
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_placement_over_the_multirow_rack_keeps_labels_disjoint() {
+        // The dense real rack the module-UI stories use, through the
+        // production spec: its callouts are scaled by the independent knob and
+        // must still keep clear of the rack and of one another.
+        let mut app = app_with_patch("fixtures/physical_multirow_rack.ini");
+        app.showing_performance = true;
+        app.physical_zoom = 1.0;
+        app.performance_label_scale = 2.0;
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let overlay = spec.performance.as_ref().expect("overlay");
+        let size = CALLOUT_LABEL_SIZE * 2.0;
+        assert!(
+            overlay.callouts.iter().all(|c| c.label_size == size),
+            "the independent scale reached every callout"
+        );
+
+        // Rebuild the placement input the overlay used: the same scaled budget
+        // (`callout_size` at the frame's size) fed through `LabelInput`.
+        let cells: Vec<&CellSpec> = spec
+            .cells
+            .iter()
+            .filter(|cell| cell.component_index.is_some() && !cell.label.is_empty())
+            .collect();
+        assert_eq!(
+            cells.len(),
+            overlay.callouts.len(),
+            "one callout per labelled real element"
+        );
+        assert!(
+            cells.len() >= 8,
+            "the dense rack carries labels: {}",
+            cells.len()
+        );
+        let inputs: Vec<crate::performance::LabelInput> = cells
+            .iter()
+            .enumerate()
+            .map(|(host_id, cell)| {
+                let (w, h) = callout_size(&cell.label, &cell.state_text, size);
+                crate::performance::LabelInput {
+                    host_id,
+                    host_rect: crate::performance::Rect::new(
+                        cell.rect.min.x,
+                        cell.rect.min.y,
+                        cell.rect.width(),
+                        cell.rect.height(),
+                    ),
+                    label_w: w,
+                    label_h: h,
+                }
+            })
+            .collect();
+        let base_w: Vec<f32> = cells
+            .iter()
+            .map(|cell| callout_size(&cell.label, &cell.state_text, CALLOUT_LABEL_SIZE).0)
+            .collect();
+        assert!(
+            inputs
+                .iter()
+                .zip(&base_w)
+                .any(|(input, &base)| input.label_w > base),
+            "the placement budget really is the scaled one, not the 14 pt one"
+        );
+
+        let rack = overlay.rack_rect;
+        let rack_rect =
+            crate::performance::Rect::new(rack.min.x, rack.min.y, rack.width(), rack.height());
+        let placed = crate::performance::place_labels(rack_rect, &inputs);
+        assert_eq!(placed.len(), inputs.len());
+        for label in &placed {
+            assert!(
+                !label.label_rect.overlaps(rack_rect),
+                "label {} enters the rack rect: {:?}",
+                label.host_id,
+                label.label_rect
+            );
+            // Placement never resizes: the rect is the scaled budget fed in.
+            let input = &inputs[label.host_id];
+            assert!(
+                (label.label_rect.w - input.label_w).abs() < 1e-3
+                    && (label.label_rect.h - input.label_h).abs() < 1e-3,
+                "label {} placed at {}×{}, budgeted {}×{}",
+                label.host_id,
+                label.label_rect.w,
+                label.label_rect.h,
+                input.label_w,
+                input.label_h
+            );
+        }
+        for (i, a) in placed.iter().enumerate() {
+            for b in &placed[i + 1..] {
+                assert!(
+                    !a.label_rect.overlaps(b.label_rect),
+                    "labels {} and {} overlap: {:?} vs {:?}",
+                    a.host_id,
+                    b.host_id,
+                    a.label_rect,
+                    b.label_rect
+                );
+            }
+        }
+
+        // The production overlay's own placed rects agree with that run.
+        for c in &overlay.callouts {
+            assert!(
+                rects_disjoint(&c.label_rect, &overlay.rack_rect),
+                "scaled callout '{}' enters the rack rect: {:?}",
+                c.label,
+                c.label_rect
+            );
+        }
+        for (i, a) in overlay.callouts.iter().enumerate() {
+            for b in &overlay.callouts[i + 1..] {
+                assert!(
+                    rects_disjoint(&a.label_rect, &b.label_rect),
+                    "scaled callouts '{}' and '{}' overlap",
+                    a.label,
+                    b.label
+                );
+            }
+        }
+    }
+
     fn nav_patch() -> crate::patch::Patch {
         crate::patch::Patch::from_ini_file(std::path::Path::new("fixtures/source_navigation.ini"))
             .unwrap()
