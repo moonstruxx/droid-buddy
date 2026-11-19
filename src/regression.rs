@@ -6283,7 +6283,8 @@ fn regression_f_maximizes_every_pane_and_clears_like_z() {
     // One case per view the band can focus: module UI, graph, source viewer,
     // optimizer. Each opens the view through its real key, then `f` must
     // maximize whichever pane ended up focused.
-    let cases: [(&str, fn(&mut App)); 4] = [
+    type OpenView = fn(&mut App);
+    let cases: [(&str, OpenView); 4] = [
         ("module UI", |_| {}),
         ("graph", |app| {
             handle_event(&key(KeyCode::Char('g')), app);
