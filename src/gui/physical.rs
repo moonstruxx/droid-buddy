@@ -201,10 +201,15 @@ pub(crate) struct CellSpec {
     pub label_layout: Option<crate::physical::LabelLayout>,
 }
 
-/// Fixed screen-space font (points) for a performance-view callout headline:
-/// big next to the 10 pt in-cell labels, so the exploded field reads at a
-/// glance (performance-view 1.3). Painted monospace so the measured callout
-/// size (via [`MONO_ADVANCE`]) matches what egui draws.
+/// The 100 % reference font (points) for a callout headline: big next to the
+/// 10 pt in-cell labels, so the exploded field reads at a glance
+/// (performance-view 1.3). Painted monospace so the measured callout size (via
+/// [`MONO_ADVANCE`]) matches what egui draws.
+///
+/// The performance view scales it per frame (zoom × the persisted label scale,
+/// D4) through [`CalloutSpec::label_size`]; the label annotations and the hover
+/// reveal still pass this constant, because their size must not follow the
+/// zoom.
 const CALLOUT_LABEL_SIZE: f32 = 14.0;
 /// Padding inside a callout rect, in points.
 const CALLOUT_PAD: f32 = 4.0;
@@ -220,6 +225,12 @@ pub(crate) struct CalloutSpec {
     pub state_text: String,
     pub color: Color,
     pub highlighted: bool,
+    /// The effective headline size the callout was measured at and must be
+    /// painted at. Placement ([`callout_size`]) and paint ([`paint_callouts`])
+    /// both read this one number, so a scaled label is never placed in a rect
+    /// measured for a different size (D4). The annotations and the hover reveal
+    /// set [`CALLOUT_LABEL_SIZE`] and are therefore unchanged.
+    pub label_size: f32,
 }
 
 /// The performance-view overlay payload for one frame: the screen-space rack
@@ -437,7 +448,7 @@ fn spec_mapping(app: &App, rack: &RackLayout, pane: egui::Rect) -> ScreenMapping
         )
     };
     if app.showing_performance {
-        performance_mapping(rack, pane).unwrap_or_else(normal_mapping)
+        performance_mapping(rack, pane, f64::from(app.physical_zoom)).unwrap_or_else(normal_mapping)
     } else {
         normal_mapping()
     }
@@ -1071,12 +1082,20 @@ fn spec_minimap(
     )
 }
 
-/// Centered compact mapping for the performance view (performance-view 1.3):
-/// the rack renders at half the fit zoom — half-linear in each dimension, so
-/// ~1/4 of the pane area — centered on the pane, ignoring the user pan/zoom.
-/// `None` on degenerate input (empty pane or rack); the caller falls back to
-/// the normal mapping. Pure math, no App dependency, so tests drive it headless.
-pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option<ScreenMapping> {
+/// Centered mapping for the performance view (performance-view 1.3, D3): the
+/// rack renders at half the whole-rack fit — half-linear in each dimension, so
+/// ~1/4 of the pane area — multiplied by `zoom` and clamped to that fit, and
+/// centered on the pane. The clamp is what makes a pan unnecessary: the rack
+/// grows from a quarter of the pane to the whole pane and can never overflow
+/// it, so the shared zoom keys need no second pan state here. `None` on
+/// degenerate input (empty pane or rack, non-positive zoom); the caller falls
+/// back to the normal mapping. Pure math, no App dependency, so tests drive it
+/// headless.
+pub(crate) fn performance_mapping(
+    rack: &RackLayout,
+    pane: egui::Rect,
+    zoom: f64,
+) -> Option<ScreenMapping> {
     let points_per_mm = crate::physical::PHYSICAL_POINTS_PER_MM;
     let pane_w = f64::from(pane.width());
     let pane_h = f64::from(pane.height());
@@ -1088,10 +1107,12 @@ pub(crate) fn performance_mapping(rack: &RackLayout, pane: egui::Rect) -> Option
     }
     let fit = (pane_w / (rack.total_width_mm * points_per_mm))
         .min(pane_h / (rack.total_height_mm * points_per_mm));
-    if !fit.is_finite() || fit <= 0.0 {
+    if !fit.is_finite() || fit <= 0.0 || !zoom.is_finite() || zoom <= 0.0 {
         return None;
     }
-    let zoom = fit * 0.5;
+    // The compact base times the zoom, capped at the fit: at or below 100 %
+    // this is byte-identical to the old fixed half-fit picture.
+    let zoom = (fit * 0.5 * zoom).min(fit);
     // Pane-relative points center on the pane middle; the pane origin folds in
     // exactly like the normal mapping so points land window-absolute.
     let offset_x =
@@ -1213,7 +1234,7 @@ pub(crate) fn budget_annotations(pane: Rect, rack_rect: Rect, cells: &[&CellSpec
     // Measure once: the drop loop only re-places.
     let measured: Vec<(f32, f32)> = cells
         .iter()
-        .map(|cell| callout_size(&cell.label, &cell.state_text))
+        .map(|cell| callout_size(&cell.label, &cell.state_text, CALLOUT_LABEL_SIZE))
         .collect();
     // Drop order is total and deterministic: family first, candidate order to
     // break ties.
@@ -1271,6 +1292,7 @@ pub(crate) fn budget_annotations(pane: Rect, rack_rect: Rect, cells: &[&CellSpec
                 state_text: cell.state_text.clone(),
                 color: cell.color,
                 highlighted: cell.highlighted,
+                label_size: CALLOUT_LABEL_SIZE,
             }
         })
         .collect();
@@ -1306,7 +1328,7 @@ fn hover_callout(pane: Rect, cell: &CellSpec) -> Option<CalloutSpec> {
     if cell.label.is_empty() || cell.component_index.is_none() {
         return None;
     }
-    let (w, h) = callout_size(&cell.label, &cell.state_text);
+    let (w, h) = callout_size(&cell.label, &cell.state_text, CALLOUT_LABEL_SIZE);
     let gap = crate::performance::SIDE_MARGIN;
     let right = cell.rect.max.x + gap;
     let left = cell.rect.min.x - gap - w;
@@ -1338,17 +1360,24 @@ fn hover_callout(pane: Rect, cell: &CellSpec) -> Option<CalloutSpec> {
         state_text: cell.state_text.clone(),
         color: cell.label_color,
         highlighted: cell.highlighted,
+        label_size: CALLOUT_LABEL_SIZE,
     })
 }
 
-/// Measured callout size for `headline` + `state` at [`CALLOUT_LABEL_SIZE`]:
-/// the wider line sets the width, one or two text lines plus padding set the
-/// height. Pure so the placement tests budget honest rects.
-fn callout_size(headline: &str, state: &str) -> (f32, f32) {
+/// Measured callout size for `headline` + `state` at `size` points: the wider
+/// line sets the width, one or two text lines plus padding set the height.
+/// Pure so the placement tests budget honest rects.
+///
+/// `size` is the spec's [`CalloutSpec::label_size`], the same number
+/// [`paint_callouts`] builds its `FontId` from. That is the invariant: the
+/// placement budget and the painted font are one number, so a scaled label is
+/// never placed in a rect measured for a different size (D4). Padding stays
+/// fixed — only the text grows.
+fn callout_size(headline: &str, state: &str, size: f32) -> (f32, f32) {
     let chars = headline.chars().count().max(state.chars().count()).max(1);
-    let w = chars as f32 * MONO_ADVANCE * CALLOUT_LABEL_SIZE + 2.0 * CALLOUT_PAD;
+    let w = chars as f32 * MONO_ADVANCE * size + 2.0 * CALLOUT_PAD;
     let lines = if state.is_empty() { 1 } else { 2 };
-    let h = lines as f32 * CALLOUT_LABEL_SIZE * 1.25 + 2.0 * CALLOUT_PAD;
+    let h = lines as f32 * size * 1.25 + 2.0 * CALLOUT_PAD;
     (w, h)
 }
 
@@ -1436,6 +1465,11 @@ pub(crate) fn performance_overlay(
         rack_rect.width(),
         rack_rect.height(),
     );
+    // D4: one effective size per frame — the 14 pt reference times the zoom
+    // relative to the compact base (hence the 2× cap) times the independent
+    // persisted scale. Written onto every spec so `callout_size` and
+    // `paint_callouts` read the same number and cannot disagree.
+    let label_size = CALLOUT_LABEL_SIZE * app.physical_zoom.min(2.0) * app.performance_label_scale;
     let mut inputs = Vec::new();
     let mut meta: Vec<(String, String, Color, bool)> = Vec::new();
     for cell in cells {
@@ -1470,7 +1504,7 @@ pub(crate) fn performance_overlay(
         } else {
             cell.state_text.clone()
         };
-        let (w, h) = callout_size(&headline, &state_text);
+        let (w, h) = callout_size(&headline, &state_text, label_size);
         inputs.push(crate::performance::LabelInput {
             host_id: inputs.len(),
             host_rect: crate::performance::Rect::new(
@@ -1498,6 +1532,7 @@ pub(crate) fn performance_overlay(
                 state_text,
                 color,
                 highlighted,
+                label_size,
             }
         })
         .collect();
@@ -1993,11 +2028,6 @@ fn paint_state_row(
     );
 }
 
-/// Draw the performance overlay: one leader line plus a boxed big-label
-/// callout per placed element. Headlines paint at [`CALLOUT_LABEL_SIZE`]
-/// monospace (the size [`callout_size`] budgets); the state line paints
-/// smaller and muted like the in-cell state text.
-///
 /// Draw a composed button face (button-led-composition D5/D6/D7): a state
 /// outline (off `muted`, on the button token with a bolder stroke) whose
 /// interior belongs to the folded LED as a concentric fill. The fill extent
@@ -2336,13 +2366,18 @@ fn paint_performance(painter: &Painter, overlay: &PerformanceOverlay, paused: bo
 /// reveal, so every callout on the surface reads as one presentation.
 fn paint_callouts(painter: &Painter, callouts: &[CalloutSpec], paused: bool) {
     let leader = rgb(crate::theme::active().performance_leader);
-    let headline_font = egui::FontId::monospace(CALLOUT_LABEL_SIZE);
-    let state_font = egui::FontId::proportional((CALLOUT_LABEL_SIZE * 0.8).max(9.0));
     for callout in callouts {
         let rect = callout.label_rect;
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             continue;
         }
+        // Both fonts and the state-row offset come from this spec's own size:
+        // the rect was measured at `label_size` by `callout_size`, so painting
+        // at anything else would overflow or under-fill it (D4). The offset
+        // must follow too, or a scaled state row would overlap its headline.
+        let size = callout.label_size;
+        let headline_font = egui::FontId::monospace(size);
+        let state_font = egui::FontId::proportional((size * 0.8).max(9.0));
         // Leader line: host-cell edge anchor to the nearest point of the
         // placed label rect (its edge facing the host cell).
         let edge = Pos2::new(
@@ -2370,7 +2405,7 @@ fn paint_callouts(painter: &Painter, callouts: &[CalloutSpec], paused: bool) {
         );
         if !callout.state_text.is_empty() {
             painter.text(
-                rect.min + egui::vec2(CALLOUT_PAD, CALLOUT_PAD + CALLOUT_LABEL_SIZE * 1.25),
+                rect.min + egui::vec2(CALLOUT_PAD, CALLOUT_PAD + size * 1.25),
                 egui::Align2::LEFT_TOP,
                 &callout.state_text,
                 state_font.clone(),
@@ -4395,6 +4430,110 @@ mod tests {
         assert!(
             (center.x - 400.0).abs() <= 2.0 && (center.y - 300.0).abs() <= 2.0,
             "rack centered on the pane: {center:?}"
+        );
+    }
+
+    /// The fit scale `performance_mapping` starts from and clamps against: the
+    /// rack exactly fills the pane on its tighter axis.
+    fn perf_fit(rack: &RackLayout, pane: Rect) -> f64 {
+        let ppmm = crate::physical::PHYSICAL_POINTS_PER_MM;
+        (f64::from(pane.width()) / (rack.total_width_mm * ppmm))
+            .min(f64::from(pane.height()) / (rack.total_height_mm * ppmm))
+    }
+
+    #[test]
+    fn performance_mapping_scales_with_zoom_and_clamps_at_the_rack_fit() {
+        let (rack, _) = fixture();
+        let pane = perf_pane();
+        let fit = perf_fit(&rack, pane);
+
+        let assert_zoom = |got: f64, want: f64, zoom: f64| {
+            assert!(
+                (got - want).abs() <= want.abs().max(1.0) * 1e-9,
+                "mapping at {zoom} zoom draws at {got}, want {want}"
+            );
+        };
+
+        // 50 %: the compact base (half the fit) times the zoom.
+        let quarter = performance_mapping(&rack, pane, 0.5).expect("mapping at 0.5");
+        assert_zoom(quarter.zoom, fit * 0.25, 0.5);
+        // 100 %: today's compact picture, exactly.
+        let compact = performance_mapping(&rack, pane, 1.0).expect("mapping at 1.0");
+        assert_zoom(compact.zoom, fit * 0.5, 1.0);
+        // 200 %: the whole-rack fit.
+        let whole = performance_mapping(&rack, pane, 2.0).expect("mapping at 2.0");
+        assert_zoom(whole.zoom, fit, 2.0);
+        // 400 %: the clamp stops at the fit, so the rack can never overflow.
+        let clamped = performance_mapping(&rack, pane, 4.0).expect("mapping at 4.0");
+        assert_zoom(clamped.zoom, fit, 4.0);
+
+        // Every mapping stays centred on the pane, so the clamp needs no pan.
+        let center = crate::physical::RectMm {
+            x_mm: rack.total_width_mm * 0.5,
+            y_mm: rack.total_height_mm * 0.5,
+            w_mm: 0.0,
+            h_mm: 0.0,
+        };
+        for mapping in [quarter, compact, whole, clamped] {
+            let (x, y, _, _) = mapping.mm_to_screen(center);
+            assert!((x - f64::from(pane.center().x)).abs() < 1e-6);
+            assert!((y - f64::from(pane.center().y)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn scaled_performance_callouts_paint_and_measure_at_one_size() {
+        let mut app = app_with_patch("fixtures/own_buttons.ini");
+        app.showing_performance = true;
+        app.performance_label_scale = 1.0;
+        app.physical_zoom = 2.0;
+        let spec = physical_spec(&app, perf_pane()).expect("spec");
+        let overlay = spec.performance.as_ref().expect("overlay");
+        assert!(!overlay.callouts.is_empty(), "zoomed callouts exist");
+
+        // D4: min(zoom, 2) × the 14 pt base × the independent scale.
+        let size = CALLOUT_LABEL_SIZE * 2.0;
+        for callout in &overlay.callouts {
+            assert_eq!(
+                callout.label_size, size,
+                "callout '{}' carries the frame's effective size",
+                callout.label
+            );
+            // Placement and paint are one number: the placed rect is exactly
+            // the budget `callout_size` measured at `label_size` (a vertical
+            // label swaps the axes, so compare the dimension set).
+            let (w, h) = callout_size(&callout.label, &callout.state_text, callout.label_size);
+            let mut got = [callout.label_rect.width(), callout.label_rect.height()];
+            let mut want = [w, h];
+            got.sort_by(|a, b| a.partial_cmp(b).expect("finite sizes"));
+            want.sort_by(|a, b| a.partial_cmp(b).expect("finite sizes"));
+            assert!(
+                (got[0] - want[0]).abs() < 1e-3 && (got[1] - want[1]).abs() < 1e-3,
+                "callout '{}' placed at {got:?}, budgeted {want:?}",
+                callout.label
+            );
+        }
+
+        let texts = painted_texts(&spec);
+        for callout in &overlay.callouts {
+            assert!(
+                texts.iter().any(|(text, font, _)| text == &callout.label
+                    && *font == egui::FontId::monospace(size)),
+                "headline '{}' paints at {size} pt",
+                callout.label
+            );
+        }
+
+        // 100 % zoom with 100 % scale is today's 14 pt presentation.
+        app.physical_zoom = 1.0;
+        let base = physical_spec(&app, perf_pane()).expect("spec at 100 %");
+        let base_overlay = base.performance.as_ref().expect("overlay at 100 %");
+        assert!(
+            base_overlay
+                .callouts
+                .iter()
+                .all(|c| c.label_size == CALLOUT_LABEL_SIZE),
+            "100 % draws the shipped 14 pt callouts"
         );
     }
 
