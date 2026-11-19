@@ -62,6 +62,37 @@ vulnerable code path is not reachable from this application). A crate with no ad
 - **Watch:** it disappears when `winit`/`sctk-adwaita` move to `skrifa` or drop
   `ab_glyph`. Re-check on every `winit` upgrade.
 
+## Sources and the optional web sync
+
+The scan reads three services. Two answer without credentials, which is why they carry the
+evaluation; the third is opt-in:
+
+| service | what it contributes | auth | used |
+|---|---|---|---|
+| **OSV** (`api.osv.dev`) | the RustSec advisory data `cargo audit` reads, queried per crate + version | none | always |
+| **cve.org** (`cveawg.mitre.org`) | the authoritative CVE record for each advisory alias — CVSS base score, publication state, title | none | always |
+| **OpenCVE** (`app.opencve.io`) | a second view of the same CVE, useful for cross-checking a RUSTSEC-to-CVE mapping | `OPENCVE_API_KEY` (401 without it) | only when the key is exported |
+
+The sync is **optional and offline-tolerant by design**. It is not a build step, not a test,
+not a CI gate: nothing fails when it cannot run.
+
+```bash
+python3 scripts/security-sync.py                  # scan both manifests, print the findings
+python3 scripts/security-sync.py --json out.json  # same, plus a machine-readable report
+python3 scripts/security-sync.py --strict         # exit 1 on a finding, 3 if a query failed
+OPENCVE_API_KEY=… python3 scripts/security-sync.py
+```
+
+- **Online:** prints the resolved package count per manifest and one line per advisory
+  (RUSTSEC id, CVE alias, CVSS, fixed version, summary). Exit `0`; `1` with `--strict` when
+  a finding exists.
+- **Offline:** prints `offline: the recorded evaluation in SECURITY.md stands unchanged`,
+  names the unreachable endpoint, and exits `0` — `3` with `--strict`, so a scheduled run
+  can notice without turning an unreachable network into a failed build. The dated
+  evaluation in this file is the fallback, which is why every entry carries a date.
+- A findings run is a prompt to edit this document, not an automatic rewrite: the
+  classification needs a human judgement about reachability that no scanner can make.
+
 ## What this evaluation does not cover
 
 - **No `cargo-audit` binary** in the environment, and no `cargo-deny` license/advisory
@@ -75,6 +106,8 @@ vulnerable code path is not reachable from this application). A crate with no ad
   no `cargo-vet`/`cargo-crev` review trail, no pinned registry mirror.
 
 ## Re-running the scan
+
+The supported path is the script; the manual query below is what it automates.
 
 ```bash
 # one advisory query per resolved package, both manifests

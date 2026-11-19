@@ -56,7 +56,7 @@ droid_tui/
 │                               #   + good/*.ini curated gold patches (generator variants removed)
 ├── tools/                      # developer analysis tools (Python fit/build scripts + artifacts)
 ├── scripts/                    # developer scripts (profile-gate.sh, gen_own_scale.py,
-│                               #   codehealth.py + codehealth-baseline.txt)
+│                               #   codehealth.py + codehealth-baseline.txt, security-sync.py)
 ├── assets/                     # JetBrainsMono-Regular.ttf (UI font)
 ├── ext/droid-lsp/              # vendored git submodule — schema/validation source of truth
 ├── patches_remote/             # remote DROID patch files (reference .ini patches + Generators/)

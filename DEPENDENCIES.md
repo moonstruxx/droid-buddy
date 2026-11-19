@@ -84,8 +84,10 @@ cargo tree -p <crate> --prefix none --format "{p}" | sort -u | wc -l
 # 4. prove the consumer before removing anything
 rg -n "<crate>::" src/ tests/ tools/
 
-# 5. vulnerability + maintenance scan: every resolved package against OSV
-#    (the recipe and the classification scale live in SECURITY.md)
+# 5. vulnerability + maintenance scan: every resolved package against OSV, then the
+#    CVE record for each advisory - optional, needs network, never a build gate
+python3 scripts/security-sync.py
+#    (sources, flags and the classification scale: SECURITY.md)
 ```
 
 Verdicts, in order of preference: **remove** (no consumer), **move to
