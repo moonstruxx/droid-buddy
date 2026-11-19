@@ -10,7 +10,7 @@ From the documents and code graph analysis, extract concrete, actionable rules i
 - Build & deployment: build commands, env requirements, deployment targets, CI gates
 - Data & state: migration rules, schema change process, state management patterns
 - Security: auth boundaries, input validation requirements, secrets handling
-- Dependencies: package manager, lockfile rules, upgrade policy, forbidden packages
+- Dependencies: package manager, lockfile rules, upgrade policy, forbidden packages, and the removal rule — every direct dependency has a proven consumer, a crate consumed only under `#[cfg(test)]` moves to dev-dependencies instead of being deleted, and the audit procedure names the commands that measure it. Name the dependency inventory document and make its regeneration mandatory in the same change that adds, removes or re-sections a dependency. Always emit this category — it does not depend on the source documents.
 - Git workflow: branch naming, commit message format, PR process (platform-specific from `harness.json`)
 - Domain-specific rules: anything in `openspec/config.yaml` context or `ARCHITECTURE.md` constraints/risks sections
 - Documentation: which artifacts are derived and by which command, which hand-written page tracks which source of truth, which facts are duplicated and where, and what a verification pass must check. Always emit this category — it does not depend on the source documents.
@@ -65,7 +65,9 @@ license: MIT
 - <rule>
 
 ## Dependencies
-- <rule>
+- **YAGNI for crates**: <the rule that every dependency has a proven consumer, and what "proven" means here>
+- **The audit is a procedure, not an opinion**: <the commands that list unused crates, enabled features, subtree size and duplicate versions>
+- **The inventory is a derived artifact**: <the dependency document, its measurement method and date, and the rule that a manifest change updates it in the same change>
 
 ## Git Workflow
 - <rule>
