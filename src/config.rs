@@ -25,6 +25,14 @@ pub const DEFAULT_MAX_SHIFT_LAYER: u8 = 4;
 pub const MIN_SHIFT_LAYER: u8 = 1;
 pub const MAX_SHIFT_LAYER: u8 = 8;
 
+/// Performance-view callout scale under `[labels]` (view-maximize-and-
+/// performance-labels D6): a multiplier on the 14 pt reference, where 1.0 at
+/// 100 % zoom is today's picture. Clamped to `MIN_PERFORMANCE_SCALE..=`
+/// `MAX_PERFORMANCE_SCALE` on load and save; absent means 1.0.
+pub const DEFAULT_PERFORMANCE_SCALE: f64 = 1.0;
+pub const MIN_PERFORMANCE_SCALE: f64 = 0.5;
+pub const MAX_PERFORMANCE_SCALE: f64 = 4.0;
+
 /// Physical-view defaults, matching the `App::new` initial state so an
 /// absent `[physical]` section keeps the out-of-box presentation.
 pub const DEFAULT_PHYSICAL_SHOW_SKELETON: bool = false;
@@ -92,6 +100,10 @@ fn default_max_shift_layer() -> u8 {
     DEFAULT_MAX_SHIFT_LAYER
 }
 
+fn default_performance_scale() -> f64 {
+    DEFAULT_PERFORMANCE_SCALE
+}
+
 fn default_show_skeleton() -> bool {
     DEFAULT_PHYSICAL_SHOW_SKELETON
 }
@@ -137,12 +149,21 @@ fn default_group_by() -> GroupBy {
 }
 
 /// Per-label configuration under `[labels]`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `performance_scale` is a float, so `Eq` is intentionally not derived; its
+/// consumers compare with `PartialEq` only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Labels {
     #[serde(default = "default_layers_enabled")]
     pub layers_enabled: bool,
     #[serde(default = "default_max_shift_layer")]
     pub max_shift_layer: u8,
+    /// Base size multiplier for the performance view's callouts: the
+    /// `Shift`+`+`/`-` knob, read by `gui::physical::performance_overlay` to
+    /// scale the 14 pt reference. Clamped to 0.5..=4.0 on load and save; absent
+    /// means 1.0, so 100 % zoom with 100 % scale is the compact presentation.
+    #[serde(default = "default_performance_scale")]
+    pub performance_scale: f64,
 }
 
 impl Default for Labels {
@@ -150,7 +171,19 @@ impl Default for Labels {
         Self {
             layers_enabled: default_layers_enabled(),
             max_shift_layer: default_max_shift_layer(),
+            performance_scale: default_performance_scale(),
         }
+    }
+}
+
+/// Clamp a stored scale into the supported range. A non-finite value (`toml`
+/// accepts `nan`/`inf`) is not a scale at all and resets to 1.0 rather than
+/// poisoning every label size downstream.
+fn clamp_performance_scale(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(MIN_PERFORMANCE_SCALE, MAX_PERFORMANCE_SCALE)
+    } else {
+        DEFAULT_PERFORMANCE_SCALE
     }
 }
 
@@ -572,6 +605,7 @@ pub fn load_from(path: &Path, canonicalize: ThemeCanonicalizer<'_>, catalog: &[&
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    settings.labels.performance_scale = clamp_performance_scale(settings.labels.performance_scale);
     settings.graph.min_group_size = settings
         .graph
         .min_group_size
@@ -640,6 +674,8 @@ pub fn save_to_dir(dir: &Path, settings: &Settings) -> io::Result<()> {
         .labels
         .max_shift_layer
         .clamp(MIN_SHIFT_LAYER, MAX_SHIFT_LAYER);
+    normalized.labels.performance_scale =
+        clamp_performance_scale(normalized.labels.performance_scale);
     normalized.graph.min_group_size = normalized
         .graph
         .min_group_size
@@ -998,6 +1034,7 @@ mod tests {
                 labels: Labels {
                     layers_enabled: false,
                     max_shift_layer: 20,
+                    ..Labels::default()
                 },
                 latency: Latency::default(),
                 physical: Physical::default(),
@@ -1027,6 +1064,7 @@ mod tests {
                     labels: Labels {
                         layers_enabled: true,
                         max_shift_layer: raw,
+                        ..Labels::default()
                     },
                     latency: Latency::default(),
                     physical: Physical::default(),
@@ -1053,6 +1091,7 @@ mod tests {
             labels: Labels {
                 layers_enabled: false,
                 max_shift_layer: 6,
+                ..Labels::default()
             },
             latency: Latency {
                 per_circuit: HashMap::from([("clocktool".to_string(), 2.0)]),
@@ -1089,6 +1128,127 @@ mod tests {
         .unwrap();
         let loaded = load_at(&dir);
         assert_eq!(loaded.labels.max_shift_layer, 4);
+    }
+
+    // ── view-maximize-and-performance-labels 2.1: [labels] performance_scale ──
+
+    #[test]
+    fn performance_scale_absent_means_one() {
+        // An absent key inside a present table, and an absent table, must both
+        // land on the 1.0 reference (D6: the table's "absent means default" rule).
+        assert_eq!(DEFAULT_PERFORMANCE_SCALE, 1.0);
+        assert_eq!(Labels::default().performance_scale, 1.0);
+
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[labels]\nmax_shift_layer = 6\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded.labels.performance_scale, 1.0);
+        assert_eq!(loaded.labels.max_shift_layer, 6, "the rest still applies");
+    }
+
+    #[test]
+    fn performance_scale_clamped_on_load() {
+        for (raw, expected) in [
+            (0.1, 0.5),
+            (0.5, 0.5),
+            (1.15, 1.15),
+            (4.0, 4.0),
+            (12.0, 4.0),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let cfg_dir = dir.path().join(APP_DIR_NAME);
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(
+                cfg_dir.join(CONFIG_FILE_NAME),
+                format!("theme = \"classic\"\n[labels]\nperformance_scale = {raw}\n"),
+            )
+            .unwrap();
+            let loaded = load_at(&dir);
+            assert_eq!(
+                loaded.labels.performance_scale, expected,
+                "raw {raw} should clamp to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_performance_scale_warns_once_and_yields_one() {
+        // A wrong-type value fails the file like every other numeric setting
+        // (`malformed_min_group_size_falls_back_to_default`): the loader emits
+        // one "ignoring malformed config file" warning and returns defaults,
+        // whose scale is 1.0. This module captures no stderr, so only the
+        // fallback is asserted, as in the sibling malformed-value tests.
+        let dir = TempDir::new().unwrap();
+        let cfg_dir = dir.path().join(APP_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join(CONFIG_FILE_NAME),
+            "theme = \"classic\"\n[labels]\nperformance_scale = \"big\"\n",
+        )
+        .unwrap();
+        let loaded = load_at(&dir);
+        assert_eq!(loaded, Settings::default());
+        assert_eq!(loaded.labels.performance_scale, 1.0);
+    }
+
+    #[test]
+    fn performance_scale_round_trips_through_save() {
+        let dir = TempDir::new().unwrap();
+        let settings = Settings {
+            labels: Labels {
+                performance_scale: 1.15,
+                ..Labels::default()
+            },
+            ..Settings::default()
+        };
+        save_to_dir(dir.path(), &settings).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+        assert!(body.contains("[labels]"), "body: {body}");
+        assert!(body.contains("performance_scale"), "body: {body}");
+        let loaded = load_from(
+            &dir.path().join(CONFIG_FILE_NAME),
+            &test_canonical,
+            &TEST_CATALOG,
+        );
+        assert_eq!(loaded.labels.performance_scale, 1.15);
+    }
+
+    #[test]
+    fn save_clamps_performance_scale() {
+        // The save path clamps like the load path (the `max_shift_layer` rule):
+        // an out-of-range in-memory value is written as the nearest bound.
+        for raw in [0.1_f64, 12.0] {
+            let dir = TempDir::new().unwrap();
+            save_to_dir(
+                dir.path(),
+                &Settings {
+                    labels: Labels {
+                        performance_scale: raw,
+                        ..Labels::default()
+                    },
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+            let loaded = load_from(
+                &dir.path().join(CONFIG_FILE_NAME),
+                &test_canonical,
+                &TEST_CATALOG,
+            );
+            let expected = raw.clamp(MIN_PERFORMANCE_SCALE, MAX_PERFORMANCE_SCALE);
+            let body = std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap();
+            assert!(
+                body.contains(&format!("performance_scale = {expected}")),
+                "raw {raw} should be written as {expected}: {body}"
+            );
+            assert_eq!(loaded.labels.performance_scale, expected);
+        }
     }
 
     // ── latency-cost-model 1.1: [latency] per_circuit ──

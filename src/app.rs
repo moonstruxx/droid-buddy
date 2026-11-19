@@ -1061,6 +1061,14 @@ pub struct App {
     /// switch of the Physical pane, default OFF. Reset on patch load like
     /// `physical_show_skeleton`.
     pub showing_performance: bool,
+    /// Base size multiplier for the performance view's callouts
+    /// (`[labels] performance_scale`, view-maximize-and-performance-labels
+    /// D4/D6): stepped by `Shift`+`+`/`-` and read by
+    /// `gui::physical::performance_overlay`, which combines it with the zoom's
+    /// relative factor to size the callout text. Seeded from config once at
+    /// startup by `seed_app`; 1.0 out of the box. `f32` because the size feeds
+    /// egui's `FontId`.
+    pub performance_label_scale: f32,
     /// Screen rects the skeleton renderer published last frame, keyed by
     /// (module index, cell index = position of the element in the module's
     /// `components` in declaration order). Rebuilt every frame; the D5
@@ -1344,6 +1352,7 @@ impl App {
             physical_show_skeleton: false,
             label_presentation: crate::config::LabelPresentation::default(),
             showing_performance: false,
+            performance_label_scale: 1.0,
             physical_skeleton_rects: Vec::new(),
             physical_full_rects: Vec::new(),
             physical_offset: (0.0, 0.0),

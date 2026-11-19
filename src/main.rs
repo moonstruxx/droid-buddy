@@ -129,6 +129,11 @@ fn seed_app(app: &mut App, settings: &config::Settings) {
     // re-reading the config file per frame/event.
     app.labels = settings.labels.clone();
 
+    // [labels] performance_scale: the performance view's base callout size
+    // (`Shift`+`+`/`-`), seeded once so the view opens at the persisted scale
+    // (100 % is the 14 pt reference).
+    app.performance_label_scale = settings.labels.performance_scale as f32;
+
     // [graph]: the same-type grouping preference (graph-same-type-grouping D6).
     // An absent table seeds App::new's defaults, so out-of-box behavior is
     // unchanged.
