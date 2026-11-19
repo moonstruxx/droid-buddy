@@ -793,6 +793,21 @@ fn handle_prefix_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 app.prefix = None;
                 return Some(false);
             }
+            KeyCode::Char('f') => {
+                // `g f` applies the *rack* fit — the whole-rack overview, the
+                // sibling of `Shift+F`'s labels fit (design D2). It is
+                // pane-scoped, not focus-scoped: the fit writes the module UI's
+                // zoom and offset, so it reaches the pane wherever it sits in
+                // the band, and states plainly when there is no such pane
+                // instead of silently doing nothing.
+                app.prefix = None;
+                if app.pane_holding(ViewType::Physical).is_some() {
+                    fit_physical_pane(app, true);
+                } else {
+                    app.status_message = String::from("No module UI pane open");
+                }
+                return Some(false);
+            }
             KeyCode::Char('s') => {
                 if app.open_select_menu() {
                     app.prefix = None;
@@ -893,10 +908,21 @@ fn handle_filter_and_performance_esc(key: &KeyEvent, app: &mut App) -> Option<bo
     None
 }
 
+/// The band-level pane keys: `z`/`f` toggle the non-latching maximize, `Alt+b`
+/// exchanges the big pane's view with the focused pane's, `Alt+s` exchanges the
+/// two small panes, and `Esc` clears a maximize before it would close a view.
+///
+/// `f` is a second maximize rather than a pane key
+/// (`view-maximize-and-performance-labels` D1): the band's default arrangement
+/// is three tiles, so putting one view on the whole band should not require
+/// learning where the maximize lives for that view. Both keys call the same
+/// [`App::maximize_toggle`], so the clearing rules cannot drift between them.
+/// The pane-scoped meanings that used to sit on `f` moved to `Shift+F` (labels
+/// fit, graph dependency filter) and `g f` (rack fit).
 fn handle_layout_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     // Class-layout pane keys (change `pane-class-layout`, task 3.1). Priority
     // is overlay (help / validation / label editor) > picker > armed `g`
-    // prefix > these keys > the per-view routing below, so `z`, `Alt+b`, and
+    // prefix > these keys > the per-view routing below, so `z`/`f`, `Alt+b`, and
     // `Alt+s` act on the band from any focused pane but never while the edit
     // overlay, help modal, validation modal, or picker has focus (spec
     // "Overlays take priority"). The select-state menu is a centered overlay
@@ -925,7 +951,7 @@ fn handle_layout_pane_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
                 }
                 _ => {}
             }
-        } else if key.code == KeyCode::Char('z') {
+        } else if matches!(key.code, KeyCode::Char('z' | 'f')) {
             app.maximize_toggle();
             return Some(false);
         }
@@ -1275,8 +1301,8 @@ fn handle_grouping_key(app: &mut App, code: &KeyCode) -> bool {
     match code {
         KeyCode::Char('o') => {
             // graph-same-type-grouping D4/D7: `o` isolates the hovered group as
-            // its own subset — the induced-subgraph shape the `f`/`i` filters
-            // already use — falling back to the group holding the shared circuit
+            // its own subset — the induced-subgraph shape the `Shift+F`/`i`
+            // filters already use — falling back to the group holding the shared circuit
             // selection. With neither there is no group to isolate, so the press
             // is silent and inert (spec "Isolate without a group is inert").
             //
@@ -1384,15 +1410,19 @@ fn handle_graph_camera_key(app: &mut App, code: &KeyCode) -> bool {
     }
 }
 
-/// The graph pane's filter rows: `f` for the dependency filter, `i` for the
-/// influence filter. Both root at the hovered node and fall back to the shared
-/// circuit selection; a second press of either restores the full graph.
+/// The graph pane's filter rows: `Shift+F` for the dependency filter, `i` for
+/// the influence filter. Both root at the hovered node and fall back to the
+/// shared circuit selection; a second press of either restores the full graph.
+///
+/// The dependency filter sits on the shifted glyph because `f` is the band's
+/// maximize (design D2); shifted keys arrive as their symbol, so `Shift+F` is
+/// `Char('F')` and never collides with the maximize.
 fn handle_graph_filter_key(app: &mut App, code: &KeyCode) -> bool {
     match code {
-        KeyCode::Char('f') => {
-            // Change D task 2.1: `f` toggles the upstream dependency
-            // filter rooted at the hovered node (fallback: the shared
-            // circuit selection); a second `f` restores the full graph.
+        KeyCode::Char('F') => {
+            // Change D task 2.1: the upstream dependency filter rooted at the
+            // hovered node (fallback: the shared circuit selection); a second
+            // `Shift+F` restores the full graph.
             app.toggle_dependency_filter();
             true
         }
@@ -1855,6 +1885,11 @@ fn handle_app_global_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
 
 /// The module UI's presentation keys that no pane table claims: the skeleton
 /// toggle, its two fits, and the label-presentation cycle.
+///
+/// `f` is not here: it is the band's maximize (`view-maximize-and-performance-
+/// labels` D2). The labels fit it used to carry sits on `Shift+F` — the shifted
+/// glyph is a distinct key, so both the module UI and the graph can read it
+/// without a collision — and the rack fit moved to the `g f` prefix.
 fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     match key.code {
         KeyCode::Char('s') => {
@@ -1867,20 +1902,14 @@ fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             handle_physical_skeleton_key(app);
             Some(false)
         }
-        KeyCode::Char('f') if app.view_focused(ViewType::Physical) => {
-            // module-ui-label-fit D8: `f` performs the *labels* fit and centres
-            // the module UI, clearing the manual-navigation latch. Free here
-            // because the graph's `f` is graph-scoped and returns in the arm
-            // above.
-            fit_physical_pane(app, false);
-            Some(false)
-        }
         KeyCode::Char('F') if app.view_focused(ViewType::Physical) => {
-            // module-ui-label-fit D8: `Shift+F` performs the *rack* fit — the
-            // whole-rack overview beside `f`'s readable-by-default label fit.
-            // Shifted glyphs arrive as their symbol, and the file picker owns
-            // `F` only inside its own overlay (which returns before this arm).
-            fit_physical_pane(app, true);
+            // module-ui-label-fit D8, re-homed by
+            // `view-maximize-and-performance-labels` D2: `Shift+F` performs the
+            // *labels* fit and centres the module UI, clearing the
+            // manual-navigation latch. Free because the graph's `Shift+F`
+            // (dependency filter) is graph-scoped, and the file picker owns `F`
+            // only inside its own overlay (which returns before this arm).
+            fit_physical_pane(app, false);
             Some(false)
         }
         KeyCode::Char('a') if app.view_focused(ViewType::Physical) => {
@@ -1909,7 +1938,7 @@ fn handle_physical_surface_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             // to. The fit clears `physical_nav_latched` and the fit marker as a
             // side effect, which is the re-arm: the automatic triggers (view
             // open, patch load, rack change, pane resize) fit the view again
-            // without another keypress. `f` reaches the same fit but is the
+            // without another keypress. `Shift+F` reaches the same fit as the
             // plain manual one; the status line reports the zoom landed on.
             fit_physical_pane(app, false);
             Some(false)
@@ -1951,8 +1980,8 @@ fn center_physical_view(app: &mut App) {
 }
 
 /// Run one of the module UI's two fits and report the rack/zoom status
-/// segment when it ran. `whole_rack` selects the `Shift+F` rack overview over
-/// `f`'s labels fit; both no-op while the pane has no measured size.
+/// segment when it ran. `whole_rack` selects the `g f` rack overview over
+/// `Shift+F`'s labels fit; both no-op while the pane has no measured size.
 fn fit_physical_pane(app: &mut App, whole_rack: bool) {
     let Some((w, h)) = app.physical_pane_size() else {
         return;
@@ -2055,7 +2084,15 @@ fn handle_shift_and_modifier_key(key: &KeyEvent, app: &mut App) -> Option<bool> 
     }
 }
 
-/// Boundary and scale keys: the two split ratios and the panel scale ladder.
+/// Boundary and scale keys: the two split ratios, the panel scale ladder, and
+/// the performance callouts' label scale on the shifted `+`/`-` glyphs.
+///
+/// The layout asymmetry is inherent (`view-maximize-and-performance-labels`
+/// D5, because `KeyEvent::from_winit_parts` yields the produced character):
+/// `Shift+-` produces `Char('_')` on every layout, but `Shift++` produces
+/// `Char('*')` only where `+` is itself unshifted (German) and `Char('+')`
+/// plus the shift flag where it is not (US). Both up-step forms are therefore
+/// accepted, while the down step needs just its one glyph.
 fn handle_layout_adjust_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
     match key.code {
         KeyCode::Char('[' | ']') => {
@@ -2075,11 +2112,30 @@ fn handle_layout_adjust_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
             };
             Some(false)
         }
+        KeyCode::Char('*' | '_') => {
+            // Design D5: the shifted pair as the *glyph* the layout produces.
+            // Bound only while the module UI pane shows the performance view;
+            // anywhere else the glyph stays unbound (the graph pane's own
+            // shifted pair, which scales the other pane's zoom, returned in an
+            // earlier step and keeps priority).
+            if !(app.showing_performance && app.view_focused(ViewType::Physical)) {
+                return None;
+            }
+            report_performance_label_scale(app, matches!(key.code, KeyCode::Char('*')));
+            Some(false)
+        }
         KeyCode::Char('+' | '-') => {
             // Zoom family (change `tiled-window-manager`, 4.2): plain scales
-            // the panels pane; `Shift` would scale the other pane, which the
-            // graph arm above already owns while the graph is open.
+            // the panels pane; `Shift` scales the other pane, which the graph
+            // arm above already owns while the graph is open. With the
+            // performance view showing on the focused module UI, the shifted
+            // pair steps the callout scale instead (D5) — on the US layout
+            // this arm is where `Shift++` arrives.
             if key.modifiers.shift {
+                if app.showing_performance && app.view_focused(ViewType::Physical) {
+                    report_performance_label_scale(app, matches!(key.code, KeyCode::Char('+')));
+                    return Some(false);
+                }
                 return None;
             }
             cycle_panel_scale(app, matches!(key.code, KeyCode::Char('+')));
@@ -2087,6 +2143,19 @@ fn handle_layout_adjust_key(key: &KeyEvent, app: &mut App) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// One label-scale step and its report: both numbers on one line because the
+/// two trade the same pane space (design D5). The value is reported even when
+/// the clamp swallowed the step, so a press that cannot move is still
+/// observable.
+fn report_performance_label_scale(app: &mut App, up: bool) {
+    let scale = app.step_performance_label_scale(up);
+    app.status_message = format!(
+        "Labels {}% \u{B7} zoom {}%",
+        (scale * 100.0).round() as u32,
+        (app.physical_zoom * 100.0).round() as u32,
+    );
 }
 
 /// The element chord: `Ctrl+Enter` toggles only the hovered element's folded
@@ -4289,6 +4358,125 @@ mod tests {
         );
     }
 
+    // ---- Performance-view label scale (change
+    // `view-maximize-and-performance-labels`, task 2.3 / design D5) ----
+
+    /// The performance view open on the focused module UI pane (the default
+    /// layout's left big pane), which is what the shifted `+`/`-` arm requires.
+    fn performance_app() -> App {
+        let mut app = app_with_fixture();
+        app.showing_performance = true;
+        app
+    }
+
+    #[test]
+    fn shifted_plus_glyphs_step_the_performance_label_scale_up() {
+        // D5: `Shift++` is `Char('*')` where `+` needs no shift and
+        // `Char('+')` plus the shift flag where it does (US `Shift+=`).
+        for glyph in [shift_key(KeyCode::Char('*')), shift_key(KeyCode::Char('+'))] {
+            let mut app = performance_app();
+            handle_event(&glyph, &mut app);
+            assert!(
+                (app.performance_label_scale - 1.05).abs() < 1e-5,
+                "{glyph:?} must step the scale up by 5 points"
+            );
+            assert_eq!(app.status_message, "Labels 105% \u{B7} zoom 100%");
+            // The label scale is independent of the shared zoom.
+            assert_eq!(app.physical_zoom, 1.0);
+        }
+    }
+
+    #[test]
+    fn shifted_minus_glyphs_step_the_performance_label_scale_down() {
+        // D5: `Shift+-` yields `Char('_')` on both layouts, so both forms mean
+        // the same thing here; the flagged `-` is the US counterpart.
+        for glyph in [shift_key(KeyCode::Char('_')), shift_key(KeyCode::Char('-'))] {
+            let mut app = performance_app();
+            handle_event(&glyph, &mut app);
+            assert!(
+                (app.performance_label_scale - 0.95).abs() < 1e-5,
+                "{glyph:?} must step the scale down by 5 points"
+            );
+            assert_eq!(app.status_message, "Labels 95% \u{B7} zoom 100%");
+            assert_eq!(app.physical_zoom, 1.0);
+        }
+    }
+
+    #[test]
+    fn performance_label_scale_clamps_at_both_ends_and_still_reports() {
+        let mut app = performance_app();
+        app.performance_label_scale = crate::config::MAX_PERFORMANCE_SCALE as f32;
+        handle_event(&shift_key(KeyCode::Char('*')), &mut app);
+        assert_eq!(
+            app.performance_label_scale,
+            crate::config::MAX_PERFORMANCE_SCALE as f32
+        );
+        assert_eq!(app.status_message, "Labels 400% \u{B7} zoom 100%");
+
+        let mut app = performance_app();
+        app.performance_label_scale = crate::config::MIN_PERFORMANCE_SCALE as f32;
+        handle_event(&shift_key(KeyCode::Char('_')), &mut app);
+        assert_eq!(
+            app.performance_label_scale,
+            crate::config::MIN_PERFORMANCE_SCALE as f32
+        );
+        assert_eq!(app.status_message, "Labels 50% \u{B7} zoom 100%");
+    }
+
+    #[test]
+    fn shifted_label_scale_keys_are_unbound_without_the_performance_view() {
+        for glyph in [
+            shift_key(KeyCode::Char('*')),
+            shift_key(KeyCode::Char('_')),
+            shift_key(KeyCode::Char('+')),
+            shift_key(KeyCode::Char('-')),
+        ] {
+            let mut app = app_with_fixture();
+            assert!(!app.showing_performance);
+            handle_event(&glyph, &mut app);
+            assert_eq!(
+                app.performance_label_scale, 1.0,
+                "{glyph:?} must not touch the scale outside the performance view"
+            );
+            assert_eq!(app.physical_zoom, 1.0, "{glyph:?} must not zoom either");
+        }
+    }
+
+    #[test]
+    fn plain_plus_keeps_the_zoom_path_in_the_performance_view() {
+        // Spec "Performance-view zoom": the shifted pair is the only
+        // label-scale binding; plain `+` still climbs the zoom ladder.
+        let mut app = performance_app();
+        handle_event(&key(KeyCode::Char('+')), &mut app);
+        assert_eq!(app.scale_factor, 1.5);
+        assert_eq!(app.physical_zoom, 1.5);
+        assert_eq!(app.performance_label_scale, 1.0);
+        assert_eq!(
+            app.status_message,
+            "Physical 150% \u{B7} Pan 0/0 \u{B7} Skeleton: off"
+        );
+    }
+
+    #[test]
+    fn graph_pane_shifted_plus_keeps_its_pane_scale_meaning() {
+        // The graph arm runs before the layout step and owns `Shift`+`+`/`-`
+        // while the graph holds focus: it must keep scaling the panels pane and
+        // never step the label scale, even with the performance view flagged on.
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        app.showing_performance = true;
+        app.layout.big_left.view = Some(ViewType::Graph);
+        app.layout.focus = PaneId::BigLeft;
+        handle_event(&shift_key(KeyCode::Char('+')), &mut app);
+        assert_eq!(app.performance_label_scale, 1.0);
+        assert_eq!(app.scale_factor, 1.5);
+        assert!(
+            !app.status_message.starts_with("Labels"),
+            "{}",
+            app.status_message
+        );
+    }
+
     #[test]
     fn mouse_ignored_while_picker_open() {
         let mut app = app_with_fixture();
@@ -4516,8 +4704,8 @@ mod tests {
             "Shift+Tab cycles backward"
         );
 
-        // Graph: `h` toggles the arrangement, `f` the dependency filter, `i`
-        // the influence filter, and `Alt+[`/`Alt+]` the cable tension.
+        // Graph: `h` toggles the arrangement, `Shift+F` the dependency filter,
+        // `i` the influence filter, and `Alt+[`/`Alt+]` the cable tension.
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
         handle_event(&key(KeyCode::Char('h')), &mut app);
@@ -4525,10 +4713,10 @@ mod tests {
         assert_eq!(app.status_message, "Layout: force");
 
         app.hovered_graph_node = Some(0);
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert!(
             app.dependency_root.is_some(),
-            "f engages the dependency filter"
+            "Shift+F engages the dependency filter"
         );
 
         app.select_component(String::from("B1.1"));
@@ -4724,7 +4912,7 @@ mod tests {
     }
 
     #[test]
-    fn f_refits_the_module_ui_and_clears_the_latch() {
+    fn shift_f_refits_the_module_ui_and_clears_the_latch() {
         let mut app = app_with_fixture();
         app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
         app.apply_physical_fit_triggers();
@@ -4736,12 +4924,12 @@ mod tests {
         assert!(app.physical_nav_latched);
         assert_ne!(app.physical_zoom, fitted);
 
-        // `f` on the focused module UI pane returns to the fit.
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        // `Shift+F` on the focused module UI pane returns to the labels fit.
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert!(!app.physical_nav_latched, "fit clears the latch");
         assert!(
             (app.physical_zoom - fitted).abs() < 1e-6,
-            "f refits: {fitted} -> {}",
+            "Shift+F refits: {fitted} -> {}",
             app.physical_zoom
         );
         assert!(
@@ -4751,11 +4939,13 @@ mod tests {
         );
     }
 
-    /// module-ui-label-fit 2.3 / D8: `f` and `Shift+F` each apply *their own*
-    /// fit. On a rack whose written label needs more than the whole-rack fit the
-    /// two keys land on different zooms, and the status names which one ran.
+    /// module-ui-label-fit 2.3 / D8, re-homed by
+    /// `view-maximize-and-performance-labels` D2: `Shift+F` and `g f` each apply
+    /// *their own* fit. On a rack whose written label needs more than the
+    /// whole-rack fit the two keys land on different zooms, and the status names
+    /// which one ran.
     #[test]
-    fn f_fits_labels_and_shift_f_fits_the_rack() {
+    fn shift_f_fits_labels_and_g_f_fits_the_rack() {
         // A written preamble label on a 9 mm button: the labels fit lifts above
         // the whole-rack fit on a pane this small.
         let ini = "# B1.1: Trigger input\n\n[p4b2]\n    pot1 = P1.1\n    pot2 = P1.2\n    pot3 = P1.3\n    pot4 = P1.4\n    button1 = B1.1\n    led1 = L1.1\n    button2 = B1.2\n    led2 = L1.2\n";
@@ -4766,28 +4956,29 @@ mod tests {
         app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
         app.apply_physical_fit_triggers();
 
-        // `Shift+F` first, so the rack fit is not the one the trigger left.
-        handle_event(&key(KeyCode::Char('F')), &mut app);
+        // `g f` first, so the rack fit is not the one the trigger left.
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
         let rack_fit = app.physical_zoom;
         assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Rack));
         assert!(
             app.status_message.contains("fit(rack)"),
-            "Shift+F reports the rack fit: {}",
+            "g f reports the rack fit: {}",
             app.status_message
         );
         assert!(!app.physical_nav_latched, "a fit clears the latch");
 
-        // `f` then applies the labels fit, which on this patch lifts.
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        // `Shift+F` then applies the labels fit, which on this patch lifts.
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Labels));
         assert!(
             app.status_message.contains("fit(labels)"),
-            "f reports the labels fit: {}",
+            "Shift+F reports the labels fit: {}",
             app.status_message
         );
         assert!(
             app.physical_zoom > rack_fit,
-            "f lifts above the rack fit ({} vs {rack_fit})",
+            "the labels fit lifts above the rack fit ({} vs {rack_fit})",
             app.physical_zoom
         );
     }
@@ -4881,6 +5072,186 @@ mod tests {
         handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.layout.maximized.is_none());
         assert_eq!(app.status_message, "Layout restored");
+    }
+
+    // ---- Change `view-maximize-and-performance-labels`, task 1.1 ----
+    //
+    // `f` is a second binding of the band's non-latching maximize, checked in
+    // the layout table so it acts from whichever view holds focus. The three
+    // pane-scoped meanings it used (module UI labels fit, module UI rack fit,
+    // graph dependency filter) moved to `Shift+F` and `g f`.
+
+    #[test]
+    fn f_maximizes_from_every_focused_view() {
+        use crate::panes::PaneId;
+        // Module UI: the startup focus is the left big pane holding it.
+        let mut app = app_with_fixture();
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(PaneId::BigLeft));
+
+        // Graph: `g g` lands focus on the graph pane.
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        let graph_pane = app.layout.focus;
+        assert_eq!(
+            app.layout.pane(graph_pane).view,
+            Some(ViewType::Graph),
+            "g g focuses the graph pane"
+        );
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(graph_pane));
+
+        // Source viewer: `g v` lands focus on the small pane holding it.
+        let mut app = app_with_fixture();
+        open_viewer(&mut app);
+        let viewer_pane = app.layout.focus;
+        assert_eq!(
+            app.layout.pane(viewer_pane).view,
+            Some(ViewType::SourceViewer)
+        );
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(viewer_pane));
+
+        // Optimizer: `g o` lands focus on the small pane holding it.
+        let mut app = app_with_fixture();
+        open_optimizer(&mut app);
+        let optimizer_pane = app.layout.focus;
+        assert_eq!(
+            app.layout.pane(optimizer_pane).view,
+            Some(ViewType::Optimizer)
+        );
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(optimizer_pane));
+    }
+
+    #[test]
+    fn f_again_tab_and_esc_restore_the_arrangement() {
+        use crate::panes::PaneId;
+        let mut app = app_with_fixture();
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout.maximized, Some(PaneId::BigLeft));
+
+        // A second `f` restores.
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert!(app.layout.maximized.is_none());
+        assert_eq!(app.status_message, "Layout restored");
+
+        // `Tab` clears it with the focus change.
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert!(app.layout.maximized.is_some());
+        handle_event(&key(KeyCode::Tab), &mut app);
+        assert!(app.layout.maximized.is_none());
+
+        // `Esc` clears it before the view would close.
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert!(app.layout.maximized.is_some());
+        let focused_view = app.layout.pane(app.layout.focus).view;
+        handle_event(&key(KeyCode::Esc), &mut app);
+        assert!(app.layout.maximized.is_none());
+        assert_eq!(
+            app.layout.pane(app.layout.focus).view,
+            focused_view,
+            "Esc restores the arrangement instead of closing the view"
+        );
+    }
+
+    #[test]
+    fn picker_keeps_f_for_favourites() {
+        use tempfile::TempDir;
+        let _env_guard = fav_lock().lock().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let _data_dir = DataDirIsolation::new(xdg_dir.path());
+
+        let mut app = picker_app_at("fixtures/picker_test");
+        app.picker_index = picker_index_of(&app, "patch_a.ini");
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert!(
+            app.layout.maximized.is_none(),
+            "the picker's f must not maximize the band"
+        );
+        assert_eq!(app.favorites.favourites.len(), 1, "f toggles the favourite");
+        assert!(
+            app.status_message.starts_with("Favourited"),
+            "status: {:?}",
+            app.status_message
+        );
+        assert!(
+            app.showing_picker,
+            "toggling a favourite keeps the picker open"
+        );
+    }
+
+    #[test]
+    fn shift_f_fits_labels_on_the_module_ui_and_filters_the_graph() {
+        // The module UI's labels fit moved off `f`.
+        let mut app = app_with_fixture();
+        app.note_physical_pane_rect(Rect::new(0, 0, 640, 520));
+        app.apply_physical_fit_triggers();
+        // A manual zoom latches the view; `Shift+F` is the fit that clears it.
+        handle_event(&key(KeyCode::Char('+')), &mut app);
+        assert!(app.physical_nav_latched);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
+        assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Labels));
+        assert!(!app.physical_nav_latched, "Shift+F clears the latch");
+        assert!(app.layout.maximized.is_none(), "Shift+F never maximizes");
+
+        // The graph's dependency filter moved off `f` too.
+        let mut app = app_with_fixture();
+        open_graph_slot(&mut app);
+        app.hovered_graph_node = Some(0);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
+        assert!(
+            app.dependency_root.is_some(),
+            "Shift+F engages the dependency filter"
+        );
+        assert!(app.layout.maximized.is_none(), "Shift+F never maximizes");
+    }
+
+    #[test]
+    fn g_f_fits_the_rack_without_focusing_or_maximizing() {
+        // A written preamble label on a 9 mm button: the labels fit lifts above
+        // the whole-rack fit on a pane this small, so the two fits differ.
+        let ini = "# B1.1: Trigger input\n\n[p4b2]\n    pot1 = P1.1\n    pot2 = P1.2\n    pot3 = P1.3\n    pot4 = P1.4\n    button1 = B1.1\n    led1 = L1.1\n    button2 = B1.2\n    led2 = L1.2\n";
+        let patch = Patch::from_ini_str(ini, String::from("rack-fit-handler"))
+            .expect("the rack-fit fixture parses");
+        let mut app = App::new();
+        assert!(app.load_patch(patch), "the rack-fit fixture loads clean");
+        app.note_physical_pane_rect(Rect::new(0, 0, 260, 200));
+        app.apply_physical_fit_triggers();
+        let labels_fit = app.physical_zoom;
+        assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Labels));
+
+        // Focus leaves the module UI; `g f` still reaches its pane.
+        handle_event(&key(KeyCode::Tab), &mut app);
+        assert!(!app.view_focused(ViewType::Physical));
+        assert!(app.pane_holding(ViewType::Physical).is_some());
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.physical_fit_mode, Some(crate::app::FitMode::Rack));
+        assert!(
+            app.status_message.contains("fit(rack)"),
+            "g f reports the rack fit: {}",
+            app.status_message
+        );
+        assert!(
+            app.physical_zoom < labels_fit,
+            "the rack fit sits below the labels fit: {} vs {labels_fit}",
+            app.physical_zoom
+        );
+        assert!(app.layout.maximized.is_none(), "g f never maximizes");
+    }
+
+    #[test]
+    fn g_f_without_a_module_ui_pane_changes_nothing() {
+        let mut app = app_with_fixture();
+        // The graph takes the left big pane, so no pane holds the module UI.
+        app.open_view(ViewType::Graph);
+        assert!(app.pane_holding(ViewType::Physical).is_none());
+        let layout_before = app.layout.clone();
+        handle_event(&key(KeyCode::Char('g')), &mut app);
+        handle_event(&key(KeyCode::Char('f')), &mut app);
+        assert_eq!(app.layout, layout_before, "the band is unchanged");
+        assert_eq!(app.status_message, "No module UI pane open");
     }
 
     #[test]
@@ -5215,12 +5586,12 @@ mod tests {
     }
 
     #[test]
-    fn f_engages_dependency_filter_on_hovered_node() {
+    fn shift_f_engages_dependency_filter_on_hovered_node() {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
         let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
         app.hovered_graph_node = Some(0);
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert_eq!(app.dependency_root, Some(root));
         assert!(!app.dependency_nodes.is_empty());
         assert!(
@@ -5237,38 +5608,38 @@ mod tests {
     }
 
     #[test]
-    fn f_falls_back_to_circuit_selection_when_nothing_hovered() {
+    fn shift_f_falls_back_to_circuit_selection_when_nothing_hovered() {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
         let root = app.graph.as_ref().unwrap().nodes[0].id.clone();
         app.selected_circuit = Some(root.clone());
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert_eq!(app.dependency_root, Some(root));
     }
 
     #[test]
-    fn f_without_hover_or_selection_hints_and_keeps_full_graph() {
+    fn shift_f_without_hover_or_selection_hints_and_keeps_full_graph() {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert!(app.dependency_root.is_none());
         assert_eq!(app.status_message, "No graph node selected");
     }
 
     #[test]
-    fn f_toggles_off_and_esc_clears_the_filter() {
+    fn shift_f_toggles_off_and_esc_clears_the_filter() {
         let mut app = app_with_fixture();
         open_graph_slot(&mut app);
         app.hovered_graph_node = Some(0);
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert!(app.dependency_root.is_some());
-        // A second `f` restores the full graph.
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        // A second `Shift+F` restores the full graph.
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert!(app.dependency_root.is_none());
         assert!(app.dependency_nodes.is_empty());
         // Re-engage, then Esc clears without closing the graph slot.
         app.hovered_graph_node = Some(0);
-        handle_event(&key(KeyCode::Char('f')), &mut app);
+        handle_event(&key(KeyCode::Char('F')), &mut app);
         assert!(app.dependency_root.is_some());
         handle_event(&key(KeyCode::Esc), &mut app);
         assert!(app.dependency_root.is_none());

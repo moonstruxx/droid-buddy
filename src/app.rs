@@ -757,16 +757,16 @@ pub fn spinner_char(elapsed: std::time::Duration) -> char {
 /// Which fit a physical-view fit request performed (module-ui-label-fit D8).
 ///
 /// Recorded alongside [`App::physical_fit_zoom`] so the status hint and the
-/// module-UI pane title can name the fit that ran: `f` performs
-/// [`FitMode::Labels`], `Shift+F` performs [`FitMode::Rack`]. Session state
+/// module-UI pane title can name the fit that ran: `Shift+F` performs
+/// [`FitMode::Labels`], `g f` performs [`FitMode::Rack`]. Session state
 /// only — never persisted, so a restart fits labels again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FitMode {
-    /// `f`: readable by default. The greater of the whole-rack fit and the
+    /// `Shift+F`: readable by default. The greater of the whole-rack fit and the
     /// zoom every written label needs, clamped to the supported range — so the
-    /// rack may exceed the pane and pan, by design. `Shift+F` is the overview.
+    /// rack may exceed the pane and pan, by design. `g f` is the overview.
     Labels,
-    /// `Shift+F`: the whole rack in the pane, centring it, with no label lift
+    /// `g f`: the whole rack in the pane, centring it, with no label lift
     /// (labels that no longer fit shrink away to annotations and hover).
     Rack,
 }
@@ -2628,7 +2628,7 @@ impl App {
     ///
     /// The rack may overflow the pane by design: the fit is the greater of the
     /// whole-rack fit and the zoom every written label needs, so the default
-    /// view is the readable one and panning reveals the rest. `Shift+F`
+    /// view is the readable one and panning reveals the rest. `g f`
     /// ([`Self::fit_physical_view_rack`]) is the overview.
     ///
     /// Clears the manual-navigation latch and the pending fit flag. Returns
@@ -2848,6 +2848,28 @@ impl App {
         self.physical_zoom = target;
         self.scale_factor = target;
         self.note_physical_navigation();
+    }
+
+    /// Step the performance view's callout scale one nudge (`Shift`+`+`/`-`,
+    /// `view-maximize-and-performance-labels` D5) and return the resulting
+    /// multiplier so the caller can report it.
+    ///
+    /// The nudge is a fixed `0.05` on the multiplier — 5 points of the 100 %
+    /// baseline — added to the stored value rather than compounded from it, so
+    /// every press moves by the same amount and ten presses take 100 % to
+    /// 150 %. The clamp reuses `config`'s `MIN_PERFORMANCE_SCALE` /
+    /// `MAX_PERFORMANCE_SCALE` instead of new literals: those are the bounds
+    /// `[labels] performance_scale` is validated against on load and save, so a
+    /// value reached here is exactly a value the config accepts back unchanged
+    /// and a restart cannot silently rewrite it. The clamp lives in this
+    /// mutator, not the key arm, so the field is in range for any future caller.
+    pub fn step_performance_label_scale(&mut self, up: bool) -> f32 {
+        let step = if up { 0.05 } else { -0.05 };
+        self.performance_label_scale = (self.performance_label_scale + step).clamp(
+            crate::config::MIN_PERFORMANCE_SCALE as f32,
+            crate::config::MAX_PERFORMANCE_SCALE as f32,
+        );
+        self.performance_label_scale
     }
 
     /// Centre the module UI on `rect`, a rect in rack points — the pure offset
@@ -6439,6 +6461,33 @@ mod tests {
         assert_eq!(
             app.physical_status_hint().as_deref(),
             Some("Physical 150% \u{B7} Pan 12/-4 \u{B7} Skeleton: on")
+        );
+    }
+
+    #[test]
+    fn performance_label_scale_steps_linearly_and_clamps() {
+        let mut app = App::new();
+        assert!((app.performance_label_scale - 1.0).abs() < 1e-6);
+        // Twenty presses take 100 % to 200 % exactly: the step is a fixed
+        // increment on the multiplier, not compounded from the current value.
+        for _ in 0..20 {
+            app.step_performance_label_scale(true);
+        }
+        assert!((app.performance_label_scale - 2.0).abs() < 1e-5);
+        // The bounds are the config's, so a stepped value reloads unchanged.
+        for _ in 0..100 {
+            app.step_performance_label_scale(true);
+        }
+        assert_eq!(
+            app.performance_label_scale,
+            crate::config::MAX_PERFORMANCE_SCALE as f32
+        );
+        for _ in 0..200 {
+            app.step_performance_label_scale(false);
+        }
+        assert_eq!(
+            app.performance_label_scale,
+            crate::config::MIN_PERFORMANCE_SCALE as f32
         );
     }
 
